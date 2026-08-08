@@ -172,6 +172,18 @@ impl Scope {
 pub enum Outcome {
     /// Bars reached the store and the census counted them.
     Stored,
+    /// The run completed cleanly and stored NOTHING.
+    ///
+    /// Not a failure and not a success. Nothing broke — no member errored and
+    /// the books balance — but no bar reached disk, so the window is still
+    /// empty and the operator's next action is not "carry on".
+    ///
+    /// It had no variant, so it was recorded as [`Self::Stored`]: a run over
+    /// zero rows has no failures and balances trivially (0 = 0 + 0 + 0). Across
+    /// the ~11,200 windows of the stated backfill that is the difference
+    /// between a complete history and a gap nobody finds, because the month
+    /// file exists and the census counts it.
+    Empty,
     /// The request was refused before anything ran.
     Refused,
     /// The request was understood and no transport exists to serve it.
@@ -189,6 +201,10 @@ impl Outcome {
             Self::Refused => 1,
             Self::NotStarted => 2,
             Self::Failed => 3,
+            // APPENDED, NOT INSERTED. These are the on-disk codes of an
+            // append-only journal: renumbering would re-read every record
+            // written before today as a different outcome.
+            Self::Empty => 4,
         }
     }
 
@@ -209,6 +225,7 @@ impl Outcome {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Stored => "STORED",
+            Self::Empty => "STORED NOTHING",
             Self::Refused => "REFUSED",
             Self::NotStarted => "NOT STARTED",
             Self::Failed => "FAILED",
@@ -218,6 +235,10 @@ impl Outcome {
     /// Whether an operator has to be told about this row.
     #[must_use]
     pub const fn is_loud(self) -> bool {
+        // `Empty` IS loud. It is not an error, but a window that stored nothing
+        // is something the operator has to look at — and the whole reason it
+        // needed its own variant is that reporting it quietly as `Stored` is
+        // how a backfill gap survives.
         !matches!(self, Self::Stored)
     }
 }
@@ -419,10 +440,16 @@ impl Record {
             },
             |first| format!("{} — {}", first.instrument, first.why),
         );
-        let outcome = if done.failures.is_empty() && done.balances() {
-            Outcome::Stored
-        } else {
+        let outcome = if !done.failures.is_empty() || !done.balances() {
             Outcome::Failed
+        } else if done.bars_stored == 0 {
+            // CLEAN, AND EMPTY. `balances()` is true here — every row read was
+            // accounted for — but zero rows read balances just as trivially as
+            // a thousand, so this arm is what stops a window that landed
+            // nothing from reporting success.
+            Outcome::Empty
+        } else {
+            Outcome::Stored
         };
         Self {
             at_unix_secs: crate::ingest::epoch_secs(at),
@@ -1027,6 +1054,59 @@ mod tests {
             c.count(DropReason::AfterWindow);
         }
         c
+    }
+
+    /// A CLEAN RUN THAT STORED NOTHING IS NOT `STORED`.
+    ///
+    /// The outcome was `if failures.is_empty() && balances() { Stored }`. A run
+    /// over zero rows has no failures and balances trivially — 0 = 0 + 0 + 0 —
+    /// so a window that landed nothing reported success in the journal and on
+    /// the page.
+    ///
+    /// Across the ~11,200 windows of the stated backfill that is the difference
+    /// between a complete history and a gap nobody finds: the month file
+    /// exists, the census counts it, and the receipt said it worked.
+    ///
+    /// Asserted at the boundary. One bar stored is `STORED`; zero is not.
+    #[test]
+    fn a_run_that_stored_nothing_says_so_instead_of_reporting_success() {
+        let empty = Ingested::default();
+        assert!(
+            empty.failures.is_empty() && empty.balances(),
+            "the premise: a zero-row run is clean and balances, which is why \
+             the old condition called it Stored"
+        );
+
+        let record = Record::of_run(Scope::Spot, at(5), 1, "folder", window(), &empty);
+        assert_eq!(
+            record.outcome,
+            Outcome::Empty,
+            "a clean run that stored no bars is STORED NOTHING, not STORED"
+        );
+        assert!(
+            record.outcome.is_loud(),
+            "and it is loud: not an error, but the operator's next action is \
+             not `carry on`"
+        );
+        assert_eq!(record.outcome.label(), "STORED NOTHING");
+
+        // ONE BAR IS THE OTHER SIDE OF THE BOUNDARY.
+        let one = Ingested {
+            bars_stored: 1,
+            rows_read: 1,
+            ..Ingested::default()
+        };
+        assert_eq!(
+            Record::of_run(Scope::Spot, at(5), 1, "folder", window(), &one).outcome,
+            Outcome::Stored,
+            "one bar stored is a stored run"
+        );
+
+        // AND THE CODE IS APPENDED, NOT INSERTED. These are on-disk values in
+        // an append-only journal; renumbering would re-read every record
+        // written before today as a different outcome.
+        assert_eq!(Outcome::Stored.code(), 0);
+        assert_eq!(Outcome::Empty.code(), 4);
     }
 
     fn run() -> Ingested {
