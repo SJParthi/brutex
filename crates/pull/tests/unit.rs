@@ -5096,7 +5096,7 @@ fn truedata_index_rows_decode_to_paisa_and_utc() {
     );
 }
 
-/// GDFL's layout, and the date trap that would shift every bar by months.
+/// `GDFL`'s layout, and the date trap that would shift every bar by months.
 #[test]
 fn gdfl_dates_are_day_first_and_the_header_is_skipped() {
     use pull::csv::{Columns, decode};
@@ -6101,4 +6101,106 @@ fn a_manifest_reports_every_key_it_holds_and_not_one_it_does_not() {
     assert_eq!(manifest.entry(&one.key).expect("held").rows, 9_000);
     assert_eq!(manifest.entries(), 4, "four entries in the log");
     assert_eq!(manifest.keys(), 3, "three keys in the index");
+}
+
+/// A call and its put stay two instruments, for BOTH vendor filename shapes.
+///
+/// # Why a fixed number of extension strips is wrong for both, oppositely
+///
+/// Splitting at the FIRST dot truncated every half-strike: both
+/// `ABCAPITAL31JUL25267.5CE.NFO.csv` and `...267.5PE.NFO.csv` became
+/// `ABCAPITAL31JUL25267`, merging a call with its put. Measured on the real
+/// `GDFL` folder: 11,490 files collapsed to 11,259 names.
+///
+/// Stripping TWICE fixed that and broke the other vendor, because it was tuned
+/// to the only folder on hand. `GDFL` writes `<name>.NFO.csv` — two extensions.
+/// `TrueData` writes `<name>.csv` — one. So the second strip, meant to remove
+/// `.NFO`, removes the STRIKE DECIMAL instead. Measured on the real `TrueData`
+/// options folder: 14,214 files collapse to 13,999 names, 215 collision groups,
+/// and every group is a call merged with its own put.
+///
+/// That is worse than the bug it replaced because it is quieter. Two members
+/// sharing a name append to ONE store file, and the append guard only objects
+/// when their timestamp ranges happen to overlap — so a call and a put that do
+/// not overlap concatenate into one monotonic series and nothing complains.
+///
+/// The names below are real, taken from the sample archives.
+#[test]
+fn a_call_and_its_put_are_never_one_instrument_for_either_vendor() {
+    use pull::archive::read_dir;
+    use pull::csv::Columns;
+
+    let dir =
+        std::env::temp_dir().join(format!("brutex-strike-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+
+    // TrueData: ONE extension, no header, five fields. The dot before `65CE`
+    // introduces a strike decimal, not an exchange suffix.
+    for name in [
+        "BANKBARODA250626256.65CE.csv",
+        "BANKBARODA250626256.65PE.csv",
+        "ABCAPITAL221027112.5CE.csv",
+        "ABCAPITAL221027112.5PE.csv",
+        // Dotless names, which must keep their whole stem including `-III`.
+        "VEDL25JULFUT.csv",
+        "ATGL-III.csv",
+    ] {
+        std::fs::write(dir.join(name), "20221003,09:38:36,742.00,1,5950\n").expect("write");
+    }
+
+    let members = read_dir(&dir, Columns::TrueDataIndex).expect("five fields, no header");
+    let mut names: Vec<_> = members.iter().map(|m| m.instrument.clone()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "ABCAPITAL221027112.5CE",
+            "ABCAPITAL221027112.5PE",
+            "ATGL-III",
+            "BANKBARODA250626256.65CE",
+            "BANKBARODA250626256.65PE",
+            "VEDL25JULFUT",
+        ],
+        "the strike decimal is part of the contract and the option type is the \
+         last two characters of it — dropping either merges two contracts"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // GDFL: TWO extensions. The last one IS an exchange suffix and must go.
+    let dir =
+        std::env::temp_dir().join(format!("brutex-strike-{}-{}", std::process::id(), line!()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("a scratch dir");
+    for name in [
+        "ABCAPITAL31JUL25267.5CE.NFO.csv",
+        "ABCAPITAL31JUL25267.5PE.NFO.csv",
+        "M&M28AUG252600PE.NFO.csv",
+        "BAJAJ-AUTO28AUG258200PE.NFO.csv",
+    ] {
+        std::fs::write(
+            dir.join(name),
+            "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n\
+             X,01/07/2025,09:16:16,27674,0,0,0,0,65,65\n",
+        )
+        .expect("write");
+    }
+
+    let members = read_dir(&dir, Columns::Gdfl).expect("ten fields, header present");
+    let mut names: Vec<_> = members.iter().map(|m| m.instrument.clone()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "ABCAPITAL31JUL25267.5CE",
+            "ABCAPITAL31JUL25267.5PE",
+            "BAJAJ-AUTO28AUG258200PE",
+            "M&M28AUG252600PE",
+        ],
+        "`.NFO` is an exchange suffix and goes; the strike decimal stays. \
+         Ampersands and hyphens are ordinary name characters."
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

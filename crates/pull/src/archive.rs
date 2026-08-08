@@ -163,6 +163,63 @@ pub struct Member {
     pub rows: Vec<RawRow>,
 }
 
+/// The instrument a member file names, with the strike decimal intact.
+///
+/// # A fixed number of strips is wrong for BOTH vendors, in opposite directions
+///
+/// Splitting at the FIRST dot truncated every half-strike: both
+/// `ABCAPITAL31JUL25267.5CE.NFO.csv` and `...267.5PE.NFO.csv` became
+/// `ABCAPITAL31JUL25267`, so a CALL and a PUT merged into one price series
+/// under one name. Measured on the real GDFL folder: 11,490 files collapsed to
+/// 11,259 names — 228 collision groups, 459 files.
+///
+/// The fix was to strip TWICE, which is right for `GDFL` and wrong for
+/// `TrueData` — and it was tuned to `GDFL` because `GDFL` was the only folder
+/// on hand. `GDFL` writes `<name>.NFO.csv`, two extensions; `TrueData` writes
+/// `<name>.csv`, one. So the second strip, which was meant to remove `.NFO`,
+/// removes the STRIKE DECIMAL instead: `BANKBARODA250626256.65CE.csv` and
+/// `...65PE.csv` both become `BANKBARODA250626256`. Measured on the real
+/// `TrueData` options folder: 14,214 files collapse to 13,999 names — 215
+/// collision groups, and every one of them is a call merged with its own put.
+///
+/// That is worse than the bug it replaced, because it is silent for longer. The
+/// store's append guard rejects a bar that does not follow the last one, so an
+/// overlapping pair is caught — by luck, not by design. A call and a put whose
+/// timestamp ranges do NOT overlap concatenate into one monotonic series and
+/// nothing objects.
+///
+/// # The rule
+///
+/// Strip `.csv`, then strip a second extension ONLY if it is entirely ASCII
+/// letters. An exchange suffix (`NFO`, `NSE`, `BSE`) always is; a strike decimal
+/// never is, because the character after the dot is a digit. That is a property
+/// of the two shapes rather than a count, so it is right for a vendor whose
+/// files carry one extension and for a vendor whose files carry two, without
+/// being told which is which.
+///
+/// A dotless name — `VEDL25JULFUT.csv`, `ATGL-III.csv` — keeps its whole stem.
+fn instrument_name(path: &std::path::Path) -> String {
+    let Some(stem) = path.file_stem() else {
+        return String::new();
+    };
+    let stem = std::path::Path::new(stem);
+    match (stem.file_stem(), stem.extension()) {
+        // A trailing all-letters extension is an exchange suffix: drop it.
+        (Some(root), Some(ext))
+            if !ext.is_empty()
+                && ext
+                    .to_string_lossy()
+                    .chars()
+                    .all(|c| c.is_ascii_alphabetic()) =>
+        {
+            root.to_string_lossy().into_owned()
+        }
+        // Anything else — no dot at all, or a dot introducing a strike decimal
+        // — is part of the name.
+        _ => stem.to_string_lossy().into_owned(),
+    }
+}
+
 /// Every real CSV directly inside `dir`, decoded.
 ///
 /// Ghost members are skipped silently *by design* — they are not data and
@@ -232,21 +289,7 @@ pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveErro
             why,
         })?;
 
-        // THE NAME IS THE STEM TWICE, NEVER THE FIRST DOT. Splitting at the
-        // FIRST dot truncated every half-strike: both
-        // `ABCAPITAL31JUL25267.5CE.NFO.csv` and `...267.5PE.NFO.csv` became
-        // `ABCAPITAL31JUL25267`, so a CALL and a PUT merged into one price
-        // series under one name. Measured on the real folder: 11,490 files
-        // collapsed to 11,259 names — 228 collision groups, 459 files.
-        //
-        // `file_stem` strips ONE trailing extension, so two calls strip `.csv`
-        // and then the exchange suffix, leaving the strike decimal intact.
-        let instrument = path
-            .file_stem()
-            .map(std::path::Path::new)
-            .and_then(std::path::Path::file_stem)
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let instrument = instrument_name(&path);
 
         out.push(Member {
             path,
