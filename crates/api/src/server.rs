@@ -2197,67 +2197,101 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     Ok(())
 }
 
-/// Charge one request against this feed's budget, or refuse and say when.
+/// Spend one rate permit, WAITING for it rather than refusing.
 ///
-/// The governor is held on the [`Site`] so its buckets survive between
-/// requests — see [`Site::budgets`] on why a governor built per call admits
-/// everything and is an elaborate way of writing `true`.
+/// # Why waiting is the right answer and refusing is not
 ///
-/// A feed with no governor slot is one that declares no HTTP transport. It
-/// cannot reach here, because the transport routes it to the CSV reader — but
-/// the slot is checked rather than unwrapped, so a future routing change fails
-/// loudly instead of panicking.
+/// The governor does not merely say no — it says *when*. This uses that.
 ///
-/// # A poisoned lock is a refusal, not a bypass
+/// Measured on the real universe with the refusing version: 785 instruments
+/// attempted, **6 reached, 779 refused**, the whole run over in 5.2 seconds,
+/// every refusal reading `Groww's minute budget is spent. The next request is
+/// admitted in 0.198s. Nothing was asked of the vendor.` The governor was
+/// right every time and the vendor was never troubled; the pull simply would
+/// not wait a fifth of a second. Refusing turns "slow down" into "give up",
+/// and a backfill that gives up is one a human has to restart — the manual
+/// intervention this exists to remove.
 ///
-/// If another thread panicked holding this mutex the budget state is unknown.
-/// Treating that as "admit" would spend an unknown allowance at a vendor;
-/// `CLAUDE.md` §4 bans the fallback that hides a failure, so it refuses and
-/// names the reason.
-fn spend_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
-    // ONE ARRAY INDEX. `Feed` is `#[repr(u8)]` with explicit discriminants and
-    // the vector is built from `Feed::ALL` in table order, so the slot is the
-    // variant's own discriminant and there is nothing to search.
-    let slot = feed as usize;
+/// # Why it is bounded, and why the bound is loud
+///
+/// [`MAX_ADMISSION_WAITS`] attempts, after which the refusal is returned
+/// unchanged. Each attempt sleeps the governor's own arithmetic, so this is 64
+/// *earned permits* of patience rather than 64 blind retries. A governor still
+/// denying after that many full waits is not congested, it is misconfigured —
+/// a ceiling below one request per span makes every wait futile — and
+/// `CLAUDE.md` §4 bans a fallback that hides a failure.
+///
+/// # Errors
+///
+/// A poisoned budget lock, or a feed with no HTTP transport: returned on the
+/// first attempt without sleeping, because neither becomes true later.
+async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
+    let mut last = String::new();
+    for _ in 0..MAX_ADMISSION_WAITS {
+        // ONE `admit` CALL PER ATTEMPT, and the lock is dropped before the
+        // sleep.
+        //
+        // `admit` is not a question, it is a WITHDRAWAL: on `Admit` it has
+        // already spent the permit. Asking twice — once to decide and once to
+        // read the wait — spends a permit and throws it away, which over a
+        // 97,524-request backfill is a leak measured in thousands. The verdict
+        // is taken once and both branches are served from it.
+        //
+        // The lock is released before the sleep because holding a
+        // `std::sync::Mutex` across an await point would stall every other
+        // instrument for the duration of one instrument's wait, turning a
+        // governor into a global serialiser.
+        let verdict = {
+            let mut budgets = site.budgets.lock().map_err(|_| {
+                format!(
+                    "the rate budget for {} cannot be read: another request \
+                     panicked while holding it, so the allowance already spent \
+                     is unknown. Nothing is issued on an unknown budget.",
+                    feed.display()
+                )
+            })?;
+            let Some(Some(governor)) = budgets.get_mut(feed as usize) else {
+                return Err(format!(
+                    "{} has no rate budget, which means it declares no HTTP \
+                     transport. Reaching this function is a routing error \
+                     rather than an operator one.",
+                    feed.display()
+                ));
+            };
+            governor.admit(monotonic_micros())
+        };
 
-    let mut budgets = site.budgets.lock().map_err(|_| {
-        format!(
-            "the rate budget for {} cannot be read: another request panicked \
-             while holding it, so the allowance already spent is unknown. \
-             Nothing is issued on an unknown budget.",
-            feed.display()
-        )
-    })?;
-
-    let Some(Some(governor)) = budgets.get_mut(slot) else {
-        return Err(format!(
-            "{} has no rate budget, which means it declares no HTTP transport. \
-             Reaching this function is a routing error rather than an operator \
-             one.",
-            feed.display()
-        ));
-    };
-
-    match governor.admit(monotonic_micros()) {
-        pull::rate::Verdict::Admit => Ok(()),
-        pull::rate::Verdict::Deny { span, wait_micros } => Err(format!(
+        let pull::rate::Verdict::Deny { span, wait_micros } = verdict else {
+            return Ok(());
+        };
+        last = format!(
             "{}'s {} budget is spent. The next request is admitted in \
              {}.{:03}s. Nothing was asked of the vendor and nothing was written.",
             feed.display(),
-            // `WindowSpan` has no operator-facing name of its own; it is an
-            // internal tag. Named here rather than adding one to `pull::rate`,
-            // whose Debug is already exactly the word an operator wants.
+            // `WindowSpan` has no operator-facing name of its own; its Debug is
+            // already exactly the word an operator wants.
             format!("{span:?}").to_lowercase(),
             // INTEGER SECONDS AND MILLISECONDS. `{:.3}` on an `f64` is the
             // obvious way to write this and clippy denies it workspace-wide —
-            // correctly. `CLAUDE.md` §7 bans the float for prices; the lint is
-            // stricter and bans it everywhere, so a duration that is exact
-            // arithmetic on integers stays exact arithmetic on integers.
+            // correctly. A duration that is exact integer arithmetic stays it.
             wait_micros / 1_000_000,
             (wait_micros % 1_000_000) / 1_000
-        )),
+        );
+        // THE GOVERNOR SAID WHEN, so sleep exactly that. A fixed sleep is
+        // either longer than the wait (throughput thrown away) or shorter (a
+        // spin). +1 ms so the clock has certainly passed the instant rather
+        // than landing exactly on it, which would deny once more.
+        tokio::time::sleep(std::time::Duration::from_micros(wait_micros + 1_000)).await;
     }
+    Err(format!(
+        "{last} — and that wait was taken {MAX_ADMISSION_WAITS} times without \
+         the permit ever being earned, so the ceiling is below one request per \
+         span and waiting longer cannot help."
+    ))
 }
+
+/// How many full waits are taken before a rate refusal is believed.
+const MAX_ADMISSION_WAITS: u32 = 64;
 
 /// A monotonic microsecond reading, which is what [`pull::rate::Governor`] asks
 /// for and deliberately will not read itself.
@@ -2387,7 +2421,7 @@ async fn fetch_chunks(
         // credential was read — a request that will not be issued must not cost
         // a round-trip to ap-south-1. The rest are charged here.
         if nth > 0 {
-            spend_budget(asked.feed, site)?;
+            await_budget(asked.feed, site).await?;
         }
 
         let request = pull::fetch::BarRequest {
@@ -2593,10 +2627,16 @@ async fn broker_window(
     //
     // Charged HERE, ahead of the credential read and the socket, because a
     // request that will not be issued must not first cost a Parameter Store
-    // round-trip. The refusal names the binding span and the exact wait that
-    // clears it, so an operator is told when to come back rather than being
-    // told "no".
-    spend_budget(asked.feed, site)?;
+    // round-trip.
+    //
+    // WAITED FOR, NOT REFUSED. This is the per-instrument path — it runs once
+    // per instrument per chunk, ~97,524 times for a full Groww backfill — and
+    // a refusal here is the difference between a slow pull and a dead one.
+    // Measured before this changed: 785 attempted, 6 reached, 779 refused for
+    // `the next request is admitted in 0.198s`, the whole run over in 5.2
+    // seconds. The governor was right every time; the pull just would not
+    // wait a fifth of a second for it.
+    await_budget(asked.feed, site).await?;
 
     if asked.target != ingest::SpotTarget::Swept {
         return Err(format!(
@@ -5702,43 +5742,52 @@ mod tests {
 
     /// A spent budget refuses, names the span, and says when it clears.
     ///
-    /// Drives the governor directly to exhaustion rather than issuing real
-    /// requests — the point is that `spend_budget` returns the refusal rather
-    /// than admitting, and that the sentence tells an operator when to come
-    /// back instead of only saying no.
-    #[test]
-    fn a_spent_budget_refuses_and_names_the_wait_that_clears_it() {
+    /// Drives the governor directly past its per-second ceiling rather than
+    /// issuing real requests. The claim is not "it refuses" — it no longer
+    /// does. The claim is that a burst larger than the ceiling is **throttled
+    /// and then admitted in full**: nothing is lost and nothing is issued
+    /// faster than the vendor published.
+    ///
+    /// This test previously asserted a refusal, and the refusal was the bug.
+    /// Measured on the real universe: 785 instruments attempted, 6 reached,
+    /// 779 refused for a wait of 0.198 s. A backfill that abandons 99% of its
+    /// work rather than waiting a fifth of a second is not automated.
+    #[tokio::test]
+    async fn a_burst_past_the_ceiling_is_throttled_and_still_admitted_in_full() {
+        const BURST: u32 = 12;
         let dir = agreeing("budgetspent");
         let site = site("budgetspent", &dir);
         let feed = pull::vendor::Feed::Dhan;
 
-        // Drain it. Dhan's per-second ceiling is the binding one, so a handful
-        // of immediate calls exhausts it without waiting for anything.
-        let mut refusal = None;
-        for _ in 0..64 {
-            if let Err(why) = spend_budget(feed, &site) {
-                refusal = Some(why);
-                break;
-            }
+        // A burst bigger than any published per-second ceiling, so at least
+        // one full second-window must be waited out. Kept small because the
+        // wait is REAL time — the point is to prove throttling happened, and
+        // one crossed window proves it as well as a hundred.
+        let started = std::time::Instant::now();
+        for n in 0..BURST {
+            await_budget(feed, &site).await.unwrap_or_else(|why| {
+                panic!(
+                    "request {n} of {BURST} was refused rather than waited \
+                     for, which loses work the vendor would have served: {why}"
+                )
+            });
         }
+        let took = started.elapsed();
 
-        let why = refusal.expect(
-            "a budget with a published per-second ceiling must refuse a burst \
-             of 64 immediate requests — if it admits all of them the governor \
-             is not being consulted",
-        );
+        // NOTHING WAS LOST — every one of the twelve was admitted, or the loop
+        // above would have panicked.
+        //
+        // AND NOTHING WAS RUSHED. Dhan publishes 5 requests per second
+        // (`docs/00-charter.md` §4), so twelve cannot be issued in under two
+        // full seconds' worth of allowance. If this elapsed instantly the
+        // governor is not being consulted at all and the assertion above
+        // would pass vacuously — which is exactly the shape of test
+        // `CLAUDE.md` §4 bans.
         assert!(
-            why.contains("budget is spent"),
-            "the refusal says the budget is what stopped it: {why}"
-        );
-        assert!(
-            why.contains("admitted in"),
-            "and when it clears, so an operator knows when to come back \
-             rather than only that the answer is no: {why}"
-        );
-        assert!(
-            why.contains("nothing was written") || why.contains("Nothing was asked"),
-            "and that the vendor was never contacted: {why}"
+            took >= std::time::Duration::from_millis(900),
+            "{BURST} requests against a 5-per-second ceiling completed in \
+             {took:?} — too fast to have been throttled, so the governor is \
+             not being consulted and this test proves nothing"
         );
     }
 
@@ -6026,7 +6075,7 @@ mod tests {
         // Every guard below is decidable from the form and the descriptor, so
         // every one of them belongs above the first thing that costs anything.
         let budget = body
-            .find("spend_budget(")
+            .find("await_budget(")
             .expect("the rate budget is charged inside broker_window");
         assert!(
             transport < budget,

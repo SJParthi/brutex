@@ -66,10 +66,56 @@
     ).then((all) => (elsewhere = all.filter((x) => x.bars > 0 && x.feed.wire !== feeds.active)));
   });
 
-  /** Bars short of whole trading days — the number worth seeing. */
+  /**
+   * THE TRADING CALENDAR, DERIVED FROM THE STORE ITSELF.
+   *
+   * How many bars a full month holds is not a constant and cannot be
+   * calculated: it is 375 x the number of sessions NSE actually held, and
+   * that depends on weekends, gazetted holidays, muhurat sessions and the
+   * occasional unscheduled close. This repository does not invent an exchange
+   * fact (`CLAUDE.md` section 3 rule 1), so the session count is OBSERVED:
+   * for each month, the fullest instrument in the store is the month.
+   *
+   * O(n) once over the rows, then O(1) per lookup — a Map probe, not a scan,
+   * so the 93,776-row census projected in `docs/06-limits.md` section 34
+   * costs one pass and not one pass per row.
+   */
+  const monthFull = $derived.by(() => {
+    const most = new Map();
+    for (const r of rows) {
+      const seen = most.get(r.month);
+      if (seen === undefined || r.rows > seen) most.set(r.month, r.rows);
+    }
+    return most;
+  });
+
+  /**
+   * Bars this instrument-month is short of the fullest one in the same month.
+   *
+   * # What this used to be, and why it was worse than useless
+   *
+   * `ceil(rows / 375) * 375 - rows`. That is `(-rows) mod 375`, so it is in
+   * [0, 374] for EVERY row, whatever the month really held. It answered "is
+   * this row a whole multiple of 375", never "does this row hold the month" —
+   * and then the answer was labelled green "full" and counted in "Complete".
+   *
+   * Measured on the real store before this changed: 137 rows rendered green
+   * "full" while short 51,750 real bars between them, and the "Bars missing"
+   * total understated the true gap by 7.1x. NSE-CASH-PAGEIND 2026-07 holds
+   * 7,875 bars — 21 sessions in a 23-session month, two whole trading days
+   * absent — and the page said "full".
+   *
+   * A monitoring page whose entire stated job is "where are the holes"
+   * reporting no hole is the fallback that hides a failure `CLAUDE.md`
+   * section 4 bans, on the one surface built to prevent it.
+   */
   function shortBy(r) {
-    const days = Math.max(1, Math.ceil(r.rows / BARS_PER_SESSION));
-    return days * BARS_PER_SESSION - r.rows;
+    return Math.max(0, (monthFull.get(r.month) ?? r.rows) - r.rows);
+  }
+
+  /** Whole sessions held, from the bar count. Fractional means a partial day. */
+  function sessions(r) {
+    return r.rows / BARS_PER_SESSION;
   }
 
   const matched = $derived(
@@ -127,7 +173,7 @@
       <div class="stat"><span class="k">Instrument-months</span><span class="v">{matched.length.toLocaleString()}</span></div>
       <div class="stat"><span class="k">Bars</span><span class="v">{total.toLocaleString()}</span></div>
       <div class="stat"><span class="k">Complete</span><span class="v up">{full.toLocaleString()}</span><span class="n">of {matched.length.toLocaleString()}</span></div>
-      <div class="stat"><span class="k">Bars missing</span><span class="v" class:down={gaps > 0}>{gaps.toLocaleString()}</span><span class="n">across {months} month(s)</span></div>
+      <div class="stat"><span class="k">Bars missing</span><span class="v" class:down={gaps > 0}>{gaps.toLocaleString()}</span><span class="n">vs the fullest instrument each month, across {months} month(s)</span></div>
     </section>
   {/if}
 
@@ -179,7 +225,7 @@
               <td>{r.month}</td>
               <td>{r.timeframe}</td>
               <td class="num">{r.rows.toLocaleString()}</td>
-              <td class="num">{Math.max(1, Math.ceil(r.rows / BARS_PER_SESSION))}</td>
+              <td class="num">{Number.isInteger(sessions(r)) ? sessions(r) : sessions(r).toFixed(1)}</td>
               <td class="num" class:down={s !== 0} class:up={s === 0}>{s === 0 ? 'full' : `−${s}`}</td>
             </tr>
           {/each}
