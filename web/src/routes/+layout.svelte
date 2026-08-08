@@ -6,8 +6,14 @@
 
   let { children } = $props();
 
-  // Both indexes load once, for the session. Everything after is in-memory.
-  $effect(() => { loadFeeds(); loadCatalogue(); });
+  // The feed list loads once. The INSTRUMENT list reloads whenever the feed
+  // changes, because the two brokers do not list the same instruments —
+  // GIFTNIFTY is Dhan-only — and a page showing the merge offers symbols the
+  // selected feed cannot be asked for.
+  $effect(() => { loadFeeds(); });
+  $effect(() => {
+    if (feeds.active) loadCatalogue(feeds.active);
+  });
 
   const tabs = [
     { href: '/', label: 'Markets' },

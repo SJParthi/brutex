@@ -17,12 +17,12 @@
     ['index', 'Indices'],
     ['fno', 'F&O'],
     ['ntm', 'NIFTY Total Market'],
-    ['held', 'Held']
+    ['held', 'With data']
   ];
 
   function inBucket(row, which) {
     if (which === 'all') return true;
-    if (which === 'held') return row.held === true;
+    if (which === 'held') return (row.bars ?? 0) > 0;
     // `universe` is a bitset rendered as `index+fno+ntm`, so an instrument in
     // several buckets appears under each — which is the truth, not a bug.
     return String(row.universe ?? '').split('+').includes(which);
@@ -98,7 +98,12 @@
               >
                 <span class="sym">{row.symbol}</span>
                 <span class="meta">
-                  {#if row.held}<span class="tag held">held</span>{/if}
+                  <!-- THE COUNT, not a boolean. "how much do I have" is the
+                       question; "HELD" answered a different one and made the
+                       operator ask what it meant. -->
+                  {#if (row.bars ?? 0) > 0}
+                    <span class="tag held">{row.bars.toLocaleString()} bars</span>
+                  {/if}
                   <span class="tag">{row.universe ?? row.kind}</span>
                 </span>
               </div>

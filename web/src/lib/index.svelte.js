@@ -20,9 +20,12 @@ const MAX_PREFIX = 4;
 export const catalogue = $state({ rows: [], ready: false, error: null });
 let byPrefix = new Map();
 
-export async function loadCatalogue() {
+export async function loadCatalogue(feed) {
   try {
-    const r = await fetch('/instruments.json');
+    // THE FEED IS PART OF THE QUESTION. The two brokers do not list the same
+    // instruments, so "every instrument" is a different set per feed and the
+    // index has to be rebuilt when the selection changes.
+    const r = await fetch(`/instruments.json?feed=${encodeURIComponent(feed ?? '')}`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const rows = await r.json();
     const next = new Map();
@@ -39,6 +42,7 @@ export async function loadCatalogue() {
     byPrefix = next;
     catalogue.rows = rows;
     catalogue.ready = true;
+    catalogue.error = null;
   } catch (why) {
     catalogue.error = String(why);
   }

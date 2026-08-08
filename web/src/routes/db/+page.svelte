@@ -13,6 +13,22 @@
   let loading = $state(false);
   let filter = $state('');
 
+  // WHICH OTHER FEEDS HAVE DATA. An empty page that only says "nothing here"
+  // makes the operator hunt: Groww may hold 8,922 bars one dropdown away and
+  // the page said nothing about it. Knowing where the data IS is the useful
+  // half of knowing it is not here.
+  let elsewhere = $state([]);
+  $effect(() => {
+    Promise.all(
+      feeds.all.map((f) =>
+        fetch(`/store.json?feed=${encodeURIComponent(f.wire)}`)
+          .then((r) => (r.ok ? r.json() : []))
+          .then((d) => ({ feed: f, bars: d.reduce((a, r) => a + r.rows, 0) }))
+          .catch(() => ({ feed: f, bars: 0 }))
+      )
+    ).then((all) => (elsewhere = all.filter((x) => x.bars > 0)));
+  });
+
   $effect(() => {
     const f = feeds.active;
     if (!f) return;
@@ -57,7 +73,29 @@
     {:else if loading}
       <p class="empty">Reading the manifest…</p>
     {:else if shown.length === 0}
-      <p class="empty">Nothing held for {feeds.active} yet. Pull it from Ingest.</p>
+      <!-- AN EMPTY STATE THAT SAYS WHAT TO DO, and where the data actually is.
+           This was one grey sentence in a full screen of black. -->
+      <div class="blank">
+        <h2>Nothing stored for {feeds.all.find((f) => f.wire === feeds.active)?.display ?? feeds.active}</h2>
+        {#if filter.trim()}
+          <p>No instrument matches "{filter}". <button class="link" onclick={() => (filter = '')}>Clear the filter</button></p>
+        {:else}
+          <p>This feed has never landed a bar in this store.</p>
+        {/if}
+
+        {#if elsewhere.length}
+          <div class="alt">
+            <span class="lbl">Data exists on</span>
+            {#each elsewhere as e}
+              <button class="utab" onclick={() => (feeds.active = e.feed.wire)}>
+                {e.feed.display}<span class="n">{e.bars.toLocaleString()} bars</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
+
+        <a class="cta" href="/ingest">Pull data on Ingest →</a>
+      </div>
     {:else}
       <table>
         <thead>

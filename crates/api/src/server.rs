@@ -711,7 +711,22 @@ async fn page(
 /// below is escaped through [`render::json_string`] rather than trusted.
 async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    // THE LIST IS THE SELECTED FEED'S, NOT THE MERGE OF ALL OF THEM.
+    //
+    // This returned the merged universe whatever feed was chosen, so switching
+    // the picker changed nothing. That is wrong twice over: the two brokers do
+    // NOT list the same instruments — `GIFTNIFTY` is Dhan-only — so the page
+    // offered symbols the selected feed cannot be asked for, and `held` was
+    // computed feed-agnostically, so a row read HELD while the chosen feed held
+    // nothing for it.
+    //
+    // An instrument belongs to a feed's list when that feed's master gave it an
+    // id. `ids` is indexed by the vendor's own discriminant, so the test is one
+    // array index per row and not a lookup.
+    let feed = ingest::parse_vendor(&param(uri.query().unwrap_or(""), "feed"))
+        .unwrap_or(brutex_core::vendor::Vendor::Dhan);
     // SORTED, GROUPED, AND HELD-FIRST. `by_key` is a HashMap, so iterating it
     // gave the browser TATACOMM, GMRAIRPORT, PINELABS — an order stable per
     // process and meaningless to a human. Nothing was findable by scrolling and
@@ -728,11 +743,30 @@ async fn instruments_json(
         .merged
         .by_key
         .iter()
-        .filter(|(_, entry)| crate::catalog::tracked(entry.universe))
+        .filter(|(_, entry)| {
+            crate::catalog::tracked(entry.universe)
+                && entry.ids.get(feed as usize).copied().flatten().is_some()
+        })
         .collect();
+    // HOW MANY BARS, not whether any. "HELD" was store jargon that leaked onto
+    // the screen: it told an operator a boolean when the question they actually
+    // have is "how much of this do I have". A count answers both — zero IS the
+    // boolean, and 1,125 is what the boolean threw away.
+    let bars_of = |sym: brutex_core::symbol::Symbol| -> u64 {
+        site.censuses
+            .iter()
+            .find(|c| c.vendor == feed)
+            .map_or(0, |c| {
+                site.entries
+                    .iter()
+                    .filter(|(series, _)| series.symbol == sym)
+                    .filter_map(|(series, month)| c.rows_for(&series.at(*month)))
+                    .sum()
+            })
+    };
     listing.sort_unstable_by_key(|(key, _)| {
         (
-            !site.series.iter().any(|s| s.symbol == key.underlying),
+            bars_of(key.underlying) == 0,
             key.kind != brutex_core::instrument::Kind::Index,
             key.underlying,
         )
@@ -740,7 +774,7 @@ async fn instruments_json(
 
     let mut out = String::from("[");
     for (n, (key, entry)) in listing.into_iter().enumerate() {
-        let held = site.series.iter().any(|s| s.symbol == key.underlying);
+        let bars = bars_of(key.underlying);
         // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
         //
         // This iterated the whole master and shipped 2,780 listings while the
@@ -763,7 +797,7 @@ async fn instruments_json(
             // `universe` and `held` travel with the row so the browser can
             // GROUP without asking again: F&O vs NIFTY Total Market vs index is
             // the distinction the operator reads, and it is a bitset here.
-            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"held":{held},"href":{}}}"#,
+            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"bars":{bars},"href":{}}}"#,
             render::json_string(key.underlying.as_str()),
             render::json_string(&canonical),
             render::json_string(&format!("{:?}", key.kind)),
@@ -5580,8 +5614,13 @@ mod tests {
         let site = site("tajson", &dir);
         let loaded: Loaded = std::sync::Arc::new(site);
 
-        let (_headers, json) =
-            instruments_json(axum::extract::State(std::sync::Arc::clone(&loaded))).await;
+        let (_headers, json) = instruments_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            // The feed is part of the question now: the two brokers do not
+            // list the same instruments, so the index is per feed.
+            "/instruments.json?feed=groww".parse().expect("a legal uri"),
+        )
+        .await;
         let site = &*loaded;
 
         let shipped = json.matches(r#""symbol":"#).count();
