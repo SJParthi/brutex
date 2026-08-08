@@ -4253,3 +4253,48 @@ makes a page useful before any script runs, and what keeps `api::render`'s tests
 meaningful.
 
 `docs/06-limits.md` gains nothing here: no bound is claimed and none is met.
+
+## D-0054 · 2026-08-08 · The daily rung, because a backfill lands it first
+
+`crates/store/src/path.rs`.
+
+`Timeframe::KNOWN` held one rung, `1min`. It now holds two, `1day` first.
+
+**Why.** The stated backfill is ~800 instruments from 2020-01-01 to yesterday.
+At the vendors' published per-request caps (`docs/00-charter.md` §4) that is
+**81 windows per instrument at one minute and 14 at day level** — 5.8× fewer
+requests for the same span. The operator's sequencing is explicit: the daily
+pass runs to completion first, and the minute pass follows only when it has.
+
+That order is also the cheaper way to be wrong. A feed that answers nothing, a
+symbol spelled differently, a date range before an instrument's listing — all of
+it surfaces in 14 requests rather than 81.
+
+**This is not a widening of D-0015, it is that decision's seam being used.**
+D-0015 deferred every timeframe but the minute and said so in a table: the
+header field `timeframe_secs` was already a `u32` of **seconds**, and the path
+was already `bars/<vendor>/<exch>/<seg>/<sym>/<tf>/<yyyy-mm>.bin`. Its own
+"cost to switch on later" column reads *none — no format change, no migration*
+and *none — the first write creates the directory*. Both hold: every existing
+`1min` file keeps its bytes and its meaning, and nothing is rewritten.
+
+What D-0015 actually deferred was **buying second-level data**, on the grounds
+that ₹1,15,050 and ₹3,04,787 are not recoverable if the minute-level hypothesis
+does not hold. Nothing here buys anything. The daily rung is derived from the
+same broker endpoints already in use.
+
+**`1day` is four bytes**, so `MAX_TIMEFRAME_LEN` is unchanged at 4 and the
+derived `MAX_LEN` does not move — unlike the vendor segment, which went 5 → 8
+when the archive feeds gained prefixes and dragged `MAX_LEN` 103 → 106 with it.
+
+**86,400 seconds is a calendar day, not a session.** The store addresses bars by
+index and the timeframe names their spacing; a daily bar is one record per
+trading day whatever that session's length was. The alternative — 22,140 seconds
+for an NSE session — would have made the constant a function of the CAS change
+of 2026-08-03 and of every exchange whose hours differ.
+
+**The test asserts the whole list, not two `contains` calls**, so a third rung
+added without a decision entry fails there rather than appearing quietly in a
+path. It also asserts the two rungs share neither a path segment nor a length:
+the first would file one over the other, the second would make `from_secs`
+ambiguous.

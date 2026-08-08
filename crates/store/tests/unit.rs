@@ -1666,7 +1666,33 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
     assert_eq!(Timeframe::from_secs(60), Ok(Timeframe::MINUTE_1));
     assert_eq!(Timeframe::MINUTE_1.secs(), 60);
     assert_eq!(Timeframe::MINUTE_1.as_str(), "1min");
-    assert_eq!(Timeframe::KNOWN, &[Timeframe::MINUTE_1]);
+
+    // THE DAILY RUNG, added because a backfill lands it first: 14 windows per
+    // instrument against 81 at one minute, for the same 2020-to-yesterday span.
+    // D-0015 built the seam and D-0054 uses it — `timeframe_secs` was already
+    // a u32 of seconds and the path already had a `<tf>` segment, so this is a
+    // new directory and nothing else.
+    assert_eq!(Timeframe::from_secs(86_400), Ok(Timeframe::DAY_1));
+    assert_eq!(Timeframe::DAY_1.secs(), 86_400);
+    assert_eq!(Timeframe::DAY_1.as_str(), "1day");
+
+    // Both rungs, and NO OTHERS. Asserted as the whole list rather than as two
+    // `contains` calls, so a third rung added without a decision entry fails
+    // here rather than appearing quietly in a path.
+    assert_eq!(
+        Timeframe::KNOWN,
+        &[Timeframe::DAY_1, Timeframe::MINUTE_1],
+        "every timeframe this build stores, in the order a backfill writes them"
+    );
+
+    // AND THEY DO NOT COLLIDE. Two rungs sharing a path segment would file one
+    // over the other; two sharing a length would make `from_secs` ambiguous.
+    assert_ne!(Timeframe::DAY_1.as_str(), Timeframe::MINUTE_1.as_str());
+    assert_ne!(Timeframe::DAY_1.secs(), Timeframe::MINUTE_1.secs());
+    assert!(
+        Timeframe::DAY_1.as_str().len() <= MAX_TIMEFRAME_LEN,
+        "`1day` is four bytes, so the derived MAX_LEN is unchanged"
+    );
     // D-0015: minute bars only, until a minute-level result earns the upgrade.
     assert_eq!(
         Timeframe::from_secs(300),

@@ -300,14 +300,43 @@ pub struct Timeframe {
 }
 
 impl Timeframe {
-    /// One-minute bars — the only timeframe D-0015 admits.
+    /// One-minute bars — what the engine sweeps.
     pub const MINUTE_1: Self = Self {
         secs: 60,
         name: "1min",
     };
 
+    /// One-day bars — what a backfill lands FIRST.
+    ///
+    /// # Why this exists beside the minute
+    ///
+    /// The stated backfill is ~800 instruments from 2020 to yesterday. At the
+    /// vendors' published caps that is **81 windows per instrument** at one
+    /// minute and **14** at day level — 5.8× fewer requests for the same span.
+    /// So the daily pass runs to completion first and the minute pass follows,
+    /// which is the operator's own sequencing and is also the cheaper way to
+    /// discover that a feed, a symbol or a date range is wrong.
+    ///
+    /// D-0015 deferred every timeframe but the minute and **built the seam for
+    /// exactly this**: `timeframe_secs` is already a `u32` of seconds in the
+    /// header, and the path is `…/<symbol>/<tf>/<yyyy-mm>.bin`, so a new rung
+    /// is a new directory and nothing else. No format change, no migration, and
+    /// every existing `1min` file keeps its bytes and its meaning. See D-0054.
+    ///
+    /// 86,400 seconds. A calendar day, not a session — the store addresses bars
+    /// by index and the timeframe names their spacing, so a daily bar is one
+    /// record per trading day whatever the session's length was.
+    pub const DAY_1: Self = Self {
+        secs: 86_400,
+        name: "1day",
+    };
+
     /// Every timeframe this build stores.
-    pub const KNOWN: &'static [Self] = &[Self::MINUTE_1];
+    ///
+    /// The daily rung is FIRST because a backfill lands it first, and because
+    /// `from_secs` walks this list — an order that matches the order things are
+    /// written costs nothing and reads honestly.
+    pub const KNOWN: &'static [Self] = &[Self::DAY_1, Self::MINUTE_1];
 
     /// The timeframe of `secs` seconds.
     ///
