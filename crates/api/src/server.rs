@@ -752,17 +752,16 @@ async fn instruments_json(
     // the screen: it told an operator a boolean when the question they actually
     // have is "how much of this do I have". A count answers both — zero IS the
     // boolean, and 1,125 is what the boolean threw away.
+    // FRESH, so a row's bar count moves as a backfill lands. See `census_now`.
+    let (censuses, entries) = census_now(&site);
     let bars_of = |sym: brutex_core::symbol::Symbol| -> u64 {
-        site.censuses
-            .iter()
-            .find(|c| c.vendor == feed)
-            .map_or(0, |c| {
-                site.entries
-                    .iter()
-                    .filter(|(series, _)| series.symbol == sym)
-                    .filter_map(|(series, month)| c.rows_for(&series.at(*month)))
-                    .sum()
-            })
+        censuses.iter().find(|c| c.vendor == feed).map_or(0, |c| {
+            entries
+                .iter()
+                .filter(|(series, _)| series.symbol == sym)
+                .filter_map(|(series, month)| c.rows_for(&series.at(*month)))
+                .sum()
+        })
     };
     listing.sort_unstable_by_key(|(key, _)| {
         (
@@ -1030,6 +1029,35 @@ async fn bars_json(
     (axum::http::StatusCode::OK, json(), out)
 }
 
+/// The census as it is on disk RIGHT NOW, not as it was at startup.
+///
+/// # Why this is read per request
+///
+/// `Site` loads the census once when the process starts and holds it. That was
+/// right when a pull was a separate invocation, and became wrong the moment the
+/// served binary could pull: a run through this process writes 772 bar files
+/// and 278,112 records, and every page went on showing the startup snapshot.
+/// An operator watching a backfill saw nothing move, which reads as a broken
+/// run rather than a stale cache.
+///
+/// It is cheap enough to do per request BECAUSE of what the census is: one
+/// header read per vendor plus a mapped entry region, never a directory walk.
+/// That is the whole point of `docs/06-limits.md` §32's layer — answering "what
+/// do I hold" without listing anything.
+///
+/// The cached copy on `Site` stays for the pages that were built against it;
+/// this is for the ones that must be current.
+fn census_now(
+    site: &Site,
+) -> (
+    Vec<census::VendorCensus>,
+    Vec<(census::Series, store::path::YearMonth)>,
+) {
+    let censuses = census::read_all(&site.store_root);
+    let entries = census::held_entries(&censuses);
+    (censuses, entries)
+}
+
 /// What the store holds for ONE feed, as JSON, for the DB page.
 ///
 /// `?feed=<wire>` — and one feed only. No response from this endpoint ever
@@ -1048,11 +1076,13 @@ async fn store_json(
     let feed =
         ingest::parse_vendor(&param(query, "feed")).unwrap_or(brutex_core::vendor::Vendor::Dhan);
 
+    // FRESH, NOT THE STARTUP SNAPSHOT. See `census_now`.
+    let (censuses, entries) = census_now(&site);
+
     let mut out = String::from("[");
     let mut n = 0usize;
-    for (series, month) in &site.entries {
-        let Some(rows) = site
-            .censuses
+    for (series, month) in &entries {
+        let Some(rows) = censuses
             .iter()
             .find(|c| c.vendor == feed)
             .and_then(|c| c.rows_for(&series.at(*month)))
