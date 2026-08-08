@@ -80,12 +80,20 @@ impl Paisa {
     /// assert_eq!(Paisa::from_rupees_half_up(23_109.55)?.raw(), 2_310_955);
     /// # Ok::<(), brutex_core::error::PriceError>(())
     /// ```
-    // This is the ONLY function in the workspace permitted to do floating-point
+    // This is the ONLY function on a PRICE path permitted to do floating-point
     // arithmetic, and the allow is written here rather than relaxed at the
     // workspace level so that any second such function is a visible, reviewable
     // addition. The vendor sends rupees as an IEEE double; something has to
     // accept it, and the whole design is that this is the only thing that does.
     // Everything downstream of the `Ok` below is an integer forever.
+    //
+    // It said "the only function in the WORKSPACE", and that has not been true
+    // since `crates/greeks` arrived with four module-wide allows for this same
+    // lint. Those are not a second price path: a delta of
+    // 0.00017142680429549402 is a statistical value, and CLAUDE.md section 7
+    // keeps those at full precision on purpose. The line is between a price and
+    // a statistic, not between an integer and a float, and
+    // `core::lint::no_float_in_price` is what now checks it (X-02, D-0061).
     #[allow(clippy::float_arithmetic)]
     pub fn from_rupees_half_up(rupees: f64) -> Result<Self, PriceError> {
         /// The scale factor as a float, pinned to the integer constant by the
