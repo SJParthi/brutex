@@ -335,23 +335,96 @@ impl<'a> Columns<'a> {
     /// rows they belong to, and this is where the two are put back together.
     /// Getting it wrong would shift every value after the first null onto the
     /// wrong bar.
-    fn expand<T: Copy>(values: &[T], defs: &[i16], rows: usize) -> Vec<Option<T>> {
+    ///
+    /// # There is no padding arm, and its absence is the point
+    ///
+    /// This function used to answer a short chunk with nulls: it walked
+    /// `0..rows` and pushed `None` for every row the levels did not reach, and
+    /// for every row whose level said PRESENT once the values had run out. A
+    /// chunk delivering 400 of 2,480 rows was therefore *accepted*, with 2,080
+    /// nulls this crate invented and nothing downstream able to tell them from
+    /// real ones. On `open_interest` each was an invented `i64::MIN`, the
+    /// `CLAUDE.md` §7 sentinel. `CLAUDE.md` §4 bans exactly that: a fallback
+    /// that hides a failure. Both conditions are now
+    /// [`LakeError::ShortColumnChunk`], named with the column, the row, and
+    /// the two counts.
+    ///
+    /// **Neither condition is a Parquet-legal file**, which is why refusing
+    /// costs nothing real:
+    ///
+    /// * *Fewer levels than rows.* `parquet.thrift` (shipped verbatim as
+    ///   `parquet-format-safe-0.2.4/parquet.thrift`) defines `RowGroup` field
+    ///   3 `num_rows` as "Number of rows in this row group",
+    ///   `ColumnMetaData` field 5 `num_values` as "Number of values in this
+    ///   column", and `DataPageHeader` field 1 `num_values` as "Number of
+    ///   values, including NULLs, in this data page". For an unnested,
+    ///   unrepeated leaf — maximum definition level 1, maximum repetition
+    ///   level 0, the only shape `crate::schema::detect` accepts — one value
+    ///   including nulls is one row, so the levels must cover every row of the
+    ///   group. Short levels mean the chunk stopped early, which is byte loss,
+    ///   not a tail of nulls.
+    /// * *Fewer values than the levels claim.* `DataPageHeaderV2` in the same
+    ///   file states "Number of non-null = num\_values - num\_nulls which is
+    ///   also the number of values in the data section": the data section's
+    ///   length is *derived* from the levels, so a page holding fewer values
+    ///   is malformed rather than a page with bonus nulls. `parquet` 59.2's
+    ///   own `read_records_with_reservation`
+    ///   (`src/column/reader.rs:290`) agrees and refuses first —
+    ///
+    ///   ```text
+    ///   let values_read = self.values_decoder.read(values, values_to_read)?;
+    ///   if values_read != values_to_read {
+    ///       return Err(general_err!(
+    ///           "insufficient values read from column - expected: \
+    ///            {values_to_read}, got: {values_read}",
+    ///       ));
+    ///   }
+    ///   ```
+    ///
+    ///   so this arm is defence on a helper rather than a path a file reaches.
+    ///   It is written as a refusal and not an `unwrap` because the comment
+    ///   that used to sit here claimed a refusal the code did not perform.
+    ///
+    /// Only two levels can arrive. `crate::schema::detect` refuses any leaf
+    /// whose maximum definition level is not 1, and the RLE/bit-packed hybrid
+    /// encodes levels at `ceil(log2(max_def_level + 1))` bits — one bit — so
+    /// the decoder cannot produce a 2 to be silently read as null.
+    fn expand<T: Copy>(
+        column: &'static str,
+        values: &[T],
+        defs: &[i16],
+        rows: usize,
+    ) -> Result<Vec<Option<T>>, LakeError> {
+        if defs.len() != rows {
+            return Err(LakeError::ShortColumnChunk {
+                column,
+                row: defs.len().min(rows),
+                expected: rows,
+                arrived: defs.len(),
+            });
+        }
         let mut out = Vec::with_capacity(rows);
         let mut next = 0usize;
-        for row in 0..rows {
-            match defs.get(row) {
-                // A max definition level of 1 means present; 0 means null.
-                Some(1) => {
-                    let v = values.get(next).copied();
-                    if v.is_some() {
-                        next += 1;
-                    }
-                    out.push(v);
-                }
-                _ => out.push(None),
+        for (row, level) in defs.iter().enumerate() {
+            // A definition level of 1 means present; 0 means null.
+            if *level == 1 {
+                let Some(v) = values.get(next) else {
+                    return Err(LakeError::ShortColumnChunk {
+                        column,
+                        row,
+                        // The scan is on the refusal path only, and the read
+                        // it belongs to ends here.
+                        expected: defs.iter().filter(|d| **d == 1).count(),
+                        arrived: values.len(),
+                    });
+                };
+                next += 1;
+                out.push(Some(*v));
+            } else {
+                out.push(None);
             }
         }
-        out
+        Ok(out)
     }
 
     fn int64(&mut self, name: &'static str) -> Result<Vec<Option<i64>>, LakeError> {
@@ -361,6 +434,15 @@ impl<'a> Columns<'a> {
         let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::Int64ColumnReader(mut r) => {
+                // `read_records` answers `(records, values, levels)`, and a
+                // short read shows up as `records < self.rows`. The triple is
+                // not the check here for one reason: `levels` IS `defs.len()`
+                // on an unnested leaf at definition level 1, which is the shape
+                // `schema::detect` has already insisted on, and `defs.len()`
+                // against `self.rows` is checked inside `Self::expand` — the
+                // one function that used to pad the shortfall with nulls.
+                // Checking the same number twice would leave a branch no file
+                // can reach and a mutant no test can kill.
                 r.read_records(self.rows, Some(&mut defs), None, &mut values)
                     .map_err(|e| LakeError::PageDecode {
                         column: name.to_owned(),
@@ -369,7 +451,7 @@ impl<'a> Columns<'a> {
             }
             _ => return Err(self.mismatch(name)),
         }
-        Ok(Self::expand(&values, &defs, self.rows))
+        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn int32(&mut self, name: &'static str) -> Result<Vec<Option<i32>>, LakeError> {
@@ -379,6 +461,7 @@ impl<'a> Columns<'a> {
         let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::Int32ColumnReader(mut r) => {
+                // The triple is discarded for the reason `Self::int64` states.
                 r.read_records(self.rows, Some(&mut defs), None, &mut values)
                     .map_err(|e| LakeError::PageDecode {
                         column: name.to_owned(),
@@ -387,7 +470,7 @@ impl<'a> Columns<'a> {
             }
             _ => return Err(self.mismatch(name)),
         }
-        Ok(Self::expand(&values, &defs, self.rows))
+        Self::expand(name, &values, &defs, self.rows)
     }
 
     fn double(&mut self, name: &'static str) -> Result<Vec<Option<f64>>, LakeError> {
@@ -397,6 +480,7 @@ impl<'a> Columns<'a> {
         let mut defs: Vec<i16> = Vec::with_capacity(self.rows);
         match parquet::column::reader::get_column_reader(desc, Box::new(pages)) {
             ColumnReader::DoubleColumnReader(mut r) => {
+                // The triple is discarded for the reason `Self::int64` states.
                 r.read_records(self.rows, Some(&mut defs), None, &mut values)
                     .map_err(|e| LakeError::PageDecode {
                         column: name.to_owned(),
@@ -405,7 +489,7 @@ impl<'a> Columns<'a> {
             }
             _ => return Err(self.mismatch(name)),
         }
-        Ok(Self::expand(&values, &defs, self.rows))
+        Self::expand(name, &values, &defs, self.rows)
     }
 
     /// The type this reader wanted against the type the file holds.
@@ -586,23 +670,140 @@ mod tests {
     fn expand_puts_values_back_on_the_rows_they_belong_to() {
         // Three rows, middle one null: the value 20 must land on row 2, not
         // row 1. This is the bug that would shift a whole series by one bar.
-        let got = Columns::expand(&[10_i64, 20], &[1, 0, 1], 3);
+        let got = Columns::expand("open_interest", &[10_i64, 20], &[1, 0, 1], 3).unwrap();
         assert_eq!(got, vec![Some(10), None, Some(20)]);
 
         // All null.
-        assert_eq!(Columns::expand::<i64>(&[], &[0, 0], 2), vec![None, None]);
+        assert_eq!(
+            Columns::expand::<i64>("open_interest", &[], &[0, 0], 2).unwrap(),
+            vec![None, None]
+        );
         // All present.
         assert_eq!(
-            Columns::expand(&[1_i64, 2], &[1, 1], 2),
+            Columns::expand("open_interest", &[1_i64, 2], &[1, 1], 2).unwrap(),
             vec![Some(1), Some(2)]
         );
-        // Fewer levels than rows: the tail is null rather than a panic.
+        // A group of no rows is empty, not an error.
         assert_eq!(
-            Columns::expand(&[1_i64], &[1], 3),
-            vec![Some(1), None, None]
+            Columns::expand::<i64>("open_interest", &[], &[], 0).unwrap(),
+            Vec::new()
         );
-        // Fewer values than levels claim: refuses to invent one.
-        assert_eq!(Columns::expand::<i64>(&[], &[1], 1), vec![None]);
+    }
+
+    /// **Fewer levels than rows is a SHORT CHUNK, and it is not legitimate
+    /// Parquet.**
+    ///
+    /// This case used to read `// Fewer levels than rows: the tail is null
+    /// rather than a panic` over an assertion that `expand(&[1], &[1], 3)`
+    /// answers `[Some(1), None, None]`. "Rather than a panic" is a false
+    /// dichotomy — `CLAUDE.md` §4 offers a third answer, a named refusal — and
+    /// the two invented nulls were the whole of defect 1 in miniature.
+    ///
+    /// What the format says, from `parquet.thrift` as shipped verbatim in
+    /// `parquet-format-safe-0.2.4`: `RowGroup` field 3 `num_rows` is "Number
+    /// of rows in this row group"; `ColumnMetaData` field 5 `num_values` is
+    /// "Number of values in this column"; `DataPageHeader` field 1
+    /// `num_values` is "Number of values, including NULLs, in this data page".
+    /// Every lake leaf is an unnested optional primitive — maximum definition
+    /// level 1, maximum repetition level 0, which `schema::detect` now insists
+    /// on — so one value including nulls is exactly one row and the levels
+    /// must cover the whole group. Fewer levels than rows therefore means the
+    /// chunk stopped early: byte loss, not a tail of nulls.
+    #[test]
+    fn fewer_levels_than_the_row_count_is_refused_as_a_short_chunk() {
+        match Columns::expand("open_interest", &[1_i64], &[1], 3) {
+            Err(LakeError::ShortColumnChunk {
+                column,
+                row,
+                expected,
+                arrived,
+            }) => {
+                assert_eq!(column, "open_interest");
+                assert_eq!(row, 1, "row 1 is the first the chunk cannot deliver");
+                assert_eq!(expected, 3);
+                assert_eq!(arrived, 1);
+            }
+            other => panic!("expected ShortColumnChunk, got {other:?}"),
+        }
+
+        // More levels than rows is the same fault seen from the other side,
+        // and is refused too rather than truncated to fit.
+        assert!(matches!(
+            Columns::expand("volume", &[1_i64, 2], &[1, 1], 1),
+            Err(LakeError::ShortColumnChunk {
+                expected: 1,
+                arrived: 2,
+                ..
+            })
+        ));
+    }
+
+    /// **Fewer values than the levels claim REFUSES — which is what the
+    /// comment always said and what the code did not do.**
+    ///
+    /// The line this replaces read `// Fewer values than levels claim: refuses
+    /// to invent one` over `assert_eq!(Columns::expand::<i64>(&[], &[1], 1),
+    /// vec![None])`. That return value *is* an invented one: a null on a row
+    /// whose definition level says PRESENT.
+    ///
+    /// The refusal is what the format and the decoder both do.
+    /// `DataPageHeaderV2` in `parquet.thrift`: "Number of non-null =
+    /// `num_values` - `num_nulls` which is also the number of values in the
+    /// data section" — the data section's length is derived from the levels,
+    /// so a page holding fewer is malformed. And `parquet` 59.2's own
+    /// `read_records_with_reservation` (`src/column/reader.rs:290`) returns
+    /// `insufficient values read from column - expected: {n}, got: {m}` before
+    /// this helper is ever reached, which is why this arm is defence on a
+    /// helper rather than a path a file can take.
+    #[test]
+    fn fewer_values_than_the_levels_claim_is_refused_and_never_invents_a_null() {
+        match Columns::expand::<i64>("open_interest", &[], &[1], 1) {
+            Err(LakeError::ShortColumnChunk {
+                column,
+                row,
+                expected,
+                arrived,
+            }) => {
+                assert_eq!(column, "open_interest");
+                assert_eq!(row, 0);
+                assert_eq!(expected, 1, "one level claims PRESENT");
+                assert_eq!(arrived, 0, "and no value arrived behind it");
+            }
+            other => panic!("expected ShortColumnChunk, got {other:?}"),
+        }
+
+        // The shortfall is named at the row it happens on, not at row 0: two
+        // values behind three PRESENT levels runs out at row 3, and the nulls
+        // in between are real ones that must not be miscounted.
+        match Columns::expand("iv", &[1.0_f64, 2.0], &[1, 0, 1, 0, 1], 5) {
+            Err(LakeError::ShortColumnChunk {
+                row,
+                expected,
+                arrived,
+                ..
+            }) => {
+                assert_eq!(row, 4);
+                assert_eq!(expected, 3);
+                assert_eq!(arrived, 2);
+            }
+            other => panic!("expected ShortColumnChunk, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_short_chunk_says_which_column_ran_out_where_and_by_how_much() {
+        let e = LakeError::ShortColumnChunk {
+            column: "open_interest",
+            row: 400,
+            expected: 2_480,
+            arrived: 400,
+        };
+        let text = e.to_string();
+        for needle in ["open_interest", "400", "2480"] {
+            assert!(text.contains(needle), "must name {needle}, got: {text}");
+        }
+        // And it must not be mistakable for the other refusal.
+        assert!(!text.contains("is null at row"), "got: {text}");
     }
 
     #[test]

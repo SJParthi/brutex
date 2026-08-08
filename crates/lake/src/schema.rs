@@ -139,6 +139,27 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
                 got,
             });
         }
+        // THE NESTING IS INVISIBLE TO EVERY CHECK ABOVE. `col.name()` is the
+        // *leaf* name, so an `open_interest` wrapped in one optional group
+        // presents as `open_interest` with the right physical type and passes
+        // both. What changes is the definition levels: the leaf sits at 2, not
+        // 1, and `Columns::expand` reads "present" as the one level 1 — so the
+        // whole column decodes to null and the file is accepted. That is why
+        // the level is checked here rather than trusted.
+        //
+        // Measured across 2,401 real files: every leaf of every one is at
+        // definition level 1 and repetition level 0. Nothing else is decoded,
+        // because a level-2 leaf distinguishes a null group from a null leaf
+        // inside a present group and `crate::bar::Bar` has one `None` for
+        // both; see `LakeError::UnsupportedColumnShape` and
+        // `docs/06-limits.md`.
+        if col.max_def_level() != 1 || col.max_rep_level() != 0 {
+            return Err(LakeError::UnsupportedColumnShape {
+                name: s.name,
+                max_def_level: col.max_def_level(),
+                max_rep_level: col.max_rep_level(),
+            });
+        }
     }
     Ok(layout)
 }

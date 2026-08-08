@@ -126,12 +126,74 @@ pub enum LakeError {
         names: Vec<String>,
     },
 
+    /// A leaf column is nested or repeated, and this reader will not guess.
+    ///
+    /// Every leaf in every lake file is an unnested `OPTIONAL` primitive:
+    /// maximum definition level 1, maximum repetition level 0. Measured
+    /// directly in the schema descriptors of 2,401 real files — every leaf of
+    /// every one.
+    ///
+    /// This refusal exists because the shape is **invisible to the name
+    /// check**. A `ColumnDescriptor`'s `name()` is the *leaf* name, so an
+    /// `open_interest` wrapped in one optional group still presents as
+    /// `open_interest` with the right physical type, and the file is accepted.
+    /// Its definition levels then run 0..=2 rather than 0..=1, and a reader
+    /// that treats "present" as the single level 1 decodes every row to null.
+    ///
+    /// It is not decoded because a level-2 leaf carries a distinction
+    /// [`crate::bar::Bar`] cannot hold — a null *group* and a null *leaf
+    /// inside a present group* are different facts and both would collapse to
+    /// one `None`. On `open_interest` that `None` is `i64::MIN`, the
+    /// `CLAUDE.md` §7 sentinel, so the collapse would invent a vendor report.
+    /// `CLAUDE.md` §3 rule 1 forbids guessing which the file meant. The limit
+    /// is written down in `docs/06-limits.md`.
+    UnsupportedColumnShape {
+        /// The column.
+        name: &'static str,
+        /// The leaf's maximum definition level. An unnested optional leaf has 1.
+        max_def_level: i16,
+        /// The leaf's maximum repetition level. An unrepeated leaf has 0.
+        max_rep_level: i16,
+    },
+
     /// A page could not be decoded.
     PageDecode {
         /// Which column's pages.
         column: String,
         /// What the page reader said.
         reason: String,
+    },
+
+    /// A column chunk stopped short of what the file declares it holds.
+    ///
+    /// **This is the refusal that replaced a fabrication.** The reader used to
+    /// walk `0..num_rows` and push `None` for every row the decoded levels did
+    /// not reach, so a chunk delivering 400 of 2,480 rows was *accepted* with
+    /// 2,080 nulls this crate invented. On `open_interest` an invented null is
+    /// an invented `i64::MIN` — `CLAUDE.md` §7's vendor-reported-none sentinel
+    /// — and nothing downstream can tell it from one the vendor really sent.
+    /// That is the fallback that hides a failure, banned by `CLAUDE.md` §4.
+    ///
+    /// Two file faults reach here and both are byte loss rather than a vendor
+    /// gap: a `ColumnMetaData.num_values` short of the row group's `num_rows`,
+    /// and a chunk whose bytes end on an exact page boundary before its pages
+    /// are exhausted. A bad sector, an interrupted write and a partial object
+    /// body all leave one of those two shapes behind.
+    ///
+    /// Deliberately **not** [`Self::UnexpectedNull`]. That one says "the file
+    /// has a null here"; this one says "the chunk ran out here". They are
+    /// different faults with different remedies — one is a vendor gap, the
+    /// other is damage — and naming the wrong one sends an operator looking in
+    /// the wrong place.
+    ShortColumnChunk {
+        /// The column that ran out.
+        column: &'static str,
+        /// The first row it could not deliver.
+        row: usize,
+        /// How many were expected.
+        expected: usize,
+        /// How many actually arrived.
+        arrived: usize,
     },
 
     /// A column that must never be null was null.
@@ -229,9 +291,26 @@ impl fmt::Display for LakeError {
                 f,
                 "unrecognised lake schema: {columns} column(s) {names:?}; this crate knows only the 7-column cash bar and the 17-column F&O bar"
             ),
+            Self::UnsupportedColumnShape {
+                name,
+                max_def_level,
+                max_rep_level,
+            } => write!(
+                f,
+                "column `{name}` is a leaf at definition level {max_def_level} and repetition level {max_rep_level}; every lake column is a flat OPTIONAL leaf at definition level 1 and repetition level 0, and a nested or repeated one is refused rather than decoded to nulls"
+            ),
             Self::PageDecode { column, reason } => {
                 write!(f, "column `{column}` page decode refused: {reason}")
             }
+            Self::ShortColumnChunk {
+                column,
+                row,
+                expected,
+                arrived,
+            } => write!(
+                f,
+                "column `{column}` does not cover its row group: {expected} expected, {arrived} arrived, diverging at row {row}; a chunk that runs out is damage rather than a tail of nulls, and it is refused rather than filled with nulls this reader invented"
+            ),
             Self::UnexpectedNull { column, row } => write!(
                 f,
                 "column `{column}` is null at row {row}, and a null there has no meaning; refusing rather than substituting a value"

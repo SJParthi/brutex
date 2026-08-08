@@ -5441,3 +5441,221 @@ Two of the three wait on crates that do not exist and one waits on a list this
 repository is forbidden to invent. `docs/07-plan.md` is where sequencing lives;
 this entry records only why the gate stopped reporting them by name and what
 must be true before a line comes back out.
+
+## D-0063 · 2026-08-09 · The lake reader refuses a short column chunk instead of filling it with nulls it invented
+
+`crates/lake/src/reader.rs` (`Columns::expand` and its three callers),
+`crates/lake/src/schema.rs` (`detect`), `crates/lake/src/error.rs`
+(`ShortColumnChunk`, `UnsupportedColumnShape`), `crates/lake/src/contract.rs`
+(`parse_strike`), `crates/lake/tests/refusals.rs`,
+`crates/lake/tests/real_lake_regression.rs`, `docs/04-invariants.md` L-02…L-07,
+`docs/06-limits.md` §37.
+
+### What the reader did
+
+`Columns::expand` put the decoded values back on the rows their definition
+levels named. It walked `0..num_rows`, and for every row the levels did not
+reach it pushed `None`:
+
+```rust
+match defs.get(row) {
+    Some(1) => { /* take the next value */ }
+    _ => out.push(None),        // <-- rows past the end of `defs`
+}
+```
+
+Measured on a synthetic chunk built to the real sample file's shape: **2,480
+rows declared, 400 real values, 2,080 fabricated nulls**, the first at row 400
+whose true value is 1,400. The file was **accepted**. Two independent faults
+reach that arm and neither is exotic — a `ColumnMetaData.num_values` short of
+the row group's `num_rows`, and a chunk whose bytes end on an exact page
+boundary, where `page.rs` answers `Ok(None)` ("no more pages") identically for a
+chunk that finished and one that ran out. A bad sector, an interrupted write and
+a partial S3 body all leave one of those behind.
+
+A second arm did the same thing one level down: when a row's level said PRESENT
+and the values had run out, `values.get(next)` gave `None` and that `None` was
+pushed as the row's value. The unit test beside it read
+
+```rust
+// Fewer values than levels claim: refuses to invent one.
+assert_eq!(Columns::expand::<i64>(&[], &[1], 1), vec![None]);
+```
+
+The comment describes a refusal. The assertion pins an invention. **A test that
+asserts the defect is correct behaviour is worse than no test**, because it
+turns the next reader's doubt into confidence.
+
+### Why a fabricated null is worse than a refusal, and not merely different
+
+This is the whole argument, so it is written out rather than assumed.
+
+A refusal costs one file. `LakeFile::read_row_group` returns an error, the
+caller names the path, and every other file in the lake is untouched — the
+reader does not abort, `CLAUDE.md` §4's *degrade loudly and name the reason*.
+
+A fabricated null costs the truth, permanently and invisibly. `CLAUDE.md` §7
+fixes open interest at `i64::MIN` for *the vendor reported none* and `0` for
+*zero*, which are two different facts about the world. An invented null becomes
+an invented `i64::MIN`: a claim, in the same representation the vendor's own
+claims use, that a contract had no reported open position for 2,080 consecutive
+minutes. Nothing downstream can distinguish it. There is no flag, no count, no
+log line — the corruption is *type-correct*.
+
+And it cannot be recovered. `lib.rs` states why the crate exists: both live
+vendor masters purge a contract when it expires, so for every expired contract
+the lake is the only copy. A refusal on a damaged file leaves the damage on disk
+where a re-fetch, a backup or a byte-level repair can still reach it. A
+fabricated null is *read* successfully, flows into a sweep, and the run that
+used it is reproducible under `CLAUDE.md` §3 rule 3 — the same wrong answer,
+byte for byte, forever, with an identity hash attesting to it.
+
+The asymmetry is the point. **A refusal is a question. A fabrication is a wrong
+answer that looks like a right one.**
+
+### What replaced it
+
+One refusal, `LakeError::ShortColumnChunk { column, row, expected, arrived }`,
+covering both arms and naming all four:
+
+```text
+column `open_interest` does not cover its row group: 2480 expected,
+400 arrived, diverging at row 400; a chunk that runs out is damage rather
+than a tail of nulls, and it is refused rather than filled with nulls this
+reader invented
+```
+
+It is deliberately **not** `UnexpectedNull`. That one says *the file has a null
+here* — a vendor gap. This one says *the chunk ran out here* — damage. Before
+this entry a short `timestamp` chunk reported the first, which sent an operator
+looking for a missing quote when the truth was missing bytes. Different fault,
+different remedy, different name.
+
+The check lives in `expand` and in exactly one place. `read_records` returns
+`(records, values, levels)` and the callers still discard it, with the reason
+written beside each: `levels` **is** `defs.len()` for a flat leaf at definition
+level 1, so checking it in the caller as well would add a branch no input can
+reach and a mutant no test can kill.
+
+### Neither condition is a Parquet-legal file, and that is cited rather than assumed
+
+`CLAUDE.md` §3 rule 1 — no invention — applies to format semantics too, so both
+arms were checked against the specification and against `arrow-rs`'s own
+behaviour before either was changed.
+
+*Fewer levels than rows.* `parquet.thrift`, shipped verbatim as
+`parquet-format-safe-0.2.4/parquet.thrift`: `RowGroup` field 3 `num_rows` is
+"Number of rows in this row group"; `ColumnMetaData` field 5 `num_values` is
+"Number of values in this column"; `DataPageHeader` field 1 `num_values` is
+"Number of values, including NULLs, in this data page". For a flat leaf at
+maximum definition level 1 and repetition level 0 — the only shape this reader
+accepts — one value including nulls is exactly one row, so the levels must cover
+the whole group. **The old comment's "the tail is null rather than a panic" was
+a false dichotomy**: §4 offers a third answer and it is the one taken.
+
+*Fewer values than the levels claim.* `DataPageHeaderV2` in the same file:
+"Number of non-null = num_values - num_nulls which is also the number of values
+in the data section". The data section's length is *derived* from the levels, so
+a page holding fewer values is malformed, not a page with bonus nulls.
+`parquet` 59.2's own `read_records_with_reservation`
+(`src/column/reader.rs:290`) agrees and refuses first:
+
+```rust
+let values_read = self.values_decoder.read(values, values_to_read)?;
+if values_read != values_to_read {
+    return Err(general_err!(
+        "insufficient values read from column - expected: {values_to_read}, got: {values_read}",
+    ));
+}
+```
+
+That arm is therefore unreachable through this crate's decode path — `parquet`
+errors before `expand` sees it — and it is written as a refusal anyway, because
+the previous occupant of that line was a comment claiming a refusal the code did
+not perform.
+
+### The nested column, which was the same failure wearing a different hat
+
+A `ColumnDescriptor`'s `name()` is the **leaf** name. An `open_interest` wrapped
+in one optional group therefore presents to `detect` as `open_interest` with the
+right physical type in the right position, and passed every check it made. Its
+maximum definition level is 2, `expand` read "present" as the single level 1,
+and a file genuinely holding 7, 8, 9 decoded to three nulls — accepted, silent,
+`i64::MIN` on every row.
+
+`detect` now checks every leaf's maximum definition and repetition level and
+answers `UnsupportedColumnShape` naming the column and both. It refuses at the
+schema gate, before a page is decompressed, so `LakeFile::open` fails rather
+than `read_row_group`.
+
+**It is refused and not decoded, and the reason is the destination type, not a
+missing dependency.** A level-2 leaf has three states per row — group null, leaf
+null inside a present group, value — and `bar::Bar` has two. Two would have to
+collapse into one `None`, which on `open_interest` manufactures a vendor report
+out of a structural absence. `docs/06-limits.md` §37 records that as a limit,
+names what would close it, and says plainly that this crate cannot read a nested
+lake file at all.
+
+### The strike, which is the same question asked of a parser
+
+`ContractName::parse` grants exactly one tolerance — the three-letter month,
+case-insensitive — and the module header's stated rule is that *every other
+field must be exactly as the lake writes it*. `parse_strike` refused `+1000`
+with the comment "a novel spelling is a refusal", and then accepted `010000`,
+rendering it back as `10000`.
+
+**The test for whether a tolerance is allowed is injectivity, not
+convenience.** Case folding over the twelve month tokens is injective — twelve
+spellings fold to twelve — so no two contracts can collapse through it, and
+across all 116,086 NSE and 33,199 BSE F&O directories there is no non-canonical
+month token, so no real name is ever altered. A leading zero is not injective:
+`010000` and `10000` are two different directory names producing one
+`ContractName`, therefore one `InstrumentKey` — the type `contract.rs` calls the
+workspace's canonical instrument identity, which §3 rule 3 hashes into every run
+identity. Two directories may not become one instrument. And `to_string()` no
+longer names the directory it came from, so a round-tripped name looks for its
+files at a path that does not exist.
+
+It is refused. The old `rupees == 0` check is gone rather than left behind,
+because `0` and `00` both start with `0` and a branch nothing can reach is a
+mutant nothing can kill. Measured: **0 leading-zero strikes across all 149,285
+F&O directories**, so this refuses no real name either.
+
+### What this costs on real data: nothing, measured
+
+A refusal that fires on sound data is a worse defect than the one it fixed, so
+this was measured rather than argued.
+
+`crates/lake/tests/real_lake_regression.rs` folds every field of every decoded
+bar — the paisa integers, the raw open-interest sentinel, all eight greeks by
+`to_bits`, the provenance id — into one FNV-1a digest per file. Run on the
+operator's machine before the change and again after: **1,737 files, 11,526,017
+rows, 189 F&O and 1,548 cash/index, across `NSE/FNO`, `NSE/CASH` and
+`NSE/INDEX`. Every per-file digest identical. Whole-run digest
+`5bb7cad9d96bb347` both times. Zero refusals.** A separate footer-and-page-header
+census over 2,401 files found zero chunks short of their row count, zero page
+sets short of it, and zero leaves off definition level 1.
+
+**Every one of these defects was latent, and that is reported rather than used
+as an argument.** Defect 1's trigger is byte loss or a lying footer; defect 3's
+is a writer change. Neither has happened. The lake is the only copy of every
+expired contract, and when either fires it fires silently on `open_interest` —
+the one column whose null is a §7 sentinel — or blanks a column across the whole
+tree at once. Latent is not benign.
+
+### What is NOT claimed
+
+That the refusals are proven on CI. They are not: `real_lake_regression.rs` and
+`real_lake.rs` need `~/.brutex/lake`, which CI gate 1 forbids committing, so on
+every runner they print that they are skipping. What CI does exercise is
+`tests/refusals.rs` and `tests/synthetic.rs`, which build their own Parquet
+files in memory and cover every refusal above. The 1,737-file figure is from one
+machine on one day and says so.
+
+That mutation testing has been run on this crate. It has not. `docs/06-limits.md`
+§22 already records that gap for `crates/store` and it is the same gap here.
+What was done instead is a reversion check: each of the four changed lines was
+removed, the suite re-run, and the tests that went red recorded — the levels
+check takes four tests down, the values check one, the schema shape check two,
+the strike check two — then the line restored and the suite re-run green. That
+is weaker than a mutant survey and it is not described as one.

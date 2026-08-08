@@ -33,6 +33,15 @@
 //! [`Display`](std::fmt::Display) always renders the canonical spelling, so a
 //! name taken from the lake round-trips byte for byte.
 //!
+//! **The month is the only tolerance, and the test for whether one is allowed
+//! is injectivity, not convenience.** Case folding is injective over the twelve
+//! month tokens, so no two contract names can ever collapse onto one identity
+//! through it. A leading zero on the strike is not: `010000` and `10000` are
+//! two different directory names, and accepting both would give them one
+//! `InstrumentKey` — the identity `CLAUDE.md` §3 rule 3 hashes into a run — and
+//! render one of them back as a path that does not exist. It is refused, in
+//! `parse_strike`, for that reason and not for tidiness.
+//!
 //! Nothing here widens the engine surface. `CLAUDE.md` §1 fixes what is
 //! *swept* at two NSE indices; futures and options may be **stored**, and this
 //! module only reads what is stored.
@@ -297,10 +306,28 @@ fn parse_strike(text: &str) -> Result<Paisa, ContractError> {
     if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
         return Err(bad());
     }
-    let rupees: u64 = text.parse().map_err(|_| bad())?;
-    if rupees == 0 {
+    // A LEADING ZERO IS EXACTLY AS NOVEL AS `+1000`, AND IT IS WORSE.
+    //
+    // The month's case tolerance above is normalisation and is safe because
+    // case folding is injective over the twelve month tokens: no two contracts
+    // can collapse through it. A leading zero is not injective. `010000` and
+    // `10000` are two different directory names that would parse to one
+    // `ContractName`, therefore one `InstrumentKey` — the workspace's
+    // canonical instrument identity, which `CLAUDE.md` §3 rule 3 puts inside
+    // the run-identity hash. Two directories may not become one instrument.
+    //
+    // It also breaks the round trip this module's header promises: `Display`
+    // would render `010000` back as `10000`, so a name taken from the lake and
+    // rendered again would no longer name the directory it came from.
+    //
+    // Measured across all 116,086 NSE and 33,199 BSE F&O directories: zero
+    // strikes carry a leading zero, so this refuses no real name. It also
+    // subsumes the old `rupees == 0` check — `0` and `00` start with `0` — and
+    // that check is gone rather than left behind as a branch nothing reaches.
+    if text.starts_with('0') {
         return Err(bad());
     }
+    let rupees: u64 = text.parse().map_err(|_| bad())?;
     let paisa = i64::try_from(rupees)
         .ok()
         .and_then(|r| r.checked_mul(PAISA_PER_RUPEE))
@@ -476,9 +503,13 @@ mod tests {
             ContractName::parse("NSE-NIFTY-01Apr20-+1000-CE"),
             Err(ContractError::BadStrike { .. })
         ));
-        // Zero strike is not a real contract.
+        // Zero strike is not a real contract, however it is spelled.
         assert!(matches!(
             ContractName::parse("NSE-NIFTY-01Apr20-0-CE"),
+            Err(ContractError::BadStrike { .. })
+        ));
+        assert!(matches!(
+            ContractName::parse("NSE-NIFTY-01Apr20-00-CE"),
             Err(ContractError::BadStrike { .. })
         ));
         // Empty strike.
@@ -573,5 +604,79 @@ mod tests {
         }
         assert!(parse_month("Xyz").is_err());
         assert!(parse_month("Ap").is_err());
+    }
+
+    /// **The month's case tolerance is normalisation, and the property that
+    /// makes it one is injectivity.**
+    ///
+    /// A tolerance is safe only if no two distinct contract names can collapse
+    /// onto one identity through it. Case folding over the twelve month tokens
+    /// is injective — the twelve lower-cased spellings are still twelve — so
+    /// every spelling of a month reaches the same expiry and no other
+    /// contract's. That is why this tolerance is granted and the leading-zero
+    /// strike below is not.
+    #[test]
+    fn the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts() {
+        let folded: std::collections::BTreeSet<String> =
+            MONTHS.iter().map(|m| m.to_ascii_lowercase()).collect();
+        assert_eq!(folded.len(), 12, "case folding must stay injective");
+
+        // Every spelling of one month renders back to the lake's own form.
+        for spelling in ["01Apr20", "01APR20", "01apr20", "01aPr20"] {
+            let name = format!("NSE-NIFTY-{spelling}-10000-CE");
+            let c = ContractName::parse(&name).expect("a month spelling parses");
+            assert_eq!(c.to_string(), "NSE-NIFTY-01Apr20-10000-CE");
+        }
+
+        // And two different months never meet, at any casing.
+        let mut seen = std::collections::BTreeSet::new();
+        for m in MONTHS {
+            let c = ContractName::parse(&format!("NSE-NIFTY-01{}20-10000-CE", m.to_uppercase()))
+                .expect("an upper-cased month parses");
+            assert!(seen.insert(c.key()), "{m} collided with another month");
+        }
+        assert_eq!(seen.len(), 12);
+    }
+
+    /// **A leading-zero strike is refused, because unlike the month it is NOT
+    /// injective.**
+    ///
+    /// `010000` and `10000` are two different lake directory names. Accepting
+    /// both gave them one `ContractName` and therefore one `InstrumentKey` —
+    /// the workspace's canonical instrument identity, which `CLAUDE.md` §3
+    /// rule 3 hashes into every run identity — and rendered `010000` back as
+    /// `10000`, a path that is not the directory the name came from.
+    ///
+    /// `parse_strike` already refused `+1000` on the stated ground that a
+    /// novel spelling is a refusal. A leading zero is exactly as novel and
+    /// strictly more dangerous, and it was accepted.
+    #[test]
+    fn a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract() {
+        let canonical = ContractName::parse("NSE-NIFTY-01Apr20-10000-CE").expect("canonical");
+
+        for padded in [
+            "NSE-NIFTY-01Apr20-010000-CE",
+            "NSE-NIFTY-01Apr20-0010000-CE",
+            "NSE-NIFTY-01Apr20-04600-PE",
+        ] {
+            match ContractName::parse(padded) {
+                Err(ContractError::BadStrike { found }) => {
+                    assert!(found.starts_with('0'), "the refusal names it: {found}");
+                }
+                other => panic!("{padded} must be refused, got {other:?}"),
+            }
+        }
+
+        // The unpadded spelling is untouched, and it is the one the lake
+        // writes.
+        assert_eq!(canonical.to_string(), "NSE-NIFTY-01Apr20-10000-CE");
+
+        // Every accepted strike round-trips, which is the property the
+        // tolerance broke: no accepted name renders back as a different one.
+        for rupees in [1_u32, 9, 10, 4_600, 10_000, 69_000] {
+            let name = format!("NSE-NIFTY-01Apr20-{rupees}-CE");
+            let c = ContractName::parse(&name).expect("a plain strike parses");
+            assert_eq!(c.to_string(), name);
+        }
     }
 }

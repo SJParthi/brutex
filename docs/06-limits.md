@@ -2388,3 +2388,45 @@ recorded, and 4 reason(s) survive on disk. 1,432 reasons were never written."*
 It does not imply they are recoverable. **They are not, for every run already
 written**, and no front-end change can alter that — this is data loss at the
 write boundary, not a rendering gap.
+
+## 37. `crates/lake` refuses a nested column rather than decoding it, and that is a real limit
+
+`schema::detect` requires every leaf of a lake file to be a flat `OPTIONAL`
+primitive: maximum definition level 1, maximum repetition level 0. Anything else
+— a leaf inside a group, a `REQUIRED` leaf, a `REPEATED` one — is
+`LakeError::UnsupportedColumnShape`, refused at the schema gate before a page is
+decompressed. **This crate therefore cannot read a nested Parquet file at all**,
+and if a future Polars or Arrow release nests a column the whole lake becomes
+unreadable to it in one step. That is the cost and it is stated rather than
+discovered.
+
+**Why refusing rather than decoding.** Nested decoding is not blocked by a
+missing dependency — `parquet`'s own column reader already hands back the
+repetition and definition levels, and treating `level == max_def_level` as
+present would be a two-line change. It is blocked by the destination type. A
+leaf one optional group deep has *three* states per row: the group is null, the
+group is present and the leaf is null, the leaf holds a value. `bar::Bar` has
+two — `Some(v)` and `None` — so two of those three would have to collapse into
+one `None`. On `open_interest` that `None` is `i64::MIN`, which `CLAUDE.md` §7
+defines as *the vendor reported none*, so the collapse would manufacture a
+vendor report out of a structural absence. `CLAUDE.md` §3 rule 1 forbids
+guessing which of the two a file meant. A `REPEATED` leaf is worse: one row can
+carry many values and the flat `Batch` has nowhere to put them.
+
+**What was measured.** Every leaf of every one of 2,401 real files sampled
+across `NSE/FNO`, `NSE/CASH` and `NSE/INDEX` — seven years, both layouts — is at
+definition level 1 and repetition level 0. Nothing in the lake today is nested,
+`REQUIRED` or `REPEATED`, so this refusal fires on no real file. It is a guard
+against a writer change, not against today's data.
+
+**What is NOT claimed.** That nested decoding is impossible here, or that it
+would need a new dependency. It would need `Bar` to grow a representation for
+"the group was absent", which is a stride change to the decoded type and a
+decision nobody has taken. Until then the honest answer is a named refusal, and
+the alternative on the table was silently blanking an entire column across the
+whole lake at once — which is what the reader did before D-0063.
+
+**What would close it.** A `Bar` (or a `Batch` column) that can distinguish an
+absent group from a null leaf, then a level-aware `expand`, then a real nested
+file to test against — and the last of those does not exist, so the first two
+would be written against a shape nobody has seen.

@@ -978,13 +978,19 @@ expired contract in there the lake is the only copy, so a file that is damaged
 must be *named*, never guessed at and never fatal — a reader that dies on one
 file takes the sweep that was part-way through the other 115 with it.
 
-**This section is one row, not the crate's full set.** The rest of `lake`'s
-invariants are not in this file yet. That is a gap and it is written down rather
-than papered over; see `docs/06-limits.md`.
+**This section was one row and is now seven, and it is still not the crate's
+full set.** The rest of `lake`'s invariants are not in this file yet. That is a
+gap and it is written down rather than papered over; see `docs/06-limits.md`.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | L-01 | A column chunk whose declared offset or length is **negative** is refused as `ImpossibleLength`, naming the offending number, and the process survives — from either field the chunk start can come from | `lake::synthetic::a_negative_chunk_length_in_the_footer_is_refused_by_name_and_never_aborts`, `lake::synthetic::a_negative_chunk_offset_is_refused_by_name_from_either_field_it_can_come_from` | ✓ |
+| L-02 | A column chunk that delivers fewer rows than its row group declares is refused as `ShortColumnChunk` **naming the column, the row it diverged at, and both counts** — never accepted with the tail filled in. A `num_values` short of `num_rows` and a chunk cut on an exact page boundary are both this refusal | `lake::reader::fewer_levels_than_the_row_count_is_refused_as_a_short_chunk`, `lake::refusals::a_column_chunk_short_of_its_row_count_is_refused_and_never_fills_the_tail_with_nulls`, `lake::refusals::a_column_chunk_whose_bytes_were_cut_is_refused_rather_than_padded_with_nulls` | ✓ |
+| L-03 | A shortfall on a **required** column is reported as the shortfall, not as `UnexpectedNull`. Byte loss and a vendor gap are different faults and the reader says which | `lake::refusals::a_short_chunk_on_a_required_column_names_the_shortfall_not_a_phantom_null`, `lake::reader::a_short_chunk_says_which_column_ran_out_where_and_by_how_much` | ✓ |
+| L-04 | Fewer values than the definition levels claim is refused, never resolved into a `None` on a row whose level says PRESENT | `lake::reader::fewer_values_than_the_levels_claim_is_refused_and_never_invents_a_null`, `lake::refusals::parquet_itself_refuses_a_page_whose_values_are_short_of_its_definition_levels` | ✓ |
+| L-05 | A leaf that is not a flat `OPTIONAL` primitive — nested, `REQUIRED` or `REPEATED` — is refused as `UnsupportedColumnShape` **at the schema gate**, before a page is decompressed, naming the column and both levels | `lake::refusals::a_nested_column_is_refused_rather_than_silently_decoding_to_all_null`, `lake::refusals::a_required_or_repeated_leaf_is_refused_by_name_rather_than_read_as_flat` | ✓ |
+| L-06 | Two distinct lake directory names never parse to one `InstrumentKey`. The month's case tolerance is injective over the twelve tokens; the strike carries no tolerance at all, and a leading zero is refused | `lake::contract::the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`, `lake::contract::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract`, `lake::refusals::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract` | ✓ |
+| L-07 | Every refusal above fires on **damage only**: 1,737 real lake files across both layouts and seven years decode to the identical digest they did before the refusals existed | `lake::real_lake_regression::a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest` | ◐ |
 
 L-01 is not a hypothetical. `parquet`'s own `ColumnChunkMetaData::byte_range`
 ends in `assert!(col_start >= 0 && col_len >= 0)`, and the reader called it. A
@@ -994,6 +1000,36 @@ an interrupted write or a truncated object body leaves behind — so the two
 fields are now read and checked in `Columns::pages` before any arithmetic, and
 `byte_range` is not called at all. There was nothing to catch: `[profile.release]`
 sets `panic = "abort"`.
+
+**L-02 to L-05 replaced a fabrication, and one of them replaced a comment that
+said the opposite of its code.** `Columns::expand` walked `0..num_rows` and
+pushed `None` for every row the decoded definition levels did not reach, so a
+chunk delivering 400 of 2,480 rows was *accepted* with 2,080 nulls this crate
+invented — the first at row 400, whose true value was 1,400. On `open_interest`
+each invented null is an invented `i64::MIN`, which `CLAUDE.md` §7 defines as
+*the vendor reported none*, and nothing downstream can tell it from one the
+vendor really sent. Beside it, a unit test asserted `expand(&[], &[1], 1) ==
+vec![None]` under the comment *"Fewer values than levels claim: refuses to
+invent one"* — a null invented on a row whose level says PRESENT, described as a
+refusal. Both are D-0063.
+
+**L-05 is the one that was invisible.** A `ColumnDescriptor`'s `name()` is the
+*leaf* name, so an `open_interest` one optional group deep presents as
+`open_interest` with the right physical type and passed every check `detect`
+made. Its definition levels then run 0..=2 while `expand` read "present" as the
+single level 1, so a file genuinely holding 7, 8, 9 decoded to three nulls and
+was accepted. The shape is now refused rather than decoded, because a level-2
+leaf distinguishes a null group from a null leaf inside a present group and
+`Bar` has one `None` for both; `docs/06-limits.md` §37 records what that costs.
+
+**L-07 is `◐` and not `✓` for the reason `tests/real_lake.rs` gives.** The
+fixture is 40 GB of operator data that CI gate 1 forbids committing, so on every
+CI runner the test prints that it is skipping and proves nothing. Where it has
+been run — the operator's machine, 2026-08-09 — it read 1,737 files, 11,526,017
+rows, 189 F&O and 1,548 cash/index, and every per-file digest and the whole-run
+digest `5bb7cad9d96bb347` were byte-identical before and after the refusals were
+added. That is the measurement that says these refusals cost nothing on sound
+data; it is not a claim about CI.
 
 ## The audit console's one read — `/audit.json`
 
