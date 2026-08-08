@@ -2329,12 +2329,13 @@ async fn fetch_chunks(
             window: *chunk,
             cadence: pull::session::Cadence::Minute,
         };
-        bodies.push(source.window_async(&request).await.map_err(|why| {
+        bodies.push(with_retry(source, &request).await.map_err(|why| {
             format!(
-                "the broker did not answer with a window. This was request {} of \
-                 {}, covering {}..={} — the chunks before it were fetched and \
-                 are not written, because a partial answer to a whole request \
-                 is a gap this store cannot correct later: {why}",
+                "the broker did not answer with a window. This was \
+                         request {} of {}, covering {}..={} — the chunks before \
+                         it were fetched and are not written, because a partial \
+                         answer to a whole request is a gap this store cannot \
+                         correct later: {why}",
                 nth + 1,
                 chunks.len(),
                 chunk.from(),
@@ -2343,6 +2344,88 @@ async fn fetch_chunks(
         })?);
     }
     Ok(bodies)
+}
+
+/// How many times a chunk is attempted before the instrument is given up on.
+///
+/// Three, not one and not ten. A 62,600-request backfill will meet a timeout, a
+/// reset connection and a 5xx many times over; giving up on the first turns
+/// each into a lost instrument. Ten would keep hammering a vendor that is down,
+/// which the rate governor cannot see because a refused connection never
+/// reaches it.
+const ATTEMPTS: u32 = 3;
+
+/// One chunk, retried on the failures that are worth retrying.
+///
+/// # Which failures, and why not all of them
+///
+/// A TRANSPORT failure is worth retrying: a timeout, a reset, a DNS blip, a
+/// 5xx. Nothing about the request was wrong and the same request may well
+/// succeed. Over the ~62,600 requests of the stated one-minute backfill these
+/// are certainties, not edge cases, and giving up on the first costs that
+/// instrument entirely.
+///
+/// A REFUSAL is not. `DH-905 missing required fields` will be refused
+/// identically three times, and retrying it spends three times the rate budget
+/// to learn what the first answer already said. Worse, it hides the real error
+/// behind two duplicates in the log.
+///
+/// # The backoff, and why it is not exponential
+///
+/// 250 ms, then 1 s. Two waits, bounded, because the caller is an HTTP request
+/// an operator is holding open — a run that backs off for a minute to recover
+/// one chunk has lost the operator's attention and the connection. The rate
+/// governor already handles *sustained* throttling; this handles the blip.
+async fn with_retry(
+    source: &pull::http::HttpSource,
+    request: &pull::fetch::BarRequest,
+) -> Result<pull::fetch::RawWindow, String> {
+    let mut last = String::new();
+    for attempt in 1..=ATTEMPTS {
+        match source.window_async(request).await {
+            Ok(body) => return Ok(body),
+            Err(why) => {
+                let text = why.to_string();
+                // A 401 MID-RUN IS THE TOKEN EXPIRING, AND IT IS CERTAIN.
+                //
+                // A broker token lasts a day; the one-minute backfill is
+                // ~62,600 requests and no run of that size fits inside one.
+                // So the run WILL cross a reset, and every request after it
+                // answers 401 — 700 instruments lost to a credential that was
+                // refreshed in Parameter Store minutes earlier.
+                //
+                // Refused rather than re-read HERE, because `CLAUDE.md` §8 is
+                // explicit: this repository never mints. The value is read
+                // fresh from Parameter Store on the NEXT pull, and the message
+                // says so — an operator who re-runs gets the new token, and one
+                // who does not is told exactly what happened rather than
+                // reading 700 identical failures.
+                if text.contains("status 401") || text.contains("Invalid_Authentication") {
+                    return Err(format!(
+                        "{text} — the access token expired mid-run. This \
+                         repository never mints one (§8): the refreshed value is \
+                         read from Parameter Store on the next pull, and resume \
+                         means re-running costs only what is still missing."
+                    ));
+                }
+                // A VENDOR THAT ANSWERED IS NOT RETRIED. It gave a reason; the
+                // reason will not change because it was asked twice more.
+                if text.contains("refused with status") {
+                    return Err(text);
+                }
+                if attempt < ATTEMPTS {
+                    // 250 ms, then 1 s.
+                    let wait = 250 * u64::from(attempt) * u64::from(attempt);
+                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                }
+                last = text;
+            }
+        }
+    }
+    Err(format!(
+        "{last} — and it failed {ATTEMPTS} times, so the transport is not \
+         blipping, it is down"
+    ))
 }
 
 async fn broker_window(
@@ -5702,6 +5785,56 @@ mod tests {
             json.starts_with('[') && json.ends_with(']'),
             "and it is an array"
         );
+    }
+
+    /// A transport blip is retried; a vendor's answer is not.
+    ///
+    /// Read off the source, because driving three real timeouts would need a
+    /// vendor that fails on demand. What is pinned is the DISTINCTION, which is
+    /// the whole content of the function: a timeout may succeed on the second
+    /// attempt and a `DH-905 missing required fields` will not. Retrying a
+    /// refusal spends three times the rate budget to learn what the first
+    /// answer already said, and buries the real error behind two duplicates.
+    #[test]
+    fn a_blip_is_retried_and_an_answered_refusal_is_not() {
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("async fn with_retry")
+            .expect("with_retry exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("its body ends at a column-0 brace")];
+
+        // The loop runs more than once, or nothing is retried at all.
+        assert!(
+            body.contains("for attempt in 1..=ATTEMPTS"),
+            "the attempt loop is what makes this a retry"
+        );
+        // A `const` comparison, so it is a compile-time assertion rather than
+        // a runtime one — clippy is right that the runtime form asserts a
+        // constant, and this is the shape that actually fails the build.
+        const _: () = assert!(ATTEMPTS > 1, "one attempt is not a retry");
+
+        // AND IT STOPS EARLY on the two answers that will not change.
+        for (what, needle) in [
+            ("a vendor refusal", "refused with status"),
+            ("an expired token", "status 401"),
+        ] {
+            assert!(
+                body.contains(needle),
+                "{what} must be recognised and returned rather than retried"
+            );
+        }
+        // Both must return BEFORE the sleep, or they are retried anyway.
+        let sleep = body.find("sleep").expect("there is a backoff");
+        for needle in ["refused with status", "status 401"] {
+            assert!(
+                body.find(needle).is_some_and(|at| at < sleep),
+                "{needle} is checked before the backoff, or the early return \
+                 never happens and the budget is spent three times over"
+            );
+        }
     }
 
     /// The transport is checked before anything a refusal should not cost.
