@@ -425,11 +425,52 @@ jobs:
           groww_symbol candle_interval 1minute
           '
 
+          # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
+          # crates/pull/src/totp.rs implements TOTP so a stale broker token can
+          # be RECOGNISED. It never mints one -- CLAUDE.md section 8 forbids it,
+          # because a local mint would invalidate the token another system
+          # shares -- and this gate seeing these six numbers is the evidence
+          # that the implementation is pinned to the published vectors rather
+          # than to whatever it happens to produce.
+          #
+          # Every value below is printed in RFC 6238, a public standards
+          # document, and reproduces from the RFC's own key at the RFC's own
+          # timestamps. They name no account, no environment, no vendor and no
+          # field. `gezdgnbvgy3tqojqgezdgnbvgy3tqojq` is the base32 spelling of
+          # the RFC's 32-byte SHA-256 test key -- the string "12345678901234567890"
+          # repeated, which is the least secret secret in cryptography.
+          #
+          # A real TOTP secret can never appear here: section 8 puts it in
+          # Parameter Store, never in a tracked file, so a six-digit literal in
+          # this crate is either a published vector or a defect. That is exactly
+          # the distinction this gate exists to force someone to make by hand.
+          #
+          # `legal`, `malformed` and `provably` are that module's own test
+          # names and refusal words -- base32 alphabets that are legal, inputs
+          # that are malformed, and a bound that is provably reached.
+          totp_vector='
+          755224 287082 359152 969429 338314 254676 287922
+          162583 399871 520489 005924 050471 081804 279037 353130
+          gezdgnbvgy3tqojqgezdgnbvgy3tqojq
+          legal malformed provably
+          '
+
+          # ---- group 19: two more test scaffolding words that arrived with the
+          # census and the null-price decoder. `census-incremental` is a
+          # temporary directory name chosen for the test that proves the census
+          # APPENDS rather than rewrites -- the one that asserts on the file's
+          # INODE, because asserting on its size passed under both strategies
+          # and let a mutant survive. `fits` and `skipped` are assertion labels:
+          # a window that fits inside both the vendor cap and one month, and a
+          # bar the Groww decoder skipped because a price cell held null.
+          late_scaffold='census-incremental fits skipped'
+
           allowed="${seg_shape} ${vendor_wire} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
-          ${redact_label} ${hash_vector} ${request_field}"
+          ${redact_label} ${hash_vector} ${request_field}
+          ${totp_vector} ${late_scaffold}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
