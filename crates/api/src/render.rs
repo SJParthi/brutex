@@ -3950,7 +3950,11 @@ mod tests {
         // the grid is readable without reading a number. One filled square, one
         // outlined square with a stroke through it.
         assert_eq!(html.matches("class=\"sw q").count(), 1, "{html}");
-        assert_eq!(html.matches("class=\"sw void\"").count(), 3, "{html}");
+        // ONE per row, not three. Two rows, one held and one not, and the
+        // page draws ONE feed — so exactly one hollow swatch. It was three
+        // because the table drew a cell per vendor for every row, which is the
+        // comparison the feed picker replaced.
+        assert_eq!(html.matches("class=\"sw void\"").count(), 1, "{html}");
         // And the page says what the shades are relative to, because there is
         // no trading calendar in this build to say what a full month is.
         assert!(html.contains("1 of 2</b> shown row(s) are held"), "{html}");
@@ -3960,7 +3964,25 @@ mod tests {
         assert!(html.contains("showing 2"));
         assert!(!html.contains("class=\"pager\""), "one page, no pager");
         assert!(html.contains("badge good"), "no census is not a bad census");
-        assert!(html.contains("groww rows") && html.contains("dhan rows"));
+        // ONE feed's column, and the OTHER feed offered as a link rather than
+        // a second column. This asserted both columns were present, which is
+        // the vendor comparison the picker replaced — the page never shows two
+        // feeds' numbers side by side now, and asserting that it does was
+        // asserting the defect.
+        assert!(
+            html.contains("groww rows"),
+            "the selected feed's column: {html}"
+        );
+        assert!(
+            !html.contains("dhan rows"),
+            "and NOT the other feed's — two columns invite reading a difference \
+             between feeds that are not the same universe, session handling or \
+             price scale: {html}"
+        );
+        assert!(
+            html.contains(r#"href="/store?feed=dhan""#),
+            "the other feed is one link away, not one column away: {html}"
+        );
         // The claim the whole page rests on is written on it.
         assert!(html.contains("hash probe"), "{html}");
         assert!(html.contains("248,000"), "{html}");
