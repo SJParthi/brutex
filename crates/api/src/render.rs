@@ -2270,7 +2270,20 @@ pub fn store_page(view: &StoreView<'_>) -> String {
             body.push_str(&halt_block(census.vendor.as_str(), &census.note()));
         }
     }
-    body.push_str(&census_cards(view.censuses));
+    // THE SELECTED FEED'S COUNTERS, not every feed's side by side.
+    //
+    // The table below became single-feed and these cards did not, which left
+    // the same comparison one level up: "groww 1 month" beside "dhan 194". Two
+    // numbers next to each other are read as a difference whether or not one
+    // is meant, and between feeds that are not the same universe there is no
+    // difference to read.
+    let mine: Vec<VendorCensus> = view
+        .censuses
+        .iter()
+        .filter(|c| c.vendor == view.feed)
+        .cloned()
+        .collect();
+    body.push_str(&census_cards(&mine));
     if let Some(filter) = view.filter {
         body.push_str(&store_filter_bar(filter, view.held_only));
     }
