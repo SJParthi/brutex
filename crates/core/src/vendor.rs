@@ -100,7 +100,6 @@ impl Vendor {
     /// instrument became non-agreeing and the whole universe degraded — the
     /// same shape as `pull::config` demanding a credential from a feed that has
     /// none. A predicate, so the right set is named rather than assumed.
-    #[must_use]
     pub const fn publishes_master(self) -> bool {
         match self {
             Self::Groww | Self::Dhan => true,
@@ -111,6 +110,29 @@ impl Vendor {
     /// Every vendor that publishes an instrument master.
     pub const MASTERED: [Self; 2] = [Self::Groww, Self::Dhan];
 
+    /// Secondary broker.
+    /// Every vendor this engine reads, in path order.
+    /// What this vendor's instrument master is called on disk.
+    ///
+    /// # Why the file name is a property of the vendor
+    ///
+    /// It was a hand-written list in `api::server::master_paths`:
+    ///
+    /// ```text
+    /// vec![(Vendor::Groww, dir.join("groww_instruments.csv")),
+    ///      (Vendor::Dhan,  dir.join("dhan_scrip.csv"))]
+    /// ```
+    ///
+    /// So adding a feed meant editing that function — and forgetting to meant a
+    /// vendor the engine knows about whose master is silently never read, which
+    /// reports as "this vendor lists nothing" rather than as the wiring bug it
+    /// is. A `match` on `Self` cannot be forgotten: a new variant is a compile
+    /// error until it names its file.
+    ///
+    /// Everything downstream already iterates [`Self::ALL`] — the census grid,
+    /// the merge, the ingest form, the coverage table. This was the one place
+    /// that did not, and it was the entry point.
+    #[must_use]
     pub const fn master_file(self) -> &'static str {
         match self {
             Self::Groww => "groww_instruments.csv",
