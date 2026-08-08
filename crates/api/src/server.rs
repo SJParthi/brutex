@@ -1932,8 +1932,20 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         // Resolved through `Feed::store_vendor`. A literal here files one
         // broker's prices under another's prefix.
         vendor: landed.store_vendor,
-        exchange: brutex_core::instrument::Exchange::Nse.as_str(),
-        segment: brutex_core::instrument::Segment::Index.as_str(),
+        // THE INSTRUMENT'S OWN EXCHANGE AND SEGMENT, not literals.
+        //
+        // `Segment::Index` was hardcoded, so all 750 equities were filed under
+        // `NSE/INDEX/` — the DB page showed `NSE-INDEX-360ONE`, and 360ONE is
+        // an equity. The path IS the index in this store, so a wrong segment is
+        // not a labelling slip: it is the bar living at the wrong address, and
+        // a later reader asking for `NSE/CASH/360ONE` finds nothing while the
+        // data sits one directory over.
+        //
+        // Same shape as the `Vendor::Dhan` literal that put GDFL futures under
+        // `bars/dhan/`, and the `Symbol::new("NIFTY")` that made spot pull one
+        // instrument. A literal where a value belongs.
+        exchange: landed.exchange,
+        segment: landed.segment,
     };
     let mut done = pull::ingest::Ingested::default();
     for body in &landed.bodies {
@@ -2139,6 +2151,10 @@ struct BrokerWindow {
     /// The row that describes this feed's wire format. Read for its timestamp
     /// encoding rather than re-stated by the caller.
     spec: pull::vendor::HttpSpec,
+    /// Where these bars belong, from the instrument rather than a literal.
+    pub exchange: &'static str,
+    /// Where these bars belong, from the instrument rather than a literal.
+    pub segment: &'static str,
     /// The window these bodies cover, so the lander need not be handed the
     /// request as well.
     pub window: pull::session::Window,
@@ -2519,6 +2535,8 @@ async fn broker_window(
     // than letting the receipt imply both.
     Ok(BrokerWindow {
         bodies,
+        exchange: instrument.exchange.as_str(),
+        segment: instrument.segment.as_str(),
         window: asked.window,
         instrument: instrument.underlying.to_string(),
         origin,

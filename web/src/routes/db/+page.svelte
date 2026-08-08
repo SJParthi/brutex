@@ -104,24 +104,27 @@
             <th>Month</th>
             <th>TF</th>
             <th class="num">Rows</th>
-            <th class="num">Sessions</th>
-            <th class="num">Complete</th>
+            <th class="num">Days</th>
+            <th class="num">Short by</th>
           </tr>
         </thead>
         <tbody>
           {#each shown as r (r.instrument + r.month)}
-            {@const sessions = Math.floor(r.rows / BARS_PER_SESSION)}
-            {@const remainder = r.rows % BARS_PER_SESSION}
+            {@const days = Math.ceil(r.rows / BARS_PER_SESSION)}
+            {@const short = days * BARS_PER_SESSION - r.rows}
             <tr>
               <td>{r.instrument}</td>
               <td>{r.month}</td>
               <td>{r.timeframe}</td>
               <td class="num">{r.rows.toLocaleString()}</td>
-              <td class="num">{sessions}</td>
-              <!-- A PARTIAL SESSION IS NAMED, not rounded away. `375 · 2 + 4`
-                   says a day is four bars short far more usefully than 99.6%. -->
-              <td class="num" class:down={remainder !== 0} class:up={remainder === 0 && sessions > 0}>
-                {remainder === 0 ? 'whole' : `+${remainder}`}
+              <td class="num">{days}</td>
+              <!-- HOW MANY BARS SHORT OF FULL DAYS, which is the question.
+                   This read "SESSIONS 0 · +368" for a 368-bar month — 0 whole
+                   sessions and a remainder — which is arithmetically true and
+                   says nothing. A day that traded 368 of 375 minutes is 7
+                   short, and 7 is the number worth seeing. -->
+              <td class="num" class:down={short !== 0} class:up={short === 0}>
+                {short === 0 ? 'full' : `−${short}`}
               </td>
             </tr>
           {/each}
