@@ -36,6 +36,33 @@ unused-allowed-license = "allow"
 # this workspace, which are ours and are not distributed.
 private = { ignore = true }
 
+# ONE CRATE, ONE LICENCE. `exceptions` does not add CC0-1.0 to `allow` above:
+# any OTHER crate carrying CC0-1.0 is still refused, which is the difference
+# between this and widening the policy.
+#
+# `tiny-keccak 2.0.2` is CC0-1.0 and it is never compiled by this workspace.
+# It arrives only as
+#
+#     parquet -> ahash -> const-random -> const-random-macro -> tiny-keccak
+#
+# and `const-random` is an OPTIONAL dependency of `ahash`, selected by its
+# `compile-time-rng` feature, which is chosen only where there is no runtime
+# random source. Measured on this tree rather than assumed —
+# `cargo tree --target <t> -p parquet -i const-random` prints "nothing to
+# print" for `x86_64-unknown-linux-gnu` and for `aarch64-apple-darwin`, and
+# prints the chain above only for `wasm32-unknown-unknown`.
+#
+# `lake` never builds for wasm32. `CLAUDE.md` §5 makes `web` the only wasm
+# crate and gives it `core` as its sole dependency, so no wasm build can reach
+# `parquet` at all. cargo-deny resolves it anyway because `[graph] targets`
+# above lists wasm32 and cargo-deny unions the targets across the whole
+# workspace — it has no way to know which member is built for which.
+#
+# So the code under this licence is never compiled, never linked and never
+# shipped. See docs/05-decisions.md D-0056, which recorded the need for this
+# line when `crates/lake` landed.
+exceptions = [{ crate = "tiny-keccak", allow = ["CC0-1.0"] }]
+
 [bans]
 multiple-versions = "warn"
 wildcards         = "deny"

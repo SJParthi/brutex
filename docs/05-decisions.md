@@ -4298,3 +4298,761 @@ added without a decision entry fails there rather than appearing quietly in a
 path. It also asserts the two rungs share neither a path segment nor a length:
 the first would file one over the other, the second would make `from_secs`
 ambiguous.
+
+## D-0055 · 2026-08-08 · The rung is selectable, and its window cap is per (feed, rung)
+
+`crates/pull/src/vendor.rs`, `crates/pull/src/session.rs`,
+`crates/pull/src/fetch.rs`, `crates/pull/src/ingest.rs`, `crates/api/src/ingest.rs`,
+`crates/api/src/render.rs`, `crates/api/src/server.rs`.
+
+D-0054 put `Timeframe::DAY_1` in the store and nothing could reach it. The spot
+form had no control for a bar length, `Granularity::store_timeframe` returned
+`Some` for exactly one rung, and `api::server::land_one` wrote
+`Timeframe::MINUTE_1` as a literal. This is the wiring.
+
+**Five things move, and they are one thing.**
+
+1. `Granularity::Day1.store_timeframe()` is `Some(Timeframe::DAY_1)`, tied to
+   the store's spelling by `const` assertion the way the minute rung already
+   was. The seconds half cannot be mirrored — `Grid::Daily` carries no interval,
+   because a session is not a fixed number of seconds — so what is pinned is the
+   directory NAME, that the ladder calls the rung an aggregate, and that
+   `DAY_1.secs()` is a whole number of `MINUTE_1` bars.
+2. `ingest::SpotRequest` carries a `Granularity`, defaulting to `Minute1` when
+   the field is absent. `/pull/spot` is a replayable POST and a body written
+   before the field existed must keep the meaning it had.
+3. The form builds its options from `Descriptor::granularities` intersected with
+   `store_timeframe().is_some()`. Not a hardcoded pair: a feed that gains a rung
+   gains the option, and a rung `crates/store` cannot file is not offered,
+   because a control that can only ever refuse is what the descriptor table's
+   own empty-set assertion already forbids.
+4. `HttpSpec::window_cap_days` is a lookup on `(feed, rung)` rather than one
+   scalar. **The qualifier was always there and was living in prose**:
+   `docs/00-charter.md` §4 records Groww's cap as "30 days per request *at
+   1-minute granularity*", and Dhan's 90 sits under a row naming the intraday
+   charts endpoint. Neither source records a day-level figure, so neither
+   descriptor carries one.
+5. `BarRequest` carries the rung instead of a separately-stated `Cadence`, which
+   is now derived from it. The two were independent fields that had to agree,
+   and they disagree silently in the direction that loses everything: a daily
+   bar is stamped at midnight, so a daily pull left at `Cadence::Minute` counts
+   every bar `BeforeSessionOpen` and reports a clean census of zero.
+
+**An absent cap is not "send the window whole", and that arm was a bug.**
+`fetch_chunks` read `None` as one unsplit request. The store addresses one month
+per file **at every rung**, and `fetch::land` refuses a batch spanning two — the
+refusal that failed 699 members on a real 37-day pull. So `split_window` now
+takes `Option<u32>` and the month boundary binds whether or not a vendor
+published anything. `Some(0)` is still a refusal, because a zero is a number that
+went wrong where `None` is a claim about a vendor.
+
+**What that buys, measured, and not more than that.** For 2020-01-01 to
+2026-08-07 per instrument: Groww goes 126 requests to 80, Dhan 80 to 80. Dhan's
+90-day cap is already wider than any month, so the month was the only bound at
+either rung and this change buys it nothing — asserted in the test rather than
+elided.
+
+**D-0054's "14 at day level" is not traceable and is superseded here.**
+That entry cites `docs/00-charter.md` §4 for it; §4 records no day-level cap for
+either vendor, and working backwards the figure implies a ~172-day cap that
+appears in no source. It is also unreachable regardless: the floor is 80, one
+per month, set by the store's addressing rather than by any vendor. The real
+saving is 126 → 80 on one feed and nothing on the other.
+
+**Rejected: writing a daily interval word.** Groww names its bar length in a
+request parameter, and the daily spelling — `1day`? `1d`? `day`? — is recorded
+nowhere in this repository and nowhere in the charter. `ParamValue::Fixed`
+became `ParamValue::Granularity`, resolved from a per-feed table of **recorded
+words only**, and a rung with no row refuses by name before the socket
+(`FetchError::RungNotSpellable`, marked UNVERIFIED in its own message). Three
+alternatives were considered and all three are worse:
+
+- *Guess the word.* `CLAUDE.md` §3 rule 1. A wrong word is answered by
+  something, and a minute answer filed under `1day/` is indistinguishable from a
+  real daily bar afterwards.
+- *Leave `Fixed("1minute")` and file the fold as daily.* Then a month-wide
+  window goes out against a cap measured at 30 days, and every 31-day month
+  breaks — quietly, if the vendor truncates rather than refusing.
+- *Keep the cap keyed on what is fetched rather than what is asked.* Honest, and
+  it delivers the 1-minute cap on every daily pull, which is the thing this
+  entry exists to stop.
+
+**Consequence, stated plainly.** A daily pull lands under `1day/` for Dhan (its
+request names no interval, so nothing has to be spelled) and for both archive
+feeds (their files are what they are, and `fold` coarsens). A daily pull against
+Groww refuses by name until its interval word is read live and written into one
+descriptor row. That is one row, and the day it lands nothing else changes.
+
+**Rejected: gating the rung on `Feed::serves`.** `Descriptor::granularities` is
+what a feed's SOURCE provides, not what may be filed from it — GDFL serves only
+`Second1` and has been filing `1min` bars through `fold` since it shipped.
+Gating on it would have made GDFL unpullable at every rung the store carries.
+
+**The write boundary is `pull::ingest`, not a route.** `Plan` no longer carries a
+`Timeframe`; it resolves one from `request.granularity` and refuses by name when
+there is none. That removes a pair of fields that could disagree — a plan naming
+`Day1` and `MINUTE_1` exempts every bar from the session filter and then files
+the result under `1min/` — and puts the refusal where a wrong answer becomes
+bytes. `Granularity::Second1` is the reachable case: both archive feeds serve it
+and the store has no directory for it.
+
+`docs/06-limits.md` gains nothing here: no bound is claimed and none is met. The
+UTC-epoch alignment of the daily fold bucket -- the bar is stamped 00:00:00 UTC,
+which is 05:30 IST, and not at the session open -- is written under **The rung**
+in `docs/04-invariants.md`, in the paragraph headed "What these rows do NOT
+claim".
+
+---
+
+## D-0056 · 2026-08-08 · `crates/lake` reads the Parquet lake, and it does it without a byte of C
+
+**The lake is the only copy.** `~/.brutex/lake` holds 40 GB of 1-minute bars
+written by an earlier collector: 116,086 F&O contract directories under
+`bars/NSE/FNO` alone — 61,075 NIFTY, 55,011 BANKNIFTY — plus cash and index
+series across 21 timeframes from `1minute` to `1day`, and a BSE tree beside the
+NSE one. **Both live vendor masters purge a contract when it expires.** For
+every expired contract in that tree there is no second source and no way to pull
+one again. Reading the lake is therefore not a convenience; nothing else can.
+
+The layout is
+`bars/<EXCHANGE>/<SEGMENT>/<CONTRACT>/<TIMEFRAME>/<YYYY>/<MM>.parquet`, and the
+files are Parquet with ZSTD-compressed pages, written by Polars. Verified by
+hand on `NSE-NIFTY-01Apr20-10000-CE/1minute/2020/03.parquet`: `PAR1` at both
+ends, a `28 b5 2f fd` zstd frame at offset 0x19, `created_by = "Polars"`, 2,480
+rows in one row group.
+
+### The trap, and why the obvious dependency is absent
+
+The obvious way to read these files is `parquet`'s `zstd` feature. That chain is
+
+    parquet -> zstd -> zstd-safe -> zstd-sys
+
+and `zstd-sys` is a binding to C: 101 vendored `.c/.h/.S` files behind a
+`build.rs` that runs `cc::Build` **and** `bindgen`. `CLAUDE.md` §2 forbids "any
+vendored binding to another language" and "any `build.rs` that invokes an
+external process", both **without exception**. `zstd` is a *default* feature, so
+the violation arrives by writing the dependency down at all.
+
+`encryption` is the other fatal feature — it pulls `ring`, which vendors C and
+assembly. It is not a default and is not enabled.
+
+`parquet::compression::create_codec` is a free function with `#[cfg]`-gated
+arms. There is no registry and no injection point, so the feature cannot be
+replaced from outside. **The page layer, however, is public.** So `crates/lake`
+takes `parquet` with *no default features at all* and supplies the two things
+the disabled feature would have done — page headers from `parquet-format-safe`,
+page bodies from `ruzstd` — then hands `parquet` a fully formed `Page`.
+Everything below that (RLE definition levels, PLAIN, RLE_DICTIONARY) is
+`parquet`'s own code, unmodified.
+
+`parquet-format-safe` is thrift-generated **Rust** with zero dependencies and no
+`build.rs`. Generated Rust is not "generated source in another language"; §2 is
+unbothered by it. It is needed because `parquet::format` was removed in 59.x and
+`parquet_thrift` is private, so a page header cannot be parsed through `parquet`
+itself.
+
+### The dependency set, exactly
+
+```toml
+brutex_core         = { path = "../core", package = "core", version = "0.1.0" }
+parquet             = { version = "59.2", default-features = false }
+parquet-format-safe = { version = "0.2",  default-features = false }
+ruzstd              = { version = "0.8",  default-features = false, features = ["std", "hash"] }
+bytes               = { version = "1",    default-features = false, features = ["std"] }
+```
+
+`default-features = false` on `parquet` is load-bearing, not tidiness:
+restoring the defaults reintroduces the C compiler.
+
+### The proof of purity
+
+`cargo tree -p lake --no-dedupe`, on `aarch64-apple-darwin`, at the commit that
+added the crate:
+
+    lake v0.1.0 (/Users/parthi/IdeaProjects/brutex/crates/lake)
+    ├── bytes v1.12.1
+    ├── core v0.1.0 (/Users/parthi/IdeaProjects/brutex/crates/core)
+    ├── parquet v59.2.0
+    │   ├── ahash v0.8.12
+    │   │   ├── cfg-if v1.0.4
+    │   │   ├── getrandom v0.3.4
+    │   │   │   ├── cfg-if v1.0.4
+    │   │   │   └── libc v0.2.189
+    │   │   ├── once_cell v1.21.4
+    │   │   └── zerocopy v0.8.56
+    │   │       └── zerocopy-derive v0.8.56 (proc-macro)
+    │   │           ├── proc-macro2 v1.0.107
+    │   │           │   └── unicode-ident v1.0.24
+    │   │           ├── quote v1.0.47
+    │   │           │   └── proc-macro2 v1.0.107
+    │   │           │       └── unicode-ident v1.0.24
+    │   │           └── syn v2.0.119
+    │   │               ├── proc-macro2 v1.0.107
+    │   │               │   └── unicode-ident v1.0.24
+    │   │               ├── quote v1.0.47
+    │   │               │   └── proc-macro2 v1.0.107
+    │   │               │       └── unicode-ident v1.0.24
+    │   │               └── unicode-ident v1.0.24
+    │   │   [build-dependencies]
+    │   │   └── version_check v0.9.5
+    │   ├── bytes v1.12.1
+    │   ├── chrono v0.4.45
+    │   │   ├── iana-time-zone v0.1.65
+    │   │   │   └── core-foundation-sys v0.8.7
+    │   │   └── num-traits v0.2.19
+    │   │       └── libm v0.2.16
+    │   │       [build-dependencies]
+    │   │       └── autocfg v1.5.1
+    │   ├── half v2.7.1
+    │   │   ├── cfg-if v1.0.4
+    │   │   ├── num-traits v0.2.19
+    │   │   │   └── libm v0.2.16
+    │   │   │   [build-dependencies]
+    │   │   │   └── autocfg v1.5.1
+    │   │   └── zerocopy v0.8.56
+    │   │       └── zerocopy-derive v0.8.56 (proc-macro)
+    │   │           ├── proc-macro2 v1.0.107
+    │   │           │   └── unicode-ident v1.0.24
+    │   │           ├── quote v1.0.47
+    │   │           │   └── proc-macro2 v1.0.107
+    │   │           │       └── unicode-ident v1.0.24
+    │   │           └── syn v2.0.119
+    │   │               ├── proc-macro2 v1.0.107
+    │   │               │   └── unicode-ident v1.0.24
+    │   │               ├── quote v1.0.47
+    │   │               │   └── proc-macro2 v1.0.107
+    │   │               │       └── unicode-ident v1.0.24
+    │   │               └── unicode-ident v1.0.24
+    │   ├── hashbrown v0.17.1
+    │   ├── num-bigint v0.5.1
+    │   │   ├── num-integer v0.1.46
+    │   │   │   └── num-traits v0.2.19
+    │   │   │       └── libm v0.2.16
+    │   │   │       [build-dependencies]
+    │   │   │       └── autocfg v1.5.1
+    │   │   └── num-traits v0.2.19
+    │   │       └── libm v0.2.16
+    │   │       [build-dependencies]
+    │   │       └── autocfg v1.5.1
+    │   ├── num-integer v0.1.46
+    │   │   └── num-traits v0.2.19
+    │   │       └── libm v0.2.16
+    │   │       [build-dependencies]
+    │   │       └── autocfg v1.5.1
+    │   ├── num-traits v0.2.19
+    │   │   └── libm v0.2.16
+    │   │   [build-dependencies]
+    │   │   └── autocfg v1.5.1
+    │   ├── seq-macro v0.3.6 (proc-macro)
+    │   └── twox-hash v2.1.3
+    ├── parquet-format-safe v0.2.4
+    └── ruzstd v0.8.2
+        └── twox-hash v2.1.3
+
+**Mechanically audited, every crate in that tree:** `0` files matching
+`*.c *.h *.cc *.cpp *.S *.asm`. No `cc`, no `cmake`, no `bindgen`, no
+`pkg-config`, no `zstd`, no `zstd-safe`, no `zstd-sys`, no `ring`. The `zstd`
+crate appears in `ruzstd`'s manifest only as a **dev**-dependency and is
+therefore not built by us — confirmed absent from the tree above.
+
+Adding the crate changed **no** pre-existing package version in `Cargo.lock`;
+the change is purely additive.
+
+### Three things this entry will not pretend away
+
+1. **`core-foundation-sys 0.8.7` is a `-sys` crate and it is new.** It arrives
+   on Apple targets only, via `chrono`'s `clock` feature, which `parquet`
+   hardcodes and which is not disableable. It has **no `build.rs`** (`build =
+   false` in its manifest), no `links` key, and no native source — only
+   `extern "C"` declarations against a system framework. It is zero occurrences
+   on Linux and on wasm32. It is still literally a `-sys` crate, and it is named
+   here rather than waved through.
+2. **`zerocopy 0.8.56`'s `build.rs` invokes `rustc --version`.** It reaches us
+   through `parquet -> half` and `parquet -> ahash`. This is feature detection
+   against the Rust compiler itself, not a foreign toolchain, and four crates
+   already in this workspace do the same thing — `libc`, `proc-macro2`, `quote`
+   and `getrandom`, all present before this change. CI gate 2 scans tracked
+   `build.rs` files and does not reach into the registry, so nothing enforces
+   this either way. It is recorded because §2's wording is broader than gate 2's
+   reach.
+3. **`tiny-keccak 2.0.2` is CC0-1.0 and `cargo deny check licenses` rejects
+   it.** It is reachable **only on wasm32**, via
+   `parquet -> ahash -> const-random -> const-random-macro -> tiny-keccak`; zero
+   occurrences on the native target. `lake` never builds for wasm32 — `web` is
+   the wasm crate and it depends on `core` alone — but `deny.toml`'s `[graph]
+   targets` lists wasm32, so cargo-deny resolves it regardless. **The exception
+   is now applied**, as `[licenses] exceptions` naming `tiny-keccak` alone —
+   `allow` is untouched, so any other crate carrying CC0-1.0 is still refused.
+   The wasm32-only claim was re-measured before the line was written:
+   `cargo tree --target <t> -p parquet -i const-random` prints "nothing to
+   print" for `x86_64-unknown-linux-gnu` and for `aarch64-apple-darwin`, and
+   prints the chain above only for `wasm32-unknown-unknown`.
+
+### What the reader does with the numbers
+
+`CLAUDE.md` §7 splits the columns in two and the crate is built around that
+split.
+
+* **Prices** — open, high, low, close, `spot_at_bar`, and an option strike — are
+  paisa `i64`. They cross out of IEEE double exactly once, at
+  `lake::bar::paisa_from_lake`, which delegates the arithmetic to
+  `brutex_core::price::Paisa::from_rupees_half_up` rather than writing a second
+  half-up rule that could drift from it by a paisa. That function is already the
+  only one in the workspace permitted to do floating-point arithmetic. This
+  crate's boundary adds only *which column* and *which row* to the refusal,
+  because `core` cannot know either. An option strike never goes near it at all:
+  every strike in the lake is a whole number of rupees (verified across all
+  115,927 option directories, range 4,600 to 69,000), so it is multiplied by 100
+  as an integer, which cannot round.
+* **Statistical values** — `iv, delta, gamma, theta, vega, rho, t_years_used,
+  rate_used` — keep full `f64` precision and are never snapped. Snapping a real
+  gamma of `0.00017142680429549402` onto the paisa grid makes it zero. The code
+  says so in a comment addressed to whoever later tries to "fix" it.
+* **Open interest** is neither. `i64::MIN` means the vendor reported none and
+  zero means zero, per §7. This is load-bearing rather than decorative: open
+  interest is null in **12.24%** of the 170,547 F&O rows measured and **0.96%**
+  of 78,448 cash/index rows, so a reader that mapped null to zero would invent
+  hundreds of thousands of "zero open interest" bars nobody ever reported.
+
+### What was measured rather than assumed
+
+The brief this work started from said open interest was the only nullable
+column. **It is not**, and the model here is built on measurement across 120
+real F&O files and 200 files overall:
+
+| Column group | Null rate | Modelled as |
+|---|---|---|
+| `timestamp`, `open`, `high`, `low`, `close`, `volume` | 0.0000% | required; a null is refused by name |
+| `open_interest` | 12.2447% | `i64::MIN` sentinel, distinct from zero |
+| the eight greeks | 5.5187%, **null as one unit** | one `Option<Greeks>` |
+| `spot_at_bar` | 0.1894%, **independently** | its own `Option<Paisa>` |
+| `greeks_provenance_id` | 0.0000% | `INT32`, present even when the greeks are not |
+
+The co-occurrence was checked directly: six distinct null signatures appear
+across those files, and in every one the eight greeks are all present or all
+absent, while `spot_at_bar` and `open_interest` each vary independently of them.
+That is why they are three separate fields and not one. A row carrying *some* of
+the eight contradicts the model and is refused as `PartialGreeks` rather than
+silently reported as `None`, which would discard the greeks that were there.
+
+Two further corrections to the brief: there are **three** contract shapes, not
+two — `-CE` (57,400), `-PE` (58,527) and **`-FUT` (159), which has no strike and
+four `-` separated parts rather than five**; and there are **21** timeframes in
+the lake, not three.
+
+### Schemas, and the refusal for a third one
+
+Exactly two layouts exist, and the 7-column one is a strict prefix of the
+17-column one:
+
+* **cash / index**, 7 columns: `timestamp, open, high, low, close, volume,
+  open_interest`
+* **F&O**, 17 columns: those seven, then `iv, delta, gamma, theta, vega, rho,
+  spot_at_bar, t_years_used, rate_used, greeks_provenance_id`
+
+Every column is `OPTIONAL`, so every one carries definition levels.
+`greeks_provenance_id` is **`INT32`**, not `INT64` — reading it as an `i64`
+decodes garbage rather than failing, so it is pinned by a test as well as
+checked at read time.
+
+The count selects the candidate layout and then **every column is checked by
+name and by type**, so a file with the right number of columns under different
+names is refused rather than read positionally — which would file a `rho` where
+a `volume` belongs.
+
+### Everything is refused by name
+
+`LakeError` has thirteen variants and none of them is a skip or a substitute
+value: `Io`, `NotParquet`, `Truncated`, `FooterUnreadable`, `UnknownCodec`,
+`MissingColumn`, `ColumnTypeMismatch`, `UnexpectedSchema`, `PageDecode`,
+`UnexpectedNull`, `NotRepresentable`, `PartialGreeks`, `NoSuchRowGroup`,
+`ImpossibleLength`. The magic bytes are checked *before* the footer reaches the
+thrift parser, because a JPEG handed to that parser produces an opaque thrift
+error and an operator needs to be told the file is simply not Parquet.
+
+Contract names get their own `ContractError` — parsing a name touches no file,
+and a caller walking 116,086 directories needs "this name is malformed" to be
+distinguishable from "the file behind it is corrupt". The month token is matched
+**case-insensitively** because `01Apr20` is the one field the lake writes in
+mixed case; every other field must be exactly as the lake writes it, and
+`Display` always renders the canonical spelling so a real name round-trips byte
+for byte. Dates are validated through `brutex_core::instrument::Expiry`, the
+workspace's only calendar validator, so `31Feb21` is refused rather than
+normalised into 3 March.
+
+### The bound, and the defect the bench found
+
+`crates/lake` makes exactly one cost claim: `Batch::row` is O(1). Opening a file
+is O(file bytes) and decoding a row group is O(bytes in the group) — every page
+in it must be decompressed — and the doc comments say so rather than implying
+otherwise.
+
+Writing the gate-8 bench immediately earned its keep. `ContractName::parse`
+measured **33.576x** on a 4 KiB name against a real 26-byte one: the digit check
+walked the whole string and the error then allocated a copy of it. That is
+unbounded work spent deciding a refusal, and the caller paying for it is the one
+walking 116,086 directories. `MAX_NAME_BYTES = 64` now bounds the work before
+anything reads the string, on exactly the reasoning D-0033 records for
+`InstrumentError::FieldTooWide`. After the fix the same measurement is
+**0.082x** — the refusal is cheaper than the accept, which is what it should
+have been all along.
+
+Final bench, ceiling 3.0x:
+
+```
+row(0): 2,480 rows -> 248,000 rows                ratio 1.004x  ok
+row(last): 2,480 -> 24,800 rows                   ratio 0.987x  ok
+row(last): 2,480 -> 248,000 rows                  ratio 1.012x  ok
+row(first) -> row(last), within 248,000 rows      ratio 1.017x  ok
+cost PER ROW of a full walk: 2,480 -> 248,000     ratio 0.960x  ok
+contract parse: 26 byte name -> 4 KiB name        ratio 0.082x  ok
+```
+
+### Where it sits, and what it is not wired into
+
+`lake` depends on `brutex_core` and third-party crates, and on nothing else in
+this workspace. **Nothing in the workspace depends on `lake`** — wiring it into
+`crates/pull` is separate work and was deliberately not done here, because
+another change was editing that crate at the same time.
+
+`CLAUDE.md` §1 is untouched. The engine surface is still exactly `NSE-NIFTY` and
+`NSE-BANKNIFTY`, and this crate widens nothing: §1 already says futures, options
+and single stocks may be **stored** and never swept, and reading stored history
+is that same permission. The BSE tree in the lake is readable for the same
+reason `CLAUDE.md` §1 gives — existing BSE data on disk is not deleted.
+
+### Rejected alternatives
+
+* **`parquet` with `zstd`.** The violation this whole entry is about.
+* **`parquet2` / `polars-parquet`.** A leaner tree (5 crates), but both leave
+  *value* decoding to the caller — RLE definition levels, PLAIN and
+  RLE_DICTIONARY would all have had to be written here. That is far more code
+  and far more risk than the one gap `parquet-format-safe` closes.
+* **A committed `.parquet` test fixture.** Impossible by construction: CI gate 1
+  allows `.rs .toml .md .lock .html .css .yml` outside `web/`, so a tracked
+  `.parquet` is the build failure that gate exists to be. The decode path is
+  instead covered by fixtures the tests *write*, using `parquet`'s own writer,
+  which is available with no features and therefore pulls no C. The real-lake
+  tests skip loudly when `~/.brutex/lake` is absent and say in their own header
+  that they prove nothing on CI — recorded here so a green tick is not read as
+  more than it is.
+
+## D-0057 · 2026-08-08 · The pull drives itself from process start, oldest month first, and the page shows it doing so
+
+`.claude/launch.json`, `web/src/routes/autopilot/+page.svelte`,
+`web/src/routes/+layout.svelte`, `web/vite.config.js`.
+
+Reaching a complete store took **three** things a human had to start and keep
+starting: `cargo run -p api`, `npm run dev`, and a shell loop posting to
+`/pull/spot`. The operator's requirement, stated in their own words, is "i dont
+want to run any commands, nothing should be manual, everything needs to be
+automated ... just click start or run". Three is not one, and a loop that lives
+in an operator's terminal dies with their terminal.
+
+**The autopilot is a task the served process starts itself.** No flag, no
+subcommand, no token. `api::server::run` parses its arguments and refuses
+anything it does not understand (`unknown argument`), so a switch would have to
+be added deliberately — and a switch is a thing that can be left off. §6 of
+`CLAUDE.md` argues exactly this about sweep depth: *a parameter that can be set
+can be set wrongly and silently*. The same reasoning applies to the one
+parameter whose wrong value is "nothing happened at all".
+
+### It runs oldest month first, and that is not a preference
+
+The store is append-only with monotonic timestamps and one file per month. A
+later month written into a month-file permanently blocks the earlier days in
+that same file. This was measured, not reasoned about: a file already holding
+2026-08-06, offered 2026-08-03..07, stored **zero** bars — including 08-07,
+which strictly follows what was already there, because the offer was refused as
+a unit.
+
+So the ladder runs 2020-01 upward. `docs/07-plan.md` R-2 states the window as
+2020-01-01 → yesterday, never today, and that is the target the autopilot
+carries; `web/src/routes/audit/+page.svelte` already draws its coverage grid
+against the same R-2 span, so there is one stated target and two views of it,
+not two targets.
+
+**Never today.** A session still running yields a partial day the store cannot
+correct later — `finished_day_only` in `crates/api/src/server.rs` already
+refuses one on the manual path, and the autopilot is under the same rule rather
+than beside it.
+
+### What it decides, and what it costs to decide
+
+`pull::work::gaps` was written for this and had no non-test caller. Gap =
+expected − held, one pass over the requested cells with one hash probe each:
+**O(cells requested), never O(store)**, and it lists no directory. The memory is
+the store's own census, not a progress variable — which is what makes §3 rule 5
+hold. Restarting the process re-derives the position from disk and redoes
+nothing. Killing it mid-month loses at most the cell in flight.
+
+### Halting, and the two things it must never do
+
+`CLAUDE.md` §4 bans a fallback that hides a failure, and an autopilot is the
+worst possible place to put one: a loop that skips a month and carries on leaves
+a hole nobody is looking for, and a loop that stops silently is
+indistinguishable from a loop that finished.
+
+* **A dead credential halts loudly and says so on the page.** §8 stands
+  unchanged: the value is read from Parameter Store, a stale token is re-read
+  once, and a re-read returning the same dead value halts. **This repository
+  never mints a token**, and an unattended loop is exactly the context in which
+  minting one would be tempting.
+* **Throttling is not a failure.** `await_budget` waits rather than refusing.
+  The measured figure it is designed for is 785 instruments, 0 failures, and
+  1,952 s of absorbed throttling — time spent waiting, not months lost.
+
+### The surface
+
+```text
+GET  /autopilot.json    state, current cell, target, coverage cursor, failures
+POST /autopilot/pause   finish the cell in flight, then stop
+POST /autopilot/resume  continue, from the census
+```
+
+`state` is one of `starting`, `running`, `waiting`, `paused`, `halted`,
+`complete`. **`why` is mandatory when the state is `paused` or `halted`** — a
+stop that does not name its reason is the failure §4 bans, and the browser
+refuses such a payload as a contract violation rather than rendering a calm
+blank. `now.elapsed_ms` is a **duration the server measured**, never a start
+instant: a start instant would be compared against the browser's clock, and two
+clocks that disagree render a cell that has been running for minus forty-seven
+seconds.
+
+Pause is *finish this cell and stop*, not *abort*. An aborted write is a half
+month the append-only store can never go back and fill.
+
+### The page: `/autopilot`
+
+A new route rather than a panel bolted onto `/ingest` or `/audit` — both were
+under concurrent edit, and a 600-line insertion into a 2,300-line file is a
+merge conflict with a deadline. It reads two sources and **never merges them**:
+
+* `/autopilot.json`, every 2 s — what the autopilot *says* it is doing. The only
+  answer to "what is in flight" and "why did it stop".
+* `/store.json`, every 30 s — what the store *actually holds*. ~400 KB on a real
+  store, folded once on arrival into per-month totals, which is why it is polled
+  at a fifteenth of the rate.
+
+**Coverage is drawn from the census, never from the autopilot's own report.** A
+progress bar fed by the process reporting its own progress reads 100% when that
+process is lying to itself. Every figure on the page is labelled *reported* or
+*measured*, because they are not the same claim (§3 rule 6).
+
+When `/autopilot.json` answers 404 the page says, in a red banner, that the
+process is serving pages and nothing is driving the pull, names what is
+therefore unknown, and **still renders the measured coverage** — the census is
+true either way. A 200 with the wrong shape is reported by naming the first
+field that broke the contract. Both were verified against the running binary:
+the 404 path against the real server, the running path against a stubbed
+response.
+
+### One click
+
+`.claude/launch.json` had `brutex-api` on port **8731** while
+`api::server::DEFAULT_ADDR` is **8080** — asserted in that crate's own test.
+Every JSON route therefore 500'd, the feed picker read "feeds unavailable", and
+`/db` read "nothing stored" against a store holding millions of bars. The whole
+front end looked like a design failure and was a one-number configuration
+failure. `web/vite.config.js` had already been fixed and carries the comment
+about it; the launcher had not. It is now one `brutex` configuration on 8080,
+first in the list, with `brutex-web-dev` kept second for front-end work only.
+
+### What is honestly not done, and is not claimed here
+
+This entry records the decision and the surface. Three things it depends on are
+**not** in this change and must land before "clone and run" is true:
+
+1. **`api` does not serve `web/build`.** There is no static-file route in
+   `api::server::router` and no `tower-http` dependency, yet
+   `web/svelte.config.js` and `web/src/routes/+layout.js` both already state
+   that the Rust binary serves the built assets. Until that route exists the
+   single process serves only its own server-rendered pages, and the SvelteKit
+   app needs Vite. The route must **read the directory at runtime** — `web/build`
+   relative to the working directory, overridable by an environment variable —
+   and not `include_dir!`. An embedded tree makes `cargo build` depend on a
+   `web/` build having happened, which is the dependency §2 exists to forbid and
+   which gate 1e exists to catch.
+2. **`web/build` is not tracked.** `web/.gitignore` ignores `build/`, so a fresh
+   clone has no front end to serve. See the position below.
+3. **CI gate 1b is already red on this branch, before any of this.** It confines
+   `*.json` to `.github/` and `crates/web/`, and `crates/web/` no longer exists —
+   D-0052 moved the front end to `web/`. `web/package.json`,
+   `web/package-lock.json` and `web/tsconfig.json` are tracked and outside both
+   allowed prefixes. Gate 1 was updated for D-0052/D-0053 and gate 1b was not.
+   It must be widened to `web/`, which D-0053 already licenses in as many words,
+   before anything further under `web/` can go green.
+
+### The position on committing `web/build`
+
+**Recommended: commit it.** A build artifact in version control is normally poor
+practice — it goes stale, it inflates diffs, and it invites the question "which
+source produced this". Here it is the single thing that makes the operator's
+requirement true, and the usual objections are all weaker than they look:
+
+* **Size.** 32 files, 600 KB. Not a burden on a repository already carrying a
+  44,000-line `Cargo.lock`.
+* **Permission.** D-0053 made `web/` unrestricted — "any language, any
+  framework, any toolchain, any file extension" — and named this exact case:
+  *"If a build step is introduced, its output is committed under `web/` ... so a
+  clone with no Node still builds a working binary."* This is not a new
+  liberty; it is the one D-0053 already granted, being used.
+* **Staleness.** Real, and it is the one genuine cost. The mitigation is a rule,
+  not a tool: `web/build` is regenerated and committed in the same commit as any
+  change under `web/src`. A CI check that rebuilds and diffs is *not* available,
+  because that would put Node on the critical path of the engine's build, which
+  §2 forbids outright.
+
+The alternative — `npm install && npm run build` after cloning — is two commands
+and a Node installation, and the requirement is zero. Rejected.
+
+**Not done in this change, deliberately: nothing was committed.** `web/` is
+under concurrent edit by another agent, so any build produced now would be stale
+before it landed. The steps for whoever lands it, in order:
+
+1. Widen CI gate 1b to allow `web/` (item 3 above). Without this the branch
+   cannot go green, with or without `web/build`.
+2. Remove `build/` from `web/.gitignore`.
+3. `npm install --prefix web && npm run build --prefix web`.
+4. `git add web/build && git commit` — in the same commit as the `web/src`
+   change it was built from, never separately.
+5. Land the runtime static-file route (item 1 above) so the binary serves it.
+
+---
+
+## D-0058 · 2026-08-09 · One run configuration is the product, and the file that holds it is not in the clone
+
+`.claude/launch.json`, `web/src/routes/autopilot/+page.svelte`, `.gitignore`,
+`web/.gitignore`, `.github/workflows/ci.yml` (gate 1b).
+
+D-0057 records the autopilot itself — that it exists, that the served process
+starts it with no flag and no subcommand, that it climbs the month ladder
+**oldest first because the store cannot prepend**, and that there is no manual
+step because a step that can be skipped is a step that will be. That entry is
+not restated here. This one records the surface an operator actually touches:
+the single run configuration, and the honest account of what a fresh clone
+does and does not get.
+
+### The configuration, and one number removed rather than corrected
+
+`.claude/launch.json` holds two entries and the **first is the default**:
+
+| entry | command | for |
+|---|---|---|
+| `brutex` | `cargo run --release -p api -- serve` | everything — the page, the store, the pull |
+| `brutex-web-dev` | `npm run dev --prefix web` | front-end work only, never required |
+
+The `brutex` entry no longer passes an address. It used to read
+`serve 127.0.0.1:8080`, and before that the whole file said **8731** while the
+binary listened on 8080 — which is the drift that made every JSON route 500 and
+made the entire front end look like a design failure when it was a one-number
+configuration failure.
+
+Correcting the number would have left three copies of it: the argument, the
+`port` field, and the `url`. `api::server::Command::parse` already defaults a
+bare `serve` to `DEFAULT_ADDR`, which is `127.0.0.1:8080` and is asserted by a
+test. So the argument is gone and the binary's own constant is the authority.
+`web/vite.config.js` made the same move for the same reason in the same week,
+reducing seven proxy literals to one. Two copies is not one, but the remaining
+`port`/`url` pair only tells the launcher where to look; it can no longer tell
+the binary where to listen, so it can no longer be the thing that is wrong.
+
+### The failure list is mandatory, and it was not
+
+The autopilot page validates `/autopilot.json` field by field and names the
+first field that breaks the contract. `failures` was the exception: it was read
+as `Array.isArray(raw.failures) ? raw.failures : []`, so a payload that omitted
+the key rendered **"Nothing has failed."** That is a fallback that hides a
+failure — §4, without qualification — and it was worse than the general case,
+because the panel two hundred lines below it already told the reader that a
+missing `failures` key is refused rather than shown as none. The page made a
+claim its own reader did not honour. `failures` is now mandatory and its absence
+is a named contract violation. A missing list and an empty list are different
+facts and only the second is good news.
+
+### The fresh-clone problem, stated honestly and not solved
+
+Three separate things stand between `git clone` and a working click. Two are
+known and recorded; the third was not, and is the reason this entry exists.
+
+**1. `web/build` is not tracked.** `web/.gitignore` line 3 ignores `build/`.
+Measured: **32 files, 600 KB**. The position is D-0057's and it is endorsed
+without amendment — **commit it**. A build artifact in version control is
+normally poor practice, and the three usual objections are all weaker than the
+requirement they are being weighed against. Size is nothing beside a
+44,000-line `Cargo.lock`. Permission is not in question: D-0053 made `web/`
+unrestricted and named this exact case in as many words. Staleness is the one
+real cost, and it is real — **the `web/build` on disk right now has
+`index.html`, `audit.html`, `db.html` and `ingest.html` and no `autopilot.html`,
+because it was built before the autopilot route existed.** The mitigation is a
+rule and cannot be a tool: `web/build` is rebuilt and committed in the same
+commit as any change under `web/src`. A CI job that rebuilds and diffs would put
+Node on the critical path of the engine's build, which §2 forbids outright and
+gate 1e exists to catch. The alternative — `npm install && npm run build` after
+cloning, plus a Node installation — is the manual step the requirement
+eliminates. Rejected.
+
+**2. `api` does not serve `web/build`.** There is no static-file route in
+`api::server::router`. Verified against the running process: `GET /` on
+port 8080 returns the older server-rendered dashboard, not the SvelteKit shell.
+The route must **read the directory at runtime**, `web/build` relative to the
+working directory and overridable by an environment variable. Never
+`include_dir!` or `include_bytes!`: an embedded tree makes `cargo build` depend
+on a `web/` build having happened, which is precisely the dependency §2 forbids.
+
+**3. The run configuration is itself not in the clone.** This is the new one.
+`.gitignore` line 30 ignores `/.claude/` outright, so `git clone` produces a
+tree with **no `launch.json` at all** — the one file whose entire purpose is to
+be the one click. It is ignored for a reason that is still true: `.json` is not
+in §2's allowed extension list, and **CI gate 1b confines `*.json` to
+`.github/` and `crates/web/`**, so a single `git add -A` turns the build red.
+D-0028 recorded that trade when `.claude/` was local tooling. It is not local
+tooling any more; it is the deliverable.
+
+Gate 1b is **already red on this branch, before any of this**, and for the same
+root cause: it still names `crates/web/`, which D-0052 deleted when the front
+end moved to `web/`. Three tracked files fail it today —
+`web/package.json`, `web/package-lock.json`, `web/tsconfig.json` — and
+committing `web/build` would add a fourth, `web/build/_app/version.json`. Gate 1
+was updated for D-0052/D-0053 and gate 1b was not.
+
+So gate 1b must be widened in one edit to `^(\.github/|web/|\.claude/)`. `web/`
+is what D-0053 already licenses. `.claude/` is the narrower and more arguable
+half, and the argument for it is that the alternative is worse: an operator who
+clones this repository and is told "now create a run configuration by hand" has
+been handed the manual step the whole feature exists to delete, and been handed
+it at the only moment they have no way to know what to type.
+
+### The fresh-clone sequence, in order, once all three land
+
+```text
+git clone …                     # web/build and .claude/launch.json arrive with it
+open in IntelliJ → Run "brutex" # one click
+```
+
+The first click compiles the workspace in release, which takes minutes and
+produces no page until it finishes. That is a wait, not a step. Nothing else is
+typed: the binary binds 127.0.0.1:8080, opens the store, serves `web/build`, and
+starts the autopilot, which reads the census, finds the oldest incomplete month
+and begins. A missing `~/.brutex/credentials.toml` does **not** stop the server
+— it halts the autopilot, loudly, with the reason on the page, which is the
+§4-compliant behaviour and not a degraded one.
+
+### What is not true yet
+
+Of the three items above, only the autopilot's own surface has landed:
+`crates/api/src/autopilot.rs` is declared in `lib.rs` and `/autopilot.json`,
+`/autopilot/pause` and `/autopilot/resume` are in the router. **Item 2 has
+not** — there is still no static-file route, so the single process serves its
+own server-rendered pages and the SvelteKit app still needs Vite. **Item 3 has
+not** — gate 1b is still red and `.claude/` is still ignored.
+
+The page was observed against a binary predating those routes, and it did the
+right thing: a red banner naming the 404, the sentence *"this process is serving
+pages, but nothing is driving the pull"*, and the coverage grid still drawn —
+19,858 instrument-months and 13.3 crore bars, measured from `/store.json`,
+because the census is true whether or not anything is driving it. That is the
+page working, not the page failing. Whenever the route is not answering, the
+backfill advances only while somebody drives it, and it must be driven **oldest
+month first**: a later month written into a month-file permanently blocks the
+earlier days in that same file.

@@ -430,6 +430,41 @@ Added by D-0038. Every row here is proven by a test that runs today.
 | A-25 | Nothing later than a field's ceiling can be clicked — not a day, and not a month in the ceiling's own year | `api::calendar::the_computed_rules_cover_alignment_the_month_end_and_the_ceiling` | ✓ |
 | A-26 | The picker never offers a year no `Day` can hold | `api::calendar::the_offered_span_ends_at_the_cap_and_is_twelve_years_long` | ✓ |
 
+## The pull journal — the codec, both halves
+
+`~/.brutex/store/audit/pull.journal` is append-only, so a record whose byte the
+reader cannot name is not a rendering bug — it is a row lost for good. Every row
+here is proven by a test that runs today.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| J-01 | Every scope and every outcome survives the trip to its stored byte and back as **itself** — the test walks `Scope::ALL` and `Outcome::ALL` rather than naming variants, so a variant the reader does not know cannot hide behind a list that agrees with it | `api::audit::scopes_and_outcomes_round_trip_through_their_stored_byte` | ✓ |
+| J-02 | The code space is **dense from zero and exactly `COUNT` wide**: each byte below `COUNT` names a variant, `COUNT` itself names none, and the codes ascend by one in `ALL` order — so a corrupt or future byte is refused by name instead of read as some other outcome | `api::audit::scopes_and_outcomes_round_trip_through_their_stored_byte` · the `const _: ()` blocks beside `Outcome::of_code` | ✓ |
+| J-03 | A clean run that stored nothing reads back off disk as `Empty`, not as `UnknownOutcome { code: 4 }` — the variant that exists to say STORED NOTHING can actually be read | `api::audit::a_run_that_stored_nothing_says_so_instead_of_reporting_success` | ✓ |
+
+**J-02 is a build gate, not only a test.** `Outcome::code` is a `match self` and
+is therefore exhaustive — the compiler forces a new variant to be given a byte.
+`Outcome::of_code` is a `match code` ending in `_ => None`, which is total by
+construction and which the compiler has nothing to say about. That asymmetry is
+how `Empty` came to be written as byte 4 and read back as a fault: the writer
+half was compulsory and the reader half was not. `COUNT` closes it by being
+load-bearing twice over — it is the length of the `ALL` array and the input to
+the assertion that `of_code(COUNT)` is `None` — so teaching `of_code` a new byte
+fails the assertion, raising `COUNT` to repair that makes the `ALL` literal the
+wrong length, and listing the variant in `ALL` is what puts it into J-01's walk.
+
+**It stops one short of an unconditional claim, deliberately.** A variant given
+an arm in `code` and put in *neither* `of_code` nor `ALL` is still not caught.
+Closing that needs the compiler to enumerate an enum's variants, which stable
+Rust will not do without a macro — and §2 does not trade a language rule for
+this. `ALL` is the shortest list left to keep honest.
+
+**The hand-written list was the defect, not a symptom of it.** The round trip
+previously named four outcomes and then asserted `of_code(4) == None`, which is
+the reader's bug restated as the test's expectation. A list written beside the
+code it checks agrees with that code by construction; only a list the code
+itself must consume can disagree with it.
+
 ## The vendor socket
 
 Added by D-0049 and D-0050. `crates/pull/src/http.rs` is the only code in this
@@ -446,6 +481,36 @@ be invented and a credential that must not travel.
 | H-06 | A redirect is reported as `VendorRefused` carrying its status, the `Location`, and the reason — never silently, and never carrying the credential | `pull::http::a_redirect_is_refused_and_the_token_never_reaches_its_target` | ✓ |
 | H-07 | An ordinary refusal still carries the vendor's own words and its own status, so a 429 stays distinguishable from a 500 | `pull::http::a_non_redirect_refusal_carries_the_body_and_its_status` | ✓ |
 | H-08 | The credential never appears in a `Debug` rendering, and the blocking seam refuses by name rather than silently blocking | `pull::http::the_sync_seam_refuses_and_the_token_is_never_printed` | ✓ |
+
+## The rung — which bar length, and where it lands
+
+Added by D-0055. `Timeframe::DAY_1` existed in the store from D-0054 and nothing
+could reach it. These rows are about the one field that decides three things at
+once — the store directory, the fold bucket, and whether the session filter
+applies — and about the two vendor facts nobody has written down.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| G-01 | `Granularity::Day1` carries `Timeframe::DAY_1`, a daily pull lands under `1day/`, and **nothing** is written under `1min/` for it | `pull::broker::a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar` — the whole broker path over a real socket, with the negative half asserted as well as the positive: the bar length is the PATH in this store, so a daily bar filed under `1min/` produces a well-formed file with a valid checksum and an accurate counter that no later reader can tell from real minute data. The same test asserts the FOLD, because the same field decides it — four one-minute bars in one session become one bar whose open is the first, high the maximum, low the minimum, close the last and volume the sum | ✓ |
+| G-02 | Exactly two rungs carry a store timeframe, and each agrees with the store on its directory name **and** on its kind | `pull::vendor::the_minute_and_day_rungs_carry_a_store_timeframe_and_the_rest_refuse` — plus three `const` assertions beside `store_timeframe` that make a rename a compile error rather than a misfiling. The day rung's seconds cannot be tied the way the minute's are: `Grid::Daily` carries no interval, so what is pinned is the name, that the ladder calls the rung an aggregate, and that `DAY_1.secs()` is a whole number of `MINUTE_1` bars | ✓ |
+| G-03 | A rung the store cannot carry is **refused by name at the write boundary**, never substituted, and nothing reaches the disk | `pull::broker::a_rung_the_store_cannot_carry_is_refused_and_the_refusal_names_it` — `Granularity::Second1` is the reachable case: both archive feeds serve it and `crates/store` has no directory for it. The refusal names the rung it refused and the rungs this build does store, one failure for the run rather than one per member, and `bars/` is never created | ✓ |
+| G-04 | The window cap is per (feed, rung): a daily window is split by the **month** and never by the one-minute cap | `api::server::a_daily_window_is_split_by_the_month_and_not_by_the_one_minute_cap` — 2020-01-01..2026-08-07 per instrument is 126 requests at Groww's one-minute cap and 80 at the day rung; Dhan is 80 at both, because its 90-day cap is already wider than any month. The equality is asserted for Dhan rather than elided, so a `<=` that let the minute cap back in on Groww cannot pass | ✓ |
+| G-05 | No chunk ever spans two months, **at every cap including none** | `pull::session::no_chunk_ever_spans_two_months` — the `None` row is the one the month clamp exists for on its own: a rung no vendor published a cap for has nothing else holding its chunks inside one file, and `fetch::land` refuses a batch spanning two. 699 members failed that way on a real 37-day pull | ✓ |
+| G-06 | The rung goes on the wire in the feed's **own** word, and a rung with no recorded word refuses before the socket | `pull::http::the_rung_is_named_on_the_wire_and_an_unrecorded_one_refuses_before_the_socket` — `candle_interval=1minute` reaches the vendor, which is not `1min`, the store's spelling for the same rung. The daily word is refused by name with UNVERIFIED in the message and nothing is sent, asserted by the listener never receiving a second request | ✓ |
+| G-07 | No descriptor carries a day-level window cap or a daily interval word, and a rung field and a rung table exist together or not at all | `pull::vendor::a_rung_on_the_wire_needs_a_word_and_the_unrecorded_ones_stay_absent` — **the absence is the assertion.** `docs/00-charter.md` §4 records a one-minute cap for both brokers and a day-level one for neither, and records no daily interval spelling; the failure mode this row guards is somebody filling one in from memory | ✓ |
+| G-08 | The form offers exactly the rungs some feed declares **and** the store can file — no more, no fewer | `api::render::the_spot_form_offers_every_storable_rung_its_feeds_declare_and_no_other` — walked over the whole ladder rather than spot-checked, so `1s` (served by both archive feeds, unfilable by `crates/store`) is asserted absent. A control that can only ever refuse is what the descriptor table's own empty-set `const` assertion already forbids | ✓ |
+| G-09 | An unstated rung is the minute, and a rung this ladder does not have is refused naming what arrived | `api::ingest::a_spot_request_names_its_bar_length_defaults_to_the_minute_or_is_refused` — the default is the load-bearing half: `/pull/spot` is a replayable POST, and a body written before the field existed that silently changed rung would file one window into two directories the append-only store cannot then reconcile | ✓ |
+
+**What these rows do NOT claim.** That a daily bar's timestamp is the session
+open. `pull::fold` buckets on `ts_micros.div_euclid(width) * width`, which is
+UTC-epoch aligned, so an NSE session — 03:45 to 10:00 UTC, and 12:45 to 13:45
+UTC for the Muhurat sessions `docs/00-charter.md` §3 records — falls inside one
+UTC day and yields one bucket. The resulting bar is stamped **00:00:00 UTC,
+which is 05:30 IST**, not 09:15. That is correct-by-construction only for venues
+whose session does not cross a UTC midnight, and this surface has no other.
+`pull::broker::a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar`
+is what pins the one bucket; nothing here pins the stamp to a session boundary,
+because it is not one.
 
 ## Cross-cutting
 
@@ -847,3 +912,27 @@ C-23 spanned 0.895×–1.030× and C-24's three size/date/underlying ratios span
 work by design and are reported rather than hidden: a signal-only trip resolves
 no rate (0.128×–0.137×) and a refused trip stops at the first refusal
 (0.164×–0.179×). No figure from a CI runner is claimed, because none was taken.
+
+## The lake reader — a footer that parses and lies
+
+`crates/lake` reads the 40 GB Parquet lake at `~/.brutex/lake`. For every
+expired contract in there the lake is the only copy, so a file that is damaged
+must be *named*, never guessed at and never fatal — a reader that dies on one
+file takes the sweep that was part-way through the other 115 with it.
+
+**This section is one row, not the crate's full set.** The rest of `lake`'s
+invariants are not in this file yet. That is a gap and it is written down rather
+than papered over; see `docs/06-limits.md`.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| L-01 | A column chunk whose declared offset or length is **negative** is refused as `ImpossibleLength`, naming the offending number, and the process survives — from either field the chunk start can come from | `lake::synthetic::a_negative_chunk_length_in_the_footer_is_refused_by_name_and_never_aborts`, `lake::synthetic::a_negative_chunk_offset_is_refused_by_name_from_either_field_it_can_come_from` | ✓ |
+
+L-01 is not a hypothetical. `parquet`'s own `ColumnChunkMetaData::byte_range`
+ends in `assert!(col_start >= 0 && col_len >= 0)`, and the reader called it. A
+thrift footer that parses perfectly well can still carry a negative
+`total_compressed_size` or `dictionary_page_offset` — that is what a bad sector,
+an interrupted write or a truncated object body leaves behind — so the two
+fields are now read and checked in `Columns::pages` before any arithmetic, and
+`byte_range` is not called at all. There was nothing to catch: `[profile.release]`
+sets `panic = "abort"`.
