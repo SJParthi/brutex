@@ -1417,8 +1417,13 @@ fn date_input(form: &str, name: &str, max: Day) -> String {
 //
 // Three ways to get true type-to-filter, and only one is available here:
 //
-//   1. A script filtering a list on each keystroke. `CLAUDE.md` §2 forbids it,
-//      and four tests assert `<script>` never appears in any page emitted here.
+//   1. A script filtering a list on each keystroke. When this was written
+//      `CLAUDE.md` §2 forbade it outright; D-0052 has since opened `web/`, and
+//      `/instruments` now carries exactly the deferred type-ahead this note
+//      says it cannot have. What still holds, and is now checked over EVERY
+//      page rather than over four, is
+//      `render::every_page_carries_the_one_script_this_repository_chose_and_no_other`:
+//      one external script, on one page, and no inline anything anywhere.
 //   2. A server round-trip per keystroke. Also needs a script to fire it.
 //   3. A server round-trip on SUBMIT: type a symbol, press Enter, get matches.
 //
@@ -4334,6 +4339,272 @@ mod tests {
              browser code in a .rs file, which is the boundary D-0052 draws by \
              path: {html}"
         );
+    }
+
+    // =======================================================================
+    // A-20, over every page rather than over one. D-0060.
+    //
+    // The test above pins the instruments page and the three assertions
+    // scattered through this module pin three more. That is four pages out of
+    // seven, and an invariant is only as true as its sample: a `<script>` added
+    // to `/store` tomorrow would pass every one of them.
+    // =======================================================================
+
+    /// The one script this repository chose, spelled once.
+    ///
+    /// Written here rather than in each assertion so the test cannot drift from
+    /// the page: change the tag and this constant is the single edit.
+    const THE_ONE_SCRIPT: &str = "<script src=\"/typeahead.js\" defer></script>";
+
+    /// An operator string carrying the injection escaping exists to stop.
+    ///
+    /// It holds no literal `on…=` and no literal `javascript:`, and that is
+    /// deliberate rather than a gap. [`escape`] leaves both alone — neither
+    /// contains one of the five characters it rewrites — so a page echoing
+    /// either as *text* would trip the two bans below for a reason that is not
+    /// a defect. What escaping does neutralise is the pair that closes an
+    /// attribute and opens a tag, `"` and `<`, and that is what this is.
+    const INJECTION: &str = "\"'&><script>alert(1)</script>";
+
+    /// Every page `crates/api` can render, with `text` in every field a route,
+    /// an operator or a vendor can put a string into.
+    ///
+    /// Built from the emitters rather than from memory: this file writes
+    /// `<!doctype` in exactly three places — [`dashboard_page`],
+    /// [`instruments_page`], and [`open_with`], the shell the other five share
+    /// — and all seven pages that reach one are here. A page added to this
+    /// module and not to this list is a page nothing below checks, which is the
+    /// failure mode the row this proves already had once.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the length IS the guarantee -- seven pages and every string \
+                  field each of them takes. Splitting it into one builder per \
+                  page would let six be checked while the seventh is quietly \
+                  dropped from the list, which is exactly the sampling defect \
+                  this function exists to end."
+    )]
+    fn every_page(text: &str) -> Vec<(&'static str, String)> {
+        let notes = [text.to_owned()];
+        let figures = [Stat {
+            label: text,
+            value: text,
+            note: text,
+            loud: true,
+        }];
+
+        let series = crate::census::Series {
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new("NIFTY").expect("valid"),
+            timeframe: store::path::Timeframe::MINUTE_1,
+        };
+        let coverage = [Coverage {
+            series,
+            month: store::path::YearMonth::new(2026, 7).expect("valid"),
+            rows: vec![(Vendor::Groww, Some(8_250)), (Vendor::Dhan, None)],
+        }];
+        let filter = crate::census::StoreFilter {
+            segment: None,
+            symbol: Some(text.to_owned()),
+            timeframe: None,
+            from: None,
+            to: None,
+        };
+
+        let bars = [store::format::Bar {
+            ts_micros: 1_751_340_300_000_000,
+            open: 2_310_955,
+            high: 2_311_000,
+            low: 2_310_000,
+            close: 2_310_500,
+            volume: 41,
+            open_interest: i64::MIN,
+        }];
+
+        let mut record = audit_row_fixture(41, true);
+        record.when = text.to_owned();
+        record.scope = text.to_owned();
+        record.outcome = text.to_owned();
+        record.source = text.to_owned();
+        record.window = text.to_owned();
+        record.note = text.to_owned();
+        record.fault = Some(text.to_owned());
+        let records = [record];
+
+        let facts = [("Field", text.to_owned())];
+
+        vec![
+            ("dashboard", dashboard_page(text, &figures, &notes)),
+            (
+                "instruments",
+                instruments_page(&View {
+                    title: text,
+                    total: 1,
+                    rows: &[row(nifty(), &[Vendor::Groww, Vendor::Dhan])],
+                    query: text,
+                    sort: text,
+                    all: true,
+                    counts: UniverseCounts::default(),
+                    active: "",
+                    page: 1,
+                    last_page: 2,
+                    notes: &notes,
+                }),
+            ),
+            ("pull", pull_page(&pull_view(Some(text), None))),
+            (
+                "receipt",
+                receipt_page(&Receipt {
+                    scope: text,
+                    verdict: text,
+                    reason: text,
+                    good: false,
+                    facts: &facts,
+                    footnote: text,
+                }),
+            ),
+            (
+                "store",
+                store_page(&StoreView {
+                    feed: Vendor::Groww,
+                    today: d(2026, 8, 7),
+                    censuses: &[],
+                    rows: &coverage,
+                    page: 0,
+                    last_page: 1,
+                    total: 1,
+                    notes: &notes,
+                    filter: Some(&filter),
+                    held: 1,
+                    held_only: false,
+                }),
+            ),
+            (
+                "bars",
+                bars_page(&BarsView {
+                    symbol: text,
+                    segment: text,
+                    vendor: text,
+                    month: text,
+                    rows: &bars,
+                    total: 1,
+                    page: 0,
+                    last_page: 1,
+                    trouble: Some(text),
+                    store_root: text,
+                }),
+            ),
+            ("audit", audit_page(&audit_view(&records, &notes))),
+        ]
+    }
+
+    /// The first inline event-handler attribute in `lower`, if there is one.
+    ///
+    /// `onclick`, `onload` and `onerror` are three of roughly ninety. Naming
+    /// three bans three; this bans the SHAPE — a word beginning `on`, in
+    /// attribute position, immediately followed by `=`. `onfocus` and
+    /// `onmouseover` are script in the page exactly as much as `onclick` is,
+    /// and neither appears in any list this module had before.
+    fn inline_handler(lower: &str) -> Option<String> {
+        let b = lower.as_bytes();
+        for i in 0..b.len() {
+            if b[i] != b'o' || b.get(i + 1) != Some(&b'n') {
+                continue;
+            }
+            // Attribute position: whitespace or a quote before it. A bare `on`
+            // inside a word — "one", "front", "session" — is prose.
+            match i.checked_sub(1).map(|p| b[p]) {
+                Some(b' ' | b'\t' | b'\n' | b'"' | b'\'' | b'/') => {}
+                _ => continue,
+            }
+            let mut j = i + 2;
+            while j < b.len() && b[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            if j > i + 2 && b.get(j) == Some(&b'=') {
+                return Some(lower[i..j].to_owned());
+            }
+        }
+        None
+    }
+
+    /// **A-20, over the whole surface: the browser runs exactly what this
+    /// repository chose, on exactly the page that chose it.**
+    ///
+    /// The row this proves used to read "no page this server emits contains a
+    /// script", and that sentence was false one day after it was written:
+    /// D-0052 and D-0053 opened `web/`, and `/instruments` gained the deferred
+    /// type-ahead. D-0060 records the correction. An absolute nobody can keep
+    /// is worse than a bound everybody can, because the absolute reads as
+    /// proven right up until someone checks.
+    ///
+    /// Three bans hold on **every** page, with no exception anywhere:
+    ///
+    ///   * no `javascript:` URL,
+    ///   * no inline event handler, matched by shape rather than by a list,
+    ///   * no `<script` that operator text opened — the second pass feeds
+    ///     [`INJECTION`] into every field and the counts must not move.
+    ///
+    /// The count itself is a budget, not an absence: six pages are allowed
+    /// zero, `/instruments` is allowed one, and that one must be
+    /// [`THE_ONE_SCRIPT`] — external, so browser code stays under `web/` where
+    /// `CLAUDE.md` §2 puts it, and therefore never inline in a `.rs` file.
+    /// Case is not a defence: `<SCRIPT>` is the same tag to a browser, so the
+    /// count is taken on the lowercased page.
+    #[test]
+    fn every_page_carries_the_one_script_this_repository_chose_and_no_other() {
+        for text in ["NIFTY", INJECTION] {
+            for (name, html) in every_page(text) {
+                let lower = html.to_lowercase();
+
+                assert!(
+                    !lower.contains("javascript:"),
+                    "{name}: a javascript: URL is script in the page, whatever \
+                     opened it: {html}"
+                );
+                assert_eq!(
+                    inline_handler(&lower),
+                    None,
+                    "{name}: an inline handler is both JavaScript in the page \
+                     and the shape an injected attribute takes: {html}"
+                );
+
+                let budget = usize::from(name == "instruments");
+                assert_eq!(
+                    lower.matches("<script").count(),
+                    budget,
+                    "{name}: this page's script budget is {budget}, and a \
+                     count is the only assertion that can say which: {html}"
+                );
+                if budget == 1 {
+                    assert!(
+                        html.contains(THE_ONE_SCRIPT),
+                        "{name}: the one script must be the external deferred \
+                         one — an inline block would put browser code in a .rs \
+                         file, which is the boundary D-0052 draws by PATH: \
+                         {html}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The injection pass above cannot pass by the field being dropped.
+    ///
+    /// If a page silently discarded the operator's string, its script count
+    /// would stay at budget for a reason that proves nothing. Every page must
+    /// therefore echo the injection back — as escaped text, `&lt;script`, which
+    /// is the same string rendered inert rather than removed.
+    #[test]
+    fn the_injection_reaches_every_page_and_arrives_escaped() {
+        for (name, html) in every_page(INJECTION) {
+            let lower = html.to_lowercase();
+            assert!(
+                lower.contains("&lt;script"),
+                "{name}: the operator's text never reached this page, so the \
+                 script count above proved nothing about escaping: {html}"
+            );
+        }
     }
 
     #[test]

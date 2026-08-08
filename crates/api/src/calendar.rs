@@ -96,8 +96,11 @@
 //! `CLAUDE.md` §2 allows exactly seven tracked extensions and none of them is a
 //! script. CI gate 1 walks tracked files — so a `<script>` block living inside a
 //! Rust string literal is another language smuggled past the gate, which is why
-//! four separate tests in [`crate::render`] assert the substring `<script>` never
-//! appears in any page this server emits.
+//! `render::every_page_carries_the_one_script_this_repository_chose_and_no_other`
+//! counts `<script` on every page this server emits rather than banning it: the
+//! budget is zero everywhere except `/instruments`, where D-0052 permits one
+//! and it must be the external, deferred file under `web/`. This picker's
+//! budget is zero, and that is not a compromise — see below.
 //!
 //! The constraint turned out to be the better build. A picker with no script
 //! cannot race, cannot fail to initialise, cannot break when a bundle 404s, and
