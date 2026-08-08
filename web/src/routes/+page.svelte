@@ -6,8 +6,38 @@
   let typed = $state('');
   let picked = $state(null);
 
+  // WHICH UNIVERSE, because "every instrument" is four different questions.
+  // An operator asking for NIFTY Total Market and one asking for the F&O
+  // underlyings are not asking the same thing, and a single 785-row list
+  // answers neither. The counts are on the tabs so the split is visible before
+  // it is clicked.
+  let bucket = $state('all');
+  const BUCKETS = [
+    ['all', 'All'],
+    ['index', 'Indices'],
+    ['fno', 'F&O'],
+    ['ntm', 'NIFTY Total Market'],
+    ['held', 'Held']
+  ];
+
+  function inBucket(row, which) {
+    if (which === 'all') return true;
+    if (which === 'held') return row.held === true;
+    // `universe` is a bitset rendered as `index+fno+ntm`, so an instrument in
+    // several buckets appears under each — which is the truth, not a bug.
+    return String(row.universe ?? '').split('+').includes(which);
+  }
+
+  const counts = $derived(
+    Object.fromEntries(
+      BUCKETS.map(([k]) => [k, catalogue.rows.filter((r) => inBucket(r, k)).length])
+    )
+  );
+
   // O(1) PER KEYSTROKE — one Map probe, not a scan. See lib/index.svelte.js.
-  const hits = $derived(search(typed));
+  // The bucket filter runs over the MATCHES, never the universe: a typed query
+  // narrows to a handful first and the filter walks that.
+  const hits = $derived(search(typed).filter((r) => inBucket(r, bucket)));
 
   // ONLY THE VISIBLE SLICE IS RENDERED. 800 rows is fine to hold in memory and
   // wasteful to put in the DOM; the window is what the viewport can show plus a
@@ -34,6 +64,14 @@
       />
     </div>
 
+    <nav class="tabs" aria-label="Universe">
+      {#each BUCKETS as [key, label]}
+        <button class="utab" aria-pressed={bucket === key} onclick={() => (bucket = key)}>
+          {label}<span class="n">{counts[key] ?? 0}</span>
+        </button>
+      {/each}
+    </nav>
+
     <div
       class="vlist"
       bind:this={scroller}
@@ -59,7 +97,10 @@
                 onkeydown={(e) => e.key === 'Enter' && (picked = row)}
               >
                 <span class="sym">{row.symbol}</span>
-                <span class="meta">{row.kind}</span>
+                <span class="meta">
+                  {#if row.held}<span class="tag held">held</span>{/if}
+                  <span class="tag">{row.universe ?? row.kind}</span>
+                </span>
               </div>
             {/each}
           </div>

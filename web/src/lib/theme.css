@@ -132,3 +132,34 @@ tbody tr:hover td { background: var(--panel-2); }
 
 .empty { padding: 28px 14px; color: var(--faint); text-align: center; font-size: 12.5px; }
 .chart { flex: 1; min-height: 0; }
+
+/* ---- feed select: N feeds without changing shape ---- */
+.feedsel { display: flex; align-items: center; gap: 6px; }
+.feedsel select {
+  font: inherit; font-size: 12px; font-weight: 650;
+  padding: 4px 26px 4px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  appearance: none; cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+                    linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+.feedsel select:focus { outline: 0; border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+
+/* ---- universe tabs: index / F&O / NTM, never mixed ---- */
+.tabs { display: flex; gap: 3px; padding: 6px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.utab {
+  padding: 4px 10px; border-radius: 5px; font-size: 11.5px; font-weight: 650;
+  border: 1px solid transparent; background: transparent; color: var(--dim);
+  cursor: pointer; white-space: nowrap;
+}
+.utab:hover { color: var(--ink); background: var(--panel-2); }
+.utab[aria-pressed="true"] { background: var(--acc-soft); color: var(--ink); border-color: var(--acc); }
+.utab .n { opacity: .55; margin-left: 5px; font-variant-numeric: tabular-nums; }
+
+.vrow .tag {
+  font-size: 9.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  padding: 1px 5px; border-radius: 3px; background: var(--panel-2); color: var(--faint);
+}
+.vrow .tag.held { background: rgba(38,166,154,.16); color: var(--up); }

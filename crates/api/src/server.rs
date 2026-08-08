@@ -712,9 +712,35 @@ async fn page(
 async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    // SORTED, GROUPED, AND HELD-FIRST. `by_key` is a HashMap, so iterating it
+    // gave the browser TATACOMM, GMRAIRPORT, PINELABS — an order stable per
+    // process and meaningless to a human. Nothing was findable by scrolling and
+    // 35 indices were scattered through 750 equities.
+    //
+    // Three keys: instruments this store HOLDS come first because those are the
+    // ones that can be charted; indices before equities because they are the
+    // engine's own surface and there are 35 against 750; then alphabetical.
+    //
+    // O(n log n) once per request over a bounded ~800, replacing an unbounded
+    // amount of human scanning.
+    let mut listing: Vec<_> = site
+        .read
+        .merged
+        .by_key
+        .iter()
+        .filter(|(_, entry)| crate::catalog::tracked(entry.universe))
+        .collect();
+    listing.sort_unstable_by_key(|(key, _)| {
+        (
+            !site.series.iter().any(|s| s.symbol == key.underlying),
+            key.kind != brutex_core::instrument::Kind::Index,
+            key.underlying,
+        )
+    });
+
     let mut out = String::from("[");
-    let mut n = 0usize;
-    for (key, entry) in &site.read.merged.by_key {
+    for (n, (key, entry)) in listing.into_iter().enumerate() {
+        let held = site.series.iter().any(|s| s.symbol == key.underlying);
         // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
         //
         // This iterated the whole master and shipped 2,780 listings while the
@@ -724,13 +750,9 @@ async fn instruments_json(
         // says why. The bound is ~800 by decision, and this is one of the
         // places that must honour it rather than one of the places that
         // quietly does not.
-        if !crate::catalog::tracked(entry.universe) {
-            continue;
-        }
         if n > 0 {
             out.push(',');
         }
-        n += 1;
         let canonical = key.to_string();
         let _ = write!(
             out,
@@ -738,12 +760,16 @@ async fn instruments_json(
             // keyed on them: the path IS the index, so a chart request names
             // every part rather than sending a synthetic id the server would
             // have to resolve back into one.
-            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"href":{}}}"#,
+            // `universe` and `held` travel with the row so the browser can
+            // GROUP without asking again: F&O vs NIFTY Total Market vs index is
+            // the distinction the operator reads, and it is a bitset here.
+            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"held":{held},"href":{}}}"#,
             render::json_string(key.underlying.as_str()),
             render::json_string(&canonical),
             render::json_string(&format!("{:?}", key.kind)),
             render::json_string(key.exchange.as_str()),
             render::json_string(key.segment.as_str()),
+            render::json_string(&universe_label(entry.universe)),
             render::json_string(&format!(
                 "/instruments?q={}",
                 render::query_value(&canonical)
@@ -802,7 +828,20 @@ async fn feeds_json(
                 .and_then(census::VendorCensus::counters)
                 .map(|(n_valid, _n_keys, _rows)| n_valid)
         });
+        // A BROKER IS READY WITH AN EMPTY STORE. Its credential is what proves
+        // entitlement and the first pull is what fills the store; an empty
+        // census means "nothing pulled yet", not "not owned". Using the census
+        // as the entitlement signal for a broker is circular — it could never
+        // be selected to do the pull that would make it selectable.
+        //
+        // An ARCHIVE is different: there is no credential, so the only evidence
+        // of ownership is data read from files the operator bought.
+        let is_broker = matches!(
+            feed.descriptor().transport,
+            pull::vendor::Transport::Http(_)
+        );
         let (ready, why) = match held {
+            _ if is_broker => (true, String::new()),
             Some(n) if n > 0 => (true, String::new()),
             Some(_) => (
                 false,
@@ -6732,5 +6771,29 @@ mod broker_target_tests {
             "exactly one target is servable today; when the parameter map lands \
              this test is the reminder to widen the guard rather than delete it"
         );
+    }
+}
+
+/// The universe a listing belongs to, as one word the browser can group by.
+///
+/// `Universe` is a bitset and an instrument can be in several — a NIFTY Total
+/// Market equity that also has F&O contracts is in both. The label names the
+/// most specific membership an operator sorts by, because a browser grouping
+/// on "index, F&O, NTM" wants one bucket per row and not a set.
+fn universe_label(u: brutex_core::universe::Universe) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    if u.contains(brutex_core::universe::Universe::INDEX) {
+        parts.push("index");
+    }
+    if u.contains(brutex_core::universe::Universe::FNO) {
+        parts.push("fno");
+    }
+    if u.contains(brutex_core::universe::Universe::TOTAL_MARKET) {
+        parts.push("ntm");
+    }
+    if parts.is_empty() {
+        "other".to_owned()
+    } else {
+        parts.join("+")
     }
 }

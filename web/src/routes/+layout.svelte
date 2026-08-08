@@ -26,27 +26,26 @@
 
     <span class="spacer"></span>
 
-    <!-- ONE FEED, SELECTED. Never two side by side — see lib/feeds.svelte.js. -->
-    <nav class="feeds" aria-label="Feed">
+    <!-- A SELECT, NOT PILLS.
+         Pills stop working past about four feeds — they wrap, they push the
+         nav off screen, and every feed added makes the bar worse. A select
+         holds N without changing shape, which is the requirement: adding a
+         broker must cost nothing in the UI.
+         Options come from /feeds.json, which is built from DESCRIPTORS, so no
+         file here names a vendor. -->
+    <label class="feedsel">
       <span class="lbl">Feed</span>
-      {#if feeds.error}
-        <span class="lbl" style="color:var(--down)">feeds unavailable — {feeds.error}</span>
-      {/if}
-      <!-- A FEED THAT CANNOT SERVE IS SHOWN AND DISABLED, WITH ITS REASON.
-           Hiding it would teach nothing; the operator would wonder where
-           TrueData went. Disabled with "nothing has been ingested yet" says
-           exactly which of two things to do. CLAUDE.md section 4. -->
-      {#each feeds.all as f}
-        <button
-          class="feed"
-          class:not-ready={!f.ready}
-          disabled={!f.ready}
-          title={f.ready ? '' : f.why}
-          aria-pressed={feeds.active === f.wire}
-          onclick={() => (feeds.active = f.wire)}
-        >{f.display}<span class="kind">{f.ready ? f.transport : 'no data'}</span></button>
-      {/each}
-    </nav>
+      <select bind:value={feeds.active} aria-label="Feed">
+        {#each feeds.all as f}
+          <option value={f.wire} disabled={!f.ready}>
+            {f.display} · {f.ready ? f.transport : 'no data'}
+          </option>
+        {/each}
+      </select>
+    </label>
+    {#if feeds.error}
+      <span class="lbl" style="color:var(--down)">feeds unavailable — {feeds.error}</span>
+    {/if}
   </header>
 
   {@render children()}
