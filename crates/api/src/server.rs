@@ -2279,6 +2279,57 @@ fn monotonic_micros() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+/// The requested window, narrowed to what this feed can actually answer.
+///
+/// # Errors
+///
+/// When the whole window is below the floor — the operator asked only for days
+/// the vendor no longer has. Refused by name rather than answered empty,
+/// because an empty answer here is indistinguishable from a market holiday and
+/// would be recorded as "nothing to store" rather than "nothing available".
+fn clamp_to_floor(
+    window: pull::session::Window,
+    floor: pull::vendor::HistoryFloor,
+) -> Result<pull::session::Window, String> {
+    use pull::vendor::HistoryFloor;
+
+    let oldest = match floor {
+        // Nothing published. Ask for what was asked — inventing a floor would
+        // be the vendor fact `CLAUDE.md` §3 rule 1 forbids.
+        HistoryFloor::Unstated => return Ok(window),
+        HistoryFloor::Fixed { year, month, day } => pull::session::Day::new(year, month, day)
+            .map_err(|why| format!("the feed's history floor is not a real day: {why}"))?,
+        HistoryFloor::Rolling { years } => {
+            // RECOMPUTED FROM TODAY, never stored. A stored rolling floor is a
+            // frozen one, and a frozen rolling floor is the bug this exists to
+            // prevent.
+            let today = ingest::ist_day(std::time::SystemTime::now())
+                .map_err(|why| format!("the clock is unusable: {why}"))?;
+            // 365.25 days per year, so four years of leap days do not drift the
+            // floor a day earlier than the vendor's own.
+            let back = u32::try_from(u64::from(years) * 36_525 / 100).unwrap_or(u32::MAX);
+            pull::session::Day::from_days(today.days_from_epoch().saturating_sub(back))
+                .map_err(|why| format!("the rolling floor lands before the epoch: {why}"))?
+        }
+    };
+
+    if window.to() < oldest {
+        return Err(format!(
+            "this feed's history starts at {oldest} and the window ends {}. \
+             Every day asked for is older than the vendor holds — it would \
+             answer empty, which reads exactly like a market holiday and would \
+             be recorded as nothing to store rather than nothing available.",
+            window.to()
+        ));
+    }
+    if window.from() >= oldest {
+        return Ok(window);
+    }
+    // The window straddles the floor. Take the part that exists.
+    pull::session::Window::new(oldest, window.to())
+        .map_err(|why| format!("the clamped window is not forward: {why}"))
+}
+
 /// Every legal chunk of the operator's window, fetched over one client.
 ///
 /// A vendor caps how much history one request may name — 30 days for Groww at
@@ -2305,10 +2356,25 @@ async fn fetch_chunks(
     // BY REFERENCE: `HttpSpec` is 280 bytes and only one field is read.
     spec: &pull::vendor::HttpSpec,
 ) -> Result<Vec<pull::fetch::RawWindow>, String> {
+    // CLAMPED TO THE FEED'S HISTORY FLOOR BEFORE ANYTHING IS SPLIT.
+    //
+    // Asking below the floor is not an error the vendor reports usefully: it
+    // answers EMPTY, and an empty answer is indistinguishable from a day that
+    // did not trade. So a 2020-to-yesterday backfill against a feed whose
+    // history starts later spends real requests on data that does not exist and
+    // reports success.
+    //
+    // For Dhan it is worse than waste. Its floor ROLLS — `docs/00-charter.md`
+    // §4: "rolling ~5 years. Not a fixed floor — it moves every day". Asking
+    // for 2020 today is asking for ~5 months it no longer has, and that gap
+    // widens every month while nothing notices. Clamping is what stops
+    // "complete" from being a claim with an expiry date.
+    let asked_window = clamp_to_floor(asked.window, spec.history_floor)?;
+
     let chunks = match spec.window_cap_days {
-        Some(cap) => pull::session::split_window(asked.window, cap)
+        Some(cap) => pull::session::split_window(asked_window, cap)
             .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?,
-        None => vec![asked.window],
+        None => vec![asked_window],
     };
 
     let mut bodies = Vec::with_capacity(chunks.len());

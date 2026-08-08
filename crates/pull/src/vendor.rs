@@ -1346,6 +1346,32 @@ pub struct Budget {
     pub per_day: Option<u32>,
 }
 
+/// The oldest day a feed will answer for, in the two shapes that occur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HistoryFloor {
+    /// A date that does not move. Groww: 2020-01-01.
+    Fixed {
+        /// Year of the oldest day served.
+        year: u16,
+        /// Month of the oldest day served.
+        month: u8,
+        /// Day of the oldest day served.
+        day: u8,
+    },
+    /// A window that moves with the clock. Dhan: ~5 years back from today.
+    ///
+    /// Recomputed per run rather than stored: storing it would freeze a floor
+    /// the vendor moves daily, and a frozen rolling floor is the exact bug this
+    /// type exists to name.
+    Rolling {
+        /// How many years back the window reaches.
+        years: u32,
+    },
+    /// The vendor publishes no floor. Not a default — an unknown floor is
+    /// UNVERIFIED in the charter and says so there.
+    Unstated,
+}
+
 /// Whether a feed's budget is shared across request kinds or held per kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pooling {
@@ -1384,6 +1410,25 @@ pub struct HttpSpec {
     pub prices: PriceScale,
     /// The published budget.
     pub budget: Budget,
+    /// The oldest day this feed will answer for.
+    ///
+    /// # Why a feed needs one, and why the two differ in KIND
+    ///
+    /// `docs/00-charter.md` §4 records Groww's history as "from 2020" and
+    /// Dhan's as "rolling ~5 years. **Not a fixed floor** — it moves every
+    /// day." That is a difference of SHAPE, not of number, and one date could
+    /// not express both.
+    ///
+    /// It matters because asking below the floor is not an error the vendor
+    /// reports usefully — it answers EMPTY, and an empty answer is
+    /// indistinguishable from a day that did not trade. So a 2020-to-yesterday
+    /// backfill against Dhan spends ~5 months of requests per instrument on
+    /// data that no longer exists, and reports success.
+    ///
+    /// For Dhan it is worse than waste: a rolling floor makes COMPLETE a claim
+    /// with an expiry date. The oldest month held falls further outside the
+    /// vendor's window every month, and nothing notices.
+    pub history_floor: HistoryFloor,
     /// How many days one request may name, at the granularity this build
     /// fetches (`1min` — see [`Granularity`]).
     ///
@@ -1821,6 +1866,9 @@ const DHAN: Descriptor = Descriptor {
             per_minute: None,
             per_day: Some(crate::rate::DHAN_PER_DAY),
         },
+        // docs/00-charter.md §4: "History depth | rolling ~5 years. Not a
+        // fixed floor — it moves every day | documented".
+        history_floor: HistoryFloor::Rolling { years: 5 },
         // docs/00-charter.md §4: "Window cap | 90 days per request |
         // documented".
         window_cap_days: Some(90),
@@ -1913,6 +1961,12 @@ const GROWW: Descriptor = Descriptor {
             per_day: None,
         },
         // Groww pools per endpoint group; the other broker does not.
+        // docs/00-charter.md §4: "History depth | from 2020 | documented".
+        history_floor: HistoryFloor::Fixed {
+            year: 2020,
+            month: 1,
+            day: 1,
+        },
         // docs/00-charter.md §4: "Window cap | 30 days per request at 1-minute
         // granularity | documented". This build fetches 1min only — the
         // charter's own row says every other timeframe is derived — so the

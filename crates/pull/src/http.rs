@@ -1034,6 +1034,8 @@ mod tests {
             },
             // A test spec: no cap, so the window is sent whole and the split is
             // not what is under test here.
+            // A test spec: no floor, so the window is used as given.
+            history_floor: crate::vendor::HistoryFloor::Unstated,
             window_cap_days: None,
             pooling: Pooling::PerVendor,
         }

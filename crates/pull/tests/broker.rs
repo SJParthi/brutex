@@ -134,6 +134,8 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // is required` was reporting the absence of.
         // No cap: the window is sent whole, because the split is not what
         // this fixture is testing.
+        // A test spec: no floor, so the window is used as given.
+        history_floor: pull::vendor::HistoryFloor::Unstated,
         window_cap_days: None,
         params: &[
             Param {
