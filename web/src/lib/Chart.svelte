@@ -14,8 +14,13 @@
 
   let { instrument, feed } = $props();
   let host = $state(null);
-  let chart = null;
-  let series = null;
+  // `$state`, NOT a plain `let`. `onMount` is async — it awaits the chart
+  // library — so the data effect below runs FIRST, bails at `if (!series)`,
+  // and with an untracked binding never runs again. The chart drew an empty
+  // canvas and said "no bars held", which was true of the series and false of
+  // the store: the endpoint had 375 of them the whole time.
+  let chart = $state(null);
+  let series = $state(null);
   let state = $state({ loading: false, error: null, bars: 0 });
 
   onMount(async () => {
@@ -38,15 +43,31 @@
 
   // Refetch when either the instrument OR THE FEED changes. The feed is part of
   // the identity of the data, never a second series drawn beside the first.
+  let month = $state('2026-08');
+
   $effect(() => {
     const key = instrument?.key;
     const f = feed;
     if (!key || !f || !series) return;
     state.loading = true;
     state.error = null;
-    fetch(`/bars.json?feed=${encodeURIComponent(f)}&key=${encodeURIComponent(key)}`)
+    // The store is keyed on (feed, exchange, segment, symbol, month) — the
+    // path IS the index, so the request names every part rather than a synthetic
+    // id the server would have to resolve.
+    const q = new URLSearchParams({
+      feed: f,
+      exchange: instrument.exchange ?? 'NSE',
+      segment: instrument.segment ?? 'INDEX',
+      symbol: instrument.symbol,
+      month: month
+    });
+    fetch(`/bars.json?${q}`)
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-      .then((bars) => {
+      .then((body) => {
+        // A PARTIAL read answers 206 with {bars, faults}. Both shapes are
+        // handled; a faulty record is surfaced, never silently skipped.
+        const bars = Array.isArray(body) ? body : (body.bars ?? []);
+        if (body.faults) state.error = body.faults;
         // ONE divide per field, at the boundary. Paisa are integers up to here.
         series.setData(
           bars.map((b) => ({

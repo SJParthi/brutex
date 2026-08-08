@@ -734,10 +734,16 @@ async fn instruments_json(
         let canonical = key.to_string();
         let _ = write!(
             out,
-            r#"{{"symbol":{},"key":{},"kind":{},"href":{}}}"#,
+            // EXCHANGE AND SEGMENT TRAVEL WITH THE ROW, because the store is
+            // keyed on them: the path IS the index, so a chart request names
+            // every part rather than sending a synthetic id the server would
+            // have to resolve back into one.
+            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"href":{}}}"#,
             render::json_string(key.underlying.as_str()),
             render::json_string(&canonical),
             render::json_string(&format!("{:?}", key.kind)),
+            render::json_string(key.exchange.as_str()),
+            render::json_string(key.segment.as_str()),
             render::json_string(&format!(
                 "/instruments?q={}",
                 render::query_value(&canonical)
@@ -786,6 +792,124 @@ async fn feeds_json() -> ([(axum::http::HeaderName, &'static str); 1], String) {
         )],
         out,
     )
+}
+
+/// One instrument-month of bars, as JSON, for the chart.
+///
+/// `?feed=<wire>&exchange=NSE&segment=INDEX&symbol=NIFTY&month=YYYY-MM`
+///
+/// # Paisa all the way out
+///
+/// Prices leave here as the `i64` paisa they are stored as. The browser divides
+/// by 100 exactly once, where a canvas needs a number to draw — `CLAUDE.md` §7
+/// says a float has no business near a price, and this endpoint keeps that true
+/// right up to the pixel.
+///
+/// # O(1) per bar, and the whole month is one pass
+///
+/// `BarFile::read_record` is a seek and a fixed-length read, so the cost of the
+/// last bar equals the cost of the first. A month is at most 375 × ~22 bars and
+/// is sent whole: the chart pans and zooms locally after that, with no request
+/// per viewport change.
+///
+/// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
+/// §7 reserves. It becomes JSON `null` rather than a number, because zero means
+/// zero and writing 0 for "not sent" is a lie in the data.
+async fn bars_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let query = uri.query().unwrap_or("");
+    // A fresh header array per return, because `HeaderName` is not `Copy` and
+    // one binding cannot be moved into three arms.
+    let json = || {
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )]
+    };
+    let refuse = |why: String| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            json(),
+            format!(r#"{{"error":{}}}"#, render::json_string(&why)),
+        )
+    };
+
+    let Some(vendor) = ingest::parse_vendor(&param(query, "feed")) else {
+        return refuse(format!(
+            "{:?} is not a feed this build can read",
+            param(query, "feed")
+        ));
+    };
+    // `YYYY-MM`, the same spelling every other route uses.
+    let raw_month = param(query, "month");
+    let Some(month) = raw_month
+        .split_once('-')
+        .and_then(|(y, m)| store::path::YearMonth::new(y.parse().ok()?, m.parse().ok()?).ok())
+    else {
+        return refuse(format!("{raw_month:?} is not a YYYY-MM month"));
+    };
+    let file = match bars::open(
+        &site.store_root,
+        vendor,
+        &param(query, "exchange"),
+        &param(query, "segment"),
+        &param(query, "symbol"),
+        month,
+    ) {
+        Ok(file) => file,
+        Err(why) => return refuse(why),
+    };
+
+    // THE WHOLE MONTH, in one pass. `page` reads by index, so this is
+    // `n_valid` seeks of fixed length and nothing scans.
+    let held = usize::try_from(file.header().n_valid).unwrap_or(usize::MAX);
+    let (rows, faults) = bars::page(&file, 0, held);
+
+    let mut out = String::with_capacity(rows.len() * 96 + 32);
+    out.push('[');
+    for (n, bar) in rows.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        // `lightweight-charts` takes UTC seconds. The store holds micros.
+        let _ = write!(
+            out,
+            r#"{{"t":{},"o":{},"h":{},"l":{},"c":{},"v":{},"oi":{}}}"#,
+            bar.ts_micros / 1_000_000,
+            bar.open,
+            bar.high,
+            bar.low,
+            bar.close,
+            bar.volume,
+            if bar.open_interest == store::format::OI_NULL {
+                "null".to_owned()
+            } else {
+                bar.open_interest.to_string()
+            }
+        );
+    }
+    out.push(']');
+
+    // A FAULTY RECORD IS NOT SILENTLY SKIPPED. `page` returns what it could
+    // read and what it could not; dropping the second half would draw a chart
+    // with a hole in it and no way to know.
+    if !faults.is_empty() {
+        return (
+            axum::http::StatusCode::PARTIAL_CONTENT,
+            json(),
+            format!(
+                r#"{{"bars":{out},"faults":{}}}"#,
+                render::json_string(&faults.join("; "))
+            ),
+        );
+    }
+    (axum::http::StatusCode::OK, json(), out)
 }
 
 /// The type-ahead itself, embedded at compile time.
@@ -2904,6 +3028,7 @@ pub fn router(site: Loaded) -> axum::Router {
         // saw. D-0052.
         .route("/instruments.json", axum::routing::get(instruments_json))
         .route("/feeds.json", axum::routing::get(feeds_json))
+        .route("/bars.json", axum::routing::get(bars_json))
         .route("/typeahead.js", axum::routing::get(typeahead_js))
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
