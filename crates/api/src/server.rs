@@ -776,16 +776,21 @@ async fn health(
 /// by [`Site::broker`], which is the value that actually decides, and the test
 /// asserts the correspondence rather than either string.
 pub const HTTP_LIVE: &str = "THE HTTP PATH IS WIRED TO THIS ROUTE. The credential \
-     is read from AWS Parameter Store through pull::ssm, the vendor is chosen \
-     from the request and resolved to a row in pull::vendor, and \
-     pull::http::HttpSource::window_async puts the request on a socket. A spot \
-     pull that names a local vendor folder still reads that folder instead. \
-     WHAT IS STILL MISSING, so this sentence does not overstate itself the way \
-     its predecessor did: pull::vendor::HttpSpec carries no request-parameter \
-     map, so the broker is reached and answers DH-905 'securityId is required'; \
-     pull::rate::Governor has no caller, so nothing is admitted against a \
-     budget before the socket opens; and the expired-F&O endpoints are not \
-     modelled at all.";
+     is read from AWS Parameter Store through pull::ssm, the descriptor drives \
+     the request, and pull::http::HttpSource::window_async puts it on a socket. \
+     WHICH PATH A PULL TAKES IS DECIDED BY THE FEED'S OWN TRANSPORT, not by \
+     whether the folder box is blank: an HTTP feed is asked over the network \
+     and an archive feed reads the folder, whatever else the form says. Before \
+     anything is spent, the feed's rate budget is charged through \
+     pull::rate::Governor, held per feed on the site so its buckets survive \
+     between requests — a request that will not be issued costs no credential \
+     read and no socket. WHAT IS STILL MISSING, so this sentence does not \
+     overstate itself the way its predecessors did: a window longer than the \
+     vendor's per-request cap is still sent whole rather than split, so a \
+     multi-year range is refused by the vendor or silently truncated by it \
+     (pull::session::split_window computes the chunks and has no caller yet); \
+     a window that stores nothing still reports STORED; and the expired-F&O \
+     endpoints are not modelled at all.";
 
 /// What the page says when the broker is NOT reachable from this process.
 ///
