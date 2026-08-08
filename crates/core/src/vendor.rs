@@ -47,11 +47,26 @@ pub enum Vendor {
     Groww,
     /// Secondary broker.
     Dhan,
+    /// Historical archives on disk. Never authenticates.
+    ///
+    /// A vendor here is a STORE PREFIX, not a credential holder. `TrueData` and
+    /// `Gdfl` are listed because their bars need somewhere of their own to
+    /// live: without a row, `Feed::store_vendor` returns `None`, and the
+    /// archive reader filed every bar under Dhan's prefix instead — 194
+    /// instrument-months of GDFL futures under `bars/dhan/`, which is exactly
+    /// the per-vendor independence D-0019 exists to protect.
+    ///
+    /// `pull::config` requires a credential table only of feeds whose transport
+    /// is HTTP, so adding these two costs no operator a `credentials.toml`
+    /// edit.
+    TrueData,
+    /// Historical archives on disk. Never authenticates.
+    Gdfl,
 }
 
 impl Vendor {
     /// Every vendor this engine reads, in path order.
-    pub const ALL: [Self; 2] = [Self::Groww, Self::Dhan];
+    pub const ALL: [Self; 4] = [Self::Groww, Self::Dhan, Self::TrueData, Self::Gdfl];
 
     /// What this vendor's instrument master is called on disk.
     ///
@@ -74,10 +89,39 @@ impl Vendor {
     /// the merge, the ingest form, the coverage table. This was the one place
     /// that did not, and it was the entry point.
     #[must_use]
+    /// Whether this vendor publishes an instrument master at all.
+    ///
+    /// Brokers do; archives do not — a folder of CSVs IS its own listing, and
+    /// every file in it is an instrument named by its filename.
+    ///
+    /// This exists because "every vendor agrees on this instrument" was written
+    /// as `Vendor::ALL.iter().all(...)`, which asks the wrong question the
+    /// moment a vendor exists that cannot answer. With archives in `ALL`, every
+    /// instrument became non-agreeing and the whole universe degraded — the
+    /// same shape as `pull::config` demanding a credential from a feed that has
+    /// none. A predicate, so the right set is named rather than assumed.
+    #[must_use]
+    pub const fn publishes_master(self) -> bool {
+        match self {
+            Self::Groww | Self::Dhan => true,
+            Self::TrueData | Self::Gdfl => false,
+        }
+    }
+
+    /// Every vendor that publishes an instrument master.
+    pub const MASTERED: [Self; 2] = [Self::Groww, Self::Dhan];
+
     pub const fn master_file(self) -> &'static str {
         match self {
             Self::Groww => "groww_instruments.csv",
             Self::Dhan => "dhan_scrip.csv",
+            // AN ARCHIVE SHIPS NO MASTER. The folder of CSVs IS the listing:
+            // every file in it is an instrument, named by its own filename.
+            // The name below is what `master_paths` looks for and will not
+            // find, which is correct — an archive contributes no rows to the
+            // merged universe and must not be expected to.
+            Self::TrueData => "truedata_instruments.csv",
+            Self::Gdfl => "gdfl_instruments.csv",
         }
     }
 
@@ -87,6 +131,8 @@ impl Vendor {
         match self {
             Self::Groww => "groww",
             Self::Dhan => "dhan",
+            Self::TrueData => "truedata",
+            Self::Gdfl => "gdfl",
         }
     }
 
@@ -95,6 +141,9 @@ impl Vendor {
         match self {
             Self::Groww => 1 << 0,
             Self::Dhan => 1 << 1,
+            // `VendorSet` is a u8 — eight feeds, and these are three and four.
+            Self::TrueData => 1 << 2,
+            Self::Gdfl => 1 << 3,
         }
     }
 }
@@ -450,6 +499,27 @@ impl Vendor {
                 expiry: "SM_EXPIRY_DATE",
                 strike: "STRIKE_PRICE",
                 option_side: Some("OPTION_TYPE"),
+            },
+            // AN ARCHIVE HAS NO MASTER TO DESCRIBE. Every column name below is
+            // the empty string, which no header can match, so a master file
+            // that somehow appeared under one of these names would decline
+            // every row rather than reading them under invented headings.
+            //
+            // Refusing here rather than returning an `Option` because this is a
+            // `const fn` on a hot path and the caller — `master_paths` — already
+            // handles a master that is simply absent, which is the real state.
+            Self::TrueData | Self::Gdfl => MasterColumns {
+                vendor_id: "",
+                exchange: "",
+                segment: "",
+                underlying: "",
+                trading_symbol: "",
+                instrument_type: "",
+                listing_class: "",
+                isin: "",
+                expiry: "",
+                strike: "",
+                option_side: None,
             },
         }
     }
@@ -854,6 +924,11 @@ impl Vendor {
             // I index, E equity cash, D equity+index derivatives,
             // C currency, M commodity.
             Self::Dhan => (&["I", "E", "D"], &["C", "M"]),
+            // AN ARCHIVE DECLINES EVERY SEGMENT, because it publishes no master
+            // for one to appear in. Empty store list AND empty decline list:
+            // nothing is stored, and nothing is quietly dropped either — code
+            // reaching here is reading a master that should not exist.
+            Self::TrueData | Self::Gdfl => (&[], &[]),
         };
         if store.contains(&code) {
             Ok(SegmentVerdict::Store)
@@ -899,6 +974,11 @@ impl Vendor {
                 "FUTCUR" | "OPTCUR" => Ok(None),
                 _ => Err(InstrumentError::Malformed),
             },
+            // AN ARCHIVE PUBLISHES NO INSTRUMENT TYPE, because it publishes no
+            // master. Every code is unrecognised, which is refused by name
+            // rather than mapped to a guess — an invented type here would file
+            // a future as an option and nothing downstream could tell.
+            Self::TrueData | Self::Gdfl => Err(InstrumentError::Malformed),
         }
     }
 }
@@ -1794,7 +1874,7 @@ mod tests {
             "N0", "N1", "SG", "GS", "MF", "IV", "Y1", "Z9", "AK", "D1", "W1", "TB", "GB", "RR",
             "P1", "SF", "ZZ",
         ] {
-            for vendor in Vendor::ALL {
+            for vendor in Vendor::MASTERED {
                 let r = match vendor {
                     Vendor::Groww => groww_cash("SOMEBOND", series, REAL_ISIN),
                     _ => dhan_cash("SOMEBOND", series, REAL_ISIN),
@@ -2156,7 +2236,7 @@ mod tests {
     fn a_vendor_set_is_a_set_and_every_vendor_has_its_own_bit() {
         let mut s = VendorSet::EMPTY;
         assert!(s.is_empty());
-        for v in Vendor::ALL {
+        for v in Vendor::MASTERED {
             assert!(!s.contains(v));
             s = s.with(v);
             assert!(s.contains(v));

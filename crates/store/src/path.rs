@@ -117,12 +117,17 @@ pub const MAX_TIMEFRAME_LEN: usize = 4;
 ///
 /// `store::unit::every_vendor_is_a_legal_segment` proves the bound is reached,
 /// so it is tight rather than merely sufficient.
-pub const MAX_VENDOR_LEN: usize = 5;
+pub const MAX_VENDOR_LEN: usize = 8;
 
 const _: () = {
-    let [groww, dhan] = Vendor::ALL;
+    // Destructured rather than looped, so a new vendor is a COMPILE ERROR here
+    // and not a path segment that quietly exceeds the bound. `truedata` is
+    // eight bytes and lifted this ceiling from five.
+    let [groww, dhan, truedata, gdfl] = Vendor::ALL;
     assert!(groww.as_str().len() <= MAX_VENDOR_LEN);
     assert!(dhan.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(truedata.as_str().len() <= MAX_VENDOR_LEN);
+    assert!(gdfl.as_str().len() <= MAX_VENDOR_LEN);
 };
 const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 

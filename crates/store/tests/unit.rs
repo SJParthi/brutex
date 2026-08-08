@@ -1449,7 +1449,11 @@ fn every_vendor_is_a_legal_segment() {
         );
         assert!(vendor.as_str().len() <= MAX_VENDOR_LEN);
     }
-    assert_eq!(MAX_VENDOR_LEN, 5, "groww");
+    // 8, for `truedata`. It was 5 for `groww` until the archive feeds gained
+    // store prefixes of their own — without one, `run_local` filed every GDFL
+    // bar under `bars/dhan/`. The bound is the longest vendor segment and this
+    // asserts it EXACTLY, so a drift in either direction fails here.
+    assert_eq!(MAX_VENDOR_LEN, 8, "truedata");
     const { assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN) }
 
     // And the check is not vacuous: a vendor segment in the wrong case would
@@ -1828,7 +1832,10 @@ fn a_maximal_path_fits_the_declared_bound() {
     // Exactly, not merely within: the bound is the length of the longest legal
     // path, so a bound that drifted in either direction fails here.
     assert_eq!(path.to_string().len(), MAX_LEN);
-    assert_eq!(MAX_LEN, 103);
+    // 106: MAX_VENDOR_LEN went 5 -> 8 when the archive feeds gained store
+    // prefixes, and MAX_LEN is derived from it. Asserted exactly, so the
+    // derivation cannot drift silently.
+    assert_eq!(MAX_LEN, 106);
     assert_eq!(
         path.to_string(),
         format!(

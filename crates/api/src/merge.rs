@@ -191,7 +191,7 @@ impl Merged {
             let mut both = 0;
             for (_, e) in members {
                 present += 1;
-                if Vendor::ALL.iter().all(|v| e.vendors.contains(*v)) {
+                if Vendor::MASTERED.iter().all(|v| e.vendors.contains(*v)) {
                     both += 1;
                 }
             }
@@ -213,10 +213,10 @@ impl Merged {
             .by_key
             .iter()
             .filter(|(_, e)| {
-                !e.universe.is_none() && !Vendor::ALL.iter().all(|v| e.vendors.contains(*v))
+                !e.universe.is_none() && !Vendor::MASTERED.iter().all(|v| e.vendors.contains(*v))
             })
             .map(|(k, e)| {
-                let who: Vec<&str> = Vendor::ALL
+                let who: Vec<&str> = Vendor::MASTERED
                     .iter()
                     .filter(|v| e.vendors.contains(**v))
                     .map(|v| v.as_str())

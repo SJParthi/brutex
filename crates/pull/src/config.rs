@@ -800,7 +800,33 @@ impl CredentialConfig {
 
         for vendor in Vendor::ALL {
             let seen = vendors.iter().filter(|v| v.vendor == vendor).count();
-            if seen == 0 {
+            // A CREDENTIAL IS REQUIRED OF FEEDS THAT AUTHENTICATE, AND OF NO
+            // OTHERS.
+            //
+            // This demanded a table for every `Vendor::ALL`, which asks the
+            // wrong question: an ARCHIVE feed reads CSV files an operator has
+            // already bought and has no endpoint, no token and nothing to
+            // authenticate against. Requiring one made adding TrueData or GDFL
+            // to `Vendor` break every existing `credentials.toml` — an operator
+            // whose install worked yesterday would be told to supply a
+            // credential for a feed that cannot have one.
+            //
+            // That single loop is most of why the store-prefix fix was measured
+            // at 24-29 edit sites. Narrowed here, it is the hinge the rest of
+            // that change hangs on.
+            //
+            // The transport is the authority, not a list of names: a feed
+            // declaring `Transport::Http` needs a credential and a feed
+            // declaring `Transport::LocalArchive` does not, so a fifth feed
+            // lands on the right side by declaring which kind it is.
+            let authenticates = crate::vendor::Feed::ALL.into_iter().any(|feed| {
+                feed.store_vendor() == Some(vendor)
+                    && matches!(
+                        feed.descriptor().transport,
+                        crate::vendor::Transport::Http(_)
+                    )
+            });
+            if seen == 0 && authenticates {
                 return Err(ConfigError::MissingVendor {
                     vendor: vendor.as_str(),
                 });

@@ -104,7 +104,7 @@ pub fn master_paths(dir: &Path) -> Vec<(Vendor, PathBuf)> {
     // `Vendor::master_file` is a `match`, so a new variant does not compile
     // until it names its file. Everything downstream of here already iterates
     // `Vendor::ALL`; this was the one place that did not.
-    Vendor::ALL
+    Vendor::MASTERED
         .into_iter()
         .map(|vendor| (vendor, dir.join(vendor.master_file())))
         .collect()
@@ -1783,7 +1783,15 @@ async fn spot_answer(
                     }
                     facts.push(("Source", format!("local folder · {folder}")));
                     facts.push(("Store root", site.store_root.display().to_string()));
-                    local_answer(&folder, asked.window, now, site, &journal, facts)
+                    local_answer(
+                        asked.feed,
+                        &folder,
+                        asked.window,
+                        now,
+                        site,
+                        &journal,
+                        facts,
+                    )
                 }
             }
         }
@@ -2404,6 +2412,7 @@ fn landed_answer(
 /// Split out of [`spot_answer`] to stay under clippy's line ceiling; the split
 /// is a lint, not a design.
 fn local_answer(
+    feed: pull::vendor::Feed,
     folder: &str,
     window: pull::session::Window,
     now: std::time::SystemTime,
@@ -2415,7 +2424,7 @@ fn local_answer(
     // clock can step backwards under NTP and a negative duration is not a
     // thing an operator should ever be shown.
     let started = std::time::Instant::now();
-    let outcome = run_local(folder, window, &site.store_root);
+    let outcome = run_local(feed, folder, window, &site.store_root);
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
 
     match outcome {
@@ -2508,11 +2517,32 @@ fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static 
 /// describing a store nobody had written to. The root now arrives as an
 /// argument, from the one [`Site`] every page renders from.
 fn run_local(
+    feed: pull::vendor::Feed,
     folder: &str,
     window: pull::session::Window,
     store_root: &Path,
 ) -> Result<pull::ingest::Ingested, String> {
     use brutex_core::instrument::{Exchange, Segment};
+
+    // THE PREFIX IS THE FEED'S OWN, and there is no default.
+    //
+    // This took no `Feed` and hardcoded `Vendor::Dhan`, so every archive bar
+    // landed under `bars/dhan/`. The operator found 194 instrument-months of
+    // GDFL futures there — `ABB-III` from `ABB-III.NFO.csv` — and was right
+    // that it is a bug, not a labelling slip: the per-vendor prefix is what
+    // D-0019 exists for.
+    //
+    // `store_vendor` is now `Some` for every feed. It is still checked rather
+    // than unwrapped, so a sixth feed added without a prefix fails loudly here
+    // instead of borrowing one.
+    let vendor = feed.store_vendor().ok_or_else(|| {
+        format!(
+            "{} has no store prefix of its own, so its bars have nowhere to be \
+             filed. Nothing was read and nothing was written — borrowing another \
+             vendor's prefix is what put GDFL futures under bars/dhan/.",
+            feed.display()
+        )
+    })?;
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         window,
@@ -2524,7 +2554,7 @@ fn run_local(
         encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
         scale: pull::vendor::PriceScale::Paisa,
         timeframe: store::path::Timeframe::MINUTE_1,
-        vendor: brutex_core::vendor::Vendor::Dhan,
+        vendor,
         exchange: Exchange::Nse.as_str(),
         segment: Segment::Fno.as_str(),
     };

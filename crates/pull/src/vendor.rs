@@ -1724,7 +1724,15 @@ impl Feed {
         match self {
             Self::Dhan => Some(Vendor::Dhan),
             Self::Groww => Some(Vendor::Groww),
-            Self::TrueData | Self::Gdfl => None,
+            // THEY HAVE PREFIXES NOW. `None` here is what filed 194
+            // instrument-months of GDFL futures under `bars/dhan/` — the
+            // archive reader could not ask which vendor it was reading for, so
+            // it used a literal. D-0019's per-vendor independence needs a row
+            // per feed, and `pull::config` now requires a credential only of
+            // feeds whose transport is HTTP, so these two cost no operator a
+            // `credentials.toml` edit.
+            Self::TrueData => Some(Vendor::TrueData),
+            Self::Gdfl => Some(Vendor::Gdfl),
         }
     }
 
@@ -2940,19 +2948,45 @@ mod tests {
         assert_eq!(wires.len(), FEED_COUNT);
     }
 
-    /// The bridge to the store's own vendor prefix refuses rather than invents.
+    /// EVERY FEED HAS ITS OWN PREFIX, AND NO TWO SHARE ONE.
+    ///
+    /// This asserted the opposite — that the archive feeds have `None` — and
+    /// that `None` is precisely what filed 194 instrument-months of GDFL
+    /// futures under `bars/dhan/`. `run_local` could not ask which vendor it
+    /// was reading for, so it used a literal, and D-0019's per-vendor
+    /// independence was destroyed exactly as the old assertion's own message
+    /// warned it would be.
+    ///
+    /// The fix was not to refuse: a feed that cannot file its bars anywhere
+    /// cannot pull at all. It was to give them prefixes, which was blocked on
+    /// `pull::config` demanding a credential table from every vendor — a
+    /// question archives cannot answer. That loop now asks only feeds whose
+    /// transport is HTTP, and this became possible.
+    ///
+    /// No feed is named on the left of any assertion below: the loop is over
+    /// `Feed::ALL`, so a fifth feed must declare a prefix and must not collide
+    /// with an existing one.
     #[test]
-    fn a_feed_with_no_store_prefix_refuses_instead_of_borrowing_one() {
-        assert_eq!(Feed::Dhan.store_vendor(), Some(Vendor::Dhan));
-        assert_eq!(Feed::Groww.store_vendor(), Some(Vendor::Groww));
-        for archive in [Feed::TrueData, Feed::Gdfl] {
-            assert_eq!(
-                archive.store_vendor(),
-                None,
-                "filing an archive vendor's bars under a broker's prefix would \
-                 destroy D-0019's per-vendor independence irreversibly"
+    fn every_feed_has_its_own_store_prefix_and_no_two_collide() {
+        let mut seen: Vec<Vendor> = Vec::new();
+        for feed in Feed::ALL {
+            let prefix = feed.store_vendor().unwrap_or_else(|| {
+                panic!(
+                    "{} has no store prefix, so its bars have nowhere to go and \
+                     the reader would borrow another vendor's — which is what \
+                     put GDFL futures under bars/dhan/",
+                    feed.display()
+                )
+            });
+            assert!(
+                !seen.contains(&prefix),
+                "{} shares a prefix with a feed already seen; two feeds under \
+                 one path is the same corruption in a different shape",
+                feed.display()
             );
+            seen.push(prefix);
         }
+        assert_eq!(seen.len(), FEED_COUNT, "one prefix per feed, no more");
     }
 
     /// A feed serves the rungs its row names and no others.
