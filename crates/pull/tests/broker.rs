@@ -29,7 +29,9 @@
 //! # The one thing this does NOT prove
 //!
 //! That `api.dhan.co` answers in the shape `crates/pull/src/vendor.rs` declares.
-//! `docs/06-limits.md` §35 records it. Every field the descriptor names is
+//! `docs/06-limits.md` records it — this cited §35, which does not exist; the
+//! file has 34 sections, and a citation to a section nobody wrote reads as a
+//! claim someone checked. Every field the descriptor names is
 //! **UNVERIFIED against a live body**, and the first real call is what verifies
 //! it — which is exactly why `decode_body` refuses a wrong `envelope` by name
 //! and lists the keys it did find (D-0049), instead of guessing.

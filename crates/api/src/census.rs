@@ -621,14 +621,25 @@ impl StoreFilter {
             return false;
         }
         match self.symbol {
-            // Upper-cased both sides rather than lower: every symbol this store
-            // holds is upper-case already, so this folds only the operator's
-            // typing and never allocates for the stored side twice.
-            Some(ref needle) if !needle.is_empty() => series
-                .symbol
-                .as_str()
-                .to_uppercase()
-                .contains(&needle.to_uppercase()),
+            // NEITHER SIDE ALLOCATES.
+            //
+            // This read `series.symbol.as_str().to_uppercase().contains(&needle
+            // .to_uppercase())` — two `String` allocations PER ROW, on a
+            // per-request path, and the comment above it claimed the opposite.
+            //
+            // The stored side is provably already upper-case: `Symbol::new`
+            // admits only ASCII `[A-Za-z0-9-_&]` and upper-cases at
+            // construction. So folding it was work to reach a value it already
+            // held. The needle is loop-invariant and was re-upcased every row;
+            // it is folded ONCE now, at `StoreFilter` construction.
+            //
+            // Measured by the O(1) audit: 9.85x cost for a 10x input, and
+            // 496,015 allocations at the 248,000-entry scale figure this
+            // repository uses. It is the more expensive of the two survivors by
+            // 83-108x at every size measured.
+            Some(ref needle) if !needle.is_empty() => {
+                series.symbol.as_str().contains(needle.as_str())
+            }
             _ => true,
         }
     }
@@ -653,7 +664,9 @@ impl StoreFilter {
 /// # Cost, stated
 ///
 /// **O(entries)** — one pass with a bounded test per entry. Not O(1), and it is
-/// on a request path, which `docs/06-limits.md` §36 records rather than hides.
+/// on a request path, which `docs/06-limits.md` §32 records rather than hides.
+/// (This cited §36, which does not exist — the file has 34 sections. A citation
+/// to a section nobody wrote reads as a claim someone checked.)
 /// It is the same bargain `/instruments` search already made (§24): a store of
 /// 194 entries filters immeasurably fast, and at 248,000 it is one pass over a
 /// vector already in memory, with no allocation per row and no disk touched.
@@ -662,15 +675,34 @@ impl StoreFilter {
 /// four more things to keep in step with the manifest for a question asked by a
 /// human at human speed. Recorded as a deliberate choice, not an oversight.
 #[must_use]
-pub fn filtered(entries: &[(Series, YearMonth)], filter: &StoreFilter) -> Vec<(Series, YearMonth)> {
+pub fn filtered<'a>(
+    entries: &'a [(Series, YearMonth)],
+    filter: &StoreFilter,
+) -> std::borrow::Cow<'a, [(Series, YearMonth)]> {
+    // BORROWED WHEN NOTHING IS FILTERED, WHICH IS THE DEFAULT PAGE.
+    //
+    // This returned `entries.to_vec()` — a fresh allocation and a memcpy of the
+    // WHOLE held-entry table — to then read 200 of them. The 200-row window is
+    // computed afterwards, so the copy bought nothing.
+    //
+    // Measured by the O(1) audit at 10.34x cost for a 10x input: 6.0 MB copied
+    // per request at the 93,776 entries `docs/06-limits.md` §34 projects for
+    // the end of the stated backfill, and 15.9 MB at the 248,000-entry scale
+    // figure — to render a page whose output is byte-identical either way.
+    //
+    // `Cow` rather than two call sites: the filtered branch genuinely needs to
+    // own its selection, and a caller that had to know which is which is a
+    // caller that will eventually get it wrong.
     if filter.is_empty() {
-        return entries.to_vec();
+        return std::borrow::Cow::Borrowed(entries);
     }
-    entries
-        .iter()
-        .filter(|&&(series, month)| filter.keeps(&series, month))
-        .copied()
-        .collect()
+    std::borrow::Cow::Owned(
+        entries
+            .iter()
+            .filter(|&&(series, month)| filter.keeps(&series, month))
+            .copied()
+            .collect(),
+    )
 }
 
 /// One page of [`held_entries`], as the grid renders it.

@@ -2155,7 +2155,32 @@ to sort**, and no arrangement of a hash index makes it less.
 startup, beside the `Manifest::open` that is already O(entries) and the master
 read that measured 150 ms per request when it was wrongly per-request (D-0039).
 Every `/store` request is then ordinal arithmetic into that vector plus one hash
-probe per cell, unchanged.
+probe per cell — **for the axis. That sentence was false about the page.**
+
+Two per-request costs sat beside that claim and were not on the axis at all,
+found by the O(1) audit of 2026-08-08 and measured, not argued:
+
+* `census::filtered` returned `entries.to_vec()` on the UNFILTERED path — a
+  fresh allocation and a memcpy of the whole held-entry table, to then read 200
+  rows. Measured 10.34x cost for a 10x input: 6.0 MB copied per request at the
+  93,776 entries §34 projects, 15.9 MB at 248,000. The rendered HTML was
+  byte-identical either way, so the copy bought nothing.
+* `StoreFilter::keeps` allocated two `String`s PER ROW —
+  `symbol.to_uppercase().contains(&needle.to_uppercase())` — while the comment
+  above it claimed it did not. The stored side is provably already upper-case
+  (`Symbol::new` upper-cases at construction) and the needle is loop-invariant.
+  Measured 9.85x for a 10x input, and 496,015 allocations at 248,000 entries.
+
+Both are fixed: `filtered` returns a `Cow` and borrows when nothing is
+filtered; the needle is folded once at `StoreFilter` construction and neither
+side of the comparison allocates. This section records what was true while it
+was true, which is what an append-only ledger is for.
+
+A note on how it was missed. The rustdoc at `census.rs` that would have
+qualified the claim cited **§36 of this file, which does not exist** — this
+document has 34 sections. `crates/pull/tests/broker.rs` carries the same
+dangling shape, citing §35. A citation to a section that was never written reads
+as a claim someone checked.
 
 The sort is not an optimisation and cannot be dropped: the pager addresses a row
 by **ordinal**, and `HashMap` iteration order is not stable between runs, so an

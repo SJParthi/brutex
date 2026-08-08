@@ -2941,7 +2941,14 @@ fn store_filter(query: &str) -> census::StoreFilter {
     let symbol = param(query, "symbol");
     census::StoreFilter {
         segment: brutex_core::instrument::Segment::parse(&param(query, "kind")).ok(),
-        symbol: (!symbol.is_empty()).then_some(symbol),
+        // UPPER-CASED ONCE, HERE, not once per row.
+        //
+        // `StoreFilter::keeps` folded the needle on every entry it tested —
+        // loop-invariant work in the innermost loop of a per-request path. The
+        // stored side needs no folding at all: `Symbol::new` admits only ASCII
+        // and upper-cases at construction, so the comparison is now allocation
+        // free on both sides.
+        symbol: (!symbol.is_empty()).then(|| symbol.to_uppercase()),
         // Not offered in the bar yet: the store holds one timeframe today, and
         // a control with one option is a control that lies about having a
         // choice. The field is parsed so a URL can still carry it.
