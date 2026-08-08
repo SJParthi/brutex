@@ -808,6 +808,39 @@ pub const HTTP_UNAVAILABLE: &str = "THE LOCAL-ARCHIVE PATH RUNS. THE HTTP PATH \
      understood, echoed back with the exact dates that would go on the wire, \
      and then REFUSED with 503 — nothing is written.";
 
+/// One governor per feed, built from the feed's own declared budget.
+///
+/// **Indexed by discriminant, not searched.** `Feed` is `#[repr(u8)]` with
+/// explicit discriminants and `Feed::ALL` is in table order, so slot *i* is
+/// feed *i* and the lookup at the call site is one array index. A fifth feed
+/// widens the vector and no code here learns its name.
+///
+/// A slot is `None` when the feed declares no HTTP transport — it has no budget
+/// because it makes no requests. That is not a silent exemption: an archive
+/// feed never reaches the code that consults this, because the transport routes
+/// it to the CSV reader instead.
+///
+/// The NUMBERS come from `pull::vendor`'s descriptor rows, which cite
+/// `docs/00-charter.md` §4 for each one and carry its verification lane in the
+/// constant's own name — `GROWW_PER_SECOND_UNVERIFIED` says in the identifier
+/// that the figure is chosen rather than measured. Nothing is invented here and
+/// nothing is defaulted: a `None` in a `Budget` field means the vendor
+/// publishes no bound for that span, and `Governor::new` treats it as such.
+fn feed_budgets() -> Vec<Option<pull::rate::Governor>> {
+    pull::vendor::Feed::ALL
+        .into_iter()
+        .map(|feed| match feed.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => pull::rate::Governor::new(
+                spec.budget.per_second,
+                spec.budget.per_minute,
+                spec.budget.per_day,
+            )
+            .ok(),
+            pull::vendor::Transport::LocalArchive(_) => None,
+        })
+        .collect()
+}
+
 /// Everything every request renders from, read once at startup.
 ///
 /// `Arc` rather than a clone per request: [`Read`] owns a `HashMap` of every
@@ -819,6 +852,26 @@ pub const HTTP_UNAVAILABLE: &str = "THE LOCAL-ARCHIVE PATH RUNS. THE HTTP PATH \
 /// contention that grows with concurrent readers.
 #[derive(Debug)]
 pub struct Site {
+    /// The rate budget every HTTP feed spends from, held across requests.
+    ///
+    /// # Why this is on the site and not in `broker_window`
+    ///
+    /// A token bucket is STATE. A governor constructed inside the function that
+    /// asks it for permission starts full every time, admits every request, and
+    /// is an elaborate way of writing `true` — which is what an unwired
+    /// governor amounts to, and `crates/pull/src/rate.rs` had zero callers.
+    ///
+    /// The budget is per FEED, keyed by discriminant so the lookup is an array
+    /// index rather than a search — a fifth feed widens the array and nothing
+    /// here learns its name. `None` in a slot is a feed that publishes no bound
+    /// at all, which is the archive feeds and is not a silent exemption: they
+    /// never reach this code, because the transport routes them elsewhere.
+    ///
+    /// A `Mutex` rather than an atomic because `Governor::admit` reads three
+    /// windows and charges all three only if every one affords a permit — that
+    /// is a single decision over three numbers, and splitting it would let a
+    /// request the day window refused still drain the second window.
+    pub budgets: std::sync::Mutex<Vec<Option<pull::rate::Governor>>>,
     /// The instrument universe, merged from both masters.
     pub read: Read,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
@@ -915,6 +968,7 @@ impl Site {
         // is: once, at startup. See census::held_entries.
         let entries = census::held_entries(&censuses);
         Self {
+            budgets: std::sync::Mutex::new(feed_budgets()),
             read,
             censuses,
             series,
@@ -1589,6 +1643,88 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Charge one request against this feed's budget, or refuse and say when.
+///
+/// The governor is held on the [`Site`] so its buckets survive between
+/// requests — see [`Site::budgets`] on why a governor built per call admits
+/// everything and is an elaborate way of writing `true`.
+///
+/// A feed with no governor slot is one that declares no HTTP transport. It
+/// cannot reach here, because the transport routes it to the CSV reader — but
+/// the slot is checked rather than unwrapped, so a future routing change fails
+/// loudly instead of panicking.
+///
+/// # A poisoned lock is a refusal, not a bypass
+///
+/// If another thread panicked holding this mutex the budget state is unknown.
+/// Treating that as "admit" would spend an unknown allowance at a vendor;
+/// `CLAUDE.md` §4 bans the fallback that hides a failure, so it refuses and
+/// names the reason.
+fn spend_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
+    // ONE ARRAY INDEX. `Feed` is `#[repr(u8)]` with explicit discriminants and
+    // the vector is built from `Feed::ALL` in table order, so the slot is the
+    // variant's own discriminant and there is nothing to search.
+    let slot = feed as usize;
+
+    let mut budgets = site.budgets.lock().map_err(|_| {
+        format!(
+            "the rate budget for {} cannot be read: another request panicked \
+             while holding it, so the allowance already spent is unknown. \
+             Nothing is issued on an unknown budget.",
+            feed.display()
+        )
+    })?;
+
+    let Some(Some(governor)) = budgets.get_mut(slot) else {
+        return Err(format!(
+            "{} has no rate budget, which means it declares no HTTP transport. \
+             Reaching this function is a routing error rather than an operator \
+             one.",
+            feed.display()
+        ));
+    };
+
+    match governor.admit(monotonic_micros()) {
+        pull::rate::Verdict::Admit => Ok(()),
+        pull::rate::Verdict::Deny { span, wait_micros } => Err(format!(
+            "{}'s {} budget is spent. The next request is admitted in \
+             {}.{:03}s. Nothing was asked of the vendor and nothing was written.",
+            feed.display(),
+            // `WindowSpan` has no operator-facing name of its own; it is an
+            // internal tag. Named here rather than adding one to `pull::rate`,
+            // whose Debug is already exactly the word an operator wants.
+            format!("{span:?}").to_lowercase(),
+            // INTEGER SECONDS AND MILLISECONDS. `{:.3}` on an `f64` is the
+            // obvious way to write this and clippy denies it workspace-wide —
+            // correctly. `CLAUDE.md` §7 bans the float for prices; the lint is
+            // stricter and bans it everywhere, so a duration that is exact
+            // arithmetic on integers stays exact arithmetic on integers.
+            wait_micros / 1_000_000,
+            (wait_micros % 1_000_000) / 1_000
+        )),
+    }
+}
+
+/// A monotonic microsecond reading, which is what [`pull::rate::Governor`] asks
+/// for and deliberately will not read itself.
+///
+/// The governor takes the clock as an argument so a test can drive it without
+/// sleeping. This is the one place that has to supply a real one.
+fn monotonic_micros() -> u64 {
+    use std::sync::OnceLock;
+    static ORIGIN: OnceLock<std::time::Instant> = OnceLock::new();
+    ORIGIN
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_micros()
+        // A `u128` of microseconds since process start exceeds `u64` after
+        // ~584,000 years. Saturating rather than wrapping, because a wrapped
+        // clock would hand the governor a reading in the past and refill every
+        // bucket at once.
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
 async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
@@ -1628,6 +1764,23 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // stays true only until the parameter map lands, and turns into a real
     // multi-instrument pull rather than being quietly deleted.
     finished_day_only(asked)?;
+
+    // THE RATE BUDGET, SPENT BEFORE THE SOCKET AND NOT AFTER.
+    //
+    // `crates/pull/src/rate.rs` implements an AIMD governor — additive increase
+    // on a clean response, multiplicative decrease on a throttle — and had ZERO
+    // callers. An implemented limiter nothing consults is not a limiter; the
+    // backfill this repository exists to run is ~11,200 requests at day
+    // granularity and ~64,800 at one-minute, and an unthrottled burst of those
+    // is cut off partway, leaving a half-written history the append-only store
+    // cannot correct.
+    //
+    // Charged HERE, ahead of the credential read and the socket, because a
+    // request that will not be issued must not first cost a Parameter Store
+    // round-trip. The refusal names the binding span and the exact wait that
+    // clears it, so an operator is told when to come back rather than being
+    // told "no".
+    spend_budget(asked.feed, site)?;
 
     if asked.target != ingest::SpotTarget::Swept {
         return Err(format!(
@@ -4629,6 +4782,106 @@ mod tests {
         )
     }
 
+    /// Every HTTP feed gets a governor, every archive feed gets none, and the
+    /// numbers are the descriptor's rather than this function's.
+    ///
+    /// The governor in `pull::rate` had ZERO callers. An implemented limiter
+    /// nothing consults is not a limiter, and the backfill this repository
+    /// exists to run is ~11,200 requests at day granularity and ~64,800 at
+    /// one-minute — an unthrottled burst of those is cut off partway and leaves
+    /// a half-written history the append-only store cannot correct.
+    ///
+    /// No feed is named here. The loop is over `Feed::ALL`, so a fifth row is
+    /// covered the day it exists, and which half it lands in is decided by its
+    /// own declared transport.
+    #[test]
+    fn every_http_feed_has_a_budget_and_no_archive_feed_does() {
+        let budgets = feed_budgets();
+        assert_eq!(
+            budgets.len(),
+            pull::vendor::Feed::ALL.len(),
+            "one slot per feed, indexed by discriminant — a short vector would \
+             make the lookup silently miss the last feed"
+        );
+
+        for (slot, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
+            match feed.descriptor().transport {
+                pull::vendor::Transport::Http(spec) => {
+                    let governor = budgets[slot].as_ref().unwrap_or_else(|| {
+                        panic!("{} is an HTTP feed and must have a budget", feed.display())
+                    });
+                    // THE DESCRIPTOR'S NUMBERS, NOT THIS FUNCTION'S. Every one
+                    // cites docs/00-charter.md §4, and the unverified figure
+                    // says so in the constant's own name.
+                    assert_eq!(
+                        (
+                            governor.ceiling(pull::rate::WindowSpan::Second),
+                            governor.ceiling(pull::rate::WindowSpan::Minute),
+                            governor.ceiling(pull::rate::WindowSpan::Day),
+                        ),
+                        (
+                            spec.budget.per_second,
+                            spec.budget.per_minute,
+                            spec.budget.per_day
+                        ),
+                        "{}'s governor must carry the budget its descriptor \
+                         declares, span for span — a mismatch means the number \
+                         was decided here instead of being read",
+                        feed.display()
+                    );
+                }
+                pull::vendor::Transport::LocalArchive(_) => assert!(
+                    budgets[slot].is_none(),
+                    "{} reads files and issues no requests, so it has no \
+                     budget to spend",
+                    feed.display()
+                ),
+            }
+        }
+    }
+
+    /// A spent budget refuses, names the span, and says when it clears.
+    ///
+    /// Drives the governor directly to exhaustion rather than issuing real
+    /// requests — the point is that `spend_budget` returns the refusal rather
+    /// than admitting, and that the sentence tells an operator when to come
+    /// back instead of only saying no.
+    #[test]
+    fn a_spent_budget_refuses_and_names_the_wait_that_clears_it() {
+        let dir = agreeing("budgetspent");
+        let site = site("budgetspent", &dir);
+        let feed = pull::vendor::Feed::Dhan;
+
+        // Drain it. Dhan's per-second ceiling is the binding one, so a handful
+        // of immediate calls exhausts it without waiting for anything.
+        let mut refusal = None;
+        for _ in 0..64 {
+            if let Err(why) = spend_budget(feed, &site) {
+                refusal = Some(why);
+                break;
+            }
+        }
+
+        let why = refusal.expect(
+            "a budget with a published per-second ceiling must refuse a burst \
+             of 64 immediate requests — if it admits all of them the governor \
+             is not being consulted",
+        );
+        assert!(
+            why.contains("budget is spent"),
+            "the refusal says the budget is what stopped it: {why}"
+        );
+        assert!(
+            why.contains("admitted in"),
+            "and when it clears, so an operator knows when to come back \
+             rather than only that the answer is no: {why}"
+        );
+        assert!(
+            why.contains("nothing was written") || why.contains("Nothing was asked"),
+            "and that the vendor was never contacted: {why}"
+        );
+    }
+
     /// The transport is checked before anything a refusal should not cost.
     ///
     /// It used to be the LAST of eleven guards in `broker_window`, below a live
@@ -4662,6 +4915,22 @@ mod tests {
             .find("Transport::Http(spec)")
             .expect("the transport is destructured inside broker_window");
 
+        // THE BUDGET IS PART OF THIS ORDER, not a separate concern.
+        //
+        // Charging it after the credential read passed every test here until
+        // this line existed: a request that will not be issued would first
+        // spend a Parameter Store round-trip to ap-south-1 to find that out.
+        // Every guard below is decidable from the form and the descriptor, so
+        // every one of them belongs above the first thing that costs anything.
+        let budget = body
+            .find("spend_budget(")
+            .expect("the rate budget is charged inside broker_window");
+        assert!(
+            transport < budget,
+            "the transport is checked before the budget is charged — an \
+             archive feed has no budget to spend"
+        );
+
         for (what, needle) in [
             (
                 "the finished-day gate, which reads the clock",
@@ -4670,6 +4939,7 @@ mod tests {
             ("the credentials file", "CredentialConfig::load"),
             ("the AWS identity", "AwsIdentity::discover"),
             ("Parameter Store", "ssm::get_parameter"),
+            ("the HTTP client and its socket", "HttpSource::new"),
         ] {
             let cost = body.find(needle).unwrap_or_else(|| {
                 panic!(
@@ -4683,6 +4953,15 @@ mod tests {
                 "the transport is checked before {what}; a feed that cannot be \
                  pulled over HTTP must not pay for discovering that"
             );
+            // The budget too, for everything that is not the clock — a request
+            // the governor will refuse must not first read a credential.
+            if needle != "finished_day_only(" {
+                assert!(
+                    budget < cost,
+                    "the rate budget is charged before {what}; a request that \
+                     will not be issued must not pay for discovering that"
+                );
+            }
         }
     }
 
