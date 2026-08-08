@@ -27,8 +27,13 @@ jobs:
       - name: Gate 1 — extension allowlist
         run: |
           set -euo pipefail
-          # The ONLY extensions this repository may contain.
+          # The ONLY extensions this repository may contain OUTSIDE web/.
           allowed='rs|toml|md|lock|html|css|yml|json'
+          # Under web/ ONLY, the browser languages are allowed -- D-0052. This
+          # is narrowed by PATH, not relaxed by extension: putting `ts` on the
+          # line above would permit a build script anywhere in the tree, which
+          # is the thing CLAUDE.md section 2 exists to forbid.
+          web_allowed='ts|tsx|js|jsx|json|svg|css|html'
           # Files with no extension that are still legitimate.
           allowed_names='LICENSE|CODEOWNERS|.gitignore|.gitattributes'
           bad=0
@@ -39,18 +44,29 @@ jobs:
               *.*) ext="${base##*.}" ;;
               *)   ext="" ;;
             esac
-            if ! printf '%s\n' "$ext" | grep -Eq "^(${allowed})$"; then
-              printf 'FORBIDDEN FILE  %s  (extension %s)\n' "$f" "${ext:-<none>}"
+            # WHICH LIST APPLIES IS DECIDED BY THE PATH, not by the file.
+            # Under web/ the browser languages are legal; everywhere else the
+            # hard rule is untouched, so a .ts under crates/ fails here exactly
+            # as it always did.
+            case "$f" in
+              web/*) list="$web_allowed" ; where='web/' ;;
+              *)     list="$allowed"     ; where='outside web/' ;;
+            esac
+            if ! printf '%s\n' "$ext" | grep -Eq "^(${list})$"; then
+              printf 'FORBIDDEN FILE  %s  (extension %s, %s)\n' \
+                "$f" "${ext:-<none>}" "$where"
               bad=1
             fi
           done < <(git ls-files)
           if [ "$bad" -ne 0 ]; then
             echo
-            echo "This repository is Rust only. See CLAUDE.md section 2."
-            echo "Allowed extensions: ${allowed//|/ }"
+            echo "This repository is Rust only outside web/. See CLAUDE.md section 2"
+            echo "and docs/05-decisions.md D-0052."
+            echo "Outside web/: ${allowed//|/ }"
+            echo "Under  web/: ${web_allowed//|/ }"
             exit 1
           fi
-          echo "OK — every tracked file is in the allowlist."
+          echo "OK — every tracked file is in the allowlist for where it lives."
 
       - name: Gate 1b — .json and .yml are confined
         run: |

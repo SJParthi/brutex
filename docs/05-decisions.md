@@ -4159,3 +4159,50 @@ Proved over two real loopback sockets: the origin answers `302` pointing at a
 second listener, the origin **is** sent the token (or the test would prove
 nothing), and the second listener is **never connected to**. Confirmed to fail
 with the policy removed.
+
+
+## D-0052 · 2026-08-08 · The one-language rule is narrowed to a path, so the browser may have a framework and the engine may not
+
+`CLAUDE.md` §2, `.github/workflows/ci.yml` gate 1.
+
+The rule was: Rust is the only language in this repository, enforced by an
+extension allowlist walked over every tracked file. The operator has asked for a
+browser UI with type-ahead, a real date picker and motion — "if you want to use
+any advanced frontend framework language use it, let us remove our strict
+language requirement especially only for our front-end" — and asked twice.
+
+**What the rule was actually protecting.** Not the extension list. The reasons
+§2 gives are about a *runtime*: an interpreted dependency, a `build.rs` that
+shells out, a vendored binding, generated source in another language checked in.
+Every one of those is about something the engine LINKS AGAINST or RUNS. A file
+that a browser downloads and executes on the operator's own machine is none of
+them — it cannot enter the sweep, cannot enter run identity, and cannot make
+`cargo build` depend on a toolchain that is not `cargo`.
+
+**So the rule is narrowed by PATH rather than relaxed by extension.** Under
+`web/` the browser languages are allowed. Everywhere else the hard rule stands
+unchanged, and a `.ts` under `crates/` fails gate 1 exactly as it did before.
+This is deliberately not a global widening: an allowlist with `ts` on it would
+have permitted a build script anywhere in the tree, which is the thing §2 exists
+to forbid.
+
+**The boundary is one-directional and is the load-bearing half of this entry.**
+Nothing under `web/` may be imported by, invoked from, or required for any crate
+to build, test or run. `cargo build`, `cargo test` and `cargo clippy` must
+succeed with `web/` deleted. A change that makes a crate depend on the browser
+tree has reintroduced exactly what §2 bans, whatever the extension says, and is
+a build failure rather than a review comment — the same standard §5 already
+applies to `web` declaring a dependency other than `core`.
+
+**What is unaffected.** The existing wasm `web` crate keeps its rule: it depends
+on `core` only. The `api` crate keeps rendering server-side HTML, so every page
+is useful before any script runs — the browser tree is progressive enhancement
+over pages that already exist, never their only producer. A page that renders a
+row ONLY from client-side data has moved rendering out of Rust, which this entry
+does not license.
+
+**Why not simply allow it and rely on review.** §2's own words: "If a task
+appears to require one of these, stop and say so. Do not add it and explain
+afterwards." A rule that depends on someone noticing is not the rule this file
+describes. Gate 1 was reordered ahead of the debt gates for the same reason and
+in the same spirit.

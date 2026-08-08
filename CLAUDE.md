@@ -33,6 +33,17 @@ Futures, options and single stocks may be **stored**. They are never swept.
 Allowed tracked extensions: `.rs` `.toml` `.md` `.lock` `.html` `.css` `.yml`
 (the last only under `.github/`).
 
+**One exception, and it is a path, not a language.** Under `web/` — and nowhere
+else — `.ts` `.tsx` `.js` `.jsx` `.json` `.svg` are allowed, for the browser UI
+only. Narrowed to that directory by D-0052.
+
+Everything the exception does not name is unchanged. `crates/**` is Rust. The
+engine, the store, the vocabulary, the sweep, the ingest and the HTTP surface do
+not gain a second language, and a file under `crates/` with one of those
+extensions is the same build failure it always was. The exception buys a
+browser, not a runtime: nothing under `web/` may be imported by, invoked from,
+or required for any crate to build, test or run.
+
 Forbidden without exception:
 - any interpreted runtime, as a dependency, a dev-dependency, or a tool
 - any `build.rs` that invokes an external process
