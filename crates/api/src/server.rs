@@ -1798,6 +1798,53 @@ async fn spot_answer(
     }
 }
 
+/// Land one instrument's bodies, and count them.
+///
+/// Split out of `broker_answer` when that grew a loop over the universe: the
+/// per-instrument work is identical for all ~800 and the only thing that varies
+/// is which `BrokerWindow` it is handed.
+///
+/// Every chunk lands. `from_window` runs once per body rather than once per
+/// form submission, and the counters are summed — reporting only the last of
+/// eighty-one chunks would make eighty chunks' bars vanish from a receipt whose
+/// entire purpose is that they do not.
+fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
+    let request = pull::fetch::BarRequest {
+        instrument_id: String::new(),
+        window: landed.window,
+        cadence: pull::session::Cadence::Minute,
+    };
+    let plan = pull::ingest::Plan {
+        columns: pull::csv::Columns::Gdfl,
+        request: &request,
+        // FROM THE DESCRIPTOR, NOT A LITERAL. Dhan stamps epoch seconds and
+        // Groww's row says milliseconds; writing either here makes the other
+        // vendor unfetchable, which is what a hardcoded `EpochSecondsUtc` did
+        // to Groww.
+        encoding: landed.spec.timestamps,
+        // `http::decode_body` already converted rupees to paisa, so the plan
+        // must say Paisa — `DECODED_PRICE_SCALE` names this trap.
+        scale: pull::http::DECODED_PRICE_SCALE,
+        timeframe: store::path::Timeframe::MINUTE_1,
+        // Resolved through `Feed::store_vendor`. A literal here files one
+        // broker's prices under another's prefix.
+        vendor: landed.store_vendor,
+        exchange: brutex_core::instrument::Exchange::Nse.as_str(),
+        segment: brutex_core::instrument::Segment::Index.as_str(),
+    };
+    let mut done = pull::ingest::Ingested::default();
+    for body in &landed.bodies {
+        done.absorb(pull::ingest::from_window(
+            body,
+            &landed.instrument,
+            &landed.origin,
+            &site.store_root,
+            plan,
+        ));
+    }
+    done
+}
+
 /// One broker run: credential, request, bars, receipt.
 ///
 /// # The join, finally
@@ -1869,55 +1916,83 @@ async fn broker_answer(
         (code, accepted_html("Spot pull", facts, site.broker))
     };
 
-    match broker_window(&asked, site).await {
-        Err(why) => refuse(facts, &why, axum::http::StatusCode::BAD_GATEWAY),
-        Ok(BrokerWindow {
-            bodies,
-            instrument,
-            origin,
-            spec,
-            store_vendor,
-        }) => {
-            let request = pull::fetch::BarRequest {
-                instrument_id: String::new(),
-                window: asked.window,
-                cadence: pull::session::Cadence::Minute,
-            };
-            let plan = pull::ingest::Plan {
-                columns: pull::csv::Columns::Gdfl,
-                request: &request,
-                // FROM THE DESCRIPTOR, NOT FROM A LITERAL. Dhan stamps epoch
-                // seconds and Groww's row says milliseconds; writing either one
-                // here makes the other vendor unfetchable, which is exactly
-                // what a hardcoded `EpochSecondsUtc` did to Groww.
-                encoding: spec.timestamps,
-                // `http::decode_body` already converted rupees to paisa, so the
-                // plan must say Paisa — `DECODED_PRICE_SCALE` names this trap.
-                scale: pull::http::DECODED_PRICE_SCALE,
-                timeframe: store::path::Timeframe::MINUTE_1,
-                // Resolved through `Feed::store_vendor` in `broker_window`. A
-                // literal here files one broker's prices under another's prefix.
-                vendor: store_vendor,
-                exchange: brutex_core::instrument::Exchange::Nse.as_str(),
-                segment: brutex_core::instrument::Segment::Index.as_str(),
-            };
-            // EVERY CHUNK LANDS, AND THE COUNTERS ADD UP ACROSS THEM.
-            //
-            // `from_window` is called once per body rather than once per form
-            // submission. Each call appends and counts; the totals are summed
-            // so the receipt reports the whole run and not merely its last
-            // eighty-first.
-            let mut done = pull::ingest::Ingested::default();
-            for body in &bodies {
-                let part =
-                    pull::ingest::from_window(body, &instrument, &origin, &site.store_root, plan);
-                done.absorb(part);
+    // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
+    //
+    // This called `broker_window` ONCE and the callee hardcoded NIFTY, so spot
+    // did 1/800th of the job whatever universe was selected. That single
+    // literal is the whole of "spot does not work".
+    //
+    // The set is the operator's own tracked universe — the same
+    // `catalog::tracked` predicate the page and `/instruments.json` use, so the
+    // three cannot disagree about what "every instrument" means.
+    //
+    // PER-INSTRUMENT ISOLATION. One instrument that fails does not abort the
+    // other 799: its reason is recorded against its own name and the loop
+    // continues. Over ~11,200 requests a run that dies on the first network
+    // blip is a run that never finishes, and a single `?` here would be that.
+    let mut targets: Vec<brutex_core::instrument::InstrumentKey> = site
+        .read
+        .merged
+        .by_key
+        .iter()
+        .filter(|(_, entry)| crate::catalog::tracked(entry.universe))
+        .map(|(key, _)| *key)
+        .collect();
+    // Sorted so a run is reproducible: `HashMap` order is not stable between
+    // processes, and an unordered backfill resumes in a different place after
+    // every restart.
+    targets.sort_unstable_by_key(|k| k.underlying);
+
+    let mut total = pull::ingest::Ingested::default();
+    let mut reached = 0usize;
+    let mut refused: Vec<String> = Vec::new();
+    let mut origin_seen = String::new();
+
+    for instrument in &targets {
+        match broker_window(&asked, instrument, site).await {
+            Err(why) => refused.push(format!("{}: {why}", instrument.underlying)),
+            Ok(landed) => {
+                reached += 1;
+                origin_seen.clone_from(&landed.origin);
+                total.absorb(land_one(&landed, site));
             }
-            let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-            facts.push(("Instrument", instrument));
-            landed_answer(&done, asked.window, now, &origin, journal, facts, took)
         }
     }
+
+    facts.push(("Instruments attempted", targets.len().to_string()));
+    facts.push(("Instruments reached", reached.to_string()));
+    if !refused.is_empty() {
+        facts.push((
+            "Instruments refused",
+            format!(
+                "{} — first: {}",
+                refused.len(),
+                refused.first().map_or("", String::as_str)
+            ),
+        ));
+    }
+
+    let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    if reached == 0 {
+        return refuse(
+            facts,
+            refused
+                .first()
+                .map_or("no instrument in the universe could be reached", |w| {
+                    w.as_str()
+                }),
+            axum::http::StatusCode::BAD_GATEWAY,
+        );
+    }
+    landed_answer(
+        &total,
+        asked.window,
+        now,
+        &origin_seen,
+        journal,
+        facts,
+        took,
+    )
 }
 
 /// The credential, the client and one window — or the reason there is none.
@@ -1961,6 +2036,9 @@ struct BrokerWindow {
     /// The row that describes this feed's wire format. Read for its timestamp
     /// encoding rather than re-stated by the caller.
     spec: pull::vendor::HttpSpec,
+    /// The window these bodies cover, so the lander need not be handed the
+    /// request as well.
+    pub window: pull::session::Window,
     /// The store prefix these bars belong under, resolved through
     /// [`pull::vendor::Feed::store_vendor`] and never assumed.
     store_vendor: brutex_core::vendor::Vendor,
@@ -2148,7 +2226,11 @@ async fn fetch_chunks(
     Ok(bodies)
 }
 
-async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<BrokerWindow, String> {
+async fn broker_window(
+    asked: &ingest::SpotRequest,
+    instrument: &brutex_core::instrument::InstrumentKey,
+    site: &Site,
+) -> Result<BrokerWindow, String> {
     // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
     // THAT ANSWERS "IS THIS A BROKER".
     //
@@ -2292,23 +2374,30 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // Refused rather than defaulted when the vendor does not list it: sending
     // Dhan a `groww_symbol`, or any other vendor's id, asks the wrong broker
     // for the wrong thing and it would answer something.
-    let spot_key = brutex_core::instrument::InstrumentKey {
-        exchange: brutex_core::instrument::Exchange::Nse,
-        segment: brutex_core::instrument::Segment::Index,
-        underlying: brutex_core::symbol::Symbol::new("NIFTY")
-            .map_err(|why| format!("NIFTY is not a symbol this build can name: {why}"))?,
-        kind: brutex_core::instrument::Kind::Index,
-    };
+    // THE INSTRUMENT IS AN ARGUMENT. It was `Symbol::new("NIFTY")`.
+    //
+    // That one literal is why spot did 1/800th of the job: the route fetched a
+    // single index whatever universe the operator selected, and
+    // `grep -c "for instrument in"` over this file returned zero.
+    //
+    // ONE HASH PROBE, not a walk. `by_key` is a `HashMap` and `ids` is indexed
+    // by the vendor's own discriminant, so resolving an instrument costs the
+    // same at 800 as at one — the measured 19 ns against the 1,236 ns walk this
+    // replaced (D-0039).
     let Some(instrument_id) = site
         .read
         .merged
         .by_key
-        .get(&spot_key)
+        .get(instrument)
         .and_then(|e| e.ids.get(vendor as usize).copied().flatten())
     else {
         return Err(format!(
-            "{} does not list NIFTY in the instrument master this build read,              so there is no id to name it by. Refused rather than sending              another vendor's id, which would ask for the wrong instrument and              be answered.",
-            vendor.as_str()
+            "{} does not list {} in the instrument master this build read, so \
+             there is no id to name it by. Refused rather than sending another \
+             vendor's id, which would ask for the wrong instrument and be \
+             answered.",
+            vendor.as_str(),
+            instrument.underlying
         ));
     };
 
@@ -2327,7 +2416,8 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // than letting the receipt imply both.
     Ok(BrokerWindow {
         bodies,
-        instrument: "NIFTY".to_owned(),
+        window: asked.window,
+        instrument: instrument.underlying.to_string(),
         origin,
         spec,
         store_vendor,
