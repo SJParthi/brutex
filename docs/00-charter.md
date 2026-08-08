@@ -123,9 +123,11 @@ Evidence lane is recorded per row and is never promoted while copying.
 |---|---|---|
 | Transport | official SDK, injected client | verified |
 | History endpoint | one method for spot and derivatives | verified |
-| Granularity fetched | `1minute` only. Every other timeframe is derived. | decided |
+| Granularity fetched | `1minute` only. Every other timeframe is derived — **at the write boundary**, by `pull::fold`, into the rung the bars are filed under. See D-0055. | decided |
 | History depth | from 2020 | documented |
-| Window cap | 30 days per request at 1-minute granularity | documented |
+| Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
+| Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
+| Daily interval word | **UNVERIFIED.** The request names its bar length in `candle_interval`, and `1minute` is the only spelling read first-hand. `1day`, `1d` and `day` are all plausible and only one is a request, so none is written. A daily pull against this feed **refuses by name** until the word is read live — `pull::fetch::FetchError::RungNotSpellable`. | unverified |
 | Response shape | row arrays: `[ts, o, h, l, c, v, oi]`, `oi` null off-derivatives | verified |
 | Timestamp | native IST string, or epoch seconds defensively | verified |
 | Price unit | rupees as float on the wire; converted to paisa at the boundary | verified |
@@ -141,7 +143,9 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Endpoint | intraday charts, 1/5/15/25/60 min — we fetch 1 only | verified from SDK |
 | Response shape | **parallel column arrays**, not rows. Unequal lengths reject the chunk. | documented |
 | Timestamp | epoch seconds, UTC | verified from SDK |
-| Window cap | 90 days per request | documented |
+| Window cap, 1-minute | 90 days per request. Documented against the **intraday charts** endpoint named one row above, so it is recorded at the one-minute rung and not promoted past it. | documented |
+| Window cap, daily | **UNVERIFIED.** Whether the 90 above applies to a day-level request is not stated anywhere read; nor is whether `/v2/charts/historical` serves daily at all — the endpoint row calls it "intraday charts" and the descriptor's path string does not say. Encoded as **absent**, which the store's month boundary already bounds: every chunk is ≤ 31 days and therefore inside the 90 regardless. | unverified |
+| Daily interval word | **Not applicable — and that is itself the fact.** This vendor's request carries no interval parameter at all (five fields: `securityId`, `exchangeSegment`, `instrument`, `fromDate`, `toDate`), so this build cannot vary the rung on its wire. Bars are folded into whatever rung they are filed under, which is correct for any vendor cadence no coarser than the target. | verified from SDK |
 | History depth | rolling ~5 years. **Not a fixed floor** — it moves every day. | documented |
 | Rate limit | 5/s, 100,000/day, no per-minute governor | documented |
 | Subscription | paid data plan; enforcement surfaces as a specific error code | documented |

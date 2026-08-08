@@ -234,14 +234,20 @@ impl Ingested {
 pub struct Plan<'a> {
     /// Which column layout the files carry.
     pub columns: Columns,
-    /// The window and cadence, passed straight to the filter.
+    /// The window and the rung, passed straight to the filter.
+    ///
+    /// **The rung on it is also the timeframe these bars are filed under**, via
+    /// [`crate::vendor::Granularity::store_timeframe`] — see [`Plan::timeframe`].
+    /// This used to be two fields, a `granularity` here and a `timeframe`
+    /// beside it, and nothing made them agree: a plan naming `Day1` and
+    /// `MINUTE_1` exempts every bar from the session filter and then files the
+    /// result under `1min/`, which is a directory of daily bars no reader can
+    /// tell from minute bars.
     pub request: &'a BarRequest,
     /// How the vendor encodes its timestamps.
     pub encoding: TimestampEncoding,
     /// Whether prices arrive in rupees or paisa.
     pub scale: PriceScale,
-    /// The timeframe the bars are filed under.
-    pub timeframe: Timeframe,
     /// Which vendor prefix to write beneath.
     pub vendor: Vendor,
     /// The exchange segment of the path.
@@ -255,6 +261,40 @@ pub struct Plan<'a> {
     /// Also parsed into a [`Segment`], so `INDEX`, `CASH` and `FNO` are the
     /// only three this build stores under, for the same reason.
     pub segment: &'a str,
+}
+
+impl Plan<'_> {
+    /// THE WRITE BOUNDARY. The directory these bars are filed under, or the
+    /// reason there is none.
+    ///
+    /// One conversion site, and it is here rather than in a caller because
+    /// here is where a wrong answer becomes bytes on a disk. A rung
+    /// `crates/store` has not been widened to carry has no directory, and
+    /// `CLAUDE.md` §4 leaves exactly two options: refuse, or substitute. A
+    /// substitution would file five-minute bars under `1min/` and no later
+    /// reader could tell them from real one-minute data — the store carries the
+    /// bar length in the PATH, not in the row.
+    ///
+    /// # Errors
+    ///
+    /// The rung, named, when it has no store timeframe.
+    fn timeframe(&self) -> Result<Timeframe, String> {
+        self.request.granularity.store_timeframe().ok_or_else(|| {
+            format!(
+                "{} has no directory in this store, so there is nowhere to file \
+                 a bar of that length. Nothing was written rather than filing \
+                 it under a rung it is not: the bar length lives in the PATH \
+                 here, so a substituted bar is one no later reader can tell \
+                 from a real one. crates/store ships {}.",
+                self.request.granularity,
+                Timeframe::KNOWN
+                    .iter()
+                    .map(|tf| tf.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+            )
+        })
+    }
 }
 
 /// Reads every CSV in `dir`, writes the bars that survive into the store, and
@@ -314,6 +354,17 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
     // for bars that are already there.
     let census_path = crate::manifest::manifest_path(store_root, vendor);
 
+    // THE RUNG IS RESOLVED ONCE, AND BEFORE THE LOCK IS TAKEN.
+    //
+    // `one` resolves it too — it is the function that opens the file — but
+    // every member of a run shares the plan, so a rung the store cannot carry
+    // is a RUN-level refusal wearing a per-member costume. Reported once here
+    // rather than eight hundred identical times, and before anything is
+    // locked, read or written.
+    if let Err(why) = plan.timeframe() {
+        return refused_whole(members, &census_path, why);
+    }
+
     // THE LOCK, AND IT IS TAKEN BEFORE THE READ.
     //
     // The census cycle is read-whole-file, mutate in memory, write-whole-file.
@@ -328,31 +379,12 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
     // use of the thing it protects.
     let census_lock = match CensusLock::take(&census_path) {
         Ok(guard) => guard,
-        Err(why) => {
-            // The folder was read, so say how much was in it, exactly as the
-            // unreadable-census arm below does. Reporting zero rows would blame
-            // the vendor for a refusal that is ours.
-            done.rows_read = members.iter().map(|member| member.rows.len()).sum();
-            done.failures.push(Failure {
-                instrument: census_path.display().to_string(),
-                why,
-            });
-            return done;
-        }
+        Err(why) => return refused_whole(members, &census_path, why),
     };
 
     let mut census = match read_census(&census_path, vendor) {
         Ok(census) => census,
-        Err(why) => {
-            // The folder was read, so say how much was in it. Reporting zero
-            // rows would blame the vendor for a refusal that is ours.
-            done.rows_read = members.iter().map(|member| member.rows.len()).sum();
-            done.failures.push(Failure {
-                instrument: census_path.display().to_string(),
-                why,
-            });
-            return done;
-        }
+        Err(why) => return refused_whole(members, &census_path, why),
     };
 
     // A census that loaded degraded may still be appended to — recovering from
@@ -448,6 +480,26 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
     done
 }
 
+/// A run refused before a single bar was written, named against the file the
+/// refusal is about.
+///
+/// **`rows_read` is the real count, not zero.** The members were read; what
+/// failed is ours — an unwritable rung, a contended lock, an unreadable census
+/// — and reporting zero rows would put the blame on a vendor that answered
+/// perfectly. Three arms of [`from_members`] end this way and they were three
+/// copies of it, which is three places for one of them to start reporting zero.
+fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
+    Ingested {
+        members: members.len(),
+        rows_read: members.iter().map(|member| member.rows.len()).sum(),
+        failures: vec![Failure {
+            instrument: about.display().to_string(),
+            why,
+        }],
+        ..Ingested::default()
+    }
+}
+
 /// One window fetched from a broker, through the same path a folder takes.
 ///
 /// # The join this repository was one function short of
@@ -501,12 +553,13 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         request,
         encoding,
         scale,
-        timeframe,
         vendor,
         exchange,
         segment,
         ..
     } = plan;
+    // THE ONE CONVERSION FROM RUNG TO DIRECTORY. See `Plan::timeframe`.
+    let timeframe = plan.timeframe()?;
     let raw = fetch::RawWindow {
         rows: member.rows.clone(),
     };

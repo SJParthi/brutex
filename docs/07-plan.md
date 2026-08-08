@@ -28,7 +28,7 @@ Restated here so the plan can be checked against it rather than against memory.
 |---|---|---|
 | R-1 | Spot, **every instrument**, bounded at ~800 — 750 NIFTY Total Market + ~35 NSE indices | `catalog::tracked`, and `/instruments.json` shares that exact predicate |
 | R-2 | **2020-01-01 → yesterday**, never today | `finished_day_only` in `broker_window`, HTTP path only |
-| R-3 | Day-level first, then one-minute | Not yet a distinct mode — **OPEN**, see §4 |
+| R-3 | Day-level first, then one-minute | Selectable and landing under `1day/` — D-0055. Open only for Groww, whose daily interval word is unrecorded; see §4 item 4a |
 | R-4 | F&O: **NIFTY only** as the first step | Not yet — **OPEN** |
 | R-5 | TrueData / GDFL are **F&O CSVs from a folder**: no market hours, no rate limit, no token | `Transport::LocalArchive`, and every vendor rule keys off the transport |
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
@@ -48,7 +48,7 @@ reader needs to recognise if it returns.
 |---|---|---|
 | Census re-imaged and renamed **per window** — 424 GB of writes to maintain a 5.75 MB file | One 64-byte positional append plus a header commit | `a8cadb4` |
 | `pull::rate::Governor` had **zero callers** | Held on the `Site`, charged **per request**, ahead of the credential read | `c1ea7ab` |
-| A multi-year window sent **whole** to a vendor capped at 30 days | Split to the descriptor's cap; 2020→yesterday is 81 legal requests, credential read once | `bf8f86e`, `0596621` |
+| A multi-year window sent **whole** to a vendor capped at 30 days | Split to the descriptor's cap, per rung as of D-0055; 2020→yesterday is 126 legal requests at Groww's one-minute cap and 80 at either feed's day rung, credential read once. The 81 this row first claimed predates the month-boundary clamp | `bf8f86e`, `0596621` |
 | `read_dir` stripped two extensions unconditionally — **215 calls merged with their own puts per day** | The rule is the extension's *shape*, not a count | `a91026e` |
 | A blank `folder` textbox decided which **protocol** to speak | The feed's declared transport decides | `d2fa20c` |
 | The page offered two hardcoded feeds, so the archive arm was unreachable | Built from `Feed::ALL` | `f8be537` |
@@ -60,6 +60,10 @@ reader needs to recognise if it returns.
 | `census::filtered` copied the **whole table** to draw 200 rows | `Cow`, borrowed when unfiltered | `7661a61` |
 | §32 asserted `/store` was constant-time **while two linear costs sat on it** | Corrected; both measurements recorded | `7661a61` |
 | A run that stored **nothing** reported `STORED` | `Outcome::Empty` — "STORED NOTHING", loud, code appended as 4 | `62274e0` |
+| `Timeframe::DAY_1` existed in the store and **nothing could reach it** — the spot form had no bar-length control and `land_one` wrote `Timeframe::MINUTE_1` as a literal | The rung is a control on the form, built from the descriptors; it lands under `1day/` | D-0055 |
+| The window cap was **one scalar per feed**, qualified by a granularity in prose only | A lookup on (feed, rung). A daily window is no longer split at the one-minute cap | D-0055 |
+| A feed with no published cap sent the window **whole**, which `fetch::land` refuses for spanning two months | `split_window` takes an `Option` and the month boundary binds at every rung | D-0055 |
+| `BarRequest` stated the rung and the `Cadence` **independently**, and a daily pull left at `Cadence::Minute` drops every bar as `BeforeSessionOpen` and reports a clean zero | One field; the cadence is derived from it | D-0055 |
 
 ---
 
@@ -83,20 +87,40 @@ reader needs to recognise if it returns.
 | 1 | **Drive one Groww pull end to end from the Ingest page** | Nobody has closed the loop once. An 11,200-request backfill on an undriven loop is how a half-written history happens |
 | 2 | **Make the readiness gate a rule, not a courtesy** | `/feeds.json` reports `ready` and the picker disables — but `parse_feed` accepts any feed, so a `curl` bypasses it. The first attempt used the census as the signal, which is **circular**: a feed just bought holds nothing and could never be pulled. Needs an entitlement signal that is not the census |
 | 3 | **Serve `web/build` from the Rust binary** | Two servers today. Assets embed the way `STYLE` already does, so a clone with no Node still builds |
-| 4 | **Day-level mode before one-minute** (R-3) | The operator's stated first step, and it is 14 windows per instrument against 81 |
+| 4 | ~~**Day-level mode before one-minute** (R-3)~~ — **selectable and landing under `1day/` as of D-0055.** What is left is one vendor fact, below | The operator's stated first step. The saving is smaller than this row used to claim; see the corrected arithmetic |
+| 4a | **Read Groww's daily `candle_interval` word off a live call and write it into one descriptor row** | Its request names the bar length in a parameter and the daily spelling is recorded nowhere — `1day`, `1d` and `day` are all plausible and only one is a request. A daily pull against that feed refuses by name until it is recorded. Dhan needs nothing: its request carries no interval field at all |
 | 5 | **The 2020 → yesterday backfill** | The goal |
 
-### The arithmetic behind #5, from the published caps
+### The arithmetic behind #5, corrected
 
-2020-01-01 to 2026-08-07 is **2,411 days inclusive**.
+2020-01-01 to 2026-08-07 is **2,411 days inclusive**, and — this is the number
+that was missing — **80 calendar months**.
 
-| Granularity | Cap | Windows / instrument | × 800 instruments |
+| Rung | Cap | Windows / instrument | × 800 instruments |
 |---|---|---|---|
-| Day-level | 180 d | 14 | **~11,200 requests** |
-| One-minute | 30 d | 81 | **~64,800 requests** |
+| Day-level, Groww | none published | **80** | ~64,000 requests |
+| Day-level, Dhan | none published | **80** | ~64,000 requests |
+| One-minute, Groww | 30 d | **126** | ~100,800 requests |
+| One-minute, Dhan | 90 d | **80** | ~64,000 requests |
 
-This is arithmetic from `docs/00-charter.md` §4, **not a throughput
-measurement**. No backfill has been run, so no duration is claimed.
+**This table replaces one that claimed a 180-day daily cap and 14 windows.**
+That cap appears in no source: `docs/00-charter.md` §4 records a day-level
+figure for neither vendor, and D-0054 cited §4 for "14 at day level" while §4
+said nothing of the kind. Both are corrected here and in D-0055.
+
+**14 was unreachable regardless, and by a bound this repository owns.** The
+store addresses one month per file and `pull::ingest` refuses a batch spanning
+two, so the floor is one request per month — 80 — whatever a vendor allows. The
+real saving of the daily rung is **126 → 80 on Groww and nothing at all on
+Dhan**, whose 90-day cap was already wider than any month.
+
+The daily rung is still the right first pass, for the reason that survives the
+arithmetic: **one bar per day instead of 375**, so a wrong symbol, a dead
+credential or a missing floor surfaces against a store one three-hundred-and-
+seventy-fifth the size.
+
+This is arithmetic from `docs/00-charter.md` §4 and from the calendar, **not a
+throughput measurement**. No backfill has been run, so no duration is claimed.
 
 ---
 

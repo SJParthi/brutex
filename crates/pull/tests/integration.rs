@@ -71,7 +71,7 @@ use pull::csv::Columns;
 use pull::fetch::BarRequest;
 use pull::ingest::{self, Ingested, Plan};
 use pull::session::{
-    BARS_PER_REGULAR_SESSION, Cadence, Day, DropReason, IstMoment, SESSION_CLOSE_MINUTE,
+    BARS_PER_REGULAR_SESSION, Day, DropReason, IstMoment, SESSION_CLOSE_MINUTE,
     SESSION_OPEN_MINUTE, Window,
 };
 use pull::vendor::{PriceScale, TimestampEncoding};
@@ -193,7 +193,6 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
             encoding: TimestampEncoding::EpochSecondsUtc,
             // And it parses straight to paisa, so there is nothing to scale.
             scale: PriceScale::Paisa,
-            timeframe: Timeframe::MINUTE_1,
             vendor: Vendor::Groww,
             exchange: "NSE",
             segment: "INDEX",
@@ -244,7 +243,7 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
     let request = BarRequest {
         instrument_id: String::new(),
         window: window(),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
 
     let done = run(&archive, &store_root, &request);
@@ -337,7 +336,7 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
             Day::new(2022, 10, 3).expect("2022-10-03"),
         )
         .expect("a one-day window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
 
     let done = run(&archive, &store_root, &request);
@@ -372,7 +371,7 @@ fn idempotent_repull_leaves_the_file_byte_identical() {
     let request = BarRequest {
         instrument_id: String::new(),
         window: window(),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
 
     let first = run(&archive, &store_root, &request);
@@ -426,7 +425,7 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
             Day::new(2022, 10, 3).expect("2022-10-03"),
         )
         .expect("a one-day window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store_root, &narrow);
     assert_eq!(first.bars_stored, 2);
@@ -439,7 +438,7 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
             Day::new(2022, 10, 4).expect("2022-10-04"),
         )
         .expect("a one-day window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let second = run(&archive, &store_root, &wider);
     assert_eq!(second.bars_stored, 1);

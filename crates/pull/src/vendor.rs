@@ -93,7 +93,8 @@ use brutex_core::vendor::Vendor;
 use store::path::Timeframe;
 
 use crate::session::{
-    BARS_PER_REGULAR_SESSION, Day, SECS_PER_MINUTE, SESSION_CLOSE_MINUTE, SESSION_OPEN_MINUTE,
+    BARS_PER_REGULAR_SESSION, Cadence, Day, SECS_PER_MINUTE, SESSION_CLOSE_MINUTE,
+    SESSION_OPEN_MINUTE,
 };
 
 // ---------------------------------------------------------------------------
@@ -174,13 +175,13 @@ pub const GRANULARITY_COUNT: usize = 11;
 
 /// Which grid a feed's records sit on.
 ///
-/// Extended rather than re-invented from one rung: `store::path::Timeframe`
-/// ships exactly `1min` today, and two spellings of "which granularity" is the
-/// drift `CLAUDE.md` forbids. [`Granularity::store_timeframe`] is the single
-/// reconciliation site between the two, and a `const` assertion below pins the
-/// one rung they share — the directory name *and* the seconds — so they cannot
-/// disagree silently. Widening `Timeframe` to the full ladder is a
-/// `crates/store` change and is recorded as outstanding.
+/// Extended rather than re-invented from the store's own list:
+/// `store::path::Timeframe` ships `1min` and `1day`, and two spellings of
+/// "which granularity" is the drift `CLAUDE.md` forbids.
+/// [`Granularity::store_timeframe`] is the single reconciliation site between
+/// the two, and the `const` assertions below pin every rung they share so they
+/// cannot disagree silently. Widening `Timeframe` to the rest of the ladder is
+/// a `crates/store` change and is recorded as outstanding.
 ///
 /// The rungs are closed rather than parameterised (`Second(n)`) on purpose: an
 /// arbitrary `n` has no stable on-disk directory name, and paths are
@@ -194,7 +195,8 @@ pub enum Granularity {
     Second1 = 1,
     /// Five-second grid.
     Second5 = 2,
-    /// One-minute bars — the only rung `store::path::Timeframe` ships.
+    /// One-minute bars — what the engine sweeps, and one of the two rungs
+    /// `store::path::Timeframe` ships.
     Minute1 = 3,
     /// Three-minute bars.
     Minute3 = 4,
@@ -206,7 +208,8 @@ pub enum Granularity {
     Minute30 = 7,
     /// One-hour bars.
     Hour1 = 8,
-    /// One bar per trading day.
+    /// One bar per trading day — the other rung `store::path::Timeframe` ships,
+    /// and the one a backfill lands first. D-0054, D-0055.
     Day1 = 9,
     /// One bar per trading week.
     Week1 = 10,
@@ -293,6 +296,22 @@ impl Granularity {
         matches!(self.grid(), Grid::Event | Grid::Intraday(_))
     }
 
+    /// Which [`Cadence`] the session filter must be run at for this rung.
+    ///
+    /// Derived from [`Self::is_intraday`] rather than chosen at the call site,
+    /// because the two were being stated independently and the disagreement is
+    /// silent in the direction that loses data: a daily bar stamped at midnight
+    /// filtered at [`Cadence::Minute`] is counted `BeforeSessionOpen`, every
+    /// one of them, and the run reports a clean census of nothing.
+    #[must_use]
+    pub const fn cadence(self) -> Cadence {
+        if self.is_intraday() {
+            Cadence::Minute
+        } else {
+            Cadence::Daily
+        }
+    }
+
     /// This rung's bit in a [`GranularitySet`].
     const fn bit(self) -> u16 {
         1u16 << (self as u16)
@@ -308,12 +327,13 @@ impl Granularity {
     pub const fn store_timeframe(self) -> Option<Timeframe> {
         match self {
             Self::Minute1 => Some(Timeframe::MINUTE_1),
+            Self::Day1 => Some(Timeframe::DAY_1),
             _ => None,
         }
     }
 }
 
-// The one rung the two spellings share, tied together by the compiler. If
+// The rungs the two spellings share, tied together by the compiler. If
 // `store::path::Timeframe::MINUTE_1` is ever renamed or re-timed, this stops
 // compiling instead of quietly writing bars into a directory nobody reads.
 const _: () = assert!(str_eq(
@@ -324,6 +344,22 @@ const _: () = assert!(match Granularity::Minute1.grid() {
     Grid::Intraday(secs) => secs == Timeframe::MINUTE_1.secs(),
     _ => false,
 });
+
+// THE DAY RUNG, TIED THE SAME WAY — but only the NAME can be tied the same way.
+//
+// `Grid::Daily` carries no interval, because a session is not a fixed number of
+// seconds, so there is no number on the ladder's side to compare against
+// `Timeframe::DAY_1.secs()`. Writing `Grid::Intraday(86_400)` above to mirror
+// the minute rung would be inventing an interval this ladder does not have.
+//
+// What can be tied is the pair of facts that decide where a bar lands: the
+// ladder says this rung AGGREGATES a session rather than sitting on an
+// interval, and the timeframe spells a calendar day as a whole number of the
+// minute rung's bars. Rename `1day` on either side, or re-time either constant,
+// and this stops compiling rather than filing daily bars under `1min/`.
+const _: () = assert!(str_eq(Granularity::Day1.dir(), Timeframe::DAY_1.as_str()));
+const _: () = assert!(matches!(Granularity::Day1.grid(), Grid::Daily));
+const _: () = assert!(Timeframe::DAY_1.secs() == Timeframe::MINUTE_1.secs() * 60 * 24);
 const _: () = assert!(Granularity::ALL.len() == GRANULARITY_COUNT);
 
 impl fmt::Display for Granularity {
@@ -1187,6 +1223,21 @@ pub enum ParamValue {
     /// `exchangeSegment: "IDX_I"`. Fixed here so it is reviewable beside the
     /// rest of the row rather than buried in a request builder.
     Fixed(&'static str),
+    /// The rung being asked for, in **this feed's own spelling** — resolved
+    /// through [`HttpSpec::granularity_token`].
+    ///
+    /// Distinct from [`Self::Fixed`], and the distinction is the whole of what
+    /// makes a rung selectable. Groww's `candle_interval` was `Fixed("1minute")`,
+    /// so a request the operator filed as daily still asked the vendor for
+    /// minutes — and a daily window is wider than the one-minute cap the vendor
+    /// publishes, so the wider window would have gone out against the narrower
+    /// contract.
+    ///
+    /// A rung this feed has no recorded spelling for is **refused by name**.
+    /// `CLAUDE.md` §3 rule 1: the wire word is a vendor fact, and there is no
+    /// spelling to derive it from — `"1day"`, `"1d"` and `"day"` are all
+    /// plausible and only one of them is a request.
+    Granularity,
 }
 
 /// One named request parameter.
@@ -1429,8 +1480,7 @@ pub struct HttpSpec {
     /// with an expiry date. The oldest month held falls further outside the
     /// vendor's window every month, and nothing notices.
     pub history_floor: HistoryFloor,
-    /// How many days one request may name, at the granularity this build
-    /// fetches (`1min` — see [`Granularity`]).
+    /// How many days one request may name, **per rung**.
     ///
     /// A VENDOR bound, and distinct from `api::ingest::MAX_WINDOW_DAYS`, which
     /// is an INPUT bound: 3,653 days, wide enough for the whole stated backfill
@@ -1438,11 +1488,36 @@ pub struct HttpSpec {
     /// nothing about what a broker will answer, so a window inside it can still
     /// be far outside this.
     ///
-    /// `None` means the vendor publishes no per-request cap. It is not a
-    /// default and not an unknown: an unknown cap would have to be `UNVERIFIED`
-    /// in the charter and named as such here, the way
-    /// [`crate::rate::GROWW_PER_SECOND_UNVERIFIED`] is.
-    pub window_cap_days: Option<u32>,
+    /// # Why a table and not a scalar
+    ///
+    /// It was a scalar, and the granularity it applied at was written in
+    /// **prose**: `docs/00-charter.md` §4 records Groww's cap as "30 days per
+    /// request **at 1-minute granularity**", and the field's own doc repeated
+    /// the qualifier. That was survivable while this build fetched one rung.
+    /// It stops being survivable the moment a second rung is selectable: a
+    /// daily window split at the one-minute cap issues four times the requests
+    /// the vendor asked for, and a one-minute window split at a daily cap
+    /// issues a request the vendor will not serve.
+    ///
+    /// A rung with no row here has **no published cap**, and that is a state
+    /// with a meaning rather than a hole: the window goes to
+    /// [`crate::session::split_window`] uncapped, which still breaks it at
+    /// every month boundary because the store addresses one month per file at
+    /// every rung. It is not a default and not a guess — an unknown cap would
+    /// have to be `UNVERIFIED` in the charter and named as such here, the way
+    /// [`crate::rate::GROWW_PER_SECOND_UNVERIFIED`] is, and it **is**: see the
+    /// two rows below and `docs/00-charter.md` §4.
+    pub window_caps: &'static [(Granularity, u32)],
+    /// This feed's own wire spelling for each rung its request can name.
+    ///
+    /// Read by [`ParamValue::Granularity`], and empty for a feed whose request
+    /// carries no interval field at all — Dhan names its rung by endpoint path
+    /// rather than by parameter, so there is nothing here to spell.
+    ///
+    /// A rung absent from this table cannot be put on this feed's wire, and the
+    /// fetch refuses by name rather than sending the request that *can* be
+    /// built and filing the answer under the rung that was asked for.
+    pub granularity_tokens: &'static [(Granularity, &'static str)],
     /// Whether that budget is pooled per request kind.
     pub pooling: Pooling,
     /// Every field this feed's request carries, and where its value comes from.
@@ -1452,6 +1527,40 @@ pub struct HttpSpec {
     pub params: &'static [Param],
     /// Headers this feed requires beyond the credential.
     pub extra_headers: &'static [(&'static str, &'static str)],
+}
+
+impl HttpSpec {
+    /// How many days one request may name **at `rung`**, when the vendor
+    /// published a figure for it.
+    ///
+    /// `None` is "no published cap at this rung", which
+    /// [`crate::session::split_window`] takes as "the month boundary is the
+    /// only bound". It is never "send the window whole" — that would be the
+    /// un-split request the splitter exists to prevent.
+    ///
+    /// A walk of a table whose length is a `const` in this file, at most one
+    /// row per rung of a closed ladder. There is no `N` here that an input can
+    /// grow. See [`Self::window_caps`].
+    #[must_use]
+    pub fn window_cap_days(&self, rung: Granularity) -> Option<u32> {
+        self.window_caps
+            .iter()
+            .find(|(at, _)| *at as u8 == rung as u8)
+            .map(|(_, cap)| *cap)
+    }
+
+    /// This feed's wire word for `rung`, or `None` when it has no recorded one.
+    ///
+    /// Same shape and same bound as [`Self::window_cap_days`], and the same
+    /// meaning for an absent row: not a default, not a derivation. See
+    /// [`Self::granularity_tokens`].
+    #[must_use]
+    pub fn granularity_token(&self, rung: Granularity) -> Option<&'static str> {
+        self.granularity_tokens
+            .iter()
+            .find(|(at, _)| *at as u8 == rung as u8)
+            .map(|(_, word)| *word)
+    }
 }
 
 /// How an archive vendor nests its files. Reported, and used to explain a
@@ -1870,8 +1979,24 @@ const DHAN: Descriptor = Descriptor {
         // fixed floor — it moves every day | documented".
         history_floor: HistoryFloor::Rolling { years: 5 },
         // docs/00-charter.md §4: "Window cap | 90 days per request |
-        // documented".
-        window_cap_days: Some(90),
+        // documented" — and that row sits directly under this vendor's
+        // "Endpoint | intraday charts, 1/5/15/25/60 min — we fetch 1 only", so
+        // the 90 is documented against the INTRADAY endpoint and is written
+        // here against the one-minute rung it was recorded for.
+        //
+        // THE DAY ROW IS ABSENT AND THAT IS THE FACT, not an omission. The
+        // charter records no day-level cap for this vendor, so there is no
+        // number to write; guessing one would be `CLAUDE.md` §3 rule 1's
+        // invention, and copying the 90 down would be promoting a figure past
+        // the endpoint it was measured against. See docs/00-charter.md §4,
+        // "Window cap, daily — UNVERIFIED".
+        window_caps: &[(Granularity::Minute1, 90)],
+        // EMPTY, AND THAT IS ALSO A FACT. This vendor's request carries no
+        // interval field at all — the five params below are the whole of it —
+        // so there is no word here to spell a rung with. Its rung is decided by
+        // `bars_path`, which means this build cannot vary it and the bars are
+        // folded to whatever rung they are filed under.
+        granularity_tokens: &[],
         pooling: Pooling::PerVendor,
         // Read first-hand from dhanhq.co/docs/v2/historical-data. All three are
         // marked REQUIRED there, and their absence is exactly what DH-905
@@ -1968,12 +2093,25 @@ const GROWW: Descriptor = Descriptor {
             day: 1,
         },
         // docs/00-charter.md §4: "Window cap | 30 days per request at 1-minute
-        // granularity | documented". This build fetches 1min only — the
-        // charter's own row says every other timeframe is derived — so the
-        // one figure is the one that applies. A per-granularity table would be
-        // three more numbers this build cannot exercise, and two of them are
-        // not in the charter at all.
-        window_cap_days: Some(30),
+        // granularity | documented". The qualifier was already in the charter
+        // and was carried in prose here; it is now in the KEY, which is the
+        // only place it binds.
+        //
+        // The day row is absent for the same reason as the vendor above: the
+        // charter records no day-level cap for this feed either. UNVERIFIED,
+        // and absent rather than guessed.
+        window_caps: &[(Granularity::Minute1, 30)],
+        // The one rung this feed's wire word is recorded for. Read first-hand
+        // from groww.in/trade-api/docs/curl/historical-data, which is where
+        // `1minute` came from.
+        //
+        // THE DAY SPELLING IS NOT HERE BECAUSE NOBODY WROTE IT DOWN. `1day`,
+        // `1d` and `day` are all plausible and only one of them is a request;
+        // `CLAUDE.md` §3 rule 1 forbids picking. Until it is read live and
+        // recorded, a daily pull against this feed refuses by name — which is
+        // also what keeps a month-wide window from being sent against the
+        // 30-day one-minute cap above.
+        granularity_tokens: &[(Granularity::Minute1, "1minute")],
         pooling: Pooling::PerRequestKind,
         // Read first-hand from groww.in/trade-api/docs/curl/historical-data.
         // `trading_symbol` is the deprecated endpoint's name for it; the live
@@ -2003,8 +2141,11 @@ const GROWW: Descriptor = Descriptor {
                 value: ParamValue::To,
             },
             Param {
+                // THE RUNG, NOT A FIXED WORD. It was `Fixed("1minute")`, so a
+                // request the operator filed under `1day/` still asked this
+                // vendor for minutes.
                 name: "candle_interval",
-                value: ParamValue::Fixed("1minute"),
+                value: ParamValue::Granularity,
             },
         ],
         // Groww's page shows this on every historical call.
@@ -2328,26 +2469,114 @@ mod tests {
         assert_eq!(intraday, GRANULARITY_COUNT - 2);
     }
 
-    /// One rung has a store timeframe and the rest refuse by absence.
+    /// Two rungs have a store timeframe and the rest refuse by absence.
+    ///
+    /// The pair is `1min` and `1day`, and the assertion below is the one that
+    /// stops a daily bar landing under `1min/`: the DIRECTORY NAME the ladder
+    /// spells and the one the store spells are compared for every rung that
+    /// carries a timeframe at all, so a rename on either side fails here as
+    /// well as at the `const` assertions beside `store_timeframe`.
     #[test]
-    fn only_the_one_minute_rung_carries_a_store_timeframe() {
-        let mut carried = 0_usize;
+    fn the_minute_and_day_rungs_carry_a_store_timeframe_and_the_rest_refuse() {
+        let mut carried = Vec::new();
         for rung in Granularity::ALL {
             match rung.store_timeframe() {
                 Some(timeframe) => {
-                    assert_eq!(rung, Granularity::Minute1);
-                    assert_eq!(timeframe.as_str(), rung.dir());
-                    assert_eq!(rung.grid(), Grid::Intraday(timeframe.secs()));
-                    carried += 1;
+                    assert_eq!(
+                        timeframe.as_str(),
+                        rung.dir(),
+                        "{rung} and its timeframe must name ONE directory"
+                    );
+                    // The grid and the timeframe agree in kind, which is the
+                    // half a name comparison cannot cover: an intraday rung
+                    // carries its own interval and must match the timeframe's
+                    // seconds, and an aggregating rung has none to match.
+                    match rung.grid() {
+                        Grid::Intraday(secs) => assert_eq!(secs, timeframe.secs()),
+                        Grid::Daily => assert_eq!(timeframe.secs(), 86_400),
+                        other => panic!("{rung} sits on {other:?}, which the store cannot file"),
+                    }
+                    carried.push(rung);
                 }
-                None => assert_ne!(
-                    rung,
-                    Granularity::Minute1,
-                    "a None is a refusal at the write boundary, never a substitution"
+                None => assert!(
+                    !matches!(rung, Granularity::Minute1 | Granularity::Day1),
+                    "a None is a refusal at the write boundary, never a \
+                     substitution — and {rung} is one of the two rungs \
+                     crates/store ships"
                 ),
             }
         }
-        assert_eq!(carried, 1, "crates/store ships exactly one rung");
+        assert_eq!(
+            carried,
+            vec![Granularity::Minute1, Granularity::Day1],
+            "crates/store ships exactly these two rungs, coarsest last"
+        );
+    }
+
+    /// A rung field and a rung table exist together or not at all, and the two
+    /// figures nobody has recorded are absent from both.
+    ///
+    /// **The pairing.** A request field spelled [`ParamValue::Granularity`]
+    /// with an empty token table is a field that can never be filled — every
+    /// request refuses. A token table with no field reading it is a vendor fact
+    /// nothing puts on a wire. Either alone is a row that says one thing and
+    /// does another.
+    ///
+    /// **The absences.** `docs/00-charter.md` §4 records a window cap for each
+    /// broker at ONE MINUTE — Groww's row carries the qualifier in its own
+    /// text, Dhan's sits under an intraday-endpoint line — and a day-level cap
+    /// for neither. It records no daily interval word for either. Both gaps are
+    /// asserted rather than tolerated, because the failure mode is somebody
+    /// filling one in from memory and nothing noticing.
+    #[test]
+    fn a_rung_on_the_wire_needs_a_word_and_the_unrecorded_ones_stay_absent() {
+        for feed in Feed::ALL {
+            let Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let names_a_rung = spec
+                .params
+                .iter()
+                .any(|p| matches!(p.value, ParamValue::Granularity));
+            assert_eq!(
+                names_a_rung,
+                !spec.granularity_tokens.is_empty(),
+                "{}: a rung field and a rung table exist together or not at all",
+                feed.display()
+            );
+            for (rung, word) in spec.granularity_tokens {
+                assert!(
+                    !word.is_empty(),
+                    "{}: {rung} has an empty wire word, which is not a word",
+                    feed.display()
+                );
+            }
+            // THE ONE-MINUTE CAP IS RECORDED. Both brokers, both in the charter.
+            assert!(
+                spec.window_cap_days(Granularity::Minute1)
+                    .is_some_and(|c| c > 0),
+                "{}: docs/00-charter.md §4 carries this feed's one-minute cap",
+                feed.display()
+            );
+            // AND THE DAY-LEVEL ONE IS NOT, at either broker. A number here is
+            // one somebody invented; `CLAUDE.md` §3 rule 1 forbids it, and an
+            // absent cap is already correct — the store's month boundary binds
+            // at every rung.
+            assert_eq!(
+                spec.window_cap_days(Granularity::Day1),
+                None,
+                "{}: no day-level cap is recorded in docs/00-charter.md §4",
+                feed.display()
+            );
+            assert_eq!(
+                spec.granularity_token(Granularity::Day1),
+                None,
+                "{}: no daily interval word is recorded anywhere in this \
+                 repository — 1day, 1d and day are all plausible and only one \
+                 of them is a request",
+                feed.display()
+            );
+        }
     }
 
     /// A bitset holds what was put in it, and adding twice is adding once.

@@ -14,7 +14,7 @@
 //! sees decides the run on its own.
 
 use crate::catalog::{Catalog, PAGE_ROWS, Selection};
-use crate::{audit, bars, census, ingest, master, merge, render};
+use crate::{audit, audit_json, autopilot, bars, census, ingest, master, merge, render};
 use brutex_core::vendor::Vendor;
 use pull::session::{Day, IstMoment};
 use std::fmt::Write as _;
@@ -1047,7 +1047,9 @@ async fn bars_json(
 ///
 /// The cached copy on `Site` stays for the pages that were built against it;
 /// this is for the ones that must be current.
-fn census_now(
+/// `pub(crate)` so `/audit.json` reads the same fresh census this does, rather
+/// than growing a second spelling of "read the manifests now, not at startup".
+pub(crate) fn census_now(
     site: &Site,
 ) -> (
     Vec<census::VendorCensus>,
@@ -1347,6 +1349,23 @@ pub struct Site {
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
     pub store_root: PathBuf,
+    /// The backfill that drives itself, and the operator's two controls over
+    /// it.
+    ///
+    /// # Why it lives on the site
+    ///
+    /// `Site` is already the `Arc` the handlers and the background task both
+    /// hold, so this is the one value both ends of pause/resume can see without
+    /// a second shared thing to keep in step. It holds atomics and one lock
+    /// rather than a channel because the check inside a 773-instrument sweep
+    /// must be a relaxed load: a sweep that took a lock per instrument would
+    /// make the operator's Pause wait on the vendor.
+    ///
+    /// Constructing it does **not** start anything. The task is spawned by
+    /// `run_in` alone, and it refuses to run unless [`Site::broker`] is
+    /// [`Broker::Live`] — which only [`Site::serving`] sets. A test that builds
+    /// a `Site` therefore gets the controls and no backfill.
+    pub autopilot: autopilot::Control,
     /// When the manifests above were read, in epoch seconds.
     ///
     /// **A counter on this page is as old as this process.** The censuses are
@@ -1416,6 +1435,9 @@ impl Site {
             broker: Broker::Refused,
             targets,
             store_root,
+            // NOT STARTED HERE. This is the controls and the status only; the
+            // task that acts on them is spawned by `run_in`.
+            autopilot: autopilot::Control::new(),
             loaded_at: ingest::epoch_secs(std::time::SystemTime::now()),
         }
     }
@@ -1513,8 +1535,12 @@ fn journal_note<'a>(
 /// Built separately from [`journal_note`] because it has to outlive the borrow
 /// the view takes of it, and because a sentence an operator reads is not a
 /// field an enum carries.
+///
+/// `pub(crate)` so `/audit.json` reports the torn tail in the same words the
+/// HTML page does. Two sentences about one file is two sentences that can
+/// disagree about it.
 #[must_use]
-fn journal_trouble(log: &audit::Log) -> String {
+pub(crate) fn journal_trouble(log: &audit::Log) -> String {
     match *log {
         audit::Log::Absent => String::new(),
         audit::Log::Unreadable { ref reason } => format!(
@@ -1851,6 +1877,11 @@ async fn spot_answer(
             // A fifth feed inherits the correct half by declaring its transport
             // and nothing else. That is the property this fork exists to keep.
             facts.push(("Feed", asked.feed.display().to_owned()));
+            // THE RUNG, ON THE RECEIPT. It decides the directory the bars land
+            // in, and a receipt that named the feed and the window but not the
+            // bar length would leave an operator unable to say which of two
+            // directories a run wrote to.
+            facts.push(("Bar length", asked.granularity.to_string()));
             match asked.feed.descriptor().transport {
                 // THE BROKER PATH. The credential is read from Parameter Store
                 // (D-0051), the descriptor drives the request, and the bars
@@ -1886,15 +1917,7 @@ async fn spot_answer(
                     }
                     facts.push(("Source", format!("local folder · {folder}")));
                     facts.push(("Store root", site.store_root.display().to_string()));
-                    local_answer(
-                        asked.feed,
-                        &folder,
-                        asked.window,
-                        now,
-                        site,
-                        &journal,
-                        facts,
-                    )
+                    local_answer(asked, &folder, now, site, &journal, facts)
                 }
             }
         }
@@ -1915,7 +1938,14 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         window: landed.window,
-        cadence: pull::session::Cadence::Minute,
+        // THE OPERATOR'S RUNG, NOT A LITERAL — and it is the one field that
+        // decides three things at once: which directory the bars land in, how
+        // wide the fold bucket is, and whether the session filter applies at
+        // all. It was `Cadence::Minute` beside a `Timeframe::MINUTE_1`, and a
+        // daily pull with either left behind is not a smaller answer: a daily
+        // bar is stamped at midnight, so every one of them is counted
+        // `BeforeSessionOpen` and the receipt reads as a clean zero.
+        granularity: landed.granularity,
     };
     let plan = pull::ingest::Plan {
         columns: pull::csv::Columns::Gdfl,
@@ -1928,7 +1958,6 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         // `http::decode_body` already converted rupees to paisa, so the plan
         // must say Paisa — `DECODED_PRICE_SCALE` names this trap.
         scale: pull::http::DECODED_PRICE_SCALE,
-        timeframe: store::path::Timeframe::MINUTE_1,
         // Resolved through `Feed::store_vendor`. A literal here files one
         // broker's prices under another's prefix.
         vendor: landed.store_vendor,
@@ -1986,13 +2015,33 @@ async fn broker_answer(
     journal: &audit::Journal,
     mut facts: Vec<(&'static str, String)>,
 ) -> (axum::http::StatusCode, String) {
-    let started = std::time::Instant::now();
     facts.push(("Source", "broker · HTTPS".to_owned()));
     facts.push(("Store root", site.store_root.display().to_string()));
 
+    // THE SWEEP ITSELF, shared verbatim with the autopilot. Everything below
+    // this line is the receipt; everything inside it is the pull.
+    let run = broker_run(&asked, site).await;
+
+    // A refusal, recorded and rendered, with the reason it carries.
+    let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
+        let record = audit::Record::refused(
+            audit::Scope::Spot,
+            audit::Outcome::NotStarted,
+            now,
+            asked.target.label(),
+            why,
+        )
+        .with_window(asked.window);
+        let mut facts = facts;
+        facts.push(("Refused because", why.to_owned()));
+        facts.push(recorded_fact(journal, &record));
+        (code, accepted_html("Spot pull", facts, site.broker))
+    };
+
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and
-    // how it was found.
-    if site.broker == Broker::Refused {
+    // how it was found. `broker_run` is the one that checks it, so an internal
+    // caller is guarded by the same line rather than by a second copy of it.
+    if run.blocked.is_some() {
         let record = audit::Record::refused(
             audit::Scope::Spot,
             audit::Outcome::NotStarted,
@@ -2015,21 +2064,100 @@ async fn broker_answer(
         );
     }
 
-    // A refusal, recorded and rendered, with the reason it carries.
-    let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
-        let record = audit::Record::refused(
-            audit::Scope::Spot,
-            audit::Outcome::NotStarted,
-            now,
-            asked.target.label(),
-            why,
-        )
-        .with_window(asked.window);
-        let mut facts = facts;
-        facts.push(("Refused because", why.to_owned()));
-        facts.push(recorded_fact(journal, &record));
-        (code, accepted_html("Spot pull", facts, site.broker))
-    };
+    facts.push(("Instruments attempted", run.attempted.to_string()));
+    facts.push(("Instruments reached", run.reached.to_string()));
+    if !run.refused.is_empty() {
+        facts.push((
+            "Instruments refused",
+            format!(
+                "{} — first: {}",
+                run.refused.len(),
+                run.refused.first().map_or("", String::as_str)
+            ),
+        ));
+    }
+    // STOPPING IS NOT FAILING, and it is not silent either. A sweep the
+    // operator interrupted says so on its own receipt, with the count it got
+    // to, so a short run is never mistaken for a complete one.
+    if let Some(ref why) = run.stopped {
+        facts.push(("Stopped", why.clone()));
+    }
+
+    if run.reached == 0 {
+        return refuse(
+            facts,
+            run.refused
+                .first()
+                .map_or("no instrument in the universe could be reached", |w| {
+                    w.as_str()
+                }),
+            axum::http::StatusCode::BAD_GATEWAY,
+        );
+    }
+    landed_answer(
+        &run.total,
+        asked.window,
+        now,
+        &run.origin,
+        journal,
+        facts,
+        run.took,
+    )
+}
+
+/// What one sweep over the tracked universe did.
+///
+/// The counters and the reasons, with no HTML anywhere in it — so the same run
+/// can become a receipt for a browser or a state transition for the autopilot
+/// without either one re-deriving what the other means.
+#[derive(Debug, Default)]
+pub(crate) struct BrokerRun {
+    /// Instruments the sweep set out to fetch.
+    pub attempted: usize,
+    /// Instruments that answered.
+    pub reached: usize,
+    /// One reason per instrument that did not, prefixed with its name.
+    pub refused: Vec<String>,
+    /// Where the bars came from, as the last reached instrument reported it.
+    pub origin: String,
+    /// Everything that landed, summed.
+    pub total: pull::ingest::Ingested,
+    /// Set when the run never opened a socket at all, with the reason.
+    ///
+    /// Distinct from an empty `reached`: nothing was attempted, so nothing can
+    /// be concluded about the vendor from it.
+    pub blocked: Option<String>,
+    /// Set when the operator stopped the sweep part-way, with the reason.
+    pub stopped: Option<String>,
+    /// How long it took, in microseconds.
+    pub took: u64,
+}
+
+/// The universe, one instrument at a time — the whole of what a spot pull does.
+///
+/// # Why this is its own function
+///
+/// Two callers need this loop: `/pull/spot` and [`crate::autopilot`]. A second
+/// implementation for the background one would be a second answer to what a
+/// pull *is* — which month split it uses, which floor it clamps to, which
+/// governor it waits on, which credential it reads — and the two would drift on
+/// the first change to either. So the autopilot decides *what* to ask for and
+/// this decides nothing at all except the order.
+///
+/// # Cost
+///
+/// O(universe) requests, which is the work itself. The stop check is one
+/// relaxed atomic load per instrument.
+pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
+    let started = std::time::Instant::now();
+    // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
+    // it was found.
+    if site.broker == Broker::Refused {
+        return BrokerRun {
+            blocked: Some("this process may not reach a live broker".to_owned()),
+            ..BrokerRun::default()
+        };
+    }
 
     // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
     //
@@ -2058,56 +2186,82 @@ async fn broker_answer(
     // every restart.
     targets.sort_unstable_by_key(|k| k.underlying);
 
-    let mut total = pull::ingest::Ingested::default();
-    let mut reached = 0usize;
-    let mut refused: Vec<String> = Vec::new();
-    let mut origin_seen = String::new();
+    let mut out = BrokerRun {
+        attempted: targets.len(),
+        ..BrokerRun::default()
+    };
+    // THE STOP GENERATION, CAPTURED ONCE. A run compares against the value it
+    // started with, so a pause that arrives after this run began stops it and a
+    // pause that happened before it began does not.
+    let epoch = site.autopilot.epoch();
 
-    for instrument in &targets {
-        match broker_window(&asked, instrument, site).await {
-            Err(why) => refused.push(format!("{}: {why}", instrument.underlying)),
+    // The month these bars are for, named once rather than per instrument.
+    let month = asked
+        .window
+        .from()
+        .year_month()
+        .map_or_else(|_| String::new(), |m| m.to_string());
+
+    for (index, instrument) in targets.iter().enumerate() {
+        // PAUSE BITES WITHIN A CELL, NOT WITHIN A MONTH. One relaxed load. A
+        // month is five to thirty-seven minutes on this store, and an operator
+        // who presses Pause must not wait out the other seven hundred
+        // instruments to be obeyed.
+        if site.autopilot.stopped(epoch) {
+            out.stopped = Some(format!(
+                "{} — stopped after {} of {} instruments. The partial month is \
+                 refilled on resume, because the resume point is the store's own.",
+                crate::autopilot::CANCELLED,
+                out.reached,
+                targets.len()
+            ));
+            break;
+        }
+        // WHAT IS ON THE WIRE, RIGHT NOW. This is the difference between a page
+        // that shows a backfill working and one an operator cannot tell from a
+        // hang — D-0057's `now` object. One uncontended lock per instrument,
+        // against an instrument that costs a network round trip, so it is free
+        // in the only units that matter.
+        site.autopilot.publish(|status| {
+            status.now = Some(crate::autopilot::InFlight {
+                instrument: instrument.underlying.to_string(),
+                month: month.clone(),
+                timeframe: asked.granularity.to_string(),
+                feed: asked.feed.display().to_owned(),
+                index: index.saturating_add(1),
+                of: targets.len(),
+                since: std::time::Instant::now(),
+            });
+        });
+        match broker_window(asked, instrument, site).await {
+            Err(why) => {
+                let why = format!("{}: {why}", instrument.underlying);
+                site.autopilot
+                    .fail(&instrument.underlying.to_string(), &month, &why);
+                out.refused.push(why);
+            }
             Ok(landed) => {
-                reached += 1;
-                origin_seen.clone_from(&landed.origin);
-                total.absorb(land_one(&landed, site));
+                out.reached += 1;
+                out.origin.clone_from(&landed.origin);
+                let landed_one = land_one(&landed, site);
+                // A MEMBER THAT REACHED THE VENDOR AND STILL DID NOT LAND IS A
+                // FAILURE, and it is a different one from a refusal — the
+                // socket worked and the store did not. Both belong on the page;
+                // only naming the first would hide the disk.
+                for failure in &landed_one.failures {
+                    site.autopilot
+                        .fail(&failure.instrument, &month, &failure.why);
+                }
+                out.total.absorb(landed_one);
             }
         }
     }
-
-    facts.push(("Instruments attempted", targets.len().to_string()));
-    facts.push(("Instruments reached", reached.to_string()));
-    if !refused.is_empty() {
-        facts.push((
-            "Instruments refused",
-            format!(
-                "{} — first: {}",
-                refused.len(),
-                refused.first().map_or("", String::as_str)
-            ),
-        ));
-    }
-
-    let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    if reached == 0 {
-        return refuse(
-            facts,
-            refused
-                .first()
-                .map_or("no instrument in the universe could be reached", |w| {
-                    w.as_str()
-                }),
-            axum::http::StatusCode::BAD_GATEWAY,
-        );
-    }
-    landed_answer(
-        &total,
-        asked.window,
-        now,
-        &origin_seen,
-        journal,
-        facts,
-        took,
-    )
+    // NOTHING IS ON THE WIRE ANY MORE. Left set, a finished run would keep
+    // claiming to be fetching the last instrument it touched for as long as the
+    // process lived.
+    site.autopilot.publish(|status| status.now = None);
+    out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    out
 }
 
 /// The credential, the client and one window — or the reason there is none.
@@ -2158,6 +2312,10 @@ struct BrokerWindow {
     /// The window these bodies cover, so the lander need not be handed the
     /// request as well.
     pub window: pull::session::Window,
+    /// The rung they were asked for, travelling with them for the same reason
+    /// the spec does: the lander would otherwise have to re-state it, and a
+    /// re-stated literal here files daily bars under `1min/`.
+    pub granularity: pull::vendor::Granularity,
     /// The store prefix these bars belong under, resolved through
     /// [`pull::vendor::Feed::store_vendor`] and never assumed.
     store_vendor: brutex_core::vendor::Vendor,
@@ -2321,7 +2479,7 @@ fn monotonic_micros() -> u64 {
 /// the vendor no longer has. Refused by name rather than answered empty,
 /// because an empty answer here is indistinguishable from a market holiday and
 /// would be recorded as "nothing to store" rather than "nothing available".
-fn clamp_to_floor(
+pub(crate) fn clamp_to_floor(
     window: pull::session::Window,
     floor: pull::vendor::HistoryFloor,
 ) -> Result<pull::session::Window, String> {
@@ -2379,9 +2537,16 @@ fn clamp_to_floor(
 /// 2020-01-01 to yesterday is 81 chunks at Groww's cap — 81 Parameter Store
 /// round-trips would be the obvious way to write this and the wrong one.
 ///
-/// A feed with no published cap sends the window whole, which is what `None`
-/// means and is not a default: an unknown cap would be `UNVERIFIED` in the
-/// charter and named as such in the descriptor.
+/// # The cap is looked up PER RUNG, and an absent one is not "no split"
+///
+/// `docs/00-charter.md` §4 records Groww's cap **at 1-minute granularity** and
+/// Dhan's against its intraday-charts endpoint. Neither records a day-level
+/// figure, so neither descriptor carries one — UNVERIFIED, absent rather than
+/// guessed. `split_window` takes the `Option` and still breaks every chunk at a
+/// month boundary, because the store addresses one month per file at every
+/// rung. That is why the `None` arm that sent the window WHOLE is gone: it was
+/// the un-split request this function exists to prevent, wearing the label of a
+/// vendor that published nothing.
 async fn fetch_chunks(
     asked: &ingest::SpotRequest,
     site: &Site,
@@ -2405,11 +2570,8 @@ async fn fetch_chunks(
     // "complete" from being a claim with an expiry date.
     let asked_window = clamp_to_floor(asked.window, spec.history_floor)?;
 
-    let chunks = match spec.window_cap_days {
-        Some(cap) => pull::session::split_window(asked_window, cap)
-            .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?,
-        None => vec![asked_window],
-    };
+    let chunks = pull::session::split_window(asked_window, spec.window_cap_days(asked.granularity))
+        .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?;
 
     let mut bodies = Vec::with_capacity(chunks.len());
     for (nth, chunk) in chunks.iter().enumerate() {
@@ -2427,7 +2589,11 @@ async fn fetch_chunks(
         let request = pull::fetch::BarRequest {
             instrument_id: instrument_id.to_owned(),
             window: *chunk,
-            cadence: pull::session::Cadence::Minute,
+            // The rung goes ON THE WIRE for a feed that spells one, and it is
+            // the same rung the answer is filed under. A feed with no recorded
+            // word for it refuses here, before the socket — see
+            // `pull::fetch::FetchError::RungNotSpellable`.
+            granularity: asked.granularity,
         };
         bodies.push(
             with_retry(source, &request, asked.feed, site)
@@ -2770,6 +2936,7 @@ async fn broker_window(
         exchange: instrument.exchange.as_str(),
         segment: instrument.segment.as_str(),
         window: asked.window,
+        granularity: asked.granularity,
         instrument: instrument.underlying.to_string(),
         origin,
         spec,
@@ -2855,19 +3022,29 @@ fn landed_answer(
 /// Split out of [`spot_answer`] to stay under clippy's line ceiling; the split
 /// is a lint, not a design.
 fn local_answer(
-    feed: pull::vendor::Feed,
+    asked: ingest::SpotRequest,
     folder: &str,
-    window: pull::session::Window,
     now: std::time::SystemTime,
     site: &Site,
     journal: &audit::Journal,
     mut facts: Vec<(&'static str, String)>,
 ) -> (axum::http::StatusCode, String) {
+    // THE WHOLE REQUEST, not three of its fields. It was `feed`, `folder` and
+    // `window` unpacked at the call site, and every field this path later needs
+    // — the rung is the third — arrived as another positional argument beside
+    // two that are already the same type.
+    let window = asked.window;
     // MEASURED, NOT ESTIMATED. `Instant` and not the wall clock: the wall
     // clock can step backwards under NTP and a negative duration is not a
     // thing an operator should ever be shown.
     let started = std::time::Instant::now();
-    let outcome = run_local(feed, folder, window, &site.store_root);
+    let outcome = run_local(
+        asked.feed,
+        folder,
+        window,
+        asked.granularity,
+        &site.store_root,
+    );
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
 
     match outcome {
@@ -2963,6 +3140,7 @@ fn run_local(
     feed: pull::vendor::Feed,
     folder: &str,
     window: pull::session::Window,
+    granularity: pull::vendor::Granularity,
     store_root: &Path,
 ) -> Result<pull::ingest::Ingested, String> {
     use brutex_core::instrument::{Exchange, Segment};
@@ -2989,14 +3167,22 @@ fn run_local(
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
         window,
-        cadence: pull::session::Cadence::Minute,
+        // THE OPERATOR'S RUNG HERE TOO, and this path is where a rung the store
+        // cannot carry is actually reachable: both archive feeds are
+        // one-SECOND sources, and `Granularity::Second1` has no directory. The
+        // refusal is `pull::ingest::Plan::timeframe`'s and it names the rung.
+        //
+        // Nothing about the archive's own cadence changes: the files are
+        // whatever they are, and the fold coarsens them to the rung being filed
+        // under. That is why a tick archive can still be filed as `1min` — it
+        // always was, and this argument did not narrow it.
+        granularity,
     };
     let plan = pull::ingest::Plan {
         columns: pull::csv::Columns::Gdfl,
         request: &request,
         encoding: pull::vendor::TimestampEncoding::EpochSecondsUtc,
         scale: pull::vendor::PriceScale::Paisa,
-        timeframe: store::path::Timeframe::MINUTE_1,
         vendor,
         exchange: Exchange::Nse.as_str(),
         segment: Segment::Fno.as_str(),
@@ -3015,6 +3201,31 @@ async fn pull_spot(
     // request that straddles midnight cannot be gated against one day and
     // recorded on another.
     let now = std::time::SystemTime::now();
+    // ONE PULL AT A TIME, AND THE REFUSAL SAYS WHAT TO DO ABOUT IT.
+    //
+    // `pull::ingest`'s census lock REFUSES rather than queues, and it is taken
+    // and released once per chunk — so a hand-made pull landing inside an
+    // autopilot tick would not wait its turn, it would see every one of the 773
+    // instruments fail with a lock message and call that a run. One seat turns
+    // that into a single honest refusal that names the control which resolves
+    // it. `CLAUDE.md` §4: degrade loudly and name the reason.
+    let Some(_seat) = site.autopilot.take_seat() else {
+        return (
+            axum::http::StatusCode::CONFLICT,
+            axum::response::Html(accepted_html(
+                "Spot pull",
+                vec![(
+                    "Refused because",
+                    "the autopilot holds the pull seat, so this request was refused \
+                     rather than run against a store another pull is already writing \
+                     to. Pause it at /autopilot and try again — it resumes from \
+                     wherever the store reaches, so nothing is lost by pausing."
+                        .to_owned(),
+                )],
+                site.broker,
+            )),
+        );
+    };
     // `dated` takes a synchronous closure, and `spot_answer` is now async
     // because the broker path awaits a credential and a window. Rather than
     // make `dated` generic over futures — which would touch every page that
@@ -3610,6 +3821,23 @@ pub fn router(site: Loaded) -> axum::Router {
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
         .route("/pull/fno", axum::routing::post(pull_fno))
+        // THE AUTOPILOT'S THREE. Status is a read of one in-memory struct
+        // behind an uncontended lock — never `census_now`, because this is the
+        // route an operator refreshes every few seconds through a twelve-hour
+        // run and re-reading every manifest per request is the O(entries) cost
+        // D-0039 exists to remove.
+        .route(
+            "/autopilot.json",
+            axum::routing::get(autopilot::status_json),
+        )
+        .route("/autopilot/pause", axum::routing::post(autopilot::pause))
+        .route("/autopilot/resume", axum::routing::post(autopilot::resume))
+        // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
+        // `/audit` is the no-script page, unchanged. Before the JSON route
+        // existed the console fetched the PAGE and parsed its table back out
+        // with `DOMParser`, which coupled a browser to `render::audit_row`'s
+        // markup and left one path answered by two different applications.
+        .route("/audit.json", axum::routing::get(audit_json::audit_json))
         .route("/audit", axum::routing::get(audit_get))
         .route("/store", axum::routing::get(store_get))
         .route("/bars", axum::routing::get(bars_get))
@@ -3735,8 +3963,25 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
                 println!("  store:   {}", store_root.display());
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
-                let site = Site::serving(dir, &store_root);
-                stopped(serve(listener, router(Loaded::new(site)), shutdown).await)
+                let site = Loaded::new(Site::serving(dir, &store_root));
+                println!(
+                    "  autopilot: starting in {}s — http://{addr}/autopilot.json",
+                    autopilot::GRACE_SECS
+                );
+                // SPAWNED, NOT AWAITED. The listener is already bound and
+                // `serve` is entered on the next line, so the first request is
+                // answered while the autopilot is still counting down its grace
+                // window. It holds the same `Arc`, so pause/resume and the
+                // status it publishes are the ones the routes read.
+                let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
+                let code = stopped(serve(listener, router(site), shutdown).await);
+                // Ctrl-C stopped the HTTP surface; stop the backfill too. A
+                // sweep aborted mid-append is safe by construction — the bar
+                // file commits its header after the records are synced, so a
+                // torn write leaves bytes past `n_valid` that the next run
+                // overwrites.
+                flying.abort();
+                code
             }
             Err(e) => {
                 eprintln!("cannot bind {addr}: {e}");
@@ -5791,8 +6036,8 @@ mod tests {
         );
     }
 
-    /// Every HTTP feed declares the cap its own vendor published, and the
-    /// fetch loop is driven by it.
+    /// Every HTTP feed declares the cap its own vendor published **at the rung
+    /// it was published for**, and the fetch loop is driven by it.
     ///
     /// The numbers are `docs/00-charter.md` §4's, not this test's: Groww 30
     /// days per request at one-minute granularity, Dhan 90. What is asserted
@@ -5800,20 +6045,30 @@ mod tests {
     /// imply is the one the backfill will actually issue — 81 requests per
     /// instrument at Groww's cap for 2020-01-01 to yesterday, not one request
     /// for 2,411 days that no vendor will serve.
+    ///
+    /// **The rung is now part of the question, and only the one-minute rung is
+    /// asserted here.** The charter's Groww row carries the qualifier "at
+    /// 1-minute granularity" in its own text and its Dhan row sits under an
+    /// intraday-endpoint line, so `Minute1` is the rung both figures were
+    /// recorded for and the only one this may demand a number at. A `None` at
+    /// any other rung is a vendor fact nobody wrote down — see
+    /// `a_daily_window_is_split_by_the_month_and_not_by_the_one_minute_cap`,
+    /// which is where the absent daily cap is asserted rather than tolerated.
     #[test]
     fn the_backfill_window_becomes_one_legal_request_per_chunk() {
         for feed in pull::vendor::Feed::ALL {
             let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
                 continue;
             };
-            let Some(cap) = spec.window_cap_days else {
-                // `None` is "the vendor publishes no per-request cap", which is
-                // a legal state and not an omission — but no shipped broker is
-                // in it, so reaching here means a row lost its number.
+            let Some(cap) = spec.window_cap_days(pull::vendor::Granularity::Minute1) else {
+                // `None` is "the vendor publishes no per-request cap at this
+                // rung", which is a legal state and not an omission — but the
+                // one-minute figure is in the charter for both shipped brokers,
+                // so reaching here means a row lost its number.
                 panic!(
-                    "{} is a broker and every shipped broker's cap is in the \
-                     charter — a None here is a number that went missing, not a \
-                     vendor that published nothing",
+                    "{} is a broker and every shipped broker's ONE-MINUTE cap is \
+                     in the charter — a None here is a number that went missing, \
+                     not a vendor that published nothing",
                     feed.display()
                 );
             };
@@ -5826,7 +6081,8 @@ mod tests {
             )
             .expect("a forward window");
 
-            let chunks = pull::session::split_window(window, cap).expect("a positive cap splits");
+            let chunks =
+                pull::session::split_window(window, Some(cap)).expect("a positive cap splits");
             for chunk in &chunks {
                 let len = chunk.to().days_from_epoch() - chunk.from().days_from_epoch() + 1;
                 assert!(
@@ -5890,6 +6146,152 @@ mod tests {
                 "{} cannot cover {} months in fewer chunks",
                 feed.display(),
                 months.len()
+            );
+        }
+    }
+
+    /// **A DAILY WINDOW IS SPLIT BY THE MONTH AND NOT BY THE ONE-MINUTE CAP.**
+    ///
+    /// The two bounds are different rules from different owners. The **cap** is
+    /// the vendor's, and `docs/00-charter.md` §4 records it *per rung*: Groww
+    /// "30 days per request **at 1-minute granularity**", Dhan 90 against its
+    /// intraday-charts endpoint. Neither records a day-level figure, so neither
+    /// descriptor carries one — UNVERIFIED, absent rather than guessed. The
+    /// **month** is the store's, and it binds at every rung, because a bar file
+    /// addresses one month whatever the bar length is.
+    ///
+    /// So the daily split must be the month alone. Groww at one minute needs
+    /// **126** requests per instrument for 2020-01-01..2026-08-07 — 80 months,
+    /// plus one extra cut inside each of the 46 months longer than its 30-day
+    /// cap. At the day rung it needs **80**, one per month and no more.
+    ///
+    /// # The honest size of that, because a test should not flatter it
+    ///
+    /// 80 is a FLOOR, not a target, and it is the store's floor rather than any
+    /// vendor's: `docs/05-decisions.md` D-0054 says "14 at day level", which
+    /// implies a ~172-day cap that appears in no source and is unreachable
+    /// regardless. For Dhan the daily count and the one-minute count are both
+    /// 80 — its 90-day cap is already wider than any month, so the month was
+    /// the only bound at either rung and this change buys it nothing. Asserted
+    /// for both feeds, including the one where the answer is "no difference",
+    /// because a test that only looked at Groww would let a Dhan regression
+    /// through.
+    #[test]
+    fn a_daily_window_is_split_by_the_month_and_not_by_the_one_minute_cap() {
+        use pull::vendor::Granularity;
+
+        // 2020-01-01 to 2026-08-07 inclusive: 2,411 days across 80 months.
+        let window = pull::session::Window::new(
+            pull::session::Day::new(2020, 1, 1).expect("2020-01-01"),
+            pull::session::Day::new(2026, 8, 7).expect("2026-08-07"),
+        )
+        .expect("a forward window");
+        let months = |chunks: &[pull::session::Window]| {
+            chunks
+                .iter()
+                .map(|w| (w.from().year(), w.from().month()))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        };
+
+        for (feed, minute_chunks) in [
+            (pull::vendor::Feed::Groww, 126_usize),
+            (pull::vendor::Feed::Dhan, 80),
+        ] {
+            let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                panic!("{} is a broker", feed.display());
+            };
+
+            // THE CAP IS ABSENT AT THE DAY RUNG, and that is the recorded fact
+            // rather than a hole: no day-level figure is in the charter for
+            // either broker. If one is ever read live and written down, this
+            // line is what has to change with it.
+            assert_eq!(
+                spec.window_cap_days(Granularity::Day1),
+                None,
+                "{} publishes no day-level cap in docs/00-charter.md §4 — a \
+                 number here is one somebody invented",
+                feed.display()
+            );
+
+            let daily =
+                pull::session::split_window(window, spec.window_cap_days(Granularity::Day1))
+                    .expect("an absent cap still splits");
+            let minute =
+                pull::session::split_window(window, spec.window_cap_days(Granularity::Minute1))
+                    .expect("a positive cap splits");
+
+            assert_eq!(
+                minute.len(),
+                minute_chunks,
+                "{} at one minute is {minute_chunks} requests per instrument",
+                feed.display()
+            );
+            assert_eq!(
+                daily.len(),
+                80,
+                "{} at the day rung is ONE request per month and no more",
+                feed.display()
+            );
+            assert_eq!(months(&daily), 80, "the window touches 80 months");
+            assert_eq!(
+                daily.len(),
+                months(&daily),
+                "{}: the month is the ONLY bound at the day rung — a chunk \
+                 count above the month count means a cap is still cutting",
+                feed.display()
+            );
+            // THE SAVING, WHERE THERE IS ONE — and no claim of one where there
+            // is not. Groww's 30-day cap is narrower than a 31-day month, so
+            // the day rung is STRICTLY cheaper; Dhan's 90 is wider than any
+            // month, so the month was already the only bound and the two counts
+            // are exactly equal. Asserting `<=` for both would have let a
+            // regression that reintroduced the minute cap at the day rung pass
+            // on Groww.
+            if minute_chunks > 80 {
+                assert!(
+                    daily.len() < minute.len(),
+                    "{}: its cap cuts inside a month at one minute, so the day \
+                     rung must issue strictly fewer requests — {} against {}",
+                    feed.display(),
+                    daily.len(),
+                    minute.len()
+                );
+            } else {
+                assert_eq!(
+                    daily.len(),
+                    minute.len(),
+                    "{}: its cap is wider than any month, so the month binds at \
+                     both rungs and the day rung saves nothing",
+                    feed.display()
+                );
+            }
+
+            // AND THE MONTH BOUND IS REALLY STILL THERE. An absent cap read as
+            // "send the window whole" would be ONE chunk of 2,411 days here,
+            // which `fetch::land` refuses at the write boundary — 699 members
+            // failed that way on a real 37-day pull.
+            let mut want = window.from().days_from_epoch();
+            for chunk in &daily {
+                assert_eq!(
+                    (chunk.from().year(), chunk.from().month()),
+                    (chunk.to().year(), chunk.to().month()),
+                    "{}: a daily chunk spans two months, which the store refuses",
+                    feed.display()
+                );
+                assert_eq!(
+                    chunk.from().days_from_epoch(),
+                    want,
+                    "{}: the daily chunks leave a gap or an overlap",
+                    feed.display()
+                );
+                want = chunk.to().days_from_epoch() + 1;
+            }
+            assert_eq!(
+                want,
+                window.to().days_from_epoch() + 1,
+                "{}: the daily chunks stop short of the window",
+                feed.display()
             );
         }
     }

@@ -54,7 +54,7 @@ use pull::fetch::BarRequest;
 use pull::http::HttpSource;
 use pull::ingest::{self, Ingested, Plan};
 use pull::manifest::{EntryKey, Manifest, manifest_path};
-use pull::session::{Cadence, Day, Window};
+use pull::session::{Day, Window};
 use pull::vendor::{
     Auth, AuthScheme, DateFormat, FieldNames, HttpSpec, Method, Param, ParamValue, PriceScale,
     RangeEnd, ResponseShape, TimestampEncoding,
@@ -132,11 +132,14 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // DHAN'S REAL REQUIRED FIELDS, read first-hand from
         // dhanhq.co/docs/v2/historical-data. This is what `DH-905 securityId
         // is required` was reporting the absence of.
-        // No cap: the window is sent whole, because the split is not what
-        // this fixture is testing.
         // A test spec: no floor, so the window is used as given.
         history_floor: pull::vendor::HistoryFloor::Unstated,
-        window_cap_days: None,
+        // No published cap at any rung, and no rung field on the wire — which
+        // is Dhan's own shape. The split happens in `api::server::fetch_chunks`
+        // and this suite calls `HttpSource` directly, so neither is what it is
+        // testing.
+        window_caps: &[],
+        granularity_tokens: &[],
         params: &[
             Param {
                 name: "securityId",
@@ -204,7 +207,7 @@ fn request() -> BarRequest {
         // NIFTY at Dhan, from their own worked example.
         instrument_id: "13".to_owned(),
         window: window(),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     }
 }
 
@@ -219,7 +222,6 @@ fn plan(request: &BarRequest) -> Plan<'_> {
         // every price is multiplied by 100 a second time — the trap
         // `pull::http::DECODED_PRICE_SCALE` exists to name.
         scale: PriceScale::Paisa,
-        timeframe: Timeframe::MINUTE_1,
         vendor: Vendor::Dhan,
         exchange: "NSE",
         segment: "INDEX",
@@ -527,4 +529,201 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
         "every row is inside the session and the window"
     );
     assert!(done.failures.is_empty());
+}
+
+// ===========================================================================
+// The rung
+// ===========================================================================
+
+/// **A DAILY PULL LANDS UNDER `1day/`, AND NOT UNDER `1min/`.**
+///
+/// The same four one-minute bodies, the same socket, the same landing code —
+/// one field different. `Granularity::Day1` is what `store_timeframe` converts
+/// into `Timeframe::DAY_1`, and `Timeframe::DAY_1.as_str()` is the directory,
+/// so this test is what stands between a day's bar and the minute directory it
+/// would otherwise be indistinguishable inside.
+///
+/// The bar length lives in the PATH in this store, never in the row. That is
+/// why the negative half matters as much as the positive one: a build that
+/// filed daily bars under `1min/` would write a well-formed file with a valid
+/// checksum and an accurate counter, and no later reader could tell those bars
+/// from real one-minute data.
+///
+/// The FOLD is asserted with it, because the same field decides both. Four
+/// one-minute bars inside one session become **one** daily bar whose open is
+/// the first, high the maximum, low the minimum, close the last and volume the
+/// sum — if this landed four rows in a `1day/` file, the directory would be
+/// right and its contents would be minute bars.
+#[test]
+fn a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar() {
+    let scratch = Scratch::new("daily");
+    let store_root = scratch.store();
+    let (url, _seen) = broker(BODY);
+
+    // THE ONE CONVERSION, asserted before the run rather than inferred from
+    // it: the rung the operator picks and the directory the store writes are
+    // tied by this function and by nothing else.
+    assert_eq!(
+        pull::vendor::Granularity::Day1.store_timeframe(),
+        Some(Timeframe::DAY_1),
+        "the day rung must carry a store timeframe or nothing can be filed at it"
+    );
+    assert_eq!(Timeframe::DAY_1.as_str(), "1day");
+
+    let raw = fetch(&url);
+    let request = BarRequest {
+        granularity: pull::vendor::Granularity::Day1,
+        ..request()
+    };
+    let done: Ingested = ingest::from_window(&raw, "NIFTY", &url, &store_root, plan(&request));
+
+    assert!(
+        done.failures.is_empty(),
+        "a daily pull is not a refusal: {:?}",
+        done.failures
+    );
+    assert_eq!(done.rows_read, 4, "the broker still sent four rows");
+    assert_eq!(done.bars_stored, 1, "one session is ONE daily bar");
+    assert_eq!(done.rows_folded, 3, "and the other three folded into it");
+    assert_eq!(
+        done.rows_read,
+        done.bars_stored + done.rows_folded + done.census.total() as usize,
+        "read = stored + folded + dropped: {done:?}"
+    );
+
+    // ── THE DIRECTORY, BOTH WAYS ────────────────────────────────────────
+    let at = |rung: &str| {
+        store_root
+            .join("bars")
+            .join("dhan")
+            .join("NSE")
+            .join("INDEX")
+            .join("NIFTY")
+            .join(rung)
+            .join("2025-07.bin")
+    };
+    assert!(
+        at("1day").is_file(),
+        "the daily month file exists at {}",
+        at("1day").display()
+    );
+    assert!(
+        !at("1min").exists(),
+        "and NOTHING was written under 1min/ — a daily bar filed there is one \
+         no reader can tell from a real one-minute bar"
+    );
+
+    // ── THE CENSUS KEYS IT AT THE DAY RUNG TOO ──────────────────────────
+    // The counter carries the timeframe, so a bar filed at one rung and counted
+    // at another is a store that disagrees with itself about what it holds.
+    let manifest = census(&store_root);
+    assert!(
+        manifest
+            .entry(&EntryKey {
+                timeframe: Timeframe::MINUTE_1,
+                ..key("NIFTY")
+            })
+            .is_none(),
+        "nothing is counted at the minute rung"
+    );
+    let entry = manifest
+        .entry(&EntryKey {
+            timeframe: Timeframe::DAY_1,
+            ..key("NIFTY")
+        })
+        .expect("the month is counted at the day rung");
+    assert_eq!(entry.rows, 1, "one daily bar, counted once");
+
+    // ── AND IT IS A REAL AGGREGATE, not the first minute wearing a date ──
+    let path = store::path::StorePath::new(store::path::PathParts {
+        vendor: Vendor::Dhan,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        timeframe: Timeframe::DAY_1,
+        month: YearMonth::new(2025, 7).expect("July 2025"),
+        file: store::path::FileKind::Bars,
+    })
+    .expect("a legal path");
+    let file = store::file::BarFile::open_or_create(&store_root, path, {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "matches pull::ingest's own derivation, which the store \
+                      verifies against on reopen — a different fold here would \
+                      make this test open a file the ingest path cannot"
+        )]
+        {
+            brutex_core::universe::fnv1a("NIFTY") as u32
+        }
+    })
+    .expect("the day month file reopens");
+    assert_eq!(file.header().n_valid, 1);
+    let bar = file.read_record(0).expect("the one daily bar");
+    // Paisa, from BODY: open 24500.75, high 24530.00, low 24498.50,
+    // close 24528.75, volume 1200+980+1450+1100.
+    assert_eq!(bar.open, 2_450_075, "the FIRST minute's open");
+    assert_eq!(bar.high, 2_453_000, "the session's maximum");
+    assert_eq!(bar.low, 2_449_850, "the session's minimum");
+    assert_eq!(bar.close, 2_452_875, "the LAST minute's close");
+    assert_eq!(bar.volume, 4_730, "and the volumes summed");
+}
+
+/// **A RUNG THE STORE CANNOT CARRY IS REFUSED BY NAME, AND THE REFUSAL SAYS
+/// WHICH RUNG.**
+///
+/// `Granularity::Second1` is a real rung of the ladder — both archive feeds
+/// serve it — and `crates/store` has no directory for it.
+/// `CLAUDE.md` §4 leaves two options there and only one of them is allowed:
+/// refuse loudly, or substitute. A substitution would file one-second bars
+/// under `1min/`, and the bar length is the path here.
+///
+/// The refusal must NAME the rung. "Invalid timeframe" would send an operator
+/// to guess which of eleven rungs the run was at.
+#[test]
+fn a_rung_the_store_cannot_carry_is_refused_and_the_refusal_names_it() {
+    let scratch = Scratch::new("unstorable");
+    let store_root = scratch.store();
+    let (url, _seen) = broker(BODY);
+
+    assert_eq!(
+        pull::vendor::Granularity::Second1.store_timeframe(),
+        None,
+        "this test is about the rung crates/store has NOT been widened to carry"
+    );
+
+    let raw = fetch(&url);
+    let request = BarRequest {
+        granularity: pull::vendor::Granularity::Second1,
+        ..request()
+    };
+    let done: Ingested = ingest::from_window(&raw, "NIFTY", &url, &store_root, plan(&request));
+
+    assert_eq!(done.bars_stored, 0, "nothing was written");
+    assert_eq!(done.counted, 0, "and nothing was counted");
+    assert_eq!(
+        done.rows_read, 4,
+        "the rows that arrived are still reported — reporting zero would blame \
+         the vendor for a refusal that is ours"
+    );
+    assert_eq!(done.failures.len(), 1, "one refusal, not one per member");
+    let why = &done.failures.first().expect("the refusal").why;
+    assert!(
+        why.contains("1s"),
+        "the refusal must NAME the rung it refused: {why}"
+    );
+    assert!(
+        why.contains("1min") && why.contains("1day"),
+        "and say which rungs this build does store: {why}"
+    );
+
+    // AND NOT ONE BYTE ON THE DISK, at any rung. A refusal that still wrote
+    // the file somewhere would be the substitution this exists to prevent.
+    assert!(
+        !store_root.join("bars").exists(),
+        "no bar file was opened at any rung"
+    );
+    assert!(
+        !manifest_path(&store_root, Vendor::Dhan).exists(),
+        "and no census was published"
+    );
 }

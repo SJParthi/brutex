@@ -61,7 +61,7 @@ use pull::ingest::{self, Ingested, Plan};
 use pull::manifest::{
     ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path,
 };
-use pull::session::{Cadence, Day, Window};
+use pull::session::{Day, Window};
 use pull::vendor::{PriceScale, TimestampEncoding};
 
 // ===========================================================================
@@ -164,7 +164,7 @@ fn request() -> BarRequest {
     BarRequest {
         instrument_id: String::new(),
         window: window(),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     }
 }
 
@@ -175,7 +175,6 @@ fn plan_over<'a>(request: &'a BarRequest, segment: &'a str) -> Plan<'a> {
         request,
         encoding: TimestampEncoding::EpochSecondsUtc,
         scale: PriceScale::Paisa,
-        timeframe: Timeframe::MINUTE_1,
         vendor: VENDOR,
         exchange: "NSE",
         segment,
@@ -407,7 +406,7 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
             Day::new(2022, 10, 3).expect("2022-10-03"),
         )
         .expect("a one-day window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store, &narrow);
     assert_eq!(first.bars_stored, 2);
@@ -426,7 +425,7 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
             Day::new(2022, 10, 4).expect("2022-10-04"),
         )
         .expect("a one-day window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let second = run(&archive, &store, &wider);
     assert_eq!(second.bars_stored, 1, "one bar was appended");

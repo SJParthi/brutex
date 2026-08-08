@@ -31,8 +31,30 @@ const ROUTES = [
 	'/bars.json',
 	'/store.json',
 	'/audit.json',
-	'/audit',
-	'/pull'
+	// `/audit` IS NOT HERE, AND ITS ABSENCE IS THE POINT.
+	//
+	// It used to be, and it made one URL serve two different applications:
+	// clicking "Audit" in the nav rendered `src/routes/audit/+page.svelte`
+	// (SvelteKit routes in the browser and never consults this proxy), while a
+	// reload, a bookmark or a typed address hit the proxy and got the
+	// Rust-rendered page instead — different nav, no feed picker, no theme, and
+	// two of its own links 404 in development. The console was unreachable by
+	// every route except a click.
+	//
+	// The collision was real: both surfaces wanted the same path, and the
+	// Svelte one had no other source of data. `/audit.json` is what removed
+	// that — see `crates/api/src/audit_json.rs`. The page now owns `/audit`
+	// here, the Rust page still answers `/audit` on the API's own port, and
+	// nothing renders differently depending on how the operator arrived.
+	'/pull',
+	// THE AUTOPILOT. Three entries and NOT the `/autopilot` prefix, deliberately:
+	// `/autopilot` is a PAGE this app renders, and proxying that prefix would
+	// hand the page itself to Rust and the route would 404 in development only.
+	// `/autopilot/` (with the slash) covers the two controls without covering
+	// the page.
+	'/autopilot.json',
+	'/autopilot/pause',
+	'/autopilot/resume'
 ];
 
 export default {

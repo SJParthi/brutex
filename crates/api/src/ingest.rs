@@ -271,6 +271,16 @@ pub enum Refusal {
         /// What arrived.
         got: String,
     },
+    /// A bar length was named, and it is not a rung of the ladder.
+    ///
+    /// The same rule as [`Self::UnknownVendor`] and for the same reason: absent
+    /// defaults to `1min`, present-but-unknown refuses by name. A coerced rung
+    /// files bars under a directory the operator did not ask for, and the bar
+    /// length lives in the path.
+    UnknownGranularity {
+        /// What arrived.
+        got: String,
+    },
     /// The underlying is not a symbol this engine can even name.
     BadUnderlying {
         /// What arrived.
@@ -361,6 +371,19 @@ impl fmt::Display for Refusal {
                  Nothing was pulled rather than another vendor's bars being \
                  filed under a prefix you did not ask for"
             ),
+            Self::UnknownGranularity { ref got } => write!(
+                f,
+                "REFUSED · {got:?} is not a bar length on this ladder. Nothing \
+                 was pulled rather than bars being filed under a rung you did \
+                 not ask for — the bar length is the DIRECTORY here, and no \
+                 reader can tell a substituted bar from a real one. This build \
+                 stores {}.",
+                store::path::Timeframe::KNOWN
+                    .iter()
+                    .map(|tf| tf.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
             Self::BadUnderlying { ref got } => {
                 write!(f, "REFUSED · {got:?} is not a symbol this engine can name")
             }
@@ -422,6 +445,25 @@ pub struct SpotRequest {
     /// defaulting to the unverified one would make a first-time operator debug
     /// a shape nobody has confirmed.
     pub feed: pull::vendor::Feed,
+    /// Which rung of the ladder to file under — `1min` or `1day`.
+    ///
+    /// # Why a `Granularity` and not a `Timeframe`
+    ///
+    /// The operator picks a **rung**; the store's directory is what a rung
+    /// converts INTO, and that conversion has exactly one site —
+    /// [`pull::vendor::Granularity::store_timeframe`] — whose `None` is a
+    /// refusal at the write boundary rather than a substitution. Carrying the
+    /// timeframe here would move the conversion up to the parser, where a rung
+    /// the store cannot file has nothing to refuse with except a guess.
+    ///
+    /// # Why it defaults rather than being required
+    ///
+    /// Absent means `1min`, which is what every request meant before this field
+    /// existed — `/pull/spot` is a POST an operator can replay, and a body
+    /// written last week must not silently change rung. The form always sends
+    /// it, so the default is reached only by a hand-built request. Naming an
+    /// unknown one still refuses: see [`parse_granularity`].
+    pub granularity: pull::vendor::Granularity,
 }
 
 /// One expired-derivative pull, validated.
@@ -598,7 +640,39 @@ pub fn parse_spot(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
             let raw = param(body, "vendor");
             parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
         },
+        granularity: {
+            let raw = param(body, "granularity");
+            parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
+        },
     })
+}
+
+/// Which rung a request names: `None` when it named one this ladder has not.
+///
+/// The same rule as [`parse_feed`] — absent defaults, present-but-unknown
+/// refuses by name — and matched on the rung's own **directory name**, which is
+/// the value the form puts on the wire and the segment the store writes. One
+/// spelling for the control, the request and the path, so a rung added to
+/// `pull::vendor::Granularity` is parseable here with no edit to this function.
+///
+/// Absent is `Minute1` because that is what every request meant before the
+/// field existed. `CLAUDE.md` §3 rule 5 makes reruns safe, and a replayed body
+/// that silently changed rung would file the same window twice under two
+/// directories.
+///
+/// **Whether the store can carry the rung is not asked here.** That question is
+/// answered once, at the write boundary, by
+/// [`pull::vendor::Granularity::store_timeframe`] — see `pull::ingest::Plan`.
+/// Asking it twice would be two answers to "where does this bar go", and the
+/// parser's copy is the one that would drift.
+#[must_use]
+pub fn parse_granularity(raw: &str) -> Option<pull::vendor::Granularity> {
+    if raw.is_empty() {
+        return Some(pull::vendor::Granularity::Minute1);
+    }
+    pull::vendor::Granularity::ALL
+        .into_iter()
+        .find(|rung| rung.dir().eq_ignore_ascii_case(raw))
 }
 
 /// Which broker a request names: `None` when it named one this build cannot serve.
@@ -1078,6 +1152,64 @@ mod tests {
         );
     }
 
+    /// The rung is a field, it defaults to the minute, and a rung this ladder
+    /// has no rung for is refused BY NAME.
+    ///
+    /// The default is the load-bearing half. `/pull/spot` is a POST an operator
+    /// can replay and a body written before this field existed must keep the
+    /// meaning it had — `CLAUDE.md` §3 rule 5 makes reruns safe, and a request
+    /// that silently changed rung would file the same window twice under two
+    /// directories, which the append-only store has no way to undo.
+    #[test]
+    fn a_spot_request_names_its_bar_length_defaults_to_the_minute_or_is_refused() {
+        use pull::vendor::Granularity;
+
+        // ABSENT IS THE MINUTE. This is the body every test written before the
+        // field existed sends, and it must still mean what it meant.
+        let old = parse_spot("target=swept&from=2022-01-08&to=2022-02-08", TEST_TODAY)
+            .expect("a body with no rung is still a request");
+        assert_eq!(
+            old.granularity,
+            Granularity::Minute1,
+            "an unstated rung is one minute, which is what it was before there \
+             was a field to state"
+        );
+
+        // AND EVERY RUNG THE STORE CAN FILE ROUND-TRIPS through the directory
+        // name — one spelling for the control, the wire and the path.
+        for rung in Granularity::ALL {
+            if rung.store_timeframe().is_none() {
+                continue;
+            }
+            let body = format!(
+                "target=swept&granularity={}&from=2022-01-08&to=2022-02-08",
+                rung.dir()
+            );
+            let asked = parse_spot(&body, TEST_TODAY).expect("a rung this build stores");
+            assert_eq!(asked.granularity, rung);
+            assert_eq!(parse_granularity(rung.dir()), Some(rung));
+        }
+
+        // A RUNG THAT IS NOT ON THE LADDER AT ALL is refused naming what
+        // arrived, never coerced to the default — the coercion would file bars
+        // under a directory the operator did not ask for.
+        assert_eq!(
+            parse_spot(
+                "target=swept&granularity=hourly&from=2022-01-08&to=2022-02-08",
+                TEST_TODAY
+            ),
+            Err(Refusal::UnknownGranularity {
+                got: "hourly".to_owned()
+            })
+        );
+        assert_eq!(parse_granularity("1 day"), None, "the spelling is exact");
+        // A rung that IS on the ladder and has no directory parses here and is
+        // refused at the write boundary instead. Two different questions, and
+        // this parser answers only the first — see `pull::ingest::Plan`.
+        assert_eq!(parse_granularity("5min"), Some(Granularity::Minute5));
+        assert_eq!(Granularity::Minute5.store_timeframe(), None);
+    }
+
     #[test]
     fn an_expired_contract_is_accepted_and_a_live_one_can_never_be() {
         let ok = parse_fno(
@@ -1248,7 +1380,16 @@ mod tests {
         // in production — and `Refusal` exists precisely so that "invalid
         // input" is never the answer.
         let day = day(2026, 8, 7);
-        let cases: [(Refusal, &str); 11] = [
+        let cases: [(Refusal, &str); 12] = [
+            (
+                Refusal::UnknownGranularity {
+                    got: "5min".to_owned(),
+                },
+                // The rung the operator typed, QUOTED BACK. A message that said
+                // only "unsupported bar length" leaves them guessing which of
+                // eleven rungs this build refused and which two it takes.
+                "\"5min\" is not a bar length",
+            ),
             (
                 Refusal::FieldMissing { field: "from" },
                 "from was not filled in",
@@ -1331,7 +1472,7 @@ mod tests {
             );
             assert!(text.contains(expected), "{refusal:?} rendered as {text}");
         }
-        // And the twelfth, which carries a calendar refusal of its own.
+        // And the thirteenth, which carries a calendar refusal of its own.
         let clock = Refusal::ClockUnusable {
             why: SessionError::BeforeEpoch { secs: -1 },
         };

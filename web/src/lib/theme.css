@@ -7,209 +7,1548 @@
  *
  * Numbers are ALWAYS tabular-nums. A price column whose digits change width is
  * a column that shimmers while you read it.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW THIS FILE IS ORGANISED, AND THE ONE RULE FOR EDITING IT
+ * ---------------------------------------------------------------------------
+ *
+ *   1. THE RAMP        raw colour, per theme, in four blocks (see below).
+ *   2. THE MAPPING     semantic names -> ramp steps. Written ONCE.
+ *   3. THE SCALES      radius, space, type, motion. Theme-invariant.
+ *   4. THE KEYFRAMES   inert until something asks for them.
+ *   5. THE COMPONENTS  every class the pages use, expressed through tokens.
+ *   6. THE MOTION      every `animation:` and `transition:` in the file, all
+ *                      of it inside `prefers-reduced-motion: no-preference`.
+ *
+ * **Never rename a token or a class.** Four route pages and a chart component
+ * reference these names directly and none of them are edited when this file is.
+ * Adding is free; renaming is a silent breakage on a page nobody re-opened.
+ *
+ * THE FOUR-BLOCK THEME PATTERN, and why it is four and not two:
+ *
+ *   :root                              the light ramp, and the baseline
+ *   @media (prefers-color-scheme:dark) the dark ramp, for an unset toggle
+ *   :root[data-theme="dark"]           the toggle, forcing dark
+ *   :root[data-theme="light"]          the toggle, forcing light
+ *
+ * The last two carry an attribute so they out-specify the bare `:root` inside
+ * the media query — media queries do not add specificity, so without the
+ * attribute the system preference would beat an explicit choice in one
+ * direction and lose in the other. With it, the toggle wins both ways. The
+ * shell writes `data-theme` for an explicit choice and REMOVES it for "auto",
+ * which is what hands control back to the media query.
  */
-:root {
-  --bg: #0b0e14;
-  --bg-2: #11151f;
-  --panel: #141924;
-  --panel-2: #1a2030;
-  --line: #232a3a;
-  --line-soft: #1b212e;
 
-  --ink: #e6ebf5;
-  --dim: #8a95ab;
-  --faint: #5c6679;
+/* ==========================================================================
+   1. THE RAMP — light
+   --------------------------------------------------------------------------
+   NOT PURE GREY. Every step is pulled toward the accent's hue (~222deg) at
+   very low saturation. Pure #808080 grey beside a blue accent reads as dirty
+   yellow by simultaneous contrast; a neutral that shares the accent's hue
+   reads as neutral and lets the accent stay the only saturated thing on the
+   page. The ramp runs background -> foreground, n0 darkest surface in dark
+   mode and lightest in light mode, so the MAPPING below is written once.
+   ========================================================================== */
+:root {
+  color-scheme: light;
+
+  --n0: #e9edf5;   /* recessed — wells, track backgrounds       */
+  --n1: #f5f7fb;   /* page                                      */
+  --n2: #ffffff;   /* bars, sticky heads, raised surfaces       */
+  --n3: #ffffff;   /* panels                                    */
+  --n4: #eef1f7;   /* panel interior, hover                     */
+  --n5: #edf0f6;   /* hairline, soft                            */
+  --n6: #dee3ed;   /* hairline                                  */
+  --n7: #c7cfdd;   /* hairline, strong / disabled edge          */
+  --n8: #8b95a8;   /* faint text — labels, units                */
+  --n9: #5a6478;   /* dim text — secondary                      */
+  --n10: #38415a;  /* ink, secondary emphasis                   */
+  --n11: #0d1220;  /* ink                                       */
+  --n12: #000814;  /* ink, strong                               */
+
+  /* SEMANTIC HUES, KEPT OFF THE ACCENT. Up/down/warn/info must survive an
+     accent change: if the accent were also the "info" colour then re-hueing
+     the brand would silently re-hue a meaning. They are four independent
+     hues — teal, red, amber, violet — and the accent is a fifth, blue. */
+  --up: #0e8f80;
+  --down: #d93a36;
+  --warn: #a86a06;
+  --info: #6d45d9;
+  --acc: #2f6fe4;
+  --acc-hi: #1c58c8;
+  --on-acc: #ffffff;
+
+  --acc-soft: rgba(47, 111, 228, 0.1);
+  --up-soft: rgba(14, 143, 128, 0.12);
+  --down-soft: rgba(217, 58, 54, 0.11);
+  --warn-soft: rgba(168, 106, 6, 0.13);
+  --info-soft: rgba(109, 69, 217, 0.11);
+
+  --focus: #1d4ed8;
+  --scrim: rgba(16, 24, 40, 0.28);
+
+  --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+  --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  --e3: 0 20px 50px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.06);
+}
+
+/* ==========================================================================
+   1. THE RAMP — dark, by system preference
+   --------------------------------------------------------------------------
+   These are the values the console was tuned against and they are unchanged.
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+
+    --up: #26a69a;
+    --down: #ef5350;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #5b8def;
+    --acc-hi: #7aa7ff;
+    --on-acc: #ffffff;
+
+    --acc-soft: rgba(91, 141, 239, 0.14);
+    --up-soft: rgba(38, 166, 154, 0.16);
+    --down-soft: rgba(239, 83, 80, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+
+    --focus: #8ab4ff;
+    --scrim: rgba(0, 0, 0, 0.55);
+
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  }
+}
+
+/* ==========================================================================
+   1. THE RAMP — dark, forced by the toggle
+   ========================================================================== */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --n0: #070a11;
+  --n1: #0b0e14;
+  --n2: #11151f;
+  --n3: #141924;
+  --n4: #1a2030;
+  --n5: #1b212e;
+  --n6: #232a3a;
+  --n7: #333c51;
+  --n8: #5c6679;
+  --n9: #8a95ab;
+  --n10: #b3bdd0;
+  --n11: #e6ebf5;
+  --n12: #fbfcff;
 
   --up: #26a69a;
   --down: #ef5350;
-  --acc: #5b8def;
-  --acc-soft: rgba(91, 141, 239, 0.14);
   --warn: #f0b429;
+  --info: #9d7cf5;
+  --acc: #5b8def;
+  --acc-hi: #7aa7ff;
+  --on-acc: #ffffff;
 
-  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  --acc-soft: rgba(91, 141, 239, 0.14);
+  --up-soft: rgba(38, 166, 154, 0.16);
+  --down-soft: rgba(239, 83, 80, 0.16);
+  --warn-soft: rgba(240, 180, 41, 0.16);
+  --info-soft: rgba(157, 124, 245, 0.16);
 
-  --r: 8px;
+  --focus: #8ab4ff;
+  --scrim: rgba(0, 0, 0, 0.55);
+
+  --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* ==========================================================================
+   1. THE RAMP — light, forced by the toggle
+   --------------------------------------------------------------------------
+   Repeated rather than inherited from `:root`, because `:root` alone loses to
+   the dark media query and a toggle that only works in one direction is worse
+   than no toggle.
+   ========================================================================== */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --n0: #e9edf5;
+  --n1: #f5f7fb;
+  --n2: #ffffff;
+  --n3: #ffffff;
+  --n4: #eef1f7;
+  --n5: #edf0f6;
+  --n6: #dee3ed;
+  --n7: #c7cfdd;
+  --n8: #8b95a8;
+  --n9: #5a6478;
+  --n10: #38415a;
+  --n11: #0d1220;
+  --n12: #000814;
+
+  --up: #0e8f80;
+  --down: #d93a36;
+  --warn: #a86a06;
+  --info: #6d45d9;
+  --acc: #2f6fe4;
+  --acc-hi: #1c58c8;
+  --on-acc: #ffffff;
+
+  --acc-soft: rgba(47, 111, 228, 0.1);
+  --up-soft: rgba(14, 143, 128, 0.12);
+  --down-soft: rgba(217, 58, 54, 0.11);
+  --warn-soft: rgba(168, 106, 6, 0.13);
+  --info-soft: rgba(109, 69, 217, 0.11);
+
+  --focus: #1d4ed8;
+  --scrim: rgba(16, 24, 40, 0.28);
+
+  --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+  --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  --e3: 0 20px 50px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.06);
+}
+
+/* ==========================================================================
+   2. THE MAPPING + 3. THE SCALES — theme-invariant, written once
+   --------------------------------------------------------------------------
+   `--bg`, `--panel`, `--line`, `--ink` and friends are the names the pages
+   already use and they keep meaning exactly what they meant. They now resolve
+   through the ramp instead of being literals, so a theme is one ramp edit.
+   ========================================================================== */
+:root {
+  --bg: var(--n1);
+  --bg-2: var(--n2);
+  --panel: var(--n3);
+  --panel-2: var(--n4);
+  --line: var(--n6);
+  --line-soft: var(--n5);
+  --line-hard: var(--n7);
+  --well: var(--n0);
+
+  --ink: var(--n11);
+  --ink-hi: var(--n12);
+  --ink-2: var(--n10);
+  --dim: var(--n9);
+  --faint: var(--n8);
+
+  --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+  /* TYPE. A terminal is read at a distance of 50cm for eight hours; the scale
+     is tight because a big jump between two sizes reads as two documents. */
+  --fs-micro: 9.5px;
+  --fs-mini: 10px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-md: 14px;
+  --fs-lg: 17px;
+  --fs-xl: 22px;
+  --fs-2xl: 28px;
+
+  --lh-tight: 1.15;
+  --lh-base: 1.45;
+
+  --w-mid: 500;
+  --w-semi: 600;
+  --w-bold: 700;
+  --w-heavy: 800;
+
+  --track-caps: 0.1em; /* the uppercase micro-label tracking, in one place */
+
+  /* SPACE. A 2px base, because a 30px row cannot afford an 8px grid. */
+  --s1: 2px;
+  --s2: 4px;
+  --s3: 6px;
+  --s4: 8px;
+  --s5: 12px;
+  --s6: 16px;
+  --s7: 24px;
+  --s8: 32px;
+
+  --r1: 4px;
+  --r2: 6px;
+  --r: 8px; /* the historical name — unchanged, and still the default */
+  --r3: 8px;
+  --r4: 12px;
+  --r-full: 999px;
+
   --row-h: 30px;
-}
-:root[data-theme="light"] {
-  --bg: #f7f8fa; --bg-2: #fff; --panel: #fff; --panel-2: #f2f4f8;
-  --line: #e2e6ee; --line-soft: #eef1f6;
-  --ink: #0d1220; --dim: #5a6478; --faint: #8b95a8;
-  --acc-soft: rgba(91, 141, 239, 0.1);
+  --topbar-h: 46px;
+  --rail-w: 320px;
+
+  /* MOTION. Durations are named for what they are FOR, not for how long they
+     are, so "make the hover snappier" is one edit and not a search for 120ms.
+     Nothing here is longer than a keystroke except the flash, which has to
+     outlast a saccade or it is not seen at all. */
+  --d-instant: 70ms;
+  --d-hover: 110ms;
+  --d-state: 160ms;
+  --d-enter: 220ms;
+  --d-panel: 300ms;
+  --d-flash: 720ms;
+  --d-shimmer: 1150ms;
+  --d-sweep: 1400ms;
+
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
 }
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; }
+/* ==========================================================================
+   BASE
+   ========================================================================== */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+html,
+body {
+  height: 100%;
+}
 body {
   background: var(--bg);
   color: var(--ink);
-  font: 13px/1.45 var(--sans);
+  font: var(--fs-base) / var(--lh-base) var(--sans);
   -webkit-font-smoothing: antialiased;
   overflow: hidden; /* the app owns its own scroll regions */
 }
-.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
-.up { color: var(--up); }
-.down { color: var(--down); }
+
+::selection {
+  background: var(--acc-soft);
+  color: var(--ink-hi);
+}
+
+/* Scrollbars belong to the instrument panel, not to the OS default. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--n7) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--n7);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-full);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--n8);
+  background-clip: content-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* FOCUS IS NEVER INVISIBLE. One rule, every interactive element, both themes.
+   `:focus-visible` and not `:focus`, so a mouse click does not ring a button;
+   a keyboard user gets the ring on everything without any page opting in. */
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r1);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* THE SKIP LINK. Off-screen until focused, then a real, visible target — the
+   nav is five stops deep and a keyboard operator should not pay them to reach
+   a 90,000-row table. */
+.skip {
+  position: absolute;
+  left: var(--s4);
+  top: -100px;
+  z-index: 100;
+  padding: var(--s3) var(--s5);
+  background: var(--acc);
+  color: var(--on-acc);
+  border-radius: var(--r2);
+  font-weight: var(--w-bold);
+  font-size: var(--fs-sm);
+  text-decoration: none;
+  box-shadow: var(--e2);
+}
+.skip:focus {
+  top: var(--s4);
+}
+
+/* ==========================================================================
+   NUMBERS
+   Tabular everywhere digits align. A symbol containing digits (NIFTY50) is
+   rendered tabular too, which is correct: it is still a column.
+   ========================================================================== */
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+.up {
+  color: var(--up);
+}
+.down {
+  color: var(--down);
+}
+.warn {
+  color: var(--warn);
+}
+.info {
+  color: var(--info);
+}
+.muted {
+  color: var(--dim);
+}
+.faint {
+  color: var(--faint);
+}
+
+/* ==========================================================================
+   5. THE COMPONENTS
+   ========================================================================== */
 
 /* ---- shell ---------------------------------------------------------- */
-.shell { display: grid; grid-template-rows: 44px 1fr; height: 100dvh; }
+.shell {
+  display: grid;
+  grid-template-rows: var(--topbar-h) 1fr;
+  height: 100dvh;
+}
 .topbar {
-  display: flex; align-items: center; gap: 2px;
-  padding: 0 12px; background: var(--bg-2);
+  position: relative; /* the pull progress bar hangs off its bottom edge */
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  padding: 0 var(--s5);
+  background: var(--bg-2);
   border-bottom: 1px solid var(--line);
+  z-index: 20;
 }
-.brand { font-weight: 800; letter-spacing: -0.4px; margin-right: 14px; font-size: 14px; }
-.brand b { color: var(--acc); }
+.brand {
+  font-weight: var(--w-heavy);
+  letter-spacing: -0.4px;
+  margin-right: var(--s5);
+  font-size: var(--fs-md);
+  white-space: nowrap;
+}
+.brand b {
+  color: var(--acc);
+}
+/* The nav is one flex item holding the tabs, so it can be a landmark without
+   the tabs losing the spacing they had when they were bare children. */
+.topbar nav {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
 .tab {
-  padding: 6px 12px; border-radius: 6px; color: var(--dim);
-  text-decoration: none; font-weight: 600; font-size: 12.5px;
-  transition: background 0.12s, color 0.12s;
+  position: relative;
+  padding: var(--s3) var(--s5);
+  border-radius: var(--r2);
+  color: var(--dim);
+  text-decoration: none;
+  font-weight: var(--w-semi);
+  font-size: 12.5px;
+  white-space: nowrap;
 }
-.tab:hover { color: var(--ink); background: var(--panel-2); }
-.tab[aria-current="page"] { color: var(--ink); background: var(--acc-soft); }
-.spacer { flex: 1; }
+.tab:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+/* THE ACTIVE TAB IS NOT JUST A TINT. A background alone is the same signal as
+   hover and the two get confused at a glance; the underline is unambiguous
+   and survives a colour-blind reading, which a hue difference does not. */
+.tab[aria-current='page'] {
+  color: var(--ink);
+  background: var(--acc-soft);
+}
+.tab[aria-current='page']::after {
+  content: '';
+  position: absolute;
+  left: var(--s5);
+  right: var(--s5);
+  bottom: -1px;
+  height: 2px;
+  background: var(--acc);
+  border-radius: 2px 2px 0 0;
+}
+.spacer {
+  flex: 1;
+}
+
+/* ---- main region ------------------------------------------------------
+   A real landmark so the skip link has somewhere to land. It is a flex column
+   and its child is told to fill, so a page whose root is `.split` (a grid) or
+   `.pane` (a flex column) keeps the exact height it had before there was a
+   `<main>` between it and the shell. */
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.main > * {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+}
+.main:focus {
+  outline: none;
+}
 
 /* ---- the feed selector — one feed, never two ------------------------ */
-.feeds { display: flex; gap: 3px; align-items: center; }
+.feeds {
+  display: flex;
+  gap: var(--s3);
+  align-items: center;
+}
+.feeds .lbl,
+.lbl {
+  font-size: var(--fs-mini);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
 .feeds .lbl {
-  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--faint); margin-right: 4px;
+  margin-right: var(--s2);
 }
 .feed {
-  padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
-  border: 1px solid var(--line); background: transparent; color: var(--dim);
-  cursor: pointer; white-space: nowrap;
+  padding: var(--s2) var(--s5);
+  border-radius: var(--r-full);
+  font-size: 11.5px;
+  font-weight: var(--w-bold);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
 }
-.feed:hover { border-color: var(--acc); color: var(--ink); }
-.feed[aria-pressed="true"] { background: var(--acc); border-color: var(--acc); color: #fff; }
-.feed.not-ready { opacity: 0.38; cursor: not-allowed; border-style: dashed; }
-.feed.not-ready:hover { border-color: var(--line); color: var(--dim); }
-.feed .kind { opacity: 0.6; font-weight: 500; margin-left: 5px; font-size: 10px; }
+.feed:hover:not(:disabled) {
+  border-color: var(--acc);
+  color: var(--ink);
+}
+.feed[aria-pressed='true'] {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--on-acc);
+}
+.feed:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.feed.not-ready {
+  opacity: 0.38;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.feed.not-ready:hover {
+  border-color: var(--line);
+  color: var(--dim);
+}
+.feed .kind {
+  opacity: 0.6;
+  font-weight: var(--w-mid);
+  margin-left: var(--s3);
+  font-size: var(--fs-mini);
+}
 
 /* ---- panes ---------------------------------------------------------- */
-.split { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
-.pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
-.pane + .pane { border-left: 1px solid var(--line); }
-.pane-head {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
-  border-bottom: 1px solid var(--line); background: var(--bg-2);
+.split {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  min-height: 0;
 }
-.pane-title { font-size: 10.5px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.pane + .pane {
+  border-left: 1px solid var(--line);
+}
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+  min-height: 40px;
+  flex: none;
+}
+.pane-title {
+  font-size: 10.5px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
 
 /* ---- search --------------------------------------------------------- */
 .search {
-  width: 100%; font: inherit; padding: 7px 10px; border-radius: var(--r);
-  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+  width: 100%;
+  font: inherit;
+  padding: 7px var(--s5);
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
 }
-.search:focus { outline: 0; border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
-.search::placeholder { color: var(--faint); }
+.search:focus {
+  outline: 0;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+.search:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.search::placeholder {
+  color: var(--faint);
+}
+.search:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* ---- virtual list --------------------------------------------------- */
-.vlist { flex: 1; overflow-y: auto; overscroll-behavior: contain; position: relative; }
-.vrow {
-  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
-  height: var(--row-h); padding: 0 10px; cursor: pointer;
-  border-bottom: 1px solid var(--line-soft);
+.vlist {
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  position: relative;
 }
-.vrow:hover { background: var(--panel-2); }
-.vrow[aria-selected="true"] { background: var(--acc-soft); box-shadow: inset 2px 0 0 var(--acc); }
-.vrow .sym { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vrow .meta { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.vrow {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--s4);
+  align-items: center;
+  height: var(--row-h);
+  padding: 0 var(--s5);
+  cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+  font-variant-numeric: tabular-nums;
+}
+.vrow:hover {
+  background: var(--panel-2);
+}
+.vrow[aria-selected='true'] {
+  background: var(--acc-soft);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.vrow .sym {
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.vrow .meta {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
 
 /* ---- table ---------------------------------------------------------- */
-.grid { flex: 1; overflow: auto; }
-table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
-thead th {
-  position: sticky; top: 0; z-index: 2; background: var(--bg-2);
-  text-align: left; padding: 7px 12px; font-size: 10px; font-weight: 700;
-  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
-  border-bottom: 1px solid var(--line); white-space: nowrap;
+.grid {
+  flex: 1;
+  overflow: auto;
 }
-thead th.num { text-align: right; }
-tbody td { padding: 5px 12px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
-tbody tr:hover td { background: var(--panel-2); }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-2);
+  text-align: left;
+  padding: 7px var(--s5);
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+thead th.num {
+  text-align: right;
+}
+tbody td {
+  padding: 5px var(--s5);
+  border-bottom: 1px solid var(--line-soft);
+  white-space: nowrap;
+}
+tbody tr:hover td {
+  background: var(--panel-2);
+}
 
-.empty { padding: 28px 14px; color: var(--faint); text-align: center; font-size: 12.5px; }
-.chart { flex: 1; min-height: 0; }
+.empty {
+  padding: var(--s7) var(--s6);
+  color: var(--faint);
+  text-align: center;
+  font-size: 12.5px;
+}
+.chart {
+  flex: 1;
+  min-height: 0;
+}
 
 /* ---- feed select: N feeds without changing shape ---- */
-.feedsel { display: flex; align-items: center; gap: 6px; }
-.feedsel select {
-  font: inherit; font-size: 12px; font-weight: 650;
-  padding: 4px 26px 4px 10px; border-radius: 6px;
-  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
-  appearance: none; cursor: pointer;
-  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
-                    linear-gradient(135deg, var(--dim) 50%, transparent 50%);
-  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
-  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+.feedsel {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
 }
-.feedsel select:focus { outline: 0; border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+.feedsel select {
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  padding: var(--s2) 26px var(--s2) var(--s5);
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  appearance: none;
+  cursor: pointer;
+  background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%),
+    linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 52%, calc(100% - 9px) 52%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+.feedsel select:focus {
+  outline: 0;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+
+/* ---- the feed combobox: N feeds, keyboard-complete -------------------
+   A listbox and not a `<select>` because the option has to carry more than a
+   name: the transport, whether the store holds anything, and — for a feed
+   that cannot be used — the SERVER'S OWN REASON. A native option renders one
+   string and no colour, so "unavailable" arrived without the why, which is
+   the half-silent failure CLAUDE.md section 4 bans. */
+.combo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+.combo-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  padding: var(--s2) var(--s4) var(--s2) var(--s5);
+  min-width: 11rem;
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  text-align: left;
+}
+.combo-btn:hover {
+  border-color: var(--line-hard);
+  background: var(--panel-2);
+}
+.combo-btn[aria-expanded='true'] {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--acc-soft);
+}
+.combo-btn .val {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.combo-btn .sub {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.combo-btn .caret {
+  width: 7px;
+  height: 7px;
+  border-right: 1.5px solid var(--dim);
+  border-bottom: 1.5px solid var(--dim);
+  transform: rotate(45deg) translate(-2px, -2px);
+  flex: none;
+}
+.combo-pop {
+  position: absolute;
+  top: calc(100% + var(--s3));
+  right: 0;
+  z-index: 60;
+  min-width: 22rem;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: var(--s2);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r4);
+  box-shadow: var(--e3);
+}
+.combo-opt {
+  display: grid;
+  grid-template-columns: 14px 1fr auto;
+  align-items: center;
+  gap: var(--s4);
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  border: 0;
+  border-radius: var(--r2);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+}
+.combo-opt .tick {
+  color: var(--acc);
+  font-weight: var(--w-bold);
+}
+.combo-opt .name {
+  font-weight: 650;
+}
+.combo-opt .why {
+  grid-column: 2 / -1;
+  font-size: var(--fs-xs);
+  color: var(--warn);
+  white-space: normal;
+  line-height: 1.35;
+}
+.combo-opt .side {
+  font-size: var(--fs-mini);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.combo-opt[data-hi='true'] {
+  background: var(--panel-2);
+}
+.combo-opt[aria-selected='true'] {
+  background: var(--acc-soft);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.combo-opt[aria-disabled='true'] {
+  cursor: not-allowed;
+  color: var(--dim);
+}
+.combo-opt[aria-disabled='true'] .name {
+  color: var(--dim);
+}
+.combo-note {
+  padding: var(--s5);
+  font-size: var(--fs-sm);
+  color: var(--dim);
+  line-height: 1.5;
+}
+.combo-note strong {
+  display: block;
+  color: var(--ink);
+  font-size: var(--fs-base);
+  margin-bottom: var(--s1);
+}
+.combo-note.bad strong {
+  color: var(--down);
+}
+
+/* ---- status: is the API there, and is anything happening -------------
+   The operator has run a 32-minute pull with no way to tell it from a hang.
+   This strip is the answer to "is anything happening", and it is in the top
+   bar on every page because that question is not one page's question. */
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s2) var(--s4);
+  border-radius: var(--r-full);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  font-family: inherit; /* it is sometimes a <button>, which would not inherit */
+  font-size: var(--fs-xs);
+  font-weight: var(--w-semi);
+  color: var(--dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  max-width: 30rem;
+  overflow: hidden;
+  flex: none;
+}
+button.status {
+  cursor: pointer;
+}
+button.status:hover {
+  border-color: var(--line-hard);
+  color: var(--ink);
+}
+button.status.bad:hover {
+  border-color: var(--down);
+  color: var(--down);
+}
+.status .txt {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.status .ms {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+}
+.status.bad {
+  border-color: var(--down);
+  background: var(--down-soft);
+  color: var(--down);
+}
+.status.busy {
+  border-color: var(--acc);
+  background: var(--acc-soft);
+  color: var(--ink);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+.dot.up {
+  background: var(--up);
+}
+.dot.down {
+  background: var(--down);
+}
+.dot.warn {
+  background: var(--warn);
+}
+.dot.acc {
+  background: var(--acc);
+}
+
+/* The indeterminate bar, welded to the bottom edge of the top bar. It exists
+   only while a request is genuinely in flight — it is driven by the fetch
+   itself, never by a timer, so it cannot claim progress that is not happening. */
+.progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  overflow: hidden;
+  background: var(--acc-soft);
+}
+.progress i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 34%;
+  background: linear-gradient(90deg, transparent, var(--acc), transparent);
+}
+
+/* ---- theme toggle ---- */
+.themer {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--well);
+}
+.themer button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 22px;
+  border: 0;
+  border-radius: var(--r1);
+  background: transparent;
+  color: var(--faint);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: var(--w-bold);
+}
+.themer button:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.themer button[aria-pressed='true'] {
+  background: var(--panel);
+  color: var(--acc);
+  box-shadow: var(--e1);
+}
+.themer svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
 
 /* ---- universe tabs: index / F&O / NTM, never mixed ---- */
-.tabs { display: flex; gap: 3px; padding: 6px 8px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.tabs {
+  display: flex;
+  gap: var(--s1);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  flex: none;
+}
 .utab {
-  padding: 4px 10px; border-radius: 5px; font-size: 11.5px; font-weight: 650;
-  border: 1px solid transparent; background: transparent; color: var(--dim);
-  cursor: pointer; white-space: nowrap;
+  padding: var(--s2) var(--s5);
+  border-radius: 5px;
+  font-size: 11.5px;
+  font-weight: 650;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--dim);
+  cursor: pointer;
+  white-space: nowrap;
 }
-.utab:hover { color: var(--ink); background: var(--panel-2); }
-.utab[aria-pressed="true"] { background: var(--acc-soft); color: var(--ink); border-color: var(--acc); }
-.utab .n { opacity: .55; margin-left: 5px; font-variant-numeric: tabular-nums; }
+.utab:hover {
+  color: var(--ink);
+  background: var(--panel-2);
+}
+.utab[aria-pressed='true'] {
+  background: var(--acc-soft);
+  color: var(--ink);
+  border-color: var(--acc);
+}
+.utab .n {
+  opacity: 0.55;
+  margin-left: 5px;
+  font-variant-numeric: tabular-nums;
+}
 
-.vrow .tag {
-  font-size: 9.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
-  padding: 1px 5px; border-radius: 3px; background: var(--panel-2); color: var(--faint);
+.vrow .tag,
+.tag {
+  font-size: var(--fs-micro);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  color: var(--faint);
+  white-space: nowrap;
 }
-.vrow .tag.held { background: rgba(38,166,154,.16); color: var(--up); }
+.vrow .tag.held,
+.tag.held,
+.tag.up {
+  background: var(--up-soft);
+  color: var(--up);
+}
+.tag.down {
+  background: var(--down-soft);
+  color: var(--down);
+}
+.tag.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+.tag.info {
+  background: var(--info-soft);
+  color: var(--info);
+}
+.tag.acc {
+  background: var(--acc-soft);
+  color: var(--acc);
+}
+
+/* ---- buttons --------------------------------------------------------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  border-radius: var(--r2);
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--line-hard);
+  background: var(--panel-2);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.primary {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: var(--on-acc);
+}
+.btn.primary:hover:not(:disabled) {
+  background: var(--acc-hi);
+  border-color: var(--acc-hi);
+}
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--dim);
+}
+.btn.ghost:hover:not(:disabled) {
+  color: var(--ink);
+  background: var(--panel-2);
+  border-color: transparent;
+}
+.btn.danger {
+  border-color: var(--down);
+  color: var(--down);
+  background: var(--down-soft);
+}
+.kbd {
+  font-family: var(--mono);
+  font-size: var(--fs-mini);
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: var(--r1);
+  background: var(--well);
+  color: var(--dim);
+}
 
 /* ---- empty states that act, instead of a sentence in a void ---- */
 .blank {
-  max-width: 34rem; margin: 8vh auto 0; padding: 0 20px; text-align: center;
+  max-width: 34rem;
+  margin: 8vh auto 0;
+  padding: 0 var(--s7);
+  text-align: center;
 }
-.blank h2 { font-size: 17px; font-weight: 700; letter-spacing: -.2px; margin: 0 0 6px; }
-.blank p { color: var(--dim); font-size: 13px; margin: 0 0 18px; }
+.blank h2 {
+  font-size: var(--fs-lg);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.2px;
+  margin: 0 0 var(--s3);
+}
+.blank p {
+  color: var(--dim);
+  font-size: var(--fs-base);
+  margin: 0 0 var(--s6);
+}
 .blank .alt {
-  display: flex; align-items: center; justify-content: center; gap: 6px;
-  flex-wrap: wrap; margin: 0 0 20px; padding: 12px;
-  border: 1px solid var(--line); border-radius: var(--r); background: var(--panel);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s3);
+  flex-wrap: wrap;
+  margin: 0 0 var(--s7);
+  padding: var(--s5);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--panel);
 }
 .blank .alt .lbl {
-  font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--faint);
+  font-size: var(--fs-mini);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
 }
 .blank .cta {
-  display: inline-block; padding: 8px 18px; border-radius: var(--r);
-  background: var(--acc); color: #fff; text-decoration: none;
-  font-size: 13px; font-weight: 650;
+  display: inline-block;
+  padding: var(--s4) var(--s7);
+  border-radius: var(--r);
+  background: var(--acc);
+  color: var(--on-acc);
+  text-decoration: none;
+  font-size: var(--fs-base);
+  font-weight: 650;
 }
-.blank .cta:hover { filter: brightness(1.1); }
+.blank .cta:hover {
+  background: var(--acc-hi);
+}
 .link {
-  background: none; border: 0; padding: 0; font: inherit;
-  color: var(--acc); cursor: pointer; text-decoration: underline;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--acc);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.link:hover {
+  color: var(--acc-hi);
 }
 
 /* ---- summary strip: the four numbers you open the page for ---- */
 .stats {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-  gap: 1px; background: var(--line);
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 1px;
+  background: var(--line);
   border-bottom: 1px solid var(--line);
+  flex: none;
 }
-.stat { background: var(--bg-2); padding: 9px 12px; display: flex; flex-direction: column; gap: 1px; }
+.stat {
+  background: var(--bg-2);
+  padding: 9px var(--s5);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
 .stat .k {
-  font-size: 9.5px; font-weight: 700; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--faint);
+  font-size: var(--fs-micro);
+  font-weight: var(--w-bold);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
 }
 .stat .v {
-  font-family: var(--mono); font-variant-numeric: tabular-nums;
-  font-size: 19px; font-weight: 700; letter-spacing: -.5px; line-height: 1.15;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 19px;
+  font-weight: var(--w-bold);
+  letter-spacing: -0.5px;
+  line-height: var(--lh-tight);
 }
-.stat .n { font-size: 10.5px; color: var(--faint); }
+.stat .n {
+  font-size: 10.5px;
+  color: var(--faint);
+}
 
 /* ---- sortable headers ---- */
 th .sort {
-  background: none; border: 0; padding: 0; font: inherit; cursor: pointer;
-  color: inherit; letter-spacing: inherit; text-transform: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+  color: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
 }
-th .sort:hover { color: var(--ink); }
-th.num .sort { width: 100%; text-align: right; }
+th .sort:hover {
+  color: var(--ink);
+}
+th.num .sort {
+  width: 100%;
+  text-align: right;
+}
+
+/* ---- loading placeholders -------------------------------------------
+   A skeleton is a SHAPE CLAIM, not decoration: it says "a row goes here and
+   it is this wide". The block is visible without motion; only the sweep is
+   conditional, so a reduced-motion reader still sees the shape. */
+.skel {
+  display: block;
+  position: relative;
+  overflow: hidden;
+  min-height: 1em;
+  border-radius: var(--r1);
+  background: var(--panel-2);
+  color: transparent;
+  user-select: none;
+}
+.skel.line {
+  height: 10px;
+  margin: 4px 0;
+}
+
+/* ==========================================================================
+   4. THE KEYFRAMES
+   --------------------------------------------------------------------------
+   Declaring a keyframe costs nothing until an `animation` names it, and every
+   `animation` in this file is inside the reduced-motion guard below. So these
+   can sit at the top level and stay readable.
+   ========================================================================== */
+
+/* THE TICK FLASH. What a trading terminal does when a number changes: a tint
+   at full strength immediately — it has to be there before the eye lands —
+   held briefly, then decayed. Green up, red down, and the hue is the semantic
+   token, never the accent. Retrigger it from a page by re-keying the node
+   (`{#key value}`) or by removing and re-adding the class on the next frame. */
+@keyframes bx-flash-up {
+  0% {
+    background-color: var(--up-soft);
+    color: var(--up);
+  }
+  55% {
+    background-color: var(--up-soft);
+    color: var(--up);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@keyframes bx-flash-down {
+  0% {
+    background-color: var(--down-soft);
+    color: var(--down);
+  }
+  55% {
+    background-color: var(--down-soft);
+    color: var(--down);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+@keyframes bx-shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+@keyframes bx-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-row-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes bx-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.996);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes bx-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes bx-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes bx-pulse {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 1;
+  }
+  70% {
+    box-shadow: 0 0 0 6px transparent;
+    opacity: 0.85;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+}
+@keyframes bx-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+/* ==========================================================================
+   6. THE MOTION
+   --------------------------------------------------------------------------
+   EVERY `animation` AND `transition` IN THIS FILE IS IN HERE. That is the
+   whole design: a reader who has asked their operating system for less motion
+   gets a completely static console without one page opting out, and a page
+   author cannot forget the guard because there is nowhere else to put the
+   declaration.
+   ========================================================================== */
+@media (prefers-reduced-motion: no-preference) {
+  .tab,
+  .utab,
+  .feed,
+  .btn,
+  .link,
+  .combo-btn,
+  .combo-opt,
+  .themer button,
+  .search,
+  .vrow,
+  .blank .cta,
+  th .sort {
+    transition:
+      background-color var(--d-hover) var(--ease-out),
+      border-color var(--d-hover) var(--ease-out),
+      color var(--d-hover) var(--ease-out),
+      box-shadow var(--d-state) var(--ease-out),
+      opacity var(--d-hover) var(--ease-out);
+  }
+  .skip {
+    transition: top var(--d-state) var(--ease-spring);
+  }
+  .tab[aria-current='page']::after {
+    animation: bx-fade-in var(--d-state) var(--ease-out);
+  }
+  .combo-btn .caret {
+    transition: transform var(--d-state) var(--ease-out);
+  }
+  .combo-btn[aria-expanded='true'] .caret {
+    transform: rotate(225deg) translate(-2px, -2px);
+  }
+  .combo-pop {
+    animation: bx-pop-in var(--d-enter) var(--ease-spring);
+  }
+
+  /* Value flash — apply `.flash-up` / `.flash-down` to the cell that changed. */
+  .flash-up {
+    animation: bx-flash-up var(--d-flash) var(--ease-out);
+  }
+  .flash-down {
+    animation: bx-flash-down var(--d-flash) var(--ease-out);
+  }
+
+  /* Loading sweep. */
+  .skel::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, transparent, var(--line), transparent);
+    animation: bx-shimmer var(--d-shimmer) var(--ease-in-out) infinite;
+  }
+
+  /* Rows arriving and leaving. */
+  .row-in {
+    animation: bx-row-in var(--d-enter) var(--ease-out) backwards;
+  }
+  .row-out {
+    animation: bx-row-out var(--d-state) var(--ease-out) forwards;
+  }
+
+  /* Whole regions swapping. */
+  .panel-in {
+    animation: bx-panel-in var(--d-panel) var(--ease-out);
+  }
+  .fade-in {
+    animation: bx-fade-in var(--d-enter) var(--ease-out);
+  }
+
+  .spin {
+    animation: bx-spin 900ms linear infinite;
+  }
+  .dot.live {
+    animation: bx-pulse var(--d-sweep) var(--ease-out) infinite;
+  }
+  .progress i {
+    animation: bx-indeterminate var(--d-sweep) var(--ease-in-out) infinite;
+  }
+}
+
+/* ==========================================================================
+   NARROW
+   The top bar is the only thing that cannot wrap — the shell gives it a fixed
+   row and a wrapped bar would be clipped rather than taller. So at narrow
+   widths the labels go and the icons stay.
+   ========================================================================== */
+@media (max-width: 900px) {
+  :root {
+    --rail-w: 260px;
+  }
+  .topbar {
+    padding: 0 var(--s4);
+  }
+  .tab {
+    padding: var(--s3) var(--s4);
+  }
+  .status {
+    max-width: 12rem;
+  }
+  .combo-btn {
+    min-width: 8rem;
+  }
+  .combo-btn .sub {
+    display: none;
+  }
+}
+@media (max-width: 700px) {
+  .split {
+    grid-template-columns: 1fr;
+  }
+  .status .ms {
+    display: none;
+  }
+}

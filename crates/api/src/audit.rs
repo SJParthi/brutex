@@ -133,6 +133,13 @@ pub enum Scope {
 }
 
 impl Scope {
+    /// How many scopes this build knows and — because the codes are dense from
+    /// zero — the first byte no scope uses.
+    const COUNT: u8 = 2;
+
+    /// Every scope, in stored-byte order.
+    pub const ALL: [Self; Self::COUNT as usize] = [Self::Spot, Self::Fno];
+
     /// The byte this scope is stored as.
     #[must_use]
     pub const fn code(self) -> u8 {
@@ -193,6 +200,26 @@ pub enum Outcome {
 }
 
 impl Outcome {
+    /// How many outcomes this build knows and — because the codes are dense
+    /// from zero — the first byte no outcome uses.
+    ///
+    /// Raising this is what forces a new variant into [`Self::ALL`]: the
+    /// literal below stops being the right length until it is listed.
+    const COUNT: u8 = 5;
+
+    /// Every outcome, in stored-byte order — which is not declaration order,
+    /// because [`Self::Empty`] was appended to the code space and reads best
+    /// beside [`Self::Stored`]. Byte order is the order that matters here: it
+    /// is what makes this list a dense map of the codes on disk, which is what
+    /// the assertions under this block rest on.
+    pub const ALL: [Self; Self::COUNT as usize] = [
+        Self::Stored,
+        Self::Refused,
+        Self::NotStarted,
+        Self::Failed,
+        Self::Empty,
+    ];
+
     /// The byte this outcome is stored as.
     #[must_use]
     pub const fn code(self) -> u8 {
@@ -216,6 +243,7 @@ impl Outcome {
             1 => Some(Self::Refused),
             2 => Some(Self::NotStarted),
             3 => Some(Self::Failed),
+            4 => Some(Self::Empty),
             _ => None,
         }
     }
@@ -242,6 +270,41 @@ impl Outcome {
         !matches!(self, Self::Stored)
     }
 }
+
+// THE WRITER AND THE READER, PINNED TO EACH OTHER AT BUILD TIME.
+//
+// `code` is a `match self`, so the compiler forces a new variant to be given a
+// byte. `of_code` is a `match code` ending in `_ => None`, which is total by
+// construction — the compiler has nothing to say about it, and that asymmetry
+// is how `Empty` came to be written as byte 4 and read back as
+// `UnknownOutcome { code: 4 }`. Assertions, not review, close it.
+//
+// Read together with `ALL`'s length, these say the code space is dense and
+// exactly `COUNT` wide: every byte below `COUNT` is a known outcome, and
+// `COUNT` itself is not. Teaching `of_code` a new byte therefore fails the
+// second assertion, and the only repair is to raise `COUNT` — which makes the
+// `ALL` literal the wrong length, which is a build error until the new variant
+// is listed there too, which is what the round-trip test walks.
+//
+// What they do NOT catch: a variant given an arm in `code` and put in neither
+// place. Closing that needs the compiler to enumerate an enum's variants, which
+// stable Rust will not do. `ALL` is the shortest list to keep honest.
+const _: () = {
+    let mut code = 0;
+    while code < Scope::COUNT {
+        assert!(Scope::of_code(code).is_some());
+        code += 1;
+    }
+};
+const _: () = assert!(Scope::of_code(Scope::COUNT).is_none());
+const _: () = {
+    let mut code = 0;
+    while code < Outcome::COUNT {
+        assert!(Outcome::of_code(code).is_some());
+        code += 1;
+    }
+};
+const _: () = assert!(Outcome::of_code(Outcome::COUNT).is_none());
 
 /// Rows that did not become bars, by reason, in the width a record stores.
 ///
@@ -1107,6 +1170,17 @@ mod tests {
         // written before today as a different outcome.
         assert_eq!(Outcome::Stored.code(), 0);
         assert_eq!(Outcome::Empty.code(), 4);
+
+        // AND IT COMES BACK OFF DISK. Writing byte 4 was only ever half the
+        // job: `of_code` did not know the byte, so a stored `Empty` decoded as
+        // `UnknownOutcome { code: 4 }` and the row that exists to say STORED
+        // NOTHING rendered as a faulted record instead. The journal is
+        // append-only — a record the reader cannot name is lost for good.
+        assert_eq!(
+            Record::decode(&record.image()).expect("decodes").outcome,
+            Outcome::Empty,
+            "a STORED NOTHING run must read back as one"
+        );
     }
 
     fn run() -> Ingested {
@@ -1614,25 +1688,45 @@ mod tests {
         assert_eq!(Drops::of_census(census(1, 1, 9, 1)).total(), 12);
     }
 
+    /// ITERATED, NOT HAND-LISTED. This test used to name four outcomes and then
+    /// assert `of_code(4) == None`, which is how `Empty` — stored as byte 4 —
+    /// was written to an append-only journal it could never be read out of. The
+    /// hand-written list was the defect: it agreed with the reader instead of
+    /// checking it. `ALL` is now the single list, and the `const` assertions
+    /// beside `Outcome::of_code` refuse to build if it drifts from the codec.
     #[test]
     fn scopes_and_outcomes_round_trip_through_their_stored_byte() {
-        for scope in [Scope::Spot, Scope::Fno] {
-            assert_eq!(Scope::of_code(scope.code()), Some(scope));
+        // WALKING `ALL` IN BYTE ORDER PROVES THREE THINGS AT ONCE: every
+        // variant reads back as itself, the codes are dense from zero with no
+        // gap and no duplicate, and one past the last is refused rather than
+        // silently read as some other variant.
+        let mut code = 0;
+        for scope in Scope::ALL {
+            assert_eq!(scope.code(), code, "ALL is in stored-byte order");
+            assert_eq!(Scope::of_code(code), Some(scope), "{scope:?}");
             assert!(!scope.label().is_empty());
+            code += 1;
         }
-        assert_eq!(Scope::of_code(2), None);
-        for outcome in [
-            Outcome::Stored,
-            Outcome::Refused,
-            Outcome::NotStarted,
-            Outcome::Failed,
-        ] {
-            assert_eq!(Outcome::of_code(outcome.code()), Some(outcome));
+        assert_eq!(Scope::of_code(code), None, "one past the last is unused");
+
+        let mut code = 0;
+        for outcome in Outcome::ALL {
+            assert_eq!(outcome.code(), code, "ALL is in stored-byte order");
+            assert_eq!(
+                Outcome::of_code(code),
+                Some(outcome),
+                "{outcome:?} is written as byte {code} and must read back as \
+                 itself — the journal is append-only, so a byte the reader \
+                 does not know is a record lost for good"
+            );
             assert!(!outcome.label().is_empty());
+            code += 1;
         }
-        assert_eq!(Outcome::of_code(4), None);
+        assert_eq!(Outcome::of_code(code), None, "one past the last is unused");
+
         assert_eq!(Scope::Fno.label(), "expired F&O");
         assert_eq!(Outcome::NotStarted.label(), "NOT STARTED");
+        assert_eq!(Outcome::Empty.label(), "STORED NOTHING");
     }
 
     #[test]

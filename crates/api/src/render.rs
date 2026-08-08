@@ -1555,6 +1555,54 @@ fn feed_select() -> String {
     choices
 }
 
+/// The bar-length picker, built the same way and from the same two tables.
+///
+/// A rung is offered when **some feed declares it** and **the store has a
+/// directory for it**, and both halves are read rather than written out. The
+/// first is `Descriptor::granularities`, so a feed that gains a rung gains the
+/// option here with no edit; the second is `Granularity::store_timeframe`,
+/// whose `None` is the refusal at the write boundary — and `crates/pull`'s own
+/// `const` assertion already says why a control that can only ever refuse must
+/// not be on a page.
+///
+/// Both halves are needed. Declared-only would offer `1s`, which both archive
+/// feeds serve and `crates/store` cannot file. Storable-only would offer a rung
+/// no feed answers at.
+///
+/// The order is `Granularity::ALL`'s — finest first — so `1min` is the option a
+/// browser selects by default, which is the rung `ingest::parse_granularity`
+/// falls back to when the field is absent. The control and the parser agree
+/// about what "unstated" means because they are not two lists.
+fn granularity_select() -> String {
+    let mut choices = String::from("<select name=\"granularity\">");
+    for rung in pull::vendor::Granularity::ALL {
+        let offered = rung.store_timeframe().is_some()
+            && pull::vendor::Feed::ALL
+                .into_iter()
+                .any(|feed| feed.descriptor().granularities.contains(rung));
+        if !offered {
+            continue;
+        }
+        // What the rung MEANS, not a second spelling of its name. A finer feed
+        // is folded up to whatever it is filed under, and that is the sentence
+        // an operator needs in order to pick.
+        let note = if rung.is_intraday() {
+            "one bar per interval \u{b7} what the engine sweeps"
+        } else {
+            "one bar per session \u{b7} a finer feed is folded into it"
+        };
+        let _ = write!(
+            choices,
+            "<option value=\"{}\">{} \u{2014} {}</option>",
+            escape(rung.dir()),
+            escape(rung.dir()),
+            note
+        );
+    }
+    choices.push_str("</select>");
+    choices
+}
+
 /// The two forms. Split out of [`pull_page`] to stay under clippy's 100-line
 /// ceiling; the split is a lint, not a design.
 fn pull_forms(view: &PullView<'_>) -> String {
@@ -1564,8 +1612,11 @@ fn pull_forms(view: &PullView<'_>) -> String {
 
     // ---- SPOT ------------------------------------------------------------
     out.push_str(
+        // "at the bar length you pick" rather than "one-minute bars", which is
+        // what this said while the rung was a literal in the route and is now
+        // a control three fields down.
         "<div class=\"panel\"><h2><span class=\"dot\"></span>Spot</h2>\
-         <p class=\"lead\">Index and cash series, one-minute bars. \
+         <p class=\"lead\">Index and cash series, at the bar length you pick. \
          NSE only — there is no BSE and no MCX on this surface.</p>\
          <form class=\"pull\" method=\"post\" action=\"/pull/spot\">",
     );
@@ -1597,6 +1648,12 @@ fn pull_forms(view: &PullView<'_>) -> String {
     // shape. Groww's response shape has never been seen, and the note below
     // says so rather than letting an operator discover it.
     out.push_str(&field("Feed", &feed_select()));
+    // WHICH BAR LENGTH, beside the feed rather than in the route. The rung
+    // decides the store directory, the fold bucket and whether the session
+    // filter applies, and it was `Timeframe::MINUTE_1` written into
+    // `land_one` — so `1day/` was unreachable from this page whatever the
+    // descriptors declared.
+    out.push_str(&field("Bar length", &granularity_select()));
     let _ = write!(
         out,
         "<div class=\"pair\">{}{}</div>",
@@ -1682,10 +1739,13 @@ fn pull_fine_print(today: Day) -> String {
          <em>after</em> the one you pick, and the extra day's bars come back and \
          are dropped as <code>after the requested window</code>, counted below. \
          The correction is stated because a correction you cannot see is the kind \
-         this repository forbids.<br>Bars are kept only inside <code>{}</code> to \
-         <code>{}</code> IST, exclusive at the close — {BARS_PER_REGULAR_SESSION} \
-         one-minute bars in a regular session. Nothing after <code>{today}</code> \
-         can be asked for.</p>",
+         this repository forbids.<br>At an <em>intraday</em> bar length, bars are \
+         kept only inside <code>{}</code> to <code>{}</code> IST, exclusive at the \
+         close — {BARS_PER_REGULAR_SESSION} one-minute bars in a regular session. \
+         A <code>1day</code> bar is <b>exempt</b> from that window: vendors stamp \
+         it at midnight, at the open or at the close, and an intraday filter \
+         would drop every one. Nothing after <code>{today}</code> can be asked \
+         for.</p>",
         hhmm(SESSION_OPEN_MINUTE),
         hhmm(SESSION_CLOSE_MINUTE),
     )
@@ -3370,6 +3430,81 @@ mod tests {
         for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
             assert!(!html.contains(forbidden), "{forbidden} must never appear");
         }
+    }
+
+    /// The bar-length control is on the page and it is built from the two
+    /// tables, not written out.
+    ///
+    /// Both halves are asserted, because each one on its own is satisfiable by
+    /// a hardcoded pair: every rung SOME feed declares AND the store can file
+    /// must be offered, and every rung failing either test must not be. `1s` is
+    /// the case that proves the second half is real — both archive feeds
+    /// declare it, and `crates/store` has no directory for it, so a control
+    /// offering it would be one that always refuses at the write boundary.
+    #[test]
+    fn the_spot_form_offers_every_storable_rung_its_feeds_declare_and_no_other() {
+        let html = pull_page(&pull_view(None, None));
+        assert!(
+            html.contains("name=\"granularity\""),
+            "the rung is a control on the form, not a literal in the route"
+        );
+
+        for rung in pull::vendor::Granularity::ALL {
+            let declared = pull::vendor::Feed::ALL
+                .into_iter()
+                .any(|feed| feed.descriptor().granularities.contains(rung));
+            let storable = rung.store_timeframe().is_some();
+            let option = format!("<option value=\"{}\">", rung.dir());
+            assert_eq!(
+                html.contains(&option),
+                declared && storable,
+                "{rung}: declared by some feed = {declared}, storable = \
+                 {storable} — the option list must be exactly the intersection"
+            );
+        }
+
+        // The two the intersection currently is, named so a change to either
+        // table shows up as a diff here rather than as a silently longer list.
+        assert!(html.contains("<option value=\"1min\">"));
+        assert!(html.contains("<option value=\"1day\">"));
+        assert!(
+            !html.contains("<option value=\"1s\">"),
+            "1s is served by both archive feeds and has no store directory — \
+             offering it would be a control that can only ever refuse"
+        );
+
+        // AND THE FIRST OPTION IS THE MINUTE, which is what a browser selects
+        // with no user input and what `ingest::parse_granularity` falls back to
+        // when the field is absent. If those two disagreed, submitting the form
+        // untouched and replaying an old body would file into different
+        // directories.
+        let list = html
+            .split_once("name=\"granularity\"")
+            .map(|(_, rest)| rest)
+            .unwrap_or_default();
+        assert!(
+            list.trim_start().starts_with("><option value=\"1min\">"),
+            "the minute is the default option: {}",
+            list.get(..120).unwrap_or(list)
+        );
+        assert_eq!(
+            crate::ingest::parse_granularity(""),
+            Some(pull::vendor::Granularity::Minute1),
+            "and the parser agrees about what unstated means"
+        );
+
+        // THE PANEL NO LONGER PROMISES A RUNG IT NO LONGER DECIDES. Its lead
+        // read "Index and cash series, one-minute bars" while `land_one` held
+        // the literal, and it would now be a sentence contradicted by the
+        // control three fields below it.
+        assert!(html.contains("at the bar length you pick"));
+        assert!(!html.contains("series, one-minute bars"));
+        // And the session fine print says which rung it is about, because a
+        // daily bar is exempt from that window rather than inside it.
+        assert!(
+            html.contains("<code>1day</code> bar is <b>exempt</b>"),
+            "the session bound must not be stated as if it applied at every rung"
+        );
     }
 
     #[test]

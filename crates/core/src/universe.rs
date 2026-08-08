@@ -1173,6 +1173,34 @@ impl<const N: usize> MemberIndex<N> {
                   range for every iteration."
     )]
     pub fn contains(&self, symbol: &str) -> bool {
+        // A STRING TOO LONG TO BE A SYMBOL CANNOT BE A MEMBER, SO IT IS NEVER
+        // HASHED.
+        //
+        // `fnv1a` walks the whole argument with no bound of its own, and
+        // `of_equity` is public, takes an unguarded `&str`, and calls this
+        // TWICE — once per table. So the cost of a membership probe was the
+        // caller's string length, not the table's size.
+        //
+        // Measured before this line existed, against gate 8's 3.0x ceiling:
+        //      8 B          8,256 ps    baseline
+        //     24 B         14,333 ps    1.736x
+        //      1 KiB    1,806,225 ps    218.777x   BREACH
+        //      4 MiB  7,663,937,500 ps  928,287x   BREACH  (7.66 ms in ONE call)
+        // The per-byte slope agreed across those last two — 882 ps/byte at
+        // 1 KiB, 914 ps/byte at 4 MiB — a clean linear fit over a 4,096x span
+        // of input. That is not a constant-time operation wearing a bad
+        // constant; it is O(n) in the argument.
+        //
+        // The guard is a CORRECTNESS statement before it is a cost one: every
+        // member of every table is a `Symbol`, and `Symbol::new` refuses
+        // anything past `SYMBOL_CAPACITY`. So a longer string has no member it
+        // could equal, and answering `false` without hashing is the same
+        // answer arrived at sooner. It is checked here rather than in
+        // `of_equity` because `contains` is the function that hashes, and a
+        // guard on the caller leaves the next caller unprotected.
+        if symbol.len() > crate::symbol::SYMBOL_CAPACITY {
+            return false;
+        }
         let mut at = mask(fnv1a(symbol), N);
         while let Some(held) = self.slots[at] {
             if held == symbol {

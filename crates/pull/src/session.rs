@@ -209,12 +209,13 @@ pub enum SessionError {
     /// non-inclusive `toDate` rule: a wrapped day would silently ask for a
     /// window ending in 1970.
     NoNextDay,
-    /// [`split_window`] was given a cap of zero days.
+    /// [`split_window`] was given a cap of `Some(0)` days.
     ///
-    /// Refused rather than silently read as "no cap". Treating it as unbounded
-    /// would hand the whole window to a vendor that published a limit, which is
-    /// precisely the bug [`split_window`] exists to prevent — and a loop that
-    /// advances by zero would not terminate anyway.
+    /// Refused rather than silently read as "no cap". `None` already says "no
+    /// cap" and says it deliberately; a zero is a number that went wrong, and
+    /// reading the two the same way would hand a whole window to a vendor that
+    /// published a limit. A loop that advances by zero would not terminate
+    /// anyway.
     WindowCapIsZero,
     /// A window whose end is before its start.
     ///
@@ -1024,7 +1025,8 @@ impl fmt::Display for Window {
 /// two are here because the counters are private and the only public way to
 /// raise one is [`DropCensus::count`], which would need 4,294,967,295 calls.
 /// A saturating add nobody ever saturates is a claim, not a behaviour.
-/// Split a window into consecutive legal chunks, each at most `cap_days` long.
+/// Split a window into consecutive legal chunks, each at most `cap_days` long
+/// and each inside one calendar month.
 ///
 /// # Why this exists
 ///
@@ -1041,6 +1043,16 @@ impl fmt::Display for Window {
 /// truncated answer if not, and the second one writes a gap the append-only
 /// store cannot later correct.
 ///
+/// # `None` is a cap the vendor did not publish, and it is not "no split"
+///
+/// The cap is per (feed, rung) — `crate::vendor::HttpSpec::window_cap_days` —
+/// and a rung the charter records no figure for has none to apply. That is
+/// `None`, and it means *the vendor puts no bound on this request*. It does
+/// **not** mean the window goes out whole: the MONTH BOUNDARY below binds at
+/// every rung, because the store addresses one month per file whatever the bar
+/// length is. The caller that read `None` as "send it whole" is the caller this
+/// argument was widened to remove.
+///
 /// # The split
 ///
 /// Chunks are **inclusive on both ends and non-overlapping**: a 30-day cap over
@@ -1054,12 +1066,11 @@ impl fmt::Display for Window {
 ///
 /// # Errors
 ///
-/// [`SessionError`] if `cap_days` is zero — a cap of nothing cannot be split
-/// into, and looping on it would not terminate. Refused rather than silently
-/// treated as "no cap", which would send the whole window and be exactly the
-/// bug this function exists to prevent.
-pub fn split_window(window: Window, cap_days: u32) -> Result<Vec<Window>, SessionError> {
-    if cap_days == 0 {
+/// [`SessionError`] if `cap_days` is `Some(0)` — a cap of nothing cannot be
+/// split into, and looping on it would not terminate. Refused rather than
+/// silently read as `None`, which is a different claim about the vendor.
+pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>, SessionError> {
+    if cap_days == Some(0) {
         return Err(SessionError::WindowCapIsZero);
     }
 
@@ -1082,15 +1093,23 @@ pub fn split_window(window: Window, cap_days: u32) -> Result<Vec<Window>, Sessio
         // decoded, and the store refused them at the write boundary for a
         // reason the caller could have prevented.
         //
-        // So the chunk ends at the earlier of: the vendor's day cap, the
-        // operator's last day, and the last day of the month `start` falls in.
-        // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk
-        // starting at day 0 ends at day 29, not day 30. Off by one here would
-        // make every chunk one day over the vendor's cap, which is the failure
-        // this function exists to prevent and would be invisible until the
-        // vendor refused.
+        // So the chunk ends at the earlier of: the vendor's day cap WHEN IT
+        // PUBLISHED ONE, the operator's last day, and the last day of the month
+        // `start` falls in. `cap_days - 1` because both ends are INCLUDED: a
+        // 30-day chunk starting at day 0 ends at day 29, not day 30. Off by one
+        // here would make every chunk one day over the vendor's cap, which is
+        // the failure this function exists to prevent and would be invisible
+        // until the vendor refused.
+        //
+        // With no published cap the month is the only bound, and it is enough
+        // to keep every chunk writable — `cap_days` is the vendor's rule and
+        // `month_end` is the store's, and only the second one is ours to know.
         let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
-        let end = start.saturating_add(cap_days - 1).min(last).min(month_end);
+        let capped = match cap_days {
+            Some(cap) => start.saturating_add(cap - 1),
+            None => month_end,
+        };
+        let end = capped.min(last).min(month_end);
         chunks.push(Window::new(Day::from_days(start)?, Day::from_days(end)?)?);
         // `end + 1` cannot overflow past `last`'s guard: `end <= last` and
         // `last` is a real day, so the successor is at most one past a value
@@ -1225,7 +1244,12 @@ mod month_boundary {
             (day(2024, 2, 1), day(2024, 3, 1)),
             (day(2020, 1, 1), day(2026, 8, 6)),
         ];
-        for cap in [30_u32, 90, 1, 365] {
+        // `None` IS IN THIS LIST, and it is the case the month clamp exists
+        // for on its own. A rung the vendor published no cap for has nothing
+        // else holding its chunks inside a file, so if the month were the
+        // vendor's rule rather than the store's, this row would produce a
+        // seven-year chunk and every assertion below would fail.
+        for cap in [Some(30_u32), Some(90), Some(1), Some(365), None] {
             for (from, to) in cases {
                 let window = Window::new(from, to).expect("from precedes to");
                 let chunks = split_window(window, cap).expect("a splittable window");
@@ -1234,14 +1258,16 @@ mod month_boundary {
                     assert_eq!(
                         (c.from().year(), c.from().month()),
                         (c.to().year(), c.to().month()),
-                        "cap {cap}: chunk {:?}..{:?} spans two months -- the store \
+                        "cap {cap:?}: chunk {:?}..{:?} spans two months -- the store \
                          refuses this batch and the whole fetch is wasted",
                         c.from(),
                         c.to(),
                     );
                     assert!(
-                        c.to().days_from_epoch() - c.from().days_from_epoch() < cap,
-                        "cap {cap}: chunk is wider than the vendor allows",
+                        cap.is_none_or(|cap| {
+                            c.to().days_from_epoch() - c.from().days_from_epoch() < cap
+                        }),
+                        "cap {cap:?}: chunk is wider than the vendor allows",
                     );
                     seen.push((c.from().days_from_epoch(), c.to().days_from_epoch()));
                 }
@@ -1250,13 +1276,13 @@ mod month_boundary {
                 // duplicate day is a wasted request).
                 let mut want = from.days_from_epoch();
                 for (start, end) in &seen {
-                    assert_eq!(*start, want, "cap {cap}: chunks do not tile at {want}");
+                    assert_eq!(*start, want, "cap {cap:?}: chunks do not tile at {want}");
                     want = end + 1;
                 }
                 assert_eq!(
                     want,
                     to.days_from_epoch() + 1,
-                    "cap {cap}: the chunks stop short of the window",
+                    "cap {cap:?}: the chunks stop short of the window",
                 );
             }
         }

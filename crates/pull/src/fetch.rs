@@ -51,8 +51,8 @@
 
 use store::format::Bar;
 
-use crate::session::{Cadence, Day, DropCensus, SessionError, Window};
-use crate::vendor::{PriceScale, TimestampEncoding};
+use crate::session::{Day, DropCensus, SessionError, Window};
+use crate::vendor::{Granularity, PriceScale, TimestampEncoding};
 
 /// The largest number of rows one window may return.
 ///
@@ -188,6 +188,21 @@ pub enum FetchError {
         /// What went wrong, in the transport's own words.
         detail: String,
     },
+    /// This feed's request carries a rung field and no word for the rung asked
+    /// has ever been recorded.
+    ///
+    /// **Nothing was sent.** The alternative is the one thing worse than a
+    /// refusal here: the request that *can* be built is the request for a
+    /// different rung, and its answer would be filed under the rung the
+    /// operator asked for. `CLAUDE.md` §3 rule 1 — the wire word is a vendor
+    /// fact, and there is nothing to derive it from.
+    RungNotSpellable {
+        /// The rung the operator asked for.
+        rung: Granularity,
+        /// The request field that would have carried it, so the descriptor row
+        /// to amend is named rather than described.
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for FetchError {
@@ -226,6 +241,15 @@ impl core::fmt::Display for FetchError {
             Self::TransportFailed { ref detail } => {
                 write!(f, "the vendor was not reached: {detail}")
             }
+            Self::RungNotSpellable { rung, field } => write!(
+                f,
+                "this feed names its bar length in the request field {field:?} \
+                 and no word for {rung} has been recorded for it. Nothing was \
+                 sent: the request that could be built is a request for a \
+                 different bar length, and its answer would be filed under \
+                 {rung}. UNVERIFIED — record the vendor's own spelling in that \
+                 feed's granularity_tokens row and this works the same day."
+            ),
         }
     }
 }
@@ -335,11 +359,18 @@ pub struct BarRequest {
     pub instrument_id: String,
     /// The inclusive window the operator asked for.
     pub window: Window,
-    /// Whether these are intraday bars or daily ones.
+    /// Which rung of the ladder these bars are.
     ///
-    /// An argument rather than an assumption: a daily bar is stamped at
-    /// midnight and would be dropped by every intraday filter.
-    pub cadence: Cadence,
+    /// An argument rather than an assumption, and a [`Granularity`] rather than
+    /// the [`Cadence`] it used to be. The two were being stated independently —
+    /// the rung decided the store directory and the cadence decided the session
+    /// filter — and they disagree silently in the direction that loses
+    /// everything: a daily bar is stamped at midnight, so a daily pull left at
+    /// `Cadence::Minute` counts every bar `BeforeSessionOpen` and reports a
+    /// clean census of nothing. One field, and
+    /// [`Granularity::cadence`](crate::vendor::Granularity::cadence) derives the
+    /// other.
+    pub granularity: Granularity,
 }
 
 /// Where rows come from. The only thing a transport must satisfy.
@@ -470,7 +501,7 @@ pub fn land(
         // different answers.
         let verdict = request
             .window
-            .verdict(epoch_utc, request.cadence)
+            .verdict(epoch_utc, request.granularity.cadence())
             .map_err(|why| FetchError::TimestampRefused {
                 row: i,
                 raw: row.timestamp,

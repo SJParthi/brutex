@@ -4861,7 +4861,7 @@ fn absent_open_interest_is_the_null_sentinel_and_zero_is_zero() {
 #[test]
 fn the_timestamp_encoding_is_dispatched_never_assumed() {
     use pull::fetch::{BarRequest, RawRow, RawWindow, land};
-    use pull::session::{Cadence, Day, Window};
+    use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
     // 2026-08-07 09:15:00 IST is 03:45:00 UTC.
@@ -4881,7 +4881,7 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
     let request = BarRequest {
         instrument_id: String::new(),
         window: Window::new(day, day).expect("one day"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
 
     let as_utc = land(
@@ -4917,14 +4917,14 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
 #[test]
 fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     use pull::fetch::{BarRequest, FetchError, RawRow, RawWindow, land};
-    use pull::session::{Cadence, Day, Window};
+    use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
     let day = Day::new(2026, 8, 7).expect("a real date");
     let request = BarRequest {
         instrument_id: String::new(),
         window: Window::new(day, day).expect("one day"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let at = ist(day, 9, 15, 0);
 
@@ -5008,14 +5008,14 @@ fn the_wire_end_honours_the_vendors_inclusivity() {
 #[test]
 fn every_row_is_either_a_bar_or_a_counted_drop() {
     use pull::fetch::{BarRequest, RawRow, RawWindow, land};
-    use pull::session::{Cadence, Day, Window};
+    use pull::session::{Day, Window};
     use pull::vendor::{PriceScale, TimestampEncoding};
 
     let day = Day::new(2026, 8, 7).expect("a real date");
     let request = BarRequest {
         instrument_id: String::new(),
         window: Window::new(day, day).expect("one day"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
 
     // 09:14:59 IST (out), 09:15:00 (in), 15:29:59 (in), 15:30:00 (out) —
@@ -6246,7 +6246,7 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
 
     // A span that does NOT divide evenly, which is the common case: 65 days at
     // a cap of 30 is 30 + 30 + 5.
-    let chunks = split_window(window(1_000, 1_064), 30).expect("a positive cap");
+    let chunks = split_window(window(1_000, 1_064), Some(30)).expect("a positive cap");
     let spans: Vec<(u32, u32)> = chunks
         .iter()
         .map(|w| (w.from().days_from_epoch(), w.to().days_from_epoch()))
@@ -6327,7 +6327,7 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     // 1972-11-01..1972-12-30: November is exactly 30 days and takes the whole
     // cap, then December takes the remaining 30. Two chunks, both bounds
     // agreeing, which is what makes the off-by-one visible.
-    let exact = split_window(window(1_035, 1_094), 30).expect("a positive cap");
+    let exact = split_window(window(1_035, 1_094), Some(30)).expect("a positive cap");
     assert_eq!(
         exact.len(),
         2,
@@ -6339,7 +6339,7 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     // path. Days 1004..1014 are 1972-10-01..1972-10-11: inside the cap AND
     // inside one month, which is now what "fits" means. (1000..1010 would
     // cross September into October and correctly split in two.)
-    let short = split_window(window(1_004, 1_014), 30).expect("a positive cap");
+    let short = split_window(window(1_004, 1_014), Some(30)).expect("a positive cap");
     assert_eq!(
         short.len(),
         1,
@@ -6349,7 +6349,7 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
 
     // AND THE MONTH ALONE IS ENOUGH TO SPLIT IT. Well inside a 30-day cap,
     // split only because the store cannot hold both months in one file.
-    let crosses = split_window(window(1_000, 1_010), 30).expect("a positive cap");
+    let crosses = split_window(window(1_000, 1_010), Some(30)).expect("a positive cap");
     assert_eq!(
         crosses.len(),
         2,
@@ -6358,10 +6358,10 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     check(&crosses, 1_000, 1_010, 30);
 
     // ONE DAY, and a cap of one day: the tightest legal case.
-    let single = split_window(window(1_000, 1_000), 1).expect("a positive cap");
+    let single = split_window(window(1_000, 1_000), Some(1)).expect("a positive cap");
     assert_eq!(single.len(), 1);
     check(&single, 1_000, 1_000, 1);
-    let daily = split_window(window(1_000, 1_004), 1).expect("a positive cap");
+    let daily = split_window(window(1_000, 1_004), Some(1)).expect("a positive cap");
     assert_eq!(daily.len(), 5, "a one-day cap yields one chunk per day");
     check(&daily, 1_000, 1_004, 1);
 
@@ -6380,7 +6380,7 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     // backfill is 126 x 774 = 97,524 requests, not 62,694.
     let backfill = window(18_262, 20_672);
     for (cap, vendor, want) in [(30_u32, "Groww at 1-minute", 126_usize), (90, "Dhan", 80)] {
-        let chunks = split_window(backfill, cap).expect("a positive cap");
+        let chunks = split_window(backfill, Some(cap)).expect("a positive cap");
         check(&chunks, 18_262, 20_672, cap);
         let months: std::collections::BTreeSet<_> = chunks
             .iter()
@@ -6404,6 +6404,6 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
 
     // A CAP OF ZERO IS REFUSED, not read as "no cap". Reading it as unbounded
     // would send the whole window, which is the bug this exists to prevent.
-    let why = split_window(window(1_000, 1_064), 0).expect_err("zero is refused");
+    let why = split_window(window(1_000, 1_064), Some(0)).expect_err("zero is refused");
     assert!(why.to_string().contains("zero days"), "and says so: {why}");
 }

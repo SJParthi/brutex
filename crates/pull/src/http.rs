@@ -705,6 +705,11 @@ impl HttpSource {
         // what a feed that needs nothing else would want and is also exactly
         // the old behaviour — so the shape did not change, only where it is
         // decided.
+        //
+        // COLLECTED THROUGH A `Result`, because one of the five sources can
+        // refuse: a feed that spells its bar length in a request field has no
+        // word for a rung nobody has recorded one for, and the request must not
+        // go out naming a different length than the answer will be filed under.
         let pairs: Vec<(&'static str, String)> = self
             .spec
             .params
@@ -715,10 +720,18 @@ impl HttpSource {
                     crate::vendor::ParamValue::To => to.clone(),
                     crate::vendor::ParamValue::InstrumentId => request.instrument_id.clone(),
                     crate::vendor::ParamValue::Fixed(word) => word.to_owned(),
+                    crate::vendor::ParamValue::Granularity => self
+                        .spec
+                        .granularity_token(request.granularity)
+                        .ok_or(FetchError::RungNotSpellable {
+                            rung: request.granularity,
+                            field: p.name,
+                        })?
+                        .to_owned(),
                 };
-                (p.name, v)
+                Ok((p.name, v))
             })
-            .collect();
+            .collect::<Result<_, FetchError>>()?;
 
         let mut builder = match self.spec.method {
             Method::Post => {
@@ -906,8 +919,10 @@ fn decode_positional(
     // is noise and one count is information.
     if null_bars > 0 {
         eprintln!(
+            // "in those intervals", not "in those minutes": this decoder is
+            // rung-blind by design and a daily pull comes through it too.
             "brutex: {null_bars} of {} bars carried a null price and were skipped \
-             — the vendor reported no trade in those minutes",
+             — the vendor reported no trade in those intervals",
             rows.len()
         );
     }
@@ -1032,11 +1047,16 @@ mod tests {
                 per_minute: None,
                 per_day: None,
             },
-            // A test spec: no cap, so the window is sent whole and the split is
-            // not what is under test here.
             // A test spec: no floor, so the window is used as given.
             history_floor: crate::vendor::HistoryFloor::Unstated,
-            window_cap_days: None,
+            // No published cap at any rung. The split is not what is under test
+            // here, and this fixture never reaches it — `window` is called
+            // directly rather than through `api`'s chunking loop.
+            window_caps: &[],
+            // ONE RUNG SPELLED AND THE REST NOT, which is the shape both
+            // shipped brokers are in. The base fixture's params carry no rung
+            // field, so this is read only by the tests that add one.
+            granularity_tokens: &[(crate::vendor::Granularity::Minute1, "1minute")],
             pooling: Pooling::PerVendor,
         }
     }
@@ -1378,7 +1398,7 @@ mod tests {
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
             )
             .expect("a real window"),
-            cadence: crate::session::Cadence::Minute,
+            granularity: crate::vendor::Granularity::Minute1,
         };
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1444,7 +1464,7 @@ mod tests {
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
             )
             .expect("a real window"),
-            cadence: crate::session::Cadence::Minute,
+            granularity: crate::vendor::Granularity::Minute1,
         };
         let outcome = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1769,7 +1789,7 @@ mod tests {
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
             )
             .expect("a real window"),
-            cadence: crate::session::Cadence::Minute,
+            granularity: crate::vendor::Granularity::Minute1,
         }
     }
 
@@ -1791,12 +1811,108 @@ mod tests {
 
     impl Driven {
         fn block_on_window(&self) -> Result<RawWindow, FetchError> {
+            self.block_on(&one_day())
+        }
+
+        fn block_on(&self, request: &BarRequest) -> Result<RawWindow, FetchError> {
             tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .expect("a runtime")
-                .block_on(self.0.window_async(&one_day()))
+                .block_on(self.0.window_async(request))
         }
+    }
+
+    /// **THE RUNG GOES ON THE WIRE, AND A RUNG WITH NO RECORDED WORD REFUSES
+    /// BEFORE THE SOCKET.**
+    ///
+    /// A feed that names its bar length in a request field — Groww's
+    /// `candle_interval` — must send the length the answer will be FILED under.
+    /// It used to be `ParamValue::Fixed("1minute")`, so a request the operator
+    /// filed as daily still asked the vendor for minutes; the answer would fold
+    /// to a correct-looking daily bar and the window would have gone out against
+    /// a cap that was measured for a different rung.
+    ///
+    /// The other half is the one `CLAUDE.md` §3 rule 1 decides. `1day`, `1d` and
+    /// `day` are all plausible spellings and only one of them is a request; no
+    /// source in this repository records which. So an unrecorded rung is refused
+    /// **by name**, nothing is sent, and the day the word is read live it is one
+    /// row in `granularity_tokens`.
+    #[test]
+    fn the_rung_is_named_on_the_wire_and_an_unrecorded_one_refuses_before_the_socket() {
+        let (url, seen, _) = listener(Some(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\
+             Connection: close\r\n\r\n"
+                .to_owned(),
+        ));
+        // Groww's shape: a GET whose interval is a request parameter.
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            method: Method::Get,
+            params: &[
+                crate::vendor::Param {
+                    name: "from",
+                    value: crate::vendor::ParamValue::From,
+                },
+                crate::vendor::Param {
+                    name: "candle_interval",
+                    value: crate::vendor::ParamValue::Granularity,
+                },
+            ],
+            ..spec(PriceScale::Rupees)
+        };
+        let source = source_of(spec, "SUPERSECRET");
+
+        // THE RECORDED RUNG REACHES THE VENDOR IN THE VENDOR'S OWN WORD —
+        // `1minute`, not `1min`, which is the STORE's spelling for the same
+        // rung. Two vocabularies, one field, and the descriptor is what
+        // translates.
+        let _ = source.block_on(&one_day());
+        let sent = seen
+            .recv_timeout(core::time::Duration::from_secs(5))
+            .expect("the vendor was contacted");
+        assert!(
+            sent.contains("candle_interval=1minute"),
+            "the rung is on the wire in this feed's own spelling: {sent}"
+        );
+        assert_eq!(
+            crate::vendor::Granularity::Minute1.dir(),
+            "1min",
+            "and it is NOT the store's spelling, which is what a `Fixed` word \
+             here would have had no way to be wrong about"
+        );
+
+        // AND THE UNRECORDED RUNG NEVER LEAVES THE PROCESS.
+        let daily = BarRequest {
+            granularity: crate::vendor::Granularity::Day1,
+            ..one_day()
+        };
+        let Err(FetchError::RungNotSpellable { rung, field }) = source.block_on(&daily) else {
+            panic!(
+                "a rung this feed has no recorded word for must refuse by name, \
+                 not be sent as some other rung"
+            );
+        };
+        assert_eq!(rung, crate::vendor::Granularity::Day1);
+        assert_eq!(field, "candle_interval", "the descriptor row to amend");
+        let why = FetchError::RungNotSpellable { rung, field }.to_string();
+        assert!(why.contains("1day"), "the refusal names the rung: {why}");
+        assert!(
+            why.contains("candle_interval"),
+            "and the field that would carry it: {why}"
+        );
+        assert!(
+            why.contains("UNVERIFIED"),
+            "and says the word is unrecorded rather than unsupported: {why}"
+        );
+        // NOTHING WAS SENT. The listener answers exactly one request and the
+        // recorded rung above consumed it, so a second arrival here would mean
+        // the daily request went out anyway.
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_millis(250))
+                .is_err(),
+            "the refusal happens before the socket, not after the answer"
+        );
     }
 
     /// Groww's declared shape, decoded: one object per bar under `payload`.

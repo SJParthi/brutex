@@ -59,7 +59,7 @@ use pull::fetch::{
 };
 use pull::fold::{Bucket, FoldError, fold};
 use pull::ingest::{Failure, Ingested, Plan};
-use pull::session::{Cadence, Day, DropCensus, DropReason, SessionError, Window};
+use pull::session::{Day, DropCensus, DropReason, SessionError, Window};
 use pull::vendor::{DateFormat, PriceScale, RangeEnd, TimestampEncoding};
 use pull::work::Selection;
 use store::format::Bar;
@@ -113,7 +113,7 @@ fn request() -> BarRequest {
     BarRequest {
         instrument_id: String::new(),
         window: window(),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     }
 }
 
@@ -1095,7 +1095,6 @@ fn plan_over<'a>(request: &'a BarRequest, exchange: &'a str, scale: PriceScale) 
         encoding: TimestampEncoding::EpochSecondsUtc,
         // And it parses straight to paisa, so by default nothing is scaled.
         scale,
-        timeframe: Timeframe::MINUTE_1,
         vendor: Vendor::Groww,
         exchange,
         segment: "INDEX",
@@ -1272,7 +1271,7 @@ fn a_member_whose_bars_cross_a_month_boundary_is_refused_by_name() {
             Day::new(2022, 11, 1).expect("a real date"),
         )
         .expect("a forward window"),
-        cadence: Cadence::Minute,
+        granularity: pull::vendor::Granularity::Minute1,
     };
     let done = pull::ingest::from_dir(
         &dir,
