@@ -754,6 +754,40 @@ async fn instruments_json(
     )
 }
 
+/// Every feed this build can read, for the browser's feed selector.
+///
+/// Built from `DESCRIPTORS`, so a fifth feed appears in the UI the day its row
+/// exists and nothing in the front end names a vendor. `transport` is included
+/// because it is what decides which of the other controls mean anything — an
+/// archive feed has no token, no rate budget and no window rules.
+async fn feeds_json() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let mut out = String::from("[");
+    for (n, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let transport = match feed.descriptor().transport {
+            pull::vendor::Transport::Http(_) => "broker",
+            pull::vendor::Transport::LocalArchive(_) => "archive",
+        };
+        let _ = write!(
+            out,
+            r#"{{"wire":{},"display":{},"transport":{}}}"#,
+            render::json_string(feed.wire()),
+            render::json_string(feed.display()),
+            render::json_string(transport),
+        );
+    }
+    out.push(']');
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        out,
+    )
+}
+
 /// The type-ahead itself, embedded at compile time.
 ///
 /// `include_str!` rather than a file read, for the same reason `render::STYLE`
@@ -2869,6 +2903,7 @@ pub fn router(site: Loaded) -> axum::Router {
         // browser with scripting off sees exactly the form and table it always
         // saw. D-0052.
         .route("/instruments.json", axum::routing::get(instruments_json))
+        .route("/feeds.json", axum::routing::get(feeds_json))
         .route("/typeahead.js", axum::routing::get(typeahead_js))
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))

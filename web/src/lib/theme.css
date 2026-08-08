@@ -1,0 +1,132 @@
+/* brutex — the operator console's visual system.
+ *
+ * A DARK-FIRST TERMINAL, not a dashboard template. The people who use this
+ * read Dhan and TradingView all day; those are dark, dense, monospaced where
+ * numbers live, and quiet everywhere else so the numbers are the only thing
+ * that moves. Every choice below follows from that.
+ *
+ * Numbers are ALWAYS tabular-nums. A price column whose digits change width is
+ * a column that shimmers while you read it.
+ */
+:root {
+  --bg: #0b0e14;
+  --bg-2: #11151f;
+  --panel: #141924;
+  --panel-2: #1a2030;
+  --line: #232a3a;
+  --line-soft: #1b212e;
+
+  --ink: #e6ebf5;
+  --dim: #8a95ab;
+  --faint: #5c6679;
+
+  --up: #26a69a;
+  --down: #ef5350;
+  --acc: #5b8def;
+  --acc-soft: rgba(91, 141, 239, 0.14);
+  --warn: #f0b429;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+
+  --r: 8px;
+  --row-h: 30px;
+}
+:root[data-theme="light"] {
+  --bg: #f7f8fa; --bg-2: #fff; --panel: #fff; --panel-2: #f2f4f8;
+  --line: #e2e6ee; --line-soft: #eef1f6;
+  --ink: #0d1220; --dim: #5a6478; --faint: #8b95a8;
+  --acc-soft: rgba(91, 141, 239, 0.1);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.45 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden; /* the app owns its own scroll regions */
+}
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.up { color: var(--up); }
+.down { color: var(--down); }
+
+/* ---- shell ---------------------------------------------------------- */
+.shell { display: grid; grid-template-rows: 44px 1fr; height: 100dvh; }
+.topbar {
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 12px; background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 800; letter-spacing: -0.4px; margin-right: 14px; font-size: 14px; }
+.brand b { color: var(--acc); }
+.tab {
+  padding: 6px 12px; border-radius: 6px; color: var(--dim);
+  text-decoration: none; font-weight: 600; font-size: 12.5px;
+  transition: background 0.12s, color 0.12s;
+}
+.tab:hover { color: var(--ink); background: var(--panel-2); }
+.tab[aria-current="page"] { color: var(--ink); background: var(--acc-soft); }
+.spacer { flex: 1; }
+
+/* ---- the feed selector — one feed, never two ------------------------ */
+.feeds { display: flex; gap: 3px; align-items: center; }
+.feeds .lbl {
+  font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--faint); margin-right: 4px;
+}
+.feed {
+  padding: 4px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+  border: 1px solid var(--line); background: transparent; color: var(--dim);
+  cursor: pointer; white-space: nowrap;
+}
+.feed:hover { border-color: var(--acc); color: var(--ink); }
+.feed[aria-pressed="true"] { background: var(--acc); border-color: var(--acc); color: #fff; }
+.feed .kind { opacity: 0.6; font-weight: 500; margin-left: 5px; font-size: 10px; }
+
+/* ---- panes ---------------------------------------------------------- */
+.split { display: grid; grid-template-columns: 320px 1fr; min-height: 0; }
+.pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.pane + .pane { border-left: 1px solid var(--line); }
+.pane-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid var(--line); background: var(--bg-2);
+}
+.pane-title { font-size: 10.5px; letter-spacing: 0.11em; text-transform: uppercase; color: var(--faint); font-weight: 700; }
+
+/* ---- search --------------------------------------------------------- */
+.search {
+  width: 100%; font: inherit; padding: 7px 10px; border-radius: var(--r);
+  border: 1px solid var(--line); background: var(--panel); color: var(--ink);
+}
+.search:focus { outline: 0; border-color: var(--acc); box-shadow: 0 0 0 3px var(--acc-soft); }
+.search::placeholder { color: var(--faint); }
+
+/* ---- virtual list --------------------------------------------------- */
+.vlist { flex: 1; overflow-y: auto; overscroll-behavior: contain; position: relative; }
+.vrow {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center;
+  height: var(--row-h); padding: 0 10px; cursor: pointer;
+  border-bottom: 1px solid var(--line-soft);
+}
+.vrow:hover { background: var(--panel-2); }
+.vrow[aria-selected="true"] { background: var(--acc-soft); box-shadow: inset 2px 0 0 var(--acc); }
+.vrow .sym { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vrow .meta { font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* ---- table ---------------------------------------------------------- */
+.grid { flex: 1; overflow: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+thead th {
+  position: sticky; top: 0; z-index: 2; background: var(--bg-2);
+  text-align: left; padding: 7px 12px; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+  border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+thead th.num { text-align: right; }
+tbody td { padding: 5px 12px; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+tbody tr:hover td { background: var(--panel-2); }
+
+.empty { padding: 28px 14px; color: var(--faint); text-align: center; font-size: 12.5px; }
+.chart { flex: 1; min-height: 0; }
