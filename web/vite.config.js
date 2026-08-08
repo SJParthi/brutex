@@ -17,7 +17,9 @@ export default {
       '/feeds.json': 'http://127.0.0.1:8731',
       '/bars.json': 'http://127.0.0.1:8731',
       '/store.json': 'http://127.0.0.1:8731',
-      '/audit.json': 'http://127.0.0.1:8731'
+      '/audit.json': 'http://127.0.0.1:8731',
+      '/audit': 'http://127.0.0.1:8731',
+      '/pull': 'http://127.0.0.1:8731'
     }
   }
 };

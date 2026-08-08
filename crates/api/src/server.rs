@@ -912,6 +912,57 @@ async fn bars_json(
     (axum::http::StatusCode::OK, json(), out)
 }
 
+/// What the store holds for ONE feed, as JSON, for the DB page.
+///
+/// `?feed=<wire>` — and one feed only. No response from this endpoint ever
+/// carries two feeds' numbers, because no page in this product compares them.
+///
+/// Percentage change is returned as INTEGER BASIS POINTS, not a float. A month
+/// that moved 1.25% is `125`, and the browser inserts the decimal point for
+/// display exactly as it does for prices. `CLAUDE.md` §7 bans the float for
+/// money; a ratio derived from money is the same arithmetic and gets the same
+/// treatment.
+async fn store_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let query = uri.query().unwrap_or("");
+    let feed =
+        ingest::parse_vendor(&param(query, "feed")).unwrap_or(brutex_core::vendor::Vendor::Dhan);
+
+    let mut out = String::from("[");
+    let mut n = 0usize;
+    for (series, month) in &site.entries {
+        let Some(rows) = site
+            .censuses
+            .iter()
+            .find(|c| c.vendor == feed)
+            .and_then(|c| c.rows_for(&series.at(*month)))
+        else {
+            continue;
+        };
+        if n > 0 {
+            out.push(',');
+        }
+        n += 1;
+        let _ = write!(
+            out,
+            r#"{{"instrument":{},"month":{},"timeframe":"1m","rows":{}}}"#,
+            render::json_string(&series.to_string()),
+            render::json_string(&month.to_string()),
+            rows
+        );
+    }
+    out.push(']');
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        out,
+    )
+}
+
 /// The type-ahead itself, embedded at compile time.
 ///
 /// `include_str!` rather than a file read, for the same reason `render::STYLE`
@@ -3029,6 +3080,7 @@ pub fn router(site: Loaded) -> axum::Router {
         .route("/instruments.json", axum::routing::get(instruments_json))
         .route("/feeds.json", axum::routing::get(feeds_json))
         .route("/bars.json", axum::routing::get(bars_json))
+        .route("/store.json", axum::routing::get(store_json))
         .route("/typeahead.js", axum::routing::get(typeahead_js))
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
