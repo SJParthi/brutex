@@ -2622,6 +2622,12 @@ pub fn store_html(site: &Site, today: Day, page: usize, query: &str) -> String {
     // grid may be down to the two swept series.
     notes.extend(site.read.notes.iter().cloned());
     render::store_page(&render::StoreView {
+        // ONE FEED PER VIEW. Parsed through the same function the pull form
+        // uses, so "groww" means the same thing on both pages, and an unknown
+        // name falls to the verified default rather than to whichever vendor
+        // happens to be first in the table.
+        feed: ingest::parse_vendor(&param(query, "feed"))
+            .unwrap_or(brutex_core::vendor::Vendor::Dhan),
         today,
         censuses: &site.censuses,
         rows: &rows,

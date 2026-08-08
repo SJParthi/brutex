@@ -884,6 +884,13 @@ pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &[String]) -> S
 /// script builds it. A page without the script never matches any of these
 /// selectors, so nothing here can change how the plain page looks.
 const TYPEAHEAD_STYLE: &str = "\
+.feedpick{display:flex;align-items:center;gap:.4rem;flex-wrap:wrap;margin:.9rem 0 1.1rem}\
+.feedpick-label{font-size:.68rem;letter-spacing:.13em;text-transform:uppercase;\
+color:#7a8794;margin-right:.35rem}\
+.feedpick-one{padding:.34rem .8rem;border-radius:999px;border:1px solid #d7dde3;\
+background:#fff;color:#344054;text-decoration:none;font-size:.84rem;font-weight:600}\
+.feedpick-one:hover{border-color:#98a8bb}\
+.feedpick-one.is-on{background:#3538cd;border-color:#3538cd;color:#fff}\
 .ta-panel{position:absolute;z-index:40;left:0;right:0;top:calc(100% + .35rem);\
 background:#fff;border:1px solid #d7dde3;border-radius:10px;overflow:hidden;\
 box-shadow:0 12px 32px rgba(16,24,40,.14);max-height:22rem;overflow-y:auto}\
@@ -1082,6 +1089,10 @@ fn open_with(title: &str, current: &str, extra: &str) -> String {
     out.push_str(&escape(title));
     out.push_str("</title><style>");
     out.push_str(STYLE);
+    // SHARED COMPONENT STYLES, on every page rather than on the two that
+    // happen to use them today. A rule set that only some pages carry is a
+    // component that looks different depending on where you met it.
+    out.push_str(TYPEAHEAD_STYLE);
     out.push_str(extra);
     out.push_str("</style></head><body>");
     out.push_str(&nav(current));
@@ -1974,6 +1985,19 @@ pub struct StoreView<'a> {
     pub held: usize,
     /// Whether the page is listing what is HELD, or the full month product.
     pub held_only: bool,
+    /// WHICH FEED THIS PAGE IS SHOWING, and it shows exactly one.
+    ///
+    /// The table used to carry one column per vendor — `Groww rows` beside
+    /// `Dhan rows` — which is a vendor COMPARISON, and this product does not
+    /// compare vendors anywhere. A backtest is run against one feed's data;
+    /// two columns invite reading a difference that has no meaning here,
+    /// because the two feeds are not the same instrument universe, the same
+    /// session handling or the same price scale.
+    ///
+    /// So the feed is a SELECTION. One column, named for the feed chosen, and
+    /// a picker built from the feed table so a fifth feed appears without an
+    /// edit here.
+    pub feed: brutex_core::vendor::Vendor,
 }
 
 /// The filter bar: what to look at, in four narrowings.
@@ -2155,11 +2179,26 @@ fn coverage_table(view: &StoreView<'_>) -> String {
         },
         coverage_strip(&held)
     );
+    // THE FEED PICKER. One feed is shown; switching is a link, so a result is
+    // reloadable and shareable and needs no script.
+    out.push_str("<nav class=\"feedpick\" aria-label=\"Feed\">");
+    out.push_str("<span class=\"feedpick-label\">Feed</span>");
+    for vendor in Vendor::ALL {
+        let on = vendor == view.feed;
+        let _ = write!(
+            out,
+            "<a class=\"feedpick-one{}\" href=\"/store?feed={}\"{}>{}</a>",
+            if on { " is-on" } else { "" },
+            query_value(vendor.as_str()),
+            if on { " aria-current=\"true\"" } else { "" },
+            escape(vendor.as_str())
+        );
+    }
+    out.push_str("</nav>");
+
     out.push_str("<div class=\"hscroll\"><table><thead><tr>");
     out.push_str("<th>Instrument</th><th>Month</th><th>Timeframe</th>");
-    for vendor in Vendor::ALL {
-        let _ = write!(out, "<th>{} rows</th>", escape(vendor.as_str()));
-    }
+    let _ = write!(out, "<th>{} rows</th>", escape(view.feed.as_str()));
     out.push_str("</tr></thead><tbody>");
     for row in view.rows {
         let cls = if row.is_held() { "swept" } else { "void" };
@@ -2180,7 +2219,10 @@ fn coverage_table(view: &StoreView<'_>) -> String {
         // A cell with no rows is not linked. Linking it would offer a page that
         // can only answer "this month is absent", which is what the empty cell
         // already says here.
-        for &(vendor, n) in &row.rows {
+        // ONE FEED, NOT ALL OF THEM. Filtering here rather than upstream keeps
+        // `Coverage` the same shape for every caller; what changes is which of
+        // its cells this page draws.
+        for &(vendor, n) in row.rows.iter().filter(|(v, _)| *v == view.feed) {
             let miss = if n.is_none() { " miss" } else { "" };
             let cell = count_cell(n);
             let inner = if n.is_some_and(|rows| rows > 0) {
@@ -3864,6 +3906,10 @@ mod tests {
         };
         let rows = [held, absent];
         let html = store_page(&StoreView {
+            // The fixture's held count belongs to Groww, so Groww is the feed
+            // this page shows. Under the old per-vendor columns the test never
+            // had to say which feed it meant; now it does, which is the point.
+            feed: Vendor::Groww,
             today: d(2026, 8, 7),
             censuses: &[],
             rows: &rows,
@@ -4308,7 +4354,13 @@ mod store_links_tests {
             // which the empty cell already says.
             rows: vec![(Vendor::Groww, Some(8_250)), (Vendor::Dhan, None)],
         }];
+        // THE FEED IS SELECTED, NOT COLUMNED. This test asserted a Groww
+        // link and a Dhan link on one page — which is the vendor comparison
+        // this product does not do. It now selects the feed whose links it is
+        // checking, and the assertion is that the SELECTED feed's counts link
+        // to their own bars.
         let html = store_page(&StoreView {
+            feed: Vendor::Groww,
             today: pull::session::Day::new(2026, 8, 7).expect("valid"),
             censuses: &[],
             rows: &rows,
