@@ -6227,6 +6227,17 @@ fn a_call_and_its_put_are_never_one_instrument_for_either_vendor() {
 /// * **No overlap.** Refetching a boundary day would make the run's cost depend
 ///   on the chunking, and spends rate budget on bars already held.
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one test for one invariant -- the splitter obeys BOTH the \
+              vendor's day cap and the store's one-month-per-file rule -- and \
+              the cases that prove it are the boundaries: a month-crossing \
+              window, an exact multiple, a window inside both bounds, a \
+              window inside the cap but crossing a month, a one-day cap, and \
+              the real 2020..2026 backfill at each vendor's published cap. \
+              Splitting them into six tests would let five pass while the \
+              sixth is deleted."
+)]
 fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     use pull::session::{Day, Window, split_window};
 
@@ -6240,12 +6251,34 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
         .iter()
         .map(|w| (w.from().days_from_epoch(), w.to().days_from_epoch()))
         .collect();
+    // TWO BOUNDS, NOT ONE. The cap is the vendor's; the month is the store's.
+    //
+    // Day 1000 is 1972-09-27, so this window runs 1972-09-27..1972-11-30 and
+    // the chunks break at September's end (1003), then the 30-day cap (1033),
+    // then October's end (1034), then November's end (1064). The old
+    // expectation — a clean 30/30/5 — was the answer when the vendor cap was
+    // the only bound, and it was wrong in a way that cost 699 instruments on a
+    // real pull: `fetch::land` refuses a batch spanning two months, because
+    // the store addresses one month per file.
     assert_eq!(
         spans,
-        vec![(1_000, 1_029), (1_030, 1_059), (1_060, 1_064)],
-        "inclusive on both ends, so a 30-day chunk from day 1000 ends at 1029 \
-         — and the remainder is a short LAST chunk, not a long one"
+        vec![
+            (1_000, 1_003),
+            (1_004, 1_033),
+            (1_034, 1_034),
+            (1_035, 1_064)
+        ],
+        "chunks break at the EARLIER of the vendor cap and the month end, \
+         inclusive on both ends"
     );
+    for (from, to) in &spans {
+        assert_eq!(
+            (day(*from).year(), day(*from).month()),
+            (day(*to).year(), day(*to).month()),
+            "chunk {from}..{to} spans two months, which the store refuses"
+        );
+        assert!(to - from < 30, "chunk {from}..{to} is wider than the cap");
+    }
 
     // The three properties, stated as properties rather than as one literal, so
     // they hold for every case below too.
@@ -6286,20 +6319,43 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     };
     check(&chunks, 1_000, 1_064, 30);
 
-    // EXACT MULTIPLE. The off-by-one that yields an empty trailing chunk, or a
-    // 31-day one, shows up here and nowhere else.
-    let exact = split_window(window(1_000, 1_059), 30).expect("a positive cap");
+    // EXACT MULTIPLE OF THE CAP, STARTING ON A MONTH BOUNDARY.
+    //
+    // The off-by-one that yields an empty trailing chunk, or a 31-day one,
+    // shows up here and nowhere else — but it can only be seen through the CAP
+    // when the month does not cut first. Day 1035 is 1972-11-01, so this runs
+    // 1972-11-01..1972-12-30: November is exactly 30 days and takes the whole
+    // cap, then December takes the remaining 30. Two chunks, both bounds
+    // agreeing, which is what makes the off-by-one visible.
+    let exact = split_window(window(1_035, 1_094), 30).expect("a positive cap");
     assert_eq!(
         exact.len(),
         2,
-        "60 days at a cap of 30 is exactly two chunks"
+        "60 days from a month start at a cap of 30 is exactly two chunks"
     );
-    check(&exact, 1_000, 1_059, 30);
+    check(&exact, 1_035, 1_094, 30);
 
-    // ALREADY FITS — returned unchanged, so a caller has one code path.
-    let short = split_window(window(1_000, 1_010), 30).expect("a positive cap");
-    assert_eq!(short.len(), 1, "a window inside the cap is not split");
-    check(&short, 1_000, 1_010, 30);
+    // ALREADY FITS BOTH BOUNDS — returned unchanged, so a caller has one code
+    // path. Days 1004..1014 are 1972-10-01..1972-10-11: inside the cap AND
+    // inside one month, which is now what "fits" means. (1000..1010 would
+    // cross September into October and correctly split in two.)
+    let short = split_window(window(1_004, 1_014), 30).expect("a positive cap");
+    assert_eq!(
+        short.len(),
+        1,
+        "a window inside the cap and one month is not split"
+    );
+    check(&short, 1_004, 1_014, 30);
+
+    // AND THE MONTH ALONE IS ENOUGH TO SPLIT IT. Well inside a 30-day cap,
+    // split only because the store cannot hold both months in one file.
+    let crosses = split_window(window(1_000, 1_010), 30).expect("a positive cap");
+    assert_eq!(
+        crosses.len(),
+        2,
+        "1972-09-27..10-07 is 11 days -- inside the cap -- but two months"
+    );
+    check(&crosses, 1_000, 1_010, 30);
 
     // ONE DAY, and a cap of one day: the tightest legal case.
     let single = split_window(window(1_000, 1_000), 1).expect("a positive cap");
@@ -6311,14 +6367,38 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
 
     // THE REAL BACKFILL, at both vendors' published caps. 2020-01-01 to
     // 2026-08-07 is 2,410 days; the arithmetic in the plan is not an estimate.
+    // THE COUNT IS NOT ceil(days / cap). It is bounded below by the number of
+    // MONTHS the window touches, because the store addresses one month per
+    // file. 2020-01-01..2026-08-07 touches 80 months.
+    //
+    // Groww's 30-day cap cuts inside every 31-day month, so it needs 126
+    // requests per instrument, not 81. Dhan's 90-day cap is wider than any
+    // month, so the month is the only bound and it needs exactly 80.
+    //
+    // This is a real change to the backfill arithmetic and it belongs in a
+    // test rather than a comment: at 774 instruments, Groww's one-minute
+    // backfill is 126 x 774 = 97,524 requests, not 62,694.
     let backfill = window(18_262, 20_672);
-    for (cap, vendor) in [(30_u32, "Groww at 1-minute"), (90, "Dhan")] {
+    for (cap, vendor, want) in [(30_u32, "Groww at 1-minute", 126_usize), (90, "Dhan", 80)] {
         let chunks = split_window(backfill, cap).expect("a positive cap");
         check(&chunks, 18_262, 20_672, cap);
+        let months: std::collections::BTreeSet<_> = chunks
+            .iter()
+            .map(|w| (w.from().year(), w.from().month()))
+            .collect();
+        assert_eq!(months.len(), 80, "{vendor}: the window touches 80 months");
+        for chunk in &chunks {
+            assert_eq!(
+                (chunk.from().year(), chunk.from().month()),
+                (chunk.to().year(), chunk.to().month()),
+                "{vendor} produced a chunk spanning two months, which the \
+                 store refuses and which throws the whole fetch away"
+            );
+        }
         assert_eq!(
             chunks.len(),
-            (2_411_u32).div_ceil(cap) as usize,
-            "{vendor} needs ceil(2411/{cap}) requests for one instrument"
+            want,
+            "{vendor} needs {want} requests per instrument at a {cap}-day cap"
         );
     }
 

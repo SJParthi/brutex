@@ -389,6 +389,34 @@ impl Day {
         YearMonth::new(self.year, self.month)
     }
 
+    /// The last day of the month this date falls in.
+    ///
+    /// # Why this exists on `Day` and not in the caller
+    ///
+    /// The store addresses ONE MONTH PER FILE. A fetch window that crosses a
+    /// month boundary produces a batch `fetch::land` refuses by name — and
+    /// the refusal is correct, because splitting is a decision about which
+    /// FILE the bars belong in, which the store cannot make for a caller that
+    /// did not make it.
+    ///
+    /// Measured before this existed: a 37-day, 774-instrument pull read
+    /// 6,907,286 rows, stored 5,496,790, and failed 699 members — every one
+    /// of them an instrument whose window crossed July into August. The
+    /// vendor answered and the bars decoded; they died at the write boundary
+    /// for a reason the caller could have prevented for free.
+    ///
+    /// Leap years come from `month_len`, the same function `Day::new`
+    /// validates against, so a February end-of-month can never disagree with
+    /// the day it was built from.
+    #[must_use]
+    pub const fn end_of_month(self) -> Self {
+        Self {
+            year: self.year,
+            month: self.month,
+            day: month_len(self.year as u32, self.month),
+        }
+    }
+
     /// The next calendar day.
     ///
     /// **This is what makes the vendor's non-inclusive `toDate` invisible to an
@@ -1041,12 +1069,28 @@ pub fn split_window(window: Window, cap_days: u32) -> Result<Vec<Window>, Sessio
     let mut chunks = Vec::new();
     let mut start = first;
     while start <= last {
+        // AND NEVER ACROSS A MONTH BOUNDARY.
+        //
+        // The store addresses ONE MONTH PER FILE, and `fetch::land` refuses a
+        // batch that spans two: "bars span 2026-07 to 2026-08; the store
+        // addresses one month per file and splitting is the caller's decision,
+        // not this one's". This IS that caller, and it was not splitting.
+        //
+        // Measured on a real 37-day, 774-instrument pull: 6,907,286 rows read,
+        // 5,496,790 stored, and 699 MEMBERS FAILED — every instrument whose
+        // window crossed July into August. The vendor answered, the bars
+        // decoded, and the store refused them at the write boundary for a
+        // reason the caller could have prevented.
+        //
+        // So the chunk ends at the earlier of: the vendor's day cap, the
+        // operator's last day, and the last day of the month `start` falls in.
         // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk
         // starting at day 0 ends at day 29, not day 30. Off by one here would
         // make every chunk one day over the vendor's cap, which is the failure
         // this function exists to prevent and would be invisible until the
         // vendor refused.
-        let end = start.saturating_add(cap_days - 1).min(last);
+        let month_end = Day::from_days(start)?.end_of_month().days_from_epoch();
+        let end = start.saturating_add(cap_days - 1).min(last).min(month_end);
         chunks.push(Window::new(Day::from_days(start)?, Day::from_days(end)?)?);
         // `end + 1` cannot overflow past `last`'s guard: `end <= last` and
         // `last` is a real day, so the successor is at most one past a value
@@ -1148,5 +1192,73 @@ mod tests {
             u64::from(u32::MAX),
             "this case is the boundary: the true sum is exactly u32::MAX"
         );
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod month_boundary {
+    use super::{Day, Window, split_window};
+
+    fn day(y: u16, m: u8, d: u8) -> Day {
+        Day::new(y, m, d).expect("a real calendar date")
+    }
+
+    /// EVERY CHUNK LANDS IN EXACTLY ONE MONTH, AND THE CHUNKS TILE THE WINDOW.
+    ///
+    /// Not a style preference. `fetch::land` refuses a batch spanning two
+    /// months by name, so a chunk that spans one is a fetch the vendor
+    /// answered and the store threw away. This is the regression test for a
+    /// measured failure: 37 days, 774 instruments, 699 members failed with
+    /// "bars span 2026-07 to 2026-08".
+    #[test]
+    fn no_chunk_ever_spans_two_months() {
+        let cases = [
+            (day(2026, 7, 1), day(2026, 8, 6)),
+            (day(2024, 1, 1), day(2024, 12, 31)),
+            (day(2024, 2, 1), day(2024, 3, 1)),
+            (day(2020, 1, 1), day(2026, 8, 6)),
+        ];
+        for cap in [30_u32, 90, 1, 365] {
+            for (from, to) in cases {
+                let window = Window::new(from, to).expect("from precedes to");
+                let chunks = split_window(window, cap).expect("a splittable window");
+                let mut seen = Vec::new();
+                for c in &chunks {
+                    assert_eq!(
+                        (c.from().year(), c.from().month()),
+                        (c.to().year(), c.to().month()),
+                        "cap {cap}: chunk {:?}..{:?} spans two months -- the store \
+                         refuses this batch and the whole fetch is wasted",
+                        c.from(),
+                        c.to(),
+                    );
+                    assert!(
+                        c.to().days_from_epoch() - c.from().days_from_epoch() < cap,
+                        "cap {cap}: chunk is wider than the vendor allows",
+                    );
+                    seen.push((c.from().days_from_epoch(), c.to().days_from_epoch()));
+                }
+                // AND NOTHING IS LOST. The chunks must tile the window exactly:
+                // no gap (a missing day is missing data) and no overlap (a
+                // duplicate day is a wasted request).
+                let mut want = from.days_from_epoch();
+                for (start, end) in &seen {
+                    assert_eq!(*start, want, "cap {cap}: chunks do not tile at {want}");
+                    want = end + 1;
+                }
+                assert_eq!(
+                    want,
+                    to.days_from_epoch() + 1,
+                    "cap {cap}: the chunks stop short of the window",
+                );
+            }
+        }
     }
 }

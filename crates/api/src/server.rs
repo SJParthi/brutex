@@ -2395,19 +2395,23 @@ async fn fetch_chunks(
             window: *chunk,
             cadence: pull::session::Cadence::Minute,
         };
-        bodies.push(with_retry(source, &request).await.map_err(|why| {
-            format!(
-                "the broker did not answer with a window. This was \
+        bodies.push(
+            with_retry(source, &request, asked.feed, site)
+                .await
+                .map_err(|why| {
+                    format!(
+                        "the broker did not answer with a window. This was \
                          request {} of {}, covering {}..={} — the chunks before \
                          it were fetched and are not written, because a partial \
                          answer to a whole request is a gap this store cannot \
                          correct later: {why}",
-                nth + 1,
-                chunks.len(),
-                chunk.from(),
-                chunk.to()
-            )
-        })?);
+                        nth + 1,
+                        chunks.len(),
+                        chunk.from(),
+                        chunk.to()
+                    )
+                })?,
+        );
     }
     Ok(bodies)
 }
@@ -2419,7 +2423,7 @@ async fn fetch_chunks(
 /// each into a lost instrument. Ten would keep hammering a vendor that is down,
 /// which the rate governor cannot see because a refused connection never
 /// reaches it.
-const ATTEMPTS: u32 = 3;
+const THROTTLE_ATTEMPTS: u32 = 6;
 
 /// One chunk, retried on the failures that are worth retrying.
 ///
@@ -2445,11 +2449,23 @@ const ATTEMPTS: u32 = 3;
 async fn with_retry(
     source: &pull::http::HttpSource,
     request: &pull::fetch::BarRequest,
+    feed: pull::vendor::Feed,
+    site: &Site,
 ) -> Result<pull::fetch::RawWindow, String> {
     let mut last = String::new();
-    for attempt in 1..=ATTEMPTS {
+    for attempt in 1..=THROTTLE_ATTEMPTS {
         match source.window_async(request).await {
-            Ok(body) => return Ok(body),
+            // THE ADDITIVE INCREASE. Without this the governor admits
+            // against a fixed budget forever and never learns the vendor's
+            // real ceiling -- AIMD with neither the A nor the D.
+            Ok(body) => {
+                if let Ok(mut budgets) = site.budgets.lock()
+                    && let Some(Some(g)) = budgets.get_mut(feed as usize)
+                {
+                    g.record_success();
+                }
+                return Ok(body);
+            }
             Err(why) => {
                 let text = why.to_string();
                 // A 401 MID-RUN IS THE TOKEN EXPIRING, AND IT IS CERTAIN.
@@ -2474,14 +2490,41 @@ async fn with_retry(
                          means re-running costs only what is still missing."
                     ));
                 }
-                // A VENDOR THAT ANSWERED IS NOT RETRIED. It gave a reason; the
-                // reason will not change because it was asked twice more.
-                if text.contains("refused with status") {
+                // 429 IS THE ONE REFUSAL THAT MEANS "LATER", SO IT IS THE ONE
+                // THAT IS RETRIED.
+                //
+                // Measured: a 785-instrument, 3-chunk pull fired ~2,355
+                // requests in 365 s (~6.4/s) and 458 instruments died on
+                // `status 429`. The branch below used to return every
+                // `refused with status` immediately -- including 429 -- so the
+                // backoff never ran on the only error it was built for, and
+                // `Governor::record_throttled` was dead code in the entire
+                // workspace. AIMD that never observes a refusal is a constant.
+                let throttled = text.contains("status 429");
+                if throttled {
+                    // THE MULTIPLICATIVE DECREASE, on every span, because a
+                    // 429 names none of them. See `pull::rate::Governor`.
+                    if let Ok(mut budgets) = site.budgets.lock()
+                        && let Some(Some(g)) = budgets.get_mut(feed as usize)
+                    {
+                        g.record_throttled();
+                    }
+                } else if text.contains("refused with status") {
+                    // A VENDOR THAT ANSWERED FOR ANY OTHER REASON IS NOT
+                    // RETRIED. It gave a reason; the reason will not change
+                    // because it was asked twice more.
                     return Err(text);
                 }
-                if attempt < ATTEMPTS {
-                    // 250 ms, then 1 s.
-                    let wait = 250 * u64::from(attempt) * u64::from(attempt);
+                if attempt < THROTTLE_ATTEMPTS {
+                    // Exponential for a throttle -- the vendor is saying the
+                    // arrival rate is wrong, and 250 ms twice does not change
+                    // an arrival rate. Quadratic for a transport blip, which is
+                    // what the original attempts were sized for.
+                    let wait = if throttled {
+                        (1_000_u64 << (attempt - 1)).min(30_000)
+                    } else {
+                        250 * u64::from(attempt) * u64::from(attempt)
+                    };
                     tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
                 }
                 last = text;
@@ -2489,7 +2532,7 @@ async fn with_retry(
         }
     }
     Err(format!(
-        "{last} — and it failed {ATTEMPTS} times, so the transport is not \
+        "{last} — and it failed {THROTTLE_ATTEMPTS} times, so the transport is not \
          blipping, it is down"
     ))
 }
@@ -5753,11 +5796,51 @@ mod tests {
                 Some(window.to()),
                 "and ends where they asked — never truncated to fit"
             );
+            // ONE CHUNK PER MONTH, NOT ONE PER CAP.
+            //
+            // This used to assert `ceil(2411 / cap)`, which was the answer when
+            // the ONLY bound was the vendor's window cap. It is no longer, and
+            // the difference cost 699 instruments on a real pull: the store
+            // addresses one month per file and `fetch::land` refuses a batch
+            // spanning two, so the splitter now also breaks at every month
+            // boundary. For a cap wider than any month -- Dhan's 90 -- the
+            // month is what binds, and 2,411 days is 80 months, not 27 chunks.
+            //
+            // Asserted as "every chunk is inside one month AND the chunks
+            // tile" rather than a literal count, because a count is a fact
+            // about the calendar and this is a claim about the invariant.
+            let mut months = std::collections::BTreeSet::new();
+            for chunk in &chunks {
+                assert_eq!(
+                    (chunk.from().year(), chunk.from().month()),
+                    (chunk.to().year(), chunk.to().month()),
+                    "{} produced a chunk spanning two months, which the store \
+                     refuses and which throws the whole fetch away",
+                    feed.display()
+                );
+                months.insert((chunk.from().year(), chunk.from().month()));
+            }
+            let mut want = window.from().days_from_epoch();
+            for chunk in &chunks {
+                assert_eq!(
+                    chunk.from().days_from_epoch(),
+                    want,
+                    "{} left a gap or an overlap between chunks",
+                    feed.display()
+                );
+                want = chunk.to().days_from_epoch() + 1;
+            }
             assert_eq!(
-                chunks.len(),
-                (2_411_usize).div_ceil(cap as usize),
-                "{} needs ceil(2411/{cap}) requests for one instrument",
+                want,
+                window.to().days_from_epoch() + 1,
+                "{} stopped short of the window",
                 feed.display()
+            );
+            assert!(
+                chunks.len() >= months.len(),
+                "{} cannot cover {} months in fewer chunks",
+                feed.display(),
+                months.len()
             );
         }
     }
@@ -5864,7 +5947,7 @@ mod tests {
     #[test]
     fn a_blip_is_retried_and_an_answered_refusal_is_not() {
         // Compile-time, and first in the scope — one attempt is not a retry.
-        const _: () = assert!(ATTEMPTS > 1);
+        const _: () = assert!(THROTTLE_ATTEMPTS > 1);
 
         let me = include_str!("server.rs");
         let body = me
@@ -5877,7 +5960,7 @@ mod tests {
 
         // The loop runs more than once, or nothing is retried at all.
         assert!(
-            body.contains("for attempt in 1..=ATTEMPTS"),
+            body.contains("for attempt in 1..=THROTTLE_ATTEMPTS"),
             "the attempt loop is what makes this a retry"
         );
 
