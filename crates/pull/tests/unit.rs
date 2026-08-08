@@ -6204,3 +6204,126 @@ fn a_call_and_its_put_are_never_one_instrument_for_either_vendor() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A window longer than the vendor's cap is split into legal, gapless chunks.
+///
+/// # What this is protecting
+///
+/// `api::ingest::MAX_WINDOW_DAYS` is 3,653 — an INPUT bound, wide enough for the
+/// whole stated backfill and narrow enough to catch a fat-fingered year. It says
+/// nothing about what a broker will answer. Groww caps one request at 30 days at
+/// one-minute granularity and Dhan at 90, so a 2020-to-today window is accepted
+/// by the parser and handed whole to a vendor that will not serve it.
+///
+/// The three properties that matter, and an off-by-one breaks each differently:
+///
+/// * **No chunk exceeds the cap.** `cap - 1` is the arithmetic, because both
+///   ends are included: a 30-day chunk from day 0 ends at day 29. Getting this
+///   wrong makes every chunk one day over, which is invisible until a vendor
+///   refuses.
+/// * **No gap.** Each chunk starts the day after the previous one ended. A gap
+///   loses a trading day into a store that is append-only and cannot be
+///   corrected later.
+/// * **No overlap.** Refetching a boundary day would make the run's cost depend
+///   on the chunking, and spends rate budget on bars already held.
+#[test]
+fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
+    use pull::session::{Day, Window, split_window};
+
+    let day = |n: u32| Day::from_days(n).expect("a real day");
+    let window = |a: u32, b: u32| Window::new(day(a), day(b)).expect("a forward window");
+
+    // A span that does NOT divide evenly, which is the common case: 65 days at
+    // a cap of 30 is 30 + 30 + 5.
+    let chunks = split_window(window(1_000, 1_064), 30).expect("a positive cap");
+    let spans: Vec<(u32, u32)> = chunks
+        .iter()
+        .map(|w| (w.from().days_from_epoch(), w.to().days_from_epoch()))
+        .collect();
+    assert_eq!(
+        spans,
+        vec![(1_000, 1_029), (1_030, 1_059), (1_060, 1_064)],
+        "inclusive on both ends, so a 30-day chunk from day 1000 ends at 1029 \
+         — and the remainder is a short LAST chunk, not a long one"
+    );
+
+    // The three properties, stated as properties rather than as one literal, so
+    // they hold for every case below too.
+    let check = |chunks: &[Window], from: u32, to: u32, cap: u32| {
+        assert!(
+            !chunks.is_empty(),
+            "a real window yields at least one chunk"
+        );
+        assert_eq!(
+            chunks[0].from().days_from_epoch(),
+            from,
+            "the split starts where the window starts"
+        );
+        assert_eq!(
+            chunks[chunks.len() - 1].to().days_from_epoch(),
+            to,
+            "and ends where it ends — a short last chunk, never a truncated one"
+        );
+        for w in chunks {
+            let len = w.to().days_from_epoch() - w.from().days_from_epoch() + 1;
+            assert!(
+                len <= cap,
+                "no chunk may exceed the vendor's cap of {cap}, and this one is \
+                 {len} days: {:?}..={:?}",
+                w.from(),
+                w.to()
+            );
+        }
+        for pair in chunks.windows(2) {
+            assert_eq!(
+                pair[1].from().days_from_epoch(),
+                pair[0].to().days_from_epoch() + 1,
+                "chunks are gapless and non-overlapping: a gap loses a trading \
+                 day into an append-only store, an overlap refetches one and \
+                 spends rate budget on bars already held"
+            );
+        }
+    };
+    check(&chunks, 1_000, 1_064, 30);
+
+    // EXACT MULTIPLE. The off-by-one that yields an empty trailing chunk, or a
+    // 31-day one, shows up here and nowhere else.
+    let exact = split_window(window(1_000, 1_059), 30).expect("a positive cap");
+    assert_eq!(
+        exact.len(),
+        2,
+        "60 days at a cap of 30 is exactly two chunks"
+    );
+    check(&exact, 1_000, 1_059, 30);
+
+    // ALREADY FITS — returned unchanged, so a caller has one code path.
+    let short = split_window(window(1_000, 1_010), 30).expect("a positive cap");
+    assert_eq!(short.len(), 1, "a window inside the cap is not split");
+    check(&short, 1_000, 1_010, 30);
+
+    // ONE DAY, and a cap of one day: the tightest legal case.
+    let single = split_window(window(1_000, 1_000), 1).expect("a positive cap");
+    assert_eq!(single.len(), 1);
+    check(&single, 1_000, 1_000, 1);
+    let daily = split_window(window(1_000, 1_004), 1).expect("a positive cap");
+    assert_eq!(daily.len(), 5, "a one-day cap yields one chunk per day");
+    check(&daily, 1_000, 1_004, 1);
+
+    // THE REAL BACKFILL, at both vendors' published caps. 2020-01-01 to
+    // 2026-08-07 is 2,410 days; the arithmetic in the plan is not an estimate.
+    let backfill = window(18_262, 20_672);
+    for (cap, vendor) in [(30_u32, "Groww at 1-minute"), (90, "Dhan")] {
+        let chunks = split_window(backfill, cap).expect("a positive cap");
+        check(&chunks, 18_262, 20_672, cap);
+        assert_eq!(
+            chunks.len(),
+            (2_411_u32).div_ceil(cap) as usize,
+            "{vendor} needs ceil(2411/{cap}) requests for one instrument"
+        );
+    }
+
+    // A CAP OF ZERO IS REFUSED, not read as "no cap". Reading it as unbounded
+    // would send the whole window, which is the bug this exists to prevent.
+    let why = split_window(window(1_000, 1_064), 0).expect_err("zero is refused");
+    assert!(why.to_string().contains("zero days"), "and says so: {why}");
+}

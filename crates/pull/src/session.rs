@@ -209,6 +209,13 @@ pub enum SessionError {
     /// non-inclusive `toDate` rule: a wrapped day would silently ask for a
     /// window ending in 1970.
     NoNextDay,
+    /// [`split_window`] was given a cap of zero days.
+    ///
+    /// Refused rather than silently read as "no cap". Treating it as unbounded
+    /// would hand the whole window to a vendor that published a limit, which is
+    /// precisely the bug [`split_window`] exists to prevent — and a loop that
+    /// advances by zero would not terminate anyway.
+    WindowCapIsZero,
     /// A window whose end is before its start.
     ///
     /// Refused rather than silently swapped. An operator who typed the dates in
@@ -242,6 +249,12 @@ impl fmt::Display for SessionError {
                 write!(f, "day {day} is not 1..={month_len} in that month")
             }
             Self::NoNextDay => write!(f, "there is no day after {MAX_YEAR}-12-31"),
+            Self::WindowCapIsZero => write!(
+                f,
+                "a window cap of zero days cannot be split into — a vendor that \
+                 publishes a limit publishes a positive one, and reading zero \
+                 as \"no limit\" would send the whole window"
+            ),
             Self::WindowRunsBackwards { from, to } => {
                 write!(f, "window {from}..={to} runs backwards")
             }
@@ -1061,4 +1074,64 @@ mod tests {
             "this case is the boundary: the true sum is exactly u32::MAX"
         );
     }
+}
+
+/// Split a window into consecutive legal chunks, each at most `cap_days` long.
+///
+/// # Why this exists
+///
+/// A vendor caps how much history one request may name, and the cap is a
+/// *vendor* bound, not an input bound. `api::ingest::MAX_WINDOW_DAYS` is the
+/// latter — 3,653 days, wide enough for the whole stated backfill and narrow
+/// enough that a fat-fingered year is caught. It says nothing about what a
+/// broker will answer.
+///
+/// So a 2020-to-today window is accepted by the parser and, until this
+/// function has a caller, handed whole to a vendor whose limit is 30 days at
+/// one-minute granularity. What comes back is whatever that vendor decides to
+/// do with an over-long range — an error if the operator is lucky, a silently
+/// truncated answer if not, and the second one writes a gap the append-only
+/// store cannot later correct.
+///
+/// # The split
+///
+/// Chunks are **inclusive on both ends and non-overlapping**: a 30-day cap over
+/// days 0..=64 yields `0..=29`, `30..=59`, `60..=64`. Overlapping them would
+/// refetch a boundary day and make the run's cost depend on the chunking; a gap
+/// between them would lose one. The last chunk is short whenever the span does
+/// not divide evenly, which is the common case and not an edge case.
+///
+/// Returns the window unchanged in a single-element vector when it already
+/// fits, so a caller has one code path rather than two.
+///
+/// # Errors
+///
+/// [`SessionError`] if `cap_days` is zero — a cap of nothing cannot be split
+/// into, and looping on it would not terminate. Refused rather than silently
+/// treated as "no cap", which would send the whole window and be exactly the
+/// bug this function exists to prevent.
+pub fn split_window(window: Window, cap_days: u32) -> Result<Vec<Window>, SessionError> {
+    if cap_days == 0 {
+        return Err(SessionError::WindowCapIsZero);
+    }
+
+    let first = window.from().days_from_epoch();
+    let last = window.to().days_from_epoch();
+
+    let mut chunks = Vec::new();
+    let mut start = first;
+    while start <= last {
+        // `cap_days - 1` because both ends are INCLUDED: a 30-day chunk
+        // starting at day 0 ends at day 29, not day 30. Off by one here would
+        // make every chunk one day over the vendor's cap, which is the failure
+        // this function exists to prevent and would be invisible until the
+        // vendor refused.
+        let end = start.saturating_add(cap_days - 1).min(last);
+        chunks.push(Window::new(Day::from_days(start)?, Day::from_days(end)?)?);
+        // `end + 1` cannot overflow past `last`'s guard: `end <= last` and
+        // `last` is a real day, so the successor is at most one past a value
+        // that already fit.
+        start = end.saturating_add(1);
+    }
+    Ok(chunks)
 }
