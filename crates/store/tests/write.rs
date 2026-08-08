@@ -444,10 +444,40 @@ fn an_overlapping_batch_with_different_bars_is_refused() {
     );
     assert_eq!(image(scratch.root()), before, "and nothing was written");
 
-    // A batch longer than the file cannot be its tail either.
-    assert!(file.append(&batch(0, 20)).is_err());
-    assert_eq!(image(scratch.root()), before);
-    assert_eq!(file.records(), 10);
+    // A LONGER BATCH WHOSE OVERLAP MATCHES IS A RESUME, AND IT LANDS.
+    //
+    // This asserted `is_err()` — "a batch longer than the file cannot be its
+    // tail either" — which is true and was the wrong conclusion. The file holds
+    // 0..10 and the batch is 0..20: the first ten are byte-identical to what is
+    // stored and the last ten follow. Refusing it is refusing the normal shape
+    // of a resumed backfill.
+    //
+    // Measured on a real Groww pull before this changed: 1,260 rows read, 0
+    // bars stored, because the window overlapped a month that already held its
+    // first day. `CLAUDE.md` §3 rule 5 promises reruns are safe; they were not.
+    assert!(
+        file.append(&batch(0, 20)).is_ok(),
+        "an overlap that matches byte for byte is a resume, not a conflict"
+    );
+    assert_eq!(
+        file.records(),
+        20,
+        "and only the ten that follow were appended — not twenty, not zero"
+    );
+
+    // THE CONFLICT ABOVE STILL REFUSES. A differing bar in the overlap is a
+    // vendor restating history, and that is not something to swallow: the
+    // `altered` batch earlier in this test is still an error, and this asserts
+    // the two cases stayed apart rather than one swallowing the other.
+    let mut altered_long = batch(0, 30);
+    altered_long[3].close += 1;
+    assert!(
+        file.append(&altered_long).is_err(),
+        "a differing bar inside the overlap is refused, however much valid \
+         suffix follows it — silently keeping the suffix would hide a vendor \
+         restating history"
+    );
+    assert_eq!(file.records(), 20, "and nothing was written");
 }
 
 // ===========================================================================

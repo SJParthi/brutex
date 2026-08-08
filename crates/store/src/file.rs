@@ -817,15 +817,43 @@ impl BarFile {
         let next = match self.header.advance(count, first_ts, last_ts) {
             Ok(next) => next,
             Err(source) => {
-                // It does not follow. If it *is* what is already there, byte
-                // for byte, this is a re-run of the same pull rather than a
-                // conflict, and the safe answer is to write nothing.
+                // It does not follow. Three things it could be, and only the
+                // third is a conflict.
+                //
+                // ONE: exactly what is already there, byte for byte — a re-run
+                // of the same pull. Write nothing.
                 if self.tail_matches(batch, count)? {
                     return Ok(Appended::AlreadyPresent {
                         first_index: self.header.n_valid.saturating_sub(count),
                         n_valid: self.header.n_valid,
                     });
                 }
+
+                // TWO: a PARTIAL overlap whose overlapping part matches. This
+                // is the normal shape of a resumed backfill and it was being
+                // refused outright:
+                //
+                //   held   2026-08-04, 375 bars
+                //   offered 2026-08-04..=2026-08-06, 1,260 bars
+                //   -> 375 duplicates, 885 new, and all 1,260 refused
+                //
+                // Measured on a real Groww pull: 1,260 rows read, 0 stored.
+                // `CLAUDE.md` §3 rule 5 promises reruns are safe, and across
+                // the ~11,200 requests of the stated backfill a run that cannot
+                // resume after one interruption is a run that cannot finish.
+                //
+                // THE OVERLAP IS VERIFIED, NOT ASSUMED. Every offered bar at or
+                // before `last_ts_micros` must equal the record already stored
+                // at its timestamp. A bar the file does not hold, or holds
+                // differently, falls through to the refusal below — dropping it
+                // silently is the fallback §4 bans, and "earlier than the last
+                // held" is NOT the same claim as "already held".
+                if let Some(suffix) = self.suffix_that_follows(batch)? {
+                    return self.append(suffix);
+                }
+
+                // THREE: a genuine conflict. The vendor restated history, or
+                // bars arrived out of order. Refused by name.
                 return Err(StoreError::Format {
                     path: self.bars_path.clone(),
                     source,
@@ -893,6 +921,54 @@ impl BarFile {
         refused(Bar::decode(&image), &self.bars_path)
     }
 
+    /// The part of `batch` that follows what is committed, when the part that
+    /// does not follow is **already stored, byte for byte**.
+    ///
+    /// `None` when the overlap cannot be verified — a bar at a timestamp the
+    /// file does not hold, or one whose values differ from the record there.
+    /// The caller refuses in that case, because silently dropping a bar the
+    /// store never had is the failure `CLAUDE.md` §4 forbids: "earlier than the
+    /// last held" is not the same claim as "already held", and a bar arriving
+    /// out of order is missing data rather than a duplicate.
+    ///
+    /// Returns `None` for an empty suffix too. A batch wholly inside what is
+    /// held is [`Appended::AlreadyPresent`]'s job, which the caller has already
+    /// tried; reaching here with nothing left means the overlap did not verify.
+    ///
+    /// # Cost
+    ///
+    /// One record read per OVERLAPPING bar. Bounded by the batch, never by the
+    /// file: the partition point comes from `last_ts_micros`, a header field.
+    /// A batch with no overlap reads nothing.
+    fn suffix_that_follows<'b>(&self, batch: &'b [Bar]) -> Result<Option<&'b [Bar]>, StoreError> {
+        if self.header.n_valid == 0 {
+            return Ok(None);
+        }
+        let held_through = self.header.last_ts_micros;
+
+        // `survey` has already proven the batch is strictly increasing, so the
+        // first bar past the held range is the partition and everything before
+        // it is the overlap.
+        let split = batch.partition_point(|bar| bar.ts_micros <= held_through);
+        let (overlap, suffix) = batch.split_at(split);
+        if suffix.is_empty() {
+            return Ok(None);
+        }
+
+        // EVERY overlapping bar must be the one already stored. The stored
+        // records are strictly increasing too, so the overlap ends at
+        // `n_valid` and begins that many records back.
+        let Some(start) = self.header.n_valid.checked_sub(len_u64(overlap.len())) else {
+            return Ok(None);
+        };
+        for (offset, bar) in overlap.iter().enumerate() {
+            let stored = self.read_record(start.saturating_add(len_u64(offset)))?;
+            if stored != *bar {
+                return Ok(None);
+            }
+        }
+        Ok(Some(suffix))
+    }
     /// Whether the last `count` committed records are exactly this batch.
     ///
     /// Reads `count` records, so it costs the batch and not the file. It runs
