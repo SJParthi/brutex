@@ -182,3 +182,125 @@ overlooked.
 It is not a promise of dates, and it names no throughput that was not measured.
 Where a number appears it is either arithmetic from a published cap (§4, labelled
 as such) or a measurement with its method stated. `CLAUDE.md` §3 rule 6.
+
+---
+
+## 9. The completeness guarantee: nothing missed, nothing corrupted
+
+The requirement, in the operator's terms: **"irrespective of any situation, not a
+single bar should be missed or corrupted."** Two different guarantees needing two
+different mechanisms, and conflating them is why "be careful" is not an answer.
+
+### 9.1 Not corrupted — achieved by construction
+
+Corruption is prevented at the moment of writing, and every mechanism below is
+already in place.
+
+| Threat | Mechanism | Where |
+|---|---|---|
+| A torn record | CRC-32C per 56-byte record, verified on read | `store::block` |
+| A torn header | Two slots, written alternately; recovery takes the newest passing CRC | `store::header` |
+| A counter published over absent bars | Entry write, **barrier**, then the slot that counts it | `pull::ingest` |
+| A vendor restating history | Overlap verified byte for byte; a differing bar **refuses** | `store::file::suffix_that_follows` |
+| Two runs racing | `CensusLock` taken before the read, so read-modify-write is atomic | `pull::ingest` |
+| A full disk | Returned, never signalled — no writable mapping, by rule | `CLAUDE.md` §4 |
+| A half-written day | Never requested: yesterday is the newest day asked for | `finished_day_only` |
+
+**This half is done.** Kill the process at any instant; the store recovers, the
+census recovers, and the rerun resumes rather than refusing.
+
+### 9.2 Not missed — NOT achievable by careful writing
+
+A gap is the absence of a write. Nothing at the write boundary can see it,
+because there is nothing there to look at. Retries, backoff and isolation all
+reduce how *often* a gap appears; **none of them can tell you none remains.**
+
+The only construction that yields the guarantee:
+
+```
+1. EXPECT   — for each (feed, instrument, day) that should exist, say so
+2. OBSERVE  — read what the store actually holds. The census is O(1) per probe
+3. DIFFER   — expected minus observed. This set IS the remaining work
+4. FETCH    — pull only the difference
+5. REPEAT   — until the difference is empty TWICE in a row
+```
+
+Twice, not once: a round that finds nothing may have found nothing because a
+vendor was down, not because nothing is missing. Two consecutive dry rounds
+distinguish "complete" from "unreachable".
+
+**This makes every failure mode in §10 a delay rather than a loss.** A timeout, a
+5xx, an expired token, a killed process — each leaves a gap, and the next round
+finds it and refills it. The pull loop stops needing to be perfect, which is
+good, because it cannot be.
+
+### 9.3 What EXPECTED means, and why it is the hard part
+
+Step 1 is where honesty is required, and it is the part with no code yet.
+
+| Question | Answer | Status |
+|---|---|---|
+| Which instruments? | The tracked universe, ~800 | ✅ `catalog::tracked` |
+| Which days? | Trading days between the instrument's floor and yesterday | ❌ **no trading calendar in this build** |
+| How many bars in a day? | 375 at one-minute, 09:15–15:29 inclusive (CAS, from 2026-08-03) | ⚠️ constant exists; holidays do not |
+| When does an instrument's history start? | Per feed AND per instrument. Groww from 2020; Dhan is a **rolling** ~5 years that moves daily | ❌ no floor recorded |
+
+**Without a trading calendar, "expected" cannot be computed exactly.** A weekend
+and an exchange holiday are indistinguishable from a missing pull, and treating
+either as a gap makes the loop never terminate.
+
+`docs/06-limits.md` already records the absence honestly: the coverage swatches
+on `/store` are quartiles of *the fullest month on the page*, "not of an ideal
+month, because no trading calendar exists in this build to say what a full month
+is."
+
+So the completeness guarantee has a prerequisite, and it is **a trading calendar
+derived from data rather than invented** — the set of days on which some
+instrument reported bars is the exchange's own answer to which days were trading
+days, and it needs no vendor to publish one.
+
+### 9.4 The honest statement of the guarantee
+
+Stated the way `CLAUDE.md` §3 rule 6 requires:
+
+* **Corruption: guaranteed against, by construction, today.** Every mechanism is
+  in place and named above.
+* **Completeness: not guaranteed today, and cannot be until §9.2 and §9.3 exist.**
+  A pull that is careful is not a pull that is complete.
+* What *is* true today: no bar that was successfully written can be silently
+  lost or altered, and a rerun cannot corrupt what a previous run wrote.
+
+Anything stronger than that would be a claim without a measurement.
+
+---
+
+## 10. Interruptions during a pull, and what each does today
+
+Enumerated because a 22,400-request run (daily) and a 129,600-request run
+(one-minute) will meet most of these at least once.
+
+| # | Interruption | Today | Needed |
+|---|---|---|---|
+| 1 | Process killed, laptop sleep | Written bars survive; rerun resumes | ✅ |
+| 2 | Crash mid bar-file write | Two-slot header recovery | ✅ |
+| 3 | Crash mid census write | Barrier before the counter | ✅ |
+| 4 | Two runs at once | Lock held across read-modify-write | ✅ |
+| 5 | Vendor throttles | AIMD decrease, charged per request | ✅ |
+| 6 | Window past the vendor cap | Split automatically | ✅ |
+| 7 | Partial trading day | Never requested | ✅ |
+| 8 | Bars outside the window | Dropped and counted by reason | ✅ |
+| 9 | Vendor restates history | Refused, not swallowed | ✅ |
+| 10 | Disk full | Returned, never signalled | ✅ |
+| 11 | **Token expires mid-run** | 401 for every later request; no re-read | ❌ **certain to fire** — daily reset 06:00 IST, and no 22,400-request run fits in one window |
+| 12 | Network timeout or reset | Chunk errors, whole member fails, remaining chunks abandoned | ❌ retry with backoff |
+| 13 | Vendor 5xx | Same | ❌ same path |
+| 14 | One instrument fails | No loop yet; when there is one it must not abort the other 799 | ❌ per-instrument isolation |
+| 15 | Restart loses progress | Rerun is safe but redoes everything | ❌ census as the progress ledger |
+| 16 | Instrument younger than the window | Every request before its listing is wasted budget | ❌ per-instrument floor |
+| 17 | Symbol renamed between deliveries | Measured: `NIFTY` (2022) vs `NIFTY 50` (2025) — two directories, one index | ❌ canonical alias, descriptor-driven |
+| 18 | Instrument delisted mid-run | 404 read as a failure rather than "history ends here" | ❌ distinguish gone-from-master from transport error |
+| 19 | Census disagrees with the bar files | Nothing notices | ❌ reconcile pass |
+| 20 | Clock skew across DST | **Not a risk.** India observes no DST | — |
+
+**#11 is the only one certain to fire**, because no run of this size fits inside
+one 24-hour token. It is a hard stop today.
