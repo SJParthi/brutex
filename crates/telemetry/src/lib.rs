@@ -109,6 +109,8 @@
 //! # Ok::<(), String>(())
 //! ```
 
+#![forbid(unsafe_code)]
+
 mod clock;
 mod encode;
 mod event;
