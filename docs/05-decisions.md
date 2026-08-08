@@ -4187,9 +4187,17 @@ have permitted a build script anywhere in the tree, which is the thing §2 exist
 to forbid.
 
 **The boundary is one-directional and is the load-bearing half of this entry.**
-Nothing under `web/` may be imported by, invoked from, or required for any crate
-to build, test or run. `cargo build`, `cargo test` and `cargo clippy` must
-succeed with `web/` deleted. A change that makes a crate depend on the browser
+No crate may depend on a JavaScript toolchain, package manager or interpreter,
+at build time or run time. A `build.rs` invoking one is the same build failure
+§2 already makes it.
+
+*Amended in the same session it was written.* The first draft said `cargo build`
+must succeed with `web/` deleted, which reads well and forbids the wrong thing:
+it rules out `include_str!`, and `include_str!` is exactly how the stylesheet
+already reaches the page. A text asset compiled into the binary is not a second
+language the engine runs — it is the same thing `STYLE` has always been, with a
+different extension. What must stay true is that nothing under `web/` is
+EXECUTED by any crate, and that no build step outside `cargo` is required. A change that makes a crate depend on the browser
 tree has reintroduced exactly what §2 bans, whatever the extension says, and is
 a build failure rather than a review comment — the same standard §5 already
 applies to `web` declaring a dependency other than `core`.

@@ -41,8 +41,14 @@ Everything the exception does not name is unchanged. `crates/**` is Rust. The
 engine, the store, the vocabulary, the sweep, the ingest and the HTTP surface do
 not gain a second language, and a file under `crates/` with one of those
 extensions is the same build failure it always was. The exception buys a
-browser, not a runtime: nothing under `web/` may be imported by, invoked from,
-or required for any crate to build, test or run.
+browser, not a runtime. No crate may depend on a JavaScript toolchain, package
+manager or interpreter, at build time or at run time; a `build.rs` that invokes
+one is the same build failure §2 already makes it.
+
+A file under `web/` may be embedded with `include_str!`, which is how the
+stylesheet already reaches the page — that is a text asset compiled in, not a
+second language the engine runs. Nothing under `web/` may be *executed* by any
+crate, and the browser tree may never be the only producer of a rendered row.
 
 Forbidden without exception:
 - any interpreted runtime, as a dependency, a dev-dependency, or a tool

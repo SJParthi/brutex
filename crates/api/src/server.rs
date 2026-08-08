@@ -696,6 +696,66 @@ async fn page(
     ))
 }
 
+/// The browser's copy of the bounded universe, for the type-ahead.
+///
+/// # Why the whole set, and why once
+///
+/// The engine surface is bounded: ~750 NIFTY Total Market equities plus ~35 NSE
+/// indices. That is small enough to hand the browser the entire searchable set
+/// in one response, which is what makes a keystroke a Map probe instead of a
+/// request. A request per character is ~800 requests to type one symbol and
+/// makes keystroke latency a function of the network.
+///
+/// Hand-written JSON rather than a serialiser, because adding one would be a
+/// dependency for six fields whose shapes are all known here, and every value
+/// below is escaped through [`render::json_string`] rather than trusted.
+async fn instruments_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let mut out = String::from("[");
+    for (n, (key, _entry)) in site.read.merged.by_key.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let canonical = key.to_string();
+        let _ = write!(
+            out,
+            r#"{{"symbol":{},"key":{},"kind":{},"href":{}}}"#,
+            render::json_string(key.underlying.as_str()),
+            render::json_string(&canonical),
+            render::json_string(&format!("{:?}", key.kind)),
+            render::json_string(&format!(
+                "/instruments?q={}",
+                render::query_value(&canonical)
+            )),
+        );
+    }
+    out.push(']');
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        out,
+    )
+}
+
+/// The type-ahead itself, embedded at compile time.
+///
+/// `include_str!` rather than a file read, for the same reason `render::STYLE`
+/// is: a served binary must not depend on a file being beside it, and an asset
+/// that can 404 is an asset that will. D-0052 permits this explicitly — it is a
+/// text asset compiled in, not a language the engine runs.
+async fn typeahead_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        include_str!("../../../web/typeahead.js"),
+    )
+}
+
 /// The health endpoint.
 ///
 /// 200 only when the read is clean. A degraded universe answers 503, because a
@@ -2784,6 +2844,12 @@ pub fn router(site: Loaded) -> axum::Router {
     axum::Router::new()
         .route("/", axum::routing::get(home))
         .route("/instruments", axum::routing::get(page))
+        // THE TYPE-AHEAD'S TWO ROUTES. Both are progressive enhancement: the
+        // instruments page renders every row without either of them, and a
+        // browser with scripting off sees exactly the form and table it always
+        // saw. D-0052.
+        .route("/instruments.json", axum::routing::get(instruments_json))
+        .route("/typeahead.js", axum::routing::get(typeahead_js))
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
         .route("/pull/fno", axum::routing::post(pull_fno))

@@ -877,6 +877,29 @@ pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &[String]) -> S
     body
 }
 
+/// The type-ahead panel's styles.
+///
+/// Kept apart from [`STYLE`] because it is the only rule set that describes
+/// something no server-rendered page has: a panel that does not exist until a
+/// script builds it. A page without the script never matches any of these
+/// selectors, so nothing here can change how the plain page looks.
+const TYPEAHEAD_STYLE: &str = "\
+.ta-panel{position:absolute;z-index:40;left:0;right:0;top:calc(100% + .35rem);\
+background:#fff;border:1px solid #d7dde3;border-radius:10px;overflow:hidden;\
+box-shadow:0 12px 32px rgba(16,24,40,.14);max-height:22rem;overflow-y:auto}\
+.ta-panel[hidden]{display:none}\
+.ta-row{display:grid;grid-template-columns:9rem 1fr 5rem;gap:.75rem;\
+align-items:baseline;padding:.55rem .85rem;text-decoration:none;color:#101828;\
+border-bottom:1px solid #f1f4f7}\
+.ta-row:last-child{border-bottom:none}\
+.ta-row:hover,.ta-row.is-active{background:#eef2ff}\
+.ta-sym{font-weight:650;letter-spacing:.01em}\
+.ta-key{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.82rem;color:#5c6b7a}\
+.ta-kind{font-size:.72rem;text-transform:uppercase;letter-spacing:.08em;color:#7a8794;text-align:right}\
+@media (prefers-reduced-motion:no-preference){.ta-panel{animation:ta-in .12s ease-out}}\
+@keyframes ta-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}\
+";
+
 /// Renders a complete instruments page.
 ///
 /// `total` is the size of the whole universe, `rows` is only what this page
@@ -911,11 +934,14 @@ pub fn instruments_page(view: &View<'_>) -> String {
     body.push_str(&escape(title));
     body.push_str("</title><style>");
     body.push_str(STYLE);
+    body.push_str(TYPEAHEAD_STYLE);
     body.push_str("</style></head><body>");
     body.push_str(&nav("/instruments"));
 
     // A search form. Method GET so the query lives in the URL and a result is
-    // linkable and reloadable -- no JavaScript, no client state.
+    // linkable and reloadable. The type-ahead below ENHANCES this; it does not
+    // replace it. With scripting off, this form and its Search button are the
+    // whole search and still work.
     let _ = write!(
         body,
         "<form method=\"get\" action=\"/instruments\">\
@@ -1011,9 +1037,15 @@ pub fn instruments_page(view: &View<'_>) -> String {
     }
     body.push_str("</tbody></table></section>");
     body.push_str(
-        "<footer>Rendered on the server. No JavaScript — \
-         CLAUDE.md section 2 does not permit it, and CI gate 1 enforces that.</footer>",
+        "<footer>Rendered on the server. Every row above was HTML before any \
+         script ran — the type-ahead filters what is already here and never \
+         produces a row. CLAUDE.md section 2 permits browser code under web/ \
+         and nowhere else; CI gate 1 enforces the boundary by path.</footer>",
     );
+    // DEFERRED, AND LAST. The page is complete and interactive before this
+    // loads; `defer` keeps it from blocking the parser, and a fetch that fails
+    // costs the type-ahead and nothing else — the form above still searches.
+    body.push_str("<script src=\"/typeahead.js\" defer></script>");
     body.push_str("</body></html>");
     body
 }
@@ -4043,15 +4075,49 @@ mod tests {
         assert_eq!(html.matches("<tr").count(), 1, "header row only");
     }
 
+    /// EXACTLY ONE script, external, and no inline handler anywhere.
+    ///
+    /// This test used to ban `<script` outright, alongside `javascript:`,
+    /// `onclick`, `onload` and `onerror`, in one list. That fused two different
+    /// rules, and D-0052 moved only one of them: browser code is now permitted
+    /// under `web/`. Deleting the whole list to allow a script would have taken
+    /// the injection guards with it, which is why they are separated here
+    /// rather than relaxed together.
+    ///
+    /// The four handler tokens stay banned and are not merely a language rule —
+    /// an inline `onclick` is both JavaScript in the page AND the shape an
+    /// injected attribute takes. `javascript:` likewise.
+    ///
+    /// `<script` becomes a COUNT rather than an absence, because "none" cannot
+    /// express "one, and only the one we meant". A `!contains` would pass a
+    /// page that emitted three; an equality pins the exact surface. It must be
+    /// external — an inline block would put code in a `.rs` file, which is the
+    /// boundary D-0052 draws by PATH and this test would otherwise not notice.
     #[test]
-    fn the_page_contains_no_script_at_all() {
-        // CLAUDE.md section 2 does not permit JavaScript, and a renderer that
-        // emitted a <script> tag would smuggle it past gate 1, which only
-        // inspects tracked FILES.
+    fn the_page_has_exactly_one_external_script_and_no_inline_handler() {
         let html = page("x", 1, &[row(opt(), &[Vendor::Groww, Vendor::Dhan])], "");
-        for forbidden in ["<script", "javascript:", "onclick", "onload", "onerror"] {
-            assert!(!html.contains(forbidden), "{forbidden} must never appear");
+
+        for forbidden in ["javascript:", "onclick", "onload", "onerror"] {
+            assert!(
+                !html.contains(forbidden),
+                "{forbidden} is an inline handler: JavaScript in the page and \
+                 the shape an injected attribute takes. D-0052 permits code \
+                 under web/, not code in an attribute."
+            );
         }
+
+        assert_eq!(
+            html.matches("<script").count(),
+            1,
+            "one script tag, not none and not three — an absence assertion \
+             cannot say which"
+        );
+        assert!(
+            html.contains(r#"<script src="/typeahead.js" defer></script>"#),
+            "and it is the external, deferred one: an inline block would put \
+             browser code in a .rs file, which is the boundary D-0052 draws by \
+             path: {html}"
+        );
     }
 
     #[test]
@@ -4270,4 +4336,46 @@ mod store_links_tests {
             "an absent month must not be linked: {html}"
         );
     }
+}
+
+/// One JSON string literal, quoted and escaped.
+///
+/// # Why this exists rather than a serialiser
+///
+/// `/instruments.json` has four fields whose shapes are all known here. Adding
+/// a serialisation dependency for them would be a dependency taken for six
+/// lines, and `CLAUDE.md` §2's spirit is that a thing this small is written
+/// rather than pulled in.
+///
+/// What it must get right is the escaping, because the values are instrument
+/// names and a name is vendor data. `core::symbol::Symbol` admits `&`, and the
+/// canonical key carries `-`; neither is dangerous, but the escaper does not
+/// depend on that staying true. Every control character below 0x20 becomes a
+/// `\uXXXX` escape, because a raw one is invalid JSON and would make the whole
+/// document unparseable — a page that silently loses its type-ahead rather
+/// than one row.
+#[must_use]
+pub fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            // `<` and `/` are escaped so the document cannot close a `<script>`
+            // that embeds it. Nothing embeds this today — it is fetched, not
+            // inlined — and that is exactly the kind of fact that changes
+            // quietly. Both escapes are valid JSON and decode to themselves.
+            '<' => out.push_str("\\u003c"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
