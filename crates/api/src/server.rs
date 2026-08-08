@@ -5797,6 +5797,9 @@ mod tests {
     /// answer already said, and buries the real error behind two duplicates.
     #[test]
     fn a_blip_is_retried_and_an_answered_refusal_is_not() {
+        // Compile-time, and first in the scope — one attempt is not a retry.
+        const _: () = assert!(ATTEMPTS > 1);
+
         let me = include_str!("server.rs");
         let body = me
             .split_once("async fn with_retry")
@@ -5811,10 +5814,6 @@ mod tests {
             body.contains("for attempt in 1..=ATTEMPTS"),
             "the attempt loop is what makes this a retry"
         );
-        // A `const` comparison, so it is a compile-time assertion rather than
-        // a runtime one — clippy is right that the runtime form asserts a
-        // constant, and this is the shape that actually fails the build.
-        const _: () = assert!(ATTEMPTS > 1, "one attempt is not a retry");
 
         // AND IT STOPS EARLY on the two answers that will not change.
         for (what, needle) in [
