@@ -1342,26 +1342,63 @@ async fn spot_answer(
             ];
             facts.extend(window_facts(asked.window));
 
-            // THE LOCAL-ARCHIVE PATH. Half the vendors are not APIs: TrueData
-            // and GDFL sell folders of CSVs, so a pull from one needs no
-            // socket, no token and no rate governor. That half works today and
-            // this is where it runs.
+            // THE TRANSPORT CHOOSES THE PATH. Nothing else does.
             //
-            // The field is optional and absent means the HTTP path, which does
-            // not exist yet — so an operator who leaves it blank gets the same
-            // loud 503 as before rather than a silent nothing.
-            let folder = param(body, "folder");
-            if folder.is_empty() {
-                // THE BROKER PATH. This is the join D-0035 stopped one function
-                // short of and the banner has named ever since: the credential
-                // is read from Parameter Store (D-0051), the descriptor drives
-                // the request, and the bars take the same route to disk a
-                // folder's do — `pull::ingest::from_window`.
-                return broker_answer(asked, now, site, &journal, facts).await;
+            // This fork used to read `if param(body, "folder").is_empty()`, and
+            // that one line was the whole N-feed problem in miniature. A blank
+            // textbox meant "broker" and a filled one meant "archive", so the
+            // operator's actual choice of feed did not decide anything: picking
+            // Groww and typing a folder ran Groww's name down the CSV reader,
+            // and picking an archive vendor and leaving the box blank sent it
+            // to the credential store to look for a token it does not have.
+            //
+            // Now the feed's own descriptor decides. HTTP feeds get the rules
+            // that are about talking to a vendor — token, rate budget, market
+            // hours, and never a window reaching today. Archive feeds get none
+            // of them, because a folder of CSVs an operator has already bought
+            // has no session to be mid-way through and no token to expire.
+            //
+            // A fifth feed inherits the correct half by declaring its transport
+            // and nothing else. That is the property this fork exists to keep.
+            facts.push(("Feed", asked.feed.display().to_owned()));
+            match asked.feed.descriptor().transport {
+                // THE BROKER PATH. The credential is read from Parameter Store
+                // (D-0051), the descriptor drives the request, and the bars
+                // take the same route to disk a folder's do —
+                // `pull::ingest::from_window`.
+                pull::vendor::Transport::Http(_) => {
+                    broker_answer(asked, now, site, &journal, facts).await
+                }
+                // THE LOCAL-ARCHIVE PATH. No socket, no token, no governor.
+                pull::vendor::Transport::LocalArchive(_) => {
+                    let folder = param(body, "folder");
+                    if folder.is_empty() {
+                        // REFUSED BY NAME rather than quietly falling through to
+                        // the broker path, which is what the old fork did. There
+                        // is no credential to try and nothing to fall back to:
+                        // an archive feed with no folder is a request with no
+                        // subject. `CLAUDE.md` §4 bans the silent version.
+                        let why = ingest::Refusal::ArchiveFolderMissing {
+                            feed: asked.feed.display(),
+                        };
+                        let record = audit::Record::refused(
+                            audit::Scope::Spot,
+                            audit::Outcome::Refused,
+                            now,
+                            &param(body, "target"),
+                            &why.to_string(),
+                        );
+                        let _ignored = journal.append(&record);
+                        return (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            refusal_html("Spot pull", &why),
+                        );
+                    }
+                    facts.push(("Source", format!("local folder · {folder}")));
+                    facts.push(("Store root", site.store_root.display().to_string()));
+                    local_answer(&folder, asked.window, now, site, &journal, facts)
+                }
             }
-            facts.push(("Source", format!("local folder · {folder}")));
-            facts.push(("Store root", site.store_root.display().to_string()));
-            local_answer(&folder, asked.window, now, site, &journal, facts)
         }
     }
 }
@@ -1533,6 +1570,40 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // it stops claiming to be. The refusal names the blocker so the message
     // stays true only until the parameter map lands, and turns into a real
     // multi-instrument pull rather than being quietly deleted.
+    // NOT TODAY, AND THIS IS A BROKER RULE ONLY.
+    //
+    // A session still running yields a PARTIAL day. The store is append-only
+    // with idempotent re-append, so a half day is not a smaller answer that a
+    // later run improves — it is either refused on the corrected re-pull, for
+    // being a different set of bars under the same key, or it is a permanent
+    // gap nobody notices because the month file exists and the census counts
+    // it. §3 rule 5 makes reruns safe; it cannot make a half-written day whole.
+    //
+    // Yesterday is the newest day that is certainly finished, whatever hour
+    // this runs at, and it needs no session table to know that.
+    //
+    // THE SPLIT IS THE TRANSPORT, NOT A LIST OF VENDOR NAMES.
+    //
+    // This function is only reached for a feed whose descriptor declares
+    // `Transport::Http`. A feed declaring `Transport::Archive` — TrueData and
+    // GDFL today, feed N tomorrow — is CSV files an operator has bought and
+    // placed in a folder: its last day is not a question about the clock, there
+    // is no vendor to be mid-session with, no token to expire and no budget to
+    // exceed. Every rule in this function is about TALKING TO A VENDOR, so
+    // every one of them follows the transport rather than a name, and a new
+    // feed inherits the right set by declaring which kind it is.
+    let today = ingest::ist_day(std::time::SystemTime::now())
+        .map_err(|why| format!("the clock is unusable, so today cannot be established: {why}"))?;
+    if asked.window.to() >= today {
+        // ONE COPY of this prose, in the `Refusal` that owns it. A second
+        // hand-written sentence here would be the thing that drifts.
+        return Err(ingest::Refusal::WindowReachesToday {
+            to: asked.window.to(),
+            today,
+        }
+        .to_string());
+    }
+
     if asked.target != ingest::SpotTarget::Swept {
         return Err(format!(
             "the broker path can address ONE instrument today and {} names a \
@@ -1562,7 +1633,28 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // vendor is a row in `pull::vendor`, and a route that names one defeats
     // that. Dhan when unstated, because it is the one whose descriptor has been
     // verified against a live body.
-    let vendor = asked.vendor;
+    // THE FEED CAME FROM THE REQUEST; NOTHING HERE MAPS A NAME TO A ROW.
+    //
+    // This was a seven-arm `match asked.vendor { Dhan => Feed::Dhan, Groww =>
+    // Feed::Groww, other => refuse }`. It was well argued — it refused by name
+    // rather than falling back — but it was still a hand-written table that a
+    // fifth feed would have had to be added to, and forgetting meant a refusal
+    // for a feed that existed. The parse now yields the `Feed` directly, so the
+    // table is `DESCRIPTORS` and there is no second copy to fall behind it.
+    let feed = asked.feed;
+
+    // The store prefix. `store_vendor` is `None` for an archive feed, which
+    // cannot happen here — the caller routes on transport and only HTTP feeds
+    // reach this function — but it is checked rather than unwrapped, because a
+    // future edit to the routing must fail loudly here instead of panicking.
+    let vendor = feed.store_vendor().ok_or_else(|| {
+        format!(
+            "{} is a local-archive feed and has no broker credential to read. \
+             Reaching this function at all is a routing error, not an operator \
+             error — the transport is what chooses the path.",
+            feed.display()
+        )
+    })?;
     let path = config
         .path_for(vendor, "access-token")
         .map_err(|why| format!("the parameter path could not be built: {why}"))?;
@@ -1581,23 +1673,6 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // `crate::vendor`, not an edit here, and this is the line that keeps that
     // true — Groww and Dhan differ in six of those fields and share every line
     // of code below.
-    let feed = match vendor {
-        brutex_core::vendor::Vendor::Dhan => pull::vendor::Feed::Dhan,
-        brutex_core::vendor::Vendor::Groww => pull::vendor::Feed::Groww,
-        // `Vendor` is `#[non_exhaustive]`, so a vendor added to `crates/core`
-        // without a feed in `crates/pull` lands here. It REFUSES BY NAME rather
-        // than falling back to one of the two above: silently pulling Dhan's
-        // bars for a request that said something else is the shape `CLAUDE.md`
-        // §4 bans, and it would file another broker's prices under this one's.
-        other => {
-            return Err(format!(
-                "{} is a vendor this build has no HTTP feed for. Adding one is \
-                 a row in pull::vendor, and until it exists nothing is pulled \
-                 rather than the wrong thing being pulled.",
-                other.as_str()
-            ));
-        }
-    };
     let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
         return Err(format!(
             "{} declares a local-archive transport, not an HTTP one",
@@ -1838,7 +1913,7 @@ fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static 
 ///
 /// **The segment was the string `"FUT"`.** `brutex_core::instrument::Segment`
 /// parses `INDEX`, `CASH` and `FNO` and nothing else, so every member of every
-/// GDFL folder was refused by the census key — 194 named failures and not one
+/// `GDFL` folder was refused by the census key — 194 named failures and not one
 /// bar written, on a page that used to write the bars and count none of them.
 /// The two path segments are now spelled by [`Exchange::as_str`] and
 /// [`Segment::as_str`] rather than by a literal, so the next typo does not
@@ -4498,12 +4573,12 @@ mod tests {
     // works today
     // =======================================================================
 
-    /// GDFL's header, character for character, and the shape `run_local`
+    /// `GDFL`'s header, character for character, and the shape `run_local`
     /// declares: ten fields, a header row, `DD/MM/YYYY`.
     const GDFL_MEMBER_HEAD: &str =
         "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n";
 
-    /// A folder holding one GDFL member, named after the test.
+    /// A folder holding one `GDFL` member, named after the test.
     fn vendor_folder(name: &str, body: &str) -> PathBuf {
         let dir = crate::scratch::path(&format!("vendor-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -4514,11 +4589,135 @@ mod tests {
     }
 
     /// A spot form body over one local folder.
+    /// A form for the ARCHIVE path, which means it names an archive feed.
+    ///
+    /// It used to name no feed at all, and worked because the route decided
+    /// HTTP-versus-archive by asking whether `folder` was blank. Once the
+    /// TRANSPORT decides instead, a form with no feed defaults to Dhan — an
+    /// HTTP broker — and a folder beside it is a contradiction the route is now
+    /// right to resolve in the broker's favour. So the feed is stated, which is
+    /// what an operator does on the page too.
     fn spot_form(folder: &Path, from: &str, to: &str) -> String {
         format!(
-            "target=swept&from={from}&to={to}&folder={}",
+            "target=swept&vendor={}&from={from}&to={to}&folder={}",
+            pull::vendor::Feed::TrueData.wire(),
             folder.display()
         )
+    }
+
+    /// An ARCHIVE feed with no folder refuses by name, and asks for a folder.
+    ///
+    /// The old fork read this exact request — no folder — as "use the broker
+    /// path", so naming `TrueData` and forgetting the folder sent the request to
+    /// Parameter Store to look for a `TrueData` access token that does not and
+    /// will never exist. The operator got a credential error for a vendor that
+    /// has no credential.
+    #[tokio::test]
+    async fn an_archive_feed_with_no_folder_says_so_instead_of_asking_for_a_token() {
+        let dir = agreeing("archivenofolder");
+        let site = site("archivenofolder", &dir);
+
+        let (code, html) = spot_answer(
+            &format!(
+                "target=swept&vendor={}&from=2022-01-08&to=2022-01-08",
+                pull::vendor::Feed::TrueData.wire()
+            ),
+            day(2026, 8, 7),
+            moment(),
+            &site,
+        )
+        .await;
+
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST, "{html}");
+        assert!(
+            html.contains("folder"),
+            "the refusal asks for the missing folder: {html}"
+        );
+        // The REFUSAL ITSELF, not the page around it. The surrounding chrome
+        // legitimately talks about credentials — it is the same layout the
+        // broker path renders — so asserting over the whole document would be
+        // asserting about the furniture. What must be true is that the reason
+        // given is the missing folder and not a credential that was sought.
+        assert!(
+            html.contains("there is no endpoint to call and no credential to read"),
+            "the reason is the folder, and it says outright that no credential \
+             was even looked for: {html}"
+        );
+    }
+
+    /// EVERY feed routes, and a feed added tomorrow routes too.
+    ///
+    /// This is the N-feed guarantee stated as an assertion rather than as a
+    /// comment. It walks `Feed::ALL` — the array a new descriptor row joins
+    /// automatically — and requires each one to reach the path its OWN
+    /// transport names, with no list of vendor names anywhere in the test.
+    ///
+    /// A fifth feed declaring `Transport::LocalArchive` starts passing the
+    /// archive half the moment its row exists. One declaring `Transport::Http`
+    /// must produce a broker-shaped answer. Neither needs an edit here, which
+    /// is the property being pinned: if a future change reintroduces a
+    /// hand-written match on vendor names, some feed in this loop stops being
+    /// routed and the test says which.
+    #[tokio::test]
+    async fn every_feed_reaches_the_path_its_own_transport_names() {
+        for feed in pull::vendor::Feed::ALL {
+            let tag = format!("routes{}", feed.wire());
+            let dir = agreeing(&tag);
+            let site = site(&tag, &dir);
+
+            // No folder, deliberately. It is the field the old fork used to
+            // decide the route, so leaving it empty for every feed is what
+            // makes this test able to see the difference at all.
+            let (code, html) = spot_answer(
+                &format!(
+                    "target=swept&vendor={}&from=2022-01-08&to=2022-01-08",
+                    feed.wire()
+                ),
+                day(2026, 8, 7),
+                moment(),
+                &site,
+            )
+            .await;
+
+            match feed.descriptor().transport {
+                pull::vendor::Transport::LocalArchive(_) => {
+                    assert_eq!(
+                        code,
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "{} is an archive feed, so no folder is the operator's \
+                         mistake and it is a 400, not an attempt to call \
+                         anything: {html}",
+                        feed.display()
+                    );
+                    // THE SPECIFIC REFUSAL, not merely the word "folder".
+                    // `contains("folder")` passed even against a mutant that
+                    // dropped the guard entirely, because the reader it then
+                    // fell through to also says "folder" — about a folder it
+                    // failed to open rather than one that was never named. The
+                    // distinction is the whole point of the guard, so the
+                    // assertion has to be able to see it.
+                    assert!(
+                        html.contains("there is no endpoint to call and no credential to read"),
+                        "{} must refuse for the missing folder itself, not \
+                         fall through and fail to open one: {html}",
+                        feed.display()
+                    );
+                }
+                pull::vendor::Transport::Http(_) => {
+                    // The broker path is not driven here — it would need a
+                    // credential and a socket. What is asserted is that it did
+                    // NOT take the archive path: an HTTP feed must never be
+                    // answered by the CSV reader complaining about a folder,
+                    // which is precisely what the old fork did.
+                    assert!(
+                        !html.contains("Name the folder"),
+                        "{} is an HTTP feed and must not be routed to the \
+                         archive reader: {html}",
+                        feed.display()
+                    );
+                }
+            }
+        }
     }
 
     /// A folder that is not there refuses the pull and names the folder.

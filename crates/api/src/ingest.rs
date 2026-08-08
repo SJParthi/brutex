@@ -231,6 +231,28 @@ pub enum Refusal {
         /// Today in IST, as the clock reported it.
         today: Day,
     },
+    /// The window reaches today, whose session may not be finished.
+    ///
+    /// Distinct from a window in the FUTURE: this one names a day that exists,
+    /// and refuses it because a running session yields a partial day the
+    /// append-only store cannot later correct. See [`parse_window`].
+    WindowReachesToday {
+        /// The end that is too recent.
+        to: Day,
+        /// Today in IST, as the caller reported it.
+        today: Day,
+    },
+    /// An archive feed was asked for with no folder to read.
+    ///
+    /// `TrueData` and `GDFL` are not endpoints — they are CSV files an operator has
+    /// bought and put somewhere. Asking one for a window without saying where
+    /// the files are is a request with no subject, and there is nothing to fall
+    /// back to: refused by name rather than quietly routed to a broker, which
+    /// is what the old folder-emptiness fork did.
+    ArchiveFolderMissing {
+        /// The feed that was named, for the message.
+        feed: &'static str,
+    },
     /// The spot form's target is not one of [`SpotTarget::ALL`].
     UnknownTarget {
         /// What arrived.
@@ -310,6 +332,23 @@ impl fmt::Display for Refusal {
                  vendor holds a bar that has not traded yet. An attribute is a \
                  courtesy, a parser is a rule."
             ),
+            Self::WindowReachesToday { to, today } => write!(
+                f,
+                "REFUSED · the window ends {to} and today is {today}. A session \
+                 that is still running yields a partial day, and this store is \
+                 append-only — a half day cannot be corrected later, only \
+                 refused or left as a gap. Ask for {} or earlier.",
+                // The day before today, through the calendar that owns the
+                // arithmetic rather than by subtracting one from a field.
+                Day::from_days(today.days_from_epoch().saturating_sub(1))
+                    .map_or_else(|_| "an earlier day".to_owned(), |d| d.to_string())
+            ),
+            Self::ArchiveFolderMissing { feed } => write!(
+                f,
+                "REFUSED · {feed} reads CSV files from a folder you have already \
+                 bought — there is no endpoint to call and no credential to \
+                 read. Name the folder to pull from it."
+            ),
             Self::UnknownTarget { ref got } => {
                 write!(f, "REFUSED · {got:?} is not one of the three spot targets")
             }
@@ -358,7 +397,23 @@ pub struct SpotRequest {
     pub target: SpotTarget,
     /// The operator's inclusive range.
     pub window: Window,
-    /// Which broker to ask.
+    /// Which feed to ask — broker or archive.
+    ///
+    /// # Why this is a `Feed` and not a `Vendor`
+    ///
+    /// `brutex_core::vendor::Vendor` names the two HTTP BROKERS. `Feed` names
+    /// every source this build can read, brokers and local CSV archives alike.
+    /// The field used to be the former, and the consequence was that the
+    /// archive vendors were not selectable at all: the route decided HTTP
+    /// versus archive by asking whether a `folder` textbox was blank, so a
+    /// blank box meant "broker" and a filled one meant "archive" no matter
+    /// which vendor the operator had actually picked.
+    ///
+    /// That made the transport a property of the FORM rather than of the FEED,
+    /// and it is exactly the coupling `CLAUDE.md` says a new vendor must not
+    /// require: with it, adding a fifth feed meant teaching a textbox about it.
+    /// With a `Feed` here, the descriptor's own `transport` picks the path and
+    /// a new row is selectable and correctly routed the day it is added.
     ///
     /// Parsed rather than hardcoded, because `CLAUDE.md` makes adding a vendor
     /// a row in `pull::vendor` — and a route that names one defeats that. An
@@ -366,7 +421,7 @@ pub struct SpotRequest {
     /// descriptor has been verified against a live body; Groww's has not, and
     /// defaulting to the unverified one would make a first-time operator debug
     /// a shape nobody has confirmed.
-    pub vendor: brutex_core::vendor::Vendor,
+    pub feed: pull::vendor::Feed,
 }
 
 /// One expired-derivative pull, validated.
@@ -502,9 +557,18 @@ pub fn parse_window(body: &str, today: Day) -> Result<Window, Refusal> {
             cap: MAX_WINDOW_DAYS,
         });
     }
-    // THE GATE THIS FUNCTION WAS MISSING. `to` is inclusive, so a window
-    // ending today is legal — today has traded, or is trading. A window ending
-    // tomorrow is not, and no vendor holds a bar that has not happened.
+    // A WINDOW IN THE FUTURE IS REFUSED HERE, AND A WINDOW REACHING TODAY IS
+    // NOT — because this parser is shared.
+    //
+    // Both ingest paths come through here: the BROKER path, which asks a vendor
+    // over HTTP, and the ARCHIVE path, which reads CSV files an operator has
+    // already bought and dropped in a folder. A partial session is a hazard of
+    // the first and meaningless to the second — a file on disk is whatever it
+    // is, and its last day is not a question about the clock.
+    //
+    // So "not today" belongs on the broker path, beside the other rules that
+    // are about talking to a vendor rather than about reading a file: the rate
+    // budget, the credential, the market-hours window. See `broker_window`.
     //
     // `today` is an argument rather than a clock call inside, for the same
     // reason `parse_fno` takes it: a gate that reads the clock cannot be tested
@@ -530,9 +594,9 @@ pub fn parse_spot(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
     Ok(SpotRequest {
         target,
         window: parse_window(body, today)?,
-        vendor: {
+        feed: {
             let raw = param(body, "vendor");
-            parse_vendor(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
+            parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
         },
     })
 }
@@ -571,6 +635,26 @@ pub fn parse_vendor(raw: &str) -> Option<brutex_core::vendor::Vendor> {
     brutex_core::vendor::Vendor::ALL
         .into_iter()
         .find(|v| v.as_str().eq_ignore_ascii_case(raw))
+}
+
+/// Which feed a request names: `None` when it named one this build cannot read.
+///
+/// The same rule as [`parse_vendor`] — absent means Dhan, present-but-unknown
+/// refuses by name — over the WIDER set. `Feed::ALL` carries the archive
+/// vendors too, so `TrueData` and `GDFL` become selectable here rather than being
+/// reachable only as a side effect of typing into a `folder` box.
+///
+/// A feed is matched on its `wire` name, which lives in its descriptor row, so
+/// a feed added to [`pull::vendor::DESCRIPTORS`] is parseable here with no edit
+/// to this function.
+#[must_use]
+pub fn parse_feed(raw: &str) -> Option<pull::vendor::Feed> {
+    if raw.is_empty() {
+        return Some(pull::vendor::Feed::Dhan);
+    }
+    pull::vendor::Feed::ALL
+        .into_iter()
+        .find(|f| f.wire().eq_ignore_ascii_case(raw) || f.display().eq_ignore_ascii_case(raw))
 }
 
 /// One expired-derivative request, out of a form body.
