@@ -17,7 +17,10 @@ export async function loadFeeds() {
     const r = await fetch('/feeds.json');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     feeds.all = await r.json();
-    feeds.active = feeds.all[0]?.wire ?? null;
+    // THE FIRST FEED THAT CAN ACTUALLY SERVE. Selecting an unusable one on
+    // load would open every page on a feed holding nothing, and the operator
+    // would read empty tables as a broken build rather than as an empty store.
+    feeds.active = (feeds.all.find((f) => f.ready) ?? feeds.all[0])?.wire ?? null;
   } catch (why) {
     // LOUD, NOT SILENT. A feed list that quietly fails leaves a picker with no
     // options and no reason, which is the shape CLAUDE.md section 4 bans.

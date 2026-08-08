@@ -766,7 +766,9 @@ async fn instruments_json(
 /// exists and nothing in the front end names a vendor. `transport` is included
 /// because it is what decides which of the other controls mean anything — an
 /// archive feed has no token, no rate budget and no window rules.
-async fn feeds_json() -> ([(axum::http::HeaderName, &'static str); 1], String) {
+async fn feeds_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let mut out = String::from("[");
     for (n, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
         if n > 0 {
@@ -776,12 +778,55 @@ async fn feeds_json() -> ([(axum::http::HeaderName, &'static str); 1], String) {
             pull::vendor::Transport::Http(_) => "broker",
             pull::vendor::Transport::LocalArchive(_) => "archive",
         };
+
+        // CAN THIS FEED ACTUALLY SERVE?
+        //
+        // A feed listed but unusable is worse than one absent: it invites a
+        // pull that cannot work and answers with a failure the operator has to
+        // decode. TrueData and GDFL are the live case — samples were supplied,
+        // the real data has not been bought, and offering them implies a
+        // capability that does not exist.
+        //
+        // The signal is the CENSUS, which is already loaded and is a header
+        // read rather than a directory walk — this is a per-render path and an
+        // O(files) probe here would be the cost `/store` exists to avoid.
+        //
+        // NOT HIDDEN, DISABLED, WITH THE REASON. §4 forbids the silent version:
+        // a feed that vanishes teaches the operator nothing, and one that says
+        // "no data held, and no credential configured" tells them exactly which
+        // of the two things to do.
+        let held = feed.store_vendor().and_then(|vendor| {
+            site.censuses
+                .iter()
+                .find(|c| c.vendor == vendor)
+                .and_then(census::VendorCensus::counters)
+                .map(|(n_valid, _n_keys, _rows)| n_valid)
+        });
+        let (ready, why) = match held {
+            Some(n) if n > 0 => (true, String::new()),
+            Some(_) => (
+                false,
+                format!("nothing has been ingested for {} yet", feed.display()),
+            ),
+            // `store_vendor` is None for a feed with no store prefix of its
+            // own. It has nowhere to file bars, so it cannot serve whatever
+            // else is true.
+            None => (
+                false,
+                format!(
+                    "{} has no store prefix, so nothing it pulled could be filed",
+                    feed.display()
+                ),
+            ),
+        };
+
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"transport":{}}}"#,
+            r#"{{"wire":{},"display":{},"transport":{},"ready":{ready},"why":{}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
             render::json_string(transport),
+            render::json_string(&why),
         );
     }
     out.push(']');

@@ -32,12 +32,19 @@
       {#if feeds.error}
         <span class="lbl" style="color:var(--down)">feeds unavailable — {feeds.error}</span>
       {/if}
+      <!-- A FEED THAT CANNOT SERVE IS SHOWN AND DISABLED, WITH ITS REASON.
+           Hiding it would teach nothing; the operator would wonder where
+           TrueData went. Disabled with "nothing has been ingested yet" says
+           exactly which of two things to do. CLAUDE.md section 4. -->
       {#each feeds.all as f}
         <button
           class="feed"
+          class:not-ready={!f.ready}
+          disabled={!f.ready}
+          title={f.ready ? '' : f.why}
           aria-pressed={feeds.active === f.wire}
           onclick={() => (feeds.active = f.wire)}
-        >{f.display}<span class="kind">{f.transport}</span></button>
+        >{f.display}<span class="kind">{f.ready ? f.transport : 'no data'}</span></button>
       {/each}
     </nav>
   </header>

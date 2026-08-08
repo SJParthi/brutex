@@ -83,6 +83,8 @@ body {
 }
 .feed:hover { border-color: var(--acc); color: var(--ink); }
 .feed[aria-pressed="true"] { background: var(--acc); border-color: var(--acc); color: #fff; }
+.feed.not-ready { opacity: 0.38; cursor: not-allowed; border-style: dashed; }
+.feed.not-ready:hover { border-color: var(--line); color: var(--dim); }
 .feed .kind { opacity: 0.6; font-weight: 500; margin-left: 5px; font-size: 10px; }
 
 /* ---- panes ---------------------------------------------------------- */
