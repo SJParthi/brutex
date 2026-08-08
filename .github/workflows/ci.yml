@@ -103,8 +103,24 @@ jobs:
         run: |
           set -euo pipefail
           # JSON and YAML are config, not source, and only belong in two places.
+          #
+          # THE SECOND PLACE IS `web/`, NOT `crates/web/`.
+          #
+          # D-0052 moved the front end out of the crate graph to `web/`, and
+          # D-0053 made that directory unrestricted -- any language, any
+          # toolchain, any extension. Gate 1a was updated for the move; this
+          # gate was not, and it kept naming a path that no longer exists.
+          #
+          # The result was a gate that failed on `web/package.json` -- a file a
+          # SvelteKit app cannot exist without, and one D-0053 explicitly
+          # permits. A stale allowlist refusing a legal file is the same class
+          # of failure as a permissive one accepting an illegal file: the gate
+          # stopped describing the rule it was written to enforce.
+          #
+          # `.claude/` is the run configuration IntelliJ and the preview tools
+          # read. It is operator tooling, not source, and it is not shipped.
           bad=$(git ls-files '*.json' '*.yml' \
-                | grep -Ev '^(\.github/|crates/web/)' || true)
+                | grep -Ev '^(\.github/|\.claude/|web/)' || true)
           if [ -n "$bad" ]; then
             printf 'CONFIG OUTSIDE ITS HOME:\n%s\n' "$bad"; exit 1
           fi
@@ -523,8 +539,15 @@ jobs:
       - name: Gate 7 — the browser crate depends on core alone
         run: |
           set -euo pipefail
+          # `crates/web` no longer exists: D-0052 moved the browser code to
+          # `web/`, where it is no longer a crate at all and so has no
+          # Cargo.toml and no dependency line to police. The check is kept
+          # rather than deleted because the INVARIANT it guards -- the browser
+          # code reaches only for `core` -- outlives the layout, and a crate of
+          # this name reappearing must be held to it again. The skip below is
+          # therefore the correct outcome today, not a gap.
           f=crates/web/Cargo.toml
-          [ -f "$f" ] || { echo "skip — crate not created yet"; exit 0; }
+          [ -f "$f" ] || { echo "skip — crates/web does not exist (D-0052 moved it to web/)"; exit 0; }
           deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
                  | grep -v '^$' || true)
           extra=$(printf '%s\n' "$deps" | grep -v '^core$' || true)
