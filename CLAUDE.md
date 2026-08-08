@@ -207,6 +207,7 @@ Report failures plainly. Do not paper over a red gate.
 | `docs/04-invariants.md` | what must hold, and its proof |
 | `docs/05-decisions.md` | append-only ledger |
 | `docs/06-limits.md` | what is not constant-time, and what is unmeasured |
+| `docs/07-plan.md` | the requirements, what is done, what is next, and what blocks it |
 
 If this file and a document disagree, **this file wins** and the document is
 the stale copy to fix.

@@ -1,0 +1,184 @@
+# 07 — The plan, the requirements, and what is actually done
+
+**This file exists because the plan kept living in conversation.** It was stated
+a dozen times and re-stated every time it was asked for, which means it was
+never anywhere a reader could check it against the code. A plan that is not
+tracked is not a plan; it is a memory.
+
+Read with `docs/06-limits.md` beside it. That file records what is *not*
+constant-time and what is unmeasured. This one records what is *not built*, in
+what order it must be, and why.
+
+Status words mean exactly one thing each:
+
+| Word | Means |
+|---|---|
+| **DONE** | Landed on `feat/pull`, gates green, and named here with its commit |
+| **NEXT** | Nothing blocks it; no permission needed |
+| **BLOCKED** | Waiting on a decision or a fact this repository cannot see |
+| **OPEN** | Real, measured, not started |
+
+---
+
+## 1. The requirement, in the operator's own terms
+
+Restated here so the plan can be checked against it rather than against memory.
+
+| # | Requirement | Where it is enforced |
+|---|---|---|
+| R-1 | Spot, **every instrument**, bounded at ~800 — 750 NIFTY Total Market + ~35 NSE indices | `catalog::tracked`, and `/instruments.json` shares that exact predicate |
+| R-2 | **2020-01-01 → yesterday**, never today | `finished_day_only` in `broker_window`, HTTP path only |
+| R-3 | Day-level first, then one-minute | Not yet a distinct mode — **OPEN**, see §4 |
+| R-4 | F&O: **NIFTY only** as the first step | Not yet — **OPEN** |
+| R-5 | TrueData / GDFL are **F&O CSVs from a folder**: no market hours, no rate limit, no token | `Transport::LocalArchive`, and every vendor rule keys off the transport |
+| R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
+| R-7 | **N feeds** appear everywhere with no edit | True of routing, the picker, budgets and `/feeds.json`. **Not** true of the descriptor table — see §5 for the measured number |
+| R-8 | Rust only, **except the front end** | `CLAUDE.md` §2, D-0052, D-0053. Gate 1 by path; gate 1e proves the engine builds with `web/` absent |
+| R-9 | **O(1)** everywhere it is claimed | Gate 8 measures at 1×/10×/100× and exits non-zero on a breach |
+| R-10 | Feeds not owned must not be offered | `/feeds.json` reports `ready`; the picker disables. **Advisory only** — see §4 |
+
+---
+
+## 2. DONE
+
+Each line names the defect, not the feature, because the defect is what a
+reader needs to recognise if it returns.
+
+| Was | Now | Commit |
+|---|---|---|
+| Census re-imaged and renamed **per window** — 424 GB of writes to maintain a 5.75 MB file | One 64-byte positional append plus a header commit | `a8cadb4` |
+| `pull::rate::Governor` had **zero callers** | Held on the `Site`, charged **per request**, ahead of the credential read | `c1ea7ab` |
+| A multi-year window sent **whole** to a vendor capped at 30 days | Split to the descriptor's cap; 2020→yesterday is 81 legal requests, credential read once | `bf8f86e`, `0596621` |
+| `read_dir` stripped two extensions unconditionally — **215 calls merged with their own puts per day** | The rule is the extension's *shape*, not a count | `a91026e` |
+| A blank `folder` textbox decided which **protocol** to speak | The feed's declared transport decides | `d2fa20c` |
+| The page offered two hardcoded feeds, so the archive arm was unreachable | Built from `Feed::ALL` | `f8be537` |
+| `run_local` hardcoded `Vendor::Dhan` — **194 instrument-months of GDFL futures filed under `bars/dhan/`** | Archive feeds have their own store prefixes | `44ce731` |
+| `/store` showed `Groww rows` beside `Dhan rows` | One feed, selected; cards follow the column | `2efdce7`, `6602a9a` |
+| Front end was server-rendered Rust HTML | Svelte 5 + `lightweight-charts` (TradingView's own), 375 real candles | `4a5953f`, `f34875b`, `6dd2e97` |
+| `totp` appeared **zero times** in the workspace | RFC 6238 generator, all six Appendix B vectors reproduce | `b96294f` |
+| `StoreFilter::keeps` allocated **two Strings per row**, and the comment said it did not | Neither side allocates; needle folded once at construction | `7661a61` |
+| `census::filtered` copied the **whole table** to draw 200 rows | `Cow`, borrowed when unfiltered | `7661a61` |
+| §32 asserted `/store` was constant-time **while two linear costs sat on it** | Corrected; both measurements recorded | `7661a61` |
+| A run that stored **nothing** reported `STORED` | `Outcome::Empty` — "STORED NOTHING", loud, code appended as 4 | `62274e0` |
+
+---
+
+## 3. BLOCKED — and on what, exactly
+
+| Item | Blocked on | Why this repository cannot decide it |
+|---|---|---|
+| Move the 194 misfiled instrument-months out of `bars/dhan/` | The operator | It is a delete and a manifest rebuild over their data. A backup exists at `~/.brutex/store.backup-1786174250` |
+| Wire the TOTP **mint** | Whether `tickvault` still calls Dhan | A broker issues one active token per client. Minting here kills whatever `tickvault` holds, and `tickvault` is not visible from this repository. `CLAUDE.md` §8 |
+| Dhan pulls at all | The same | The token in Parameter Store has not been refreshed since 2026-07-25 while Groww's is refreshed daily. This repository never mints, by rule |
+| `TrueData` descriptor: `Segment::Index` vs F&O-only | A real bought archive | The sample proved the layout; `MemberPattern::SymbolAtRoot` is wrong for the futures family, which nests under `Contract Futures/` |
+
+**Groww is not blocked.** The backfill can run single-sourced today.
+
+---
+
+## 4. NEXT — in dependency order, no permission needed
+
+| # | Item | Why this position |
+|---|---|---|
+| 1 | **Drive one Groww pull end to end from the Ingest page** | Nobody has closed the loop once. An 11,200-request backfill on an undriven loop is how a half-written history happens |
+| 2 | **Make the readiness gate a rule, not a courtesy** | `/feeds.json` reports `ready` and the picker disables — but `parse_feed` accepts any feed, so a `curl` bypasses it. The first attempt used the census as the signal, which is **circular**: a feed just bought holds nothing and could never be pulled. Needs an entitlement signal that is not the census |
+| 3 | **Serve `web/build` from the Rust binary** | Two servers today. Assets embed the way `STYLE` already does, so a clone with no Node still builds |
+| 4 | **Day-level mode before one-minute** (R-3) | The operator's stated first step, and it is 14 windows per instrument against 81 |
+| 5 | **The 2020 → yesterday backfill** | The goal |
+
+### The arithmetic behind #5, from the published caps
+
+2020-01-01 to 2026-08-07 is **2,411 days inclusive**.
+
+| Granularity | Cap | Windows / instrument | × 800 instruments |
+|---|---|---|---|
+| Day-level | 180 d | 14 | **~11,200 requests** |
+| One-minute | 30 d | 81 | **~64,800 requests** |
+
+This is arithmetic from `docs/00-charter.md` §4, **not a throughput
+measurement**. No backfill has been run, so no duration is claimed.
+
+---
+
+## 5. R-7, measured rather than asserted
+
+"N feeds appear everywhere with no edit" was said repeatedly in conversation and
+is only partly true. A fifth feed was **actually added in a scratch clone and
+compiled to green** on 2026-08-08. The result:
+
+| Layer | Edits | Note |
+|---|---|---|
+| Routing, feed picker, `/feeds.json`, budgets | **0** | All walk `Feed::ALL`. Verified: the N-feed tests passed with the fifth feed present |
+| `crates/pull/src/vendor.rs` | 12 | **4 are deliberate** — the file destructures its own arrays so a half-added feed is a compile error, not a runtime surprise |
+| `run_local` / `broker_answer` plans | 2 | Accidental duplication |
+| + a CSV layout not already in `csv::Columns` | +5 | A second hand-written copy of what the descriptor already says |
+| + its own store prefix (`core::Vendor`) | +8 | `VendorSet(u8)` caps the total at 8 feeds |
+
+**20 edit sites to compile.** But the compile count is the least interesting
+number: `cargo test --workspace` then failed **29 tests across 7 targets**, and
+the compiler could not see the two worst problems.
+
+Three descriptor fields **cannot express an arbitrary broker at all**:
+
+* `HttpSpec::bars_path` is a fixed string concatenated with `base_url`. A vendor
+  whose instrument and granularity are *path segments* cannot be described.
+* `AuthScheme` is `Raw | Bearer`. A scheme carrying a prefix and a **second**
+  secret cannot be described.
+* `TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone. A
+  vendor returning `+0530` cannot be described.
+
+All three compile as lies. **The table is genuinely N-feed for a vendor shaped
+like Dhan or Groww. It is not N-feed for an arbitrary broker**, and saying
+otherwise was overstatement.
+
+Two costs that made this worse have since been removed: `pull::config` demanded
+a credential table from every vendor (an archive has none), and `api::merge`
+required every vendor to agree (an archive publishes no master). Both asked a
+question the wrong set could not answer. `44ce731`.
+
+---
+
+## 6. How O(1) is kept, not promised
+
+`CLAUDE.md` §3 rule 4 says a change that makes a named operation scan **fails
+the bench gate**. That gate is real and it is the answer to "how is this
+ensured":
+
+* `cargo bench --workspace` measures each operation at **1×, 10× and 100×**
+  input, divides, and `std::process::exit(1)` on a ratio past **3.0×**.
+* Picoseconds and integer permille, so no float is anywhere near the comparison.
+* An **unmeasurable baseline is a failure**, not a divide-by-something —
+  reporting a ratio nobody measured is what §3 rule 6 forbids.
+* Gate 14 separately proves the benches *exist and have the shape of a ratio
+  measurement*, so deleting one to make gate 8 pass fails a different gate.
+
+Last run: **`rc=0`**, every ratio inside the ceiling at 100× input.
+
+**Where it does not yet reach.** `engine`, `vocab` and `indicators` have no
+implementation, so four of the five operations rule 4 names — condition lookup,
+mask evaluation, duplicate rejection, result append — have nothing to measure.
+Gate 14 goes red the day they land without benches. That is designed, not
+overlooked.
+
+---
+
+## 7. OPEN — real, measured, not started
+
+| Item | Evidence |
+|---|---|
+| GDFL futures unreadable | `MemberPattern::SymbolAtRoot`, but they nest one level deeper. **All 642 files invisible** |
+| 596 decimal-strike contracts per day decode then vanish | `.` is not in the store's legal identifier byte set |
+| TrueData 2025 indices store nothing | 88,885 rows read, **0 stored** — `NIFTY 50` and `INDIA VIX` contain spaces |
+| The only true 1-minute archive product is unreadable | 8 fields, and the time is `09:15` — the parser needs seconds |
+| No zip reader anywhere in the workspace | Every archive must be hand-extracted |
+| `PriceScale::Rupees` in both archive descriptors | The decoder already emits paisa. Dormant ×100 error, masked only by `run_local` hardcoding `Paisa` |
+| `RecordShape::Snapshot` unenforced | Its doc says a snapshot feed must refuse rather than be "stored as a bar with the price repeated four times — a lie written into the data itself". That is exactly what reaches disk |
+| The archive half of the descriptor table has **zero non-test consumers** | Wiring it as-is would activate the ×100 scale and the wrong member pattern. The rows must be corrected first |
+
+---
+
+## 8. What this file is not
+
+It is not a promise of dates, and it names no throughput that was not measured.
+Where a number appears it is either arithmetic from a published cap (§4, labelled
+as such) or a measurement with its method stated. `CLAUDE.md` §3 rule 6.
