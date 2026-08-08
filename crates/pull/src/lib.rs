@@ -90,6 +90,7 @@ pub mod rate;
 pub mod secret;
 pub mod session;
 pub mod ssm;
+pub mod totp;
 
 pub mod vendor;
 pub mod work;
