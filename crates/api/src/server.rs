@@ -1555,7 +1555,64 @@ struct BrokerWindow {
     store_vendor: brutex_core::vendor::Vendor,
 }
 
+/// A broker is never asked for a day that has not finished.
+///
+/// A session still running yields a PARTIAL day. The store is append-only with
+/// idempotent re-append, so a half day is not a smaller answer that a later run
+/// improves — it is either refused on the corrected re-pull, for being a
+/// different set of bars under the same key, or it is a permanent gap nobody
+/// notices because the month file exists and the census counts it. `CLAUDE.md`
+/// §3 rule 5 makes reruns safe; it cannot make a half-written day whole.
+///
+/// Yesterday is the newest day that is certainly finished, whatever hour this
+/// runs at, and it needs no session table to know that.
+///
+/// # Why this is not in `parse_window`
+///
+/// Both ingest paths share that parser. This rule is about TALKING TO A VENDOR,
+/// so it belongs beside the others that are: the rate budget, the credential,
+/// the market-hours window. A `Transport::LocalArchive` feed is CSV files an
+/// operator has bought and placed in a folder — there is no vendor to be
+/// mid-session with, and a file's last day is not a question about the clock.
+fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
+    let today = ingest::ist_day(std::time::SystemTime::now())
+        .map_err(|why| format!("the clock is unusable, so today cannot be established: {why}"))?;
+    if asked.window.to() >= today {
+        // ONE COPY of this prose, in the `Refusal` that owns it. A second
+        // hand-written sentence here would be the thing that drifts.
+        return Err(ingest::Refusal::WindowReachesToday {
+            to: asked.window.to(),
+            today,
+        }
+        .to_string());
+    }
+    Ok(())
+}
+
 async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<BrokerWindow, String> {
+    // THE TRANSPORT CHECK IS THE FIRST STATEMENT, AND IT IS THE ONLY THING
+    // THAT ANSWERS "IS THIS A BROKER".
+    //
+    // It used to be the LAST of eleven guards, below a live `GetParameter`
+    // round-trip to ap-south-1. Nothing reached it wrongly, because a
+    // `store_vendor()` check six lines above happened to refuse the same set —
+    // but that made this destructure unreachable, and it was standing in for a
+    // question it does not answer. `store_vendor` is "which store prefix", not
+    // "which transport", and the two come apart on the first HTTP feed added
+    // before its `core::Vendor` row: it would be told it is a local archive,
+    // which is a lie that sends the operator to the wrong place entirely.
+    //
+    // Placed first, an archive feed that ever reached here pays nothing: no
+    // clock, no HOME, no credentials file, no AWS identity, no socket.
+    let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
+        return Err(format!(
+            "{} declares a local-archive transport, not an HTTP one. Reaching \
+             this function at all is a routing error rather than an operator \
+             one — the transport is what chooses the path.",
+            asked.feed.display()
+        ));
+    };
+
     // ONE INSTRUMENT IS ALL THIS PATH CAN ADDRESS, AND IT NOW SAYS SO.
     //
     // `HttpSpec` carries no request-parameter map, so nothing here can name an
@@ -1570,39 +1627,7 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // it stops claiming to be. The refusal names the blocker so the message
     // stays true only until the parameter map lands, and turns into a real
     // multi-instrument pull rather than being quietly deleted.
-    // NOT TODAY, AND THIS IS A BROKER RULE ONLY.
-    //
-    // A session still running yields a PARTIAL day. The store is append-only
-    // with idempotent re-append, so a half day is not a smaller answer that a
-    // later run improves — it is either refused on the corrected re-pull, for
-    // being a different set of bars under the same key, or it is a permanent
-    // gap nobody notices because the month file exists and the census counts
-    // it. §3 rule 5 makes reruns safe; it cannot make a half-written day whole.
-    //
-    // Yesterday is the newest day that is certainly finished, whatever hour
-    // this runs at, and it needs no session table to know that.
-    //
-    // THE SPLIT IS THE TRANSPORT, NOT A LIST OF VENDOR NAMES.
-    //
-    // This function is only reached for a feed whose descriptor declares
-    // `Transport::Http`. A feed declaring `Transport::Archive` — TrueData and
-    // GDFL today, feed N tomorrow — is CSV files an operator has bought and
-    // placed in a folder: its last day is not a question about the clock, there
-    // is no vendor to be mid-session with, no token to expire and no budget to
-    // exceed. Every rule in this function is about TALKING TO A VENDOR, so
-    // every one of them follows the transport rather than a name, and a new
-    // feed inherits the right set by declaring which kind it is.
-    let today = ingest::ist_day(std::time::SystemTime::now())
-        .map_err(|why| format!("the clock is unusable, so today cannot be established: {why}"))?;
-    if asked.window.to() >= today {
-        // ONE COPY of this prose, in the `Refusal` that owns it. A second
-        // hand-written sentence here would be the thing that drifts.
-        return Err(ingest::Refusal::WindowReachesToday {
-            to: asked.window.to(),
-            today,
-        }
-        .to_string());
-    }
+    finished_day_only(asked)?;
 
     if asked.target != ingest::SpotTarget::Swept {
         return Err(format!(
@@ -1643,15 +1668,20 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // table is `DESCRIPTORS` and there is no second copy to fall behind it.
     let feed = asked.feed;
 
-    // The store prefix. `store_vendor` is `None` for an archive feed, which
-    // cannot happen here — the caller routes on transport and only HTTP feeds
-    // reach this function — but it is checked rather than unwrapped, because a
-    // future edit to the routing must fail loudly here instead of panicking.
+    // THE STORE PREFIX — a different question from the transport, asked
+    // separately now that the transport has its own answer above.
+    //
+    // `store_vendor` is `None` for a feed with no `core::Vendor` row. For an
+    // HTTP feed that is not "you picked an archive", it is "this broker has
+    // nowhere to file its bars yet", and saying the first would misdirect. The
+    // message names the real gap.
     let vendor = feed.store_vendor().ok_or_else(|| {
         format!(
-            "{} is a local-archive feed and has no broker credential to read. \
-             Reaching this function at all is a routing error, not an operator \
-             error — the transport is what chooses the path.",
+            "{} has no store prefix. Bars are filed under bars/<vendor>/, and \
+             filing one broker's prices under another's path destroys the \
+             per-vendor independence D-0019 exists for — so nothing is pulled \
+             until {} has a row in brutex_core::vendor::Vendor.",
+            feed.display(),
             feed.display()
         )
     })?;
@@ -1673,12 +1703,6 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // `crate::vendor`, not an edit here, and this is the line that keeps that
     // true — Groww and Dhan differ in six of those fields and share every line
     // of code below.
-    let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
-        return Err(format!(
-            "{} declares a local-archive transport, not an HTTP one",
-            vendor.as_str()
-        ));
-    };
     let source = pull::http::HttpSource::new(spec, token).map_err(|why| why.to_string())?;
     let origin = source.url();
 
@@ -4603,6 +4627,63 @@ mod tests {
             pull::vendor::Feed::TrueData.wire(),
             folder.display()
         )
+    }
+
+    /// The transport is checked before anything a refusal should not cost.
+    ///
+    /// It used to be the LAST of eleven guards in `broker_window`, below a live
+    /// `GetParameter` round-trip to ap-south-1 — so a feed that could not be
+    /// pulled over HTTP paid a clock read, a `HOME`, a parsed credentials file,
+    /// an AWS identity discovery and a socket to be told so. Every one of those
+    /// is decidable from the descriptor before any of it.
+    #[test]
+    fn the_transport_is_checked_before_any_vendor_facing_cost() {
+        // ORDER, read off the source rather than asserted about behaviour,
+        // because the thing being pinned is that a refusal COSTS NOTHING, and
+        // no observable distinguishes "refused cheaply" from "refused after a
+        // round-trip" except the round-trip itself.
+        //
+        // The search is BOUNDED to this function. It was not, and extracting
+        // the clock read into `finished_day_only` — declared above
+        // `broker_window` — silently moved it outside the searched span, so the
+        // clock assertion started passing because the needle was absent rather
+        // than because the order was right. A test that passes when the thing
+        // it names has left the building asserts nothing.
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("async fn broker_window")
+            .expect("broker_window exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("broker_window's body ends at a column-0 brace")];
+
+        let transport = body
+            .find("Transport::Http(spec)")
+            .expect("the transport is destructured inside broker_window");
+
+        for (what, needle) in [
+            (
+                "the finished-day gate, which reads the clock",
+                "finished_day_only(",
+            ),
+            ("the credentials file", "CredentialConfig::load"),
+            ("the AWS identity", "AwsIdentity::discover"),
+            ("Parameter Store", "ssm::get_parameter"),
+        ] {
+            let cost = body.find(needle).unwrap_or_else(|| {
+                panic!(
+                    "{what} is named by `{needle}`, and it is not in \
+                     broker_window's body. If it moved, this test must follow \
+                     it — an absent needle would otherwise pass for free."
+                )
+            });
+            assert!(
+                transport < cost,
+                "the transport is checked before {what}; a feed that cannot be \
+                 pulled over HTTP must not pay for discovering that"
+            );
+        }
     }
 
     /// An ARCHIVE feed with no folder refuses by name, and asks for a folder.

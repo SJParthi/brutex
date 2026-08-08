@@ -1477,6 +1477,41 @@ pub struct PullView<'a> {
     pub folders: &'a [String],
 }
 
+/// The feed picker, built from the descriptor table rather than written out.
+///
+/// A hand-written option list was survivable while the route decided
+/// HTTP-versus-archive by asking whether the folder box was blank — the archive
+/// feeds did not need to be selectable because the box selected them. Once the
+/// TRANSPORT decides, an unlisted feed cannot be named at all, so the arm that
+/// reads its folder is unreachable and a typed folder is silently discarded: a
+/// field that does nothing and says nothing, which `CLAUDE.md` §4 bans.
+///
+/// Each option says which KIND the feed is, because that is what decides which
+/// of the other fields on the form mean anything. A row added to `DESCRIPTORS`
+/// appears here the day it exists.
+fn feed_select() -> String {
+    let mut choices = String::from("<select name=\"vendor\">");
+    for feed in pull::vendor::Feed::ALL {
+        let kind = match feed.descriptor().transport {
+            pull::vendor::Transport::Http(_) => {
+                "broker \u{b7} needs a token, a rate budget and a finished day"
+            }
+            pull::vendor::Transport::LocalArchive(_) => {
+                "archive \u{b7} reads the folder below; no token, no window rules"
+            }
+        };
+        let _ = write!(
+            choices,
+            "<option value=\"{}\">{} \u{2014} {}</option>",
+            escape(feed.wire()),
+            escape(feed.display()),
+            kind
+        );
+    }
+    choices.push_str("</select>");
+    choices
+}
+
 /// The two forms. Split out of [`pull_page`] to stay under clippy's 100-line
 /// ceiling; the split is a lint, not a design.
 fn pull_forms(view: &PullView<'_>) -> String {
@@ -1518,29 +1553,22 @@ fn pull_forms(view: &PullView<'_>) -> String {
     // `DH-905 securityId is required`, which is a vendor confirming its own
     // shape. Groww's response shape has never been seen, and the note below
     // says so rather than letting an operator discover it.
-    out.push_str(&field(
-        "Broker",
-        "<select name=\"vendor\">\
-         <option value=\"dhan\">Dhan — reached live; descriptor confirmed by the vendor</option>\
-         <option value=\"groww\">Groww — never reached; response shape UNVERIFIED</option>\
-         </select>",
-    ));
+    out.push_str(&field("Feed", &feed_select()));
     let _ = write!(
         out,
         "<div class=\"pair\">{}{}</div>",
         field_unlabelled("From (inclusive)", &date_input("s", "from", today)),
         field_unlabelled("To (inclusive)", &date_input("s", "to", today)),
     );
-    // THE LOCAL-ARCHIVE FIELD. Half the vendors are not APIs — TrueData and
-    // GDFL sell folders of CSVs — and that half needs no socket, no token and
-    // no rate governor, so it is the half that works today. Left blank, the
-    // request takes the HTTP path, which does not exist yet and refuses loudly
-    // rather than doing nothing.
+    // THE LOCAL-ARCHIVE FIELD. It is read ONLY when the selected feed declares
+    // `Transport::LocalArchive`, and it is labelled to say so — an operator who
+    // picks a broker and types here would otherwise get a receipt that never
+    // mentions the folder it ignored.
     let _ = write!(
         out,
         "{}",
         field(
-            "Local vendor folder (optional)",
+            "Folder — for archive feeds only (TrueData, GDFL)",
             &folder_input(view.folders),
         )
     );
@@ -3174,6 +3202,35 @@ mod tests {
             // on; the walk that used to happen here made the page 72x slower
             // and made its own test a function of $HOME. See folder_suggestions.
             folders: &[],
+        }
+    }
+
+    /// The pull page offers EVERY feed in the descriptor table.
+    ///
+    /// It offered two hand-written options, `dhan` and `groww`. That survived
+    /// only while the route decided HTTP-versus-archive by asking whether the
+    /// folder box was blank: the archive feeds did not need to be selectable
+    /// because the box selected them. Once the TRANSPORT decides, an unlisted
+    /// feed cannot be named, so the arm that reads the folder is unreachable
+    /// and a typed folder is silently discarded — a field that does nothing and
+    /// says nothing, which is the shape `CLAUDE.md` §4 bans.
+    ///
+    /// No feed name is written here. The loop is over `Feed::ALL`, so a row
+    /// added to `DESCRIPTORS` is required on the page the day it exists.
+    #[test]
+    fn the_pull_page_offers_every_feed_in_the_table() {
+        let html = pull_page(&pull_view(None, None));
+        for feed in pull::vendor::Feed::ALL {
+            assert!(
+                html.contains(&format!("value=\"{}\"", feed.wire())),
+                "{} is a feed this build can read, so the form must offer it",
+                feed.display()
+            );
+            assert!(
+                html.contains(feed.display()),
+                "{} must be named in words too, not only as a wire value",
+                feed.display()
+            );
         }
     }
 
