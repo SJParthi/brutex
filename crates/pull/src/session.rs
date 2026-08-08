@@ -773,6 +773,21 @@ impl DropCensus {
         }
     }
 
+    /// Add another census's tallies to this one, reason by reason.
+    ///
+    /// A window wider than the vendor's per-request cap is fetched as several
+    /// chunks, each with its own census of what it declined. The receipt must
+    /// account for every row the whole run read, so the tallies are summed —
+    /// reporting only the last chunk's drops would make eighty of eighty-one
+    /// chunks' declined rows vanish from a page whose entire purpose is that
+    /// they do not.
+    pub const fn absorb(&mut self, other: Self) {
+        self.before_open += other.before_open;
+        self.after_close += other.after_close;
+        self.before_window += other.before_window;
+        self.after_window += other.after_window;
+    }
+
     /// Counts one drop. Saturating, because a census that wrapped would report
     /// a smaller number than the truth, which is the one direction a count must
     /// never be wrong in.

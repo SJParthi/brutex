@@ -954,6 +954,9 @@ mod tests {
                 per_minute: None,
                 per_day: None,
             },
+            // A test spec: no cap, so the window is sent whole and the split is
+            // not what is under test here.
+            window_cap_days: None,
             pooling: Pooling::PerVendor,
         }
     }

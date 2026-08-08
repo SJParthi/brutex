@@ -1384,6 +1384,20 @@ pub struct HttpSpec {
     pub prices: PriceScale,
     /// The published budget.
     pub budget: Budget,
+    /// How many days one request may name, at the granularity this build
+    /// fetches (`1min` — see [`Granularity`]).
+    ///
+    /// A VENDOR bound, and distinct from `api::ingest::MAX_WINDOW_DAYS`, which
+    /// is an INPUT bound: 3,653 days, wide enough for the whole stated backfill
+    /// and narrow enough that a fat-fingered year is caught. That number says
+    /// nothing about what a broker will answer, so a window inside it can still
+    /// be far outside this.
+    ///
+    /// `None` means the vendor publishes no per-request cap. It is not a
+    /// default and not an unknown: an unknown cap would have to be `UNVERIFIED`
+    /// in the charter and named as such here, the way
+    /// [`crate::rate::GROWW_PER_SECOND_UNVERIFIED`] is.
+    pub window_cap_days: Option<u32>,
     /// Whether that budget is pooled per request kind.
     pub pooling: Pooling,
     /// Every field this feed's request carries, and where its value comes from.
@@ -1799,6 +1813,9 @@ const DHAN: Descriptor = Descriptor {
             per_minute: None,
             per_day: Some(crate::rate::DHAN_PER_DAY),
         },
+        // docs/00-charter.md §4: "Window cap | 90 days per request |
+        // documented".
+        window_cap_days: Some(90),
         pooling: Pooling::PerVendor,
         // Read first-hand from dhanhq.co/docs/v2/historical-data. All three are
         // marked REQUIRED there, and their absence is exactly what DH-905
@@ -1888,6 +1905,13 @@ const GROWW: Descriptor = Descriptor {
             per_day: None,
         },
         // Groww pools per endpoint group; the other broker does not.
+        // docs/00-charter.md §4: "Window cap | 30 days per request at 1-minute
+        // granularity | documented". This build fetches 1min only — the
+        // charter's own row says every other timeframe is derived — so the
+        // one figure is the one that applies. A per-granularity table would be
+        // three more numbers this build cannot exercise, and two of them are
+        // not in the charter at all.
+        window_cap_days: Some(30),
         pooling: Pooling::PerRequestKind,
         // Read first-hand from groww.in/trade-api/docs/curl/historical-data.
         // `trading_symbol` is the deprecated endpoint's name for it; the live

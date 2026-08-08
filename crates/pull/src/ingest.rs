@@ -191,6 +191,25 @@ pub struct Ingested {
 }
 
 impl Ingested {
+    /// Add another run's counters to this one.
+    ///
+    /// A window wider than the vendor's per-request cap is several requests and
+    /// several answers, each landed by its own [`from_window`] call. The receipt
+    /// must report the WHOLE run rather than merely its last chunk, so the
+    /// counters are summed and the failures concatenated.
+    ///
+    /// `members` is summed like the rest: one body is one member, so eighty-one
+    /// chunks are eighty-one members, which is what the page should say.
+    pub fn absorb(&mut self, other: Self) {
+        self.members += other.members;
+        self.rows_read += other.rows_read;
+        self.bars_stored += other.bars_stored;
+        self.rows_folded += other.rows_folded;
+        self.counted += other.counted;
+        self.census.absorb(other.census);
+        self.failures.extend(other.failures);
+    }
+
     /// Whether every row is accounted for: stored, folded into a bar that was
     /// already open, dropped, or in a member that failed.
     ///

@@ -130,6 +130,9 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // DHAN'S REAL REQUIRED FIELDS, read first-hand from
         // dhanhq.co/docs/v2/historical-data. This is what `DH-905 securityId
         // is required` was reporting the absence of.
+        // No cap: the window is sent whole, because the split is not what
+        // this fixture is testing.
+        window_cap_days: None,
         params: &[
             Param {
                 name: "securityId",

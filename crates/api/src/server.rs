@@ -1536,7 +1536,7 @@ async fn broker_answer(
     match broker_window(&asked, site).await {
         Err(why) => refuse(facts, &why, axum::http::StatusCode::BAD_GATEWAY),
         Ok(BrokerWindow {
-            raw,
+            bodies,
             instrument,
             origin,
             spec,
@@ -1565,8 +1565,18 @@ async fn broker_answer(
                 exchange: brutex_core::instrument::Exchange::Nse.as_str(),
                 segment: brutex_core::instrument::Segment::Index.as_str(),
             };
-            let done =
-                pull::ingest::from_window(&raw, &instrument, &origin, &site.store_root, plan);
+            // EVERY CHUNK LANDS, AND THE COUNTERS ADD UP ACROSS THEM.
+            //
+            // `from_window` is called once per body rather than once per form
+            // submission. Each call appends and counts; the totals are summed
+            // so the receipt reports the whole run and not merely its last
+            // eighty-first.
+            let mut done = pull::ingest::Ingested::default();
+            for body in &bodies {
+                let part =
+                    pull::ingest::from_window(body, &instrument, &origin, &site.store_root, plan);
+                done.absorb(part);
+            }
             let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
             facts.push(("Instrument", instrument));
             landed_answer(&done, asked.window, now, &origin, journal, facts, took)
@@ -1600,8 +1610,14 @@ async fn broker_answer(
 /// a broker is a row in `crate::vendor`, not an edit here". A literal at this
 /// seam is an edit here.
 struct BrokerWindow {
-    /// The bars, exactly as the vendor sent them.
-    raw: pull::fetch::RawWindow,
+    /// The bars, exactly as the vendor sent them — ONE BODY PER LEGAL CHUNK,
+    /// in window order.
+    ///
+    /// A vendor caps how much history one request may name, so a window wider
+    /// than that cap is several requests and several answers. It was one field
+    /// and one request, which is why a multi-year range was handed whole to a
+    /// vendor that would not serve it.
+    bodies: Vec<pull::fetch::RawWindow>,
     /// Which instrument they are.
     instrument: String,
     /// The URL they came from, for the receipt.
@@ -1728,6 +1744,72 @@ fn monotonic_micros() -> u64 {
         // bucket at once.
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+/// Every legal chunk of the operator's window, fetched over one client.
+///
+/// A vendor caps how much history one request may name — 30 days for Groww at
+/// one-minute granularity, 90 for Dhan, both from `docs/00-charter.md` §4.
+/// `api::ingest::MAX_WINDOW_DAYS` is 3,653 and says nothing about that, so a
+/// 2020-to-today window passed the parser and was handed WHOLE to a vendor that
+/// will not serve it: an error if the operator was lucky, a silently truncated
+/// answer if not, and the second writes a gap the append-only store cannot
+/// correct.
+///
+/// The split happens here rather than in the caller so the credential, the
+/// identity and the client are paid for once and reused across every chunk.
+/// 2020-01-01 to yesterday is 81 chunks at Groww's cap — 81 Parameter Store
+/// round-trips would be the obvious way to write this and the wrong one.
+///
+/// A feed with no published cap sends the window whole, which is what `None`
+/// means and is not a default: an unknown cap would be `UNVERIFIED` in the
+/// charter and named as such in the descriptor.
+async fn fetch_chunks(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    source: &pull::http::HttpSource,
+    instrument_id: &str,
+    // BY REFERENCE: `HttpSpec` is 280 bytes and only one field is read.
+    spec: &pull::vendor::HttpSpec,
+) -> Result<Vec<pull::fetch::RawWindow>, String> {
+    let chunks = match spec.window_cap_days {
+        Some(cap) => pull::session::split_window(asked.window, cap)
+            .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?,
+        None => vec![asked.window],
+    };
+
+    let mut bodies = Vec::with_capacity(chunks.len());
+    for (nth, chunk) in chunks.iter().enumerate() {
+        // THE BUDGET IS CHARGED PER REQUEST, NOT PER FORM SUBMISSION. One
+        // submission is up to 81 requests; charging once would spend one permit
+        // for eighty-one calls and make the governor a decoration.
+        //
+        // The first chunk's permit was taken in `broker_window`, before the
+        // credential was read — a request that will not be issued must not cost
+        // a round-trip to ap-south-1. The rest are charged here.
+        if nth > 0 {
+            spend_budget(asked.feed, site)?;
+        }
+
+        let request = pull::fetch::BarRequest {
+            instrument_id: instrument_id.to_owned(),
+            window: *chunk,
+            cadence: pull::session::Cadence::Minute,
+        };
+        bodies.push(source.window_async(&request).await.map_err(|why| {
+            format!(
+                "the broker did not answer with a window. This was request {} of \
+                 {}, covering {}..={} — the chunks before it were fetched and \
+                 are not written, because a partial answer to a whole request \
+                 is a gap this store cannot correct later: {why}",
+                nth + 1,
+                chunks.len(),
+                chunk.from(),
+                chunk.to()
+            )
+        })?);
+    }
+    Ok(bodies)
 }
 
 async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<BrokerWindow, String> {
@@ -1894,18 +1976,8 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
         ));
     };
 
-    let request = pull::fetch::BarRequest {
-        instrument_id: instrument_id.as_str().to_owned(),
-        window: asked.window,
-        cadence: pull::session::Cadence::Minute,
-    };
-    let raw = source
-        .window_async(&request)
-        .await
-        .map_err(|why| format!("the broker did not answer with a window: {why}"))?;
-    // WHICH PREFIX THESE BARS ARE FILED UNDER, ASKED RATHER THAN ASSUMED.
-    // `store_vendor` refuses the two archive feeds, which have no prefix, and
-    // it is the only thing that may answer this question — see `BrokerWindow`.
+    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), &spec).await?;
+
     let Some(store_vendor) = feed.store_vendor() else {
         return Err(format!(
             "{} has no store prefix of its own, so there is nowhere to file its \
@@ -1918,7 +1990,7 @@ async fn broker_window(asked: &ingest::SpotRequest, site: &Site) -> Result<Broke
     // Even `Swept` is two series and this fetches one. Saying which, rather
     // than letting the receipt imply both.
     Ok(BrokerWindow {
-        raw,
+        bodies,
         instrument: "NIFTY".to_owned(),
         origin,
         spec,
@@ -4887,6 +4959,105 @@ mod tests {
         );
     }
 
+    /// Every HTTP feed declares the cap its own vendor published, and the
+    /// fetch loop is driven by it.
+    ///
+    /// The numbers are `docs/00-charter.md` §4's, not this test's: Groww 30
+    /// days per request at one-minute granularity, Dhan 90. What is asserted
+    /// here is that the descriptor CARRIES them and that the split those caps
+    /// imply is the one the backfill will actually issue — 81 requests per
+    /// instrument at Groww's cap for 2020-01-01 to yesterday, not one request
+    /// for 2,411 days that no vendor will serve.
+    #[test]
+    fn the_backfill_window_becomes_one_legal_request_per_chunk() {
+        for feed in pull::vendor::Feed::ALL {
+            let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let Some(cap) = spec.window_cap_days else {
+                // `None` is "the vendor publishes no per-request cap", which is
+                // a legal state and not an omission — but no shipped broker is
+                // in it, so reaching here means a row lost its number.
+                panic!(
+                    "{} is a broker and every shipped broker's cap is in the \
+                     charter — a None here is a number that went missing, not a \
+                     vendor that published nothing",
+                    feed.display()
+                );
+            };
+            assert!(cap > 0, "{} must publish a positive cap", feed.display());
+
+            // The real backfill: 2020-01-01 to 2026-08-07 inclusive.
+            let window = pull::session::Window::new(
+                pull::session::Day::new(2020, 1, 1).expect("2020-01-01"),
+                pull::session::Day::new(2026, 8, 7).expect("2026-08-07"),
+            )
+            .expect("a forward window");
+
+            let chunks = pull::session::split_window(window, cap).expect("a positive cap splits");
+            for chunk in &chunks {
+                let len = chunk.to().days_from_epoch() - chunk.from().days_from_epoch() + 1;
+                assert!(
+                    len <= cap,
+                    "{} caps a request at {cap} days and this chunk is {len}",
+                    feed.display()
+                );
+            }
+            assert_eq!(
+                chunks.first().map(|w| w.from()),
+                Some(window.from()),
+                "the split starts where the operator asked"
+            );
+            assert_eq!(
+                chunks.last().map(|w| w.to()),
+                Some(window.to()),
+                "and ends where they asked — never truncated to fit"
+            );
+            assert_eq!(
+                chunks.len(),
+                (2_411_usize).div_ceil(cap as usize),
+                "{} needs ceil(2411/{cap}) requests for one instrument",
+                feed.display()
+            );
+        }
+    }
+
+    /// The fetch loop reads the DESCRIPTOR's cap, not a literal and not `None`.
+    ///
+    /// Written against the source because the alternative is a live broker.
+    /// It exists because a mutant that replaced `spec.window_cap_days` with a
+    /// hardcoded `None` — sending the whole window, which is the entire bug —
+    /// passed every other test here: they assert that the descriptor CARRIES
+    /// the cap and that `split_window` divides correctly, and both remain true
+    /// while the loop ignores the answer.
+    #[test]
+    fn the_fetch_loop_takes_its_cap_from_the_descriptor() {
+        // `fetch_chunks`, because the loop moved there when `broker_window`
+        // crossed the 100-line lint. The test follows the code rather than
+        // passing because the needle left the span it was searching — which is
+        // the failure mode that already bit the ordering test once.
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("async fn fetch_chunks")
+            .expect("fetch_chunks exists")
+            .1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("fetch_chunks' body ends at a column-0 brace")];
+
+        assert!(
+            body.contains("spec.window_cap_days"),
+            "the chunking must be driven by the feed's own declared cap — a \
+             literal here is one vendor's number applied to every vendor, and \
+             a `None` is the un-split window this loop exists to prevent"
+        );
+        assert!(
+            body.contains("split_window("),
+            "and the split must be the one function that computes it, not a \
+             second copy of the arithmetic"
+        );
+    }
+
     /// The transport is checked before anything a refusal should not cost.
     ///
     /// It used to be the LAST of eleven guards in `broker_window`, below a live
@@ -5996,10 +6167,21 @@ mod broker_target_tests {
         let guard = body
             .find("asked.target != ingest::SpotTarget::Swept")
             .expect("the guard is still there");
+        // THE SOCKET IS NAMED BY ITS CALLER NOW, not by `window_async`.
+        //
+        // The fetch loop moved into `fetch_chunks` when `broker_window` crossed
+        // the 100-line lint, taking `window_async` with it — and this test
+        // failed loudly saying so, rather than passing because the needle had
+        // left the span it was searching. That is the behaviour two tests I
+        // wrote today did NOT have, and the reason this one is trustworthy.
+        //
+        // `fetch_chunks(` is the call site, still inside `broker_window`, and
+        // it is what the guard must precede: everything the socket costs is
+        // behind it.
         for (what, needle) in [
             ("the credential read", "CredentialConfig::load"),
             ("the AWS identity", "AwsIdentity::discover"),
-            ("the socket", "window_async"),
+            ("the socket", "fetch_chunks("),
         ] {
             let at = body.find(needle).unwrap_or_else(|| {
                 panic!("{what} moved; this test pins an ordering it can no longer see")
