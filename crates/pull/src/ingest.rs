@@ -119,7 +119,7 @@ use store::path::{FileKind, PathParts, StorePath, Timeframe};
 use crate::archive::{self, Member};
 use crate::csv::Columns;
 use crate::fetch::{self, BarRequest};
-use crate::manifest::{ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest};
+use crate::manifest::{Append, ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest};
 use crate::session::DropCensus;
 use crate::vendor::{PriceScale, TimestampEncoding};
 
@@ -353,7 +353,15 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
             ),
         });
     }
-    let mut publish = repairing;
+    // A REPAIR still publishes the whole image, because it may rewrite entries
+    // the append region already holds and an append-only log cannot say that.
+    let publish = repairing;
+    // EVERY WRITE THIS RUN OWES THE CENSUS, IN ORDER.
+    //
+    // One 64-byte entry image and one header commit each, both already computed
+    // by `Manifest::record`. Collecting them is what lets the install publish
+    // what CHANGED rather than re-imaging what did not — see `install_census`.
+    let mut appends: Vec<Append> = Vec::new();
 
     for member in members {
         done.rows_read += member.rows.len();
@@ -378,7 +386,9 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
                     match count(&mut census, entry) {
                         Ok(changed) => {
                             done.counted += 1;
-                            publish |= changed;
+                            if let Some(append) = changed {
+                                appends.push(append);
+                            }
                         }
                         // THE WORST OUTCOME THERE IS, AND IT IS NAMED. The
                         // bars are on the disk and the census does not count
@@ -405,7 +415,7 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
 
     // ONE INSTALL, AFTER THE LOOP — and none at all when nothing changed, so
     // a re-run of the same folder leaves the census byte for byte as it was.
-    if publish && let Err(why) = install_locked(&census_lock, &census_path, &census.image()) {
+    if let Err(why) = install_census(&census_lock, &census_path, &census, &appends, publish) {
         done.failures.push(Failure {
             instrument: census_path.display().to_string(),
             why: format!(
@@ -639,12 +649,18 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
 ///
 /// Whatever [`Manifest::record`] refuses, in its own words: a row count that
 /// went backwards, timestamps that did, or a census at its ceiling.
-fn count(census: &mut Manifest, entry: Entry) -> Result<bool, String> {
+fn count(census: &mut Manifest, entry: Entry) -> Result<Option<Append>, String> {
     if census.entry(&entry.key) == Some(entry) {
-        return Ok(false);
+        return Ok(None);
     }
-    census.record(entry).map_err(|why| why.to_string())?;
-    Ok(true)
+    // THE `Append` IS KEPT, NOT DROPPED. It carries the one 64-byte write and
+    // the header commit that publishes it — everything an incremental install
+    // needs, already computed. Discarding it here is what forced the caller to
+    // re-image every committed entry to publish the few it had touched.
+    census
+        .record(entry)
+        .map(Some)
+        .map_err(|why| why.to_string())
 }
 
 /// Whether a file of `len` bytes is larger than this build could have written.
@@ -803,6 +819,110 @@ impl CensusLock {
         }
         Ok(Self { _held: Some(lock) })
     }
+}
+
+/// Publish what this run changed, without re-imaging what it did not.
+///
+/// # The 424 GB
+///
+/// The census was installed by [`Manifest::image`] and one `rename`: an
+/// `O(entries)` write bought for an install that is atomic by construction.
+/// That is a good bargain **once per run**, which is what `from_dir` is — one
+/// folder, twelve thousand members, one install.
+///
+/// `from_window` is not that. It hands a SINGLE-ELEMENT slice to
+/// [`from_members`], so the batch cost is paid at per-member frequency: the
+/// whole file re-imaged, `fsync`ed and renamed for every window fetched.
+/// Measured against the operator's stated backfill in `docs/06-limits.md` §34
+/// — **424 GB rewritten to maintain a 5.75 MB file**, where the same work as
+/// positional appends is 9.16 MB. The amplification is ~47,400×.
+///
+/// # Why an append is safe without the rename
+///
+/// The rename was buying atomicity. The manifest format already buys it
+/// another way, and has from the start: **two header slots, written
+/// alternately**, commit *g* landing in slot `g % 2`. A crash during a slot
+/// write leaves the other slot holding the previous generation, and recovery
+/// takes the newest slot that passes its own CRC-32C. So the sequence is
+///
+/// 1. write the entry at its own offset — beyond `n_valid`, so no reader can
+///    see it yet whatever happens next;
+/// 2. **barrier**, through [`Commit::durable_through`];
+/// 3. write the header slot, which is the single act that makes the entry
+///    real.
+///
+/// A crash before 3 leaves bytes past the counter, which the next run
+/// overwrites; a crash during 3 leaves the other slot intact. Neither state is
+/// a census that disagrees with itself, which is the property the rename was
+/// there for.
+///
+/// # When the whole image is still written
+///
+/// **A repair**, because it may rewrite entries the append region already holds
+/// and an append-only log cannot express that. And **the first write**, when
+/// there is no file or it is shorter than the header: an append at
+/// `HEADER_LEN + 0` against a zero-length file would leave the header region a
+/// sparse hole and one slot never written at all. Both are stated conditions,
+/// not a fallback around a failure — either one failing still fails loudly.
+fn install_census(
+    lock: &CensusLock,
+    path: &Path,
+    census: &Manifest,
+    appends: &[Append],
+    repairing: bool,
+) -> Result<(), String> {
+    // Nothing moved. A re-run of the same folder leaves the census byte for
+    // byte as it was, which is `CLAUDE.md` §3 rule 5 about the bytes.
+    if appends.is_empty() && !repairing {
+        return Ok(());
+    }
+
+    let virgin = match fs::metadata(path) {
+        Ok(meta) => meta.len() < HEADER_LEN,
+        Err(_) => true,
+    };
+    if repairing || virgin {
+        return install_locked(lock, path, &census.image());
+    }
+    append_locked(lock, path, appends)
+}
+
+/// The positional writes, kept apart from the sentence they fail with.
+fn append_locked(_lock: &CensusLock, path: &Path, appends: &[Append]) -> Result<(), String> {
+    write_appends(path, appends).map_err(|why| {
+        format!(
+            "{} could not be appended to after {} entry write(s): {why}",
+            path.display(),
+            appends.len()
+        )
+    })
+}
+
+/// One entry write, one barrier and one slot write per append, in that order.
+///
+/// The barrier is not optional and not an optimisation to skip: issuing the
+/// slot write before the entry bytes are on stable storage publishes a counter
+/// over entries that may not exist, which is the one way this format can be
+/// made to lie. [`Commit::durable_through`] names the offset, so a writer
+/// cannot claim it did not know which one to flush.
+fn write_appends(path: &Path, appends: &[Append]) -> std::io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+
+    let mut file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+    for append in appends {
+        file.seek(SeekFrom::Start(append.offset))?;
+        file.write_all(&append.bytes)?;
+
+        // THE BARRIER. Everything through here must be durable before the slot
+        // below is allowed to count it.
+        debug_assert!(append.commit.durable_through <= append.offset + ENTRY_STRIDE);
+        file.sync_data()?;
+
+        file.seek(SeekFrom::Start(append.commit.offset))?;
+        file.write_all(&append.commit.bytes)?;
+        file.sync_all()?;
+    }
+    Ok(())
 }
 
 /// The install itself, once the census lock is held.

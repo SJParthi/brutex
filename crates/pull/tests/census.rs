@@ -899,3 +899,118 @@ fn a_run_that_cannot_take_the_census_lock_writes_no_bars_at_all() {
         done.rows_read
     );
 }
+
+/// Publishing one entry writes ONE entry, not the whole census again.
+///
+/// # The 424 GB this pins down
+///
+/// The census was installed by re-imaging every committed entry and renaming
+/// the result: an `O(entries)` write bought for an install that is atomic by
+/// construction. That is a good bargain once per run, which is what `from_dir`
+/// is. It is a terrible one per WINDOW, and `from_window` hands a
+/// single-element slice to `from_members` — so the whole file was re-imaged,
+/// `fsync`ed and renamed for every window fetched. Measured against the stated
+/// backfill in `docs/06-limits.md` §34: **424 GB rewritten to maintain a
+/// 5.75 MB file**, against 9.16 MB for the same work as positional appends.
+///
+/// This drives the shape that bites — one member at a time, repeatedly — and
+/// requires two things of it.
+///
+/// **The file grows by exactly one stride per new entry.** That is what makes
+/// the write positional rather than a re-image: a re-image of an *n*-entry
+/// census writes `HEADER_LEN + n·64` bytes to add the `n`th, and an append
+/// writes 64.
+///
+/// **The census is the same census either way.** An append that were subtly
+/// different from the image it replaced would be a far worse bug than the cost
+/// it fixed, so the run is repeated against a second store built by a single
+/// batch install, and the two are required to agree on every entry and on all
+/// three header totals.
+#[test]
+fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
+    let scratch = Scratch::new("census-incremental");
+
+    // FOUR SEPARATE RUNS, one member each — the `from_window` shape.
+    let mut sizes = Vec::new();
+    let mut inodes = Vec::new();
+    let incremental = scratch.root.join("STORE-INCREMENTAL");
+    for name in ["AAA", "BBB", "CCC", "DDD"] {
+        let archive = scratch.archive(&[(name, BODY)]);
+        let done = run(&archive, &incremental, &request());
+        assert!(
+            done.failures.is_empty(),
+            "{name} must ingest cleanly: {:?}",
+            done.failures
+        );
+        let meta = fs::metadata(manifest_path(&incremental, VENDOR))
+            .expect("the census exists after a run that counted something");
+        sizes.push(meta.len());
+        inodes.push(std::os::unix::fs::MetadataExt::ino(&meta));
+        fs::remove_dir_all(&archive).expect("clear the archive between runs");
+    }
+
+    // The first run creates the file: header plus its one entry. Every run
+    // after it adds exactly one stride and touches nothing else.
+    assert_eq!(
+        sizes[0],
+        HEADER_LEN + ENTRY_STRIDE,
+        "the first install writes the header and one entry"
+    );
+    for (n, pair) in sizes.windows(2).enumerate() {
+        assert_eq!(
+            pair[1] - pair[0],
+            ENTRY_STRIDE,
+            "run {} added one entry, so the file must grow by one stride",
+            n + 2
+        );
+    }
+
+    // THE INODE IS THE ASSERTION THAT BITES, and size alone is not.
+    //
+    // A re-image writes `HEADER_LEN + n·64` bytes and an append writes 64, but
+    // both leave a file of `HEADER_LEN + n·64`. The first version of this test
+    // asserted only on the size and PASSED against a mutant that re-imaged
+    // every time — it was named after an amplification it could not observe.
+    //
+    // The two strategies differ where the filesystem can see it. `install` is
+    // write-a-temporary-then-rename, so the live path gets a NEW inode every
+    // time; an append opens the existing file and writes in place, so the inode
+    // is stable. That is exactly the distinction between "rewritten whole and
+    // republished" and "one entry added to what was already there".
+    for (n, pair) in inodes.windows(2).enumerate() {
+        assert_eq!(
+            pair[0],
+            pair[1],
+            "run {} must APPEND to the census, not rewrite and rename it — a \
+             changed inode is a whole-file republish, which is the {}x \
+             amplification this test exists to prevent",
+            n + 2,
+            "47,400"
+        );
+    }
+
+    // THE SAME CENSUS, BUILT IN ONE BATCH. Four members, one install.
+    let batched = scratch.root.join("STORE-BATCHED");
+    let archive = scratch.archive(&[("AAA", BODY), ("BBB", BODY), ("CCC", BODY), ("DDD", BODY)]);
+    let done = run(&archive, &batched, &request());
+    assert!(done.failures.is_empty(), "{:?}", done.failures);
+
+    let one = census_of(&incremental);
+    let many = census_of(&batched);
+    assert_eq!(
+        (one.header().n_valid, one.header().n_keys, one.total_rows()),
+        (
+            many.header().n_valid,
+            many.header().n_keys,
+            many.total_rows()
+        ),
+        "four appends and one image of the same four entries are the same census"
+    );
+    for name in ["AAA", "BBB", "CCC", "DDD"] {
+        assert_eq!(
+            one.entry(&key(name)),
+            many.entry(&key(name)),
+            "{name} must be recorded identically whichever way it was published"
+        );
+    }
+}
