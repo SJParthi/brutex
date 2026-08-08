@@ -1561,6 +1561,24 @@ the module segment** — its own comment says `store::unit::x` and
 green for their whole lives while naming `store::loom::` and `store::proptest::`,
 modules that do not exist.
 
+**Gate 10, re-measured on 2026-08-09 — it now exits 0, and the figure above is
+the historical reading it was when D-0045 took it.** Same script, this tree:
+**383 rows read, 376 checked, 17 pending for a crate that is not a member, 7
+exempted by the allowlist, 0 missing.** The path from ten to zero is not ten
+tests: six were written or corrected during D-0045, A-20 joined the list when
+its absolute went stale under D-0052, and the final five were split by whether
+the subject exists. A-20 (D-0060) and X-02 (D-0061) were writable and were
+written. **P-03, X-01 and X-13 are the first three entries the `allow_pending`
+allowlist has ever carried** (D-0062) — it is no longer empty, and the sentence
+above saying it is deliberately empty is the reading at `79c5e80`. Each entry
+names what does not exist and what would close it, and a green gate that
+exempts three rows is not the same as a green gate that proves them: X-10 is
+`◐` rather than `✓` in `docs/04-invariants.md` for exactly that reason. **What
+this gate still cannot see is unchanged and is the reason A-20 went stale in
+the first place: it checks that a NAME exists, never that the sentence beside
+it is still true.** No gate in this repository checks that, and nothing here
+claims one does.
+
 **Gate 1d.** Reproduced verbatim under `bash` (under `zsh` the allowlist
 word-splits differently and the count is wrong). **60** undeclared literals. They
 arrived with the vendor, fetch, archive and CSV work and are mostly timeframe
@@ -2323,3 +2341,50 @@ the resumability work that will drive it.
 
 No wall-clock figure. The 424 GB is bytes written, and how long that takes
 depends on the device — unmeasured. `CLAUDE.md` §3 rule 6.
+
+## 35. A pull in flight is invisible between commits, and `/audit.json` cannot fix that
+
+`/audit.json` reports the manifest's `generation` and its mtime so the audit
+console can say whether the store is growing. That is the whole of the evidence
+available, and it has a hole in it.
+
+**Nothing writes a record for a run that has not finished.** A pull is one
+synchronous POST; `audit::Journal::append` runs when it ends. So during a
+ten-minute window the journal is silent, and the only thing moving is the
+manifest. Between two of its commits — and a commit can be a minute apart on a
+slow instrument — "the store has not moved" and "nothing is running" are the
+same observation from outside the process.
+
+The console therefore says the measured thing (`the store has not been written
+for 2m 21s`) and never the inferred one (`no pull is running`). Measured on the
+live system: a backfill wrote 580 files over nine minutes and every surface in
+this repository reported nothing; with this route the same run reads `RUNNING ·
+the manifest committed 54 times and the store gained 1,94,456 bars in the last
+1m 10s`, and falls back to `JUST WROTE · the manifest was written 1s ago` when
+it is mid-instrument.
+
+**What would close it** is a record at the START of a run — an in-flight slot,
+or a second journal outcome appended before the work rather than after. That is
+a record-format change (`CLAUDE.md` §8: a new field is a new file version at
+its own stride) and it is not made here.
+
+## 36. Four hundred failure reasons per run are destroyed before any page sees them
+
+`audit::Record` stores `failures: u64` — a COUNT — and one note of 68 bytes.
+`Record::of_run` fills that note from `done.failures.first()`, which is the
+**alphabetically first** failed member, not the most common or the most severe.
+`server.rs` puts `done.failures.iter().take(5)` into the POST's HTML reply, and
+the rest are dropped when the run returns.
+
+Measured on the journal as it stands: **1,436 member-level failures, 4
+surviving reasons.** One record failed 699 members and carries the single line
+`360ONE — bars span 2026-07 to 2026-08; the store addresses one mon` — itself
+cut, from 134 bytes. Forty-two of 133 notes were truncated at write time, the
+worst from 414 bytes.
+
+The audit console groups, counts and ranks every reason that IS on disk, and
+prints the arithmetic of what is not: *"1,436 member-level failures are
+recorded, and 4 reason(s) survive on disk. 1,432 reasons were never written."*
+It does not imply they are recoverable. **They are not, for every run already
+written**, and no front-end change can alter that — this is data loss at the
+write boundary, not a rendering gap.

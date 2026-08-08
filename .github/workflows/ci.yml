@@ -1332,10 +1332,34 @@ jobs:
           # that is the whole repair. One row id per line, with the reason
           # beside it, gate 1d's mechanism: adding a line is a visible diff and
           # the moment to ask whether the test should just be written.
-          # IT IS DELIBERATELY EMPTY. The ten rows above are reported by name
-          # in the log of this step; pinning them here on the way in would turn
-          # ten findings into one line nobody reads.
-          allow_pending=''
+          #
+          # IT WAS DELIBERATELY EMPTY while ten rows were being worked through,
+          # so that all ten stayed named in this step's log rather than becoming
+          # one line nobody reads. Five survived that pass. Two of the five were
+          # WRITABLE and have been written -- A-20 and X-02, D-0060 and D-0061.
+          # The three below are not writable, and they are not writable for the
+          # same reason each time: THE SUBJECT DOES NOT EXIST. There is no code
+          # for a test to drive, so a test here would assert the absence and
+          # then have to be deleted the day the thing arrives.
+          #
+          # A line is honest ONLY while that stays true. Each says what is
+          # missing and what would close it; when the closing condition is met,
+          # the line goes and the test is written in the same change.
+          #
+          # WHAT A LINE COSTS, because it is not free. The allowlist keys on the
+          # ROW, not on the token, so a row naming two tests has both silenced.
+          # P-03 names a second test that EXISTS and passes --
+          # pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule,
+          # which pins the absence of a weekend rule as the current behaviour --
+          # and this step stops confirming its name for as long as the P-03 line
+          # is here. It is still run by cargo test; what is lost is this gate's
+          # check that the ROW still points at it. Both silenced tokens are
+          # printed by name above, so the cost is in the log rather than hidden.
+          allow_pending='
+          P-03  no trading calendar and no holiday list exist. crates/pull/src/session.rs computes no day of the week and docs/00-charter.md section 3 records special-session shapes and NO holiday list, so a weekend rule would be wrong -- it records 2025-02-01, a Saturday, as a full 375-bar session. CLOSED BY: a sourced holiday list recorded in the charter FIRST (golden rule 1 forbids inventing one), then a filter in session.rs, then pull::unit::calendar_filter driving it.
+          X-01  no run-identity function exists in any crate. blake3 is declared at Cargo.toml [workspace.dependencies] and NO member takes it; nothing hashes CLAUDE.md section 3 rule 3s nine inputs. Five of those inputs have no source either: crates/vocab, crates/indicators and crates/engine are not workspace members, so there is no mask, no vocab_version and no sweep to identify. CLOSED BY: those crates, then a data_digest over loaded bars, then the identity function, then the test. NOT by adding proptest -- this workspace has twice replaced a phantom property test with exhaustive ordinary tests (S-02, P-01).
+          X-13  no cross-vendor bar comparison exists. The reader is there -- BarFile::read_record, walked at every index by S-02, and X-12 already files each vendor under its own path prefix -- but nothing opens two vendors months and matches them bar for bar, so there is no code for a test to drive. This is NOT ruled out by docs/07-plan.md R-6: that forbids SHOWING two feeds side by side and is enforced by a picker and a column, while api::merge already refuses a universe on a cross-vendor ISIN conflict. CLOSED BY: a two-BarFile comparison in crates/store that refuses and names the first divergent timestamp, then store::unit::vendor_disagreement_refuses.
+          '
 
           # (crate, fn) for every tracked crate, built once.
           fns="$work/fns"; : > "$fns"

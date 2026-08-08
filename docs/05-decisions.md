@@ -5056,3 +5056,388 @@ page working, not the page failing. Whenever the route is not answering, the
 backfill advances only while somebody drives it, and it must be driven **oldest
 month first**: a later month written into a month-file permanently blocks the
 earlier days in that same file.
+
+---
+
+## D-0059 · 2026-08-09 · `/audit.json` exists, and `/audit` stops being two applications
+
+**Decision.** The API answers `GET /audit.json?feed=<wire>&page=<n>` —
+`crates/api/src/audit_json.rs`, one route, added to the router beside the HTML
+page it does not replace. `/audit` is removed from `web/vite.config.js`'s proxy
+list, so in development the SvelteKit console owns that path and the Rust page
+is still served on the API's own port.
+
+**What was wrong.** Three things, all measured on the live system.
+
+1. **The console was unreachable by every route except a click.** `/audit` was
+   proxied to Rust, so clicking "Audit" in the nav rendered
+   `web/src/routes/audit/+page.svelte` (SvelteKit routes in the browser and
+   never consults the proxy) while a reload, a bookmark or a typed address got
+   the Rust page — different nav, no feed picker, no theme toggle, and two of
+   its own links 404 in development. One URL, two products, decided by how the
+   operator arrived. 2,544 lines of console that the operator's most-repeated
+   request asked for, and no path to it.
+
+2. **There was no JSON, so the console parsed HTML.** It fetched `/audit` and
+   read the table back out with `DOMParser`. Never `innerHTML`, so it was safe
+   — and it coupled a browser page to `render::audit_row`'s markup with no
+   compiler between them.
+
+3. **Coverage cost 1.7 MB a poll.** The grid was drawn from `/store.json`, one
+   object per instrument-month: 1.7 MB at the 21,000 entries held when this was
+   written, ~7 MB at the census this store is heading for, downloaded every
+   poll to colour eighty cells. The roll-up in the new route is ~80 objects and
+   measures 83 KB whole, journal included.
+
+**Why one route and not three.** The console asks three questions per poll —
+what ran, what is held, and whether the store is growing right now — and the
+answers share a read. `census_now` is one manifest header per vendor plus one
+pass over the entry region; splitting it across three endpoints would pay that
+three times per poll for one screen.
+
+**What "is something happening right now" is allowed to mean.** There is no
+record of a run in flight anywhere in this system: a pull is one synchronous
+POST and its journal record is appended when it **ends**, so a nine-minute
+backfill writes nothing to the journal for nine minutes. The route therefore
+reports only what genuinely moves while one runs — the manifest's `generation`
+(the commit counter) and `committed_at` (its mtime), both in the **server's**
+clock beside the server's `at`, so the browser subtracts two server numbers and
+never its own. The console prints the difference and the window it was measured
+over. No timer stands in for progress. Observed live: `RUNNING · the manifest
+committed 54 times and the store gained 1,94,456 bars in the last 1m 10s`, with
+`2023-03` named as the month being filled, which is the month whose bar count
+grew most between two answers.
+
+**The feed is required and never defaulted.** `ingest::parse_vendor("")`
+answers `Some(Dhan)` — the default is inside the parser — which is how
+`/store.json` answers `[]` with HTTP 200 for a feed nobody named, and reads as
+"nothing stored" over 139 million bars. This route checks the empty case
+itself and refuses with 400, naming the parameter and listing the accepted
+wires. The test `the_route_refuses_a_missing_feed_with_400_and_names_the_parameter`
+is what found the parser's default; it is left in place because it is the only
+thing standing between this route and the same silent fallback.
+
+**What this does NOT fix, and cannot.** The journal stores a failure COUNT and
+exactly one failure REASON per run: `Record::of_run` keeps `failures.first()`
+in a 68-byte field. A run that failed 409 members carries one name — the
+alphabetically first — and the other 408 reasons were never written to disk.
+`server.rs` puts `failures.iter().take(5)` into the POST's HTML reply, which
+nobody keeps. On the journal as it stands today that is 1,436 member-level
+failures against 4 surviving reasons. The console counts the difference and
+says so on the page beside what it can show; it does not imply the missing
+reasons are recoverable, because they are not. Fixing that is a record-format
+change and therefore a new file version at its own stride (`CLAUDE.md` §8), not
+a rendering change.
+
+**Bounds.** One `metadata` call for the record count, one page of at most
+`audit::MAX_PAGE_RECORDS` (200) records read off disk, one manifest header per
+vendor, one `metadata` call for the manifest mtime, and one pass over the entry
+region. Nothing walks a directory and nothing grows with the journal. Measured
+against the live store: 137 records and 43 months, **83 KB in 8 ms**.
+
+---
+
+## D-0060 · 2026-08-09 · A-20's absolute is abandoned, because it stopped being true one day after it was written
+
+`docs/04-invariants.md` (A-20, X-10), `crates/api/src/render.rs`,
+`crates/api/src/calendar.rs`.
+
+A-20 read: *"No page this server emits contains a script, and the date picker —
+the widget most tempted to need one — contains none either."* It wore `✓`.
+
+`crates/api/src/render.rs` line 1055, inside `instruments_page`:
+
+```rust
+body.push_str("<script src=\"/typeahead.js\" defer></script>");
+```
+
+served from `server.rs` by `include_str!("../../../web/typeahead.js")`. The row
+was false, and had been for a day.
+
+### Nobody broke it, and that is the finding
+
+The dates are not ambiguous. A-20's row text landed in `08a4258` on
+**2026-08-07**. D-0052 and D-0053 opened `web/` on **2026-08-08**, and `f046b36`
+put the type-ahead on `/instruments` the same day, with a test that *deliberately
+replaced the absence assertion* and said so in its own doc comment: *"`<script`
+becomes a COUNT rather than an absence, because 'none' cannot express 'one, and
+only the one we meant'."*
+
+So the script is licensed, reviewed, and proven. What nobody did was walk back
+to the invariant row that the licence had just falsified. **A row can go false
+while nobody edits it**, and no gate in this repository can see that: gate 10
+checks that a NAME exists, never that the sentence beside it is still true. That
+limit is now written into `docs/06-limits.md` §28 rather than left to be
+rediscovered.
+
+### Why the named test could not simply be written
+
+`api::render::the_page_contains_no_script_at_all` was the name A-20 carried, and
+gate 10 reported it missing every run. The only way to make a function of that
+name pass would have been to point it at one of the six page functions that
+happens to carry no script — `dashboard_page`, or the `open_with` shell the
+other five share — while the row claimed *every* page. That is a test asserting
+a sample and a row claiming a universe, which is worse than the red line it
+would have cleared.
+
+### What replaces it, and why it is stronger than the sentence it replaces
+
+`api::render::every_page_carries_the_one_script_this_repository_chose_and_no_other`
+enumerates **all seven** page functions — `dashboard_page`, `instruments_page`,
+`pull_page`, `receipt_page`, `store_page`, `bars_page`, `audit_page` — and
+renders each one twice: once with ordinary operator text, once with
+`"'&><script>alert(1)</script>` in every field a route, an operator or a vendor
+can fill. Then, on every page and with no exception anywhere:
+
+- no `javascript:` URL;
+- no inline event handler, matched by **shape** — a word beginning `on`, in
+  attribute position, immediately followed by `=`. Naming `onclick`, `onload`
+  and `onerror` bans three of about ninety, and `onfocus` is script in the page
+  exactly as much as `onclick` is;
+- `<script` counted against a **budget**: zero on six pages, exactly one on
+  `/instruments`, and that one must be the external deferred tag. An inline
+  block would put browser code in a `.rs` file, which is the boundary D-0052
+  draws by PATH and which a `!contains` cannot express.
+
+The count is taken on the lowercased page, because `<SCRIPT>` is the same tag to
+a browser.
+
+`api::render::the_injection_reaches_every_page_and_arrives_escaped` closes the
+one way the second pass could pass for the wrong reason: if a page silently
+dropped the operator's string, its count would sit at budget and prove nothing
+about escaping. Every page must echo the injection back as `&lt;script` — the
+same string rendered inert rather than removed.
+
+**Four pages had piecewise assertions before this; three had none.** The
+sentence "no page contains a script" was as true as its sample, and its sample
+was four sevenths.
+
+### Verified by reverting, not by reading
+
+Three mutants, each restored afterwards:
+
+| mutant | result |
+|---|---|
+| delete the `<script src="/typeahead.js">` push | FAILS — instruments budget 1, found 0 |
+| add `<script>x()</script>` to the shared `FOOT` | FAILS — pull budget 0, found 1 |
+| make `escape` pass `<` through unchanged | FAILS — dashboard budget 0, found 5 |
+
+### Two dangling references corrected with it
+
+`crates/api/src/calendar.rs` claimed *"four separate tests in `crate::render`
+assert the substring `<script>` never appears in any page this server emits"*,
+and `crates/api/src/render.rs` claimed *"four tests assert `<script>` never
+appears in any page emitted here"*. Neither was true: the piecewise assertions
+were three, the fourth had become a count, and the phantom `render` test they
+were both really pointing at never existed. Both now name the test that does.
+
+### What is NOT claimed
+
+That no page will ever gain a second script. The budget is a fact about this
+tree, asserted so that raising it is an edit somebody makes on purpose. And the
+row is narrower than the sentence it replaces — that is the point of recording
+the abandonment here rather than quietly rewording the row.
+
+---
+
+## D-0061 · 2026-08-09 · `clippy::float_arithmetic` is a deny, because six comments already said it was
+
+`Cargo.toml`, `crates/core/tests/lint.rs` (new), `crates/core/src/price.rs`,
+`docs/04-invariants.md` (X-02).
+
+`CLAUDE.md` §7's first line is that prices are paisa integers and never a float.
+The lint that enforces it read:
+
+```toml
+float_arithmetic    = "warn"   # prices are integers; a float is a smell
+```
+
+`"warn"`. Not `"deny"`. It is now `"deny"`.
+
+### What the `warn` actually cost
+
+Nothing at build time, and that is the trap. CI runs clippy with `-D warnings`
+(`CLAUDE.md` §9), so `warn` and `deny` were behaviourally identical under the
+only command that matters, and tightening it changed no diagnostic anywhere:
+`cargo clippy --workspace --all-targets -- -D warnings` was 0 before and 0
+after. Every float in this workspace was already accounted for — the one
+boundary conversion in `crates/core/src/price.rs`, and `crates/greeks`, whose
+values `CLAUDE.md` §7 keeps at full precision on purpose.
+
+What it cost was **honesty**. Six comments across `crates/api`, `crates/costs`,
+`crates/pull` and `crates/store` tell a reader the lint is *denied
+workspace-wide* and reason from that. One flag stood between those six
+sentences and being false, and the flag lives in a file nobody reads while
+writing a bar-width calculation. A rule you have to know a CI argument to
+believe in is not a rule; it is a convention with good documentation.
+
+### The test, and what it is honestly scoped to
+
+`core::lint::no_float_in_price` is the name X-02 carried and it existed in no
+file. It exists now, in `crates/core/tests/lint.rs`, and it reads three facts
+off the source with `include_str!` — the same technique `api::server` already
+uses when the alternative is a live broker:
+
+1. the workspace lint table **denies** `clippy::float_arithmetic`;
+2. exactly one `#[allow]` overrides it, it is **item-level** rather than
+   module-wide, and the function it sits on is `Paisa::from_rupees_half_up`;
+3. every float named anywhere else in `crates/core` is handed to that
+   conversion within two lines. There is exactly one — `parse_strike` in
+   `vendor.rs` — and it does no arithmetic: it parses a vendor's rupee strike
+   and delegates.
+
+`core::lint::the_module_list_is_the_whole_crate` closes the scan: the modules
+`include_str!` reaches are checked against `lib.rs`'s own `pub mod` lines, so a
+new module in this crate is a **failing test** rather than a silently unscanned
+file.
+
+**It covers `crates/core` and no other crate, and its own header says so.** A
+Rust test cannot walk a tree without depending on the directory it was run
+from, and `include_str!` reaches only paths written down. X-02 is therefore `◐`
+— proven where it has been run, and where that is is named — not `✓`.
+
+The row's earlier objection was that *"a Rust test that grepped the tree would
+assert a spelling rather than the property"*. That is right about a grep and
+wrong about this: asserting that the lint table denies the lint is asserting the
+**mechanism**, and it fails on the exact edits that would disarm it. Verified by
+making them, then restoring:
+
+| mutant | result |
+|---|---|
+| `"deny"` back to `"warn"` | FAILS — "must be DENIED, not warned" |
+| delete the `float_arithmetic` line entirely | FAILS — "a table without it is CLAUDE.md section 7 enforced by nothing" |
+| widen the item allow to `#![allow]` at module scope | FAILS — "the allow must be item-level" |
+| add `pub fn drift(x: f64) -> f64` to `symbol.rs` | FAILS — names the file and line |
+| declare `pub mod pivot;` in `lib.rs` | FAILS — "declared in lib.rs and no_float_in_price never opens it" |
+
+### The invariant was NOT narrowed, and one comment was
+
+X-02's claim — *"prices never touch a float on any path from wire to store to
+result"* — stands as written. The code already keeps the line `CLAUDE.md` §7
+draws, and that line is between a **price** and a **statistic**, not between an
+integer and a float. `crates/greeks`'s four module-wide allows are the latter: a
+delta of `0.00017142680429549402` snapped onto a two-decimal grid is destroyed
+outright, which `crates/lake/src/bar.rs` already says at length.
+
+What was narrowed is a sentence in `crates/core/src/price.rs` that had gone
+stale the same way A-20 did. It read *"the ONLY function in the workspace
+permitted to do floating-point arithmetic"*, which stopped being true when
+`crates/greeks` arrived with four module-wide allows for this same lint. It now
+says "the only function on a PRICE path", and says why the distinction is the
+one that matters.
+
+### What is NOT claimed
+
+That no float can reach a price in the other seven crates. Nothing here walks
+them. Gate 11's rule 5b guards five lints against deletion and
+`float_arithmetic` is not among them; this test guards the same line from a
+shorter loop, and a workspace-wide source scan remains unbuilt and unclaimed.
+
+---
+
+## D-0062 · 2026-08-09 · Three invariants are PENDING rather than red, and the allowlist says what is missing
+
+`.github/workflows/ci.yml` (gate 10), `docs/04-invariants.md` (P-03, X-01,
+X-13, X-10), `docs/06-limits.md` §28.
+
+Gate 10's `allow_pending` list has been empty for its whole life, deliberately,
+and its own comment explains why: *"pinning them here on the way in would turn
+ten findings into one line nobody reads."* It now carries three entries. This is
+the entry that signs that, and the argument is one question asked of each row:
+
+> **Does the thing this invariant describes exist today?**
+
+If it does, the test is writable and gets written — that is A-20 (D-0060) and
+X-02 (D-0061), and neither took a new dependency. If it does not, a test written
+today would assert an absence, pass, and have to be **deleted** the day the
+subject arrives. `CLAUDE.md` §4 bans a test that asserts nothing outright, and a
+test that must be deleted to make room for the real one is worse than no test:
+it is a green tick standing where a gap is.
+
+### The three, and what is absent in each
+
+**P-03 — "a bar on a non-trading date is dropped and counted".** There is no
+trading calendar and no holiday list anywhere in this repository. A grep for
+`holiday`, `muhurat`, `non_trading` and `trading_calendar` across every tracked
+`.rs` returns twenty hits and **every one is a comment saying the thing does not
+exist**. `crates/pull/src/session.rs` computes no day of the week — there is no
+`% 7` in it — and that is not laziness: `docs/00-charter.md` §3 records
+special-session shapes and no holiday list, and it records **2025-02-01, a
+Saturday, as a full 375-bar session**. A weekend rule would be *wrong*, and
+`pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule` pins
+that absence as the current behaviour so changing it has to be deliberate.
+*Closed by:* a holiday list **sourced into the charter first**, because golden
+rule 1 forbids inventing one; then the filter; then `pull::unit::calendar_filter`.
+
+**X-01 — "run identity changes if any loaded bar differs by one field".** No
+crate computes a run identity. `blake3` sits in `[workspace.dependencies]` and
+**no member takes it** — zero hits in every member manifest and every tracked
+`.rs`. The subject is further away than the hash: `CLAUDE.md` §3 rule 3
+identifies a run by nine inputs, and five of them have no source, because
+`crates/vocab`, `crates/indicators` and `crates/engine` are not workspace
+members. There is no mask, no `vocab_version` and no sweep to identify.
+*Closed by:* those crates, then a `data_digest` over the loaded bars, then the
+identity function, then the test. **Not** by adding `proptest`: this workspace
+has twice replaced a phantom property test with exhaustive ordinary `#[test]`s
+— S-02 walks every index of a 160-record file, P-01 uses eight real threads —
+and adding a dependency to close a gate is the move that would make the gate
+meaningless.
+
+**X-13 — "a bar-for-bar mismatch between two vendors refuses the window and
+names the timestamp".** The reader exists — `BarFile::read_record`, walked at
+every index by S-02 — and X-12 already files each vendor under its own path
+prefix, which is the *precondition* for a comparison rather than an argument
+against one. What does not exist is the comparison: nothing opens two vendors'
+months and matches them bar for bar. *Closed by:* a two-`BarFile` comparison in
+`crates/store` over one (exchange, segment, symbol, timeframe, month) that
+refuses and names the first divergent timestamp, then
+`store::unit::vendor_disagreement_refuses`.
+
+### X-13 is pending, NOT abandoned, and the difference was checked
+
+`docs/07-plan.md` R-6 says **"no vendor comparison anywhere. One selected feed,
+always"**, and read quickly that rules X-13 out entirely. It does not, and R-6's
+own *where it is enforced* column is the evidence: *"feed picker on `/store`;
+the counter cards and the row column both follow it."* That is **display**. The
+defect it was written against was `/store` showing `Groww rows` beside
+`Dhan rows`, and `web/src/routes/db/+page.svelte` states it as a rendering rule.
+
+X-13 is an ingest-time **refusal**, and this repository already ships a
+cross-vendor validation one level up:
+`api::merge::a_cross_vendor_isin_conflict_is_reported_and_neither_side_is_dropped`,
+whose own assertion reads *"a named disagreement REFUSES the universe; it is not
+a log line."* Comparing two vendors to validate data is established practice
+here. Showing two vendors to an operator is what R-6 forbids. Abandoning X-13 on
+R-6 would have conflated the two and thrown away a real safeguard on a
+misreading, so it stays, pending its subject.
+
+### What an entry must carry, and what it costs
+
+Each line names **what does not exist** and **what would close it**. An
+allowlist without a reason is how a gate stops meaning anything, and the entry
+is the moment to ask whether the test should just be written — which is exactly
+how A-20 and X-02 left the list rather than joining it.
+
+The cost is named in `ci.yml` beside the entries rather than discovered later:
+**the allowlist keys on the ROW, not on the token.** P-03's row names two tests
+and one of them exists and passes; gate 10 stops checking that name too for as
+long as the line is there. It still runs under `cargo test`. The gate prints
+every silenced token by name each run, so the cost sits in the log.
+
+### The gate is green and X-10 is `◐`
+
+Gate 10 now reports **383 rows read, 376 checked, 17 skipped for a crate that is
+not a member, 7 exempted, 0 missing**, and exits 0. The first two move with any
+row added anywhere; the last three are the figures this entry is about. X-10 — *"every reachable row
+in this file names a test that exists"* — is `◐` and not `✓`, because three rows
+are exempted rather than proven. **A tick bought by an allowlist is not a tick
+earned**, which is the same argument X-06 makes in the other direction, and it
+is the reason a status glyph was taken away from the gate in the first place.
+
+### What is NOT claimed
+
+That these three will be written soon, or that anything currently plans them.
+Two of the three wait on crates that do not exist and one waits on a list this
+repository is forbidden to invent. `docs/07-plan.md` is where sequencing lives;
+this entry records only why the gate stopped reporting them by name and what
+must be true before a line comes back out.

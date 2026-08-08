@@ -19,12 +19,23 @@ cell that the name is a plan rather than a proof. The names are deliberately
 **left in the backticks** so CI gate 10 goes on reporting them by name every
 run; removing the token would make the gate green by blinding it.
 
-**Six of the ten rows gate 10 reported now name a test that runs. Four still do
-not, and the gate is still red on exactly those four.** What changed and what
-did not is in *The ten phantom rows, one at a time* near the end of this file.
-The four that remain — P-03, X-01, X-02, X-13 — kept their phantom names for the
-reason the paragraph above gives, and a red gate whose four lines a reader can
-name is worth more than a green one bought by deleting them.
+**Six of the ten rows gate 10 reported now name a test that runs. Four still did
+not, and a fifth joined them when A-20's absolute went stale.** What changed and
+what did not is in *The ten phantom rows, one at a time* near the end of this
+file, and *The last five, and the gate that stopped being red* after it.
+
+**Of those five, two were WRITABLE and were written; three were not, and are
+allowlisted by name.** A-20 (D-0060) and X-02 (D-0061) have tests. P-03, X-01
+and X-13 (D-0062) sit in CI gate 10's `allow_pending` with the reason beside
+each, because in all three cases the code the row describes does not exist —
+there is no trading calendar, no run-identity function, no cross-vendor bar
+comparison — so a test would assert an absence and be deleted the day the thing
+arrives. **That allowlist is the third mechanism the gate offers and it is
+honest only while the subject is genuinely absent.** It is not a way to go
+green: a row is still never deleted, still never weakened, and the entry states
+what is missing and what closes it. Gate 10 exits 0 now, and X-10 is `◐` rather
+than `✓` for exactly that reason — a tick bought by an allowlist is not a tick
+earned.
 
 **X-07 and X-08 were narrowed by D-0036, not weakened.** X-07 sat at `—`, which
 this legend defines as "the crate does not exist" — untrue once `crates/pull`
@@ -193,7 +204,7 @@ directory, found none, and exited zero — see `docs/06-limits.md` §7b and §7c
 |---|---|---|---|
 | P-01 | A rate governor never issues above the configured ceiling, under any concurrency | `pull::concurrency::the_ceiling_holds_however_many_threads_share_the_governor` · `pull::concurrency::a_throttle_recorded_by_one_thread_binds_every_other` — 512 requests from eight real threads at one fixed instant are issued exactly the allowance between them, three times over, and a throttle one caller records binds the rest. `Governor::admit` takes `&mut self`, the type holds no interior mutability and the crate is `#![forbid(unsafe_code)]`, so exclusive access is the **only** sharing safe Rust admits and no two `admit` calls can interleave — which is why the `loom` module this row named is not merely absent but would have nothing to enumerate. **What is not bounded: two separate `Governor` values.** The type is `Copy`; nothing here or in the crate holds the sum of two of them to one ceiling | ◐ |
 | P-02 | A bar outside the requested window is never stored | `pull::integration::a_bar_outside_the_window_or_the_session_is_never_stored` · `pull::integration::a_narrower_window_stores_strictly_fewer_bars_and_says_why` — **"never stored" is now checkable**, because `pull::ingest::from_dir` takes a vendor's folder all the way to an append. Both tests reopen the month afterwards and read **every** committed record back, asserting each one is inside the operator's window and inside the exchange's session, from a fixture carrying a row on each side of every boundary — 15:29:59 in, 15:30:00 out. The narrower window stores strictly fewer bars off the same bytes, so the filter is keyed on the request rather than on the file. The window *arithmetic* remains `pull::unit::a_window_is_inclusive_at_both_ends_and_refuses_to_run_backwards`, `pull::unit::every_second_of_a_day_falls_on_exactly_one_side_of_the_session` and `pull::unit::an_inclusive_window_survives_the_vendors_exclusive_to_date`. One member, one month, one instrument | ✓ |
-| P-03 | A bar on a non-trading date is dropped and counted | **NOT PROVEN, and the code says so first.** `pull::unit::calendar_filter` exists in no file, and `crates/pull/src/session.rs` states plainly that there is **no trading calendar and no holiday list** here — so there is nothing yet to prove. A weekend rule without a holiday list would be wrong, which is why `pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule` asserts the *absence* as the current behaviour. **The name stays in the backticks and CI gate 10 goes on reporting it by name every run.** That is the intent, not an oversight: this row is one of the four the gate is deliberately red on | ✗ |
+| P-03 | A bar on a non-trading date is dropped and counted | **NOT PROVEN, and the code says so first.** `pull::unit::calendar_filter` exists in no file, and `crates/pull/src/session.rs` states plainly that there is **no trading calendar and no holiday list** here — so there is nothing yet to prove. A weekend rule without a holiday list would be wrong, which is why `pull::unit::a_saturday_is_a_full_session_because_there_is_no_weekend_rule` asserts the *absence* as the current behaviour. **The name stays in the backticks. What changed is that gate 10 now reports it as PENDING rather than as red**: D-0062 put `P-03` in the gate's `allow_pending` allowlist with the reason beside it, and the reason is the one above — the subject does not exist, so a test here would assert an absence and be deleted the day a calendar arrives. What closes it, in this order: a holiday list **sourced** into `docs/00-charter.md` §3 first, because golden rule 1 forbids inventing one; then the filter in `session.rs`; then `pull::unit::calendar_filter` driving it. The exemption keys on the ROW, so gate 10 also stops checking the second name above — that test still runs under `cargo test`, and the gate prints both silenced names every run | ✗ |
 | P-04 | Re-running an ingest stores nothing new and reports zero net-new | **THE DISK HALF HOLDS. THE REPORTING HALF DOES NOT, AND THE TEST PINS THAT RATHER THAN HIDING IT.** `pull::integration::idempotent_repull_leaves_the_file_byte_identical` · `pull::integration::a_second_window_over_the_same_month_appends_rather_than_rewrites` — a second run over the same folder and window leaves the bar file **byte for byte** what it was, and a run that brings bars the file does not hold still appends them, so idempotence is not bought by refusing every second run. What is **false today** is "reports zero net-new": `Ingested::bars_stored` counts the bars a member *offered*, `BarFile::append`'s already-present answer never reaches it, and the re-run therefore reports 3 stored where it wrote 0. The test asserts that 3. Fixing it is a `crates/pull/src/ingest.rs` change this row does not own | ◐ |
 | P-05 | A credential is read, never written; no token is ever minted | `pull::unit::readonly_credentials` (a write attempt must panic the test double) | ✓ |
 | P-06 | An auth failure halts the pull loudly rather than degrading | `pull::unit::auth_halt` | ✓ |
@@ -422,7 +433,7 @@ Added by D-0038. Every row here is proven by a test that runs today.
 | A-17 | A census that is absent or unreadable contributes no series to the axis and invents none; two vendors holding one series contribute one row | `api::census::an_unloadable_census_adds_nothing_to_the_axis` | ✓ |
 | A-18 | The two swept series are always on the axis, held or not, so a fresh install names what it is missing | `api::census::a_store_of_nothing_but_futures_still_reaches_the_grid` · `api::server::a_site_with_no_universe_still_shows_the_two_instruments_that_matter` | ✓ |
 | A-19 | A series renders as the store names it, and `Series::of` and `Series::at` are inverses, so the axis and the probe are the same values | `api::census::a_series_reads_back_as_the_store_names_it` | ✓ |
-| A-20 | No page this server emits contains a script, and the date picker — the widget most tempted to need one — contains none either | `api::render::the_page_contains_no_script_at_all` · `api::calendar::nothing_the_picker_emits_is_a_script` | ✓ |
+| A-20 | **The absolute this row used to claim was abandoned by D-0060; this is what replaced it, and it is checked over more than the old wording ever was.** Exactly one script reaches a browser from this server — the external, deferred `/typeahead.js`, on `/instruments` alone. Every other page's budget is zero, the date picker's included. On **every** page, that one included, there is no inline event handler, no `javascript:` URL, and no `<script` that operator text opened | `api::render::every_page_carries_the_one_script_this_repository_chose_and_no_other` · `api::render::the_injection_reaches_every_page_and_arrives_escaped` · `api::calendar::nothing_the_picker_emits_is_a_script` — **the row read "no page this server emits contains a script" and wore `✓` while `render.rs` line 1055 emitted one.** It was true the day it was written and false the next: D-0052 and D-0053 opened `web/`, `f046b36` landed the type-ahead, and no row was revisited. The name this row used to carry, `the_page_contains_no_script_at_all`, could not be written honestly at any point after that day, so the CLAIM changed and the tick did not move on its own. **It is written here without its crate and module segments on purpose:** spelled in full it is a token gate 10 scrapes out of this row and reports as missing every run, which is the right behaviour for a pending row and the wrong one for an abandoned name. D-0060 is where the abandonment is signed. What is checked now is all seven page functions — `dashboard_page`, `instruments_page`, `pull_page`, `receipt_page`, `store_page`, `bars_page`, `audit_page` — rather than the four that had piecewise assertions, and each is rendered twice: once with ordinary text and once with `"'&><script>` in every field a route, an operator or a vendor can fill, so the count is proof of escaping and not only of absence. Handlers are matched by SHAPE, a word beginning `on` in attribute position followed by `=`, because naming `onclick`, `onload` and `onerror` bans three of about ninety | ✓ |
 | A-21 | At most one date panel per form can be open, so two panels cannot overlap at any viewport | `api::calendar::the_latch_is_a_radio_so_two_panels_cannot_be_open_at_once` | ✓ |
 | A-22 | Exactly one pane of the picker is shown at a time, chosen by which radios are checked and by no extra control | `api::calendar::three_panes_are_emitted_and_the_year_pane_is_the_one_with_no_prerequisite` | ✓ |
 | A-23 | A month arrow steps exactly one month and never crosses a year boundary; the two that would are inert spans, not labels | `api::calendar::the_arrows_step_one_month_and_do_not_cross_a_year_boundary` | ✓ |
@@ -516,8 +527,8 @@ because it is not one.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| X-01 | Run identity changes if any loaded bar differs by one field | **NOT PROVEN, AND THERE IS NOTHING TO PROVE IT AGAINST.** `core::proptest::identity_sensitivity` exists in no file; no `proptest` dependency exists. There is no run-identity function either: `blake3` sits in the workspace dependency table and **no member takes it**, and no crate holds a function that hashes `CLAUDE.md` §3 rule 3's eight inputs. So this row has neither the test nor the code, and the name stays in the backticks — gate 10 is deliberately red on it | ✗ |
-| X-02 | Prices never touch a float on any path from wire to store to result | **PARTLY PROVEN, and the row overstated both halves.** `core::lint::no_float_in_price` exists in no file, so the *source check* does not exist. The *lint* is `float_arithmetic`, and in `Cargo.toml` it is `"warn"`, **not** `"deny"` — it fails a build only because CI passes `-D warnings`, and it fires on float *arithmetic*, never on a float *type* held in a price. What is genuinely proven is X-11: `Price` has a private field, so the one checked conversion is the only constructor. **No test was written for this row and none is claimed.** A source scan is CI gate 11's mechanism, not a test's, and a Rust test that grepped the tree would assert a spelling rather than the property; the name stays in the backticks and gate 10 is deliberately red on it | ✗ |
+| X-01 | Run identity changes if any loaded bar differs by one field | **NOT PROVEN, AND THERE IS NOTHING TO PROVE IT AGAINST.** `core::proptest::identity_sensitivity` exists in no file; no `proptest` dependency exists. There is no run-identity function either: `blake3` sits in the workspace dependency table and **no member takes it**, and no crate holds a function that hashes `CLAUDE.md` §3 rule 3's nine inputs. So this row has neither the test nor the code. **The subject is further away than the hash:** five of those nine inputs have no source at all, because `crates/vocab`, `crates/indicators` and `crates/engine` are not workspace members — there is no mask, no `vocab_version` and no sweep to identify. The name stays in the backticks, and D-0062 put `X-01` in gate 10's `allow_pending` with that reason, so the row reads PENDING rather than red. What closes it: those crates, then a `data_digest` over the loaded bars, then the identity function, then the test — and **not** by adding `proptest`, which this workspace has twice declined in favour of exhaustive ordinary `#[test]`s (S-02 walks every index; P-01 uses eight real threads) | ✗ |
+| X-02 | Prices never touch a float on any path from wire to store to result | **THE ROW WAS RIGHT THAT THE LINT WAS A `warn`, AND THAT IS NOW FIXED RATHER THAN DESCRIBED.** D-0061 tightened `float_arithmetic` from `"warn"` to `"deny"` in `Cargo.toml`; nothing broke, because CI already passed `-D warnings` and every float in this workspace was already either the one boundary conversion or a statistical value. What the `warn` cost was honesty: six comments across `crates/api`, `crates/costs`, `crates/pull` and `crates/store` told a reader the lint was denied, and one flag stood between that and false. `core::lint::no_float_in_price` now exists and reads three facts off the source — that the workspace lint table **denies** the lint, that exactly one *item-level* `#[allow]` overrides it, and that it sits on `Paisa::from_rupees_half_up` — then walks every other module of `crates/core` and requires each float it finds to be handed to that conversion within two lines. `crates/core/src/vendor.rs`'s `parse_strike` is the one that is, and it does no arithmetic. `core::lint::the_module_list_is_the_whole_crate` checks the scanned list against `lib.rs`'s own `pub mod` lines, so a new module is a failing test rather than a silently unscanned file. **It is a source check and says so in its own header: it covers `crates/core` and no other crate**, because a Rust test cannot walk a tree without depending on the directory it ran from. `crates/greeks`'s four module-wide allows are not a second price path — a delta of `0.00017142680429549402` is a statistical value and `CLAUDE.md` §7 keeps those at full precision, so the line is between a price and a statistic rather than between an integer and a float. The type half is still X-11's | ◐ |
 | X-03 | Every tracked file has an allowed extension | CI gate 1 | ✓ |
 | X-04 | No build script invokes an external process | CI gate 2 | ✓ |
 | X-05 | `web` depends on `core` alone | CI gate 7 | ✓ |
@@ -527,9 +538,9 @@ because it is not one.
 | X-08 | No tracked file contains a **slash-joined** credential path whose environment segment is a well-known one | CI gate 1c | ✓ |
 | X-08b | No literal under `crates/pull` that could be a path segment is undeclared | CI gate 1d | ✓ |
 | X-09 | `core` declares no dependency at all | CI gate 9 | ✓ |
-| X-10 | Every reachable row in this file names a test that exists | **THE GATE EXITS 1 ON THIS TREE, AND THIS ROW SAID `✓` WHILE IT DID.** Measured by running gate 10's own script at this commit: 293 rows read, 294 named tests checked against a tracked crate, 17 skipped for a crate that is not a workspace member, **4 missing** — P-03, X-01, X-02, X-13. It read **10 missing** before this pass. The four are `✗` in their own rows, each saying what is absent, and CI gate 10 goes on naming them every run. This row is `✗` and not `◐` on the same argument X-06 makes: a tick beside a red gate is the defect, whatever the reason for the red | ✗ |
+| X-10 | Every reachable row in this file names a test that exists | **THE GATE EXITS 0 ON THIS TREE, AND THIS ROW IS `◐` RATHER THAN `✓` BECAUSE THREE ROWS ARE EXEMPTED RATHER THAN PROVEN.** Measured by running gate 10's own script at this commit: **383 rows read, 376 named tests checked against a tracked crate, 17 skipped for a crate that is not a workspace member, 7 exempted by the allowlist, 0 missing.** The first two figures move whenever any row is added and are a reading, not a bound; the last three are the ones this row is about. It read **10 missing**, then **4**, then **5** when A-20 joined them, across three earlier passes. Two of the five were written — A-20 by D-0060 and X-02 by D-0061 — and three were allowlisted by D-0062: P-03, X-01, X-13, each because the code the row describes does not exist and a test would therefore assert an absence. The 7 exempted tokens come from those 3 rows; a row naming a test twice is counted twice, and P-03's second name is a test that exists and passes. **A tick bought by an allowlist is not a tick earned**, which is the same argument X-06 makes in the other direction, so the glyph names where this has been proven — every row but three — rather than claiming all of them | ◐ |
 | X-12 | Each vendor writes only under its own path prefix; no vendor can overwrite another | `store::unit::vendor_prefix_isolated` — the test **exists and passes**, and this row wore `—` anyway. It proves the claim *lexically*: the first segment is a `Vendor` rather than a string, and no segment can hold a separator. It does not touch a filesystem | ✓ |
-| X-13 | A bar-for-bar mismatch between two vendors refuses the window and names the timestamp | **NOT PROVEN, AND THE REASON HAS CHANGED.** `store::unit::vendor_disagreement_refuses` exists in no file. `crates/store` **does** have a bar reader now — `BarFile::read_record`, walked at every index by S-02 — so the missing piece is no longer the reader. What is missing is the comparison: nothing in this repository opens two vendors' months and matches them bar for bar, so there is no code for a test to drive. The name stays in the backticks and gate 10 is deliberately red on it | ✗ |
+| X-13 | A bar-for-bar mismatch between two vendors refuses the window and names the timestamp | **NOT PROVEN, AND THE REASON HAS CHANGED.** `store::unit::vendor_disagreement_refuses` exists in no file. `crates/store` **does** have a bar reader now — `BarFile::read_record`, walked at every index by S-02 — so the missing piece is no longer the reader. What is missing is the comparison: nothing in this repository opens two vendors' months and matches them bar for bar, so there is no code for a test to drive. **This row was checked against the product direction before it was left standing, and it survives that check.** `docs/07-plan.md` R-6 — "no vendor comparison anywhere" — is about DISPLAY, and says so in its own enforcement column: a feed picker on `/store` and one row column. X-13 is an ingest-time refusal, and the same repository already ships a cross-vendor validation that refuses one level up — `api::merge::a_cross_vendor_isin_conflict_is_reported_and_neither_side_is_dropped`, whose own assertion reads "a named disagreement REFUSES the universe". Comparing two vendors to validate is established practice here; showing two vendors to an operator is what R-6 forbids, and abandoning this row on R-6 would conflate them and discard a real safeguard. The name stays in the backticks, and D-0062 put `X-13` in gate 10's `allow_pending` so it reads PENDING rather than red. What closes it: a two-`BarFile` comparison in `crates/store` for one (exchange, segment, symbol, timeframe, month) that refuses and names the first divergent timestamp, then `store::unit::vendor_disagreement_refuses` | ✗ |
 | X-11 | A price is constructible from a float only through the one checked conversion | `core::price::refuses_an_out_of_range_price_instead_of_saturating` (private field; no other path exists) | ✓ |
 
 ### X-06, measured rather than asserted — D-0045
@@ -700,6 +711,53 @@ that would silence them is the `allow_pending` allowlist in
 file. Using it would be a decision to stop reporting four known gaps, and that
 is a `docs/05-decisions.md` entry somebody has to sign — which is the ledger
 entry this pass owes, alongside the three new test files.
+
+### The last five, and the gate that stopped being red
+
+*The paragraph above is kept as written. This section is what happened next.*
+
+**The four became five**, and the fifth was not a new gap so much as an old
+claim that had gone stale without anyone touching it. A-20 read "no page this
+server emits contains a script" and wore `✓`. It was true on 2026-08-07, the day
+its row landed in `08a4258`. D-0052 and D-0053 opened `web/` on 2026-08-08, and
+`f046b36` put a deferred `<script src="/typeahead.js">` on `/instruments` the
+same day. **A row can go false while nobody edits it**, which is the failure
+mode this whole file is built against, and no gate can see it: gate 10 checks
+that a name exists, never that a sentence is still true.
+
+The five were then sorted by ONE question — *does the thing this row describes
+exist today?* — and the answer decided the mechanism:
+
+- **A-20 — it exists, and more of it than the row covered.** Written: D-0060.
+  Seven page functions, each rendered twice, script counted as a budget rather
+  than banned as an absence. The absolute was abandoned because it was false;
+  what replaced it is checked over three more pages than the four that had
+  piecewise assertions.
+- **X-02 — the lint existed and was weaker than the row claimed.** Written:
+  D-0061. `float_arithmetic` went from `"warn"` to `"deny"`, which broke
+  nothing, and `core::lint::no_float_in_price` now reads that off the table so
+  it cannot drift back. Scoped to `crates/core` and says so.
+- **P-03, X-01, X-13 — the subject does not exist.** Allowlisted: D-0062. No
+  trading calendar, no run-identity function, no two-vendor bar comparison. A
+  test written today would assert an absence, pass, and have to be deleted the
+  day the thing arrives — which is a test that asserts nothing, and `CLAUDE.md`
+  §4 bans those outright.
+
+**X-13 was checked against the product before it was left standing.**
+`docs/07-plan.md` R-6 forbids vendor comparison, and on the face of it that
+reads like an argument to abandon this row. It is not: R-6's own enforcement
+column is "feed picker on `/store`; the counter cards and the row column both
+follow it", which is DISPLAY. X-13 is an ingest-time refusal, and `crates/api`
+already ships a cross-vendor validation that refuses — `merge`'s ISIN conflict,
+whose assertion reads "a named disagreement REFUSES the universe". Comparing two
+vendors to validate is established here; showing two feeds to an operator is
+what R-6 forbids. Abandoning X-13 on R-6 would have conflated the two and thrown
+away a safeguard on a misreading.
+
+**What the allowlist costs, so it is not free.** It keys on the row, not on the
+token, so P-03's second name — a test that exists and passes — stops being
+checked too. Gate 10 prints every silenced token by name each run, so the cost
+is in the log rather than hidden, and the entry in `ci.yml` says it out loud.
 
 ---
 
@@ -936,3 +994,32 @@ an interrupted write or a truncated object body leaves behind — so the two
 fields are now read and checked in `Columns::pages` before any arithmetic, and
 `byte_range` is not called at all. There was nothing to catch: `[profile.release]`
 sets `panic = "abort"`.
+
+## The audit console's one read — `/audit.json`
+
+`crates/api/src/audit_json.rs` serves the journal and one feed's month roll-up
+to the browser console. It is the route an operator refreshes for twelve hours,
+so its cost is a property that has to hold, not a hope. D-0059.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AJ-01 | A read is bounded by the PAGE, never by the journal: at most `audit::MAX_PAGE_RECORDS` records leave disk however long the file is | `api::audit_json::a_page_reads_at_most_the_records_it_shows`, `api::audit::the_tail_reads_only_the_records_it_shows` | ✓ |
+| AJ-02 | A `page` past the end **clamps** to the last page and answers; it does not refuse, and it does not answer page 0 of an empty list | `api::audit_json::a_page_past_the_end_clamps_to_the_last_page_rather_than_refusing` | ✓ |
+| AJ-03 | A missing or unknown `feed` is a **400 naming the parameter**, never a defaulted vendor. `ingest::parse_vendor("")` answers `Some(Dhan)`, so the empty case is checked before it, not by it | `api::audit_json::the_route_refuses_a_missing_feed_with_400_and_names_the_parameter` | ✓ |
+| AJ-04 | No answer ever carries two feeds' numbers | `api::audit_json::the_answer_names_one_feed_and_never_a_second` | ✓ |
+| AJ-05 | An absent journal and an absent manifest answer with `false`/`null` and a named path — never a `0` that a reader could mistake for a measurement | `api::audit_json::an_empty_store_answers_every_key_with_a_reason_and_never_a_zero_that_means_unknown` | ✓ |
+| AJ-06 | Every field of a decoded record survives the round trip, and a note holding `&` or `"` arrives as text — escaped, never mangled | `api::audit_json::a_recorded_run_survives_the_round_trip_field_for_field` | ✓ |
+| AJ-07 | A clock that cannot name today is **said** (`"today":null` with the refusal in `"clock"`) and the journal is still answered | `api::audit_json::a_refused_clock_says_so_and_still_answers_the_journal` | ✓ |
+
+AJ-03 is not defensive coding. The default lives inside the parser, so every
+caller that only checks for `None` has already silently chosen a vendor — which
+is how `/store.json` answers `[]` with HTTP 200 for a feed nobody named, over a
+store holding 139 million bars. The test was written first and it is what found
+it.
+
+**What is NOT invariant here, and is a limit rather than a bug.** The
+`generation` and `committed_at` this route reports are the only evidence a run
+is in flight, because nothing writes a record for a run that has not finished.
+When a pull is between commits, "the store has not moved" and "nothing is
+running" are indistinguishable from outside, and the console says the former
+rather than the latter. See `docs/06-limits.md`.
