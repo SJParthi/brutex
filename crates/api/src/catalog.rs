@@ -266,7 +266,12 @@ impl Pill {
 }
 
 /// Whether a membership is in the default (tracked) scope.
-fn tracked(u: Universe) -> bool {
+///
+/// `pub(crate)` because `/instruments.json` needs the SAME answer the page
+/// uses. It shipped the whole master — 2,780 listings — while the page beside
+/// it said 785, so the type-ahead offered instruments the operator's own
+/// universe excludes.
+pub(crate) fn tracked(u: Universe) -> bool {
     u.contains(Universe::TOTAL_MARKET) || u.contains(Universe::INDEX)
 }
 

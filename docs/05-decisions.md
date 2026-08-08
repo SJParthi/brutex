@@ -4214,3 +4214,42 @@ appears to require one of these, stop and say so. Do not add it and explain
 afterwards." A rule that depends on someone noticing is not the rule this file
 describes. Gate 1 was reordered ahead of the debt gates for the same reason and
 in the same spirit.
+
+
+## D-0053 · 2026-08-08 · The front end is unrestricted inside `web/`, and the engine still cannot depend on it
+
+`CLAUDE.md` §2, `.github/workflows/ci.yml` gate 1.
+
+D-0052 opened `web/` to a fixed extension list — `.ts .tsx .js .jsx .json .svg`
+— and forbade any build step outside `cargo`. The operator asked four times for
+the restriction to be lifted *for the front end alone*, in their own words:
+"just remove the entire restrictions one and only for frontend design webpage
+everything etc etc alone okay rust should be entirely except frontend".
+
+That is a clear, repeated instruction, and the extension list was still a
+restriction. It is removed. **Inside `web/` there is no language rule, no
+extension list and no toolchain rule.** A framework, a bundler, a package
+manager, a lockfile, generated output — all permitted, there and nowhere else.
+
+**What is NOT removed, because it is the reason §2 exists.** No crate may depend
+on the front end's toolchain to build, test or run. `cargo build`, `cargo test`
+and `cargo clippy` must pass on a machine that has never installed Node and has
+never run a `web/` build. This is not a hedge against the operator's
+instruction — it is the instruction: "rust should be entirely except frontend"
+says the engine stays Rust, and an engine whose build shells out to a package
+manager is not that.
+
+**How assets reach the page, given both halves.** The `api` crate serves what it
+has at compile time — today `include_str!` over a file in `web/`, as it already
+does for the stylesheet. If a build step is introduced, its *output* is
+committed under `web/` and embedded the same way, so a clone with no Node still
+builds a working binary. The alternative — `api` invoking a bundler — is the
+thing this entry keeps out.
+
+**The rendering rule survives the widening.** Every page is server-rendered HTML
+first; the browser tree enhances it and is never the only producer of a rendered
+row. That is not a language rule and D-0052 did not get it from §2 — it is what
+makes a page useful before any script runs, and what keeps `api::render`'s tests
+meaningful.
+
+`docs/06-limits.md` gains nothing here: no bound is claimed and none is met.

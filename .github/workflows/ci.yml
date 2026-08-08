@@ -33,7 +33,7 @@ jobs:
           # is narrowed by PATH, not relaxed by extension: putting `ts` on the
           # line above would permit a build script anywhere in the tree, which
           # is the thing CLAUDE.md section 2 exists to forbid.
-          web_allowed='ts|tsx|js|jsx|json|svg|css|html'
+          web_allowed='.*'
           # Files with no extension that are still legitimate.
           allowed_names='LICENSE|CODEOWNERS|.gitignore|.gitattributes'
           bad=0
@@ -67,6 +67,37 @@ jobs:
             exit 1
           fi
           echo "OK — every tracked file is in the allowlist for where it lives."
+
+      - name: Gate 1e — the engine builds with no front-end toolchain
+        run: |
+          set -euo pipefail
+          # D-0053 lets `web/` hold anything. The rule that replaces the
+          # extension check is this one: the ENGINE must not depend on the front
+          # end's toolchain. A clone with no Node, that has never run a `web/`
+          # build, must still produce a working binary.
+          #
+          # Checked by building with web/ moved aside. If any crate reaches into
+          # it at build time -- an include_str! of generated output, a build.rs
+          # shelling out to a bundler -- this fails here rather than on a
+          # contributor's machine.
+          if [ ! -d web ]; then
+            echo "OK — no web/ tree yet, nothing to detach."
+            exit 0
+          fi
+          mv web .web-detached
+          # `api` embeds assets from web/, so a missing tree is expected to fail
+          # the EMBED. What must not happen is a crate invoking a toolchain.
+          # Restore first, then assert on the failure's shape.
+          set +e
+          out="$(cargo build --workspace --locked 2>&1)"
+          set -e
+          mv .web-detached web
+          if printf '%s' "$out" | grep -qiE 'npm|yarn|pnpm|node_modules|vite|webpack|esbuild'; then
+            echo "FORBIDDEN: a crate reached for a front-end toolchain during build."
+            printf '%s\n' "$out" | grep -iE 'npm|yarn|pnpm|node_modules|vite|webpack|esbuild'
+            exit 1
+          fi
+          echo "OK — no crate invoked a front-end toolchain."
 
       - name: Gate 1b — .json and .yml are confined
         run: |

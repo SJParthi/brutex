@@ -34,21 +34,23 @@ Allowed tracked extensions: `.rs` `.toml` `.md` `.lock` `.html` `.css` `.yml`
 (the last only under `.github/`).
 
 **One exception, and it is a path, not a language.** Under `web/` — and nowhere
-else — `.ts` `.tsx` `.js` `.jsx` `.json` `.svg` are allowed, for the browser UI
-only. Narrowed to that directory by D-0052.
+else — the front end is unrestricted. Any language, any framework, any
+toolchain, any file extension. Narrowed to that directory by D-0052 and widened
+to "unrestricted within it" by D-0053.
 
 Everything the exception does not name is unchanged. `crates/**` is Rust. The
 engine, the store, the vocabulary, the sweep, the ingest and the HTTP surface do
 not gain a second language, and a file under `crates/` with one of those
-extensions is the same build failure it always was. The exception buys a
-browser, not a runtime. No crate may depend on a JavaScript toolchain, package
-manager or interpreter, at build time or at run time; a `build.rs` that invokes
-one is the same build failure §2 already makes it.
+extensions is the same build failure it always was. **The one rule that remains, and it is about the ENGINE, not the browser:** no
+crate may depend on the front end's toolchain to build, test or run. `cargo
+build`, `cargo test` and `cargo clippy` must pass on a machine with no Node, no
+package manager and no `web/` build ever run. A `build.rs` that invokes one is
+the build failure §2 already makes it.
 
-A file under `web/` may be embedded with `include_str!`, which is how the
-stylesheet already reaches the page — that is a text asset compiled in, not a
-second language the engine runs. Nothing under `web/` may be *executed* by any
-crate, and the browser tree may never be the only producer of a rendered row.
+That is the whole boundary. Inside `web/` do whatever serves the page best.
+Outside it, everything above stands unchanged: `crates/**` is Rust, and a file
+with a front-end extension under `crates/` is the same build failure it always
+was.
 
 Forbidden without exception:
 - any interpreted runtime, as a dependency, a dev-dependency, or a tool

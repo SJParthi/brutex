@@ -713,10 +713,24 @@ async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let mut out = String::from("[");
-    for (n, (key, _entry)) in site.read.merged.by_key.iter().enumerate() {
+    let mut n = 0usize;
+    for (key, entry) in &site.read.merged.by_key {
+        // THE TRACKED UNIVERSE ONLY — the same predicate the page uses.
+        //
+        // This iterated the whole master and shipped 2,780 listings while the
+        // page beside it said 785. A type-ahead that suggests instruments the
+        // operator's own universe excludes is worse than none: it offers a
+        // symbol, the click lands on a page that does not list it, and nothing
+        // says why. The bound is ~800 by decision, and this is one of the
+        // places that must honour it rather than one of the places that
+        // quietly does not.
+        if !crate::catalog::tracked(entry.universe) {
+            continue;
+        }
         if n > 0 {
             out.push(',');
         }
+        n += 1;
         let canonical = key.to_string();
         let _ = write!(
             out,
@@ -5121,6 +5135,56 @@ mod tests {
             body.contains("split_window("),
             "and the split must be the one function that computes it, not a \
              second copy of the arithmetic"
+        );
+    }
+
+    /// The type-ahead index is the SAME universe the page shows.
+    ///
+    /// It shipped `merged.by_key` whole — 2,780 listings — while the page
+    /// beside it said 785. A suggestion the operator's own universe excludes is
+    /// worse than no suggestion: the click lands on a page that does not list
+    /// it and nothing says why. `CLAUDE.md` bounds the surface; a second
+    /// endpoint that does not honour the bound is the bound not holding.
+    #[tokio::test]
+    async fn the_typeahead_index_is_the_tracked_universe_and_not_the_master() {
+        let dir = agreeing("tajson");
+        let site = site("tajson", &dir);
+        let loaded: Loaded = std::sync::Arc::new(site);
+
+        let (_headers, json) =
+            instruments_json(axum::extract::State(std::sync::Arc::clone(&loaded))).await;
+        let site = &*loaded;
+
+        let shipped = json.matches(r#""symbol":"#).count();
+        let tracked = site
+            .read
+            .merged
+            .by_key
+            .values()
+            .filter(|e| crate::catalog::tracked(e.universe))
+            .count();
+
+        assert_eq!(
+            shipped, tracked,
+            "the index must carry exactly the tracked universe — not the whole \
+             master, which is what shipped 2,780 rows behind a page saying 785"
+        );
+        assert!(
+            shipped <= site.read.merged.by_key.len(),
+            "and it cannot exceed the master it is drawn from"
+        );
+
+        // The escaper is exercised on real data rather than asserted about:
+        // `&` is a legal symbol byte (M&M, M&MFIN) and a raw control character
+        // would make the whole document unparseable, losing the type-ahead
+        // rather than one row.
+        assert!(
+            !json.contains('\n') && !json.contains('\t'),
+            "no raw control characters reach the document"
+        );
+        assert!(
+            json.starts_with('[') && json.ends_with(']'),
+            "and it is an array"
         );
     }
 
