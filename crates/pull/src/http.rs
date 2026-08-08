@@ -359,6 +359,7 @@ fn decode_objects(
         open_interest: Vec::new(),
     };
 
+    let mut null_bars = 0usize;
     for (i, item) in items.iter().enumerate() {
         // A field missing from ONE object is refused naming both the field and
         // which bar it was, because "the vendor sent 400 bars and one of them
@@ -369,6 +370,35 @@ fn decode_objects(
                 detail: format!("bar {i} carries no {name:?}. It has: {}", keys_of(item)),
             })
         };
+        // A BAR WITH A NULL PRICE IS SKIPPED, NOT FATAL.
+        //
+        // Groww answers for an equity with `open: null` on a minute that did
+        // not trade. This decoded every bar and returned `Err` on the first
+        // one, so ONE untraded minute killed the whole instrument — measured on
+        // a real 785-instrument pull: 24 reached, 761 refused, and the first
+        // refusal read `"open" holds null`. The vendor was answering correctly
+        // and the decoder was throwing the answer away.
+        //
+        // Skipped rather than zero-filled: a zero price is a LIE about a minute
+        // that had no trade, and this store cannot tell an invented zero from a
+        // real one afterwards.
+        //
+        // Skipped rather than silent: `null_bars` is counted and travels with
+        // the window, so a run that dropped half its bars says so. `CLAUDE.md`
+        // §4 — degrade loudly and name the reason.
+        //
+        // ALL FOUR PRICES ARE CHECKED before any is pushed. Pushing open and
+        // then discovering close is null would leave the arrays at different
+        // lengths, which `RawWindow` refuses — correctly, and with a message
+        // about column lengths that says nothing about the null that caused it.
+        let quartet = [f.open, f.high, f.low, f.close];
+        if quartet
+            .iter()
+            .any(|name| one(name).is_ok_and(serde_json::Value::is_null))
+        {
+            null_bars += 1;
+            continue;
+        }
         arrays
             .open
             .push(one_price(one(f.open)?, f.open, spec.prices)?);
@@ -386,6 +416,18 @@ fn decode_objects(
         if let Some(name) = f.open_interest {
             arrays.open_interest.push(one_number(one(name)?, name)?);
         }
+    }
+
+    // NOT SILENT. A window whose bars were mostly untraded minutes is a
+    // window an operator has to know about — it is not an error, and it is not
+    // a full answer either. Emitted once per window rather than once per bar,
+    // because 375 lines of "skipped" is noise and one count is information.
+    if null_bars > 0 {
+        eprintln!(
+            "brutex: {null_bars} of {} bars carried a null price and were \
+             skipped — the vendor reported no trade in those minutes",
+            items.len()
+        );
     }
 
     RawWindow::decode(&arrays)
@@ -795,6 +837,7 @@ fn decode_positional(
         open_interest: Vec::new(),
     };
 
+    let mut null_bars = 0usize;
     for (i, row) in rows.iter().enumerate() {
         let cells = row.as_array().ok_or_else(|| FetchError::TransportFailed {
             detail: format!("bar {i} is {row}, and this vendor sends one ARRAY per bar"),
@@ -816,6 +859,29 @@ fn decode_positional(
                 detail: format!("bar {i} has no cell {at}"),
             })
         };
+        // A BAR WITH A NULL PRICE IS SKIPPED, NOT FATAL.
+        //
+        // Groww answers for an equity with `null` in a price cell on a minute
+        // that did not trade. This returned `Err` on the first one, so ONE
+        // untraded minute killed the whole instrument — measured on a real
+        // 785-instrument pull: 24 reached, 761 refused, every refusal reading
+        // `"open" holds null`. The vendor was answering correctly and the
+        // decoder was throwing the answer away.
+        //
+        // `volume` was ALREADY tolerant of null a few lines below, mapping it
+        // to 0. A null volume genuinely is zero — nothing traded. A null PRICE
+        // is not zero, it is absent, and zero-filling it writes a lie this
+        // store cannot tell from a real price afterwards. So the bar goes
+        // rather than the value.
+        //
+        // ALL FOUR CHECKED BEFORE ANY IS PUSHED: pushing open and then finding
+        // close null would leave the parallel arrays at different lengths,
+        // which `RawWindow::decode` refuses with a message about columns that
+        // says nothing about the null that caused it.
+        if (1..=4).any(|at| cell(at).is_ok_and(serde_json::Value::is_null)) {
+            null_bars += 1;
+            continue;
+        }
         arrays
             .timestamp
             .push(one_stamp(cell(0)?, spec.timestamps, i)?);
@@ -832,6 +898,18 @@ fn decode_positional(
             serde_json::Value::Null => 0,
             given => one_number(given, "volume")?,
         });
+    }
+
+    // NOT SILENT. A window that was mostly untraded minutes is something the
+    // operator has to know: it is not an error, and it is not a full answer
+    // either. Once per window rather than once per bar — 375 lines of "skipped"
+    // is noise and one count is information.
+    if null_bars > 0 {
+        eprintln!(
+            "brutex: {null_bars} of {} bars carried a null price and were skipped \
+             — the vendor reported no trade in those minutes",
+            rows.len()
+        );
     }
 
     RawWindow::decode(&arrays)
