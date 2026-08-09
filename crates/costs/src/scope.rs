@@ -17,7 +17,11 @@
 //! # Cost-free is about the CHARGES, never about the fill
 //!
 //! A signal-only round trip is still filled off the worst-case bar extremes
-//! ([`crate::fill`]). "Cost-free" removes the charge stack and nothing else —
+//! ([`crate::fill`]) — the model [`crate::fill`]'s own header names and proves,
+//! not a timing. `costs::scope::only_the_option_segment_bears_the_charge_stack`
+//! and `costs::trip::a_signal_only_segment_pays_nothing_and_its_net_is_its_gross`
+//! (`K-48`) hold that the charges go and the fills do not.
+//! "Cost-free" removes the charge stack and nothing else —
 //! there is no second fill law, and a cost-free trip's gross profit and loss is
 //! computed from exactly the same two fills a cost-bearing one would use. That
 //! is why [`crate::trip::price`] short-circuits **after** the fills and the

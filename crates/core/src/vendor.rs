@@ -22,6 +22,11 @@
 //! it is O(1) per row, and it makes the symbology question disappear rather
 //! than answering it. The display symbol is never an input to identity.
 //!
+//! `C-09` is where the per-row cost is measured rather than asserted:
+//! `core::bench::decode_is_flat_in_field_width` decodes one row whose field is
+//! 28 bytes and one whose field is 4 MiB, and `C-10` beside it holds that an
+//! over-wide field is **refused** rather than merely decoded quickly.
+//!
 //! # Prices
 //!
 //! Strikes arrive in **rupees** and are stored in **paisa**. `27000` in the

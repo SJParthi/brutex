@@ -25,6 +25,11 @@
 //! actually runs, and prints the ratio so a local run can be read against the
 //! tighter one.
 //!
+//! The three rows it prints are the three functions below: `C-01`,
+//! `store::bench::header_read_is_flat`; `C-07`,
+//! `store::bench::block_seal_is_flat`; and `C-08`,
+//! `store::bench::checksum_beats_the_bit_loop`.
+//!
 //! All arithmetic is integer. `clippy::float_arithmetic` is a workspace lint
 //! and a ratio is the one place it would be tempting.
 

@@ -67,6 +67,11 @@ use crate::rate::BpsX100;
 /// Two, which with the anchor makes [`MAX_REGIME_ROWS`]. This is the number
 /// the O(1) claim rests on: it is the length of a fixed-size array, so it
 /// bounds the lookup's loop at compile time and no input can raise it.
+///
+/// Measured, not argued: `costs::bench::the_row_count_does_not_change_the_cost`
+/// times a lookup on a two-row table against a three-row one, and
+/// `costs::bench::the_selected_row_does_not_change_the_cost` times the anchor
+/// row against the last row of the same table.
 pub const MAX_LATER_ROWS: usize = 2;
 
 /// How many rows a table may carry in total, anchor included.

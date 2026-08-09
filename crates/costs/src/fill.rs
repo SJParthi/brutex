@@ -48,6 +48,25 @@
 //! `checked`), two comparisons, one absolute value and two narrowings from
 //! `i128` back to `i64`. No loop, no allocation, and nothing whose count
 //! depends on how far apart the two bars are or how large their prices.
+//!
+//! # Where each sentence above is held
+//!
+//! The words "worst case" here name the model, not a timing, and each of the
+//! four laws has a test rather than a paragraph:
+//!
+//! * the two anchors and both directions —
+//!   `costs::fill::a_long_fills_the_entry_high_and_the_exit_low_each_one_tick_adverse`
+//!   and
+//!   `costs::fill::a_short_fills_the_exit_high_and_the_entry_low_and_is_adverse_on_both_legs`
+//!   (`K-45`);
+//! * the sell floor and the realized slippage that follows it —
+//!   `costs::fill::the_sell_floor_binds_at_one_tick_and_the_realized_slippage_follows_it`;
+//! * the buy leg having no reachable floor —
+//!   `costs::fill::the_buy_leg_needs_no_floor_because_no_legal_bar_can_reach_it`;
+//! * "the worst-case fill can never flatter the retired one on any bar", which
+//!   is the sentence above word for word —
+//!   `costs::fill::the_worst_case_fill_never_flatters_an_open_anchored_one`
+//!   (`K-46`), at either bracket end of any bar, on either direction.
 
 use brutex_core::price::Paisa;
 
@@ -146,7 +165,11 @@ impl Bar {
     ///
     /// The worked examples in the predecessor's `COSTS_VERIFIED` §5 quote a
     /// single price per leg, so this is the shape that reproduces them — and on
-    /// a flat bar the worst-case anchor coincides with the open exactly.
+    /// a bar that did not move the adverse anchor coincides with the open
+    /// exactly. That coincidence is the module header's "can never flatter the
+    /// retired one", and
+    /// `costs::fill::the_worst_case_fill_never_flatters_an_open_anchored_one`
+    /// is where it is checked at both bracket ends of a bar.
     ///
     /// # Errors
     ///
@@ -216,6 +239,12 @@ impl Fills {
 }
 
 /// The worst-case fills for one round trip.
+///
+/// "Worst case" is the name of the model this module's header states, not a
+/// timing. The law it applies is held by
+/// `costs::fill::a_long_fills_the_entry_high_and_the_exit_low_each_one_tick_adverse`,
+/// `costs::fill::a_short_fills_the_exit_high_and_the_entry_low_and_is_adverse_on_both_legs`
+/// and `costs::fill::the_worst_case_fill_never_flatters_an_open_anchored_one`.
 ///
 /// # Errors
 ///

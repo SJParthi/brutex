@@ -62,8 +62,16 @@
 //! no input-dependent cost. [`solver`] is a root find. `CLAUDE.md` §3 rule 4
 //! is about per-operation cost, and inverting a transcendental function is not
 //! one operation. What the solver has instead is a **hard bound that is
-//! arithmetic rather than hopeful** — see [`solver`] and `docs/06-limits.md`
-//! §18.
+//! arithmetic rather than hopeful** — 75 model evaluations, counted at the one
+//! function every evaluation passes through, by
+//! `greeks::solver::the_iteration_count_never_exceeds_the_arithmetic_bound` and
+//! `greeks::solver::the_reported_cost_is_every_model_evaluation`. See
+//! [`solver`] and `docs/06-limits.md` §18.
+//!
+//! Named as tests rather than as an invariant row on purpose: `docs/04-invariants.md`
+//! carries **two** families numbered `G-01`…`G-09` — the pull-granularity rows
+//! and this crate's — and a row id that resolves to whichever comes first in
+//! the file is not a citation, it is a coincidence.
 //!
 //! # Every refusal is loud
 //!

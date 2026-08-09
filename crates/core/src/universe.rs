@@ -1121,8 +1121,10 @@ pub fn of_equity(symbol: &str) -> Universe {
 /// A power-of-two table of `Option<&str>` filled by linear probing at compile
 /// time. Lookup hashes once, masks, and probes. The table is sized so it is at
 /// most half full, which bounds the probe length: with 750 entries in 2048
-/// slots the expected probe is under 1.5 and the worst observed is asserted by
-/// a test, so the bound is measured rather than assumed.
+/// slots the expected probe is under 1.5, and the worst observed is asserted by
+/// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1` —
+/// which walks the table the way `contains` does and pins a NUMBER — so the
+/// bound is measured rather than assumed.
 ///
 /// Costs one pointer per slot — 32 KiB for the larger table. That is the space
 /// traded for the time, and it is constant rather than growing with the data.

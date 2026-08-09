@@ -16,7 +16,11 @@
 //!
 //! Every field is fixed-width and every one derives [`Hash`], so a key hashes
 //! in a constant number of machine words no matter which vendor it came from.
-//! That is what makes the O(1) dedup claim true rather than aspirational.
+//! That is what makes the O(1) dedup claim true rather than aspirational — and
+//! `core::symbol::hashing_feeds_the_same_number_of_bytes_however_long_the_input_was`
+//! is what makes it checked: it builds an [`InstrumentKey`] from a
+//! one-character underlying and one from a full-width underlying, and asserts
+//! both feed a hasher the identical number of bytes.
 //!
 //! # Storable is not sweepable
 //!

@@ -55,6 +55,9 @@ const RATIO_CEILING_PERMILLE: u128 = 3_000;
 /// 1,000 ps = 1 ns. The audit measured **62,500 ps** per instrument per
 /// request against the pre-D-0042 code, so this is 62× below the defect and
 /// still far above measurement noise on a flat implementation.
+///
+/// This constant **is** `C-15`'s ceiling, and `api::bench::gate` is where it is
+/// asserted — the `C-15 … marginal` lines this file prints.
 const MARGINAL_CEILING_PS: u128 = 1_000;
 
 /// The most the cost **per rendered row** may grow between the smallest and

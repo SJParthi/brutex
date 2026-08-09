@@ -41,6 +41,21 @@
 //! [`MAX_SECRET_LEN`], the MAC is one fixed-size block, and the truncation is
 //! four bytes at a computed offset. No loop here runs a number of times that
 //! depends on the clock, the counter, or the code.
+//!
+//! Both halves of that are held, and by different tests:
+//!
+//! * the secret's bound, by
+//!   `pull::totp::the_length_bound_is_checked_before_a_single_character_is_decoded`
+//!   — the only loop in this file is the base32 decode, and it cannot start on
+//!   a secret past the bound;
+//! * the counter's width, by
+//!   `pull::totp::the_rfc_6238_sha1_vectors_reproduce_exactly` — RFC 6238's
+//!   T = 20,000,000,000 vector is a counter with four leading zero bytes, so
+//!   reproducing it pins the message at eight big-endian bytes for **every**
+//!   counter rather than at however many a shorter encoding would send.
+//!
+//! Neither is a timing. This has not been benched, and the claim above is a
+//! count of operations, not of nanoseconds.
 
 use hmac::{Hmac, Mac};
 use sha1::Sha1;
@@ -378,5 +393,40 @@ mod tests {
     fn a_bad_character_is_refused_and_not_skipped() {
         assert!(code_at("GEZD0GNBV", 59).is_err());
         assert!(base32_decode("GEZD0GNBV").is_err());
+    }
+
+    /// The length bound is checked BEFORE a character is decoded, which is what
+    /// makes the only loop here bounded by a constant.
+    ///
+    /// The module header rests its cost claim on "the secret is bounded by
+    /// [`MAX_SECRET_LEN`]". [`every_refusal_says_which_thing_was_wrong`] above
+    /// proves the refusal exists; it cannot see *where* it happens, because its
+    /// over-long secret is all `A` and would decode cleanly either way.
+    ///
+    /// So the fixture here is over-long **and** unspellable: characters past the
+    /// bound that the alphabet does not contain. If the length test were moved
+    /// after the decode loop — or dropped so the loop ran to the end of whatever
+    /// arrived — the refusal would come back as `NotBase32` instead, and this
+    /// assertion is the difference between the two.
+    #[test]
+    fn the_length_bound_is_checked_before_a_single_character_is_decoded() {
+        let past_bound = format!("{}!!!!", "A".repeat(MAX_SECRET_LEN));
+        assert_eq!(
+            base32_decode(&past_bound),
+            Err(TotpError::TooLong {
+                len: MAX_SECRET_LEN + 4
+            }),
+            "the length is refused first; a decode would have reported the '!'"
+        );
+
+        // At the bound it decodes, so the guard is `>` and not `>=`: the
+        // constant is a length this module accepts, not one it refuses.
+        let at_bound = "A".repeat(MAX_SECRET_LEN);
+        let key = base32_decode(&at_bound).expect("exactly at the bound is legal");
+        assert_eq!(
+            key.len(),
+            MAX_SECRET_LEN * 5 / 8,
+            "128 base32 characters are 80 key bytes"
+        );
     }
 }

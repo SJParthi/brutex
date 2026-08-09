@@ -353,6 +353,9 @@ pub enum Verdict {
 ///
 /// Four numbers and a tag. There is no history, no ring and no timestamp list:
 /// see the module header on why an exact sliding window is not O(1) space.
+/// `pull::unit::a_governor_holds_no_allocation_and_no_history` (`P-34`) is the
+/// proof that this one is: ten thousand admitted requests leave the governor's
+/// `size_of` unchanged, and it owns no allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Window {
     span: WindowSpan,

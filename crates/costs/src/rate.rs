@@ -113,12 +113,19 @@ pub enum Broker {
 /// same ₹20. The predecessor's `CALCULATOR_SPEC` §4.4 records correcting an
 /// earlier "₹20 per contract" claim, which is the error this comment exists to
 /// stop being made again. Source: `COSTS_VERIFIED` §8.1.
+///
+/// `costs::rate::brokerage_is_flat_per_order_and_both_brokers_are_priced`
+/// (`K-11`) holds it: per executed order, both brokers priced, and lots do not
+/// enter it.
 pub const GROWW_BROKERAGE_PER_ORDER: Paisa = Paisa::from_raw(2_000);
 
 /// Zerodha: ₹20 per executed order, flat for F&O since June 2024.
 ///
 /// The same flat figure as Groww, kept as its own constant because it is its
 /// own citation and could move independently. Source: `COSTS_VERIFIED` §8.2.
+/// Both brokers' figures are asserted together by
+/// `costs::rate::brokerage_is_flat_per_order_and_both_brokers_are_priced`
+/// (`K-11`), so a change to one of them cannot pass while the other stands.
 pub const ZERODHA_BROKERAGE_PER_ORDER: Paisa = Paisa::from_raw(2_000);
 
 /// The brokerage charged on one executed order.

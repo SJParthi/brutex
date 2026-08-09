@@ -1725,7 +1725,7 @@ pub struct ArchiveSpec {
     pub archive: ArchiveName,
     /// How a member inside it is named.
     pub member: MemberPattern,
-    /// The group folders, by name. Empty for a flat archive.
+    /// The group folders, by name. Empty for an archive with no group folders.
     pub groups: &'static [(ArchiveGroup, &'static str)],
     /// The segment tokens an [`ArchiveName::SegmentAndDate`] needs.
     pub segment_tokens: &'static [(Segment, &'static str)],
@@ -1755,8 +1755,8 @@ impl ArchiveSpec {
         self.layouts.iter().find(|row| row.segment == segment)
     }
 
-    /// The folder name for a group, or `None` when the archive is flat or the
-    /// group is not one this vendor has.
+    /// The folder name for a group, or `None` when the archive has no group
+    /// folders at all, or the group is not one this vendor has.
     #[must_use]
     pub fn group_folder(&self, group: ArchiveGroup) -> Option<&'static str> {
         self.groups

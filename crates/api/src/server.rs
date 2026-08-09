@@ -922,12 +922,24 @@ async fn feeds_json(
 /// says a float has no business near a price, and this endpoint keeps that true
 /// right up to the pixel.
 ///
-/// # O(1) per bar, and the whole month is one pass
+/// # A positional read per bar, and the whole month is one pass
 ///
-/// `BarFile::read_record` is a seek and a fixed-length read, so the cost of the
-/// last bar equals the cost of the first. A month is at most 375 × ~22 bars and
-/// is sent whole: the chart pans and zooms locally after that, with no request
-/// per viewport change.
+/// `BarFile::read_record` reaches bar N by arithmetic — the header length plus
+/// `N × record_stride`, one multiply and one add — and then reads exactly one
+/// record's bytes. The records before it are not touched, so the *work* of
+/// reaching the last bar of a month is the work of reaching the first.
+/// `store::geometry::addressing_is_arithmetic_and_flat` asserts that across a
+/// long walk: every index's offset is exactly one stride past the one before
+/// it, at index 0 and at 400,000 alike.
+///
+/// This heading read **"O(1) per bar"** and the sentence under it said "the
+/// cost of the last bar equals the cost of the first". The arithmetic is
+/// constant and that is what is named above. The `pread` under it has never
+/// been timed here, and a page cache is not a bound — so the claim is the
+/// shape, not the nanoseconds, and it says which.
+///
+/// A month is at most 375 × ~22 bars and is sent whole: the chart pans and
+/// zooms locally after that, with no request per viewport change.
 ///
 /// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
 /// §7 reserves. It becomes JSON `null` rather than a number, because zero means

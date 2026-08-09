@@ -347,6 +347,11 @@ impl Layout {
     /// therefore verify a record by reading one checksum — the property that
     /// makes `docs/02-store-format.md` §6's "verification is O(1) per read"
     /// true rather than approximately true.
+    ///
+    /// `S-20` is that property as an invariant, and
+    /// `store::geometry::no_record_straddles_a_block` walks 5,000 indices to
+    /// hold it; `store::geometry::a_block_index_names_seventy_three_consecutive_records`
+    /// asserts the partition — every index in exactly one block, none in two.
     #[must_use]
     pub const fn block_of(self, index: u64) -> u64 {
         index / self.records_per_block

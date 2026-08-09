@@ -291,6 +291,13 @@ unchanged and is still where every boundary is asserted at the microsecond.
 | P-33 | The vendor figures in `pull::rate` are the ones `docs/00-charter.md` §4 records, frozen against hardcoded numbers rather than re-derived | `pull::unit::the_published_vendor_figures_are_the_ones_the_charter_records` | ✓ |
 | P-34 | A governor's whole state is a fixed-size `Copy` struct: ten thousand admitted requests leave its `size_of` unchanged, and it owns no allocation | `pull::unit::a_governor_holds_no_allocation_and_no_history` | ✓ |
 | P-35 | Against a vendor honouring less than it publishes, the allowance converges into `1..=honoured` and never passes the published ceiling; when the refusals stop it walks back up to that ceiling | `pull::unit::the_allowance_converges_onto_the_rate_the_vendor_actually_honours` | ✓ |
+| P-36 | A TOTP secret past `MAX_SECRET_LEN` is refused **before** a single character is decoded, so the only loop in `pull::totp` is bounded by a constant — proven with an over-long secret whose tail is not base32, so a bound moved after the loop would refuse it under a different name — and the bound is `>` and not `>=` | `pull::totp::the_length_bound_is_checked_before_a_single_character_is_decoded` | ✓ |
+
+P-36 added by the gate 12 sweep. The counter half of that module's cost claim
+is not a new row: `pull::totp::the_rfc_6238_sha1_vectors_reproduce_exactly`
+already pins it, because RFC 6238's `T = 20,000,000,000` vector is a counter
+with four leading zero bytes and reproducing it requires the message to be eight
+big-endian bytes for every counter.
 
 ## The manifest — layer 13
 
@@ -370,6 +377,12 @@ cited either block — checked before the renumber — so nothing else moves.
 | I-35 | A master larger than the reader holds is refused from its size, before it is read into memory | `api::master::a_master_larger_than_this_reader_holds_is_refused_before_it_is_read` | ✓ |
 | I-36 | A row longer than the reader splits is named at its line number and never split | `api::master::a_row_longer_than_this_reader_splits_is_named_and_never_split` | ✓ |
 | I-37 | An over-wide field makes the row an error that names the field; it is never a silent keep | `api::master::a_field_wider_than_core_will_read_is_an_error_and_not_a_silent_keep` | ✓ |
+| I-39 | Hashing a `Symbol` — and hashing a whole `InstrumentKey` — feeds a hasher the **same number of bytes** at one character as at `SYMBOL_CAPACITY`, so the dedup probe's cost does not depend on what a vendor sent. Counted with a hasher that records only how much it was fed, so it is exact and machine-independent; `core::symbol::padding_never_affects_identity` beside it proves the hash's *identity* and says nothing about its cost | `core::symbol::hashing_feeds_the_same_number_of_bytes_however_long_the_input_was` | ✓ |
+
+I-38 is taken, by the NSE series tables section near the end of this file.
+I-39 added by the gate 12 sweep: `crates/core/src/symbol.rs` and
+`crates/core/src/instrument.rs` had both rested an O(1) dedup claim on the field
+being fixed-width, and nothing measured it in either direction.
 
 ## The equity gate after D-0025, and the refusal after D-0026
 
@@ -440,6 +453,15 @@ Added by D-0038. Every row here is proven by a test that runs today.
 | A-24 | No control in the picker is `required`, because an unfocusable `required` control blocks submission in silence | `api::calendar::no_control_in_the_picker_is_required` · `api::server::the_pickers_do_not_block_submission_and_do_not_close_on_their_own_chrome` | ✓ |
 | A-25 | Nothing later than a field's ceiling can be clicked — not a day, and not a month in the ceiling's own year | `api::calendar::the_computed_rules_cover_alignment_the_month_end_and_the_ceiling` | ✓ |
 | A-26 | The picker never offers a year no `Day` can hold | `api::calendar::the_offered_span_ends_at_the_cap_and_is_twelve_years_long` | ✓ |
+| A-27 | The coverage grid's axis comes out strictly ascending in one stated order whatever order the censuses were read in, and a series two vendors both hold is one row — so a page ordinal names the same instrument after a restart | `api::census::the_axis_is_sorted_and_deduplicated_whatever_order_the_censuses_arrive_in` | ✓ |
+| A-28 | `StoreFilter::keeps` searches a haystack bounded by the **type**: a symbol one byte past `SYMBOL_CAPACITY` is refused at construction, so no longer haystack can ever be handed to it | `api::census::the_symbol_arm_searches_a_haystack_the_symbol_type_bounds` | ✓ |
+| A-29 | The unfiltered `/store` page **borrows** the held table — the same allocation, not an equal copy — and only a filter that narrows owns its selection | `api::census::the_unfiltered_page_borrows_the_table_and_copies_nothing` | ✓ |
+
+A-27 through A-29 added by the gate 12 sweep. All three are properties
+`crates/api/src/census.rs` already argued for at length in prose and none of
+them had a test: the axis's sort and dedup are one line each, and the `Cow`
+borrow could have been deleted with every assertion in that file still passing,
+because the two arms are equal by value and differ only in what they cost.
 
 ## The pull journal — the codec, both halves
 
@@ -766,6 +788,17 @@ is in the log rather than hidden, and the entry in `ci.yml` says it out loud.
 `crates/greeks` is `f64` throughout and never sees a paisa. `CLAUDE.md` §7
 reserves `i64` for prices and keeps statistical values at full precision; a
 delta is the second kind. D-0046.
+
+**`G-01` … `G-09` below are the SECOND family with those ids.** The rung
+section above carries a `G-01` … `G-09` of its own, and the two are unrelated.
+Nothing outside this file cites either block by id today, and nothing should
+start: CI gate 12 resolves a row id with the **first** match in this file, so a
+doc comment citing `G-09` from `crates/greeks` would be validated against the
+rung row instead — which is the hazard D-0045 renumbered `K-*` to `C-K-*` to
+remove, still open here. Cite these rows by their test name until one family is
+renumbered under its own decision entry. Found by the gate 12 sweep; not fixed
+by it, because renumbering a row is a change to this file's contract and belongs
+with the decision that signs it.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
@@ -1130,3 +1163,26 @@ here on purpose — renaming a test moves a token CI gate 10 scrapes out of this
 file, and doing that in the same change as the code it describes is how a green
 gate stops meaning anything. Named here so the next reader finds it stated
 rather than discovers it.
+
+## The event sink — what one `emit` does not depend on
+
+Added by the gate 12 sweep. `crates/telemetry/src/sink.rs` lists what one
+`emit` costs and closes with "nothing in that list is a function of how many
+events came before, how large the file is, or how many files there are". Of
+those three, exactly one could have been a lie in the code rather than in the
+comment, and it is the one that had no test.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| T-01 | The rotation check reads the sink's **own** running byte count and never the file's size: the current file grown behind the sink's back to sixty-four times the bound does not cause a roll, and the running count still causes one afterwards | `telemetry::sink::the_roll_decision_reads_the_running_count_and_never_the_files_size` | ✓ |
+
+**Why the second half of that row is there.** The first half alone is satisfied
+by a sink that has stopped rotating at all, which is why the test goes on to
+emit until the count rolls. Every other rotation test in that file drives the
+count and the file size together, so a `metadata` call on the write path would
+have passed all of them — `FileTarget::len`'s own comment says "at open time
+only — never on the write path", and nothing held it.
+
+**Not claimed: a timing.** `crates/telemetry` carries no bench, so every figure
+in that module header is a count of operations. CI gate 14 refuses this crate
+for exactly that reason and this row does not change it.

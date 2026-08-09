@@ -348,7 +348,8 @@ mod tests {
         assert_eq!(ist_clock(1_751_400_000_000_000), "01:30");
     }
 
-    /// A rising bar, a falling bar and a flat one are three different rows.
+    /// A rising bar, a falling bar and one that did not move are three
+    /// different rows.
     #[test]
     fn direction_is_encoded_in_the_row_and_not_only_in_the_number() {
         let bar = |open: i64, close: i64| Bar {

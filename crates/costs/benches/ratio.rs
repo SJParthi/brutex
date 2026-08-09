@@ -432,7 +432,8 @@ fn the_stage_two_pre_history_windows_still_refuse() -> bool {
     ok
 }
 
-/// A flat fill bar, or a loud failure.
+/// A fill bar that did not move — high, low and open all one price — or a loud
+/// failure.
 fn flat_bar(price_paisa: i64) -> Option<Bar> {
     match Bar::flat(Paisa::from_raw(price_paisa)) {
         Ok(bar) => Some(bar),
@@ -443,7 +444,8 @@ fn flat_bar(price_paisa: i64) -> Option<Bar> {
     }
 }
 
-/// The worst-case fills of a flat-bar long round trip, or a loud failure.
+/// The adverse fills of a long round trip on two bars that did not move, or a
+/// loud failure.
 fn flat_fills(entry: i64, exit: i64) -> Option<Fills> {
     let (Some(entry_bar), Some(exit_bar)) = (flat_bar(entry), flat_bar(exit)) else {
         return None;

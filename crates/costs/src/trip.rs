@@ -240,6 +240,11 @@ impl Leg {
 /// duty, the GST rate and the flat brokerage — are read straight from
 /// [`crate::rate`] and cannot be supplied, so a caller cannot get them wrong.
 ///
+/// "Flat" is the brokerage's shape, not a timing:
+/// `costs::trip::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays`
+/// (`K-42`) prices a thousand lots against one and asserts this charge alone
+/// does not move while every other one does.
+///
 /// A [`BpsX100`] cannot be minted outside this crate, so a `Rates` can only be
 /// assembled out of figures that came from a citation-grounded table. That is
 /// what carries stage one's refusal contract into stage three intact.
@@ -296,7 +301,11 @@ impl Rates {
     ///
     /// Test-only, and deliberately: the flat rates are flat because getting
     /// them wrong is one of the ways an Indian cost stack goes wrong, and
-    /// nothing outside this crate can reach this. It exists so that the
+    /// nothing outside this crate can reach this — the shipped ones are held by
+    /// `costs::trip::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays`
+    /// (`K-42`) and by
+    /// `costs::rate::brokerage_is_flat_per_order_and_both_brokers_are_priced`
+    /// (`K-11`). It exists so that the
     /// overflow guard on every levy in [`charge_stack`] is a **tested** path
     /// rather than one asserted to be unreachable — the shipped SEBI fee,
     /// stamp duty and GST rate are all far too small to overflow anything, and
@@ -362,6 +371,10 @@ impl Rates {
     }
 
     /// The brokerage for the whole round trip — both orders, flat.
+    ///
+    /// Flat in the lots, which is
+    /// `costs::trip::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays`
+    /// (`K-42`), not flat in any timing sense.
     #[must_use]
     pub const fn brokerage_round_trip(self) -> Paisa {
         self.brokerage_round_trip
@@ -677,7 +690,9 @@ impl Charges {
         self.sell_notional
     }
 
-    /// Brokerage, both orders, flat.
+    /// Brokerage, both orders, flat in the lots —
+    /// `costs::trip::the_brokerage_is_flat_per_order_and_a_thousand_lots_pay_what_one_pays`
+    /// (`K-42`).
     #[must_use]
     pub const fn brokerage(self) -> Paisa {
         self.brokerage
@@ -976,6 +991,11 @@ fn both_legs(
 /// preserved exactly, because the GST base is the sum of the **already
 /// rounded** service components and therefore depends on it.
 ///
+/// The worked example below is one of `K-38`'s four, and
+/// `costs::trip::the_first_worked_example_prices_one_nifty_lot_to_the_paisa`
+/// is where it is priced to the paisa against this crate's own dated tables
+/// rather than against numbers restated in a test.
+///
 /// # Errors
 ///
 /// * [`CostError::NotPositive`] when the quantity is not strictly positive.
@@ -1259,7 +1279,7 @@ mod tests {
         .expect("a well-formed round trip")
     }
 
-    /// The fills a flat-bar long round trip produces.
+    /// The fills a round trip on two bars that did not move produces.
     fn flat_fills(entry: i64, exit: i64, direction: Direction) -> Fills {
         worst_case_fills(
             Bar::flat(Paisa::from_raw(entry)).expect("legal"),

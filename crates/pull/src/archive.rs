@@ -32,6 +32,11 @@
 //! What is bounded: [`MAX_MEMBERS`] caps the walk, one file is open at a time,
 //! and each file's rows are decoded and handed on rather than accumulated
 //! across the whole directory. Peak memory is one file, not one archive.
+//!
+//! The cap is the only positive bound this paragraph claims, and
+//! `pull::pipeline::a_directory_past_the_member_cap_is_refused_at_the_cap` is
+//! where it is held — a directory one member past [`MAX_MEMBERS`] is refused at
+//! the cap rather than walked to the end and then complained about.
 
 use std::fs;
 use std::path::{Path, PathBuf};

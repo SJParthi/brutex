@@ -233,10 +233,31 @@ impl Merged {
 ///
 /// Two passes, because the confirmation a strip needs may come from a vendor
 /// that has not been read yet. The first pass records every identity any
-/// vendor asserted; the second resolves each listing against it. Both are
-/// O(1) per listing — a hash probe on fixed-width `Copy` keys, never a scan.
-/// The eligibility check is a third probe against a map built once, so it is
-/// O(1) per declined row too.
+/// vendor asserted; the second resolves each listing against it.
+///
+/// # Three maps, and only two of them are hash probes
+///
+/// This used to say "**both** are O(1) per listing — a hash probe on
+/// fixed-width `Copy` keys, never a scan", and of the three maps here that was
+/// true of one. It is corrected rather than left to be believed.
+///
+/// * `asserted` and `by_key` are `HashMap`/`HashSet` **pre-sized from
+///   `capacity`**, so a probe is O(1) in the worst case and not merely
+///   amortised — the argument for that reservation is written out below, and
+///   `api::bench::every_order_and_pill_is_flat` measures the request path these
+///   two feed at 2,787 and at 50,000 instruments.
+/// * `kept_isins` and `disputes` are `BTreeMap`, so they are **O(log n)
+///   comparisons per listing, not a probe**, and `kept_isins` allocates a
+///   `Vec<Vendor>` for each new ISIN. That is deliberate and is not a defect to
+///   repair: their ordering *is* the output order of the conflict and
+///   eligibility lines, which `CLAUDE.md` §3 rule 5 requires to be identical
+///   between two runs. A `HashMap` would trade a stated determinism guarantee
+///   for a bound nobody measured.
+///
+/// Neither `BTreeMap` is on a request path. `merge` runs where the masters are
+/// parsed — `server::universe`, reached from `server::Site::load` once per
+/// process — which is the read D-0039 moved out of the request at 150 ms, and
+/// is why `server::instruments_html_from` takes an already-loaded universe.
 #[must_use]
 pub fn merge(sources: &[Source]) -> Merged {
     // THE BOUND, TAKEN ONCE AND USED BY BOTH MAPS BELOW.

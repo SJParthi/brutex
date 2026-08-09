@@ -497,7 +497,11 @@ fn kind_cells(kind: Kind) -> String {
 ///
 /// When both brokers list the same contract they resolve to one
 /// [`InstrumentKey`] and therefore one row — so seeing `groww · dhan` in a
-/// single row *is* the O(1) dedup, on screen.
+/// single row *is* the deduplication, on screen.
+/// `api::merge::one_instrument_named_by_both_vendors_is_one_entry_with_two_tags`
+/// is the test. What that dedup **costs** is [`crate::merge`]'s subject and not
+/// this cell's; this said "the O(1) dedup" and a renderer is not where a cost
+/// bound is argued.
 fn vendor_cell(row: &Row) -> String {
     let mut tags = Vec::new();
     for v in Vendor::ALL {
@@ -2840,8 +2844,9 @@ const MAX_FOLDER_SUGGESTIONS: usize = 60;
 ///
 /// # Call this at startup and nowhere else
 ///
-/// This is the only `read_dir` under `crates/api`, and it is O(entries under
-/// `$HOME/Downloads`) — unbounded by anything this repository controls.
+/// This is the only `read_dir` in shipping code under `crates/api` — `bars.rs`
+/// has one behind `#[cfg(test)]`, which ships nowhere — and it is O(entries
+/// under `$HOME/Downloads`), unbounded by anything this repository controls.
 /// `server::Site::new` calls it once and holds the result for the process's
 /// lifetime, which is the same bargain D-0039 struck for the instrument master
 /// and `census::held_series` strikes for the coverage axis. Calling it from a

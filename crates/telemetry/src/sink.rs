@@ -23,6 +23,24 @@
 //! is unavoidable and is bounded by the ceilings in [`crate::event`], and a
 //! syscall is not free.
 //!
+//! **"How large the file is" is the row that could have been a lie, and it is
+//! the row with a test.**
+//! `telemetry::sink::the_roll_decision_reads_the_running_count_and_never_the_files_size`
+//! grows the current file behind this sink's back to sixty-four times the
+//! bound and asserts the next `emit` does **not** roll — which it would if the
+//! rotation check reached for `metadata` — and then that the running count
+//! still rolls on its own. The remaining rows are single operations by
+//! inspection, and
+//! `telemetry::sink::the_file_rolls_at_the_bound_and_the_set_never_grows_past_the_count`
+//! holds "how many files there are".
+//!
+//! **No timing was taken and none is claimed**, which the first line of this
+//! section already said and this one keeps saying: every entry in the table is
+//! a count of operations. This crate carries no bench. Turning the counts into
+//! a measurement needs a `crates/telemetry/benches/ratio.rs` of the shape
+//! `crates/store` and `crates/pull` already have — which CI gate 14 wants
+//! anyway — and nothing here should be read as a figure until it exists.
+//!
 //! Once per [`Config::max_file_bytes`] a rotation happens instead, inside the
 //! same lock: at most `2 * keep_files` renames and one `open`. That is a
 //! constant, it is amortised over ~33,000 events at the default bound, and it
@@ -1062,6 +1080,82 @@ mod tests {
         // the roll itself.
         assert_eq!(first_rolled[first_rolled.len() - 1].seq + 1, current[0].seq);
         assert_eq!(sink.health().written, 400);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The rotation check reads the sink's own running count, never the file.
+    ///
+    /// This module's header lists what one `emit` costs and says of that step
+    /// "one integer comparison against a running byte count the sink already
+    /// holds — **never** a `metadata` call", and `FileTarget::len` says the same
+    /// thing from the other side: "at open time only — never on the write path".
+    /// Nothing held either sentence. Every rotation test above drives the count
+    /// and the file size together, so a `metadata()` on the write path would
+    /// pass all of them.
+    ///
+    /// So this pulls the two apart: the file is grown behind the sink's back to
+    /// sixty-four times the bound, and the next `emit` must **not** roll. Then
+    /// it keeps emitting, and the count must roll on its own — otherwise the
+    /// test could be satisfied by a sink that had simply stopped rotating.
+    #[test]
+    fn the_roll_decision_reads_the_running_count_and_never_the_files_size() {
+        use std::io::Write as _;
+
+        let dir = scratch("running-count");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+
+        assert_eq!(sink.emit(&Event::info("count", "one")), Emitted::Written);
+        let after_one = sink.health().current_bytes;
+        assert!(
+            after_one > 0 && after_one < MIN_FILE_BYTES,
+            "one line is under the bound: {after_one}"
+        );
+
+        // GROWN BEHIND THE SINK'S BACK. Same path, same append mode, so the
+        // sink's own writes still land after these bytes.
+        let mut behind = std::fs::OpenOptions::new()
+            .append(true)
+            .open(current_path(&dir))
+            .expect("the current file exists");
+        behind
+            .write_all(&vec![b'x'; 64 * 1024])
+            .expect("grow it past the bound");
+        drop(behind);
+
+        let on_disk = std::fs::metadata(current_path(&dir)).expect("stat").len();
+        assert!(
+            on_disk > MIN_FILE_BYTES * 8,
+            "the file is now far past the bound: {on_disk}"
+        );
+
+        assert_eq!(sink.emit(&Event::info("count", "two")), Emitted::Written);
+        assert_eq!(
+            sink.health().rotations,
+            0,
+            "a `metadata` call on the write path would have rolled on a \
+             {on_disk}-byte file against a {MIN_FILE_BYTES}-byte bound"
+        );
+        assert!(
+            sink.health().current_bytes < on_disk,
+            "the count is the sink's own, not the file's"
+        );
+
+        // AND THE COUNT STILL ROLLS, so this cannot be passed by not rotating.
+        for i in 0..64u32 {
+            assert_eq!(
+                sink.emit(&Event::info("count", "more").with("i", i)),
+                Emitted::Written
+            );
+        }
+        assert!(
+            sink.health().rotations > 0,
+            "the running count is still what triggers a roll"
+        );
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

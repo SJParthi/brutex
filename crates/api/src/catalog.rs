@@ -289,6 +289,10 @@ pub struct Page {
 }
 
 /// The instrument set, indexed for constant-time paging.
+///
+/// `C-14` is the row and `api::bench::every_order_and_pill_is_flat` is the
+/// measurement: one page at 2,787 and at 50,000 instruments, over every sort
+/// column, both directions, every pill and a clamped deep page.
 #[derive(Debug)]
 pub struct Catalog {
     /// Every instrument, materialised once, in no particular order.
@@ -303,6 +307,8 @@ pub struct Catalog {
     ///
     /// A needle longer than this cannot be a substring of anything, so an
     /// over-long search is answered in constant time instead of scanned.
+    /// `api::catalog::a_needle_longer_than_the_longest_name_is_answered_without_a_scan`
+    /// pins it at the bound and one byte past it.
     longest: usize,
     /// `SETS` × `COLUMNS` precomputed orders of indices into `rows`.
     orders: Box<[Box<[usize]>]>,
@@ -326,7 +332,13 @@ impl Catalog {
     ///
     /// `COLUMNS` sorts of the universe plus `SETS × COLUMNS` linear filters
     /// plus one pass to index trigrams. Linear-times-log, paid once at load,
-    /// never on a request. `docs/06-limits.md` §O(1) carries the measurement.
+    /// never on a request.
+    ///
+    /// `docs/06-limits.md` §24 records the trade D-0042 made — the orderings
+    /// and the filters left the request and moved here. It does **not** carry a
+    /// measurement of this function, and neither does any other section: what
+    /// was measured is the request path this pays for. The citation here used to
+    /// name a section of that file which has never existed.
     #[must_use]
     pub fn build(merged: &Merged) -> Self {
         let rows: Vec<Row> = merged
@@ -464,7 +476,10 @@ impl Catalog {
     ///   which is what a search that matches everything *is*.
     ///
     /// A needle longer than the longest name is answered in constant time: it
-    /// cannot be a substring of anything.
+    /// cannot be a substring of anything. That is the one arm here with a
+    /// bound, and
+    /// `api::catalog::a_needle_longer_than_the_longest_name_is_answered_without_a_scan`
+    /// is where it is asserted — at the bound, and one byte past it.
     #[must_use]
     pub fn search(&self, sel: Selection, needle: &str, page: usize) -> Page {
         let mut hits: Vec<usize> = if needle.len() > self.longest {
