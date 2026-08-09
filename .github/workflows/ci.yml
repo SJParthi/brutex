@@ -2346,6 +2346,9 @@ jobs:
           store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08
           api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17
           costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12
+          lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03
+          telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-02 C-T-03
+          greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03
           '
 
           inv=docs/04-invariants.md

@@ -859,6 +859,47 @@ with the decision that signs it.
 | G-32 | The reported cost is **every** model evaluation, checked against a count the solver did not compute — a thread-local counter inside `Checked::greeks`, the one function all of them pass through — on a Newton solve, on the worst solve and on a refusal | `greeks::solver::the_reported_cost_is_every_model_evaluation` | ✓ |
 | G-33 | The scale the `Indeterminate` guard screens on is the sum of the two legs the price is a difference of, and it is measurably coarser than one ulp of the price itself — 100.8× on a one-day in-the-money NIFTY strike | `greeks::bsm::the_price_scale_is_the_two_legs_and_it_dwarfs_the_price_they_leave` | ✓ |
 
+### Complexity rows for the greeks
+
+Enforced by gate 8, `crates/greeks/benches/ratio.rs`, against the same **3.0×
+shared-CI ceiling**. **These ids are `C-G-*` and not `G-*` on purpose.** This
+file already carries two unrelated families spelled `G-01` … `G-09` — the rung
+rows above and the greeks rows here — and gate 12 resolves a row id by the
+first match, so a third family reusing that prefix would make the collision
+worse. `C-G-*` is unambiguous against both, which is the lesson D-0045 recorded
+when it renumbered `K-*` to `C-K-*`.
+
+**The solver row is a different shape from the other two, and the difference is
+the point.** `greeks::solver` opens by saying it is not O(1) and is not claimed
+to be; what it has is an ARITHMETIC ceiling of `MAX_ITERATIONS` = 75 model
+evaluations, held by `G-09` and `G-32`. Timing an easy solve against a hard one
+and calling the ratio a bound would be measuring the evaluation COUNT, which is
+allowed to differ. So `C-G-03` measures cost **per model evaluation** — the part
+that has to be constant for a bounded count to bound anything at all. A solver
+that did more work per step on a difficult quote would pass `G-09` and still be
+unbounded in time.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-G-01 | A closed-form price costs the same whatever it is pricing: at the money against a strike a tenth of spot and one ten times it, and one day to expiry against five years | `greeks::bench::a_price_costs_the_same_whatever_the_contract_is` | ✓ |
+| C-G-02 | The full greek set costs the same across those same contracts — every greek falls out of the same two normal-CDF evaluations, so none of them adds a data-dependent path | `greeks::bench::the_full_greek_set_costs_the_same_whatever_the_contract_is` | ✓ |
+| C-G-03 | One **model evaluation** costs the same however hard the quote is, so `G-09`'s ceiling of 75 evaluations is a bound on work and not merely on step count — and the evaluation count each solve reports is checked against `MAX_ITERATIONS` in the bench as well as in the unit test | `greeks::bench::one_model_evaluation_costs_the_same_however_hard_the_quote_is` | ✓ |
+
+Measured on the operator's machine, 2026-08-09, `cargo bench -p greeks`, exit 0.
+C-G-01 spanned **0.943× – 0.998×** at ~23–25 ns a price; C-G-02 **0.996×** and
+**1.011×**. C-G-03 is the one worth reading twice: the at-the-money solve
+finished in **7** evaluations and the 20%-out-of-the-money one in **68**, both
+under the ceiling of 75 — a **9.7× spread in count** — and the cost per
+evaluation across that spread was **1.195×**. A bench that had timed the two
+solves against each other would have reported ~9.7× and breached, on a crate
+whose bound was never violated. That is the measurement this row exists to
+avoid mis-stating.
+
+A strike ten times spot is used in C-G-01 and C-G-02 but NOT in C-G-03: its
+model price is close enough to zero that the solve is refused before it starts,
+which is the no-arbitrage guard working rather than a cost to measure. No figure
+from a CI runner is claimed, because none was taken.
+
 ## Greeks against the vendors — the external anchor
 
 Every row here is measured against one live Dhan option-chain response. D-0046.
@@ -1095,6 +1136,36 @@ digest `5bb7cad9d96bb347` were byte-identical before and after the refusals were
 added. That is the measurement that says these refusals cost nothing on sound
 data; it is not a claim about CI.
 
+### Complexity rows for the lake reader
+
+Enforced by gate 8, `crates/lake/benches/ratio.rs`, against the same **3.0×
+shared-CI ceiling**. The bench was tracked and wired with `harness = false`
+before these rows existed, and gate 14 refused `crates/lake` for exactly that
+reason: a crate that claims a bound and names no measurement. The measurement
+was already there; what was missing was the row that points at it.
+
+`crates/lake` makes **one** O(1) claim and the other two rows are the honest
+super-constant ones beside it, stated so that neither is mistaken for the other.
+Opening a file is O(file bytes) and decoding a row group is O(bytes in the
+group) — benching those would measure zstd, not this crate — so they are not
+here, and `docs/06-limits.md` is where that gap is recorded.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-L-01 | `Batch::row` costs the same at 2,480, 24,800 and 248,000 rows, and the **last** row of a 248,000-row batch costs what its **first** row costs — the form a scan would fail by 248,000× | `lake::bench::row_lookup_is_constant_in_batch_size` | ✓ |
+| C-L-02 | A full walk stays linear: cost **per row** does not grow from 2,480 rows to 248,000, so iteration is not quadratic in the batch | `lake::bench::iteration_is_linear_per_row` | ✓ |
+| C-L-03 | Parsing a contract name does not scan it — a 4 KiB name that is **refused** never costs more than a 26-byte name that is accepted | `lake::bench::contract_parse_does_not_scan_the_name` | ✓ |
+
+Measured on the operator's machine, 2026-08-09, `cargo bench -p lake`, exit 0.
+C-L-01 spanned **0.986× – 1.073×** across its four comparisons, at 4.5–4.9 ns
+per lookup. C-L-02 measured **1.007×** at 252 ps and 254 ps per row. C-L-03
+measured **0.082×** — 41.1 ns to accept the real 26-byte name against 3.4 ns to
+refuse the 4 KiB one — and that figure is far below 1.0× rather than near it
+**because the refusal is the cheaper path, not because the parser is fast**:
+the length is rejected before the name is walked. It is reported rather than
+hidden, for the same reason C-K-11's two sub-1.0× arms are. No figure from a CI
+runner is claimed, because none was taken.
+
 ## The audit console's one read — `/audit.json`
 
 `crates/api/src/audit_json.rs` serves the journal and one feed's month roll-up
@@ -1214,6 +1285,31 @@ count and the file size together, so a `metadata` call on the write path would
 have passed all of them — `FileTarget::len`'s own comment says "at open time
 only — never on the write path", and nothing held it.
 
-**Not claimed: a timing.** `crates/telemetry` carries no bench, so every figure
-in that module header is a count of operations. CI gate 14 refuses this crate
-for exactly that reason and this row does not change it.
+**T-01 is still a count and not a timing**, and that is the right shape for it:
+it asserts which NUMBER the roll decision reads, which no stopwatch can show.
+What has changed since it was written is the sentence that used to follow it —
+"`crates/telemetry` carries no bench … CI gate 14 refuses this crate for exactly
+that reason". The bench exists now and the three rows below are it.
+
+### Complexity rows for the event stream
+
+Enforced by gate 8, `crates/telemetry/benches/ratio.rs`, against the same **3.0×
+shared-CI ceiling**. Two claims, two different sizes: the sink's is per-`emit`
+against **events already written**, the tail's is the same twenty events against
+a file a hundred times bigger.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-T-01 | One `emit` costs the same with 1,000, 10,000 and 100,000 events already in the file — the level check, the clock, the lock, the render and the rotation check are none of them a function of what came before | `telemetry::bench::emit_cost_does_not_grow_with_the_file` | ✓ |
+| C-T-02 | A filtered event returns at the level check having touched nothing else: its cost is flat in the file too, and it is **measurably** cheaper than a written one on the same sink rather than merely documented as such | `telemetry::bench::a_filtered_event_touches_nothing_and_stays_flat` | ✓ |
+| C-T-03 | Reading the last twenty events costs the same at 1,000, 10,000 and 100,000 events in the file, and reads the **same number of bytes** at every size — O(1) in the size of the file, which is the bound that matters because the file grows all day and N does not | `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file` | ✓ |
+
+Measured on the operator's machine, 2026-08-09, `cargo bench -p telemetry`,
+exit 0. C-T-01 measured **0.990×** and **0.968×**. C-T-02 measured **0.974×**
+flat, and the filtered-against-written comparison came out at **0.002×** — a
+filtered event is ~390× cheaper than a written one, which is the early return
+doing exactly what `sink.rs` says it does. C-T-03 measured **1.011×** and
+**1.035×**, and the byte count is the sharper half: **8,192 bytes read at 1,000
+events and 8,192 at 100,000** — one `READ_BLOCK` either way, unchanged by a file
+a hundred times larger. That equality is asserted in the bench, not just
+printed. No figure from a CI runner is claimed, because none was taken.

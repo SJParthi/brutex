@@ -48,3 +48,19 @@ rust-version = "1.85"
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the O(1) ratio harness. `harness = false` so it is a plain binary
+# with no benchmarking framework and therefore no dependency; `test = false`
+# because `cargo test` must not run a timing loop, and the coverage gate must
+# not measure one. See D-0034 and crates/greeks/benches/ratio.rs.
+#
+# THIS IS NOT A DEPENDENCY AND GATE 9B IS UNAFFECTED. A [[bench]] target links
+# this crate's own lib and std, and nothing else -- the [dependencies] and
+# [dev-dependencies] tables gate 9b reads are both still empty, which is what
+# it checks. A consumer taking this crate by git URL does not build benches.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

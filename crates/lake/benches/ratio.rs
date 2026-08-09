@@ -118,16 +118,24 @@ fn row_lookup_is_constant_in_batch_size() -> bool {
 
     let mut ok = true;
     ok &= ratio(
-        "row(0): 2,480 rows -> 248,000 rows",
+        "C-L-01 row(0): 2,480 rows -> 248,000 rows",
         first_small,
         first_large,
     );
-    ok &= ratio("row(last): 2,480 -> 24,800 rows", last_small, last_medium);
-    ok &= ratio("row(last): 2,480 -> 248,000 rows", last_small, last_large);
+    ok &= ratio(
+        "C-L-01 row(last): 2,480 -> 24,800 rows",
+        last_small,
+        last_medium,
+    );
+    ok &= ratio(
+        "C-L-01 row(last): 2,480 -> 248,000 rows",
+        last_small,
+        last_large,
+    );
     // The sharpest form of the same question: inside ONE large batch, the last
     // row must cost what the first row costs. A scan would be 248,000x here.
     ok &= ratio(
-        "row(first) -> row(last), within 248,000 rows",
+        "C-L-01 row(first) -> row(last), within 248,000",
         first_large,
         last_large,
     );
@@ -143,7 +151,7 @@ fn iteration_is_linear_per_row() -> bool {
     let per_row_large = cost_ps(20, || large.iter().count()) / u128::try_from(LARGE).unwrap_or(1);
 
     ratio(
-        "cost PER ROW of a full walk: 2,480 -> 248,000",
+        "C-L-02 cost PER ROW of a full walk: 2,480 -> 248,000",
         per_row_small,
         per_row_large,
     )
@@ -160,7 +168,11 @@ fn contract_parse_does_not_scan_the_name() -> bool {
     let short = cost_ps(2_000, || ContractName::parse(black_box(real)));
     let long = cost_ps(2_000, || ContractName::parse(black_box(&long_refused)));
 
-    ratio("contract parse: 26 byte name -> 4 KiB name", short, long)
+    ratio(
+        "C-L-03 contract parse: 26 byte name -> 4 KiB name",
+        short,
+        long,
+    )
 }
 
 fn main() {

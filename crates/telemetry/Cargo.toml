@@ -34,3 +34,18 @@ description  = "The structured event stream: one NDJSON line per event, rotated,
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# GATE 8 — the O(1) ratio harness. `harness = false` so it is a plain binary
+# with no benchmarking framework and therefore no dependency; `test = false`
+# because `cargo test` must not run a timing loop, and the coverage gate must
+# not measure one. Same shape and same reasons as crates/core. See D-0034 and
+# crates/telemetry/benches/ratio.rs.
+#
+# A [[bench]] target is not a dependency: it links this crate's own lib and
+# std, and the empty [dependencies] table above stays empty.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false
