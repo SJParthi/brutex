@@ -73,6 +73,7 @@
    * records or 11,200. The coverage grid is bounded by the target window (80
    * cells today) and not by the store.
    */
+  import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
 
   /* ══════════════════════════════════════════════════════════════════════
@@ -107,6 +108,16 @@
   const OVERSCAN = 6;
   /** `web/src/lib/index.svelte.js`: one Map probe up to this prefix length. */
   const MAX_PREFIX = 4;
+  /**
+   * How many causes are shown before the list is folded.
+   *
+   * The tail of this list is long and thin — 28 distinct causes today, of
+   * which 20 are one-run refusals from a form typed wrongly once. Showing all
+   * of them pushed the run log and the timeline below three screens of noise,
+   * so the largest are shown and the rest are one click away. Nothing is
+   * dropped and the count of what is folded is printed.
+   */
+  const TOP_CAUSES = 8;
 
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -289,7 +300,12 @@
           ' — the route exists in this source tree (crates/api/src/audit_json.rs). A 404 means the ' +
           'running process was started before it was built. Restart the API binary.';
       } else {
-        extra = ` — ${(await r.text().catch(() => '')).slice(0, 400)}`;
+        const said = (await r.text().catch(() => '')).trim();
+        extra = said
+          ? ` — ${said.slice(0, 400)}`
+          : ' — the response had no body. Through the dev proxy a 500 with no body is what an API ' +
+            'that is not listening looks like: check that the port in web/vite.config.js is the one ' +
+            'the binary was started on.';
       }
       throw new Error(`GET ${url} answered HTTP ${r.status}${extra}`);
     }
@@ -351,21 +367,27 @@
     }
   }
 
-  /* THE POLL. Faster while the store is moving, slower while it is not, and
-     stopped while the tab is hidden — a monitoring page that keeps a
-     five-second request loop running in a background tab for eight hours is
-     charging the operator's rate budget to show nobody anything. */
+  /**
+   * THE FEED CHANGED, SO EVERYTHING MEASURED SO FAR BELONGS TO ANOTHER FEED.
+   *
+   * `untrack` is load-bearing and its absence was a live bug: this effect
+   * writes `payload`, and `refresh()` READS `payload` on its first synchronous
+   * line. That read made the effect depend on the state it had just written,
+   * so every answer re-ran the effect, which cleared the answer and fetched
+   * again — a request storm, ~30 identical GETs before it was seen in the
+   * network log. The dependency here is the FEED and nothing else.
+   */
   $effect(() => {
     const feed = feeds.active;
     if (!feed) return;
-    // Re-read from scratch when the feed changes: none of the samples above
-    // are this feed's.
-    payload = null;
-    older = [];
-    pagesHeld = 1;
-    samples = [];
-    base = null;
-    refresh();
+    untrack(() => {
+      payload = null;
+      older = [];
+      pagesHeld = 1;
+      samples = [];
+      base = null;
+      refresh();
+    });
   });
 
   /* ══════════════════════════════════════════════════════════════════════
@@ -433,9 +455,19 @@
      stopped while the tab is hidden — a monitoring page that keeps a
      five-second request loop running in a background tab for eight hours is
      spending on nobody's behalf. Declared after `pulse` because it reads it. */
+  /**
+   * A BOOLEAN, NOT THE WHOLE PULSE.
+   *
+   * The poll below must depend on "is it hot", which flips rarely — not on
+   * `pulse`, which is rebuilt on every answer. An interval torn down and
+   * recreated on every answer is an interval that can be reset just before it
+   * would have fired, forever.
+   */
+  const hot = $derived(pulse.moving);
+
   $effect(() => {
     if (!live) return;
-    const period = pulse.moving ? HOT_MS : COLD_MS;
+    const period = hot ? HOT_MS : COLD_MS;
     const tick = () => {
       if (!document.hidden) refresh();
     };
@@ -597,8 +629,12 @@
   function fold(/** @type {string} */ note) {
     if (!note) return '(no reason recorded)';
     let text = note;
-    // `SYMBOL — reason`: the symbol is the subject, not the cause.
-    const dash = text.indexOf(' — ');
+    // `SYMBOL — reason` and `SYMBOL: reason`: the symbol is the SUBJECT, not
+    // the cause, and both separators are in the journal. Stripping it first
+    // also stops the digit rule below from turning `360ONE` into `#ONE`, which
+    // is what the first version of this function did on real records.
+    const sep = ['—', ':'].map((s) => text.indexOf(` ${s} `)).filter((i) => i > 0);
+    const dash = Math.min(...(sep.length ? sep : [-1]));
     if (dash > 0 && dash <= 24 && /^[A-Z0-9&.\-*]+$/.test(text.slice(0, dash))) {
       text = `<instrument>${text.slice(dash)}`;
     }
@@ -684,6 +720,7 @@
     byOrdinal = ords;
   });
 
+  let allCauses = $state(false);
   let query = $state('');
   /** @type {'all'|'loud'|'STORED'|'STORED NOTHING'|'REFUSED'|'NOT STARTED'|'FAILED'} */
   let outcomeFilter = $state('all');
@@ -739,11 +776,18 @@
     const raw = span / target;
     const steps = [900, 1800, 3600, 7200, 21600, 43200, 86400, 604800];
     const step = steps.find((s) => s >= raw) ?? steps[steps.length - 1];
-    const start = Math.floor(from / step) * step;
+    // BUCKETS ALIGNED TO IST, NOT TO UTC. Epoch seconds floor to UTC
+    // boundaries, and IST is UTC+05:30, so an "hourly" bucket labelled from a
+    // raw floor starts at :30 past every hour — arithmetically right and
+    // unreadable beside a column of IST stamps. The offset is a constant:
+    // India has no daylight saving.
+    const IST = 5.5 * 3600;
+    const floorIst = (/** @type {number} */ t) => Math.floor((t + IST) / step) * step - IST;
+    const start = floorIst(from);
     /** @type {Map<number, {at:number, ok:number, mid:number, bad:number, bars:number, failures:number}>} */
     const by = new Map();
     for (const r of rows) {
-      const k = Math.floor(r.at / step) * step;
+      const k = floorIst(r.at);
       let b = by.get(k);
       if (!b) by.set(k, (b = { at: k, ok: 0, mid: 0, bad: 0, bars: 0, failures: 0 }));
       if (isOk(r.outcome)) b.ok += 1;
@@ -840,10 +884,10 @@
       type="button"
       aria-pressed={live}
       onclick={() => (live = !live)}
-      title="Re-read /audit.json every {pulse.moving ? HOT_MS / 1000 : COLD_MS / 1000} s — faster while the store is moving, and stopped while this tab is hidden"
+      title="Re-read /audit.json every {hot ? HOT_MS / 1000 : COLD_MS / 1000} s — faster while the store is moving, and stopped while this tab is hidden"
     >
       <span class="dot" class:acc={live} class:live></span>
-      {live ? `Live · ${pulse.moving ? HOT_MS / 1000 : COLD_MS / 1000}s` : 'Paused'}
+      {live ? `Live · ${hot ? HOT_MS / 1000 : COLD_MS / 1000}s` : 'Paused'}
     </button>
     <button class="btn" type="button" onclick={refresh}>Refresh</button>
   </div>
@@ -1065,6 +1109,7 @@
                     <span
                       class="cell held"
                       role="cell"
+                      class:dense={cell.im / coverage.maxIm > 0.5}
                       style="--fill:{Math.max(0.18, cell.im / coverage.maxIm)}"
                       class:filling={pulse.filling?.month === month}
                       title="{month} — {n0(cell.im)} instrument-months, {n0(cell.bars)} bars"
@@ -1170,7 +1215,7 @@
           </p>
         {:else}
           <ul class="causes">
-            {#each faults.groups as g (g.cause)}
+            {#each allCauses ? faults.groups : faults.groups.slice(0, TOP_CAUSES) as g (g.cause)}
               <li>
                 <div class="cause-head">
                   <span class="tag bad">{n0(g.members)} member{g.members === 1 ? '' : 's'}</span>
@@ -1200,6 +1245,17 @@
               </li>
             {/each}
           </ul>
+          {#if faults.groups.length > TOP_CAUSES}
+            <button class="btn" type="button" onclick={() => (allCauses = !allCauses)}>
+              {allCauses
+                ? `Show the ${TOP_CAUSES} largest only`
+                : `Show all ${n0(faults.groups.length)} causes`}
+            </button>
+            <p class="fine">
+              Ranked by members failed, then by how many runs hit them. The tail is mostly
+              single-run refusals — a form filled in wrongly once — and they are all still here.
+            </p>
+          {/if}
         {/if}
       </section>
 
@@ -1666,9 +1722,15 @@
     border: 1px dashed color-mix(in srgb, var(--down) 45%, transparent);
   }
   .cell.held {
+    /* THE INK IS CHOSEN, NOT ASSUMED. A pale cell with white digits on it is a
+       number nobody can read, which is what a fixed `--on-acc` gave for every
+       month below half the busiest one. */
     background: color-mix(in srgb, var(--acc) calc(var(--fill) * 72%), var(--well));
-    color: var(--on-acc);
+    color: var(--ink);
     border: 1px solid transparent;
+  }
+  .cell.held.dense {
+    color: var(--on-acc);
   }
   .cell.held.filling {
     outline: 2px solid var(--up);
@@ -1849,7 +1911,7 @@
   .lhead,
   .lrow {
     display: grid;
-    grid-template-columns: 52px 148px 118px minmax(120px, 1.4fr) 152px 74px 96px 104px 72px 72px;
+    grid-template-columns: 52px 148px 118px minmax(0, 1.4fr) 152px 74px 96px 104px 72px 72px;
     gap: var(--s4);
     align-items: center;
     padding: 0 var(--s4);
@@ -1900,6 +1962,16 @@
   }
   .lrow.bad {
     background: color-mix(in srgb, var(--down) 5%, transparent);
+  }
+  /* NO CELL WIDENS THE GRID. A timestamp is 118px at 11px type and the narrow
+     layout's column is 92px, which is how this page put 50px of horizontal
+     scroll on a 375px screen. Clipping is the floor; the columns above are
+     sized so it is not reached. */
+  .lrow > span,
+  .lhead > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .lrow .ord {
     color: var(--faint);
@@ -1979,7 +2051,7 @@
   @media (max-width: 1180px) {
     .lhead,
     .lrow {
-      grid-template-columns: 44px 132px 104px minmax(90px, 1fr) 130px 64px 84px 92px 60px 60px;
+      grid-template-columns: 44px 132px 104px minmax(0, 1fr) 130px 64px 84px 92px 60px 60px;
       font-size: var(--fs-xs);
     }
   }
@@ -1987,9 +2059,31 @@
     .scroll {
       padding: var(--s4);
     }
+    /* NARROW IS A LAYOUT, NOT A SCROLLBAR. Measured at 375: the outcome tabs
+       did not wrap and a nine-digit Indian-grouped figure did not fit a 92px
+       stat, so this page pushed 50px of horizontal scroll onto a shell that
+       already had its own. Both are fixed here; the shell's own minimum width
+       is in theme.css and is not this page's to change. */
+    .stats {
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    }
+    .stat .v {
+      font-size: 15px;
+      letter-spacing: -0.3px;
+      overflow-wrap: anywhere;
+    }
+    .controls :global(.tabs) {
+      flex-wrap: wrap;
+      flex: 1 1 100%;
+      min-width: 0;
+    }
+    .verdict .big {
+      font-size: var(--fs-lg);
+    }
     .lhead,
     .lrow {
-      grid-template-columns: 40px 92px 92px 1fr 72px;
+      grid-template-columns: 34px 124px 78px minmax(0, 1fr) 62px;
+      gap: var(--s3);
     }
     .lhead span:nth-child(n + 6),
     .lrow span:nth-child(n + 6) {

@@ -6,6 +6,7 @@
 //!
 //! | Module | Owns |
 //! |---|---|
+//! | [`assets`] | the built front end, read off disk at request time |
 //! | [`audit`] | what every pull did, on disk, one fixed-stride record each |
 //! | [`autopilot`] | the backfill driving itself: what is missing, fetched oldest first |
 //! | [`master`] | reading one vendor's instrument master off disk |
@@ -29,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod assets;
 pub mod audit;
 pub mod audit_json;
 pub mod autopilot;

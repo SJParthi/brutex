@@ -2441,3 +2441,33 @@ whole lake at once — which is what the reader did before D-0063.
 absent group from a null leaf, then a level-aware `expand`, then a real nested
 file to test against — and the last of those does not exist, so the first two
 would be written against a shape nobody has seen.
+
+## §38 — `web/build` is committed output and nothing keeps it fresh
+
+D-0064 commits the front end's build output under `web/` so that a clone with no
+package manager still serves a working page. The cost is stated here rather than
+argued away.
+
+**Nothing regenerates it and nothing checks it.** There is no gate comparing
+`web/build` against `web/src`, and there cannot be one that runs on CI without
+installing the front end's toolchain — which `CLAUDE.md` §2 forbids as a
+build-time dependency of the engine. A change to a `.svelte` file that is not
+followed by a build and a commit of the output is a change the served page does
+not have, and the only symptom is a page that looks one revision old.
+
+**What is measured:** the tree committed on 2026-08-09 is 32 files and 600 KB,
+all of them text. Whether it corresponds to `web/src` at that commit is
+**UNVERIFIED** — it was built on the operator's machine on 2026-08-08 and
+`web/src/routes/audit/+page.svelte` had uncommitted edits at the time it was
+staged.
+
+**What would close it:** a build in the front end's own workflow that commits
+its output, or a served page carrying the digest of the sources it was built
+from so a mismatch is visible rather than silent. Neither exists.
+
+## §39 — the served asset path is not measured
+
+`crates/api/src/assets.rs` does one `canonicalize` and one `read` per request.
+Neither is claimed to be constant-time and neither is benched: the cost is the
+filesystem's, it is not on any path `docs/04-invariants.md` C-01 covers, and no
+number has been taken. Nothing here should be read as an O(1) claim.

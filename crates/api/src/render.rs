@@ -748,12 +748,22 @@ fn clamp(note: &str) -> String {
 /// `/pull` and `/store` moved from disabled to real in D-0038 and now answer.
 /// `/runs` has not: there is no sweep yet, so it stays a `lnk off`, which is
 /// what keeps this rule a rule rather than a phase the nav passed through.
+///
+/// # Why the dashboard is `/dashboard` and not `/`
+///
+/// `/` is the front end's front door — the one the browser opens when the
+/// binary starts, and the one `web/src/routes/+layout.svelte` has listed as
+/// `Markets` since it was written. Two applications on one URL is the defect
+/// `web/vite.config.js` already records against `/audit`: a click renders one
+/// page and a reload renders another, and nothing tells the operator which they
+/// are looking at. Every server-rendered page keeps its own path, this one
+/// included; only the collision is removed. D-0064.
 fn nav(current: &str) -> String {
     let mut out = String::with_capacity(512);
     out.push_str("<nav class=\"top\"><div class=\"inner\">");
-    out.push_str("<a class=\"logo\" href=\"/\">brutex</a><div class=\"links\">");
+    out.push_str("<a class=\"logo\" href=\"/dashboard\">brutex</a><div class=\"links\">");
     for (href, label, built) in [
-        ("/", "Dashboard", true),
+        ("/dashboard", "Dashboard", true),
         ("/instruments", "Instruments", true),
         ("/pull", "Ingest", true),
         ("/audit", "Audit", true),
@@ -800,7 +810,7 @@ pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &[String]) -> S
     body.push_str("<title>brutex · dashboard</title><style>");
     body.push_str(STYLE);
     body.push_str("</style></head><body>");
-    body.push_str(&nav("/"));
+    body.push_str(&nav("/dashboard"));
     let _ = write!(
         body,
         "<header class=\"hero\"><div class=\"hw\">\

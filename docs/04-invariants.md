@@ -1060,6 +1060,44 @@ When a pull is between commits, "the store has not moved" and "nothing is
 running" are indistinguishable from outside, and the console says the former
 rather than the latter. See `docs/06-limits.md`.
 
+## The front end on disk — `crates/api/src/assets.rs`
+
+The binary serves the built front end itself, read from a directory at request
+time. D-0064. Serving files off disk is the one thing in this crate that can
+hand out a file nobody meant to publish, so every rule below is a property that
+has to hold rather than a behaviour that happens to be right today.
+
+Every row was verified by **deleting the line it names and re-running the
+suite**: the tests listed went red, the line was restored, and the suite went
+green again. That is weaker than a mutant survey and is not described as one.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| W-01 | The path is percent-decoded **once**. `%252e%252e` is the literal name `%2e%2e`, never `..` | `api::assets::a_double_encoded_traversal_is_a_name_and_not_a_traversal` | ✓ |
+| W-02 | `..` is refused in every spelling — bare, `%2e%2e`, `..%2f`, `..%5c`, mid-path, and under `_app/` — with the rule named in the body | `api::assets::a_parent_directory_is_refused_in_every_spelling` | ✓ |
+| W-03 | A null byte in the decoded path is a refusal, not a truncation | `api::assets::a_null_byte_is_refused` | ✓ |
+| W-04 | A malformed `%` escape is a refusal, never a byte taken literally | `api::assets::a_malformed_escape_is_refused_rather_than_taken_literally` | ✓ |
+| W-05 | A decoded path that is not UTF-8 is a refusal | `api::assets::a_path_that_is_not_utf8_is_refused` | ✓ |
+| W-06 | Every segment is exactly one `Component::Normal`; `\` is a separator here, not a file-name character | `api::assets::a_leading_separator_is_not_an_ordinary_name_and_a_backslash_is_a_separator` | ✓ |
+| W-07 | A resolved path outside the canonical root is `403` — the symlink case — and a symlink that stays inside is still served | `api::assets::a_symlink_pointing_out_of_the_root_is_refused`, `api::assets::a_symlink_staying_inside_the_root_is_served` | ✓ |
+| W-08 | An absent path with an extension, or under `_app/`, is a **404 and never HTML**; an absent path without one is the client-routed shell | `api::assets::a_real_asset_is_served_and_a_missing_one_is_a_404_not_the_shell`, `api::assets::a_client_routed_path_gets_the_shell_and_so_does_the_root` | ✓ |
+| W-09 | `Content-Type` comes from the extension alone; an unknown extension is `application/octet-stream` and never a guess | `api::assets::every_extension_the_front_end_emits_has_a_type_and_the_rest_do_not_guess` | ✓ |
+| W-10 | A missing asset directory answers **503 naming the directory, the override and the command**, and every JSON route still answers | `api::assets::a_missing_root_is_named_loudly_and_the_server_still_runs`, `api::assets::a_root_that_is_a_file_is_not_a_root` | ✓ |
+| W-11 | An asset directory with no `index.html` says so rather than answering blank | `api::assets::a_build_with_no_shell_says_so_rather_than_answering_blank` | ✓ |
+| W-12 | Only `GET` and `HEAD` reach the front end; anything else is `405` naming the method | `api::assets::only_get_and_head_reach_the_front_end` | ✓ |
+| W-13 | Every registered route wins over a file of the same name on disk, and `POST /pull/spot` is still a `POST` route | `api::server::the_static_handler_is_last_and_never_shadows_a_route` | ✓ |
+| W-14 | `/typeahead.js` is read from disk at request time, and its absence is a named 404 rather than a build failure | `api::assets::the_typeahead_is_read_from_disk_and_says_so_when_it_is_not_there` | ✓ |
+
+**W-13 is the row that needed a decoy.** A routing-order assertion with nothing
+at the shadowed path cannot fail, so `api::server::tests::front` writes a
+`store.json` into the build directory that answers `"DECOY"`. Deleting the
+`/store.json` route from the router makes the test serve it and go red, which is
+what makes the row an assertion rather than a description.
+
+**What is NOT claimed.** That `crates/api` has been mutation-tested. It has not;
+`docs/06-limits.md` records that gap. The reversion check above is what was
+actually done and is the weaker thing.
+
 ## The NSE series tables — layer 4, with the probe asserted as a number
 
 Added by D-0065. `core::vendor::board_of` classified an NSE series code with

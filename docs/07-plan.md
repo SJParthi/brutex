@@ -20,6 +20,53 @@ Status words mean exactly one thing each:
 
 ---
 
+## 0. How the operator runs this
+
+Stated first because it is the requirement everything else serves, and because
+it changed: until D-0064 and D-0068 there were **two** processes on two ports.
+
+### The whole procedure
+
+1. `git clone`
+2. Open the directory in IntelliJ.
+3. Press **Run** on the `api` binary — the run configuration named
+   *"brutex — the whole application (press Run on THIS one)"*.
+4. Open <http://127.0.0.1:8080>.
+
+**No commands. No `npm`. No second process. No Node on the machine.** The
+binary serves the front end itself, the store opens, and the autopilot drives
+the backfill without being asked — `crates/api/src/autopilot.rs`, and
+`/autopilot.json` reports what it is doing.
+
+### Why that works with no Node
+
+`web/build` is **committed** (D-0068), and `crates/api` reads it from disk at
+request time rather than embedding it (D-0064). So a clone already contains the
+built front end, and `cargo build` never looks at it — CI gate 1e proves that
+by building the workspace with `web/` moved aside.
+
+### What is honest about it
+
+* **The first Run compiles the workspace in release and takes minutes.** It is
+  one click, not one second. Later runs are incremental.
+* **The run configuration itself is not in the clone.** `.claude/` is ignored by
+  root `.gitignore:30`, and a tracked IntelliJ `.run/*.xml` is an extension gate
+  1 forbids outside `web/`. What the operator actually gets today is IntelliJ's
+  own Cargo auto-detection of the `api` binary, which does produce a working Run
+  entry — but it is the IDE inferring it, **not this repository promising it**.
+  Closing that needs a decision entry and a gate 1 amendment. **OPEN.**
+* **`web/build` can be stale.** Nothing ties it to `web/src`; see
+  `docs/06-limits.md` §38 and D-0068's cost list.
+
+### The two other configurations, and when they are not what you want
+
+| Configuration | Use it for | Not for |
+|---|---|---|
+| `brutex — the whole application` | Everything. This is the one. | — |
+| `web — Vite dev server` | Front-end development with hot reload, on port 5173. **Needs Node.** | Running the application. It serves only the page and proxies the rest |
+
+---
+
 ## 1. The requirement, in the operator's own terms
 
 Restated here so the plan can be checked against it rather than against memory.
@@ -86,7 +133,7 @@ reader needs to recognise if it returns.
 |---|---|---|
 | 1 | **Drive one Groww pull end to end from the Ingest page** | Nobody has closed the loop once. An 11,200-request backfill on an undriven loop is how a half-written history happens |
 | 2 | **Make the readiness gate a rule, not a courtesy** | `/feeds.json` reports `ready` and the picker disables — but `parse_feed` accepts any feed, so a `curl` bypasses it. The first attempt used the census as the signal, which is **circular**: a feed just bought holds nothing and could never be pulled. Needs an entitlement signal that is not the census |
-| 3 | **Serve `web/build` from the Rust binary** | Two servers today. Assets embed the way `STYLE` already does, so a clone with no Node still builds |
+| 3 | ~~**Serve `web/build` from the Rust binary**~~ — **done: D-0064 serves it from a directory read at run time, D-0068 commits the output.** See §0 | This row used to say "assets embed the way `STYLE` already does". **That was wrong and it is worth recording why:** an embed resolves at compile time against a path under `web/`, and CI gate 1e builds with `web/` *moved aside* — so embedding makes the crate fail to compile under the gate's own premise. The assets are read from disk instead |
 | 4 | ~~**Day-level mode before one-minute** (R-3)~~ — **selectable and landing under `1day/` as of D-0055.** What is left is one vendor fact, below | The operator's stated first step. The saving is smaller than this row used to claim; see the corrected arithmetic |
 | 4a | **Read Groww's daily `candle_interval` word off a live call and write it into one descriptor row** | Its request names the bar length in a parameter and the daily spelling is recorded nowhere — `1day`, `1d` and `day` are all plausible and only one is a request. A daily pull against that feed refuses by name until it is recorded. Dhan needs nothing: its request carries no interval field at all |
 | 5 | **The 2020 → yesterday backfill** | The goal |

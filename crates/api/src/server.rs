@@ -14,7 +14,7 @@
 //! sees decides the run on its own.
 
 use crate::catalog::{Catalog, PAGE_ROWS, Selection};
-use crate::{audit, audit_json, autopilot, bars, census, ingest, master, merge, render};
+use crate::{assets, audit, audit_json, autopilot, bars, census, ingest, master, merge, render};
 use brutex_core::vendor::Vendor;
 use pull::session::{Day, IstMoment};
 use std::fmt::Write as _;
@@ -1110,22 +1110,6 @@ async fn store_json(
             "application/json; charset=utf-8",
         )],
         out,
-    )
-}
-
-/// The type-ahead itself, embedded at compile time.
-///
-/// `include_str!` rather than a file read, for the same reason `render::STYLE`
-/// is: a served binary must not depend on a file being beside it, and an asset
-/// that can 404 is an asset that will. D-0052 permits this explicitly — it is a
-/// text asset compiled in, not a language the engine runs.
-async fn typeahead_js() -> ([(axum::http::HeaderName, &'static str); 1], &'static str) {
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
-        include_str!("../../../web/typeahead.js"),
     )
 }
 
@@ -3805,9 +3789,37 @@ pub enum Broker {
 /// named it. A framework default is a bound somebody else may change, and
 /// `docs/07-o1-architecture.md` law 5 is bound every input **at the boundary**
 /// — which means the boundary says the number.
+///
+/// # The front end is served by the same process, and it is served last
+///
+/// Everything named below is a registered route and every one of them wins.
+/// The built front end is the **fallback**, so no static file can shadow a JSON
+/// route, `POST /pull/spot`, or any server-rendered page — see
+/// [`crate::assets`] for what happens to a path that reaches it.
+///
+/// `/` is deliberately NOT registered. It is the front end's front door — the
+/// `SvelteKit` app's `Markets` page, and what `web/svelte.config.js` and
+/// `web/src/routes/+layout.svelte` have both said `/` is since they were
+/// written. The server-rendered dashboard it displaced answers at
+/// `/dashboard`, unchanged and still linked from the nav; D-0064.
 pub fn router(site: Loaded) -> axum::Router {
+    router_serving(
+        site,
+        std::sync::Arc::new(assets::Assets::new(&assets::web_dir())),
+    )
+}
+
+/// [`router`], over a front end the caller names.
+///
+/// Split for the reason [`run_in`] takes a directory: which directory the
+/// assets come from is read from the environment at the edge, and a test cannot
+/// set an environment variable — `set_var` is `unsafe` under edition 2024 and
+/// this crate forbids `unsafe`. Every routing-order and traversal test drives
+/// this one over a scratch directory it owns.
+pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> axum::Router {
+    let typeahead = std::sync::Arc::clone(&assets);
     axum::Router::new()
-        .route("/", axum::routing::get(home))
+        .route("/dashboard", axum::routing::get(home))
         .route("/instruments", axum::routing::get(page))
         // THE TYPE-AHEAD'S TWO ROUTES. Both are progressive enhancement: the
         // instruments page renders every row without either of them, and a
@@ -3817,7 +3829,16 @@ pub fn router(site: Loaded) -> axum::Router {
         .route("/feeds.json", axum::routing::get(feeds_json))
         .route("/bars.json", axum::routing::get(bars_json))
         .route("/store.json", axum::routing::get(store_json))
-        .route("/typeahead.js", axum::routing::get(typeahead_js))
+        // READ FROM DISK, NOT `include_str!`. It is a file under `web/`, and a
+        // crate that reaches into that tree at compile time is the coupling CI
+        // gate 1e detaches the tree to find. D-0064.
+        .route(
+            "/typeahead.js",
+            axum::routing::get(move || {
+                let typeahead = std::sync::Arc::clone(&typeahead);
+                async move { typeahead.typeahead() }
+            }),
+        )
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
         .route("/pull/fno", axum::routing::post(pull_fno))
@@ -3842,6 +3863,12 @@ pub fn router(site: Loaded) -> axum::Router {
         .route("/store", axum::routing::get(store_get))
         .route("/bars", axum::routing::get(bars_get))
         .route("/health", axum::routing::get(health))
+        // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
+        // every line above keeps winning and nothing on disk can shadow one.
+        .fallback(move |request: axum::extract::Request| {
+            let assets = std::sync::Arc::clone(&assets);
+            async move { assets.respond(request.method(), request.uri().path()) }
+        })
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .with_state(site)
 }
@@ -3958,9 +3985,23 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
         Ok(Command::Serve(addr)) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 let store_root = served_store_root();
-                println!("brutex api listening on http://{addr}/instruments");
+                println!("brutex api listening on http://{addr}/");
                 println!("  masters: {}", dir.display());
                 println!("  store:   {}", store_root.display());
+                // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
+                // is not being served looks exactly like a front end that is
+                // broken, and the operator has no way to tell the two apart
+                // from the browser. `CLAUDE.md` §4.
+                let front = std::sync::Arc::new(assets::Assets::new(&assets::web_dir()));
+                println!(
+                    "  web:     {} ({})",
+                    front.named().display(),
+                    if front.built() {
+                        "serving"
+                    } else {
+                        "NOT BUILT — / says so and names the command"
+                    }
+                );
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
                 let site = Loaded::new(Site::serving(dir, &store_root));
@@ -3974,7 +4015,7 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
-                let code = stopped(serve(listener, router(site), shutdown).await);
+                let code = stopped(serve(listener, router_serving(site, front), shutdown).await);
                 // Ctrl-C stopped the HTTP surface; stop the backfill too. A
                 // sweep aborted mid-append is safe by construction — the bar
                 // file commits its header after the records are synced, so a
@@ -4675,6 +4716,37 @@ mod tests {
         .expect("the client thread must not panic")
     }
 
+    /// A front end on disk, named after the test.
+    ///
+    /// EVERY SERVING TEST TAKES ONE OF THESE RATHER THAN THE REAL `web/build`.
+    /// [`router`] reads the environment, so a test driving it answers `/nope`
+    /// with the shell on a machine that has run a front-end build and with a
+    /// `503` on one that has not — the same machine-dependence `run_in`'s
+    /// doc comment records against `$HOME/.brutex/masters`, and an assertion
+    /// written to survive both outcomes asserts nothing.
+    fn front(name: &str) -> std::sync::Arc<assets::Assets> {
+        let dir = crate::scratch::path(&format!("front-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let build = dir.join("build");
+        std::fs::create_dir_all(build.join("_app")).expect("mkdir");
+        for (path, body) in [
+            (
+                build.join("index.html"),
+                "<!doctype html><title>shell</title>",
+            ),
+            (build.join("_app").join("app.js"), "export const app = 1;"),
+            (dir.join("typeahead.js"), "export const typeahead = 1;"),
+            // A DECOY, on purpose. A file on disk at the same path as a JSON
+            // route is the one way a static handler can silently take a route
+            // over, and the only way to prove it cannot is to put one there.
+            (build.join("store.json"), "\"DECOY\""),
+        ] {
+            let mut f = std::fs::File::create(&path).expect("create");
+            f.write_all(body.as_bytes()).expect("write");
+        }
+        std::sync::Arc::new(assets::Assets::new(&dir))
+    }
+
     #[tokio::test]
     async fn the_server_answers_every_route_and_then_shuts_down_gracefully() {
         let dir = agreeing("serve");
@@ -4692,7 +4764,10 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(Site::load(&dir, &store_root("serve")))),
+            router_serving(
+                Loaded::new(Site::load(&dir, &store_root("serve"))),
+                front("serve"),
+            ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
@@ -4708,10 +4783,15 @@ mod tests {
             "a searched page still carries the notes: {page}"
         );
 
-        // `/` is the DASHBOARD, not a second copy of the instruments page.
-        // It carries the nav, so every other page is one click away, and its
-        // figures are counters rather than a row listing.
-        let root = get(addr, "/").await;
+        // `/dashboard` IS THE DASHBOARD, not a second copy of the instruments
+        // page. It carries the nav, so every other page is one click away, and
+        // its figures are counters rather than a row listing.
+        //
+        // It answered at `/` until D-0064 moved it. `/` is the front end's
+        // front door and two applications on one URL is the defect
+        // `web/vite.config.js` already records against `/audit`: a click
+        // renders one page and a reload renders another.
+        let root = get(addr, "/dashboard").await;
         assert!(root.contains("200 OK"));
         assert!(root.contains("nav class"), "the dashboard carries the nav");
         assert!(
@@ -4805,12 +4885,107 @@ mod tests {
             );
         }
 
+        // AN UNMATCHED PATH IS THE FRONT END'S, NOT A 404. `/nope` is a route
+        // the browser may own — the client router decides — so it gets the
+        // shell. A path that LOOKS like an asset does not: see
+        // `the_static_handler_is_last_and_never_shadows_a_route`.
         let missing = get(addr, "/nope").await;
-        assert!(missing.contains("404"), "{missing}");
+        assert!(missing.contains("200 OK"), "{missing}");
+        assert!(missing.contains("<title>shell</title>"), "{missing}");
 
         let _ = tokio::net::TcpStream::connect(stop_addr).await;
         let outcome = served.await.expect("the serve task must not panic");
         assert!(outcome.is_ok(), "a graceful shutdown is not a failure");
+    }
+
+    /// Every rule in the routing order, over a real socket.
+    ///
+    /// The unit tests in [`crate::assets`] prove what the handler does with a
+    /// path. This one proves WHERE it sits: that a registered route still wins
+    /// when a file of the same name is sitting on disk, that a `POST` route is
+    /// still a `POST` route, and that the handler is reached at all.
+    #[tokio::test]
+    async fn the_static_handler_is_last_and_never_shadows_a_route() {
+        let dir = agreeing("static");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stopper = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let stop_addr = stopper.local_addr().expect("addr");
+        let served = tokio::spawn(serve(
+            listener,
+            router_serving(
+                Loaded::new(Site::load(&dir, &store_root("static"))),
+                front("static"),
+            ),
+            Box::pin(async move { stopper.accept().await.map(|_| ()) }),
+        ));
+
+        // 1. A JSON ROUTE WINS OVER A FILE OF THE SAME NAME. `front` puts a
+        //    `store.json` in the build directory precisely so this can fail.
+        let json = get(addr, "/store.json?feed=groww").await;
+        assert!(json.contains("200 OK"), "{json}");
+        assert!(
+            !json.contains("DECOY"),
+            "the route wins, not the file: {json}"
+        );
+
+        // 2. A SERVER-RENDERED PAGE WINS TOO.
+        let dashboard = get(addr, "/dashboard").await;
+        assert!(dashboard.contains("nav class"), "{dashboard}");
+
+        // 3. `POST /pull/spot` IS STILL A POST ROUTE. If the fallback had
+        //    swallowed it, this would answer with the shell and start nothing —
+        //    which reads exactly like a refusal and is not one.
+        let posted = post(
+            addr,
+            "/pull/spot",
+            "target=nifty&from=2024-01-01&to=2024-01-02",
+        )
+        .await;
+        assert!(
+            !posted.contains("<title>shell</title>"),
+            "the ingest route answers, not the front end: {posted}"
+        );
+
+        // 4. A REAL ASSET IS SERVED, WITH ITS TYPE.
+        let asset = get(addr, "/_app/app.js").await;
+        assert!(asset.contains("200 OK"), "{asset}");
+        assert!(asset.contains("text/javascript"), "{asset}");
+        assert!(asset.contains("export const app"), "{asset}");
+
+        // 5. THE TYPE-AHEAD COMES OFF DISK NOW, NOT OUT OF THE BINARY.
+        let script = get(addr, "/typeahead.js").await;
+        assert!(script.contains("200 OK"), "{script}");
+        assert!(script.contains("text/javascript"), "{script}");
+        assert!(script.contains("export const typeahead"), "{script}");
+
+        // 6. A MISSING ASSET IS A 404 AND NEVER HTML.
+        let missing = get(addr, "/assets/missing.js").await;
+        assert!(missing.contains("404"), "{missing}");
+        assert!(
+            !missing.contains("<!doctype"),
+            "a missing script must not answer with a page: {missing}"
+        );
+
+        // 7. A CLIENT ROUTE GETS THE SHELL.
+        let db = get(addr, "/db").await;
+        assert!(db.contains("200 OK"), "{db}");
+        assert!(db.contains("<title>shell</title>"), "{db}");
+
+        // 8. AND A TRAVERSAL IS REFUSED OVER THE WIRE, not only in a unit test.
+        let escape = get(addr, "/%2e%2e/Cargo.toml").await;
+        assert!(escape.contains("400"), "{escape}");
+        assert!(!escape.contains("[package]"), "nothing leaked: {escape}");
+
+        let _ = tokio::net::TcpStream::connect(stop_addr).await;
+        served
+            .await
+            .expect("task")
+            .expect("a graceful shutdown is not a failure");
     }
 
     /// A signal that has already fired.
@@ -4860,7 +5035,7 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(site(name, &dir))),
+            router_serving(Loaded::new(site(name, &dir)), front(name)),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
         body(addr).await;
@@ -5511,7 +5686,7 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(built)),
+            router_serving(Loaded::new(built), front("pill")),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
@@ -5635,7 +5810,10 @@ mod tests {
         let stop_addr = stopper.local_addr().expect("addr");
         let served = tokio::spawn(serve(
             listener,
-            router(Loaded::new(Site::load(&dir, &store_root("hatchhttp")))),
+            router_serving(
+                Loaded::new(Site::load(&dir, &store_root("hatchhttp"))),
+                front("hatchhttp"),
+            ),
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
