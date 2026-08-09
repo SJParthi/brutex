@@ -71,6 +71,7 @@ Measured on an Apple M4 Pro, 48 GB, macOS 26.5.2, rustc 1.97.1.
 |---|---|---|
 | One mask evaluation | **0.2007–0.2101 ns**, flat 1→74 bits (**1.047×**) | The hardware floor. Identical at 0%, 28% and 100% hit rate, so no data-dependent branch |
 | Universe membership | worst probe **6** (750 members) / **7** (213 members) | Replaced ~10 comparisons that grew with the list |
+| NSE series membership | worst probe **2** (6 members) / **1** (2) / **6** (120) | Layer 4's last holdout. `core::vendor::board_of` binary-searched these three until D-0065. The 120-code table measured **10** at 256 slots and was refused by its own test until it was 512 — the second time this section's own warning has caught a table that was accepted by `build` and too slow to ship |
 | Page render, 2,787 → 50,000 instruments | **0.929× – 1.088×**, every sort column × pill, plus the hatch and a clamped deep page | Layer 12. `cargo bench -p api`, exit 0, 2026-08-07 — re-measured for D-0045. Absolute ~137–166 µs at *both* sizes, release profile. Marginal cost of one more instrument: **0 – 259 ps** per request (C-15), against 85,400 ps before D-0042 |
 | Dashboard, 2 → 50,000 instruments | **1.052×** | Layer 12. Was 80.640× under a docstring that already said "nothing here scans" (C-16) |
 | Instruments **search**, 2,787 → 50,000 | **6.53 ms** at n = 50,000 for a 2-byte needle | **NOT flat and not asserted.** Printed by the same bench, never gated. `docs/06-limits.md` §24 |

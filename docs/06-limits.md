@@ -299,18 +299,29 @@ not claimed.
 
 ---
 
-## 11. The instrument universes are snapshots, and lookup is O(log n)
+## 11. The instrument universes are snapshots
 
-`crates/core/src/universe.rs`. D-0029.
+`crates/core/src/universe.rs`. D-0029, D-0065.
 
-**Not constant time.** Membership is a `binary_search` over a sorted array —
-O(log n), at most ten comparisons on 750 entries. `CLAUDE.md` golden rule 4
-requires constant per-operation cost, and this is a departure from it, written
-down here rather than glossed. It is defensible because membership is asked
-**once per instrument at merge time and never once per bar**, so it is not on
-the path the rule protects; a perfect hash would make it O(1) and is not worth
-the machinery at this size. If a universe lookup ever moves onto the per-bar
-path, this entry is the reason it must be replaced first.
+**THIS SECTION SAID "lookup is O(log n)" AND THAT HAS NOT BEEN TRUE FOR SOME
+TIME.** The text read: "Membership is a `binary_search` over a sorted array —
+O(log n), at most ten comparisons on 750 entries ... a perfect hash would make
+it O(1) and is not worth the machinery at this size." `universe.rs` holds
+`MemberIndex`, an open-addressed table built at compile time, and its worst
+probe is asserted at `<= 8` and measured at 6 on 750 members and 7 on 213. The
+machinery was built and this register was never updated, so the one document
+whose job is to list what is **not** constant time was carrying a departure
+that had already been closed. D-0029's "**Rejected — a perfect hash**"
+paragraph says the same expired thing and is left as written, because that
+ledger is append-only; D-0065 is where the correction is signed. So does
+`U-01`'s row in `docs/04-invariants.md`, whose test is named
+`..._so_binary_search_is_valid`.
+
+**Nothing about membership is a departure from golden rule 4 now.** The last
+`binary_search` anywhere in `crates/*/src/**.rs` was `core::vendor::board_of`,
+removed by D-0065; CI gate 11 rule 1 refuses the construct workspace-wide with
+an allowlist that is empty and stays empty. What remains below is about the
+**data**, not the lookup.
 
 **UNVERIFIED against any exchange source.** Neither list has been checked
 against an NSE constituent circular:

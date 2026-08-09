@@ -34,6 +34,7 @@ use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use crate::isin::Isin;
 use crate::price::Paisa;
 use crate::symbol::Symbol;
+use crate::universe::MemberIndex;
 
 /// Which vendor a row came from.
 ///
@@ -850,8 +851,12 @@ enum EquityVerdict {
 /// still declines; every one of them is `ES` in Dhan's paper-class column; and
 /// they are ordinary listed companies.
 ///
-/// Sorted, because `board_of` binary-searches it and an unsorted array makes
-/// `binary_search` return garbage in silence.
+/// Sorted, and no longer for a search. `board_of` probes
+/// [`EQUITY_BOARD_INDEX`], so order carries no correctness weight at all now;
+/// it is kept because a sorted list is the one a human can append to without
+/// re-reading it, and because sortedness is how
+/// `the_measured_series_tables_are_sorted_disjoint_and_complete` catches a
+/// duplicate.
 pub const EQUITY_BOARD_SERIES: [&str; 6] = ["BE", "BZ", "E1", "EQ", "IT", "SZ"];
 
 /// The NSE series codes that are the SME board.
@@ -878,7 +883,8 @@ pub const SME_BOARD_SERIES: [&str; 2] = ["SM", "ST"];
 /// outcome — [`Skip::UnrecognisedListingClass`]. The list is data, so a new
 /// NSE debt series is a one-line append and nothing else moves.
 ///
-/// Sorted, for `board_of`'s binary search.
+/// Sorted for the same reason [`EQUITY_BOARD_SERIES`] is: a human appends to
+/// it, and `board_of` probes [`NON_EQUITY_INDEX`] rather than searching here.
 pub const NON_EQUITY_SERIES: [&str; 120] = [
     "AK", "AL", "AM", "AN", "AZ", "BA", "BC", "BR", "BS", "BU", "BV", "BW", "BX", "D1", "GB", "GS",
     "IV", "MF", "N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA", "NB", "NC", "ND",
@@ -889,6 +895,48 @@ pub const NON_EQUITY_SERIES: [&str; 120] = [
     "Z4", "Z5", "Z6", "Z7", "Z8", "Z9", "ZC", "ZF", "ZG", "ZH", "ZI", "ZJ", "ZK", "ZL", "ZM", "ZN",
     "ZO", "ZP", "ZQ", "ZR", "ZS", "ZT", "ZY", "ZZ",
 ];
+
+// THE THREE SERIES TABLES, INDEXED. `docs/07-o1-architecture.md` layer 4 is
+// "no search of any kind ... never `binary_search`", and it carries no
+// exemption for a small table. `board_of` searched all three until D-0065.
+//
+// The replacement is not new machinery. [`MemberIndex`] already exists in
+// `crate::universe` for exactly this, already builds at compile time with no
+// dependency and no lazy initialisation, and already carries the probe-length
+// test layer 4's "How a layer is proven" section demands. These three tables
+// are 6, 2 and 120 entries — an order of magnitude SMALLER than the 750 that
+// justified building it. Writing the first entry into a rule-1 allowlist whose
+// comment reads "no allowlist, layer 4 is unconditional", in order to keep
+// three calls the crate beside it already knows how to remove, is the move
+// that turns an allowlist into a place failures go to be filed.
+//
+// What it cost: three static tables, 16 + 8 + 512 slots of
+// `Option<&'static str>`. Constant, and it does not grow with the lists.
+//
+// Every table is at most half full, which is what bounds the probe;
+// `MemberIndex::build` asserts that at COMPILE time, so an over-full table
+// cannot ship. The measured worst probe is asserted as a number by
+// `the_series_tables_probe_in_bounded_time`, for the reason layer 4 records:
+// the first open-addressed table anyone wrote here measured 14 probes and was
+// refused by its own test until it was widened.
+
+/// [`EQUITY_BOARD_SERIES`], indexed. 6 members in 16 slots.
+static EQUITY_BOARD_INDEX: MemberIndex<16> = MemberIndex::build(&EQUITY_BOARD_SERIES);
+
+/// [`SME_BOARD_SERIES`], indexed. 2 members in 8 slots.
+static SME_BOARD_INDEX: MemberIndex<8> = MemberIndex::build(&SME_BOARD_SERIES);
+
+/// [`NON_EQUITY_SERIES`], indexed. 120 members in 512 slots.
+///
+/// **512 and not 256, because the test said so.** At 256 the table is under
+/// half full and `build` accepts it, and the worst probe measured **10** —
+/// over the `<= 8` every `MemberIndex` in this crate is held to. These are
+/// two-byte codes over a narrow alphabet, so FNV-1a clusters them harder than
+/// it clusters ticker symbols. One doubling takes the worst probe from 10 to
+/// **6**. That is layer 4's "How a layer is proven" happening again, with the
+/// same outcome it records the first time: the test refused the table until it
+/// was widened, and the number in the assertion is why anybody found out.
+static NON_EQUITY_INDEX: MemberIndex<512> = MemberIndex::build(&NON_EQUITY_SERIES);
 
 /// What an NSE board series means, for either vendor.
 ///
@@ -915,11 +963,15 @@ fn board_of(series: &str) -> EquityVerdict {
     // Dhan pads this column, e.g. `"   ES   "`. Trimming Groww's already-tight
     // values costs nothing and cannot change a verdict.
     let series = series.trim();
-    if EQUITY_BOARD_SERIES.binary_search(&series).is_ok() {
+    // Hash, mask, probe — three times at most, each of them constant. The
+    // tables are disjoint (asserted), so the order these are asked in cannot
+    // change a verdict; it is the order of decreasing frequency, which is a
+    // property of the data rather than of correctness.
+    if EQUITY_BOARD_INDEX.contains(series) {
         EquityVerdict::MainBoard
-    } else if SME_BOARD_SERIES.binary_search(&series).is_ok() {
+    } else if SME_BOARD_INDEX.contains(series) {
         EquityVerdict::Sme
-    } else if NON_EQUITY_SERIES.binary_search(&series).is_ok() {
+    } else if NON_EQUITY_INDEX.contains(series) {
         EquityVerdict::NotEquity
     } else {
         EquityVerdict::Unrecognised
@@ -1913,8 +1965,11 @@ mod tests {
 
     #[test]
     fn the_measured_series_tables_are_sorted_disjoint_and_complete() {
-        // `board_of` binary-searches all three, and binary_search on an
-        // unsorted array returns garbage in silence.
+        // Sortedness no longer carries a search — `board_of` probes three
+        // `MemberIndex` tables — but a strictly increasing walk is still how a
+        // duplicate is caught, and a duplicate is what would make one code
+        // appear in a table twice and the census counts disagree with the
+        // list.
         for (name, list) in [
             ("EQUITY_BOARD_SERIES", EQUITY_BOARD_SERIES.as_slice()),
             ("SME_BOARD_SERIES", SME_BOARD_SERIES.as_slice()),
@@ -1941,6 +1996,77 @@ mod tests {
             EQUITY_BOARD_SERIES.len() + SME_BOARD_SERIES.len() + NON_EQUITY_SERIES.len(),
             128
         );
+    }
+
+    /// I-38. The three series tables answer in a bounded number of probes, and
+    /// the bound is a NUMBER rather than the word "small".
+    ///
+    /// `docs/07-o1-architecture.md` layer 4: a layer is built when a test
+    /// asserts the bound as a number. The section records why — the first
+    /// open-addressed table written in this workspace measured **14** probes,
+    /// worse than the `binary_search` it replaced and still O(1) by
+    /// definition, and only its own test caught that.
+    ///
+    /// Asserted at the same `<= 8` the universe tables are held to, so one
+    /// number governs every `MemberIndex` in the crate, and PRINTED so a
+    /// regression that stays inside the bound is still visible in the log.
+    #[test]
+    fn the_series_tables_probe_in_bounded_time() {
+        fn worst<const N: usize>(idx: &MemberIndex<N>, members: &[&str]) -> usize {
+            let mut worst = 0;
+            for m in members {
+                // Walks the table the way `contains` does and COUNTS the
+                // steps, rather than trusting the shape of the code. The start
+                // index comes from `universe::mask` itself rather than from a
+                // copy of it: a copy is free to disagree with the thing under
+                // test, and would then measure a probe nobody performs.
+                let mut at = crate::universe::mask(crate::universe::fnv1a(m), N);
+                let mut steps = 1;
+                while let Some(held) = idx.slots[at] {
+                    if held == *m {
+                        break;
+                    }
+                    at = (at + 1) & (N - 1);
+                    steps += 1;
+                }
+                worst = worst.max(steps);
+            }
+            worst
+        }
+        let eq = worst(&EQUITY_BOARD_INDEX, &EQUITY_BOARD_SERIES);
+        let sme = worst(&SME_BOARD_INDEX, &SME_BOARD_SERIES);
+        let non = worst(&NON_EQUITY_INDEX, &NON_EQUITY_SERIES);
+        assert!(
+            eq <= 8,
+            "6 in 16 slots must probe at most 8 times, got {eq}"
+        );
+        assert!(
+            sme <= 8,
+            "2 in 8 slots must probe at most 8 times, got {sme}"
+        );
+        assert!(
+            non <= 8,
+            "120 in 512 slots must probe at most 8 times, got {non}"
+        );
+        println!("worst probe: equity {eq}, sme {sme}, non-equity {non}");
+        // And the tables answer the questions `board_of` asks of them, which
+        // is the property the probe bound is only worth having for.
+        for code in EQUITY_BOARD_SERIES {
+            assert!(EQUITY_BOARD_INDEX.contains(code), "{code} missing");
+        }
+        for code in SME_BOARD_SERIES {
+            assert!(SME_BOARD_INDEX.contains(code), "{code} missing");
+        }
+        for code in NON_EQUITY_SERIES {
+            assert!(NON_EQUITY_INDEX.contains(code), "{code} missing");
+        }
+        // A code in no table is `false` in all three, which is what makes
+        // `Unrecognised` reachable at all.
+        for absent in ["QQ", "", "  ", "EQUITY"] {
+            assert!(!EQUITY_BOARD_INDEX.contains(absent));
+            assert!(!SME_BOARD_INDEX.contains(absent));
+            assert!(!NON_EQUITY_INDEX.contains(absent));
+        }
     }
 
     #[test]

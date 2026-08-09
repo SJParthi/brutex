@@ -16,14 +16,20 @@
 //!
 //! # Cost
 //!
-//! Lookup is a binary search over a sorted array — O(log n) on 750 entries, so
-//! at most 10 comparisons. Not O(1), and saying otherwise would be false; a
-//! perfect hash would make it O(1) and is not worth the machinery at this size.
-//! Recorded as a departure from `CLAUDE.md` golden rule 4 in
-//! `docs/06-limits.md` §11, because a departure nobody wrote down is a claim
-//! nobody can check. Neither list is on the sweep's per-bar path — membership
-//! is asked once per instrument at merge time, never once per bar — which is
-//! why O(log n) is acceptable here and would not be there.
+//! Lookup is one hash, one mask and a bounded probe of [`MemberIndex`] — a
+//! table this file builds at compile time. The worst probe is asserted at
+//! `<= 8` and measured at 6 on 750 members and 7 on 213.
+//!
+//! **This paragraph said "a binary search over a sorted array — O(log n) on 750
+//! entries, so at most 10 comparisons ... a perfect hash would make it O(1) and
+//! is not worth the machinery at this size."** The machinery was built, in this
+//! file, and neither this sentence nor `docs/06-limits.md` §11 was walked back
+//! for it — so the crate documented a departure from `CLAUDE.md` golden rule 4
+//! that no longer existed. Corrected by D-0065, which removed the workspace's
+//! last `binary_search` next door in [`crate::vendor`] and found this on the
+//! way. Neither list is on the sweep's per-bar path in any case — membership is
+//! asked once per instrument at merge time — but that is now a fact about
+//! where it is called, not an excuse for what it costs.
 //!
 //! # What consults this
 //!
@@ -1121,7 +1127,12 @@ pub fn of_equity(symbol: &str) -> Universe {
 /// Costs one pointer per slot — 32 KiB for the larger table. That is the space
 /// traded for the time, and it is constant rather than growing with the data.
 pub struct MemberIndex<const N: usize> {
-    slots: [Option<&'static str>; N],
+    /// `pub(crate)` so the probe-length tests can walk the table the way
+    /// [`Self::contains`] does and COUNT the steps. Layer 4's bound is the
+    /// probe length, and a test that cannot see the slots can only assert the
+    /// answer, never the cost. Crate-visible and no wider: nothing outside
+    /// `core` has a reason to reach past `contains`.
+    pub(crate) slots: [Option<&'static str>; N],
 }
 
 impl<const N: usize> MemberIndex<N> {
@@ -1230,7 +1241,12 @@ impl<const N: usize> MemberIndex<N> {
 /// truncate on a 32-bit pointer target before the mask could narrow it. After
 /// the mask the value is at most `n - 1`, which fits any pointer width this
 /// engine builds for.
-const fn mask(hash: u64, n: usize) -> usize {
+///
+/// `pub(crate)` for the same reason [`MemberIndex::slots`] is: a probe-length
+/// test in another module of this crate must start where `contains` starts,
+/// and a second copy of this arithmetic in a test is a copy free to disagree
+/// with the one under test.
+pub(crate) const fn mask(hash: u64, n: usize) -> usize {
     #[expect(
         clippy::cast_possible_truncation,
         reason = "the mask has already reduced the value to at most n-1, and n \

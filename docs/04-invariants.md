@@ -1059,3 +1059,36 @@ is in flight, because nothing writes a record for a run that has not finished.
 When a pull is between commits, "the store has not moved" and "nothing is
 running" are indistinguishable from outside, and the console says the former
 rather than the latter. See `docs/06-limits.md`.
+
+## The NSE series tables — layer 4, with the probe asserted as a number
+
+Added by D-0065. `core::vendor::board_of` classified an NSE series code with
+three `binary_search` calls, which `docs/07-o1-architecture.md` layer 4 forbids
+without qualification — "no search of any kind ... **never `binary_search`**".
+It probes three `MemberIndex` tables now, the same open-addressed structure
+`crates/core/src/universe.rs` already built to retire a `binary_search` over
+750 entries.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| I-38 | Every series table answers in at most 8 probes, measured by walking it the way `contains` does, and every measured code is found while an absent one is found in none of the three | `core::vendor::the_series_tables_probe_in_bounded_time` | ✓ |
+
+**The number in that row is the row.** Layer 4's "How a layer is proven" records
+that the first open-addressed table written in this workspace measured **14**
+probes — worse than the `binary_search` it replaced, and still O(1) by
+definition — and that only its own test caught it. It happened again here: 120
+codes in 256 slots is under half full, `MemberIndex::build` accepted it, and the
+worst probe measured **10**. The table is 512 slots and the worst probe is
+**6** because the assertion refused the first attempt. A row saying "the probe
+is bounded" without a number would have shipped the 10.
+
+**I-16 is not superseded and its test is unchanged.** Sortedness no longer makes
+a search valid, because there is no search; it is still how a duplicate in a
+hand-maintained list is caught, and that is what the test asserts. The row's
+sentence still says "so `binary_search` cannot return garbage", and so does
+`U-01`'s, whose test is *named* `..._so_binary_search_is_valid`. Both describe a
+reason that has expired rather than a property that has. They are left alone
+here on purpose — renaming a test moves a token CI gate 10 scrapes out of this
+file, and doing that in the same change as the code it describes is how a green
+gate stops meaning anything. Named here so the next reader finds it stated
+rather than discovers it.
