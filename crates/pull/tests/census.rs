@@ -1013,3 +1013,149 @@ fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
         );
     }
 }
+
+// ===========================================================================
+// The version-1 census upgrades, and only when a run has something to record
+// ===========================================================================
+
+/// A version-1 census file at `path`, holding exactly `entries`.
+///
+/// Built from the version-1 header slot and the version-1 entry images
+/// directly, not from `Manifest::image`, which writes the current version. The
+/// whole point is a file this build did **not** write.
+fn write_version_1_census(path: &Path, entries: &[Entry]) {
+    let mut file = vec![0u8; 32_768];
+    let header = pull::manifest::ManifestHeader {
+        format_version: 1,
+        entry_stride: 64,
+        vendor: VENDOR,
+        // Even, so the commit belongs in slot 0, which is where it is written.
+        generation: 2,
+        n_valid: entries.len() as u64,
+        n_keys: entries.len() as u64,
+        total_rows: entries.iter().map(|e| e.rows).sum(),
+    };
+    file[..64].copy_from_slice(&header.image());
+    for entry in entries {
+        file.extend_from_slice(&entry.image_v1());
+    }
+    fs::create_dir_all(path.parent().expect("a parent")).expect("the manifest directory");
+    fs::write(path, &file).expect("a version-1 census");
+}
+
+/// M-25, from the operator's side: a version-1 census on disk survives a run,
+/// and the run leaves it at version 2 with everything it held.
+///
+/// **This is the guard on `install_census`'s upgrade branch.** Without it the
+/// run takes the positional-append path: one 128-byte entry written at
+/// `HEADER_LEN + ordinal·128` over a file whose entries are 64 bytes apart,
+/// which lands on top of entries the census already holds and publishes a
+/// counter over bytes that are not entries. Remove `census.upgrading()` from
+/// that condition and this test goes red.
+#[test]
+fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
+    let scratch = Scratch::new("UPGRADE");
+    let archive = scratch.archive(&[("NIFTY", BODY)]);
+    let store = scratch.store();
+    let path = manifest_path(&store, VENDOR);
+
+    // A month this run will not touch, recorded the way version 1 recorded it.
+    let older = Entry {
+        key: EntryKey {
+            month: YearMonth::new(2021, 5).expect("May 2021"),
+            ..key("BANKNIFTY")
+        },
+        rows: 4_321,
+        first_ts_micros: 1_000,
+        last_ts_micros: 2_000,
+    };
+    write_version_1_census(&path, &[older]);
+    let before = fs::read(&path).expect("the version-1 census");
+    assert_eq!(before.len(), 32_768 + 64, "one 64-byte entry, version 1");
+    assert_eq!(&before[..8], b"BRUTEXM1");
+    assert_eq!(census_of(&store).loaded_version(), 1);
+
+    // A RUN THAT RECORDS NOTHING LEAVES IT ALONE. The archive is not read at
+    // all here: an empty window stores nothing, so nothing is recorded, so
+    // nothing is installed — `CLAUDE.md` §3 rule 5 about the bytes.
+    let quiet = BarRequest {
+        window: Window::new(
+            Day::new(2019, 1, 2).expect("a day"),
+            Day::new(2019, 1, 3).expect("a day"),
+        )
+        .expect("a forward window"),
+        ..request()
+    };
+    let done = run(&archive, &store, &quiet);
+    assert_eq!(done.counted, 0, "nothing landed in that window");
+    assert_eq!(
+        fs::read(&path).expect("still there"),
+        before,
+        "a run that recorded nothing left a version-1 census byte for byte as \
+         it was, rather than rewriting it to say the same thing"
+    );
+
+    // AND THE FIRST RUN THAT RECORDS SOMETHING UPGRADES THE WHOLE FILE.
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.failures, Vec::new(), "no member failed");
+    assert_eq!(done.counted, 1);
+
+    let after = fs::read(&path).expect("the upgraded census");
+    assert_eq!(
+        after.len() as u64,
+        HEADER_LEN + 2 * ENTRY_STRIDE,
+        "two entries at the new 128-byte stride, not one old and one new"
+    );
+
+    let census = census_of(&store);
+    assert_eq!(census.loaded_version(), 2);
+    // The commit lands in slot `generation % 2`, and it is the version-2 slot.
+    let slot = usize::try_from(census.header().generation % 2).expect("0 or 1") * 16_384;
+    assert_eq!(&after[slot..slot + 8], b"BRUTEXM2", "version 2 now");
+    assert_eq!(census.header().format_version, 2);
+    assert_eq!(census.header().entry_stride, 128);
+    assert!(!census.upgrading(), "and it will not be upgraded again");
+    assert_eq!(census.entries(), 2);
+    assert_eq!(census.keys(), 2);
+    assert_eq!(census.total_rows(), 4_321 + BARS as u64);
+    assert_eq!(census.degraded_reason(), None);
+
+    // THE MONTH CARRIED ACROSS KEEPS ITS COUNTERS AND SAYS "NOT RECORDED".
+    assert_eq!(census.entry(&older.key), Some(older));
+    assert_eq!(
+        census.closes(&older.key),
+        Some(pull::manifest::Closes::UNKNOWN),
+        "version 1 never priced it, and moving it does not price it"
+    );
+
+    // THE MONTH THIS RUN WROTE CARRIES REAL PRICES, off its own bar file.
+    let landed = census
+        .closes(&key("NIFTY"))
+        .expect("the month this run recorded");
+    // Scoped, because the handle holds the month's advisory lock and the run
+    // below takes it again.
+    let (first_close, last_close) = {
+        let file = bar_file(&store, "NIFTY");
+        let first = file.read_record(0).expect("record 0");
+        let last = file
+            .read_record(file.header().n_valid - 1)
+            .expect("the last record");
+        (first.close, last.close)
+    };
+    assert_eq!(
+        landed.paisa(),
+        Some((first_close, last_close)),
+        "the census records the FILE's first and last close, in paisa"
+    );
+    assert_ne!(first_close, 0, "and this fixture's prices are not zero");
+
+    // A SECOND IDENTICAL RUN CHANGES NOTHING. The closes are in the equality
+    // probe, so once they are recorded the file stops moving.
+    let done = run(&archive, &store, &request());
+    assert_eq!(done.failures, Vec::new());
+    assert_eq!(
+        fs::read(&path).expect("still there"),
+        after,
+        "the census is byte for byte what the upgrading run left"
+    );
+}

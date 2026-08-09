@@ -484,12 +484,29 @@ jobs:
           # vendor or account uses.
           late_scaffold='census-incremental fits skipped daily unstorable'
 
+          # ---- group 20: THE MANIFEST FORMAT'S OWN FIELD NAMES, and nothing
+          # else. `pull::manifest::Layout::declare` refuses a degenerate format
+          # geometry and NAMES THE FIELD it refused —
+          # `ManifestError::DegenerateLayout { field }` — exactly as
+          # `store::layout::Layout::declare` does one crate away, and for the
+          # reason stated there: a `const` panic cannot format a field name, so
+          # the fallible door is where an operator finds out which of the four
+          # numbers was wrong.
+          #
+          # All four are field names on a struct in THIS repository, spelled the
+          # way the struct spells them. None is an account, an environment, a
+          # vendor or a field of a vendor's record: `magic` is the eight bytes a
+          # manifest begins with, `version` is its format number, and the two
+          # strides are the byte width of one entry in the two widths this
+          # workspace computes offsets in. D-0067.
+          layout_field='magic version entry_stride entry_stride_len'
+
           allowed="${seg_shape} ${vendor_wire} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
-          ${totp_vector} ${late_scaffold}"
+          ${totp_vector} ${late_scaffold} ${layout_field}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

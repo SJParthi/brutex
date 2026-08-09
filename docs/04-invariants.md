@@ -325,6 +325,37 @@ Every row here is proven by a test that runs today.
 | M-17 | The loaded index is reserved from the committed entry count, not from the region's byte length, so the reservation is proportional to the census and never to the file | `pull::unit::the_loaded_index_is_reserved_from_the_census` | ✓ |
 | M-18 | The reservation is the census doubled and never past `MAX_ENTRIES`; from half the ceiling upward it covers every append `advance` will ever accept, so no append can rehash at all | `pull::unit::the_reservation_is_capped_at_the_design_ceiling` | ✓ |
 | M-19 | A loaded index carries free room for at least `n_valid` further appends, and none of them rebuilds the table — checked at a census of `7·2^8`, where a table reserved to exactly the census has zero free slots | `pull::unit::a_loaded_index_carries_headroom_for_the_appends_after_it` | ✓ |
+| M-20 | A whole manifest survives its own image, through the reader unchanged — zero entries, one, several, and a key recorded twice | `pull::unit::a_whole_manifest_survives_its_own_image` | ✓ |
+| M-21 | The image puts every byte at the address the reader computes for it: the slot at `generation % 2`, entry *i* at `offset_of(i)`, and the length at the commit's own `durable_through` | `pull::unit::the_image_puts_every_byte_where_the_reader_looks_for_it` | ✓ |
+| M-22 | A half-installed image is refused by name, never believed | `pull::unit::a_half_installed_image_is_refused_by_name` | ✓ |
+| M-23 | The image carries the entry LOG, in the order it was recorded, not the index over it — an older entry for a key is never compacted away | `pull::unit::the_log_is_the_entry_region_in_order` | ✓ |
+| M-24 | A census that loaded degraded images as its **repair**, and the repaired file reloads clean | `pull::unit::a_degraded_census_images_as_its_repair` | ✓ |
+| M-25 | A version-1 census still reads after version 2 exists — every counter, every entry, at version 1's own 64-byte stride — and every one of its closes reads back as *not recorded*, never as zero | `pull::unit::an_old_version_manifest_still_reads_after_version_2_exists` | ✓ |
+| M-26 | A version-2 entry round-trips both closes exactly, and a pair that is half-recorded or not a price is refused rather than half-believed | `pull::unit::a_version_2_entry_round_trips_both_closes_exactly` | ✓ |
+| M-27 | An absent close is distinguishable from a close of zero — in the type, in the sixteen bytes, and across a whole census; and "not held at all" is a third answer, not the same one | `pull::unit::an_absent_close_is_not_a_zero_close` | ✓ |
+| M-28 | Rebuilding a census from the same rows is byte-identical, and a version-1 census converges: the upgrade is paid once and imaging the result again changes not one byte | `pull::unit::rebuilding_a_census_from_the_same_rows_is_byte_identical` | ✓ |
+| M-29 | The stride, the header fields and the entry's two halves are the geometry `docs/02-store-format.md` §11 states, pinned against hardcoded numbers rather than against the constants themselves | `pull::unit::the_manifest_geometry_is_what_the_format_document_says` | ✓ |
+| M-30 | A version-2 entry opens with a version-1 entry, byte for byte, which is why one decoder serves both versions' base fields | `pull::unit::a_version_2_entry_opens_with_a_version_1_entry` | ✓ |
+| M-31 | A flipped bit in any of a version-2 entry's 1,024 bits is detected — every byte is covered by exactly one of its two checksums | `pull::unit::a_flipped_bit_in_any_version_2_entry_byte_is_detected` | ✓ |
+| M-32 | A known version keeps its stride after a new one exists, proven through the production resolver against a table already holding a third version | `pull::unit::a_known_manifest_version_keeps_its_stride_after_a_new_one_exists` | ✓ |
+| M-33 | Every declared layout states one stride in both widths, a degenerate row is refused **by field**, and the stride bound is exact at the limit | `pull::unit::every_known_manifest_layout_states_one_stride_in_both_widths` | ✓ |
+| M-34 | A month whose file **is** the batch just written takes its closes from that batch and issues no read; every other shape falls to the two positional reads rather than recording a suffix's first close as the month's | `pull::ingest::tests::a_virgin_month_takes_its_closes_from_the_batch_it_just_wrote` | ✓ |
+| M-35 | A version-1 census on disk is left byte for byte alone by a run that records nothing, and is rewritten **whole** at version 2 by the first run that records anything — never appended to at a stride the file does not have | `pull::census::a_version_1_census_upgrades_on_the_first_run_that_records_anything` | ✓ |
+
+M-25 through M-35 added by D-0067. **M-34 is a claim about a branch, not about a
+stopwatch**, and that is deliberate: `closes_in_hand` returning `Some` is the
+only way the two positional reads are not reached, so proving the arm is not
+taken is what proves the reads are not issued. A timing test could not prove it
+and a mock would only prove the mock.
+
+**M-25 is the migration requirement.** 43,422 entries across two vendors are on
+disk in version 1's geometry, `CLAUDE.md` §3 rule 8 does not admit mutating them
+in place, and reading them at version 2's stride would decode every second entry
+as the tail of the one before it. Two further rows guard the same seam from the
+other side: M-32 proves a new version cannot alter what an old one resolves to,
+and `pull::unit::two_slots_naming_two_versions_are_each_walked_at_their_own_stride`
+covers the crash in the middle of an upgrade, where the two header slots name
+two versions and each must be validated against its own capacity.
 
 M-18 and M-19 added by D-0040. **M-19 stops one short of an unconditional
 claim, deliberately.** Its last assertion is that the append *after* the

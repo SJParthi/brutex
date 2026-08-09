@@ -8,8 +8,18 @@
 //! ~248,000 `stat` calls, it gets slower with every ingest, and putting it
 //! behind an HTTP request means a page whose cost grows with the thing it
 //! describes. [`pull::manifest::Manifest`] is the counter maintained on write;
-//! this module reads it and probes it, and there is no `read_dir` anywhere
-//! under `crates/api`.
+//! this module reads it and probes it, and
+//! `api::census::a_census_that_holds_a_month_answers_a_probe_in_one_read` is
+//! where that probe is asserted to be one read rather than a walk.
+//!
+//! **This paragraph used to end "and there is no `read_dir` anywhere under
+//! `crates/api`", which stopped being true and was left standing.**
+//! `render::folder_suggestions` walks `$HOME/Downloads` for the folder picker.
+//! `crates/api/src/render.rs` recorded, in the same change that moved that walk
+//! to startup, that it "made `crate::census`'s opening sentence false" — and
+//! nobody came back here. It is one walk, at startup, into `server::Site`, and
+//! it is the only one in shipping code under `crates/api`; the sentence it
+//! falsified is corrected rather than reargued.
 //!
 //! # Read once, rendered many times
 //!
@@ -63,14 +73,19 @@ const _: () = assert!(HEADER_LEN == 32_768 && HEADER_LEN_USIZE == 32_768);
 /// It is not chosen, it is **derived**: `HEADER_LEN + MAX_ENTRIES ×
 /// ENTRY_STRIDE` is the largest file the writer can produce, because
 /// `ManifestHeader::advance` refuses a counter past [`MAX_ENTRIES`] and every
-/// entry occupies exactly [`ENTRY_STRIDE`] bytes. 32,768 + 2,097,152 × 64 =
-/// 134,250,496 bytes. A file larger than that is not a manifest this build
+/// entry occupies exactly [`ENTRY_STRIDE`] bytes. 32,768 + 2,097,152 × 128 =
+/// 268,468,224 bytes. A file larger than that is not a manifest this build
 /// could have written, so refusing it loses nothing and the refusal names both
 /// numbers so an operator sees what to raise.
+///
+/// [`ENTRY_STRIDE`] is the **widest** stride `pull::manifest` declares, which is
+/// what this bound needs: a version-1 census at the ceiling is half this size
+/// and must still be readable, and the version that decides which is inside the
+/// file this bound decides whether to read. D-0067.
 pub const MAX_MANIFEST_BYTES: u64 = HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE;
 
 /// The derivation above, checked at compile time rather than in a comment.
-const _: () = assert!(MAX_MANIFEST_BYTES == 134_250_496);
+const _: () = assert!(MAX_MANIFEST_BYTES == 268_468_224);
 
 /// How many months back the coverage grid reaches.
 ///
@@ -514,6 +529,11 @@ pub fn grid_rows(series: usize) -> usize {
 /// iteration order is not stable between runs, so an unsorted axis would put a
 /// different instrument on page 3 every time the process restarted, and two
 /// reloads would disagree about what is held.
+///
+/// That is the half of this a test can hold, and
+/// `api::census::the_axis_is_sorted_and_deduplicated_whatever_order_the_censuses_arrive_in`
+/// holds it: the axis comes out strictly ascending, in one stated order, with a
+/// series two vendors both hold appearing once.
 #[must_use]
 pub fn held_series(censuses: &[VendorCensus]) -> Vec<Series> {
     let mut out: Vec<Series> = swept_series();
@@ -606,6 +626,12 @@ impl StoreFilter {
     /// Every arm is a comparison on a fixed-width field except the symbol,
     /// which is a substring search over at most `Symbol`'s 24 bytes — bounded,
     /// so this is O(1) per entry rather than O(1) per *character of the store*.
+    ///
+    /// The bound is the **type's**, not the store's, which is what makes it a
+    /// bound at all:
+    /// `api::census::the_symbol_arm_searches_a_haystack_the_symbol_type_bounds`
+    /// pins that nothing longer than [`brutex_core::symbol::SYMBOL_CAPACITY`]
+    /// can become a `Symbol`, so nothing longer can ever be the haystack here.
     #[must_use]
     pub fn keeps(&self, series: &Series, month: YearMonth) -> bool {
         if self.segment.is_some_and(|s| s != series.segment) {
@@ -665,8 +691,14 @@ impl StoreFilter {
 ///
 /// **O(entries)** — one pass with a bounded test per entry. Not O(1), and it is
 /// on a request path, which `docs/06-limits.md` §32 records rather than hides.
-/// (This cited §36, which does not exist — the file has 34 sections. A citation
-/// to a section nobody wrote reads as a claim someone checked.)
+/// (This cited §36 when that file ended at §34. A citation to a section nobody
+/// had written reads as a claim someone checked. §36 exists today and is about
+/// something else, which is why this note stays: the number was never the
+/// point.)
+///
+/// **What this does bound, and what proves it.** The default page — no filter
+/// at all — borrows the held table and copies nothing:
+/// `api::census::the_unfiltered_page_borrows_the_table_and_copies_nothing`.
 /// It is the same bargain `/instruments` search already made (§24): a store of
 /// 194 entries filters immeasurably fast, and at 248,000 it is one pass over a
 /// vector already in memory, with no allocation per row and no disk touched.
@@ -758,6 +790,7 @@ pub fn swept_series() -> Vec<Series> {
 )]
 mod tests {
     use super::*;
+    use brutex_core::symbol::SYMBOL_CAPACITY;
     use pull::manifest::{Entry, ManifestHeader};
 
     fn day(y: u16, m: u8, d: u8) -> Day {
@@ -1263,5 +1296,135 @@ mod tests {
         // be the same values.
         let month = YearMonth::new(2026, 7).expect("valid");
         assert_eq!(Series::of(&nifty().at(month)), nifty());
+    }
+
+    /// The axis comes out in ONE order, whatever order the censuses were read
+    /// in, and a series two vendors both hold is one row.
+    ///
+    /// This is the property [`held_series`]'s doc trades its `O(keys log keys)`
+    /// for: the pager addresses a row by ordinal, so an axis that depended on
+    /// map iteration order would put a different instrument on page 3 every
+    /// restart. Nothing tested it, and the sort and the dedup are one line each.
+    ///
+    /// The fixture is chosen so the sort is load-bearing: `AAA` sorts before
+    /// both swept series and is appended after them, so the unsorted axis is
+    /// provably not ascending.
+    #[test]
+    fn the_axis_is_sorted_and_deduplicated_whatever_order_the_censuses_arrive_in() {
+        let month = YearMonth::new(2026, 7).expect("valid");
+        let index = |symbol: &str| Series {
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: Symbol::new(symbol).expect("a legal symbol"),
+            timeframe: Timeframe::MINUTE_1,
+        };
+        let a = census_of(
+            &root("axissort-a"),
+            Vendor::Groww,
+            &[(index("ZZZ"), month, 3), (index("MMM"), month, 4)],
+        );
+        let b = census_of(
+            &root("axissort-b"),
+            Vendor::Dhan,
+            &[(index("MMM"), month, 5), (index("AAA"), month, 6)],
+        );
+
+        let axis = held_series(&[a, b]);
+        let names: Vec<String> = axis.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            names,
+            [
+                "NSE-INDEX-AAA",
+                "NSE-INDEX-BANKNIFTY",
+                "NSE-INDEX-MMM",
+                "NSE-INDEX-NIFTY",
+                "NSE-INDEX-ZZZ",
+            ],
+            "one stated order, and MMM appears once though two vendors hold it"
+        );
+        assert!(
+            axis.windows(2).all(|w| w[0] < w[1]),
+            "strictly ascending, so no ordinal names two instruments: {names:?}"
+        );
+    }
+
+    /// The symbol filter's haystack is bounded by the TYPE, not by the store.
+    ///
+    /// [`StoreFilter::keeps`] rests its per-entry bound on the only arm that is
+    /// not a fixed-width comparison searching "at most `Symbol`'s 24 bytes".
+    /// That is a statement about what can reach it, so this is what it takes to
+    /// hold: a symbol one byte past the capacity is refused at construction, so
+    /// no longer haystack exists to be handed here.
+    #[test]
+    fn the_symbol_arm_searches_a_haystack_the_symbol_type_bounds() {
+        let at_bound = "A".repeat(SYMBOL_CAPACITY);
+        let past_bound = "A".repeat(SYMBOL_CAPACITY + 1);
+        assert!(
+            Symbol::new(&past_bound).is_err(),
+            "a symbol past the capacity is refused, which is what bounds the search"
+        );
+
+        let widest = Symbol::new(&at_bound).expect("exactly at the capacity");
+        assert_eq!(
+            widest.as_str().len(),
+            SYMBOL_CAPACITY,
+            "the widest haystack `keeps` can ever be handed"
+        );
+        let series = Series {
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            symbol: widest,
+            timeframe: Timeframe::MINUTE_1,
+        };
+        let month = YearMonth::new(2026, 7).expect("valid");
+
+        let full_width = StoreFilter {
+            symbol: Some(at_bound),
+            ..StoreFilter::default()
+        };
+        assert!(full_width.keeps(&series, month), "the whole symbol matches");
+        let over_long = StoreFilter {
+            symbol: Some(past_bound),
+            ..StoreFilter::default()
+        };
+        assert!(
+            !over_long.keeps(&series, month),
+            "a needle no symbol can hold matches nothing"
+        );
+    }
+
+    /// The default `/store` page borrows the held table; only a narrowing copies.
+    ///
+    /// [`filtered`]'s own comment says the copy it removed was 6.0 MB per
+    /// request at the projected entry count and bought nothing. Nothing held
+    /// that: the `Cow::Borrowed` arm could be deleted and every assertion in
+    /// this file would still pass, because the two arms are equal by value.
+    #[test]
+    fn the_unfiltered_page_borrows_the_table_and_copies_nothing() {
+        let month = YearMonth::new(2026, 7).expect("valid");
+        let entries = vec![(nifty(), month), (series(Segment::Fno, "ABB-III"), month)];
+
+        let default_page = filtered(&entries, &StoreFilter::default());
+        assert!(
+            matches!(default_page, std::borrow::Cow::Borrowed(_)),
+            "the default page must not copy the table to read a window of it"
+        );
+        assert!(
+            std::ptr::eq(default_page.as_ptr(), entries.as_ptr()),
+            "and it is the same table, not an equal one"
+        );
+
+        let narrowed = filtered(
+            &entries,
+            &StoreFilter {
+                symbol: Some("NIFTY".to_owned()),
+                ..StoreFilter::default()
+            },
+        );
+        assert!(
+            matches!(narrowed, std::borrow::Cow::Owned(_)),
+            "a filter that narrows genuinely needs to own its selection"
+        );
+        assert_eq!(narrowed.len(), 1);
     }
 }

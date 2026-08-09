@@ -2471,3 +2471,97 @@ from so a mismatch is visible rather than silent. Neither exists.
 Neither is claimed to be constant-time and neither is benched: the cost is the
 filesystem's, it is not on any path `docs/04-invariants.md` C-01 covers, and no
 number has been taken. Nothing here should be read as an O(1) claim.
+
+---
+
+## 40. The census carries prices now, and four things about that are not free
+
+D-0067 minted manifest version 2 and put the month's first and last close in
+every entry. Each of the following is a real cost or a real gap, stated rather
+than absorbed. None of them is a defect; §32 and §34 are the ones that already
+covered `/store.json`'s shape and this adds to them rather than replacing them.
+
+### 40.1 The file doubles, and so do both in-memory structures
+
+The entry stride goes from 64 bytes to 128. Measured against the live store on
+2026-08-09 by decoding `~/.brutex/store/manifest/groww.man`: **43,422 committed
+entries, 31,493 distinct keys, 216,496,530 rows.** That census goes from 2.78 MB
+to 5.56 MB on disk. The design ceiling at `MAX_ENTRIES` goes from 134,250,496 to
+268,468,224 bytes, and both readers' in-memory bounds move with it — they take
+the **widest** stride this build declares, because a version-1 census at the
+ceiling is half that size and must still be readable.
+
+In memory the index element `(EntryKey, Held)` goes from 136 bytes to 152 and
+the log element from 80 to 96, both pinned by
+`pull::unit::the_log_is_the_entry_region_in_order`. At the 248,000-entry scale
+`MAX_ENTRIES`'s note names, that is ~144 MB → ~159 MB of table and ~40 MB →
+~48 MB of log; at the ceiling, ~574 MB → ~637 MB.
+
+### 40.2 Ingest pays two extra 56-byte reads per month, and the syscall is UNVERIFIED
+
+When the batch just appended **is** the whole file — same record count, same two
+instants, all three already in hand as header fields — the closes come from the
+batch and cost nothing. `pull::ingest::tests::a_virgin_month_takes_its_closes_from_the_batch_it_just_wrote`
+is the proof, and it is a proof about a *branch*: the arm holding the reads is
+not reached. A timing test could not prove that and a mock would only prove the
+mock.
+
+Every other shape reads them back, because the counter row describes the FILE
+and on a second window into a month the batch is a suffix. Two `read_record`
+calls on an already-open handle. Against the groww census's own numbers that is
+**86,844 extra 56-byte reads against 216,496,530 record writes: +0.040%.**
+
+**The syscall latency is not measured and is not claimed.**
+`store::file::BarFile::read_record` states the same limit for the same reason:
+the operation is constant, the read underneath it is the device's, and no bench
+in this repository times a syscall. §14 carries what *is* measured.
+
+### 40.3 The 43,422 entries already on disk have no closes, and get none for free
+
+They read back as *not recorded* — a sentinel that is not zero and cannot be
+mistaken for a price — and they fill in only as each month is re-ingested. There
+is **no automatic backfill**, deliberately: priming all 31,493 keys means 31,493
+`open` + 2 `pread` + `close`, which is exactly the O(files) reconciliation walk
+`pull::manifest`'s own module header declines to build. It remains available as
+a deliberate operator command and one is not built here.
+
+So for some time after this change, most rows on `/store.json` will answer
+"unknown" for the closes. That is the honest state and it is visible as such; it
+is not a zero, and §4 of `CLAUDE.md` is what forbids it being one.
+
+### 40.4 The census can flag a month; it cannot name a day, and no threshold is sourced
+
+Two limits, and both bind any caller that renders a percentage from these
+prices.
+
+**No corporate-action threshold exists anywhere in this repository.** `grep`
+over `crates/` finds zero implementation of D-0018's refusal, `docs/00-charter.md`
+names no verified split-and-bonus source, and D-0018 itself names no number.
+Measured on the same walk: **31,282 of the 31,493 keys are segment CASH
+(99.33%)** and 211 are INDEX (0.67%). Indices never split; equities do. So until
+an operator supplies a threshold with a source, a percentage computed for an
+equity month is unverifiable, and the honest rendering is a marked cell naming
+the reason rather than a number with a caveat beside it — a number travels and a
+caveat does not.
+
+**And a month-level field cannot name the day D-0018 requires.** Its stated
+detector is an unexplained *overnight* gap, which is a bar-to-bar test over the
+month's ~8,250 bars: O(bars) work that cannot live in a 128-byte census row. The
+census supports a coarse month-level gate at best. Any marker built on it must
+say "a corporate action may fall in this month", never "split on 2024-06-14".
+
+### 40.5 What is NOT claimed
+
+* **That mutation testing has been run on this change.** It has not. §22 already
+  records that gap for `crates/store` and it is the same gap here. What was done
+  instead is the reversion check `CLAUDE.md` §9 implies: each guard was removed,
+  the suite re-run, the red tests recorded, and the guard restored.
+* **That the two closes are checked against the bar file.** They are not, and
+  nothing in the manifest ever is. §17's statement stands unchanged: the census
+  is a record of what a writer *said*. A close that was mis-read at ingest is a
+  close the census will repeat forever.
+* **That `/store.json` became O(1) per request.** It did not, and it was not
+  before. Per-row work is one hash probe; per-request work is still a whole-file
+  read and a whole-census walk, and this adds a constant factor to that linear
+  term. What it removes is a route that would have been quadratic in practice —
+  31,951 requests and ~17.5 GB to extract 492 KB.

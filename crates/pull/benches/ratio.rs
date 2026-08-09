@@ -9,6 +9,12 @@
 //! re-deriving the same answer from the entries by a wide margin, measured in
 //! the same process.
 //!
+//! Those two numbers are `C-12` — `pull::bench::entry_lookup_is_flat` — and
+//! `C-11` — `pull::bench::census_beats_the_scan_it_replaces`; `C-13`,
+//! `pull::bench::append_after_load_is_flat`, is the third and is about the
+//! write side. They are functions in **this file**, which is why the layer is
+//! asserted rather than described.
+//!
 //! # Why no benchmarking framework
 //!
 //! `harness = false` makes this an ordinary binary: `cargo bench` runs it, it
@@ -46,7 +52,7 @@ use brutex_core::symbol::Symbol;
 use brutex_core::vendor::Vendor;
 use store::path::{Timeframe, YearMonth};
 
-use pull::manifest::{Commit, Entry, EntryKey, HEADER_LEN, IMAGE_LEN, Manifest};
+use pull::manifest::{Commit, ENTRY_LEN, Entry, EntryKey, HEADER_LEN, Held, Manifest};
 
 /// [`HEADER_LEN`] as a length, for building a header region.
 const HEADER_LEN_LEN: usize = 32_768;
@@ -227,7 +233,7 @@ fn census_bytes(count: u32) -> (Vec<u8>, Vec<u8>) {
     let Ok(mut writer) = Manifest::open(Vendor::Groww, &[], &[]) else {
         refuse("a genesis manifest")
     };
-    let mut data = Vec::with_capacity(count as usize * IMAGE_LEN);
+    let mut data = Vec::with_capacity(count as usize * ENTRY_LEN);
     let mut published: Option<Commit> = None;
     for index in 0..count {
         let entry = Entry {
@@ -273,9 +279,9 @@ fn census_beats_the_scan_it_replaces() -> bool {
     let (manifest, data) = census(10_000);
     let counter = cost_ps(REPS, || black_box(&manifest).total_rows());
     let scan = cost_ps(20, || {
-        data.chunks_exact(IMAGE_LEN)
-            .filter_map(|chunk| Entry::decode(chunk).ok())
-            .fold(0u64, |sum, entry| sum.wrapping_add(entry.rows))
+        data.chunks_exact(ENTRY_LEN)
+            .filter_map(|chunk| Held::decode(chunk).ok())
+            .fold(0u64, |sum, held| sum.wrapping_add(held.entry.rows))
     });
     if counter == 0 {
         println!("  C-11 census vs the scan                      UNMEASURABLE");
@@ -362,6 +368,9 @@ const APPEND_TRIALS: u32 = 12;
 /// the boundary where the defect is not a matter of luck. Both sets are
 /// measured, because a bench that only visited the round numbers would report
 /// whatever slack the rounding happened to leave that day.
+///
+/// These are `pull::bench::append_after_load_is_flat`'s sizes — `C-13`, and
+/// `M-19` beside it for the free room a loaded index carries.
 const APPEND_SIZES: [u32; 3] = [1_000, 10_000, 50_000];
 
 /// [`APPEND_SIZES`], moved onto the capacity boundary. See there.
@@ -431,7 +440,7 @@ fn append_after_load_is_flat() -> bool {
     println!(
         "  {:<44} {} bytes per key/value pair",
         "index element width (context, not a ratio)",
-        size_of::<(EntryKey, Entry)>()
+        size_of::<(EntryKey, Held)>()
     );
 
     let mut ok = true;

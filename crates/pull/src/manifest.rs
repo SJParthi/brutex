@@ -23,16 +23,35 @@
 //!
 //! # Bytes on disk
 //!
+//! `docs/02-store-format.md` §11 is the authority; this is the summary.
+//!
 //! ```text
-//! byte 0                 32768                                     EOF
-//!   ├──── header region ────┼── entry 0 ──┼── entry 1 ──┼── … ───────┤
-//!    2 slots × 16384 spacing    64 bytes      64 bytes
+//! byte 0                 32768                                       EOF
+//!   ├──── header region ────┼─── entry 0 ──┼─── entry 1 ──┼── … ──────┤
+//!    2 slots × 16384 spacing    64 or 128      64 or 128
 //! ```
 //!
-//! **Address of entry *i*: `HEADER_LEN + i·64`.** [`Manifest::offset_of`] is an
-//! add and a multiply — law 4, arithmetic beats lookup. Both the header slot and
-//! the entry are 64 bytes with a CRC-32C over the first 60, so one checksum
-//! helper serves both and neither straddles a cache line.
+//! **Address of entry *i*: `HEADER_LEN + i·stride`,** where the stride comes
+//! from the file's own [`Layout`] and is **never a constant on the read path**.
+//! [`Layout::offset_of`] is an add and a multiply — law 4, arithmetic beats
+//! lookup.
+//!
+//! Everything here is built out of one 64-byte unit with a CRC-32C over its
+//! first 60 bytes: the header slot is one, a **version-1 entry** is one, and a
+//! **version-2 entry is two** — a version-1 entry byte for byte, then the
+//! month's first and last close. So one checksum helper serves all of them,
+//! nothing straddles a cache line, and every byte of an entry is covered by
+//! exactly one checksum.
+//!
+//! Version 1 is read and never written. Version 2 is what this build writes,
+//! and D-0067 says why the closes are in the census at all: `/store.json` must
+//! serve a month's percentage change, and deriving it from the bars costs
+//! ~17.5 GB to extract 492 KB.
+//!
+//! **[`CLOSE_NULL`] is the not-recorded sentinel and zero means zero.** A month
+//! that really closed at zero paisa records a zero; a month nobody has priced
+//! records `i64::MIN`; a month the census does not hold answers `None`. Three
+//! facts, three answers.
 //!
 //! # What is reused from `crates/store`, and what is not
 //!
@@ -152,22 +171,78 @@ pub const MANIFEST_EXTENSION: &str = ".man";
 /// `BRUTEXM` rather than `BRUTEXB`: a manifest and a bar file must never be
 /// mistaken for one another, and the family check is the first thing either
 /// decoder does.
+///
+/// **This constant keeps meaning version 1 forever.** It is not "the magic this
+/// build writes" — that is [`MAGIC_V2`] — because `CLAUDE.md` §3 rule 8 makes a
+/// version an append-only identifier. A constant that followed the current
+/// version would silently renumber an existing geometry, which is the same
+/// argument `store::layout::FORMAT_VERSION_2` makes one crate away.
 pub const MAGIC: [u8; 8] = *b"BRUTEXM1";
+
+/// Identifies a version-2 manifest — the one this build writes.
+pub const MAGIC_V2: [u8; 8] = *b"BRUTEXM2";
 
 /// The seven bytes shared by every manifest version.
 pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXM";
 
-/// The only format version this build reads or writes.
-pub const FORMAT_VERSION: u16 = 1;
+/// The format version this build **writes**. Version 1 is read, never written.
+///
+/// `Layout::KNOWN` is what this build **reads**, and it holds both.
+pub const FORMAT_VERSION: u16 = 2;
 
-/// Bytes per entry, and per header slot. One image size serves both.
+/// Bytes per header slot, and per checksummed image unit.
+///
+/// One 64-byte unit with a CRC-32C over its first 60 bytes serves the header
+/// slot, a version-1 entry, and each half of a version-2 entry. That is why
+/// there is one checksum helper here rather than three: two kernels that
+/// disagree produce two files that each verify only against themselves.
 pub const IMAGE_LEN: usize = 64;
 
-/// Bytes per entry, in the width an offset is computed in.
-pub const ENTRY_STRIDE: u64 = 64;
+/// Bytes per entry at [`FORMAT_VERSION`], in the width an offset is computed in.
+///
+/// **Version 1's stride is 64 and it is still read.** Nothing on the read path
+/// may use this constant to address an entry; [`Layout::entry_stride`] is the
+/// one that dispatches, and this is the value the version this build writes
+/// declares. D-0067.
+pub const ENTRY_STRIDE: u64 = 128;
 
-/// Bytes per entry, in the width the header stores it.
-pub const ENTRY_STRIDE_U16: u16 = 64;
+/// Bytes per entry at [`FORMAT_VERSION`], in the width the header stores it.
+pub const ENTRY_STRIDE_U16: u16 = 128;
+
+/// Bytes per entry at [`FORMAT_VERSION`], in the width a slice is chunked at.
+pub const ENTRY_LEN: usize = 128;
+
+/// The widest entry stride a [`Layout`] row may declare.
+///
+/// Derived, not chosen: `HEADER_LEN + MAX_ENTRIES · stride` must fit a `u64`,
+/// because [`Layout::offset_within_bounds`] is total past the ordinal check.
+/// Ten orders of magnitude above anything a real format would use, and it is
+/// here so that "the arithmetic cannot overflow" is a checked property of every
+/// declared row rather than a sentence about the two rows that exist today.
+pub const MAX_ENTRY_STRIDE: u64 = (u64::MAX - HEADER_LEN) / MAX_ENTRIES;
+
+/// Version 1's entry stride, in the width an offset is computed in.
+const V1_ENTRY_STRIDE: u64 = 64;
+
+/// Version 1's entry stride, in the width a slice is chunked at.
+const V1_ENTRY_STRIDE_LEN: usize = 64;
+
+/// **The close that was never recorded.** Not zero, and never rendered as one.
+///
+/// A close is a price in paisa, so every real value is at or above zero and
+/// `i64::MIN` is not a price any tick grid can produce. This is the same
+/// convention `store::format::OI_NULL` states for open interest — *one* value
+/// that cannot be a real quantity means "not recorded" — applied to a second
+/// field, rather than a second mechanism that could drift out of step with the
+/// first. `CLAUDE.md` §7: **zero means zero**, and a month whose bars really
+/// closed at zero paisa records a zero and is told apart from a month whose
+/// closes nobody has read.
+///
+/// The 31,493 keys already committed under version 1 have no closes at all, and
+/// after the upgrade they carry this. An operator reading `/store.json` can
+/// therefore tell "no data yet" from "the price really was that", which is the
+/// whole reason the sentinel exists rather than a default.
+pub const CLOSE_NULL: i64 = i64::MIN;
 
 /// Header slots. Writes alternate between them.
 pub const SLOT_COUNT: u64 = 2;
@@ -261,13 +336,19 @@ const MAX_ENTRIES_LEN: usize = 2_097_152;
 ///
 /// # What it costs, measured
 ///
-/// `size_of::<(EntryKey, Entry)>()` is **136 bytes** on this workspace's
-/// target, printed by the same bench. The *ceiling* is unchanged: a census at
-/// [`MAX_ENTRIES`] reserved `MAX_ENTRIES` before this constant existed and
-/// reserves `MAX_ENTRIES` now — about 574 MB of table either way, the same
-/// number the region-sized reservation was refused for. What doubles is the
-/// middle: a 248,000-entry census (the measured scale in [`MAX_ENTRIES`]'s
-/// note) goes from roughly 72 MB of table to roughly 144 MB.
+/// `size_of::<(EntryKey, Held)>()` is **152 bytes** on this workspace's target,
+/// printed by the same bench and pinned by
+/// `pull::unit::the_log_is_the_entry_region_in_order`. The *ceiling* is
+/// unchanged in element count: a census at [`MAX_ENTRIES`] reserved
+/// `MAX_ENTRIES` before this constant existed and reserves `MAX_ENTRIES` now —
+/// about 637 MB of table either way. What doubles is the middle: a
+/// 248,000-entry census (the measured scale in [`MAX_ENTRIES`]'s note) goes from
+/// roughly 80 MB of table to roughly 159 MB.
+///
+/// **D-0067 widened the element from 136 bytes to 152**, by putting the month's
+/// two closes in it. That is +11.8% on every figure in this note, and it is
+/// stated rather than absorbed: the 574 MB and 144 MB this paragraph used to
+/// name became the 637 MB and 159 MB above.
 ///
 /// # What it does NOT buy
 ///
@@ -330,8 +411,17 @@ const _: () = assert!(HEADER_LEN == 32_768 && HEADER_REGION_LEN == 32_768);
 const _: () = assert!(HEADER_LEN == SLOT_COUNT * SLOT_STRIDE);
 const _: () = assert!(SLOT_COUNT <= MAX_SLOT_COUNT);
 const _: () = assert!(IMAGE_LEN == SLOT_LEN);
-const _: () = assert!(ENTRY_STRIDE == 64 && ENTRY_STRIDE_U16 == 64);
+const _: () = assert!(ENTRY_STRIDE == 128 && ENTRY_STRIDE_U16 == 128 && ENTRY_LEN == 128);
+const _: () = assert!(V1_ENTRY_STRIDE == 64 && V1_ENTRY_STRIDE_LEN == 64);
+// A version-2 entry is exactly two of the 64-byte units this module already
+// checksums, so its first half IS a version-1 entry image, byte for byte.
+const _: () = assert!(ENTRY_LEN == 2 * IMAGE_LEN);
+// 32,768 is a whole multiple of 128, so an entry is 64-byte aligned at both
+// strides and never straddles a cache line.
+const _: () = assert!(HEADER_LEN.is_multiple_of(ENTRY_STRIDE));
 const _: () = assert!(MAGIC[0] == MAGIC_FAMILY[0] && MAGIC[7] == b'1');
+const _: () = assert!(MAGIC_V2[0] == MAGIC_FAMILY[0] && MAGIC_V2[7] == b'2');
+const _: () = assert!(CLOSE_NULL == i64::MIN);
 
 /// Byte offset of the checksum, in both an entry and a header slot.
 const OFF_CRC: usize = 60;
@@ -381,6 +471,22 @@ const _: () = assert!(E_SYMBOL + SYMBOL_CAPACITY == E_ROWS);
 const _: () = assert!(E_SEGMENT < OFF_CRC);
 const _: () = assert!(OFF_CRC + 4 == IMAGE_LEN);
 
+// Version 2's second half, offsets relative to the half rather than to the
+// entry. It is its own 64-byte image with its own CRC-32C at the same offset
+// 60, so `seal` and `verify` are reused as CODE rather than re-derived — the
+// argument this module's header already makes about two checksum kernels.
+
+/// Byte offset of the month's first close, within the closes half.
+const C_FIRST_CLOSE: usize = 0;
+/// Byte offset of the month's last close, within the closes half.
+const C_LAST_CLOSE: usize = 8;
+
+const _: () = assert!(C_FIRST_CLOSE + 8 == C_LAST_CLOSE);
+// 16..60 is reserved and stays zero. `docs/02-store-format.md` §2: a future
+// field takes reserved space in a NEW VERSION, never by reinterpreting this
+// one.
+const _: () = assert!(C_LAST_CLOSE + 8 < OFF_CRC);
+
 /// The path of one vendor's manifest under `root`.
 ///
 /// One allocation, bounded: the root, one directory, one file name whose
@@ -400,6 +506,321 @@ pub fn manifest_path(root: &Path, vendor: Vendor) -> PathBuf {
     out.push(MANIFEST_ROOT);
     out.push(format!("{}{MANIFEST_EXTENSION}", vendor.as_str()));
     out
+}
+
+/// The geometry of one manifest format version, and the dispatch that selects
+/// it.
+///
+/// # The stride is not a global
+///
+/// `docs/02-store-format.md` says "a format change mints a **new version** and
+/// old files stay readable at their own stride". Until D-0067 that sentence was
+/// prose here: [`ManifestHeader::decode`] compared `format_version` against one
+/// constant and `entry_stride` against another, so this build could read exactly
+/// one geometry and minting version 2 would have made every version-1 census on
+/// disk unreadable. Reading one version's entries at the other's stride is
+/// worse still — fields lifted from the wrong offsets are plausible integers,
+/// silently wrong, which is `docs/00-charter.md` prohibition 6 exactly.
+///
+/// `crates/store` solved this for bar files and `store::layout` is the model
+/// followed here, deliberately down to the shape of the table: every geometric
+/// question is a method on a `Layout`, and the only way to obtain one is
+/// [`Layout::for_version`], which refuses an unknown version **by number**.
+///
+/// # Adding version 3
+///
+/// Add a row to [`Layout::KNOWN`], built by [`Layout::declared`]. Resolution is
+/// a search of that table for a matching `version`, so a new row cannot alter
+/// what an existing row resolves to — proven by
+/// `pull::unit::a_known_manifest_version_keeps_its_stride_after_a_new_one_exists`,
+/// which runs the production resolver against a table that already holds a
+/// third version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Layout {
+    version: u16,
+    magic: [u8; 8],
+    entry_stride: u64,
+    entry_stride_len: usize,
+    carries_closes: bool,
+}
+
+impl Layout {
+    /// Version 1 — 64-byte entries, no closes. **Read, never written.**
+    ///
+    /// Not retired and not refused: 43,422 entries across two vendors are on
+    /// disk in this geometry and `CLAUDE.md` §3 rule 8 does not admit mutating
+    /// them in place. They read at their own stride and report their closes as
+    /// [`Closes::UNKNOWN`], which is the honest answer — nothing ever recorded
+    /// one.
+    pub const V1: Self = Self::declared(1, MAGIC, V1_ENTRY_STRIDE, V1_ENTRY_STRIDE_LEN, false);
+
+    /// Version 2 — 128-byte entries carrying the month's first and last close.
+    pub const V2: Self = Self::declared(2, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true);
+
+    /// Every version this build can read, in ascending order.
+    pub const KNOWN: &'static [Self] = &[Self::V1, Self::V2];
+
+    /// The version this build writes. Older versions are read, never written.
+    pub const CURRENT: Self = Self::V2;
+
+    /// Declares a version's geometry at compile time.
+    ///
+    /// This is how a row of [`Layout::KNOWN`] is written. It applies exactly the
+    /// rule [`Layout::declare`] applies, but as a `const` assertion, so a
+    /// degenerate row does not compile rather than failing at a call site that
+    /// may never run.
+    ///
+    /// # Panics
+    ///
+    /// At **compile time**, when the geometry is one no file could have. The
+    /// message does not name the field, because a `const` panic cannot format
+    /// one; [`Layout::declare`] does.
+    #[must_use]
+    pub const fn declared(
+        version: u16,
+        magic: [u8; 8],
+        entry_stride: u64,
+        entry_stride_len: usize,
+        carries_closes: bool,
+    ) -> Self {
+        assert!(
+            degenerate_field(version, magic, entry_stride, entry_stride_len).is_none(),
+            "a manifest Layout row is not a geometry a file can have; see Layout::declare",
+        );
+        Self {
+            version,
+            magic,
+            entry_stride,
+            entry_stride_len,
+            carries_closes,
+        }
+    }
+
+    /// Declares a version's geometry, refusing a degenerate one.
+    ///
+    /// The fallible twin of [`Layout::declared`], for a geometry that is not a
+    /// compile-time constant. The additive-property test builds its hypothetical
+    /// next version through this door, so it drives the same [`Layout::resolve`]
+    /// the read path drives rather than a paraphrase of it.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::DegenerateLayout`] naming the field, for a zero version,
+    /// a zero stride in either width, a stride whose region at [`MAX_ENTRIES`]
+    /// would overflow `u64`, or a magic outside [`MAGIC_FAMILY`].
+    pub const fn declare(
+        version: u16,
+        magic: [u8; 8],
+        entry_stride: u64,
+        entry_stride_len: usize,
+        carries_closes: bool,
+    ) -> Result<Self, ManifestError> {
+        match degenerate_field(version, magic, entry_stride, entry_stride_len) {
+            Some(field) => Err(ManifestError::DegenerateLayout { field }),
+            None => Ok(Self {
+                version,
+                magic,
+                entry_stride,
+                entry_stride_len,
+                carries_closes,
+            }),
+        }
+    }
+
+    /// The layout for `version`, or a refusal naming the version.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::UnknownVersion`] carrying the version it saw. There is
+    /// no fallback to [`Layout::CURRENT`]: a version this build does not know
+    /// has a geometry this build cannot infer, and inferring it wrongly returns
+    /// plausible nonsense rather than an error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pull::manifest::{Layout, ManifestError};
+    /// assert_eq!(Layout::for_version(1)?.entry_stride(), 64);
+    /// assert_eq!(Layout::for_version(2)?.entry_stride(), 128);
+    /// assert_eq!(Layout::for_version(9), Err(ManifestError::UnknownVersion(9)));
+    /// # Ok::<(), ManifestError>(())
+    /// ```
+    pub fn for_version(version: u16) -> Result<Self, ManifestError> {
+        Self::resolve(Self::KNOWN, version)
+    }
+
+    /// Resolves `version` against an explicit table.
+    ///
+    /// [`Layout::for_version`] is this function applied to [`Layout::KNOWN`]. It
+    /// is public so a test can prove the additive property against a table that
+    /// already holds a third version, running the same code the read path runs.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::UnknownVersion`].
+    pub fn resolve(table: &[Self], version: u16) -> Result<Self, ManifestError> {
+        table
+            .iter()
+            .copied()
+            .find(|layout| layout.version == version)
+            .ok_or(ManifestError::UnknownVersion(version))
+    }
+
+    /// This layout's version number.
+    #[must_use]
+    pub const fn version(self) -> u16 {
+        self.version
+    }
+
+    /// The eight magic bytes a file of this version begins with.
+    #[must_use]
+    pub const fn magic(self) -> [u8; 8] {
+        self.magic
+    }
+
+    /// Bytes per entry, in the width an offset is computed in.
+    #[must_use]
+    pub const fn entry_stride(self) -> u64 {
+        self.entry_stride
+    }
+
+    /// Bytes per entry, in the width a slice is chunked at.
+    ///
+    /// Paired literals rather than a cast of the other, exactly as
+    /// [`HEADER_LEN`] and its `usize` twin are: this workspace denies a cast
+    /// that can truncate, and `usize` is not `u64` on every target Rust
+    /// defines. The pairing is checked rather than believed —
+    /// `pull::unit::every_known_manifest_layout_states_one_stride_in_both_widths`.
+    #[must_use]
+    pub const fn entry_stride_len(self) -> usize {
+        self.entry_stride_len
+    }
+
+    /// Whether an entry of this version carries the month's closes.
+    ///
+    /// False for version 1, and that is not a defect to be papered over: those
+    /// entries never had a close recorded, so they answer [`Closes::UNKNOWN`]
+    /// rather than a zero somebody could mistake for a price.
+    #[must_use]
+    pub const fn carries_closes(self) -> bool {
+        self.carries_closes
+    }
+
+    /// The byte offset of entry `ordinal`, for an ordinal already known to be
+    /// within [`MAX_ENTRIES`].
+    ///
+    /// Total, not fallible. `MAX_ENTRIES · entry_stride + HEADER_LEN` is 268 MB
+    /// at the widest stride this build declares, so past the bound check there
+    /// is nothing left that can overflow — and therefore nothing left that needs
+    /// a failure arm. [`Layout::declare`] is what keeps that true for a row
+    /// added later.
+    #[must_use]
+    pub const fn offset_within_bounds(self, ordinal: u64) -> u64 {
+        HEADER_LEN + ordinal * self.entry_stride
+    }
+
+    /// The byte offset of entry `ordinal`.
+    ///
+    /// `HEADER_LEN + ordinal·stride`. An add and a multiply — law 4. There is no
+    /// index to consult and nothing to search.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::OrdinalOutOfRange`] past [`MAX_ENTRIES`]. The bound is
+    /// on the ordinal rather than on the product, so the arithmetic itself is
+    /// total.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pull::manifest::{HEADER_LEN, Layout, ManifestError, MAX_ENTRIES};
+    /// assert_eq!(Layout::V1.offset_of(1)?, HEADER_LEN + 64);
+    /// assert_eq!(Layout::V2.offset_of(1)?, HEADER_LEN + 128);
+    /// assert!(Layout::V2.offset_of(MAX_ENTRIES + 1).is_err());
+    /// # Ok::<(), ManifestError>(())
+    /// ```
+    pub const fn offset_of(self, ordinal: u64) -> Result<u64, ManifestError> {
+        if ordinal > MAX_ENTRIES {
+            return Err(ManifestError::OrdinalOutOfRange {
+                ordinal,
+                limit: MAX_ENTRIES,
+            });
+        }
+        Ok(self.offset_within_bounds(ordinal))
+    }
+
+    /// How many whole entries of this version `entries` holds, capped at
+    /// [`MAX_ENTRIES`].
+    ///
+    /// **Computed per version rather than once for the file**, because the
+    /// answer is the byte length divided by a stride that the header has not
+    /// been read yet to know. Counting whole entries at version 1's stride and
+    /// then validating a version-2 counter against it would accept a counter
+    /// naming twice the entries the region can hold.
+    ///
+    /// Counted by folding rather than by `len()` so the answer is a `u64`
+    /// without a `usize` conversion whose failure arm no test on a 64-bit host
+    /// could reach, and bounded so the fold cannot overflow.
+    #[must_use]
+    pub fn capacity_for(self, entries: &[u8]) -> u64 {
+        entries
+            .chunks_exact(self.entry_stride_len)
+            .take(MAX_ENTRIES_LEN)
+            .fold(0u64, |seen, _| seen + 1)
+    }
+}
+
+const _: () = assert!(Layout::CURRENT.version() == FORMAT_VERSION);
+const _: () = assert!(Layout::CURRENT.entry_stride() == ENTRY_STRIDE);
+const _: () = assert!(Layout::V1.entry_stride() == V1_ENTRY_STRIDE);
+const _: () = assert!(!Layout::V1.carries_closes() && Layout::V2.carries_closes());
+
+/// The first field of a declaration that is not a geometry a file can have.
+///
+/// One function so [`Layout::declared`] and [`Layout::declare`] cannot drift: a
+/// guard added here is a compile error for the const rows and an `Err` for the
+/// fallible door, in the same commit.
+const fn degenerate_field(
+    version: u16,
+    magic: [u8; 8],
+    entry_stride: u64,
+    entry_stride_len: usize,
+) -> Option<&'static str> {
+    if version == 0 {
+        return Some("version");
+    }
+    if entry_stride == 0 {
+        return Some("entry_stride");
+    }
+    if entry_stride_len == 0 {
+        return Some("entry_stride_len");
+    }
+    // `HEADER_LEN + MAX_ENTRIES·stride` must fit a `u64`, because
+    // `Layout::offset_within_bounds` is total past the ordinal check and has no
+    // failure arm to take.
+    //
+    // Written as ONE comparison against [`MAX_ENTRY_STRIDE`] rather than as a
+    // `checked_mul` followed by a `checked_add`: at this [`MAX_ENTRIES`] the
+    // second of those could never fire — the products step by 2,097,152 and the
+    // header region is 32,768, so a product that fits always leaves room for it
+    // — and an arm no input can enter is an arm no test can close.
+    if entry_stride > MAX_ENTRY_STRIDE {
+        return Some("entry_stride");
+    }
+    if !magic_is_family(magic) {
+        return Some("magic");
+    }
+    None
+}
+
+/// Whether `magic`'s first seven bytes are [`MAGIC_FAMILY`].
+///
+/// Destructured rather than iterated because this runs in `const` context, where
+/// an iterator is not available and an index would be a denied lint.
+const fn magic_is_family(magic: [u8; 8]) -> bool {
+    let [m0, m1, m2, m3, m4, m5, m6, _] = magic;
+    let [f0, f1, f2, f3, f4, f5, f6] = MAGIC_FAMILY;
+    m0 == f0 && m1 == f1 && m2 == f2 && m3 == f3 && m4 == f4 && m5 == f5 && m6 == f6
 }
 
 /// Why one entry's bytes are not an entry.
@@ -458,6 +879,27 @@ pub enum EntryFault {
         /// The last timestamp, which did not follow it.
         last: i64,
     },
+    /// One close is [`CLOSE_NULL`] and the other is a price.
+    ///
+    /// A month has both closes or neither: they are read from record 0 and
+    /// record `n_valid − 1` of one file in one operation. Half of a pair is a
+    /// state no writer here can produce, and reading it as either not-recorded
+    /// or recorded would be inventing the missing half.
+    CloseHalfRecorded {
+        /// The first close as stored.
+        first: i64,
+        /// The last close as stored.
+        last: i64,
+    },
+    /// A close is below zero and is not [`CLOSE_NULL`].
+    ///
+    /// Prices are paisa integers and no tick grid produces a negative one, so
+    /// the sentinel is the **only** negative value this field may hold. Refusing
+    /// the rest is what keeps not-recorded a single value rather than a range.
+    CloseNotAPrice {
+        /// The value that is neither a price nor the sentinel.
+        paisa: i64,
+    },
 }
 
 impl fmt::Display for EntryFault {
@@ -478,6 +920,16 @@ impl fmt::Display for EntryFault {
             Self::TimestampsOutOfOrder { first, last } => {
                 write!(f, "timestamp {last} does not follow {first}")
             }
+            Self::CloseHalfRecorded { first, last } => write!(
+                f,
+                "closes ({first}, {last}): one is the not-recorded sentinel and \
+                 the other is a price; a month has both or neither"
+            ),
+            Self::CloseNotAPrice { paisa } => write!(
+                f,
+                "close {paisa} paisa is neither a price nor the not-recorded \
+                 sentinel {CLOSE_NULL}"
+            ),
         }
     }
 }
@@ -621,6 +1073,11 @@ pub enum ManifestError {
         /// What the entries hold.
         entries: u64,
     },
+    /// A [`Layout`] row is not a geometry a manifest could have.
+    DegenerateLayout {
+        /// Which field.
+        field: &'static str,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -693,6 +1150,9 @@ impl fmt::Display for ManifestError {
                 f,
                 "the header claims {header} rows; the entries hold {entries}"
             ),
+            Self::DegenerateLayout { field } => {
+                write!(f, "{field} is not a geometry a manifest could have")
+            }
         }
     }
 }
@@ -759,7 +1219,157 @@ pub struct EntryKey {
     pub month: YearMonth,
 }
 
+/// The month's first and last close, or the fact that neither was recorded.
+///
+/// # Why the census carries a price at all
+///
+/// `/store.json` serves one row per `(instrument, month)` and the operator asks
+/// it for the month's percentage change. Deriving that from the bars costs one
+/// request and a whole month of records per row — measured at 31,951 requests
+/// and ~17.5 GB to extract 492 KB of signal, and it grows with the census. Two
+/// `i64` beside the row answer it in one probe. D-0067.
+///
+/// # The fields are private, and that is the invariant
+///
+/// A `Closes` is **either** both-unknown or both-a-price. Half of a pair, or a
+/// negative that is not [`CLOSE_NULL`], is unrepresentable outside this module
+/// — [`Closes::known`] is the only door and it refuses both. That is what makes
+/// [`Closes::is_known`] a single comparison rather than a rule a caller has to
+/// remember, and it is why the encoder and the decoder cannot drift: they go
+/// through the same door.
+///
+/// # What it does NOT say
+///
+/// Nothing about corporate actions. An equity that split 1:5 mid-month has two
+/// closes that are both real and a ratio between them that is a fabricated 80%
+/// crash. This type records the two prices; whether a percentage may be
+/// computed from them is a separate decision, and `docs/05-decisions.md` D-0018
+/// already made it — refuse loudly and name the date, never back-adjust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Closes {
+    /// The close of record 0, or [`CLOSE_NULL`].
+    first_paisa: i64,
+    /// The close of record `rows − 1`, or [`CLOSE_NULL`].
+    last_paisa: i64,
+}
+
+impl Closes {
+    /// No close was recorded for this month. **Not zero, and never rendered as
+    /// one.**
+    ///
+    /// Every version-1 entry reads back as this, because version 1 had nowhere
+    /// to put a close. So does a version-2 entry a writer chose not to price.
+    pub const UNKNOWN: Self = Self {
+        first_paisa: CLOSE_NULL,
+        last_paisa: CLOSE_NULL,
+    };
+
+    /// The closes of a month whose bar file was read.
+    ///
+    /// # Errors
+    ///
+    /// [`EntryFault::CloseNotAPrice`] for a value below zero — which includes
+    /// [`CLOSE_NULL`] itself, so not-recorded cannot be smuggled in through the
+    /// door marked [`Closes::known`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pull::manifest::{CLOSE_NULL, Closes};
+    /// let held = Closes::known(2_950_50, 3_100_25)?;
+    /// assert_eq!(held.paisa(), Some((295_050, 310_025)));
+    /// // Zero is a price. It is NOT unknown.
+    /// assert_eq!(Closes::known(0, 0)?.paisa(), Some((0, 0)));
+    /// assert_eq!(Closes::UNKNOWN.paisa(), None);
+    /// assert!(Closes::known(CLOSE_NULL, 1).is_err());
+    /// # Ok::<(), pull::manifest::EntryFault>(())
+    /// ```
+    pub const fn known(first_paisa: i64, last_paisa: i64) -> Result<Self, EntryFault> {
+        if first_paisa < 0 {
+            return Err(EntryFault::CloseNotAPrice { paisa: first_paisa });
+        }
+        if last_paisa < 0 {
+            return Err(EntryFault::CloseNotAPrice { paisa: last_paisa });
+        }
+        Ok(Self {
+            first_paisa,
+            last_paisa,
+        })
+    }
+
+    /// Whether a close was recorded at all.
+    ///
+    /// One comparison, and it may look at either field: [`Closes::known`]
+    /// refuses every negative, so [`CLOSE_NULL`] appears in one field only when
+    /// it appears in both.
+    #[must_use]
+    pub const fn is_known(self) -> bool {
+        self.first_paisa != CLOSE_NULL
+    }
+
+    /// The month's first close in paisa, or `None` when none was recorded.
+    #[must_use]
+    pub const fn first_paisa(self) -> Option<i64> {
+        if self.is_known() {
+            Some(self.first_paisa)
+        } else {
+            None
+        }
+    }
+
+    /// The month's last close in paisa, or `None` when none was recorded.
+    #[must_use]
+    pub const fn last_paisa(self) -> Option<i64> {
+        if self.is_known() {
+            Some(self.last_paisa)
+        } else {
+            None
+        }
+    }
+
+    /// Both closes, or `None` when neither was recorded.
+    ///
+    /// The shape a caller computing a percentage wants: there is no arm in
+    /// which one is available and the other is not, so there is no arm in which
+    /// a caller can accidentally divide by a number it invented.
+    #[must_use]
+    pub const fn paisa(self) -> Option<(i64, i64)> {
+        if self.is_known() {
+            Some((self.first_paisa, self.last_paisa))
+        } else {
+            None
+        }
+    }
+
+    /// The pair as stored, refusing a half-recorded or impossible one.
+    ///
+    /// The decoder's door. It is the same door the encoder used, which is what
+    /// makes the round trip a property of the type rather than of two functions
+    /// that happen to agree today.
+    const fn decode(first: i64, last: i64) -> Result<Self, EntryFault> {
+        match (first == CLOSE_NULL, last == CLOSE_NULL) {
+            (true, true) => Ok(Self::UNKNOWN),
+            (false, false) => Self::known(first, last),
+            // Exactly one sentinel. Reading it as either answer invents the
+            // other half, and `CLAUDE.md` §4 admits no fallback that hides a
+            // failure.
+            (true, false) | (false, true) => Err(EntryFault::CloseHalfRecorded { first, last }),
+        }
+    }
+
+    /// The two values as they go on disk, sentinel and all.
+    const fn stored(self) -> (i64, i64) {
+        (self.first_paisa, self.last_paisa)
+    }
+}
+
 /// One month of one instrument, as the manifest records it.
+///
+/// **The version-1 record, unchanged.** Its four fields are at the offsets
+/// version 1 wrote them at and its image is still 64 bytes, because
+/// `CLAUDE.md` §3 rule 8 makes a format append-only: version 2 adds a second
+/// 64-byte half beside this one rather than renumbering it. [`Held`] is an
+/// entry together with the closes that half carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Entry {
     /// What this entry is about.
@@ -795,9 +1405,25 @@ impl Entry {
         Ok(())
     }
 
-    /// The 64-byte image of this entry, checksum computed.
+    /// This entry's image at the version this build writes — [`ENTRY_LEN`]
+    /// bytes, with the closes recorded as [`Closes::UNKNOWN`].
+    ///
+    /// A convenience for the caller that has an entry and no price for it.
+    /// [`Held::image`] is the one that carries a close.
     #[must_use]
-    pub fn image(&self) -> [u8; IMAGE_LEN] {
+    pub fn image(&self) -> [u8; ENTRY_LEN] {
+        Held::unknown(*self).image()
+    }
+
+    /// The **version-1** image of this entry: 64 bytes, checksum computed.
+    ///
+    /// Also bytes `0..64` of the version-2 image, byte for byte — which is not
+    /// a coincidence to be relied on quietly but the shape of the format:
+    /// version 2 is two of this module's 64-byte checksummed units, the first
+    /// of which is a version-1 entry. `pull::unit::a_version_2_entry_opens_with_a_version_1_entry`
+    /// pins it.
+    #[must_use]
+    pub fn image_v1(&self) -> [u8; IMAGE_LEN] {
         let mut out = [0u8; IMAGE_LEN];
         write_text(&mut out, E_SYMBOL, self.key.symbol.as_str());
         write_at(&mut out, E_ROWS, self.rows.to_le_bytes());
@@ -824,7 +1450,13 @@ impl Entry {
         out
     }
 
-    /// Decodes one entry.
+    /// Decodes the **base** 64 bytes of an entry — a whole version-1 entry, or
+    /// the first half of a version-2 one.
+    ///
+    /// It reads no close and refuses none: a version-2 entry's second half is
+    /// [`Held::decode`]'s to check. A caller holding version-2 bytes and calling
+    /// this gets the four base fields and no error, which is correct and is not
+    /// the whole row — [`Layout::decode_entry`] is the door that dispatches.
     ///
     /// The bytes are copied into a 64-byte array **once**, before anything is
     /// checked, and every field is read from that copy — the same argument
@@ -872,6 +1504,116 @@ impl Entry {
     }
 }
 
+/// One row of the census: the entry, and the closes recorded beside it.
+///
+/// # Why this is a second type and not two more fields on [`Entry`]
+///
+/// Because that is what the bytes are. A version-2 entry is **two** 64-byte
+/// checksummed units — a version-1 entry, then the closes — and this type is
+/// that pair with the same seam in the same place. `Entry` keeps meaning "the
+/// version-1 record", so nothing that already reads or writes one changes
+/// meaning, and a version-1 file loads into `Held { entry, closes: UNKNOWN }`
+/// without a special case anywhere.
+///
+/// It is also what makes the ingest probe correct. `pull::ingest::count` asks
+/// "is this month already recorded exactly as it is now" with one comparison,
+/// and if that comparison were over `Entry` alone, a month whose rows had not
+/// moved but whose closes had just been read for the first time would compare
+/// equal and the closes would never be written. Comparing the whole row is what
+/// makes the version-1 census fill in as it is re-ingested — and, once filled,
+/// stop rewriting, because then the closes compare equal too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Held {
+    /// What the census records about the bar file.
+    pub entry: Entry,
+    /// The month's first and last close, or [`Closes::UNKNOWN`].
+    pub closes: Closes,
+}
+
+impl Held {
+    /// A row whose closes nobody has read.
+    #[must_use]
+    pub const fn unknown(entry: Entry) -> Self {
+        Self {
+            entry,
+            closes: Closes::UNKNOWN,
+        }
+    }
+
+    /// A row with both parts.
+    #[must_use]
+    pub const fn new(entry: Entry, closes: Closes) -> Self {
+        Self { entry, closes }
+    }
+
+    /// The version-2 image of this row: [`ENTRY_LEN`] bytes, both checksums
+    /// computed.
+    ///
+    /// Bytes `0..64` are exactly [`Entry::image_v1`]. Bytes `64..128` are their
+    /// own 64-byte image — the two closes, then reserved zeroes, then a CRC-32C
+    /// over the first 60 of them at the same offset the other half uses. So
+    /// every one of the 128 bytes is covered by exactly one checksum, and the
+    /// same [`seal`] serves both halves rather than a second kernel that could
+    /// disagree with the first.
+    #[must_use]
+    pub fn image(&self) -> [u8; ENTRY_LEN] {
+        let base = self.entry.image_v1();
+
+        let mut closes = [0u8; IMAGE_LEN];
+        let (first, last) = self.closes.stored();
+        write_at(&mut closes, C_FIRST_CLOSE, first.to_le_bytes());
+        write_at(&mut closes, C_LAST_CLOSE, last.to_le_bytes());
+        // 16..60 stays zero. `docs/02-store-format.md` §2: a future field takes
+        // reserved space in a NEW VERSION.
+        seal(&mut closes);
+
+        let mut out = [0u8; ENTRY_LEN];
+        for (dst, src) in out.iter_mut().zip(base.iter().chain(closes.iter())) {
+            *dst = *src;
+        }
+        out
+    }
+
+    /// Decodes a version-2 entry: both halves, both checksums, both fields.
+    ///
+    /// # Errors
+    ///
+    /// [`EntryFault::TooShort`] for fewer than [`ENTRY_LEN`] bytes, whatever
+    /// [`Entry::decode`] refuses in the first half, [`EntryFault::Checksum`] for
+    /// a second half that fails its own, or [`EntryFault::CloseHalfRecorded`] /
+    /// [`EntryFault::CloseNotAPrice`] for a pair that is not a pair.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EntryFault> {
+        let entry = Entry::decode(bytes)?;
+        let half = image_of_at(bytes, IMAGE_LEN).map_err(|len| EntryFault::TooShort { len })?;
+        verify(&half).map_err(|(stored, computed)| EntryFault::Checksum { stored, computed })?;
+        let closes = Closes::decode(
+            i64::from_le_bytes(le_bytes(&half, C_FIRST_CLOSE)),
+            i64::from_le_bytes(le_bytes(&half, C_LAST_CLOSE)),
+        )?;
+        Ok(Self { entry, closes })
+    }
+}
+
+impl Layout {
+    /// Decodes one entry **at this version's geometry**.
+    ///
+    /// This is the dispatch the module header is about: a version-1 entry is 64
+    /// bytes with no close, a version-2 entry is 128 with two, and reading
+    /// either at the other's stride returns plausible integers lifted from the
+    /// wrong offsets.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Entry::decode`] or [`Held::decode`] refuses.
+    pub fn decode_entry(self, bytes: &[u8]) -> Result<Held, EntryFault> {
+        if self.carries_closes {
+            Held::decode(bytes)
+        } else {
+            Entry::decode(bytes).map(Held::unknown)
+        }
+    }
+}
+
 /// One header slot's fields.
 ///
 /// The three counters are the whole point of the file. They are maintained on
@@ -879,9 +1621,13 @@ impl Entry {
 /// a field read that means something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ManifestHeader {
-    /// Format version. Selects nothing yet; refused when unknown.
+    /// Format version. **Selects the geometry** — see [`Layout`]. Refused when
+    /// unknown, never read at the current version's offsets.
     pub format_version: u16,
     /// Bytes per entry, as this file declares them.
+    ///
+    /// Read, and then checked against what [`Layout`] says the version's stride
+    /// is. A file may not declare a stride its own version does not have.
     pub entry_stride: u16,
     /// Which vendor's census this is. A cross-check against the file name.
     pub vendor: Vendor,
@@ -926,8 +1672,11 @@ pub struct Append {
     pub ordinal: u64,
     /// The byte offset to write the entry at.
     pub offset: u64,
-    /// Exactly the bytes to write, checksum included.
-    pub bytes: [u8; IMAGE_LEN],
+    /// Exactly the bytes to write, both checksums included.
+    ///
+    /// [`ENTRY_LEN`] and not [`IMAGE_LEN`]: an append is always at the version
+    /// this build writes, and that entry is two 64-byte checksummed units.
+    pub bytes: [u8; ENTRY_LEN],
     /// The header write that publishes it, to be issued **after** the entry is
     /// durable through [`Commit::durable_through`].
     pub commit: Commit,
@@ -948,10 +1697,41 @@ impl ManifestHeader {
         }
     }
 
+    /// The geometry this header's version declares.
+    ///
+    /// # Errors
+    ///
+    /// [`ManifestError::UnknownVersion`]. The fields of this struct are public,
+    /// so a header naming a version no [`Layout`] declares is constructible —
+    /// and answering with [`Layout::CURRENT`] would address its entries at a
+    /// stride it never claimed.
+    pub fn layout(&self) -> Result<Layout, ManifestError> {
+        Layout::for_version(self.format_version)
+    }
+
+    /// This header restated at the version this build writes.
+    ///
+    /// **The migration, and it is one line.** A census loaded from a version-1
+    /// file is published at version 2, because older versions are read and never
+    /// written — the same rule `store::layout::Layout::CURRENT` states. Nothing
+    /// on disk is mutated by this: the version-1 bytes stay exactly as they are
+    /// until a run has something new to record, and then the whole file is
+    /// rewritten rather than appended to. See [`Manifest::upgrading`].
+    const fn at_current(self) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            entry_stride: ENTRY_STRIDE_U16,
+            ..self
+        }
+    }
+
     /// The header that publishing `appended` more entries produces.
     ///
     /// Advances the generation and the counter together, because they are
-    /// written together.
+    /// written together — **and restates the version as the one this build
+    /// writes**, so the first commit after a version-1 census is loaded is a
+    /// version-2 commit. A header that advanced at the loaded version would
+    /// publish a counter over entries this build no longer knows how to write.
     ///
     /// # Errors
     ///
@@ -989,7 +1769,7 @@ impl ManifestHeader {
             n_valid,
             n_keys,
             total_rows,
-            ..*self
+            ..self.at_current()
         })
     }
 
@@ -1036,9 +1816,11 @@ impl ManifestHeader {
     /// # Errors
     ///
     /// [`ManifestError::TooManyEntries`] if the counter is past
-    /// [`MAX_ENTRIES`]. Past that gate every offset below is plain arithmetic
-    /// that provably cannot overflow, which is why nothing downstream carries a
-    /// failure arm no test could enter.
+    /// [`MAX_ENTRIES`], or [`ManifestError::UnknownVersion`] for a header naming
+    /// a version no [`Layout`] declares — its `durable_through` is an offset,
+    /// and an offset needs a stride. Past those gates every offset below is
+    /// plain arithmetic that provably cannot overflow, which is why nothing
+    /// downstream carries a failure arm no test could enter.
     pub fn commit(&self) -> Result<Commit, ManifestError> {
         if self.n_valid > MAX_ENTRIES {
             return Err(ManifestError::TooManyEntries {
@@ -1046,33 +1828,39 @@ impl ManifestHeader {
                 limit: MAX_ENTRIES,
             });
         }
-        Ok(self.commit_within_bounds())
+        Ok(self.commit_at(self.layout()?))
     }
 
     /// [`ManifestHeader::commit`] for a header whose counter is already known
-    /// to be within [`MAX_ENTRIES`].
+    /// to be within [`MAX_ENTRIES`] and whose geometry the caller holds.
     ///
-    /// Private, and the precondition is not a comment on a public door: the
-    /// only caller other than [`ManifestHeader::commit`] is
-    /// [`Manifest::record`], which reaches it through
-    /// [`ManifestHeader::advance`] — and `advance` refuses a counter past
-    /// [`MAX_ENTRIES`] before this can be called.
-    fn commit_within_bounds(&self) -> Commit {
+    /// Private, and neither precondition is a comment on a public door: the only
+    /// callers other than [`ManifestHeader::commit`] are [`Manifest::record_held`]
+    /// and [`Manifest::image`], which reach it through
+    /// [`ManifestHeader::advance`] and [`ManifestHeader::at_current`] — the
+    /// first refuses a counter past [`MAX_ENTRIES`] and both leave the version
+    /// at [`Layout::CURRENT`].
+    fn commit_at(&self, layout: Layout) -> Commit {
         let slot = self.generation % SLOT_COUNT;
         Commit {
             slot,
             offset: slot * SLOT_STRIDE,
             bytes: self.image(),
-            durable_through: offset_within_bounds(self.n_valid),
+            durable_through: layout.offset_within_bounds(self.n_valid),
             header: *self,
         }
     }
 
     /// The 64-byte slot image for this header, checksum computed.
+    ///
+    /// The magic follows the **version**, from [`Layout`], rather than a
+    /// constant: a version-1 slot begins `BRUTEXM1` and a version-2 slot begins
+    /// `BRUTEXM2`, so the two can never be mistaken for one another even before
+    /// the version field is read.
     #[must_use]
     pub fn image(&self) -> [u8; IMAGE_LEN] {
         let mut out = [0u8; IMAGE_LEN];
-        write_at(&mut out, H_MAGIC, MAGIC);
+        write_at(&mut out, H_MAGIC, magic_for(self.format_version));
         write_at(&mut out, H_VERSION, self.format_version.to_le_bytes());
         write_at(&mut out, H_STRIDE, self.entry_stride.to_le_bytes());
         write_at(&mut out, H_GENERATION, self.generation.to_le_bytes());
@@ -1094,6 +1882,16 @@ impl ManifestHeader {
     /// checked in that order, so the most basic disagreement is the one
     /// reported.
     pub fn decode(slot: &[u8]) -> Result<Self, ManifestError> {
+        Self::decode_with_layout(slot).map(|(header, _)| header)
+    }
+
+    /// [`ManifestHeader::decode`], keeping the geometry it resolved.
+    ///
+    /// Private, and it exists so nothing downstream has to resolve the version a
+    /// second time and carry an `Err` arm for a version `decode` has already
+    /// proved is known — an arm no input could reach is an arm no test can
+    /// close.
+    fn decode_with_layout(slot: &[u8]) -> Result<(Self, Layout), ManifestError> {
         let image = image_of(slot).map_err(|len| ManifestError::SlotTooShort { len })?;
         let magic: [u8; 8] = le_bytes(&image, H_MAGIC);
         if magic
@@ -1104,13 +1902,21 @@ impl ManifestHeader {
             return Err(ManifestError::NotAManifest);
         }
         let format_version = u16::from_le_bytes(le_bytes(&image, H_VERSION));
-        if format_version != FORMAT_VERSION || magic != MAGIC {
+        // THE DISPATCH. Not a comparison against one constant: this build reads
+        // every version in `Layout::KNOWN` and refuses the rest BY NUMBER, so a
+        // version-1 census on disk keeps reading after version 2 is minted and a
+        // version-3 file is refused rather than decoded at version 2's offsets.
+        let layout = Layout::for_version(format_version)?;
+        if magic != layout.magic() {
+            // The magic and the version field disagree, and there is no way to
+            // tell which of the two is the lie. Refused by version, because the
+            // version field is the thing that selects the geometry.
             return Err(ManifestError::UnknownVersion(format_version));
         }
         verify(&image)
             .map_err(|(stored, computed)| ManifestError::SlotChecksum { stored, computed })?;
         let entry_stride = u16::from_le_bytes(le_bytes(&image, H_STRIDE));
-        if entry_stride != ENTRY_STRIDE_U16 {
+        if u64::from(entry_stride) != layout.entry_stride() {
             return Err(ManifestError::StrideMismatch(entry_stride));
         }
         let name = text_at(&image, H_VENDOR, H_VENDOR_LEN).ok_or(ManifestError::UnknownVendor)?;
@@ -1118,15 +1924,18 @@ impl ManifestHeader {
             .into_iter()
             .find(|v| v.as_str() == name)
             .ok_or(ManifestError::UnknownVendor)?;
-        Ok(Self {
-            format_version,
-            entry_stride,
-            vendor,
-            generation: u64::from_le_bytes(le_bytes(&image, H_GENERATION)),
-            n_valid: u64::from_le_bytes(le_bytes(&image, H_N_VALID)),
-            n_keys: u64::from_le_bytes(le_bytes(&image, H_N_KEYS)),
-            total_rows: u64::from_le_bytes(le_bytes(&image, H_TOTAL_ROWS)),
-        })
+        Ok((
+            Self {
+                format_version,
+                entry_stride,
+                vendor,
+                generation: u64::from_le_bytes(le_bytes(&image, H_GENERATION)),
+                n_valid: u64::from_le_bytes(le_bytes(&image, H_N_VALID)),
+                n_keys: u64::from_le_bytes(le_bytes(&image, H_N_KEYS)),
+                total_rows: u64::from_le_bytes(le_bytes(&image, H_TOTAL_ROWS)),
+            },
+            layout,
+        ))
     }
 
     /// Reads the whole header region and returns every generation that
@@ -1153,7 +1962,7 @@ impl ManifestHeader {
     /// another vendor.
     pub fn read_region(
         region: &[u8],
-        capacity: u64,
+        entries: &[u8],
         vendor: Vendor,
     ) -> Result<HeaderRead, ManifestError> {
         let slots = whole_slots(region);
@@ -1164,14 +1973,14 @@ impl ManifestHeader {
             });
         }
 
-        let mut candidates: Vec<Self> = Vec::with_capacity(MAX_SLOTS);
+        let mut candidates: Vec<(Self, Layout)> = Vec::with_capacity(MAX_SLOTS);
         let mut fault: Option<ManifestError> = None;
         for (index, chunk) in (0u64..).zip(region.chunks(SLOT_STRIDE_LEN).take(MAX_SLOTS)) {
-            match Self::decode(chunk) {
-                Ok(header) => {
+            match Self::decode_with_layout(chunk) {
+                Ok((header, layout)) => {
                     let expected = header.generation % SLOT_COUNT;
                     if expected == index {
-                        candidates.push(header);
+                        candidates.push((header, layout));
                     } else {
                         fault.get_or_insert(ManifestError::SlotPositionMismatch {
                             expected,
@@ -1191,16 +2000,21 @@ impl ManifestHeader {
         // generation strictly decreasing: a loop that leaned on the comparison
         // would hang rather than fail if that comparison stopped being strict,
         // and a hang is the one failure a test suite cannot report.
-        candidates.sort_unstable_by_key(|header| std::cmp::Reverse(header.generation));
-        let mut newest: Option<Self> = None;
-        let mut older: Option<Self> = None;
+        candidates.sort_unstable_by_key(|(header, _)| std::cmp::Reverse(header.generation));
+        let mut newest: Option<(Self, Layout)> = None;
+        let mut older: Option<(Self, Layout)> = None;
         // Kept apart from `fault` on purpose. A generation the region cannot
         // support is what an operator needs to hear about first — it is the
         // state a writer published — and it is reported for the NEWEST such
         // generation rather than the last one looked at.
         let mut unsupported: Option<ManifestError> = None;
-        for candidate in candidates {
-            match candidate.validate(capacity) {
+        for (candidate, layout) in candidates {
+            // THE CAPACITY IS THE CANDIDATE'S OWN, not the file's. Two slots may
+            // name two versions — that is exactly the state a crash between the
+            // upgrade's two writes leaves — and counting whole entries at one
+            // stride to validate a counter written at the other accepts a header
+            // claiming twice the entries the region holds.
+            match candidate.validate(layout.capacity_for(entries)) {
                 Ok(()) => {
                     if candidate.vendor != vendor {
                         return Err(ManifestError::VendorMismatch {
@@ -1214,9 +2028,9 @@ impl ManifestHeader {
                     // grew one would be a compile error rather than a lost
                     // generation.
                     if newest.is_none() {
-                        newest = Some(candidate);
+                        newest = Some((candidate, layout));
                     } else {
-                        older = Some(candidate);
+                        older = Some((candidate, layout));
                     }
                 }
                 Err(refused) => {
@@ -1225,11 +2039,12 @@ impl ManifestHeader {
             }
         }
         let stepped_over = unsupported.or(fault);
-        let Some(newest) = newest else {
+        let Some((newest, newest_layout)) = newest else {
             return Err(stepped_over.unwrap_or(ManifestError::NoValidHeader));
         };
         Ok(HeaderRead {
             newest,
+            newest_layout,
             older,
             stepped_over,
         })
@@ -1249,7 +2064,8 @@ const _: () = assert!(MAX_SLOTS == 2);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeaderRead {
     newest: ManifestHeader,
-    older: Option<ManifestHeader>,
+    newest_layout: Layout,
+    older: Option<(ManifestHeader, Layout)>,
     stepped_over: Option<ManifestError>,
 }
 
@@ -1260,13 +2076,39 @@ impl HeaderRead {
         self.newest
     }
 
+    /// The geometry [`HeaderRead::newest`] declared.
+    ///
+    /// Carried rather than re-resolved, so the walk that follows cannot resolve
+    /// it differently from the decode that accepted it.
+    #[must_use]
+    pub const fn newest_layout(&self) -> Layout {
+        self.newest_layout
+    }
+
     /// The generation below it, if the other slot still holds one.
     ///
     /// The recovery point. A commit that became durable before the entries it
     /// counts leaves this one describing exactly the prefix that *is* durable.
     #[must_use]
     pub const fn older(&self) -> Option<ManifestHeader> {
-        self.older
+        match self.older {
+            Some((header, _)) => Some(header),
+            None => None,
+        }
+    }
+
+    /// The geometry [`HeaderRead::older`] declared.
+    ///
+    /// **The two slots may name two versions.** That is not hypothetical: it is
+    /// exactly the state a crash between the upgrade's entry writes and its slot
+    /// write leaves, and walking the older generation at the newer's stride
+    /// would read its entries at offsets it never wrote.
+    #[must_use]
+    pub const fn older_layout(&self) -> Option<Layout> {
+        match self.older {
+            Some((_, layout)) => Some(layout),
+            None => None,
+        }
     }
 
     /// A refusal that was stepped over to produce [`HeaderRead::newest`].
@@ -1322,18 +2164,19 @@ impl HeaderRead {
 /// image emitted in `HashMap` iteration order would differ between two
 /// processes given identical inputs, which is rule 5.
 ///
-/// It costs `size_of::<Entry>()` — **80 bytes** on this workspace's target,
+/// It costs `size_of::<Held>()` — **96 bytes** on this workspace's target,
 /// pinned by `pull::unit::the_log_is_the_entry_region_in_order` — per committed
-/// entry, reserved through [`reservation_for`] exactly as the index is, so the
+/// row, reserved through [`reservation_for`] exactly as the index is, so the
 /// first `n_valid` appends after a load cannot reallocate it either. At the
-/// measured 248,000-entry scale that is about 40 MB beside the index's 144 MB;
-/// at [`MAX_ENTRIES`] it is 168 MB beside 574 MB.
+/// measured 248,000-entry scale that is about 48 MB beside the index's 159 MB;
+/// at [`MAX_ENTRIES`] it is 201 MB beside 637 MB.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     header: ManifestHeader,
-    log: Vec<Entry>,
-    index: HashMap<EntryKey, Entry>,
+    log: Vec<Held>,
+    index: HashMap<EntryKey, Held>,
     degraded: Option<ManifestError>,
+    loaded_version: u16,
 }
 
 impl Manifest {
@@ -1359,6 +2202,7 @@ impl Manifest {
             log: Vec::new(),
             index: HashMap::new(),
             degraded: None,
+            loaded_version: FORMAT_VERSION,
         }
     }
 
@@ -1453,17 +2297,17 @@ impl Manifest {
         header_region: &[u8],
         entries: &[u8],
     ) -> Result<Self, ManifestError> {
-        let capacity = whole_entries(entries);
-        let read = ManifestHeader::read_region(header_region, capacity, vendor)?;
+        let read = ManifestHeader::read_region(header_region, entries, vendor)?;
 
         let header = read.newest();
-        let published = match Self::walk(header, entries) {
+        let published = match Self::walk(header, read.newest_layout(), entries) {
             Ok(census) => {
                 return Ok(Self {
                     header,
                     log: census.log,
                     index: census.index,
                     degraded: read.stepped_over(),
+                    loaded_version: header.format_version,
                 });
             }
             Err(fault) => fault,
@@ -1474,15 +2318,16 @@ impl Manifest {
         // `stepped_over` here: a stepped-over slot costs a candidate, and with
         // two slots a file cannot both have one and still offer an older
         // generation.
-        let Some(previous) = read.older() else {
+        let (Some(previous), Some(previous_layout)) = (read.older(), read.older_layout()) else {
             return Err(published);
         };
-        Self::walk(previous, entries)
+        Self::walk(previous, previous_layout, entries)
             .map(|census| Self {
                 header: previous,
                 log: census.log,
                 index: census.index,
                 degraded: Some(published),
+                loaded_version: previous.format_version,
             })
             .map_err(|_| published)
     }
@@ -1492,7 +2337,11 @@ impl Manifest {
     ///
     /// Split out of [`Manifest::load`] so that walking a second generation is
     /// the same code rather than a paraphrase of it.
-    fn walk(header: ManifestHeader, entries: &[u8]) -> Result<Census, ManifestError> {
+    fn walk(
+        header: ManifestHeader,
+        layout: Layout,
+        entries: &[u8],
+    ) -> Result<Census, ManifestError> {
         // Reserved from the COUNTER, which `validate` has already proved is
         // within both `MAX_ENTRIES` and the region's capacity -- not from the
         // region's byte length, which is untrusted input. Sizing it from the
@@ -1512,29 +2361,36 @@ impl Manifest {
         // onto a `Vec` with no spare capacity copies the whole log, so a
         // reservation of exactly `n_valid` would move the O(census) arm out of
         // the map and into the log rather than removing it.
-        let mut index: HashMap<EntryKey, Entry> =
+        let mut index: HashMap<EntryKey, Held> =
             HashMap::with_capacity(reservation_for(header.n_valid));
-        let mut log: Vec<Entry> = Vec::with_capacity(reservation_for(header.n_valid));
+        let mut log: Vec<Held> = Vec::with_capacity(reservation_for(header.n_valid));
         let mut n_keys = 0u64;
 
-        for (ordinal, chunk) in (0u64..header.n_valid).zip(entries.chunks_exact(IMAGE_LEN)) {
-            let entry =
-                Entry::decode(chunk).map_err(|fault| ManifestError::Entry { ordinal, fault })?;
-            log.push(entry);
-            match index.insert(entry.key, entry) {
+        // CHUNKED AT THE HEADER'S OWN STRIDE, from the layout its version
+        // selected. Reading a version-1 region in 128-byte steps would decode
+        // every second entry as the tail of the one before it.
+        for (ordinal, chunk) in
+            (0u64..header.n_valid).zip(entries.chunks_exact(layout.entry_stride_len()))
+        {
+            let held = layout
+                .decode_entry(chunk)
+                .map_err(|fault| ManifestError::Entry { ordinal, fault })?;
+            let entry = held.entry;
+            log.push(held);
+            match index.insert(entry.key, held) {
                 None => n_keys += 1,
                 Some(previous) => {
-                    if entry.rows < previous.rows {
+                    if entry.rows < previous.entry.rows {
                         return Err(ManifestError::RowCountWentBackwards {
                             ordinal,
-                            previous: previous.rows,
+                            previous: previous.entry.rows,
                             next: entry.rows,
                         });
                     }
-                    if entry.last_ts_micros < previous.last_ts_micros {
+                    if entry.last_ts_micros < previous.entry.last_ts_micros {
                         return Err(ManifestError::KeyTimestampsOutOfOrder {
                             ordinal,
-                            previous: previous.last_ts_micros,
+                            previous: previous.entry.last_ts_micros,
                             next: entry.last_ts_micros,
                         });
                     }
@@ -1543,9 +2399,9 @@ impl Manifest {
         }
 
         let mut total_rows = 0u64;
-        for entry in index.values() {
+        for held in index.values() {
             total_rows = total_rows
-                .checked_add(entry.rows)
+                .checked_add(held.entry.rows)
                 .ok_or(ManifestError::RowTotalOverflow)?;
         }
         if n_keys != header.n_keys {
@@ -1630,10 +2486,75 @@ impl Manifest {
         self.header.total_rows
     }
 
+    /// The version this census was **loaded** from.
+    ///
+    /// [`FORMAT_VERSION`] for a genesis census and for one read from a file this
+    /// build wrote. Older for a file written before the version it names was
+    /// minted — and that number does not move when [`Manifest::record`] is
+    /// called, because it is a fact about the bytes on disk, not about the
+    /// bytes this census will publish.
+    #[must_use]
+    pub const fn loaded_version(&self) -> u16 {
+        self.loaded_version
+    }
+
+    /// Whether publishing this census rewrites it at a newer version.
+    ///
+    /// **A writer must not append positionally when this is true.** The
+    /// incremental path writes one entry at `HEADER_LEN + ordinal·stride` at the
+    /// stride this build *writes*, and the file on disk is at the stride it was
+    /// *written* at; against a version-1 file those two disagree from the first
+    /// entry onward. `pull::ingest::install_census` installs the whole image
+    /// instead, which is the same thing it already does for a repair and for a
+    /// file that does not exist yet.
+    ///
+    /// The upgrade is therefore paid **once, and only by a run that had
+    /// something to record**. A run that changes nothing installs nothing and
+    /// leaves the version-1 file byte for byte as it was — `CLAUDE.md` §3 rule
+    /// 5 is about the bytes.
+    #[must_use]
+    pub const fn upgrading(&self) -> bool {
+        self.loaded_version != FORMAT_VERSION
+    }
+
     /// The newest entry for one key, if any. One hash probe.
     #[must_use]
     pub fn entry(&self, key: &EntryKey) -> Option<Entry> {
+        self.index.get(key).map(|held| held.entry)
+    }
+
+    /// The newest row for one key — the entry and its closes. One hash probe.
+    #[must_use]
+    pub fn held(&self, key: &EntryKey) -> Option<Held> {
         self.index.get(key).copied()
+    }
+
+    /// The month's closes, if the census holds that month. **One hash probe.**
+    ///
+    /// `None` means the month is not held. [`Closes::UNKNOWN`] means it is held
+    /// and no close was ever recorded for it — a version-1 entry, or one this
+    /// build wrote without reading the bar file. Those are two different facts
+    /// and this is where they stop being one.
+    ///
+    /// # Cost, and what crossing a month costs
+    ///
+    /// **O(1) worst case**, the same bound [`Manifest::entry`] carries: one
+    /// probe into a table the load walk built once and never grew. A caller
+    /// computing a month-over-month change probes twice — this month and
+    /// `YearMonth::previous` — which crosses a manifest **entry**, not a file:
+    /// no `open`, no `stat`, no `pread`, because the whole census is already
+    /// resident. Two probes, zero syscalls.
+    ///
+    /// That bound is **measured, not asserted**: `C-12` —
+    /// `pull::bench::entry_lookup_is_flat` — times this same `self.index`
+    /// probe at 1×, 10× and 100× the census, on a hit and on a miss. The bench
+    /// calls [`Manifest::entry`] rather than this method because the two are
+    /// one `HashMap::get` on the same key type and differ only in which field
+    /// of the `Copy` value they hand back, so a cost that had started to grow
+    /// with the census would show on either one.
+    #[must_use]
+    pub fn closes(&self, key: &EntryKey) -> Option<Closes> {
+        self.index.get(key).map(|held| held.closes)
     }
 
     /// Every key this census holds, in no particular order.
@@ -1725,6 +2646,20 @@ impl Manifest {
     /// whatever [`ManifestHeader::advance`] and [`ManifestHeader::commit`]
     /// refuse.
     pub fn record(&mut self, entry: Entry) -> Result<Append, ManifestError> {
+        self.record_held(Held::unknown(entry))
+    }
+
+    /// Records one month **with the closes read off its bar file**.
+    ///
+    /// [`Manifest::record`] is this with [`Closes::UNKNOWN`], for a caller that
+    /// has a counter row and no price. Everything else about the two is
+    /// identical, including every refusal.
+    ///
+    /// # Errors
+    ///
+    /// The same list [`Manifest::record`] carries.
+    pub fn record_held(&mut self, held: Held) -> Result<Append, ManifestError> {
+        let entry = held.entry;
         let ordinal = self.header.n_valid;
         entry
             .check()
@@ -1739,17 +2674,17 @@ impl Manifest {
                     .ok_or(ManifestError::RowTotalOverflow)?,
             ),
             Some(previous) => {
-                if entry.rows < previous.rows {
+                if entry.rows < previous.entry.rows {
                     return Err(ManifestError::RowCountWentBackwards {
                         ordinal,
-                        previous: previous.rows,
+                        previous: previous.entry.rows,
                         next: entry.rows,
                     });
                 }
-                if entry.last_ts_micros < previous.last_ts_micros {
+                if entry.last_ts_micros < previous.entry.last_ts_micros {
                     return Err(ManifestError::KeyTimestampsOutOfOrder {
                         ordinal,
-                        previous: previous.last_ts_micros,
+                        previous: previous.entry.last_ts_micros,
                         next: entry.last_ts_micros,
                     });
                 }
@@ -1762,7 +2697,7 @@ impl Manifest {
                     self.header.n_keys,
                     self.header
                         .total_rows
-                        .checked_add(entry.rows - previous.rows)
+                        .checked_add(entry.rows - previous.entry.rows)
                         .ok_or(ManifestError::RowTotalOverflow)?,
                 )
             }
@@ -1773,17 +2708,21 @@ impl Manifest {
         // fallible entry points here would add two `?` arms that no input could
         // ever take — a branch nobody has checked, sitting behind a coverage
         // gate that would still report 100%.
+        //
+        // `advance` also restates the version as the one this build writes, so
+        // the geometry below is `Layout::CURRENT` on every path, including the
+        // one that loaded a version-1 file.
         let header = self.header.advance(1, n_keys, total_rows)?;
-        let offset = offset_within_bounds(ordinal);
-        let commit = header.commit_within_bounds();
+        let offset = Layout::CURRENT.offset_within_bounds(ordinal);
+        let commit = header.commit_at(Layout::CURRENT);
 
-        self.log.push(entry);
-        self.index.insert(entry.key, entry);
+        self.log.push(held);
+        self.index.insert(entry.key, held);
         self.header = header;
         Ok(Append {
             ordinal,
             offset,
-            bytes: entry.image(),
+            bytes: held.image(),
             commit,
         })
     }
@@ -1847,11 +2786,15 @@ impl Manifest {
     /// no failure arm here for a test to be unable to reach.
     #[must_use]
     pub fn image(&self) -> Vec<u8> {
-        let commit = self.header.commit_within_bounds();
+        // AT THE VERSION THIS BUILD WRITES, always. A census loaded from a
+        // version-1 file images as version 2, with every entry it read carrying
+        // `Closes::UNKNOWN` — which is the truth about them: version 1 had
+        // nowhere to record a close, so nothing ever did.
+        let commit = self.header.at_current().commit_at(Layout::CURRENT);
         // `log.len()` is at most `MAX_ENTRIES`, so this product is at most
-        // 134,217,728 and the sum cannot overflow a `usize` on any target that
+        // 268,435,456 and the sum cannot overflow a `usize` on any target that
         // could hold the log in the first place.
-        let mut out = Vec::with_capacity(HEADER_REGION_LEN + self.log.len() * IMAGE_LEN);
+        let mut out = Vec::with_capacity(HEADER_REGION_LEN + self.log.len() * ENTRY_LEN);
 
         // Two slots, written out longhand rather than indexed into, because
         // this workspace denies slice indexing and the family is two: the
@@ -1866,41 +2809,40 @@ impl Manifest {
         }
         out.resize(HEADER_REGION_LEN, 0);
 
-        for entry in &self.log {
-            out.extend_from_slice(&entry.image());
+        for held in &self.log {
+            out.extend_from_slice(&held.image());
         }
         out
     }
 
-    /// The byte offset of entry `ordinal`.
+    /// The byte offset of entry `ordinal` **at the version this build writes**.
     ///
-    /// `HEADER_LEN + ordinal·64`. An add and a multiply — law 4. There is no
+    /// `HEADER_LEN + ordinal·128`. An add and a multiply — law 4. There is no
     /// index to consult and nothing to search.
+    ///
+    /// This is [`Manifest::record`]'s geometry, which is the one a writer needs,
+    /// because this build writes exactly one version. [`Layout::offset_of`] is
+    /// the door that **dispatches**, and it is the one a reader addressing a
+    /// file of unknown version must use.
     ///
     /// # Errors
     ///
     /// [`ManifestError::OrdinalOutOfRange`] past [`MAX_ENTRIES`]. The bound is
     /// on the ordinal rather than on the product, so the arithmetic itself is
-    /// total: `MAX_ENTRIES · 64 + HEADER_LEN` is 134 MB and nowhere near `u64`.
+    /// total: `MAX_ENTRIES · 128 + HEADER_LEN` is 268 MB and nowhere near `u64`.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use pull::manifest::{Manifest, ManifestError, HEADER_LEN, MAX_ENTRIES};
+    /// # use pull::manifest::{ENTRY_STRIDE, Manifest, ManifestError, HEADER_LEN, MAX_ENTRIES};
     /// assert_eq!(Manifest::offset_of(0)?, HEADER_LEN);
-    /// assert_eq!(Manifest::offset_of(1)?, HEADER_LEN + 64);
-    /// assert_eq!(Manifest::offset_of(1_000)?, HEADER_LEN + 64_000);
+    /// assert_eq!(Manifest::offset_of(1)?, HEADER_LEN + ENTRY_STRIDE);
+    /// assert_eq!(Manifest::offset_of(1_000)?, HEADER_LEN + 128_000);
     /// assert!(Manifest::offset_of(MAX_ENTRIES + 1).is_err());
     /// # Ok::<(), ManifestError>(())
     /// ```
     pub const fn offset_of(ordinal: u64) -> Result<u64, ManifestError> {
-        if ordinal > MAX_ENTRIES {
-            return Err(ManifestError::OrdinalOutOfRange {
-                ordinal,
-                limit: MAX_ENTRIES,
-            });
-        }
-        Ok(offset_within_bounds(ordinal))
+        Layout::CURRENT.offset_of(ordinal)
     }
 }
 
@@ -1911,23 +2853,34 @@ impl Manifest {
 /// newest entry per key. Returned together from one walk because building them
 /// in two passes would decode and checksum every entry twice.
 struct Census {
-    /// Every committed entry, in the order the region holds them.
-    log: Vec<Entry>,
-    /// The newest entry for each distinct key.
-    index: HashMap<EntryKey, Entry>,
-}
-
-/// `HEADER_LEN + ordinal · ENTRY_STRIDE`, for an ordinal already known to be
-/// within [`MAX_ENTRIES`].
-///
-/// Total, not fallible. `MAX_ENTRIES · ENTRY_STRIDE + HEADER_LEN` is 134 MB, so
-/// past the bound check there is nothing left that can overflow — and therefore
-/// nothing left that needs a failure arm.
-const fn offset_within_bounds(ordinal: u64) -> u64 {
-    HEADER_LEN + ordinal * ENTRY_STRIDE
+    /// Every committed row, in the order the region holds them.
+    log: Vec<Held>,
+    /// The newest row for each distinct key.
+    index: HashMap<EntryKey, Held>,
 }
 
 const _: () = assert!(MAX_ENTRIES * ENTRY_STRIDE + HEADER_LEN < u64::MAX);
+
+/// The eight magic bytes for a version, or the family alone for one no
+/// [`Layout`] declares.
+///
+/// The second arm is reachable — [`ManifestHeader`]'s fields are public, so a
+/// header naming version 7 can be imaged — and what it writes matters: leaving
+/// the family bytes in place means [`ManifestHeader::decode`] refuses the slot
+/// by **version**, which names the actual problem, rather than as "not a
+/// manifest", which names the wrong one.
+fn magic_for(version: u16) -> [u8; 8] {
+    Layout::for_version(version).map_or_else(
+        |_| {
+            let mut out = [0u8; 8];
+            for (dst, src) in out.iter_mut().zip(MAGIC_FAMILY.iter()) {
+                *dst = *src;
+            }
+            out
+        },
+        Layout::magic,
+    )
+}
 
 /// Whether a refusal says something about the file, or only that a slot is not
 /// a header at all.
@@ -1946,31 +2899,28 @@ fn whole_slots(region: &[u8]) -> u64 {
         .fold(0u64, |seen, _| seen + 1)
 }
 
-/// How many whole entries the region holds, capped at [`MAX_ENTRIES`].
-///
-/// Counted by folding rather than by `len()` so the answer is a `u64` without a
-/// `usize` conversion whose failure arm no test on a 64-bit host could reach,
-/// and bounded so the fold cannot overflow. It walks the region, which is O(n)
-/// — it is on the load path, where a walk is already being paid, and it is the
-/// last one: every question afterwards is a field read or a hash probe.
-fn whole_entries(entries: &[u8]) -> u64 {
-    entries
-        .chunks_exact(IMAGE_LEN)
-        .take(MAX_ENTRIES_LEN)
-        .fold(0u64, |seen, _| seen + 1)
-}
-
 /// Copies the first [`IMAGE_LEN`] bytes, or reports how few there were.
 ///
 /// One observation of the caller's bytes. Everything downstream reads this
 /// array and nothing touches the caller's slice again, so the checksum covers
 /// exactly the bytes the decoded value is built from.
 fn image_of(bytes: &[u8]) -> Result<[u8; IMAGE_LEN], usize> {
-    if bytes.len() < IMAGE_LEN {
+    image_of_at(bytes, 0)
+}
+
+/// Copies the [`IMAGE_LEN`] bytes beginning at `start`, or reports how few
+/// there were **in total**.
+///
+/// The length reported is the caller's whole slice rather than what was left
+/// past `start`, because that is the number an operator can act on: an entry
+/// region truncated mid-row is short by however much it is short of a whole
+/// entry, not of a half.
+fn image_of_at(bytes: &[u8], start: usize) -> Result<[u8; IMAGE_LEN], usize> {
+    if bytes.len() < start + IMAGE_LEN {
         return Err(bytes.len());
     }
     let mut image = [0u8; IMAGE_LEN];
-    for (dst, src) in image.iter_mut().zip(bytes.iter()) {
+    for (dst, src) in image.iter_mut().zip(bytes.iter().skip(start)) {
         *dst = *src;
     }
     Ok(image)

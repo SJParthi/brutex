@@ -17,6 +17,12 @@
 //! `O(census)` twelve thousand times to maintain an `O(1)` read is the shape
 //! this layer exists to remove.
 //!
+//! That read is measured, not asserted: `pull::bench::entry_lookup_is_flat`
+//! times one lookup at 1×, 10× and 100× the census on the map a loaded manifest
+//! holds (`C-12`), and `pull::bench::census_beats_the_scan_it_replaces` times it
+//! against re-deriving the same answer from the entries (`C-11`). The append
+//! this loop pays instead is `pull::bench::append_after_load_is_flat` (`C-13`).
+//!
 //! The load happens **first**, before a single bar reaches the disk, because a
 //! census this build cannot read is a run whose bars would land uncounted. That
 //! is the one outcome worse than a run that refused outright: the bars are
@@ -38,6 +44,13 @@
 //! offered. On a second window into a month that already holds bars the batch
 //! is a suffix and the header is the whole file, and it is the file the census
 //! is a census of.
+//!
+//! **The month's two closes are the same fact and get the same treatment.**
+//! They come from the batch when the batch is provably the whole file — three
+//! header comparisons, no read — and are read back off the disk otherwise, two
+//! O(1) positional reads. Recording a suffix's first close as the month's first
+//! close would put a fabricated base under every percentage computed from it.
+//! See `closes_in_hand` and D-0067.
 //!
 //! # What this refuses to do
 //!
@@ -71,7 +84,7 @@
 //!
 //! # Cost
 //!
-//! One pass per member, one append per member, one hash probe and one 64-byte
+//! One pass per member, one append per member, one hash probe and one 128-byte
 //! entry per member that stored anything. The append is
 //! `base + header + index·stride` — arithmetic, not a search. Enumerating the
 //! folder is O(members), which is inherent to a bulk import and is stated in
@@ -81,7 +94,7 @@
 //! committed entry, including the ones this run did not touch. That is the
 //! documented cost of [`Manifest::image`], taken deliberately in exchange for
 //! an install that is one `rename`. The incremental alternative —
-//! [`Manifest::record`]'s [`crate::manifest::Append`], one 64-byte positional
+//! [`Manifest::record`]'s [`crate::manifest::Append`], one 128-byte positional
 //! write per member and one commit — is what a per-member publish would use,
 //! and this deliberately does not publish per member.
 //!
@@ -114,12 +127,16 @@ use std::path::{Path, PathBuf};
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
 use store::file::BarFile;
+use store::format::Bar;
+use store::header::Header;
 use store::path::{FileKind, PathParts, StorePath, Timeframe};
 
 use crate::archive::{self, Member};
 use crate::csv::Columns;
 use crate::fetch::{self, BarRequest};
-use crate::manifest::{Append, ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest};
+use crate::manifest::{
+    Append, Closes, ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, Held, MAX_ENTRIES, Manifest,
+};
 use crate::session::DropCensus;
 use crate::vendor::{PriceScale, TimestampEncoding};
 
@@ -132,10 +149,17 @@ use crate::vendor::{PriceScale, TimestampEncoding};
 /// file larger than that is not a census this build could have written, and
 /// reading it to find that out is an allocation the size of whatever somebody
 /// left at that path — which is not a bound, it is the absence of one.
+///
+/// **It is the WIDEST stride this build knows, and that is deliberate.** A
+/// version-1 census at the ceiling is 134,250,496 bytes and must still be
+/// readable; a version-2 one is twice that. Bounding at version 1's stride
+/// would refuse a legal version-2 file, and bounding per-version is impossible
+/// here because the version is inside the file this bound decides whether to
+/// read. D-0067.
 const MAX_CENSUS_BYTES: u64 = HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE;
 
 /// The derivation above, checked at compile time rather than in a comment.
-const _: () = assert!(MAX_CENSUS_BYTES == 134_250_496);
+const _: () = assert!(MAX_CENSUS_BYTES == 268_468_224);
 
 /// What one member could not do, kept so the run can continue past it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -433,8 +457,8 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
                         done.census.count(reason);
                     }
                 }
-                if let Some(entry) = landed.entry {
-                    match count(&mut census, entry) {
+                if let Some(held) = landed.entry {
+                    match count(&mut census, held) {
                         Ok(changed) => {
                             done.counted += 1;
                             if let Some(append) = changed {
@@ -451,7 +475,7 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
                             instrument: member.instrument.clone(),
                             why: format!(
                                 "{} holds {} bar(s) the census does not count: {why}",
-                                member.instrument, entry.rows
+                                member.instrument, held.entry.rows
                             ),
                         }),
                     }
@@ -543,7 +567,81 @@ struct Landed {
     /// Why rows were declined.
     census: DropCensus,
     /// The counter row for the month file, `None` when nothing was stored.
-    entry: Option<Entry>,
+    entry: Option<Held>,
+}
+
+/// The month's two closes, when the batch just appended **is** the whole file.
+///
+/// # Why this is a question and not an assumption
+///
+/// The counter row describes the FILE, not the batch — which is why `rows`,
+/// `first_ts_micros` and `last_ts_micros` are all read back off the committed
+/// header a few lines below rather than taken from `landed.bars`. The closes are
+/// the same fact and get the same treatment: on a second window into a month
+/// that already held bars, the batch is a *suffix*, and recording its first
+/// close as the month's first close would put a fabricated base under every
+/// percentage computed from it.
+///
+/// So the batch's closes are used only when the file is provably the batch: the
+/// same count, and the same two instants at the same two ends. **All three are
+/// header fields already in hand, so the test is three comparisons and no I/O**
+/// — and when it passes, the two closes cost nothing at all. That is the
+/// property `pull::unit::a_virgin_month_takes_its_closes_from_the_batch_it_just_wrote`
+/// pins: the `None` arm is where the reads live, and a virgin month never
+/// reaches it.
+///
+/// `None` means "read them off the disk" — two O(1) positional reads of 56 bytes
+/// on a handle that is already open. Measured against the groww census's own
+/// numbers, 43,422 committed months over 216,496,530 records written, that is
+/// **86,844 extra 56-byte reads against 216.5 M record writes: +0.040%**. The
+/// syscall latency itself is the device's and is UNVERIFIED here —
+/// `store::file::BarFile::read_record` says so and this does not claim more.
+fn closes_in_hand(header: &Header, batch: &[Bar]) -> Option<(i64, i64)> {
+    let first = batch.first()?;
+    let last = batch.last()?;
+    let count = u64::try_from(batch.len()).ok()?;
+    if header.n_valid != count
+        || header.first_ts_micros != first.ts_micros
+        || header.last_ts_micros != last.ts_micros
+    {
+        return None;
+    }
+    Some((first.close, last.close))
+}
+
+/// The month's two closes, read back off the file.
+///
+/// Two positional reads of [`store::format::RECORD_LEN`] bytes at computed
+/// offsets on an already-open handle. No scan, no reopen, no allocation.
+///
+/// `saturating_sub` rather than a checked one: the last committed index of a
+/// file holding `n_valid` records is `n_valid − 1`, and for `n_valid == 0` this
+/// asks for record 0 of an empty file — which
+/// [`BarFile::read_record`] refuses by name, with both numbers, rather than
+/// being answered by an arm here that no successful append could reach.
+fn closes_on_disk(file: &BarFile, n_valid: u64) -> Result<(i64, i64), String> {
+    let first = file.read_record(0).map_err(|why| why.to_string())?;
+    let last = file
+        .read_record(n_valid.saturating_sub(1))
+        .map_err(|why| why.to_string())?;
+    Ok((first.close, last.close))
+}
+
+/// The month's closes: from the batch when that is free, off the file when it
+/// is not, and refused when the pair is not a pair of prices.
+///
+/// # Errors
+///
+/// The host's own words for a read that failed, or
+/// [`crate::manifest::EntryFault::CloseNotAPrice`] for a negative close — which
+/// no tick grid produces, and which would otherwise become a not-recorded
+/// sentinel that looks like a price.
+fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes, String> {
+    let (first, last) = match closes_in_hand(header, batch) {
+        Some(pair) => pair,
+        None => closes_on_disk(file, header.n_valid)?,
+    };
+    Closes::known(first, last).map_err(|why| why.to_string())
 }
 
 /// One member: convert, fold, append, and describe the month file that
@@ -683,22 +781,32 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // was offered — and an `AlreadyPresent` append records what is there
     // rather than counting it twice.
     let header = file.header();
+
+    // THE CLOSES DESCRIBE THE FILE TOO. Free when the batch is the whole file —
+    // three header comparisons and no read — and two O(1) positional reads when
+    // it is not. See `closes_in_hand` for why the second case cannot be skipped.
+    let closes = month_closes(&file, &header, &landed.bars)
+        .map_err(|why| format!("{}: {why}", member.instrument))?;
+
     Ok(Landed {
         bars: landed.bars.len(),
         folded,
         census: landed.census,
-        entry: Some(Entry {
-            key: EntryKey {
-                exchange,
-                segment,
-                symbol,
-                timeframe,
-                month: ym,
+        entry: Some(Held::new(
+            Entry {
+                key: EntryKey {
+                    exchange,
+                    segment,
+                    symbol,
+                    timeframe,
+                    month: ym,
+                },
+                rows: header.n_valid,
+                first_ts_micros: header.first_ts_micros,
+                last_ts_micros: header.last_ts_micros,
             },
-            rows: header.n_valid,
-            first_ts_micros: header.first_ts_micros,
-            last_ts_micros: header.last_ts_micros,
-        }),
+            closes,
+        )),
     })
 }
 
@@ -713,24 +821,31 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
 /// whose numbers have not moved appends a second row saying what the first row
 /// already said. Two identical runs would then leave two different files, and
 /// `CLAUDE.md` §3 rule 5 is about the bytes. One hash probe answers "is this
-/// already exactly what is recorded", and equality is over the whole entry —
-/// key, rows and both timestamps — so a month that grew by one bar is a
-/// change and is recorded.
+/// already exactly what is recorded", and equality is over the whole row —
+/// key, rows, both timestamps **and both closes** — so a month that grew by one
+/// bar is a change and is recorded.
+///
+/// **The closes are in that comparison on purpose.** A version-1 census records
+/// no close, so a month re-ingested against one differs in exactly that field
+/// and is re-recorded — which is how the 43,422 entries already on disk fill in
+/// as they are touched, rather than staying unknown forever. Once filled they
+/// compare equal and the file stops moving, so the run after that writes
+/// nothing.
 ///
 /// # Errors
 ///
-/// Whatever [`Manifest::record`] refuses, in its own words: a row count that
-/// went backwards, timestamps that did, or a census at its ceiling.
-fn count(census: &mut Manifest, entry: Entry) -> Result<Option<Append>, String> {
-    if census.entry(&entry.key) == Some(entry) {
+/// Whatever [`Manifest::record_held`] refuses, in its own words: a row count
+/// that went backwards, timestamps that did, or a census at its ceiling.
+fn count(census: &mut Manifest, held: Held) -> Result<Option<Append>, String> {
+    if census.held(&held.entry.key) == Some(held) {
         return Ok(None);
     }
-    // THE `Append` IS KEPT, NOT DROPPED. It carries the one 64-byte write and
+    // THE `Append` IS KEPT, NOT DROPPED. It carries the one 128-byte write and
     // the header commit that publishes it — everything an incremental install
     // needs, already computed. Discarding it here is what forced the caller to
     // re-image every committed entry to publish the few it had touched.
     census
-        .record(entry)
+        .record_held(held)
         .map(Some)
         .map_err(|why| why.to_string())
 }
@@ -931,11 +1046,19 @@ impl CensusLock {
 /// # When the whole image is still written
 ///
 /// **A repair**, because it may rewrite entries the append region already holds
-/// and an append-only log cannot express that. And **the first write**, when
-/// there is no file or it is shorter than the header: an append at
-/// `HEADER_LEN + 0` against a zero-length file would leave the header region a
-/// sparse hole and one slot never written at all. Both are stated conditions,
-/// not a fallback around a failure — either one failing still fails loudly.
+/// and an append-only log cannot express that. **An upgrade**, because the file
+/// on disk is at the stride it was written at and this build appends at the
+/// stride it writes — against a version-1 census those two disagree from the
+/// first entry onward, so the whole file is restated at version 2 instead. And
+/// **the first write**, when there is no file or it is shorter than the header:
+/// an append at `HEADER_LEN + 0` against a zero-length file would leave the
+/// header region a sparse hole and one slot never written at all. All three are
+/// stated conditions, not a fallback around a failure — any of them failing
+/// still fails loudly.
+///
+/// The upgrade is checked **after** the "nothing moved" gate, so a run that
+/// records nothing leaves a version-1 census exactly as it found it. The
+/// conversion is paid once, by the first run that had something to say.
 fn install_census(
     lock: &CensusLock,
     path: &Path,
@@ -953,7 +1076,7 @@ fn install_census(
         Ok(meta) => meta.len() < HEADER_LEN,
         Err(_) => true,
     };
-    if repairing || virgin {
+    if repairing || virgin || census.upgrading() {
         return install_locked(lock, path, &census.image());
     }
     append_locked(lock, path, appends)
@@ -1032,16 +1155,16 @@ fn publish(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result
     fs::File::open(dir)?.sync_all()
 }
 
-/// The one fact about this module no external test can reach.
+/// The two facts about this module no external test can reach.
 ///
-/// Everything else here is proved from outside, in
-/// `crates/pull/tests/census.rs`, because that is where a caller stands — a
-/// folder goes in, bars and a counter come out, and the two are checked
-/// against each other. This one is here because reaching it from outside means
-/// putting a 134,250,496-byte file on the disk and reading it into memory, and
-/// a boundary that is only ever tested one side of is a boundary nobody has
-/// checked. `pull::manifest` makes the same argument about [`MAX_ENTRIES`] and
-/// verifies it the same way.
+/// Most of it is proved from outside, in `crates/pull/tests/census.rs`, because
+/// that is where a caller stands — a folder goes in, bars and a counter come
+/// out, and the two are checked against each other. These two are here because
+/// one needs a 268,468,224-byte file on the disk to reach from outside, and the
+/// other is about a read that **does not happen**, which a caller cannot
+/// observe by definition. A boundary that is only ever tested one side of is a
+/// boundary nobody has checked; `pull::manifest` makes the same argument about
+/// [`MAX_ENTRIES`] and verifies it the same way.
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -1051,15 +1174,97 @@ fn publish(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::{MAX_CENSUS_BYTES, beyond_ceiling};
+    use store::format::Bar;
+    use store::header::Header;
+
+    use super::{MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand};
+
+    /// A bar at one instant with one close. Every other field is zero, which
+    /// the store's own format calls a legal bar.
+    fn bar(ts_micros: i64, close: i64) -> Bar {
+        Bar {
+            ts_micros,
+            open: close,
+            high: close,
+            low: close,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// A committed header describing `n_valid` records between two instants.
+    fn header(n_valid: u64, first: i64, last: i64) -> Header {
+        Header {
+            format_version: 2,
+            record_stride: 56,
+            flags: 0,
+            generation: 1,
+            n_valid,
+            first_ts_micros: first,
+            last_ts_micros: last,
+            symbol_id: 1,
+            timeframe_secs: 60,
+        }
+    }
+
+    /// M-34 — a virgin month takes its closes from the batch it just wrote, and
+    /// pays for no read at all.
+    ///
+    /// **This is the "costs nothing extra" claim, and it is a claim about a
+    /// branch rather than about a stopwatch.** `closes_in_hand` returning `Some`
+    /// is the only way the `None` arm — the two positional reads — is not
+    /// reached, so proving the arm is not taken proves the reads are not issued.
+    /// A timing test could not prove it and a mock would only prove the mock.
+    ///
+    /// The `None` cases are the whole reason the function exists: on a second
+    /// window into a month that already holds bars, the batch is a SUFFIX, and
+    /// its first close is not the month's first close. Recording it as one puts
+    /// a fabricated base under every percentage computed from it.
+    #[test]
+    fn a_virgin_month_takes_its_closes_from_the_batch_it_just_wrote() {
+        let batch = [
+            bar(1_000, 295_050),
+            bar(2_000, 300_000),
+            bar(3_000, 310_025),
+        ];
+
+        // THE FILE IS THE BATCH: same count, same two instants. Free.
+        assert_eq!(
+            closes_in_hand(&header(3, 1_000, 3_000), &batch),
+            Some((295_050, 310_025)),
+            "the month's first and last close, with no read issued"
+        );
+
+        // The file holds MORE than the batch — the batch is a suffix. The first
+        // close in hand belongs to the suffix, not to the month.
+        assert_eq!(closes_in_hand(&header(9, 500, 3_000), &batch), None);
+        // The counts agree and the FIRST instant does not: the batch is not the
+        // prefix it looks like.
+        assert_eq!(closes_in_hand(&header(3, 900, 3_000), &batch), None);
+        // The counts agree and the LAST instant does not.
+        assert_eq!(closes_in_hand(&header(3, 1_000, 4_000), &batch), None);
+        // A count below the batch is not a state a committed append leaves, and
+        // it is still not "the file is the batch".
+        assert_eq!(closes_in_hand(&header(2, 1_000, 3_000), &batch), None);
+        // An empty batch has no ends to read.
+        assert_eq!(closes_in_hand(&header(0, 0, 0), &[]), None);
+
+        // One bar is both ends of its own file.
+        assert_eq!(
+            closes_in_hand(&header(1, 7, 7), &[bar(7, 0)]),
+            Some((0, 0)),
+            "and a close of zero comes back as a zero, not as unknown"
+        );
+    }
 
     /// The largest census this build can write is accepted; one byte more is
     /// not.
     #[test]
     fn the_ceiling_admits_the_largest_census_this_build_can_write() {
         assert_eq!(
-            MAX_CENSUS_BYTES, 134_250_496,
-            "32,768 bytes of header region and 2,097,152 entries of 64 bytes"
+            MAX_CENSUS_BYTES, 268_468_224,
+            "32,768 bytes of header region and 2,097,152 entries of 128 bytes"
         );
         assert!(
             !beyond_ceiling(MAX_CENSUS_BYTES),

@@ -334,3 +334,149 @@ append-only identifier, not a slot to be overwritten.
 No version-1 file can exist — version 1 never had a reader or a writer in this
 repository, only constants. The entry costs one comparison and removes the only
 way this build could misread one if that assumption is ever wrong.
+
+---
+
+## 11. The census file — `BRUTEXM`, versions 1 and 2
+
+Everything above is a **bar** file. The per-vendor census at
+`manifest/<vendor>.man` is a different format in the same store, and until
+D-0067 its only description was a module comment in `crates/pull/src/manifest.rs`
+— which made a Rust comment the authority for bytes on a disk. This section is
+the authority now.
+
+### 11.1 What is shared with the bar format, and what is not
+
+**Shared, because a reader must locate the header before it knows the version:**
+the two-slot header region, `slot_count × 16384`, 64 bytes of fields at the
+start of each slot, commit *g* in slot `g % 2`, and the highest valid generation
+wins. The 16384-byte spacing is the measured failure-unit argument of §2 and it
+is the same argument here.
+
+**Not shared:** the header's *fields* are counters, not a bar file's
+`symbol_id`/`timeframe_secs`; the magic is `BRUTEXM`, never `BRUTEXB`, and the
+family check is the first thing either decoder does; and the checksum domain is
+one contiguous run `0..60` rather than §2's discontiguous one, because this
+slot has no reserved field after its checksum.
+
+### 11.2 File layout
+
+```
+byte 0                 32768                                       EOF
+  ├──── header region ────┼─── entry 0 ──┼─── entry 1 ──┼── … ──────┤
+   2 slots × 16384 spacing    64 or 128      64 or 128
+```
+
+**Address of entry *i*: `32768 + i·stride`,** where `stride` comes from
+`pull::manifest::Layout`, selected by the file's own `format_version`. It is not
+a constant on the read path. 32768 divides by both strides, so an entry is
+64-byte aligned at either one and never straddles a cache line.
+
+### 11.3 One header slot — 64 bytes, both versions
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 0 | 8 | `magic` | `b"BRUTEXM1"` or `b"BRUTEXM2"` — the last byte is the version |
+| 8 | 2 | `format_version` | `1` or `2`. **Selects the geometry.** |
+| 10 | 2 | `entry_stride` | `64` at version 1, `128` at version 2. Read it; never assume it, and check it against what the version declares. |
+| 16 | 8 | `generation` | which commit this slot holds. Higher wins. |
+| 24 | 8 | `n_valid` | the commit counter: entries readable |
+| 32 | 8 | `n_keys` | distinct `(instrument, timeframe, month)` keys among them |
+| 40 | 8 | `total_rows` | bars held across every distinct key |
+| 48 | 8 | `vendor` | NUL-padded text; a cross-check against the file name |
+| 54 | 6 | reserved | zero |
+| 60 | 4 | `crc` | CRC-32C over bytes `0..60`, one contiguous run |
+
+The slot layout is **identical across both versions**: only the magic, the
+version and the stride differ, which is why one decoder reads both and dispatch
+is a table lookup rather than a second parser.
+
+A slot whose magic and version field disagree is refused **by version**. There
+is no way to tell which of the two is the lie, and the version field is the
+thing that selects the geometry.
+
+### 11.4 Entry, version 1 — 64 bytes
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 24 | `symbol`, NUL-padded, canonical case |
+| 24 | 8 | `rows` — bars in that month's file |
+| 32 | 8 | `first_ts_micros` |
+| 40 | 8 | `last_ts_micros` |
+| 48 | 4 | `timeframe_secs` |
+| 52 | 2 | `year` |
+| 54 | 1 | `month` |
+| 55 | 1 | `exchange` code — NSE 1, BSE 2, append-only |
+| 56 | 1 | `segment` code — INDEX 1, CASH 2, FNO 3, append-only |
+| 57 | 3 | reserved, zero |
+| 60 | 4 | `crc` — CRC-32C over `0..60` |
+
+**Version 1 is not retired.** 43,422 entries across two vendors are on disk in
+this geometry and §3 rule 8 does not admit mutating them in place. It is read at
+its own stride and never written.
+
+### 11.5 Entry, version 2 — 128 bytes, two 64-byte halves
+
+Version 2 exists because `/store.json` must serve a month's percentage change
+without opening a bar file. It is **two** of the 64-byte checksummed units this
+format already has:
+
+```
+byte 0                        64                            128
+  ├──── a version-1 entry ─────┼──── the closes ─────────────┤
+       its own CRC at 60             its own CRC at 124
+```
+
+Bytes `0..64` are, byte for byte, a version-1 entry image. Bytes `64..128` are:
+
+| Offset | Size | Field | Notes |
+|---|---|---|---|
+| 64 | 8 | `first_close_paisa` | close of record `0`, or `i64::MIN` |
+| 72 | 8 | `last_close_paisa` | close of record `rows − 1`, or `i64::MIN` |
+| 80 | 44 | reserved | zero |
+| 124 | 4 | `crc` | CRC-32C over bytes `64..124` |
+
+Every one of the 128 bytes is covered by exactly one of the two checksums, so a
+flipped bit anywhere in the entry is detected — there is no window a corruption
+can land in and be called clean.
+
+**`i64::MIN` is the not-recorded sentinel, and zero means zero.** A close is a
+price in paisa, so `i64::MIN` is not a value any tick grid produces; this is the
+same convention §3 states for open interest, applied to a second field rather
+than a second mechanism that could drift out of step with the first. A month
+whose bars really closed at zero paisa records a zero and is told apart from a
+month whose closes nobody has read. Every version-1 entry reads back as
+not-recorded, because version 1 had nowhere to put a close and nothing ever did.
+
+**Both closes or neither.** They are read from record 0 and record `n_valid − 1`
+of one file in one operation, so half of a pair is a state no writer produces
+and it is refused rather than half-believed. A negative close that is not the
+sentinel is refused for the same reason: the sentinel must be one value, not a
+range.
+
+Reserved bytes are zero and stay zero. A future field takes reserved space in a
+**new version**, never by reinterpreting version 2 — §2's rule, unchanged.
+
+### 11.6 Old files stay readable, and the upgrade is a rewrite
+
+`pull::manifest::Layout` is the dispatch: `KNOWN` holds one row per version,
+`for_version` refuses an unknown version **by number**, and every geometric
+question is a method on the resolved row. Reading a version-1 region in 128-byte
+steps would decode every second entry as the tail of the one before it and
+return plausible integers, which is §9's "a wrong value that is well-formed"
+arriving through the front door.
+
+This build **writes** version 2 only. A census loaded from a version-1 file is
+published at version 2, and because the two strides disagree from the first
+entry onward, the publish is a whole-file rewrite rather than a positional
+append — the same path a repair and a first write already take. It is checked
+after the "nothing moved" gate, so a run that records nothing leaves a version-1
+file byte for byte as it was, and the conversion is paid once by the first run
+that has something to say.
+
+The entries carried across say **not recorded**, because that is the truth about
+them: nothing ever read a close for those months. They fill in as they are
+re-ingested — the census's equality probe covers the closes, so a month whose
+rows have not moved but whose closes have just been read for the first time is a
+change and is recorded, and once recorded it compares equal and the file stops
+moving.

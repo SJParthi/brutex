@@ -36,9 +36,10 @@ use pull::config::{
     check_segment, default_config_path,
 };
 use pull::manifest::{
-    APPEND_HEADROOM_FACTOR, Append, Commit, Entry, EntryFault, EntryKey, FORMAT_VERSION,
-    HEADER_LEN, IMAGE_LEN, MAGIC, MAX_ENTRIES, Manifest, ManifestError, ManifestHeader,
-    manifest_path, reservation_for,
+    APPEND_HEADROOM_FACTOR, Append, CLOSE_NULL, Closes, Commit, ENTRY_LEN, ENTRY_STRIDE, Entry,
+    EntryFault, EntryKey, FORMAT_VERSION, HEADER_LEN, Held, IMAGE_LEN, Layout, MAGIC, MAGIC_V2,
+    MAX_ENTRIES, MAX_ENTRY_STRIDE, Manifest, ManifestError, ManifestHeader, manifest_path,
+    reservation_for,
 };
 use pull::rate::{
     DHAN_PER_DAY, DHAN_PER_SECOND, GROWW_PER_MINUTE, GROWW_PER_SECOND_UNVERIFIED, Governor,
@@ -1065,7 +1066,7 @@ fn built(vendor: Vendor, entries: &[Entry]) -> (Vec<u8>, Vec<u8>, Manifest) {
     let mut data: Vec<u8> = Vec::new();
     for entry in entries {
         let append: Append = manifest.record(*entry).expect("a record");
-        assert_eq!(append.offset, HEADER_LEN + append.ordinal * 64);
+        assert_eq!(append.offset, HEADER_LEN + append.ordinal * ENTRY_STRIDE);
         assert_eq!(append.offset as usize, HEADER_LEN_USIZE + data.len());
         data.extend_from_slice(&append.bytes);
         assert_eq!(
@@ -1089,7 +1090,7 @@ fn an_entry_round_trips_through_its_image() {
         let mut original = entry("BANKNIFTY", 2024, 6, 7_312, 1_000, 2_000);
         original.key.exchange = exchange;
         original.key.segment = segment;
-        let image = original.image();
+        let image = original.image_v1();
         assert_eq!(image.len(), IMAGE_LEN);
         assert_eq!(Entry::decode(&image), Ok(original));
     }
@@ -1119,7 +1120,7 @@ fn the_covered_domain_is_the_image_minus_its_checksum() {
         1_717_200_000_000_000,
         1_719_791_940_000_000,
     )
-    .image();
+    .image_v1();
     let stored = u32::from_le_bytes(image[60..64].try_into().unwrap());
     assert_eq!(
         stored,
@@ -1138,7 +1139,7 @@ fn the_covered_domain_is_the_image_minus_its_checksum() {
 #[test]
 fn a_flipped_bit_in_any_entry_byte_is_detected() {
     let original = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000);
-    let image = original.image();
+    let image = original.image_v1();
     let mut caught = 0;
     for byte in 0..IMAGE_LEN {
         for bit in 0..8u8 {
@@ -1159,7 +1160,7 @@ fn a_flipped_bit_in_any_entry_byte_is_detected() {
 /// Every way an entry's bytes can fail to be an entry is named.
 #[test]
 fn an_entry_that_is_not_an_entry_is_named() {
-    let good = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000).image();
+    let good = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000).image_v1();
 
     assert_eq!(
         Entry::decode(&good[..IMAGE_LEN - 1]),
@@ -1236,7 +1237,7 @@ fn the_exchange_and_segment_codes_are_frozen() {
         let mut one = entry("NIFTY", 2024, 6, 1, 0, 0);
         one.key.exchange = exchange;
         one.key.segment = segment;
-        let image = one.image();
+        let image = one.image_v1();
         assert_eq!(image[55], exchange_code, "{exchange:?}");
         assert_eq!(image[56], segment_code, "{segment:?}");
         assert_eq!(Entry::decode(&image).expect("round trip"), one);
@@ -1247,11 +1248,25 @@ fn the_exchange_and_segment_codes_are_frozen() {
 #[test]
 fn the_offset_of_an_entry_is_arithmetic() {
     assert_eq!(Manifest::offset_of(0), Ok(HEADER_LEN));
-    assert_eq!(Manifest::offset_of(1), Ok(HEADER_LEN + 64));
-    assert_eq!(Manifest::offset_of(12_345), Ok(HEADER_LEN + 12_345 * 64));
+    assert_eq!(Manifest::offset_of(1), Ok(HEADER_LEN + ENTRY_STRIDE));
+    assert_eq!(
+        Manifest::offset_of(12_345),
+        Ok(HEADER_LEN + 12_345 * ENTRY_STRIDE)
+    );
     assert_eq!(
         Manifest::offset_of(MAX_ENTRIES),
-        Ok(HEADER_LEN + MAX_ENTRIES * 64)
+        Ok(HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE)
+    );
+
+    // AND THE DISPATCH. Version 1's entries are still on disk at their own
+    // stride, and `Layout` is the door that addresses them there.
+    assert_eq!(Layout::V1.offset_of(1), Ok(HEADER_LEN + 64));
+    assert_eq!(Layout::V2.offset_of(1), Ok(HEADER_LEN + 128));
+    assert_eq!(
+        Layout::V1.offset_of(12_345),
+        Ok(HEADER_LEN + 12_345 * 64),
+        "a version-1 census keeps addressing its entries at 64 bytes after \
+         version 2 exists"
     );
     assert_eq!(
         Manifest::offset_of(MAX_ENTRIES + 1),
@@ -1315,7 +1330,7 @@ fn the_counters_are_maintained_on_write() {
     assert!(format!("{header:?}").contains("Groww"));
     assert_eq!(header.n_valid, 3);
     assert_eq!(header.format_version, FORMAT_VERSION);
-    assert_eq!(header.entry_stride, 64);
+    assert_eq!(header.entry_stride, 128);
 }
 
 /// An entry that contradicts what a key already holds is refused, on write.
@@ -1484,14 +1499,14 @@ fn a_header_published_before_its_entries_falls_back_a_generation() {
     );
     assert_eq!(recovered.reserved(), 0, "an empty census reserves nothing");
 
-    // (b) The commit landed; the entry's 64 bytes are PRESENT and were never
+    // (b) The commit landed; the entry's 128 bytes are PRESENT and were never
     // written back. The region is long enough, `validate` passes, and the
     // entry's own checksum is what fails.
     let two = entry("BANKNIFTY", 2024, 6, 7_310, 1_000, 2_000);
     let (header_region, data, _) = built(Vendor::Groww, &[one, two]);
     let mut torn = data.clone();
-    torn[IMAGE_LEN..].fill(0);
-    assert_eq!(torn.len(), 2 * IMAGE_LEN, "the region is its full length");
+    torn[ENTRY_LEN..].fill(0);
+    assert_eq!(torn.len(), 2 * ENTRY_LEN, "the region is its full length");
 
     let recovered = Manifest::load(Vendor::Groww, &header_region, &torn)
         .expect("the previous generation describes the durable prefix");
@@ -1510,7 +1525,7 @@ fn a_header_published_before_its_entries_falls_back_a_generation() {
 
     // The same, with a garbage tail rather than a zeroed one.
     let mut garbage = data.clone();
-    garbage[IMAGE_LEN..].fill(0xA5);
+    garbage[ENTRY_LEN..].fill(0xA5);
     assert_eq!(
         Manifest::load(Vendor::Groww, &header_region, &garbage)
             .expect("the fallback")
@@ -1520,7 +1535,7 @@ fn a_header_published_before_its_entries_falls_back_a_generation() {
 
     // And with a half-written one: the first 32 bytes are new, the rest is not.
     let mut half = data.clone();
-    half[IMAGE_LEN + 32..].fill(0);
+    half[ENTRY_LEN + 32..].fill(0);
     assert_eq!(
         Manifest::load(Vendor::Groww, &header_region, &half)
             .expect("the fallback")
@@ -1873,7 +1888,7 @@ fn a_counter_that_disagrees_with_its_entries_is_refused() {
     // An entry below the counter that fails its own checksum is named by
     // ordinal, not swallowed.
     let mut damaged = data.clone();
-    damaged[64] ^= 0xFF;
+    damaged[ENTRY_LEN] ^= 0xFF;
     match Manifest::load(
         Vendor::Groww,
         &region(&[written.header().commit().expect("a commit")]),
@@ -1992,13 +2007,26 @@ fn a_slot_that_is_not_a_header_is_named() {
     );
     // The version field and the magic's own version byte are two statements of
     // one fact, and either one disagreeing is a refusal.
+    //
+    // A version no `Layout` declares is refused BY NUMBER rather than decoded
+    // at whatever geometry this build happens to write — which is the whole
+    // point of the dispatch, and the failure `docs/00-charter.md` prohibition 6
+    // is about.
     assert_eq!(
-        edit(&|i| i[8..10].copy_from_slice(&2u16.to_le_bytes()), true),
-        ManifestError::UnknownVersion(2)
+        edit(&|i| i[8..10].copy_from_slice(&3u16.to_le_bytes()), true),
+        ManifestError::UnknownVersion(3)
+    );
+    // Version 1 IS declared, so this one is refused for the magic instead: the
+    // slot says version 1 and begins `BRUTEXM2`, and there is no way to tell
+    // which of the two is the lie.
+    assert_eq!(
+        edit(&|i| i[8..10].copy_from_slice(&1u16.to_le_bytes()), true),
+        ManifestError::UnknownVersion(1)
     );
     assert_eq!(
-        edit(&|i| i[7] = b'2', true),
-        ManifestError::UnknownVersion(FORMAT_VERSION)
+        edit(&|i| i[7] = b'1', true),
+        ManifestError::UnknownVersion(FORMAT_VERSION),
+        "and the same disagreement written the other way round"
     );
     match edit(&|i| i[24] ^= 0xFF, false) {
         ManifestError::SlotChecksum { stored, computed } => assert_ne!(stored, computed),
@@ -2023,7 +2051,29 @@ fn a_slot_that_is_not_a_header_is_named() {
         ManifestHeader::decode(&good),
         Ok(ManifestHeader::genesis(Vendor::Groww))
     );
-    assert_eq!(&good[..8], MAGIC);
+    assert_eq!(&good[..8], MAGIC_V2);
+
+    // AND SO DOES A VERSION-1 SLOT. Its magic is `BRUTEXM1`, its declared
+    // stride is 64, and this build reads it — that is what "old files stay
+    // readable at their own stride" means when it is code rather than prose.
+    let v1 = ManifestHeader {
+        format_version: 1,
+        entry_stride: 64,
+        ..ManifestHeader::genesis(Vendor::Groww)
+    };
+    let v1_image = v1.image();
+    assert_eq!(&v1_image[..8], MAGIC);
+    assert_eq!(ManifestHeader::decode(&v1_image), Ok(v1));
+    assert_eq!(v1.layout(), Ok(Layout::V1));
+    // A version-1 slot declaring version 2's stride is refused: a file may not
+    // claim a geometry its own version does not have.
+    let mut lying = v1_image;
+    lying[10..12].copy_from_slice(&128u16.to_le_bytes());
+    reseal(&mut lying);
+    assert_eq!(
+        ManifestHeader::decode(&lying),
+        Err(ManifestError::StrideMismatch(128))
+    );
 }
 
 /// The header region is refused when it is too short, and a misplaced commit
@@ -2034,10 +2084,10 @@ fn a_short_or_misplaced_header_region_is_refused() {
         .commit()
         .expect("genesis");
     assert_eq!(
-        ManifestHeader::read_region(&[0u8; 16_384], 0, Vendor::Groww),
+        ManifestHeader::read_region(&[0u8; 16_384], &[], Vendor::Groww),
         Err(ManifestError::HeaderRegionTooShort { slots: 1, need: 2 })
     );
-    let read = ManifestHeader::read_region(&region(&[genesis]), 0, Vendor::Groww)
+    let read = ManifestHeader::read_region(&region(&[genesis]), &[], Vendor::Groww)
         .expect("the genesis commit");
     assert_eq!(read.newest(), ManifestHeader::genesis(Vendor::Groww));
     assert_eq!(read.older(), None, "one commit is one generation");
@@ -2046,7 +2096,7 @@ fn a_short_or_misplaced_header_region_is_refused() {
     assert!(format!("{read:?}").contains("Groww"));
     // Nothing at all: no slot decodes, and none gave a specific reason.
     assert_eq!(
-        ManifestHeader::read_region(&vec![0u8; HEADER_LEN_USIZE], 0, Vendor::Groww),
+        ManifestHeader::read_region(&vec![0u8; HEADER_LEN_USIZE], &[], Vendor::Groww),
         Err(ManifestError::NoValidHeader)
     );
 
@@ -2060,7 +2110,7 @@ fn a_short_or_misplaced_header_region_is_refused() {
     let mut misplaced = vec![0u8; HEADER_LEN_USIZE];
     misplaced[..IMAGE_LEN].copy_from_slice(&odd.commit().expect("a commit").bytes);
     assert_eq!(
-        ManifestHeader::read_region(&misplaced, 0, Vendor::Groww),
+        ManifestHeader::read_region(&misplaced, &[], Vendor::Groww),
         Err(ManifestError::SlotPositionMismatch {
             expected: 1,
             found: 0
@@ -2080,7 +2130,8 @@ fn a_short_or_misplaced_header_region_is_refused() {
     };
     beside[SLOT_STRIDE_USIZE..SLOT_STRIDE_USIZE + IMAGE_LEN]
         .copy_from_slice(&even.commit().expect("a commit").bytes);
-    let read = ManifestHeader::read_region(&beside, 0, Vendor::Groww).expect("the genesis commit");
+    let read =
+        ManifestHeader::read_region(&beside, &[], Vendor::Groww).expect("the genesis commit");
     assert_eq!(read.newest(), ManifestHeader::genesis(Vendor::Groww));
     assert_eq!(
         read.stepped_over(),
@@ -2099,7 +2150,7 @@ fn a_short_or_misplaced_header_region_is_refused() {
         ..ManifestHeader::genesis(Vendor::Groww)
     };
     let both = region(&[genesis, newer.commit().expect("a commit")]);
-    let read = ManifestHeader::read_region(&both, 0, Vendor::Groww).expect("two generations");
+    let read = ManifestHeader::read_region(&both, &[], Vendor::Groww).expect("two generations");
     assert_eq!(read.newest(), newer);
     assert_eq!(read.older(), Some(ManifestHeader::genesis(Vendor::Groww)));
     assert_eq!(read.stepped_over(), None);
@@ -2275,7 +2326,7 @@ fn every_declared_bound_is_exact_at_the_limit() {
         .commit()
         .expect("exactly MAX_ENTRIES commits")
         .durable_through,
-        HEADER_LEN + MAX_ENTRIES * 64
+        HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE
     );
 
     // `n_keys > n_valid` — equal is the ordinary case of every key being new.
@@ -5597,7 +5648,7 @@ fn a_whole_manifest_survives_its_own_image() {
     let mut single = fresh(Vendor::Groww);
     single.record(one).expect("one month");
     let image = single.image();
-    assert_eq!(image.len(), HEADER_LEN_USIZE + IMAGE_LEN);
+    assert_eq!(image.len(), HEADER_LEN_USIZE + ENTRY_LEN);
     assert_eq!(
         Manifest::open_image(Vendor::Groww, &image).expect("one month reloads"),
         single
@@ -5696,33 +5747,45 @@ fn the_image_puts_every_byte_where_the_reader_looks_for_it() {
     );
     assert_eq!(&image[..MAGIC.len()], &[0u8; 8], "slot 0 carries no magic");
     assert_eq!(
-        &image[SLOT_STRIDE_USIZE..SLOT_STRIDE_USIZE + MAGIC.len()],
-        &MAGIC[..],
-        "and slot 1 carries the manifest magic, not a bar file's"
+        &image[SLOT_STRIDE_USIZE..SLOT_STRIDE_USIZE + MAGIC_V2.len()],
+        &MAGIC_V2[..],
+        "and slot 1 carries the manifest magic for the version it writes, not \
+         a bar file's and not version 1's"
     );
 
-    // Entry `i` is at `HEADER_LEN + i·64`, and holds exactly that entry's own
-    // image — checksum included, because the reader verifies it.
+    // Entry `i` is at `HEADER_LEN + i·128`, and holds exactly that entry's own
+    // image — both checksums included, because the reader verifies both.
     for (ordinal, month) in months.iter().enumerate() {
-        let at = HEADER_LEN_USIZE + ordinal * IMAGE_LEN;
+        let at = HEADER_LEN_USIZE + ordinal * ENTRY_LEN;
         assert_eq!(
             at as u64,
             Manifest::offset_of(ordinal as u64).expect("an ordinal in range"),
             "entry {ordinal} sits where the arithmetic says"
         );
         assert_eq!(
-            &image[at..at + IMAGE_LEN],
+            &image[at..at + ENTRY_LEN],
             &month.image()[..],
             "entry {ordinal} is its own image, in the order it was recorded"
         );
-        assert_eq!(Entry::decode(&image[at..at + IMAGE_LEN]), Ok(*month));
+        assert_eq!(
+            Held::decode(&image[at..at + ENTRY_LEN]),
+            Ok(Held::unknown(*month))
+        );
+        assert_eq!(
+            &image[at..at + IMAGE_LEN],
+            &month.image_v1()[..],
+            "and its first half is, byte for byte, a version-1 entry"
+        );
     }
 
     // The length is the offset the commit already told a writer to flush
     // through. One number, not two that have to agree.
     assert_eq!(image.len() as u64, commit.durable_through);
-    assert_eq!(image.len() as u64, HEADER_LEN + manifest.entries() * 64);
-    assert_eq!(image.len(), HEADER_LEN_USIZE + 3 * IMAGE_LEN);
+    assert_eq!(
+        image.len() as u64,
+        HEADER_LEN + manifest.entries() * ENTRY_STRIDE
+    );
+    assert_eq!(image.len(), HEADER_LEN_USIZE + 3 * ENTRY_LEN);
 
     // # The design ceiling is arithmetic here, not a census that was built
     //
@@ -5743,10 +5806,16 @@ fn the_image_puts_every_byte_where_the_reader_looks_for_it() {
     .commit()
     .expect("exactly MAX_ENTRIES commits")
     .durable_through;
-    assert_eq!(at_ceiling, HEADER_LEN + MAX_ENTRIES * 64);
+    assert_eq!(at_ceiling, HEADER_LEN + MAX_ENTRIES * ENTRY_STRIDE);
     assert_eq!(
-        at_ceiling, 134_250_496,
-        "134 MB, the figure MAX_ENTRIES names"
+        at_ceiling, 268_468_224,
+        "268 MB — MAX_ENTRIES at the 128-byte stride version 2 declares"
+    );
+    assert_eq!(
+        Layout::V1.offset_within_bounds(MAX_ENTRIES),
+        134_250_496,
+        "and the same census in version 1's geometry is half of it, which is \
+         why the reader's ceiling is the WIDEST stride and not the current one"
     );
     assert_eq!(
         ManifestHeader {
@@ -5782,7 +5851,7 @@ fn a_half_installed_image_is_refused_by_name() {
         manifest.record(*month).expect("a record");
     }
     let whole = manifest.image();
-    assert_eq!(whole.len(), HEADER_LEN_USIZE + 3 * IMAGE_LEN);
+    assert_eq!(whole.len(), HEADER_LEN_USIZE + 3 * ENTRY_LEN);
 
     // Truncated in the MIDDLE of the last entry: the region holds two whole
     // entries and the header counts three.
@@ -5797,7 +5866,7 @@ fn a_half_installed_image_is_refused_by_name() {
     // Truncated by a WHOLE entry, which is the shape that would otherwise look
     // like a perfectly good two-entry file.
     assert_eq!(
-        Manifest::open_image(Vendor::Groww, &whole[..whole.len() - IMAGE_LEN]),
+        Manifest::open_image(Vendor::Groww, &whole[..whole.len() - ENTRY_LEN]),
         Err(ManifestError::CounterExceedsRegion {
             n_valid: 3,
             capacity: 2
@@ -5866,7 +5935,19 @@ fn the_log_is_the_entry_region_in_order() {
     assert_eq!(
         size_of::<Entry>(),
         80,
-        "the per-entry cost of the log, as the Manifest doc states it"
+        "the version-1 record's width, unchanged by version 2"
+    );
+    assert_eq!(
+        size_of::<Held>(),
+        96,
+        "the per-row cost of the log, as the Manifest doc states it: the entry \
+         plus the two closes"
+    );
+    assert_eq!(
+        size_of::<(EntryKey, Held)>(),
+        152,
+        "and the per-element cost of the index, as APPEND_HEADROOM_FACTOR \
+         states it"
     );
 
     let june = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000);
@@ -5882,16 +5963,16 @@ fn the_log_is_the_entry_region_in_order() {
     let image = manifest.image();
     assert_eq!(
         image.len(),
-        HEADER_LEN_USIZE + 2 * IMAGE_LEN,
+        HEADER_LEN_USIZE + 2 * ENTRY_LEN,
         "two entries on disk for one key — the older one is not compacted away"
     );
     assert_eq!(
-        &image[HEADER_LEN_USIZE..HEADER_LEN_USIZE + IMAGE_LEN],
+        &image[HEADER_LEN_USIZE..HEADER_LEN_USIZE + ENTRY_LEN],
         &june.image()[..],
         "the first entry recorded is the first entry written"
     );
     assert_eq!(
-        &image[HEADER_LEN_USIZE + IMAGE_LEN..],
+        &image[HEADER_LEN_USIZE + ENTRY_LEN..],
         &june_again.image()[..]
     );
 
@@ -5904,8 +5985,8 @@ fn the_log_is_the_entry_region_in_order() {
     // The order is load-bearing, and the reader is what enforces it: the same
     // two entries the other way round are the row count going backwards.
     let mut swapped = image.clone();
-    swapped[HEADER_LEN_USIZE..HEADER_LEN_USIZE + IMAGE_LEN].copy_from_slice(&june_again.image());
-    swapped[HEADER_LEN_USIZE + IMAGE_LEN..].copy_from_slice(&june.image());
+    swapped[HEADER_LEN_USIZE..HEADER_LEN_USIZE + ENTRY_LEN].copy_from_slice(&june_again.image());
+    swapped[HEADER_LEN_USIZE + ENTRY_LEN..].copy_from_slice(&june.image());
     assert_eq!(
         Manifest::open_image(Vendor::Groww, &swapped),
         Err(ManifestError::RowCountWentBackwards {
@@ -5949,7 +6030,7 @@ fn a_degraded_census_images_as_its_repair() {
     // The commit for entry 1 landed; entry 1's own bytes never were written
     // back. The generation below it describes the durable prefix.
     let mut torn = data.clone();
-    torn[IMAGE_LEN..].fill(0);
+    torn[ENTRY_LEN..].fill(0);
     let recovered = Manifest::load(Vendor::Groww, &header_region, &torn).expect("the fallback");
     assert_eq!(recovered.entries(), 1);
     assert!(
@@ -6406,4 +6487,666 @@ fn a_window_past_the_vendor_cap_is_split_gaplessly_and_never_over_it() {
     // would send the whole window, which is the bug this exists to prevent.
     let why = split_window(window(1_000, 1_064), Some(0)).expect_err("zero is refused");
     assert!(why.to_string().contains("zero days"), "and says so: {why}");
+}
+
+// ===========================================================================
+// The manifest — part 9: version 2, and the closes it carries
+//
+// D-0067. Version 2 adds the month's first and last close so `/store.json` can
+// serve a percentage without reading a single bar. Every test below drives the
+// PRODUCTION reader and writer — `Layout::resolve`, `ManifestHeader::decode`,
+// `Manifest::load`, `Manifest::image` — because a version dispatch that is only
+// exercised by a paraphrase of itself is a dispatch nobody has checked.
+// ===========================================================================
+
+/// A version-1 manifest file, built the way version 1 wrote one.
+///
+/// Not `Manifest::image`, which writes the current version: the point of these
+/// tests is a file this build did **not** write, so the bytes are assembled
+/// from the version-1 header slot and the version-1 entry images directly.
+fn version_1_file(vendor: Vendor, entries: &[Entry]) -> Vec<u8> {
+    let n = entries.len() as u64;
+    let mut keys: Vec<EntryKey> = entries.iter().map(|e| e.key).collect();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut rows = 0u64;
+    for key in &keys {
+        rows += entries
+            .iter()
+            .filter(|e| e.key == *key)
+            .map(|e| e.rows)
+            .next_back()
+            .unwrap();
+    }
+    let header = ManifestHeader {
+        format_version: 1,
+        entry_stride: 64,
+        vendor,
+        // EVEN, so the commit belongs in slot 0, which is where this fixture
+        // writes it. An odd generation is refused as a misplaced slot — the
+        // manifest being right about a fixture that was wrong.
+        generation: 2,
+        n_valid: n,
+        n_keys: keys.len() as u64,
+        total_rows: rows,
+    };
+    let mut out = vec![0u8; HEADER_LEN_USIZE];
+    out[..IMAGE_LEN].copy_from_slice(&header.image());
+    for entry in entries {
+        out.extend_from_slice(&entry.image_v1());
+    }
+    out
+}
+
+/// M-25 — a version-1 census still reads after version 2 exists.
+///
+/// **This is the migration requirement, as a test.** 43,422 entries are on disk
+/// in version 1's geometry across two vendors, and `CLAUDE.md` §3 rule 8 does
+/// not admit mutating them in place. Reading them at version 2's stride would
+/// decode every second entry as the tail of the one before it and return
+/// plausible integers — so the stride comes from the file's own version, and
+/// this is what proves it.
+///
+/// Revert `Layout::for_version` to a comparison against `FORMAT_VERSION` and
+/// this test goes red on the first line.
+#[test]
+fn an_old_version_manifest_still_reads_after_version_2_exists() {
+    let months = [
+        entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000),
+        entry("BANKNIFTY", 2024, 6, 7_310, 1_000, 2_000),
+        entry("NIFTY", 2024, 7, 7_500, 3_000, 4_000),
+        entry("NIFTY", 2024, 6, 7_400, 1_000, 2_500),
+    ];
+    let file = version_1_file(Vendor::Groww, &months);
+    assert_eq!(
+        file.len(),
+        HEADER_LEN_USIZE + 4 * 64,
+        "a version-1 file is 64 bytes per entry and stays that way"
+    );
+
+    let census =
+        Manifest::open_image(Vendor::Groww, &file).expect("a version-1 census still reads");
+    assert_eq!(census.loaded_version(), 1);
+    assert!(census.upgrading(), "and it will be published at version 2");
+    assert_eq!(
+        census.header().format_version,
+        1,
+        "the header is the FILE's"
+    );
+    assert_eq!(census.header().entry_stride, 64);
+    assert_eq!(census.degraded_reason(), None, "old is not damaged");
+
+    // Every counter and every entry, field for field.
+    assert_eq!(
+        (census.entries(), census.keys(), census.total_rows()),
+        (4, 3, 7_400 + 7_310 + 7_500)
+    );
+    assert_eq!(census.entry(&months[0].key), Some(months[3]), "newest wins");
+    assert_eq!(census.entry(&months[1].key), Some(months[1]));
+    assert_eq!(census.entry(&months[2].key), Some(months[2]));
+
+    // AND EVERY CLOSE IS UNKNOWN, because version 1 had nowhere to record one.
+    // Not zero. Not absent. Unknown, and it says which.
+    for month in &months {
+        assert_eq!(census.closes(&month.key), Some(Closes::UNKNOWN));
+        assert_eq!(
+            census.closes(&month.key).and_then(Closes::paisa),
+            None,
+            "a version-1 month has no price to give, and gives none"
+        );
+    }
+    let absent = entry("NIFTY", 2030, 1, 1, 0, 0).key;
+    assert_eq!(
+        census.closes(&absent),
+        None,
+        "a month the census does not hold answers None — which is a different \
+         fact from Closes::UNKNOWN, and the two must not collapse"
+    );
+}
+
+/// M-26 — a version-2 entry round-trips both closes exactly.
+#[test]
+fn a_version_2_entry_round_trips_both_closes_exactly() {
+    let base = entry("RELIANCE", 2024, 6, 7_875, 1_000, 2_000);
+    let cases = [
+        Closes::UNKNOWN,
+        Closes::known(295_050, 310_025).unwrap(),
+        Closes::known(0, 0).unwrap(),
+        Closes::known(0, i64::MAX).unwrap(),
+        Closes::known(i64::MAX, 0).unwrap(),
+        Closes::known(1, 1).unwrap(),
+    ];
+    for closes in cases {
+        let held = Held::new(base, closes);
+        let image = held.image();
+        assert_eq!(image.len(), ENTRY_LEN);
+        assert_eq!(
+            Held::decode(&image),
+            Ok(held),
+            "both halves, both checksums, both prices"
+        );
+        assert_eq!(Held::decode(&image).unwrap().closes, closes);
+    }
+
+    // Through a whole census and back off a file image.
+    let mut census = fresh(Vendor::Groww);
+    let priced = Held::new(base, Closes::known(295_050, 310_025).unwrap());
+    census.record_held(priced).expect("a priced month");
+    let read = Manifest::open_image(Vendor::Groww, &census.image()).expect("it reloads");
+    assert_eq!(read.held(&base.key), Some(priced));
+    assert_eq!(
+        read.closes(&base.key).and_then(Closes::paisa),
+        Some((295_050, 310_025)),
+        "paisa integers, out the same way they went in"
+    );
+    assert_eq!(read.entry(&base.key), Some(base));
+
+    // The pair that is not a pair is refused rather than half-believed.
+    let mut half = priced.image();
+    half[64..72].copy_from_slice(&CLOSE_NULL.to_le_bytes());
+    reseal_closes(&mut half);
+    assert_eq!(
+        Held::decode(&half),
+        Err(EntryFault::CloseHalfRecorded {
+            first: CLOSE_NULL,
+            last: 310_025
+        })
+    );
+    let mut negative = priced.image();
+    negative[64..72].copy_from_slice(&(-1i64).to_le_bytes());
+    reseal_closes(&mut negative);
+    assert_eq!(
+        Held::decode(&negative),
+        Err(EntryFault::CloseNotAPrice { paisa: -1 })
+    );
+    assert!(!format!("{:?}", Held::decode(&negative)).is_empty());
+    assert!(
+        EntryFault::CloseNotAPrice { paisa: -1 }
+            .to_string()
+            .contains("neither a price nor")
+    );
+    assert!(
+        EntryFault::CloseHalfRecorded { first: 1, last: 2 }
+            .to_string()
+            .contains("both or neither")
+    );
+
+    // And a truncated entry is short, not silently half-read.
+    assert_eq!(
+        Held::decode(&priced.image()[..ENTRY_LEN - 1]),
+        Err(EntryFault::TooShort { len: ENTRY_LEN - 1 })
+    );
+}
+
+/// Recomputes the closes half's checksum after a test has edited it.
+fn reseal_closes(image: &mut [u8; ENTRY_LEN]) {
+    let crc = crc32c(&image[IMAGE_LEN..IMAGE_LEN + 60]);
+    image[IMAGE_LEN + 60..].copy_from_slice(&crc.to_le_bytes());
+}
+
+/// M-27 — an absent close is distinguishable from a close of zero.
+///
+/// `CLAUDE.md` §7: **zero means zero.** A month whose bars really closed at zero
+/// paisa is a fact; a month nobody has read a close for is a different fact; and
+/// a month the census does not hold at all is a third. Three states, three
+/// answers, and none of them is the number `0` standing in for "we do not know".
+///
+/// Revert `CLOSE_NULL` to `0` and this test goes red on the first assertion.
+#[test]
+fn an_absent_close_is_not_a_zero_close() {
+    let key = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000);
+    let zero = Closes::known(0, 0).unwrap();
+
+    // IN THE TYPE.
+    assert_ne!(zero, Closes::UNKNOWN);
+    assert!(zero.is_known());
+    assert!(!Closes::UNKNOWN.is_known());
+    assert_eq!(zero.paisa(), Some((0, 0)));
+    assert_eq!(zero.first_paisa(), Some(0));
+    assert_eq!(zero.last_paisa(), Some(0));
+    assert_eq!(Closes::UNKNOWN.paisa(), None);
+    assert_eq!(Closes::UNKNOWN.first_paisa(), None);
+    assert_eq!(Closes::UNKNOWN.last_paisa(), None);
+
+    // IN THE BYTES. The sentinel is `i64::MIN`, which no tick grid produces, so
+    // the two states are sixteen different bytes rather than a flag beside them
+    // that could drift out of step.
+    let unknown_image = Held::unknown(key).image();
+    let zero_image = Held::new(key, zero).image();
+    assert_ne!(unknown_image, zero_image);
+    assert_eq!(&unknown_image[64..72], &CLOSE_NULL.to_le_bytes());
+    assert_eq!(&unknown_image[72..80], &CLOSE_NULL.to_le_bytes());
+    assert_eq!(&zero_image[64..72], &0i64.to_le_bytes());
+    assert_eq!(&zero_image[72..80], &0i64.to_le_bytes());
+    assert_eq!(CLOSE_NULL, i64::MIN);
+    assert_eq!(
+        &unknown_image[..IMAGE_LEN],
+        &zero_image[..IMAGE_LEN],
+        "the base half is identical: the difference is entirely in the closes"
+    );
+
+    // AND THE SENTINEL CANNOT BE SMUGGLED THROUGH THE DOOR MARKED "KNOWN".
+    assert_eq!(
+        Closes::known(CLOSE_NULL, CLOSE_NULL),
+        Err(EntryFault::CloseNotAPrice { paisa: CLOSE_NULL })
+    );
+    assert_eq!(
+        Closes::known(1, CLOSE_NULL),
+        Err(EntryFault::CloseNotAPrice { paisa: CLOSE_NULL })
+    );
+
+    // ACROSS THE WHOLE CENSUS: three states, three answers.
+    let mut census = fresh(Vendor::Groww);
+    let flat = entry("BANKNIFTY", 2024, 6, 10, 1, 2);
+    census.record(key).expect("a month with no price");
+    census
+        .record_held(Held::new(flat, zero))
+        .expect("a month that closed flat");
+    let read = Manifest::open_image(Vendor::Groww, &census.image()).expect("it reloads");
+    assert_eq!(read.closes(&key.key), Some(Closes::UNKNOWN), "not recorded");
+    assert_eq!(
+        read.closes(&flat.key),
+        Some(zero),
+        "recorded, and it is zero"
+    );
+    assert_eq!(
+        read.closes(&entry("NIFTY", 2030, 1, 1, 0, 0).key),
+        None,
+        "not held at all"
+    );
+}
+
+/// M-28 — rebuilding a census from the same rows is byte-identical.
+///
+/// `CLAUDE.md` §3 rule 5. Two things could break it and both are checked: an
+/// image emitted in `HashMap` iteration order, and a close that arrived from a
+/// different place the second time.
+#[test]
+fn rebuilding_a_census_from_the_same_rows_is_byte_identical() {
+    let rows = [
+        Held::new(
+            entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000),
+            Closes::known(2_395_050, 2_410_025).unwrap(),
+        ),
+        Held::new(
+            entry("BANKNIFTY", 2024, 6, 7_310, 1_000, 2_000),
+            Closes::known(5_112_000, 5_009_500).unwrap(),
+        ),
+        Held::new(
+            entry("RELIANCE", 2024, 6, 7_875, 1_000, 2_000),
+            Closes::UNKNOWN,
+        ),
+        Held::new(
+            entry("NIFTY", 2024, 7, 7_500, 3_000, 4_000),
+            Closes::known(2_410_025, 2_500_000).unwrap(),
+        ),
+    ];
+
+    let build = || {
+        let mut census = fresh(Vendor::Groww);
+        for row in &rows {
+            census.record_held(*row).expect("a row");
+        }
+        census.image()
+    };
+    let once = build();
+    assert_eq!(once, build(), "the same rows, the same bytes");
+    assert_eq!(once.len(), HEADER_LEN_USIZE + 4 * ENTRY_LEN);
+
+    // And through the reader: image -> load -> image is a fixed point.
+    let read = Manifest::open_image(Vendor::Groww, &once).expect("it reloads");
+    assert_eq!(read.image(), once, "a round trip changes not one byte");
+    assert_eq!(
+        Manifest::open_image(Vendor::Groww, &read.image()).expect("a second reload"),
+        read
+    );
+    for row in &rows {
+        assert_eq!(read.held(&row.entry.key), Some(*row));
+    }
+
+    // A VERSION-1 CENSUS CONVERGES: the upgrade is paid once, and imaging the
+    // result twice is the same bytes. The entries it carried keep saying
+    // not-recorded, because that is the truth about them.
+    let v1 = version_1_file(
+        Vendor::Groww,
+        &rows.iter().map(|r| r.entry).collect::<Vec<_>>(),
+    );
+    let loaded = Manifest::open_image(Vendor::Groww, &v1).expect("version 1 reads");
+    let upgraded = loaded.image();
+    assert_eq!(upgraded.len(), HEADER_LEN_USIZE + 4 * ENTRY_LEN);
+    let reloaded = Manifest::open_image(Vendor::Groww, &upgraded).expect("version 2 reads");
+    assert_eq!(reloaded.loaded_version(), FORMAT_VERSION);
+    assert!(!reloaded.upgrading(), "the upgrade is not paid twice");
+    assert_eq!(reloaded.image(), upgraded, "and it is a fixed point");
+    for row in &rows {
+        assert_eq!(
+            reloaded.closes(&row.entry.key),
+            Some(Closes::UNKNOWN),
+            "a month version 1 never priced is not priced by moving it"
+        );
+    }
+    assert_eq!(
+        (reloaded.entries(), reloaded.keys(), reloaded.total_rows()),
+        (loaded.entries(), loaded.keys(), loaded.total_rows())
+    );
+}
+
+/// M-29 — the stride and the header are the geometry the format document
+/// states.
+///
+/// `docs/02-store-format.md` §2, §8 and §11. Pinned
+/// against hardcoded numbers rather than against the constants themselves,
+/// because a test that asks the code what the code does agrees with any
+/// renumbering — and a renumbered stride is every entry already on disk read
+/// from the wrong offset.
+#[test]
+fn the_manifest_geometry_is_what_the_format_document_says() {
+    // The family geometry: two slots, 16,384 bytes apart, 64 bytes of fields
+    // each. Every version shares it, which is what lets a reader find the slots
+    // before it knows the version.
+    assert_eq!(HEADER_LEN, 32_768);
+    assert_eq!(HEADER_LEN, 2 * 16_384);
+    assert_eq!(IMAGE_LEN, 64);
+
+    // The per-version geometry.
+    assert_eq!(Layout::V1.version(), 1);
+    assert_eq!(Layout::V1.entry_stride(), 64);
+    assert_eq!(Layout::V1.entry_stride_len(), 64);
+    assert_eq!(Layout::V1.magic(), *b"BRUTEXM1");
+    assert!(!Layout::V1.carries_closes());
+
+    assert_eq!(Layout::V2.version(), 2);
+    assert_eq!(Layout::V2.entry_stride(), 128);
+    assert_eq!(Layout::V2.entry_stride_len(), 128);
+    assert_eq!(Layout::V2.magic(), *b"BRUTEXM2");
+    assert!(Layout::V2.carries_closes());
+
+    assert_eq!(Layout::CURRENT, Layout::V2);
+    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(ENTRY_STRIDE, 128);
+    assert_eq!(ENTRY_LEN, 128);
+    assert_eq!(
+        MAGIC, *b"BRUTEXM1",
+        "version 1's magic keeps meaning version 1"
+    );
+    assert_eq!(MAGIC_V2, *b"BRUTEXM2");
+
+    // The header slot's fields sit where the document puts them, and the
+    // stride is READ from the file rather than assumed.
+    let header = ManifestHeader {
+        generation: 6,
+        n_valid: 7,
+        n_keys: 5,
+        total_rows: 51_184,
+        ..ManifestHeader::genesis(Vendor::Groww)
+    };
+    let slot = header.image();
+    assert_eq!(&slot[0..8], b"BRUTEXM2");
+    assert_eq!(&slot[8..10], &2u16.to_le_bytes());
+    assert_eq!(&slot[10..12], &128u16.to_le_bytes());
+    assert_eq!(&slot[16..24], &6u64.to_le_bytes());
+    assert_eq!(&slot[24..32], &7u64.to_le_bytes());
+    assert_eq!(&slot[32..40], &5u64.to_le_bytes());
+    assert_eq!(&slot[40..48], &51_184u64.to_le_bytes());
+    assert_eq!(&slot[48..54], b"groww\0");
+    assert_eq!(&slot[60..64], &crc32c(&slot[..60]).to_le_bytes());
+    assert!(
+        slot[54..60].iter().all(|b| *b == 0),
+        "reserved bytes are zero and stay zero"
+    );
+
+    // The entry's two halves, and the reserved run in the second one.
+    let held = Held::new(
+        entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000),
+        Closes::known(2_395_050, 2_410_025).unwrap(),
+    );
+    let image = held.image();
+    assert_eq!(&image[60..64], &crc32c(&image[..60]).to_le_bytes());
+    assert_eq!(&image[64..72], &2_395_050i64.to_le_bytes());
+    assert_eq!(&image[72..80], &2_410_025i64.to_le_bytes());
+    assert!(
+        image[80..124].iter().all(|b| *b == 0),
+        "44 reserved bytes, zero, waiting for a NEW VERSION rather than a \
+         reinterpretation of this one"
+    );
+    assert_eq!(
+        &image[124..128],
+        &crc32c(&image[64..124]).to_le_bytes(),
+        "the second half is checksummed by the same rule as the first"
+    );
+
+    // 32,768 divides by both strides, so an entry is 64-byte aligned at either
+    // one and never straddles a cache line.
+    assert_eq!(HEADER_LEN % 64, 0);
+    assert_eq!(HEADER_LEN % 128, 0);
+}
+
+/// M-30 — a version-2 entry opens with a version-1 entry, byte for byte.
+#[test]
+fn a_version_2_entry_opens_with_a_version_1_entry() {
+    let base = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000);
+    for closes in [Closes::UNKNOWN, Closes::known(1, 2).unwrap()] {
+        let image = Held::new(base, closes).image();
+        assert_eq!(
+            &image[..IMAGE_LEN],
+            &base.image_v1()[..],
+            "the first half IS a version-1 entry, which is why one decoder \
+             serves both versions' base fields"
+        );
+        assert_eq!(Entry::decode(&image), Ok(base));
+    }
+}
+
+/// M-31 — a flipped bit in any of a version-2 entry's 1,024 bits is detected.
+///
+/// The twin of M-03, over both halves. Every one of the 128 bytes is covered by
+/// exactly one of the two checksums; there is no window a corruption can land in
+/// and be called clean.
+#[test]
+fn a_flipped_bit_in_any_version_2_entry_byte_is_detected() {
+    let held = Held::new(
+        entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000),
+        Closes::known(2_395_050, 2_410_025).unwrap(),
+    );
+    let image = held.image();
+    let mut caught = 0;
+    for byte in 0..ENTRY_LEN {
+        for bit in 0..8u8 {
+            let mut damaged = image;
+            damaged[byte] ^= 1 << bit;
+            match Held::decode(&damaged) {
+                Err(EntryFault::Checksum { .. }) => caught += 1,
+                other => panic!("byte {byte} bit {bit} was not caught: {other:?}"),
+            }
+        }
+    }
+    assert_eq!(caught, ENTRY_LEN * 8, "every one of the 1,024 flips");
+}
+
+/// M-32 — a known version keeps its stride after a new one exists.
+///
+/// The additive property, run through the PRODUCTION resolver against a table
+/// that already holds a third version. A dispatch that resolved by position, or
+/// by "the last row wins", would pass every test written against two versions
+/// and silently renumber them the day a third arrived.
+#[test]
+fn a_known_manifest_version_keeps_its_stride_after_a_new_one_exists() {
+    let v3 = Layout::declare(3, *b"BRUTEXM3", 256, 256, true).expect("a plausible next version");
+    let table = [Layout::V1, Layout::V2, v3];
+
+    assert_eq!(Layout::resolve(&table, 1), Ok(Layout::V1));
+    assert_eq!(Layout::resolve(&table, 2), Ok(Layout::V2));
+    assert_eq!(Layout::resolve(&table, 3), Ok(v3));
+    assert_eq!(
+        Layout::resolve(&table, 1).unwrap().entry_stride(),
+        64,
+        "version 1 still says 64 with two newer versions beside it"
+    );
+    assert_eq!(
+        Layout::resolve(&table, 4),
+        Err(ManifestError::UnknownVersion(4))
+    );
+    assert_eq!(
+        Layout::resolve(&[], 1),
+        Err(ManifestError::UnknownVersion(1))
+    );
+
+    // And the shipped table answers the same way.
+    assert_eq!(Layout::for_version(1), Ok(Layout::V1));
+    assert_eq!(Layout::for_version(2), Ok(Layout::V2));
+    assert_eq!(
+        Layout::for_version(0),
+        Err(ManifestError::UnknownVersion(0))
+    );
+    assert_eq!(
+        Layout::for_version(3),
+        Err(ManifestError::UnknownVersion(3))
+    );
+    assert_eq!(Layout::KNOWN.len(), 2);
+    assert!(format!("{:?}", Layout::V2).contains(&ENTRY_STRIDE.to_string()));
+}
+
+/// M-33 — every declared layout states one stride in both widths, and a
+/// degenerate row is refused by field.
+#[test]
+fn every_known_manifest_layout_states_one_stride_in_both_widths() {
+    for layout in Layout::KNOWN {
+        assert_eq!(
+            u64::try_from(layout.entry_stride_len()).unwrap(),
+            layout.entry_stride(),
+            "version {} states two different strides",
+            layout.version()
+        );
+        assert!(layout.entry_stride() > 0);
+        assert_eq!(&layout.magic()[..7], b"BRUTEXM");
+    }
+
+    assert_eq!(
+        Layout::declare(0, MAGIC_V2, 128, 128, true),
+        Err(ManifestError::DegenerateLayout { field: "version" })
+    );
+    assert_eq!(
+        Layout::declare(3, MAGIC_V2, 0, 128, true),
+        Err(ManifestError::DegenerateLayout {
+            field: "entry_stride"
+        })
+    );
+    assert_eq!(
+        Layout::declare(3, MAGIC_V2, 128, 0, true),
+        Err(ManifestError::DegenerateLayout {
+            field: "entry_stride_len"
+        })
+    );
+    assert_eq!(
+        Layout::declare(3, u64::MAX.to_le_bytes(), 128, 128, true),
+        Err(ManifestError::DegenerateLayout { field: "magic" })
+    );
+    assert!(
+        ManifestError::DegenerateLayout { field: "magic" }
+            .to_string()
+            .contains("magic")
+    );
+
+    // THE STRIDE BOUND IS EXACT AT THE LIMIT. The widest stride whose region at
+    // MAX_ENTRIES still fits a u64 is accepted; one byte more is refused, and
+    // the arithmetic every offset relies on stays total.
+    assert_eq!(
+        Layout::declare(3, MAGIC_V2, MAX_ENTRY_STRIDE, 128, true)
+            .expect("the widest stride that fits")
+            .offset_within_bounds(MAX_ENTRIES),
+        HEADER_LEN + MAX_ENTRY_STRIDE * MAX_ENTRIES
+    );
+    assert_eq!(
+        Layout::declare(3, MAGIC_V2, MAX_ENTRY_STRIDE + 1, 128, true),
+        Err(ManifestError::DegenerateLayout {
+            field: "entry_stride"
+        })
+    );
+    assert_eq!(
+        Layout::declare(3, MAGIC_V2, u64::MAX, 128, true),
+        Err(ManifestError::DegenerateLayout {
+            field: "entry_stride"
+        })
+    );
+    const {
+        assert!(
+            MAX_ENTRY_STRIDE > ENTRY_STRIDE,
+            "and the version this build writes is nowhere near it"
+        );
+    }
+}
+
+/// A header naming a version no `Layout` declares still images, and the image
+/// is refused by VERSION rather than as "not a manifest".
+#[test]
+fn a_header_naming_an_undeclared_version_is_refused_by_number() {
+    let odd = ManifestHeader {
+        format_version: 7,
+        ..ManifestHeader::genesis(Vendor::Groww)
+    };
+    let image = odd.image();
+    assert_eq!(
+        &image[..7],
+        b"BRUTEXM",
+        "the family bytes go down, so the refusal names the version"
+    );
+    assert_eq!(image[7], 0, "and there is no version byte to invent");
+    assert_eq!(
+        ManifestHeader::decode(&image),
+        Err(ManifestError::UnknownVersion(7))
+    );
+    assert_eq!(odd.layout(), Err(ManifestError::UnknownVersion(7)));
+    assert_eq!(odd.commit(), Err(ManifestError::UnknownVersion(7)));
+}
+
+/// A census whose two slots name two versions loads the newer one at ITS
+/// stride, and falls back to the older at the older's.
+///
+/// This is the crash in the middle of the upgrade: the version-2 image was
+/// installed, its slot went down, and the entries behind it did not. Walking the
+/// surviving version-1 generation at version 2's stride would read its entries
+/// from offsets it never wrote.
+#[test]
+fn two_slots_naming_two_versions_are_each_walked_at_their_own_stride() {
+    let one = entry("NIFTY", 2024, 6, 7_312, 1_000, 2_000);
+    let two = entry("BANKNIFTY", 2024, 6, 7_310, 1_000, 2_000);
+
+    // Slot 0: a version-1 commit over a one-entry version-1 region.
+    let v1 = ManifestHeader {
+        format_version: 1,
+        entry_stride: 64,
+        generation: 2,
+        n_valid: 1,
+        n_keys: 1,
+        total_rows: 7_312,
+        ..ManifestHeader::genesis(Vendor::Groww)
+    };
+    // Slot 1: a version-2 commit claiming two entries, which the region — one
+    // 64-byte version-1 entry — cannot support at 128 bytes each.
+    let v2 = ManifestHeader {
+        generation: 3,
+        n_valid: 2,
+        n_keys: 2,
+        total_rows: 7_312 + 7_310,
+        ..ManifestHeader::genesis(Vendor::Groww)
+    };
+    let mut region = vec![0u8; HEADER_LEN_USIZE];
+    region[..IMAGE_LEN].copy_from_slice(&v1.image());
+    region[SLOT_STRIDE_USIZE..SLOT_STRIDE_USIZE + IMAGE_LEN].copy_from_slice(&v2.image());
+
+    let census = Manifest::load(Vendor::Groww, &region, &one.image_v1())
+        .expect("the version-1 generation describes the durable prefix");
+    assert_eq!(census.loaded_version(), 1);
+    assert_eq!(census.entries(), 1);
+    assert_eq!(census.entry(&one.key), Some(one));
+    assert_eq!(census.entry(&two.key), None);
+    assert_eq!(
+        census.degraded_reason(),
+        Some(ManifestError::CounterExceedsRegion {
+            n_valid: 2,
+            capacity: 0
+        }),
+        "the version-2 counter is checked against version 2's OWN capacity — \
+         one 64-byte entry is zero 128-byte entries, not one"
+    );
 }
