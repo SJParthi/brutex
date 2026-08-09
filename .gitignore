@@ -27,7 +27,20 @@
 # `crates/web/`, so a single `git add -A` here would turn the build red. The
 # directory is local tooling, not source; it is ignored rather than deleted so
 # the tooling keeps working. See docs/05-decisions.md D-0028.
-/.claude/
+# THE OPERATOR TOOLING DIRECTORY, EXCEPT THE ONE FILE THAT IS THE PRODUCT.
+#
+# `.claude/` holds a local settings file and scratch worktrees, neither of
+# which belongs to anyone but the machine they are on. `launch.json` is
+# different: it is the Run configuration, and after D-0064 made the binary
+# serve the front end it is the ONLY thing standing between a fresh clone and
+# a working application. Ignored, it meant "clone and press Run" depended on
+# IntelliJ inferring a Cargo target rather than on anything this repository
+# promises — the IDE's guess, not the project's contract.
+#
+# Gate 1b already admits `.claude/` alongside `.github/` for exactly this
+# reason: it is configuration, not source, and it is not shipped.
+/.claude/*
+!/.claude/launch.json
 
 # macOS.
 .DS_Store

@@ -1,0 +1,31 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "brutex — the whole application (press Run on THIS one)",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": [
+        "run",
+        "--release",
+        "-p",
+        "api",
+        "--",
+        "serve"
+      ],
+      "port": 8080,
+      "url": "http://127.0.0.1:8080"
+    },
+    {
+      "name": "web — Vite dev server (FRONT-END DEVELOPMENT ONLY, needs Node)",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "web",
+        "run",
+        "dev"
+      ],
+      "port": 5173,
+      "url": "http://localhost:5173"
+    }
+  ]
+}
