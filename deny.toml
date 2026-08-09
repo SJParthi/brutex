@@ -61,7 +61,35 @@ private = { ignore = true }
 # So the code under this licence is never compiled, never linked and never
 # shipped. See docs/05-decisions.md D-0056, which recorded the need for this
 # line when `crates/lake` landed.
-exceptions = [{ crate = "tiny-keccak", allow = ["CC0-1.0"] }]
+#
+# `webpki-roots 1.0.9` is CDLA-Permissive-2.0 and the operator decided on
+# 2026-08-09 to accept it. UNLIKE `tiny-keccak` above, this one IS compiled and
+# IS shipped: it is reached on the ordinary native path,
+#
+#     webpki-roots -> hyper-rustls -> reqwest -> pull -> api
+#
+# measured with `cargo tree -i webpki-roots` on this tree, not assumed. It is
+# the Mozilla CA certificate root store — the trust anchors rustls checks a
+# vendor's TLS certificate against, which is what makes `crates/pull` able to
+# reach a vendor over HTTPS at all.
+#
+# The decision rests on three things. CDLA-Permissive-2.0 is permissive: it
+# carries no copyleft, no reciprocal obligation on this repository, and no
+# source-disclosure term, so it cannot reach the rest of the workspace. What it
+# licenses is DATA rather than code — a generated list of certificates, which
+# is the case the Community Data License Agreement was written for. And there
+# is no substitute that avoids it without being worse: the alternative is the
+# host platform's native trust store, which would make the pull's behaviour
+# depend on the machine it runs on and break `CLAUDE.md` §3 rule 5.
+#
+# It is an EXCEPTION and not an `allow` entry on purpose. The reasoning above
+# is about this crate being certificate data; it does not transfer to some
+# other crate that happens to carry the same licence, and such a crate is still
+# refused. See docs/05-decisions.md D-0066.
+exceptions = [
+    { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+    { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"

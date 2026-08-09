@@ -5659,3 +5659,775 @@ removed, the suite re-run, and the tests that went red recorded — the levels
 check takes four tests down, the values check one, the schema shape check two,
 the strike check two — then the line restored and the suite re-run green. That
 is weaker than a mutant survey and it is not described as one.
+
+## D-0064 · 2026-08-09 · The binary serves the front end from a directory it reads at run time, and `/` is the front door
+
+`crates/api/src/assets.rs`, `crates/api/src/server.rs`, `web/build/`,
+`web/.gitignore`, `.claude/launch.json`.
+
+The operator's requirement, in their own words and said five times: *"i wont run
+any commands, just clone and start or run application from intellij, that's it,
+then everything needs to be entirely automated"*. The whole acceptance test is
+`git clone`, open the project, press Run once, and a browser shows the working
+application — on a machine with no package manager installed.
+
+Two things stood between the repository and that.
+
+**One: the binary did not serve the front end.** `crates/api` answered JSON and
+its own server-rendered HTML and nothing else, so the front end had to be run as
+a second process on a second port by a second command. That is the command being
+removed.
+
+**Two: `web/build` was ignored.** It existed on the operator's machine and was
+tracked by zero files, so a clone had nothing to serve even once the binary
+could serve it, and the way back was `npm install && npm run build` — a command.
+
+### How the assets are reached, and why it is not an embedding
+
+`include_dir!` and `include_bytes!` are the obvious answers and both are wrong
+here, for the same reason and it is not a style one. They resolve at COMPILE
+time against a path under `web/`. CI gate 1e builds the workspace with `web/`
+moved aside — that is its entire method — so an embedding makes the crate
+uncompilable exactly when the gate is looking, and makes every contributor who
+has never run a front-end build inherit a red workspace. `CLAUDE.md` §2 and
+D-0053 both say the engine must build on a machine that has never installed the
+front end's toolchain; a compile-time reach into the tree is a weaker version of
+the same coupling.
+
+So the assets are **read at run time from a directory**, named by `BRUTEX_WEB`
+or defaulting to `web/` beside the workspace the binary was built from. The only
+thing compiled in is that default path, which is a string cargo already defines.
+
+**This strengthens gate 1e rather than dodging it.** The gate's own comment says
+"`api` embeds assets from `web/`, so a missing tree is expected to FAIL the
+embed" — it only asserted that the failure did not mention a toolchain. With
+this change `cargo build --workspace --locked` and
+`cargo clippy --workspace --all-targets` both **succeed** with `web/` detached,
+verified by moving the tree aside, forcing a recompile of `api`, and moving it
+back. The gate is left as it is; whoever tightens "must not mention npm" into
+"must exit 0" now can.
+
+`include_str!("../../../web/typeahead.js")` is gone for the same reason. It was
+D-0052-legal — a text asset compiled in, like `render::STYLE` — but it is the
+one line that made this crate reach into the browser tree at compile time, and
+`/typeahead.js` is now read from `web/typeahead.js` at request time through the
+same code path as everything else. When the file is absent the route answers 404
+naming it and saying that the instruments page renders every row without it.
+
+### The build output is committed, which D-0053 already licensed
+
+D-0053, in as many words: *"If a build step is introduced, its OUTPUT is
+committed under `web/`, so a clone with no Node still builds a working binary."*
+`web/.gitignore` carried `build/` and that is the line that was removed. 32
+files, 600 KB, every one of them text; gate 1 permits any extension under `web/`
+and gate 1b permits `.json` there.
+
+**It is generated output and it will go stale.** Nothing regenerates it, nothing
+checks it against `web/src`, and a change to a `.svelte` file that is not
+followed by a build is a change the served page does not have. That is a real
+cost and it is recorded in `docs/06-limits.md` rather than argued away.
+
+### `/` is the front end's, and the dashboard moves to `/dashboard`
+
+`/` was the server-rendered dashboard. It is now the front end's front door, and
+the dashboard answers at `/dashboard` — same page, same nav, one link changed.
+
+The reason is not preference. `web/src/routes/+layout.svelte` has listed `/` as
+`Markets` since it was written, and `web/svelte.config.js` says in its own
+header that "the Rust binary serves them". Serving both from one port made `/`
+a path where a click renders one application and a reload renders another —
+which is precisely the defect `web/vite.config.js` already records against
+`/audit`, in a comment that ends "nothing renders differently depending on how
+the operator arrived". Leaving `/` on the dashboard would also have meant the
+operator presses Run, sees the page they already had, and concludes the front
+end is still not being served.
+
+**Nothing server-rendered is lost, and that is the half D-0052 and D-0053
+protect.** `/dashboard`, `/instruments`, `/pull`, `/store`, `/audit`, `/bars`
+and `/health` all answer exactly as before, every one of them without a script,
+and both honest pages below link to them by name. Every registered route wins
+over the front end, because the front end is the router's **fallback** and not
+a `/{*path}` route: no file on disk can shadow a JSON route or `POST
+/pull/spot`, and there is a test that puts a decoy `store.json` in the build
+directory to prove it.
+
+**`/audit` IS STILL A COLLISION AND IS NOT FIXED HERE.** The front end has an
+audit page and so does `crates/api`, both at `/audit`, and the registered route
+wins — so an in-app click renders the front end's and a reload renders the
+Rust one. That is the same defect as `/`, it is left standing, and renaming a
+server-rendered page with a pager on it is a product decision rather than a
+consequence of serving files. It is written down here so it is a known open
+item and not a discovery.
+
+### Path traversal, which is the part of this that can leak a file
+
+Serving files off disk is the one thing this crate does that can hand out a file
+nobody meant to publish. The rules, each with its own test and each verified by
+deleting the line and watching the test go red:
+
+* the path is percent-decoded **once**. Decoding to a fixed point is what turns
+  `%252e%252e` into `..`; decoding once turns it into the literal name
+  `%2e%2e`, which is a 404;
+* a malformed escape, a null byte and a non-UTF-8 path are refusals naming the
+  rule, not bytes taken literally;
+* every segment must be exactly one `Component::Normal`, which refuses `..`,
+  `.`, a leading `/` and a drive prefix with one predicate rather than a list of
+  spellings that can be one spelling short;
+* `\` is a separator here, decided by this module rather than by the platform —
+  on a unix target it is an ordinary character in a file name, so `..%5c` would
+  otherwise survive as a segment;
+* the resolved path is canonicalised and must still lie under the canonicalised
+  root, which is what catches a symlink pointing out of it. A symlink that stays
+  inside is served, and there is a test for that too, because otherwise a rule
+  refusing every symlink would pass.
+
+Refusals are `400`, except a path that resolved outside the root, which is
+`403`: the request was well formed and the answer is no.
+
+### A missing asset is a 404 and never the shell
+
+An unmatched path gets `index.html` so client routing works. A path with a file
+extension, or any path under the bundler's own `_app/`, does not: it 404s. A
+missing script that answers with HTML makes the browser report a syntax error at
+line 1 of a file that was never the problem, which sends the reader to the wrong
+place entirely.
+
+### A missing asset directory is loud, and the server still runs
+
+`CLAUDE.md` §4. If the directory is not there the process still binds, still
+serves every JSON route, still runs the autopilot, and still renders every
+server-rendered page — and `/` answers **503** with a page naming the directory
+it looked in, the environment variable that overrides it, the one command that
+produces it, and links to everything that does work. `200` with an apology in
+the body is the fallback that hides a failure; refusing to start would take the
+JSON down over a page. The startup log says the same thing on one line.
+
+### What this does NOT do
+
+* It does not make IntelliJ's Run configuration a tracked file. `.claude/` is
+  ignored by the root `.gitignore` and a `.run/*.xml` is an extension gate 1
+  does not allow outside `web/`, so the operator's "one configuration" is
+  whatever the IDE's cargo integration offers for the `api` binary. Changing
+  that needs its own entry and a gate 1 amendment.
+* It does not rebuild `web/build`. The committed output is whatever was on disk
+  when this landed.
+* It does not add a dependency. No new crate, no `tower-http`, no MIME table —
+  the extension match is fifteen lines and an unknown extension is
+  `application/octet-stream` rather than a guess.
+
+---
+
+## D-0065 · 2026-08-09 · Gate 11 stops truncating at the first `#[cfg(test)]`, drops the workspace's last `binary_search`, and states the half of §7 it was leaving out
+
+`.github/workflows/ci.yml`, `crates/core/src/vendor.rs`,
+`crates/core/src/universe.rs`, `crates/api/src/merge.rs`,
+`crates/pull/src/work.rs`, `docs/04-invariants.md`, `docs/06-limits.md`,
+`docs/07-o1-architecture.md`.
+
+**Gate 11 had never run.** Two stale gate-1 paths failed ahead of it and
+short-circuited every step behind them; when they were fixed, gate 11 exited 1
+at its own boundary check before printing a single rule. Nobody had ever seen
+its output. What follows is therefore accumulated debt surfacing at once, not a
+regression, and it is signed one item at a time because a gate that goes green
+in one commit nobody can read is a gate nobody will trust the next time.
+
+### 1 · The boundary was the defect it warned about
+
+The gate scanned "the region BEFORE the first `#[cfg(test)]`" and hard-failed
+any file with two of them, on this reasoning, quoted from the step:
+
+> A file with two of them has no such region and would be scanned only as far
+> as the first, silently.
+
+**The first clause is false and the second is true of ONE attribute as much as
+of two.** A file with two attributes has a region before the first; the gate
+happily used it in the `n == 1` case. What actually shrank the scan was the
+truncation, and the truncation fires on a single attribute exactly as hard.
+`crates/api/src/lib.rs` has one `#[cfg(test)]`, on line 50 of 51, on a module
+*declaration* — the gate scanned 49 lines, reported success, and the ambiguity
+check never fired. The check detected a proxy that correlates with the failure,
+not the failure.
+
+Measured on the tree this landed against: **790 lines of production code,
+comments already stripped, lay after some file's first `#[cfg(test)]`** and were
+invisible while the gate reported success — 512 of them in
+`crates/costs/src/trip.rs`, whose first attribute sits on a `const fn` 876 lines
+above its tests, 146 in `crates/costs/src/dated.rs` and 73 in
+`crates/greeks/src/bsm.rs`. Two of those lines are
+shipping functions that sit *after* a test module, where no truncation rule of
+any shape can reach them: `api::render::json_string`, the JSON escaper, and
+`api::server::universe_label`.
+
+**Restructuring the ten files was considered and does not work.** Five of them
+have two genuinely adjacent test modules, one blank line apart, so merging them
+buys the gate nothing. The other five carry `#[cfg(test)]` on an item that is
+not a module — a const, a helper fn, a `thread_local!` — and reducing those
+files to one attribute leaves the boundary exactly where it was, still hiding
+146 lines in `costs/src/dated.rs`. And `crates/greeks/src/bsm.rs:316` is a
+statement-level `#[cfg(test)]` inside the body of the shipping function
+`Checked::greeks`. There is no legal rearrangement of Rust that removes it. **A
+gate whose only compliant state is unreachable is a gate that gets deleted, not
+obeyed.**
+
+So the boundary is a subtraction now. From a `#[cfg(test)]`, skip blanks,
+comments and attributes to find the item it covers; if that item is an inline
+`mod NAME {`, drop through to the matching `}` at the same indent; otherwise
+keep the attribute and the item and carry on. A file may hold as many test
+modules as it likes, anywhere, and none of them hides a line.
+
+**THE REFINED GATE SCANS MORE, NOT LESS**, which is the only direction a
+boundary change may go. 87 files, **49,089 lines in scope** against 35,534
+before — and the 35,534 was itself measured with the ten refusing files
+excluded entirely, which is what the old code did with `continue`. Both figures
+move with the code and are quoted from the tree this landed on; the direction is
+what the sentence is for.
+
+**And it produces the same corpus under the awk CI actually has.** macOS ships
+BSD awk and `ubuntu-latest` symlinks `awk` to **mawk 1.3.4**, so a scanner that
+leans on one flavour is a gate that behaves differently where it runs. The two
+were compared line by line over all 87 files inside an `ubuntu:24.04` container:
+identical scope counts, identical corpus, identical per-rule figures, one line
+apart — and that line was a concurrent edit landing between the two runs.
+
+**Proved by construction rather than by reading**, in a throwaway repository so
+nothing in this one was staged to do it:
+
+* A file with a second test module and production code after it carrying
+  `binary_search`, `HashMap::new()` and `.unwrap()`. The old gate printed
+  `AMBIGUOUS TEST BOUNDARY`, scanned **0 lines**, and reported `rule 1: 0
+  occurrence(s)`. The new gate refuses all three at lines 30, 31 and 32.
+* The same file reduced to the old rule's own compliant state — exactly ONE
+  trailing test module, code after it. The old gate scanned 4 lines and printed
+  `rule 1: 0 occurrence(s)` with the `binary_search` sitting in the file. The
+  new gate prints `rule 1: 1 occurrence(s)` and REFUSES. **That is the case the
+  ambiguity check existed to prevent, passing the check.**
+* A test module whose closing brace is not at its own `mod` keyword's indent.
+  The first attempt at this scanner **silently resynced on the next brace at
+  column 0** — the one closing the function *below* the module — and swallowed
+  the four lines between them, `binary_search` among them. That is the original
+  defect wearing a new hat, and it was caught by this fixture rather than by
+  reading. A non-blank line at or shallower than the module indent that is not
+  the closing brace is a hard failure now, and the fixture prints
+  `UNDELIMITED TEST MODULE`.
+
+The hard failure that remains is one the gate can justify: *I cannot tell where
+this module ends.* `cargo fmt` cannot produce that shape, and gate 6a enforces
+`cargo fmt` — but gate 11 runs in the job that gates 6a, so it may not lean on
+it, which is the same argument the `wc -l` comment beside it already makes.
+
+### 2 · Rule 1 keeps an EMPTY allowlist, and the code moved instead
+
+`core::vendor::board_of` classified an NSE series code with three
+`binary_search` calls over const tables of 6, 2 and 120 entries. It is called
+once per equity master row — 200,460 of them in the secondary broker's master
+alone, the figure `segment_of` records beside it — from
+`decode_master_row`, which `universe()` runs once into an `Arc<Site>` (D-0039).
+Nothing per-bar and nothing per-request reaches it.
+
+**That is a defensible allowlist entry and it was not written.** Layer 4 says
+"no search of any kind ... **never `binary_search`**" with no size qualifier and
+wears a `✓`; `core::universe::MemberIndex` already exists for exactly this,
+already builds at compile time with no dependency, and was built to retire a
+`binary_search` over **750** entries — an order of magnitude more than the 120
+here. Writing the first line into an allowlist whose comment reads "No
+allowlist. docs/07 layer 4 is unconditional", in order to keep three calls the
+crate next door already knows how to remove, is the move that turns an allowlist
+into a place failures go to be filed. The allowlist is still empty.
+
+**The table needed widening and only the test said so.** 120 codes in 256 slots
+is under half full, so `MemberIndex::build`'s compile-time assert accepted it,
+and the worst probe measured **10** against the `<= 8` every table in this crate
+is held to. Two-byte codes over a narrow alphabet cluster harder under FNV-1a
+than ticker symbols do. At 512 slots the worst probe is **6**. This is the
+second time `docs/07-o1-architecture.md`'s "How a layer is proven" has caught a
+table that `build` accepted and whose probe was over the bound anyway; the first
+measured 14. I-38 and the probe numbers in that document are the record.
+
+**Two documents were describing a `binary_search` that had already gone.**
+`docs/06-limits.md` §11 was titled "lookup is O(log n)" and stated membership as
+a departure from golden rule 4; `crates/core/src/universe.rs`'s own `# Cost`
+header said the same. `MemberIndex` closed both and neither was walked back, so
+the register whose whole job is to list what is *not* constant time was carrying
+an entry that had been fixed. Corrected here. D-0029's "**Rejected — a perfect
+hash**" paragraph says the same expired thing and is **left exactly as written**
+— that ledger is append-only and this entry is the correction. `U-01`'s row and
+its test name `..._so_binary_search_is_valid` are left alone too, and named in
+`docs/04-invariants.md` so the next reader finds the staleness stated rather
+than discovers it: renaming a test moves a token gate 10 scrapes out of that
+file, and doing it in the same change as the code is how a green gate stops
+meaning anything.
+
+### 3 · Rule 2's law string said half of what §7 says
+
+The rule printed:
+
+> CLAUDE.md section 7 — prices are paisa i64, never a float
+
+`CLAUDE.md` §7 says that, and in the next sentence says **"Statistical values
+(Sharpe, p-values, ratios) keep full precision and are never rounded for
+storage."** The rule was quoting half its own source, so every full-precision
+statistic in the workspace read as a violation of a law that permits it. The
+gate's own comment conceded the gap and dated it: *"There is no entry for them
+because no such code exists yet. When it lands it needs a line here, and that
+line is the review."* It landed — `crates/greeks`, `crates/lake`,
+`crates/telemetry` — and nobody came back.
+
+**The law string is corrected rather than allowlisted around.** It now reads
+"prices are paisa i64 and never a float; statistics keep full precision". This
+changes no behaviour: the string is display-only, echoed in the per-rule header
+and used nowhere in the matching. No pattern was touched.
+
+Then all 117 occurrences were read one at a time and classified PRICE or
+STATISTIC-or-ENCODER, and **not one turned out to be on a price path**:
+
+* `crates/greeks/*` — 73. Model inputs, model outputs, polynomial coefficients.
+  **No paisa can reach that crate**: no member of this workspace depends on it,
+  its dependency table is empty and gate 9b enforces that, and there is no
+  `i64` and no `Paisa` anywhere in its surface. D-0046.
+* `crates/lake/src/bar.rs` — 9. The eight greeks, plus `paisa_from_lake`, whose
+  entire body delegates to `Paisa::from_rupees_half_up` and attaches the column
+  and row to the refusal. The delegation was checked, not assumed. The money
+  fields beside them are already `Paisa` and `i64`.
+* `crates/lake/src/reader.rs` — 3. The raw Parquet `DOUBLE` reader, its buffer,
+  and the null check the greeks use. **Every caller was traced**: `price` and
+  `optional_price` convert every row to `Paisa` before returning, and the other
+  eight are greeks. No `f64` price leaves that file.
+* `crates/telemetry/*` — 7. `Value::Float`, its `From`, its owned twin, and the
+  JSON number writer and reader. An encoder type: `Value::paisa` exists, it
+  produces `Value::Int`, and the `Float` variant's own doc reads "Never a
+  price."
+
+### 4 · Rule 3: two maps pre-sized, one allowlisted, and the reason is circular
+
+`api::merge::merge` opened `asserted` with `HashSet::new()` and filled it from a
+loop over every kept listing — **thirty-three lines above a comment arguing at
+length that the bound of the identical loop is known exactly before it starts**,
+beside a map that used it. The bound was already computed and already written
+down; it just was not applied to the map that came first. One binding moved up,
+used by both.
+
+`pull::work::Selection::of` took a generic `IntoIterator`, so the count is not
+knowable from the type — but it is from the value: `into_iter()` first,
+`size_hint()` second. Every caller passes an array or a `Vec`, whose hint is
+exact. **The smaller claim is stated in the code rather than rounded up**:
+`size_hint().0` is a lower bound, an iterator that under-reports would still
+grow the set, and that is the largest guarantee an unbounded generic admits.
+
+`api::catalog::build_trigrams` is allowlisted, and the reason is circular rather
+than lazy: **the map's size is the number of distinct trigrams, and counting
+distinct trigrams needs the map.** What can be counted before the loop is the
+number of trigram *windows*, one per (name, offset) — an upper bound only in the
+sense that every key came from some window. It reserves per window rather than
+per key, and the ratio between them is how many names share a trigram, which is
+a property of the data and not computable from it ahead of the pass. The build
+runs once, in `Catalog::build` from `Site::new`, into an `Arc<Site>`. **If it
+ever moves onto a request path the entry is wrong and must be deleted rather
+than re-pinned**, which is the condition the rule-4 `merge.rs` entry already
+names.
+
+### 5 · Rules 4 and 5 had never been triaged, because they had never run
+
+Rule 4 refused nine files and rule 5 three. Every one is reasoned beside its
+entry in `ci.yml` rather than here, but two are worth naming:
+
+**The `census.rs` entry was stale in both its count and its reason.** It read 1
+and justified `grid_instruments`, a function that no longer exists in that file.
+The two sorts actually there are `held_series` and `held_entries`, different
+functions over a different argument, and the reason was re-derived rather than
+the number re-pinned. **That is the whole difference between an allowlist and a
+mute button**, and it is the failure mode an allowlist has when nobody can see
+it fire.
+
+**Nine of rule 5's ten hits are not `Result::expect` at all.**
+`telemetry::json::Scan::expect(&mut self, want: u8) -> Result<(), LineFault>` is
+a parser method; every call site is `self.expect(b'"')?`. The gate says up front
+that it "refuses the spelling, not the behaviour", and this is the case that
+sentence was written for. Renaming a parser method to satisfy a grep would be
+the tail wagging the gate.
+
+The tenth is real and stays. `pull::ssm::hmac` calls `.expect()` on
+`Hmac::new_from_slice`, which returns `InvalidLength` — a variant HMAC cannot
+produce for any key length. The alternatives are to propagate an error no input
+can cause, which is an arm no test can enter and therefore the coverage hole
+`CLAUDE.md` §4 calls a test that asserts nothing, or to substitute a key, which
+is a fallback that hides a failure. The `expect` message names the reason.
+
+### 6 · Rule 5c reported "none" while something was disarming a lint
+
+Its pattern was `allow\([^)]*clippy::(unwrap_used|…)` — one line. `[^)]*` cannot
+cross a newline, so every multi-line attribute was invisible, which is the shape
+`cargo fmt` produces the moment an attribute carries a `reason =`.
+`crates/pull/src/ssm.rs` disarms `clippy::expect_used` in shipping code across
+eight lines, and rule 5c answers `none` for it — which nobody saw, because this
+gate has never reached rule 5c in CI. The first time it ran, it lied.
+
+**A rule that prints "none" while the thing exists is worse than one that does
+not run**, so the pattern is a bracket walk now: from a line beginning
+`#[allow(` or `#[expect(`, count `[` against `]` until the attribute closes and
+test the joined text. `#[expect]` is included because it disarms exactly as
+`#[allow]` does. It reads the un-comment-stripped text, because an attribute
+list may carry a `//` inside it — `crates/costs/src/trip.rs` does, in its test
+module, which is where the shape was found — and a
+bracket count over stripped text loses its place.
+
+One entry, `ssm.rs 1`, kept as its own list rather than folded into rule 5's:
+the two ask different questions — "this construct appears" and "the lint that
+would have caught it is switched off here" — and a file could earn one without
+the other.
+
+### What this does NOT claim
+
+* **Not that gate 11 sees behaviour.** It is a text scan and its own comment
+  says so. A sort behind a trait, a map arrived at by `.collect()`, a float
+  behind a type alias — all still invisible.
+* **Not that `crates/api` is mutation-tested.** It is not, and
+  `docs/06-limits.md` records that gap.
+* **Not that the allowlist is small.** It is 27 entries across five rules —
+  12, 2, 9, 3 and 1, with rule 1 empty — and every one is a claim somebody has
+  to be able to defend. Two more files would sit on it if `merge.rs` and
+  `work.rs` had been allowlisted instead of fixed; they are named in `ci.yml` so
+  nobody re-derives the same reasoning.
+* **Not that `catalog.rs::build_trigrams` was measured.** The argument above is
+  about what is computable before the loop, not about a benchmark. No number was
+  taken and none is quoted.
+
+---
+
+## D-0066 · 2026-08-09 · `webpki-roots` is CDLA-Permissive-2.0, and it is accepted as an exception rather than an allow
+
+`deny.toml`.
+
+Gate 3 (`cargo deny check`) had `licenses FAILED` on `feat/pull`:
+
+```
+error[rejected]: failed to satisfy license requirements
+   ┌─ webpki-roots-1.0.9/Cargo.toml:26:12
+26 │ license = "CDLA-Permissive-2.0"
+   │            rejected: license is not explicitly allowed
+```
+
+It was invisible until now for the same reason gate 11 was invisible until
+D-0065: the job holding it was `skipping` behind a red gate ahead of it.
+Neither `Cargo.lock` nor `deny.toml` was touched by the work on this branch, so
+this is standing debt that surfaced when the gate in front of it went green —
+not something this branch introduced.
+
+### Where it comes from, measured
+
+```
+$ cargo tree -i webpki-roots
+webpki-roots v1.0.9
+├── hyper-rustls v0.27.9
+│   └── reqwest v0.12.28
+│       └── pull v0.1.0
+│           └── api v0.1.0
+└── reqwest v0.12.28 (*)
+```
+
+**This is nothing like D-0056.** `tiny-keccak` was accepted on the ground that
+it is never compiled, never linked and never shipped, and that claim was
+checked per-target. `webpki-roots` is compiled, linked and shipped on the
+ordinary native path. The exception is granted on the merits of the licence and
+the content, not on the code being unreachable, and conflating the two would
+make the earlier entry look like a precedent it is not.
+
+### What it is
+
+The Mozilla CA certificate root store: the trust anchors rustls checks a
+vendor's TLS certificate against. It is the reason `crates/pull` can reach a
+vendor over HTTPS. `CLAUDE.md` §8 requires the credential to come from
+Parameter Store over the network; there is no configuration of this repository
+that pulls anything without a trust store.
+
+### Why it is accepted
+
+* **Permissive, and that word is load-bearing.** CDLA-Permissive-2.0 carries no
+  copyleft, no reciprocal licensing obligation, and no source-disclosure term.
+  It cannot propagate a condition into this workspace.
+* **It licenses DATA, not code.** A generated list of certificates is exactly
+  the artefact the Community Data License Agreement was drafted for. Nothing
+  under this licence is linked into the binary as logic.
+* **The alternative is worse.** Dropping it means the platform's native trust
+  store, which makes a pull's success depend on the machine it runs on. That
+  is a violation of `CLAUDE.md` §3 rule 5 — same inputs, same outputs — traded
+  for a licence-list entry.
+
+### Why an `exception` and not an `allow` entry
+
+`allow` admits the licence for every crate, present and future, and nothing
+would report the next one. Every sentence of the justification above is about
+*this crate being certificate data*; none of it transfers to some unrelated
+crate that happens to carry CDLA-Permissive-2.0, and such a crate is still
+refused with the same error. The narrower instrument is the one that records
+the decision that was actually made.
+
+This is the same reasoning `deny.toml` already gives for `tiny-keccak` under
+the heading ONE CRATE, ONE LICENCE, and it is why the policy in `allow` is
+unchanged by this entry.
+
+### What this does NOT claim
+
+* **Not that the licence text was reviewed by a lawyer.** It was not. The three
+  properties asserted above — no copyleft, no reciprocal obligation, no
+  disclosure term — are readable in the licence, and the decision to accept
+  them is the operator's, recorded here as theirs.
+* **Not that `webpki-roots` was audited.** Its contents are unexamined; this
+  entry is about its licence and its role, nothing else.
+* **Not that the trust store is pinned.** The set of roots changes when the
+  dependency is upgraded, and no gate in this repository asserts anything about
+  which certificates are in it.
+
+---
+
+## D-0067 · 2026-08-09 · The census mints version 2 and carries the month's two closes, so a percentage is a probe rather than 17.5 GB
+
+**Decision.** `pull::manifest` gains a version dispatch and a second format
+version. Version 2's entry is **128 bytes: a version-1 entry, byte for byte,
+followed by a second 64-byte checksummed half holding the month's first and last
+close as paisa `i64`.** Version 1 keeps its 64-byte stride and is still read.
+`docs/02-store-format.md` §11 is the byte-level authority and did not exist
+before this entry; the format's only description was a module comment.
+
+**The sentinel.** `i64::MIN` means *not recorded*. It is not a price any tick
+grid produces, and it is the same convention §3 of that document already states
+for open interest — one value that cannot be a real quantity — rather than a
+second mechanism that could drift out of step with the first. `CLAUDE.md` §7:
+**zero means zero**, and a month whose bars really closed at zero paisa records
+a zero and is told apart from a month whose closes nobody has read. Both closes
+are present or neither is: they come off record 0 and record `n_valid − 1` of
+one file in one operation, so half a pair is a state no writer produces and it
+is refused rather than half-believed.
+
+### Why the census and not the bars
+
+Measured against the live store on 2026-08-09, by decoding
+`~/.brutex/store/manifest/groww.man` rather than reading a document: **31,493
+distinct keys, 216,496,530 rows, 43,422 committed entries**, all NSE. Serving
+the two closes per row from `/bars.json` is 31,951 requests and 216.5 M bars —
+about **17.5 GB at the page's own measured 81.0 B/bar, to extract
+2 × 31,493 × 8 B = 492 KB of signal.** ~35,600× amplification, growing with the
+census. Two `i64` beside the counter row answer the same question in one hash
+probe.
+
+The stale comment at `crates/api/src/server.rs` already described the answer —
+percentage change as **integer basis points**, `125` for 1.25% — and nothing
+computed it. This entry makes the field available; the arithmetic that renders
+it is the caller's and is not decided here.
+
+### Why a new version and not a sibling file
+
+`docs/02-store-format.md` §8 sends *overlay* fields to a `.ovl` sibling, and that
+was the other candidate. It was not taken, for three reasons that are about this
+file rather than about bar files:
+
+1. **`CLAUDE.md` §4 says "a new field is a new file version at its own stride",
+   and `crates/pull/src/manifest.rs` had already committed to that reading in
+   writing** — "a per-segment counter in the header … would be a **new field at
+   a new format version**, never a dynamic schema". A sibling would have made
+   that sentence wrong the first time it was tested.
+2. A sibling needs its own two-slot header, its own commit counter, its own
+   generation, and a per-row binding back to the entry it describes, or the two
+   files drift. That is a second crash-recovery protocol to get right beside one
+   that already works — and the ordering hazard it introduces (an overlay that
+   leads its base) has no analogue in the widened record.
+3. The closes are not an overlay in §8's sense. §8's argument is that computed
+   fields must not widen the **bar record**, whose stride is on the hot path of
+   every sweep and must "stay constant forever". A census entry is read once at
+   startup and probed thereafter; nothing addresses it in a loop.
+
+**Rejected — serving the closes from `/bars.json`.** The measurement above.
+`crates/api/src/server.rs` sends a whole month per request and takes no batch
+parameter, so there is no cheaper shape of the same route.
+
+**Rejected — storing the basis points instead of the two prices.** It freezes a
+rounding rule into the file, so correcting the rule later would mean rewriting
+history against §3 rule 8, and it destroys the ability to answer a
+month-over-month question that the two prices still answer. What is on disk
+stays paisa, full stop.
+
+**Rejected — widening the entry to 96 bytes.** It fits, and it makes entry 1
+start at 32,864, which is not 64-byte aligned. 128 keeps every entry on a cache
+line at both strides, which is the property `manifest.rs` already claimed for its
+64-byte images.
+
+### What it costs, measured and stated
+
+* **The file doubles.** 43,422 entries go from 2.78 MB to 5.56 MB per vendor;
+  the design ceiling at `MAX_ENTRIES` goes from 134,250,496 to 268,468,224 bytes.
+  Both readers' in-memory bounds move with it, and they take the **widest**
+  stride this build declares, because a version-1 census at the ceiling is half
+  that size and must still be readable.
+* **Ingest pays two extra 56-byte positional reads per (month, window) — and
+  only when it has to.** When the batch just appended *is* the whole file — same
+  count, same two instants, all three of them header fields already in hand —
+  the closes come from the batch and cost nothing at all. Otherwise they are
+  read back, for the same reason `rows` and both timestamps already are: on a
+  second window into a month that already holds bars the batch is a **suffix**,
+  and recording its first close as the month's first close puts a fabricated base
+  under every percentage computed from it. Against the groww census's own
+  numbers that is 86,844 extra reads against 216,496,530 record writes:
+  **+0.040%**. The syscall latency itself is the device's and is **UNVERIFIED** —
+  `store::file::BarFile::read_record` says so and this does not claim more.
+* **The in-memory row grows by 11.8%.** The log element goes from 80 to 96
+  bytes and the index element `(EntryKey, Held)` from 136 to 152, both pinned by
+  `pull::unit::the_log_is_the_entry_region_in_order`. At the 248,000-entry scale
+  `MAX_ENTRIES` names, the index goes from ~144 MB to ~159 MB and the log from
+  ~40 MB to ~48 MB; at the design ceiling, ~574 MB to ~637 MB.
+* **`/store.json` is still O(entries) per request**, because it re-reads and
+  re-walks every manifest. It was before this change too. The per-row work stays
+  O(1); this adds a constant factor to a linear term that already existed and
+  removes a route that would have been quadratic in practice. `docs/06-limits.md`
+  §40.
+
+### Migration: recompute on next touch, and say "unknown" until then
+
+The 43,422 entries already on disk have no close, because version 1 had nowhere
+to put one. Three options, and the third is taken:
+
+* **Rewrite on load.** Rejected: it moves a file a run had nothing to say about,
+  against §3 rule 5.
+* **Backfill in a pass.** Rejected as automatic. It is 31,493 `open` + 2 `pread`
+  + `close`, which is exactly the O(files) reconciliation walk `manifest.rs`
+  declines to build for the same reason. It remains available as a deliberate
+  operator command and is not built here.
+* **Taken: upgrade on the first run that has something to record, and answer
+  *not recorded* for everything else.** A loaded version-1 census publishes at
+  version 2, and because the two strides disagree from the first entry onward the
+  publish is a whole-file rewrite rather than a positional append — the path a
+  repair and a first write already take. It is checked **after** the "nothing
+  moved" gate, so a run that records nothing leaves a version-1 file byte for
+  byte as it was.
+
+The entries carried across say *not recorded*, and they fill in as they are
+re-ingested: the census's equality probe is over the whole row, closes included,
+so a month whose rows have not moved but whose closes have just been read for the
+first time is a change and is recorded. Once recorded it compares equal and the
+file stops moving. **An operator can always tell "no data yet" from "the price
+really was that"** — that is the sentinel's entire job, and M-27 is the test.
+
+### What this deliberately does NOT do
+
+**It computes no percentage, and it does not touch corporate actions.** D-0018
+already decided that behaviour — refuse the window loudly and name the date,
+never back-adjust from an unverified feed — and grep over `crates/` finds zero
+implementation of it. This entry adds the two prices; it does not license a
+number to be rendered from them. Two things must be said plainly before any
+caller does:
+
+1. **No corporate-action threshold is sourced anywhere in this repository.**
+   `docs/00-charter.md` names no verified split-and-bonus source, and D-0018
+   names no number. Inventing one here would be `CLAUDE.md` §3 rule 1 violated in
+   the entry that cites it. Until an operator supplies one with a source, the
+   honest rendering for an equity is a marked cell naming the reason, not a
+   number with a caveat beside it — a number travels and a caveat does not.
+2. **A month-level field can flag a month; it cannot name the day.** D-0018's
+   stated detector is an unexplained *overnight* gap, which is a bar-to-bar test
+   over the month's ~8,250 bars and O(bars) work that cannot live in a census
+   row. So this supports a coarse gate at best, and any marker built on it must
+   say "a corporate action may fall in this month", never "split on 2024-06-14".
+
+Measured for scale, by walking the same 43,422 entries and reading byte 56:
+**31,282 keys are segment CASH (99.33%) and 211 are INDEX (0.67%)**. Indices
+never split. So on the day a percentage is rendered under the posture above,
+0.67% of rows show a number and 99.33% show a named refusal. That is brutal and
+it is what the evidence supports.
+
+**It does not add a version dispatch to anything else.** `crates/store` already
+has one. `pull::manifest` has one now. Nothing else in the workspace does, and
+this entry does not claim otherwise.
+
+---
+
+## D-0068 · 2026-08-09 · `web/build` is committed output, because the alternative is a command the operator will not type
+
+**Status: locked.** Supersedes nothing. D-0064 decided *how* the binary finds
+the front end; this entry decides *why the front end is in the repository at
+all*, and takes the cost of that on the record.
+
+### The requirement this serves, in the operator's words
+
+> "i wont run any commands, just clone and start or run application from
+> intellij, that's it, then everything needs to be entirely automated"
+
+The whole acceptance test is three steps: `git clone`, open the project, press
+Run on one configuration. A browser shows the application, the store opens, and
+the backfill drives itself. **On a machine with no Node installed.** Anything
+that requires a fourth step is a failure of the requirement, not a caveat on it.
+
+### Why there is no build step that would make this unnecessary
+
+The obvious answer is to generate the assets during `cargo build` and never
+commit them. Every spelling of that is forbidden here, and not by accident:
+
+* `CLAUDE.md` §2 forbids "any `build.rs` that invokes an external process",
+  without exception. A `build.rs` shelling out to a bundler is that, exactly.
+* `include_dir!` and `include_bytes!` do not invoke anything, but they resolve
+  at compile time against a path under `web/`. CI gate 1e builds the workspace
+  with `web/` **moved aside**; an embedding makes the crate fail to compile
+  under the gate's own premise, and makes the workspace red for every
+  contributor who has never run a front-end build.
+* Building the assets by hand and committing nothing is the state this entry
+  replaces, and it is precisely the `npm install && npm run build` the
+  requirement forbids.
+
+So there is no route to a served front end that does not either break §2, break
+gate 1e, or hand the operator a command. **Committing the output is the only one
+of the four that survives all three constraints.**
+
+### What licenses it
+
+D-0053 already said this in as many words when it made `web/` unrestricted:
+"If a build step is introduced, its OUTPUT is committed under `web/`, so a clone
+with no Node still builds a working binary." This entry takes that up and
+records what it costs.
+
+Gate 1's extension allowlist is decided by path — `web/*` matches `.*` — so the
+`.js` and `.json` under `web/build` are legal where they live and would be a
+build failure anywhere else. Gate 1b confines `.json` to `.github/`, `.claude/`
+and `web/`, and this output is in the third. Nothing is widened by this entry.
+
+### The cost, stated rather than glossed
+
+**A build artifact in version control is normally poor practice, and calling it
+anything else here would be dishonest.** Concretely, what is being accepted:
+
+1. **The tree can lie.** Nothing mechanically ties `web/build` to `web/src`.
+   Edit a `.svelte` file, commit without rebuilding, and the repository serves
+   the previous front end while the source says otherwise. Recorded as a real
+   gap in `docs/06-limits.md` §38 — there is no gate for it today.
+2. **Every front-end change is a diff nobody reads.** The bundler renames its
+   chunks by content hash, so a one-line source change rewrites most of the
+   36 file names. Review of `web/build` is not review; it is noise.
+3. **History grows by the size of the output on every front-end commit.** The
+   present output is 36 files and 555.5 KB, all of it text. That is small, and
+   it is small *now*: a large dependency added to the front end lands in this
+   repository forever, because history is append-only.
+4. **Merge conflicts in generated files are not resolvable by hand.** The
+   resolution is always "rebuild", which means the artifact is authoritative
+   over nobody and the source is authoritative over everything.
+
+Bound so the number is checkable rather than remembered: **if the output ever
+exceeds roughly 20 MB, this decision is void and must be retaken.** At that
+size the trade stops being "a few hundred KB against a command the operator
+will not type" and becomes a real cost on every clone, which is the operator's
+call and not this entry's.
+
+### What was measured
+
+* `npm install && npm run build` in `web/`, from a removed `build/`: **exit 0**,
+  36 files, **568,797 bytes**, zero binary files, zero occurrences of gate 15's
+  banned token.
+* The output that was on disk before this rebuild had **32** files and **no
+  `autopilot.html`** — `web/src/routes/autopilot/+page.svelte` is tracked and
+  committed, and the stale artifact predated it. That is defect (1) above
+  happening before the entry that names it was written, which is the argument
+  for §38 being a limit and not a footnote.
+
+### What this does NOT decide
+
+It does not add a gate proving the artifact matches the source. Building one
+requires the front-end toolchain in CI, which is a separate decision with its
+own cost, and asserting freshness without checking it would be the fallback
+that hides a failure `CLAUDE.md` §4 bans. Until such a gate exists the honest
+statement is the one in §38: **nothing keeps `web/build` fresh except the
+discipline of whoever last touched `web/src`.**
