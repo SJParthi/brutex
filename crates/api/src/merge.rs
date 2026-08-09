@@ -239,10 +239,26 @@ impl Merged {
 /// O(1) per declined row too.
 #[must_use]
 pub fn merge(sources: &[Source]) -> Merged {
+    // THE BOUND, TAKEN ONCE AND USED BY BOTH MAPS BELOW.
+    //
+    // No more distinct entries can exist in either than there are kept
+    // listings, so this one sum reserves both. It used to be computed 33 lines
+    // further down, beside `by_key` alone, under a comment arguing at length
+    // that "the upper bound is known exactly before the loop starts" — and
+    // `asserted`, filled by the identical loop over the identical listings,
+    // started at `HashSet::new()` two lines above it and rehashed its way up.
+    // The argument was already written; it just was not applied to the map
+    // that came first. `docs/07-o1-architecture.md` law 2.
+    let capacity = sources.iter().map(|s| s.kept.len()).sum();
+
     // Pass 1. Every (identity, ISIN) pair anybody asserted. A row can never
     // confirm ITSELF: it asserts its raw key, and the candidate it offers is
     // by construction a different symbol.
-    let mut asserted: HashSet<(InstrumentKey, Isin)> = HashSet::new();
+    //
+    // Pre-sized from `capacity`: a listing contributes at most one pair, and
+    // only when it carries an ISIN, so the set is a subset of the listings and
+    // this reservation cannot be exceeded.
+    let mut asserted: HashSet<(InstrumentKey, Isin)> = HashSet::with_capacity(capacity);
     // And every ISIN each vendor KEPT, which is what a decline is checked
     // against. `BTreeMap` rather than `HashMap` so the conflict lines come out
     // in a stable order and two runs produce byte-identical output.
@@ -269,13 +285,13 @@ pub fn merge(sources: &[Source]) -> Merged {
     // The upper bound is known exactly before the loop starts: no more distinct
     // keys can exist than there are kept listings. Reserving that much means the
     // map never grows, so no rehash can occur at all and the amortised
-    // qualifier disappears from the guarantee.
+    // qualifier disappears from the guarantee. `capacity` is taken at the top
+    // of this function, because `asserted` needs the same number.
     //
     // It over-reserves when two vendors name the same instrument — which is the
     // common case, and the point of merging. That is bounded waste (one entry
     // per duplicate, freed when the map is dropped) traded for a bound that
     // holds in the worst case rather than on average.
-    let capacity = sources.iter().map(|s| s.kept.len()).sum();
     let mut out = Merged {
         by_key: HashMap::with_capacity(capacity),
         ..Merged::default()

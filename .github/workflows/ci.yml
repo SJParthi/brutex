@@ -1446,9 +1446,30 @@ jobs:
           # path got slower". Gate 11 says "this construct may not appear".
           #
           # WHAT IT SCANS. Tracked `crates/*/src/**.rs` only, and inside each
-          # file only the region BEFORE the first `#[cfg(test)]`. Test code and
-          # benches are exempt on purpose: a test asserting that a refusal
-          # happens legitimately unwraps, sorts and panics.
+          # file everything EXCEPT the `#[cfg(test)] mod NAME { ... }` blocks.
+          # Test code and benches are exempt on purpose: a test asserting that
+          # a refusal happens legitimately unwraps, sorts and panics.
+          #
+          # IT USED TO BE "THE REGION BEFORE THE FIRST `#[cfg(test)]`", AND
+          # THAT BOUNDARY WAS THE BUG IT WARNED ABOUT. Truncating at an
+          # attribute hides every line after it, and an attribute is not only
+          # ever a test module: `costs/src/trip.rs` carries `#[cfg(test)]` on a
+          # const fn 876 lines above its tests, `costs/src/dated.rs` on a const
+          # at line 55, `greeks/src/bsm.rs` on a STATEMENT inside the shipping
+          # body of `Checked::greeks`. One attribute shrank the scan exactly as
+          # silently as two, and the two-attribute check never fired on the
+          # single-attribute case — 790 lines of production code were invisible
+          # while the gate reported success, `render::json_string` and
+          # `server::universe_label` among them, both of which sit AFTER a test
+          # module where no truncation rule of any shape can reach them.
+          #
+          # So the boundary is a SUBTRACTION now, not a cut: from a
+          # `#[cfg(test)]`, skip blank lines, `//` comments and attributes to
+          # find the item it covers; if that item is an inline `mod NAME {`,
+          # drop through to the matching `}` at the same indent; otherwise keep
+          # the attribute and the item and carry on scanning. A file may hold
+          # as many test modules as it likes, in any position, and none of them
+          # hides a line. D-0065.
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP. The inputs are `git ls-files`
           # and the static patterns below, the same discipline gate 1c states.
@@ -1473,8 +1494,16 @@ jobs:
           #     sort in non-test source and leans on the allowlist to record,
           #     one file at a time, WHY a given sort is bounded. The reasons
           #     are written beside the entries and are the reviewable part.
-          #   * A second `#[cfg(test)]` in a file would silently shrink the
-          #     scanned region, so that is a hard failure rather than a guess.
+          #   * A test module whose closing `}` is not at the module keyword's
+          #     own indent — which `cargo fmt` cannot produce, and gate 6a
+          #     enforces `cargo fmt` — is not delimitable by this scanner, and
+          #     that is a HARD FAILURE rather than a guess. "I could not tell
+          #     where this module ends" is a thing a gate may say; quietly
+          #     scanning half of it is not.
+          #   * `#[cfg(test)] mod tests {` written on ONE line is not
+          #     recognised as a module and its body IS scanned. That direction
+          #     is loud — the test bodies refuse under rules 4 and 5 — never
+          #     silent, which is why it is left rather than pattern-matched at.
           #
           # THE ESCAPE HATCH IS HERE, NEVER IN THE CODE. No magic comment, no
           # `// gate-11-ok` scattered through crates/. Each entry is
@@ -1485,22 +1514,76 @@ jobs:
           # whether the construct is really justified.
 
           # ---- rule 1. No allowlist. docs/07 layer 4 is unconditional. ------
+          # AND IT STAYS EMPTY. The one candidate this rule ever had was
+          # `core::vendor::board_of`, which binary-searched three const tables
+          # of 6, 2 and 120 entries, once per equity master row. The audit that
+          # found it could have written the first entry here with a defensible
+          # reason — the tables are compile-time fixed and nothing per-bar
+          # reaches them — and did not, because `core::universe::MemberIndex`
+          # already exists for exactly this, was built to retire a
+          # `binary_search` over 750 entries, and is smaller machinery than the
+          # paragraph justifying an exemption would have been. D-0065.
           allow_search=''
 
-          # ---- rule 2. CLAUDE.md section 7: paisa i64, never a float. -------
-          # price.rs carries the ONE sanctioned float boundary — the file says
-          # so itself: "the ONLY function in the workspace permitted to do
-          # floating-point arithmetic". The vendor sends rupees as an IEEE
-          # double and something has to accept it; everything downstream of
-          # that `Ok` is an integer forever. vendor.rs::parse_strike is the
-          # other end of the same boundary and hands its f64 straight to it.
-          # NOTE for whoever builds the engine: CLAUDE.md section 7 also lets
-          # Sharpe, p-values and ratios keep full precision. There is no entry
-          # for them because no such code exists yet. When it lands it needs a
-          # line here, and that line is the review.
+          # ---- rule 2. CLAUDE.md section 7, BOTH HALVES OF IT. --------------
+          # THE LAW STRING USED TO SAY ONLY "never a float", AND SECTION 7 DOES
+          # NOT SAY ONLY THAT. It says prices are paisa integers and never a
+          # float, and in the next sentence that statistical values keep full
+          # precision and are never rounded for storage. The rule was printing
+          # half its own source, so every full-precision statistic in the
+          # workspace read as a violation of a law that permits it. The note
+          # below used to say "no such code exists yet". It exists now — three
+          # crates of it — so the law string was corrected to state the rule
+          # this gate actually enforces. D-0065.
+          #
+          # THE LINE THIS RULE DRAWS IS PRICE vs STATISTIC, NOT INTEGER vs
+          # FLOAT. Each entry below was read occurrence by occurrence and is
+          # one or the other:
+          #   price.rs      the ONE sanctioned float boundary on a PRICE path —
+          #                 the file says so itself. The vendor sends rupees as
+          #                 an IEEE double and something has to accept it;
+          #                 everything downstream of that `Ok` is an integer
+          #                 forever.
+          #   vendor.rs     parse_strike, the other end of that same boundary.
+          #                 Hands its f64 straight to `from_rupees_half_up` and
+          #                 does no arithmetic of its own.
+          #   greeks/*      73 occurrences, every one a model input, a model
+          #                 output or a polynomial coefficient. NO PAISA CAN
+          #                 REACH THIS CRATE: no member of this workspace
+          #                 depends on it (it is shared with `tickvault` by git
+          #                 URL), its manifest has an empty dependency table
+          #                 that gate 9b enforces, and there is no `i64` and no
+          #                 `Paisa` in its surface. Snapping a gamma of
+          #                 0.00017142680429549402 to a two-decimal grid makes
+          #                 it 0.00. D-0046.
+          #   lake/bar.rs   8 greek fields plus `paisa_from_lake`, which is a
+          #                 boundary PARAMETER and not a stored value: its
+          #                 whole body delegates to `Paisa::from_rupees_half_up`
+          #                 and attaches the column and row to the refusal. The
+          #                 money fields beside it are already `Paisa`.
+          #   lake/reader.rs the raw Parquet DOUBLE reader and its buffer. Every
+          #                 caller is `price`, `optional_price` — both of which
+          #                 convert EVERY row to `Paisa` before returning — or
+          #                 one of the eight greeks. Traced: no f64 price
+          #                 leaves this file.
+          #   telemetry/*   `Value::Float`, its `From`, its owned twin, the
+          #                 JSON number writer and the JSON number reader. An
+          #                 ENCODER type, not a value type: `Value::paisa`
+          #                 exists and produces `Value::Int`, and the `Float`
+          #                 variant's own doc reads "Never a price."
           allow_float='
           crates/core/src/price.rs 4
           crates/core/src/vendor.rs 1
+          crates/greeks/src/bsm.rs 36
+          crates/greeks/src/normal.rs 21
+          crates/greeks/src/error.rs 17
+          crates/greeks/src/solver.rs 13
+          crates/greeks/src/moneyness.rs 6
+          crates/lake/src/bar.rs 9
+          crates/lake/src/reader.rs 3
+          crates/telemetry/src/value.rs 5
+          crates/telemetry/src/encode.rs 1
+          crates/telemetry/src/record.rs 1
           '
 
           # ---- rule 3. docs/07 law 2: pre-size every map. -------------------
@@ -1513,41 +1596,203 @@ jobs:
           # to reserve from; the doc comment argues it and points at
           # docs/06-limits.md §17. Layer 3's guarantee is about the LOADED
           # index, which is the one a query touches, and that one is reserved.
+          #
+          # catalog.rs::build_trigrams is the one place here where the bound is
+          # genuinely not knowable, and the reason is circular rather than
+          # lazy: THE MAP'S SIZE IS THE NUMBER OF DISTINCT TRIGRAMS, AND
+          # COUNTING DISTINCT TRIGRAMS NEEDS THE MAP. What can be counted
+          # before the loop is the number of trigram WINDOWS — one per
+          # (name, offset) — which is an upper bound only in the sense that
+          # every key came from some window; it reserves per window rather than
+          # per key, and the ratio between them is how many names share a
+          # trigram, which is a property of the data and not computable from it
+          # ahead of the pass. Reserving the window count would trade a
+          # reservation that grows with the universe for a key count bounded by
+          # a three-byte alphabet. The build runs ONCE, inside `Catalog::build`
+          # from `Site::new`, into an Arc<Site> (D-0039) — never in a handler.
+          # IF IT EVER MOVES ONTO A REQUEST PATH THIS ENTRY IS WRONG and must
+          # be deleted rather than re-pinned, which is the same condition the
+          # rule 4 merge.rs entry names.
+          #
+          # TWO MORE FILES WOULD SIT ON THIS LIST IF THEY HAD BEEN ALLOWLISTED
+          # INSTEAD OF FIXED, and they are named so nobody re-derives the same
+          # reasoning: merge.rs::merge now reserves `asserted` from the same
+          # `capacity` the map 33 lines below it already used, and
+          # pull::work::Selection::of reserves from the iterator size hint.
           allow_unsized='
+          crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
-          # Each of these was traced to its callers before it was written down:
-          #   census.rs   grid_instruments — filters to Segment::Index AND
-          #               Kind::Index first, so it sorts the index series,
-          #               bounded by CLAUDE.md section 1, not by the universe.
-          #   master.rs   skipped_by_reason — sorts DECLINE REASONS, bounded by
-          #               the Skip vocabulary. Reached from `universe()`.
-          #   merge.rs    single_vendor_members — O(universe log universe), and
-          #               allowed only because `universe()` runs once into an
-          #               Arc<Site> (D-0039), not per request. If that parse
-          #               ever moves back into a handler this entry is wrong
-          #               and must be deleted, not re-pinned.
-          #   manifest.rs newest-generation pick — bounded by MAX_SLOTS, 2.
+          # Each of these was traced to its callers before it was written down.
+          # FIVE of the nine files are new here only because this rule had
+          # never run: the boundary check above exited before it ever printed,
+          # and the four that were already listed are the four that happened to
+          # sit in the truncated region.
+          #
+          # THE census.rs ENTRY WAS STALE IN BOTH ITS COUNT AND ITS REASON. It
+          # read 1 and named `grid_instruments`, a function that no longer
+          # exists in that file. The two sorts actually there are different
+          # functions with a different argument, re-derived below rather than
+          # re-pinned — which is the whole difference between an allowlist and
+          # a mute button.
+          #
+          #   BUILT ONCE AT STARTUP, into an Arc<Site> (D-0039). Never in a
+          #   handler. If any of these moves into one, the entry is wrong and
+          #   must be deleted rather than re-pinned:
+          #     autopilot.rs tracked_series — its own doc says "computed once
+          #                 when the autopilot starts ... that belongs beside
+          #                 the manifest load, not inside a tick".
+          #     catalog.rs  build_orders (COLUMNS sorts of the universe, once)
+          #                 AND Catalog::search. The second IS per request and
+          #                 is allowed anyway: it sorts the HIT LIST of a
+          #                 substring search, which layer 12 names as "the
+          #                 named exception and stays O(universe)" and
+          #                 docs/06-limits.md §24 measures at 6.53 ms.
+          #     census.rs   held_series and held_entries. Both run in
+          #                 `Site::new` beside the manifest load, both sort the
+          #                 store's own held keys, and both are sorted for
+          #                 REPRODUCIBILITY rather than for display: the pager
+          #                 addresses a row by ordinal, and HashMap order is
+          #                 not stable between processes. docs/06-limits.md §32.
+          #     master.rs   skipped_by_reason — sorts DECLINE REASONS, bounded
+          #                 by the Skip vocabulary. Reached from `universe()`.
+          #     merge.rs    single_vendor_members — O(universe log universe),
+          #                 allowed only because `universe()` runs once.
+          #     render.rs   folder_suggestions — the ~/Downloads walk, bounded
+          #                 by MAX_FOLDER_SUGGESTIONS and called from
+          #                 `Site::new`. docs/06-limits.md §34.
+          #
+          #   BOUNDED BY A CONSTANT, wherever they run:
+          #     archive.rs  the member list, bounded by MAX_MEMBERS, which the
+          #                 walk checks on every push and refuses past.
+          #     manifest.rs newest-generation pick — bounded by MAX_SLOTS, 2.
+          #
+          #   PER RUN, NOT PER REQUEST:
+          #     server.rs   broker_run sorts the tracked universe ONCE before
+          #                 making one network request per member of it, for
+          #                 reproducibility — an unordered backfill resumes
+          #                 somewhere different after every restart. The sort
+          #                 is not the cost of that function.
+          #     server.rs   instruments_json sorts per request, over the
+          #                 TRACKED universe (~800 by decision) and not the
+          #                 master, which its own comment states and which the
+          #                 type-ahead's bound depends on. It is the one entry
+          #                 here that is per request and not the layer-12
+          #                 exception, and it is the one to look at first if
+          #                 this list is ever audited again.
           allow_sort='
-          crates/api/src/census.rs 1
+          crates/api/src/autopilot.rs 1
+          crates/api/src/catalog.rs 2
+          crates/api/src/census.rs 2
           crates/api/src/master.rs 1
           crates/api/src/merge.rs 1
+          crates/api/src/render.rs 1
+          crates/api/src/server.rs 2
+          crates/pull/src/archive.rs 1
           crates/pull/src/manifest.rs 1
+          '
+
+          # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------
+          # THIS RULE REFUSES A SPELLING, and these ten occurrences are what
+          # that costs. Nine of them are not `Result::expect` at all:
+          # `telemetry::json::Scan::expect(&mut self, want: u8) ->
+          # Result<(), LineFault>` is a PARSER method, every call site is
+          # `self.expect(b'"')?` or `scan.expect(b'{')?`, and every one
+          # propagates rather than panicking. Renaming it to satisfy a grep
+          # would be the tail wagging the gate.
+          #
+          # ssm.rs::hmac is the one real `Result::expect` in shipping code, and
+          # it stays. `Hmac::new_from_slice` returns `InvalidLength`, which HMAC
+          # cannot produce for any key length; the alternatives are to
+          # propagate an error no input can cause — an arm no test can enter,
+          # which is the coverage hole CLAUDE.md section 4 calls a test that
+          # asserts nothing — or to substitute a key, which is a fallback that
+          # hides a failure. The `expect` message names the reason and rule 5c
+          # below now sees the local allow that goes with it.
+          allow_panic='
+          crates/pull/src/ssm.rs 1
+          crates/telemetry/src/json.rs 5
+          crates/telemetry/src/record.rs 4
+          '
+
+          # ---- rule 5c. Nothing disarms those lints outside a test module. --
+          # One entry, and it is the same line rule 5 allows above: ssm.rs
+          # carries `#[allow(clippy::expect_used, reason = ...)]` on `hmac`.
+          # Kept as its own list rather than folded into `allow_panic` because
+          # the two ask different questions — "this construct appears" and
+          # "the lint that would have caught it is switched off here" — and a
+          # file could earn one without the other.
+          allow_disarm='
+          crates/pull/src/ssm.rs 1
           '
 
           work=$(mktemp -d)
           corpus="$work/corpus"
-          : > "$corpus"
+          scope="$work/scope"
+          : > "$corpus"; : > "$scope"
 
-          walked=0; kept=0; dropped=0; ambiguous=0
+          # THE SUBTRACTION, one file at a time. `scope` keeps every line that
+          # is not inside a `#[cfg(test)] mod NAME { ... }` block, comments and
+          # all; `corpus` is `scope` with whole-line `//` dropped. Rules 1..5
+          # read `corpus`; rule 5c reads `scope`, because an attribute list can
+          # carry a `//` comment inside it and a bracket-counting walk over the
+          # stripped text would then lose count.
+          strip='
+            function emit(line, no,   t) {
+              print F ":" no ":" line > SCOPE
+              t = line; sub(/^[ \t]+/, "", t)
+              if (t !~ /^\/\//) print F ":" no ":" line
+            }
+            function flush(  i) { for (i = 1; i <= nb; i++) emit(bl[i], bn[i]); nb = 0 }
+            function hold(line, no) { nb++; bl[nb] = line; bn[nb] = no }
+            BEGIN { st = 0; depth = 0; nb = 0; drop = 0 }
+            {
+              if (st == 2) {
+                drop++
+                if ($0 ~ CLOSE) { st = 0; next }
+                # INSIDE THE MODULE, EVERY LINE IS DEEPER THAN THE `mod`
+                # KEYWORD OR IT IS BLANK. A line at the module indent or
+                # shallower that is NOT the closing brace means the brace this
+                # scanner is waiting for is not the one that closes the module,
+                # and matching a later brace at the same indent would swallow
+                # whatever lies between them -- silently, which is the whole
+                # defect this boundary replaced. Refuse instead.
+                #
+                # Blank lines and whole-line comments are exempt, and that
+                # costs nothing: neither can hide a construct, and the first
+                # line of actual code past the module still trips the check.
+                lead = $0; sub(/[^ \t].*$/, "", lead)
+                t = $0; sub(/^[ \t]+/, "", t)
+                if (t != "" && t !~ /^\/\// && length(lead) <= length(IND)) exit 3
+                next
+              }
+              t = $0; sub(/^[ \t]+/, "", t)
+              if (st == 0) {
+                if (t ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; depth = 0; nb = 0; hold($0, NR); next }
+                emit($0, NR); next
+              }
+              if (depth > 0) { depth += gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
+              if (t == "" || t ~ /^\/\//) { hold($0, NR); next }
+              if (t ~ /^#\[/) { depth = gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
+              if ($0 ~ /^[ \t]*(pub([ \t]*\([^)]*\))?[ \t]+)?mod[ \t]+[A-Za-z0-9_]+[ \t]*\{[ \t]*$/) {
+                IND = $0; sub(/[^ \t].*$/, "", IND)
+                CLOSE = "^" IND "\\}[ \t]*$"
+                drop += nb + 1; nb = 0; st = 2; next
+              }
+              flush(); emit($0, NR); st = 0
+            }
+            # A module still open at EOF, or an attribute with no item under
+            # it, is the same refusal for the same reason: this scanner will
+            # not guess where test code ends.
+            END { print drop > SUM; if (st != 0) exit 3 }
+          '
+
+          walked=0; kept=0; dropped=0; undelimited=0
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
-            # `grep -c` exits 1 on no match, and with pipefail that would kill
-            # the gate exactly when a file is clean — the bug gate 5 records.
-            n=$( { grep -c '#\[cfg(test)\]' "$f" || true; } | tr -d ' ')
             # `wc -l` COUNTS NEWLINES, NOT LINES, so a file whose last line is
             # unterminated is reported one short — and a one-line file reports
             # ZERO, which set `end=0` and skipped the file entirely. Caught by
@@ -1556,20 +1801,23 @@ jobs:
             # lives in a later job that this one gates, so relying on it would
             # make gate 11 blind exactly while it runs first.
             tot=$(awk 'END{print NR}' "$f")
-            if [ "$n" -gt 1 ]; then
-              printf 'AMBIGUOUS TEST BOUNDARY  %s  (%s attributes)\n' "$f" "$n"
-              ambiguous=$((ambiguous + 1))
-              continue
-            fi
-            if [ "$n" -eq 1 ]; then
-              end=$(( $(grep -n '#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1) - 1 ))
+            # Pre-created, because a file that is nothing but a test module
+            # produces neither, and `set -e` would kill the gate on the `cat`.
+            : > "$work/one.scope"; : > "$work/one.sum"
+            # NOTHING IS APPENDED UNTIL THE FILE PARSES. A partial corpus from
+            # a file the scanner could not delimit would be a scan that quietly
+            # covered less than it reported — the exact defect this boundary
+            # replaced.
+            if awk -v F="$f" -v SCOPE="$work/one.scope" -v SUM="$work/one.sum" \
+                   "$strip" "$f" > "$work/one.corpus"; then
+              cat "$work/one.corpus" >> "$corpus"
+              cat "$work/one.scope" >> "$scope"
+              d=$(cat "$work/one.sum")
+              dropped=$((dropped + d)); kept=$((kept + tot - d))
             else
-              end="$tot"
+              printf 'UNDELIMITED TEST MODULE  %s\n' "$f"
+              undelimited=$((undelimited + 1))
             fi
-            kept=$((kept + end)); dropped=$((dropped + tot - end))
-            awk -v F="$f" -v E="$end" '
-              NR<=E { l=$0; sub(/^[ \t]+/,"",l); if (l ~ /^\/\//) next; print F":"NR":"$0 }
-            ' "$f" >> "$corpus"
           done < <(git ls-files 'crates/*.rs' \
                    | grep '/src/' | grep -vE '/(tests|benches)/' || true)
 
@@ -1577,26 +1825,27 @@ jobs:
           # failure mode gate 8 shipped with for the whole life of the
           # repository, and it reported success the entire time.
           echo "walked ${walked} non-test source file(s) under crates/*/src/"
-          echo "  ${kept} line(s) in scope, ${dropped} after a #[cfg(test)]"
+          echo "  ${kept} line(s) in scope, ${dropped} inside a #[cfg(test)] module"
           echo "  $(awk 'END{print NR}' "$corpus") line(s) after comment stripping"
           if [ "$walked" -eq 0 ]; then
             echo "GATE 11 WALKED NOTHING. A gate that scans no file is not a gate."
             exit 1
           fi
-          if [ "$ambiguous" -ne 0 ]; then
+          if [ "$undelimited" -ne 0 ]; then
             echo
-            echo "The test boundary is the region BEFORE the first #[cfg(test)]."
-            echo "A file with two of them has no such region and would be"
-            echo "scanned only as far as the first, silently. One trailing test"
-            echo "module per file."
+            echo 'A #[cfg(test)] module above has no closing brace at the same'
+            echo 'indent as its own `mod` keyword, so this scanner cannot tell'
+            echo 'where it ends and will not guess. `cargo fmt` does not emit'
+            echo 'that shape; if it is deliberate, the boundary above is what'
+            echo 'has to change, not this message.'
             exit 1
           fi
 
           bad=0
 
           check() {
-            rule="$1"; pattern="$2"; allow="$3"; law="$4"
-            hits=$( { grep -E "$pattern" "$corpus" || true; } )
+            rule="$1"; pattern="$2"; allow="$3"; law="$4"; src="${5:-$corpus}"
+            hits=$( { grep -E "$pattern" "$src" || true; } )
             n=$( { printf '%s' "$hits" | grep -c . || true; } | tr -d ' ')
             echo
             echo "rule ${rule}: ${n} occurrence(s) — ${law}"
@@ -1634,7 +1883,7 @@ jobs:
 
           check 2 '\b(f32|f64)\b' \
                 "$allow_float" \
-                'CLAUDE.md section 7 — prices are paisa i64, never a float'
+                'CLAUDE.md section 7 — prices are paisa i64 and never a float; statistics keep full precision'
 
           check 3 '\b(HashMap|HashSet)::(new|default)\(\)' \
                 "$allow_unsized" \
@@ -1645,7 +1894,7 @@ jobs:
                 'docs/07 layer 12 — bounded page, never O(universe)'
 
           check 5 '(^|[^A-Za-z0-9_])(panic!|todo!|unimplemented!)|\.unwrap\(\)|\.expect\(' \
-                '' \
+                "$allow_panic" \
                 'CLAUDE.md section 4 — degrade loudly or refuse, never die'
 
           # Rule 5's construct is ALREADY denied by clippy at the workspace
@@ -1669,14 +1918,45 @@ jobs:
           # And the second way to disarm it: a local allow. In a test module
           # that is legitimate and this gate never looks there; in shipping
           # code it is a panic nobody can see from the lint table.
-          echo
-          echo "rule 5c: nothing disarms those lints outside a test module"
-          dis=$( { grep -E 'allow\([^)]*clippy::(unwrap_used|expect_used|panic|todo|unimplemented)' \
-                   "$corpus" || true; } )
-          if [ -n "$dis" ]; then
-            printf '%s\n' "$dis" | awk -F: '{printf "  REFUSED  %s:%s\n", $1, $2}'
-            bad=1
-          else
+          #
+          # THE PATTERN USED TO BE `allow\([^)]*clippy::…` ON ONE LINE, AND IT
+          # REPORTED "none" WHILE crates/pull/src/ssm.rs DISARMED expect_used.
+          # `[^)]*` cannot cross a newline, so every multi-line attribute — the
+          # shape `cargo fmt` produces the moment an attribute carries a
+          # `reason =` — was invisible, and a rule that prints "none" while a
+          # thing exists is worse than one that does not run. It is a bracket
+          # walk over `scope` now: from a line beginning `#[allow(` or
+          # `#[expect(`, count `[` against `]` until the attribute closes, and
+          # test the whole joined attribute for the five lint names. `#[expect]`
+          # is included because it disarms exactly as `#[allow]` does.
+          #
+          # Read over `scope` and not `corpus`, because an attribute list may
+          # carry a `//` comment inside it — crates/costs/src/trip.rs does —
+          # and a bracket count over comment-stripped text loses its place.
+          awk -F: '
+            {
+              p = $1; n = $2; t = $0
+              sub("^" p ":" n ":", "", t); sub(/^[ \t]+/, "", t)
+              if (d <= 0) {
+                if (t !~ /^#\[(allow|expect)\(/) next
+                acc = t; sp = p; sn = n; d = gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
+              } else {
+                acc = acc " " t; d += gsub(/\[/, "[", t) - gsub(/\]/, "]", t)
+              }
+              if (d <= 0 && acc ~ /clippy::(unwrap_used|expect_used|panic|todo|unimplemented)/) {
+                print sp ":" sn ":" acc
+              }
+            }
+          ' "$scope" > "$work/disarm"
+          check 5c 'clippy::' \
+                "$allow_disarm" \
+                'CLAUDE.md section 4 — a local allow is a panic the lint table cannot show' \
+                "$work/disarm"
+
+          # The old inline form printed "none" and nothing else. Kept, because
+          # a rule whose healthy state prints one word is a rule a reader can
+          # confirm at a glance.
+          if [ ! -s "$work/disarm" ]; then
             echo "  none"
           fi
 

@@ -70,9 +70,28 @@ impl Selection {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let mut seen = HashSet::new();
+        // PRE-SIZED FROM THE ITERATOR'S OWN LOWER BOUND, not from
+        // `HashSet::new()`. `docs/07-o1-architecture.md` law 2: growth is the
+        // only source of O(n) in a hash table, so the reservation is taken
+        // before the loop rather than paid for in doublings during it.
+        //
+        // The count is not knowable from the TYPE — `I` is any
+        // `IntoIterator` — but it is knowable from the VALUE, which is why
+        // `into_iter()` happens first and `size_hint` second. Every caller in
+        // this workspace passes an array or a `Vec`, whose hint is exact, so
+        // the set never grows at all; `seen` can only ever hold as many
+        // entries as the iterator yields, and dedup and the empty-name filter
+        // both only reduce that.
+        //
+        // SAID PLAINLY BECAUSE IT IS A REAL LIMIT: `size_hint().0` is a lower
+        // bound, and an iterator that under-reports would still grow the set.
+        // That is a smaller claim than "no rehash can occur", and it is the
+        // largest one an unbounded generic parameter admits. The honest
+        // alternative would be to take `&[S]` and lose the callers that build
+        // a selection from a filter.
+        let names = names.into_iter();
+        let mut seen = HashSet::with_capacity(names.size_hint().0);
         let names = names
-            .into_iter()
             .map(Into::into)
             .filter(|n| !n.is_empty() && seen.insert(n.clone()))
             .collect();
