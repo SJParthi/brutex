@@ -1676,12 +1676,21 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
     assert_eq!(Timeframe::DAY_1.secs(), 86_400);
     assert_eq!(Timeframe::DAY_1.as_str(), "1day");
 
-    // Both rungs, and NO OTHERS. Asserted as the whole list rather than as two
-    // `contains` calls, so a third rung added without a decision entry fails
-    // here rather than appearing quietly in a path.
+    // Every rung, and NO OTHERS. Asserted as the whole list rather than as a
+    // handful of `contains` calls, so a rung added without a decision entry
+    // fails here rather than appearing quietly in a path. The intraday rungs
+    // arrived with D-0077.
     assert_eq!(
         Timeframe::KNOWN,
-        &[Timeframe::DAY_1, Timeframe::MINUTE_1],
+        &[
+            Timeframe::DAY_1,
+            Timeframe::MINUTE_1,
+            Timeframe::MINUTE_3,
+            Timeframe::MINUTE_5,
+            Timeframe::MINUTE_15,
+            Timeframe::MINUTE_30,
+            Timeframe::MINUTE_60,
+        ],
         "every timeframe this build stores, in the order a backfill writes them"
     );
 
@@ -1691,13 +1700,15 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
     assert_ne!(Timeframe::DAY_1.secs(), Timeframe::MINUTE_1.secs());
     assert!(
         Timeframe::DAY_1.as_str().len() <= MAX_TIMEFRAME_LEN,
-        "`1day` is four bytes, so the derived MAX_LEN is unchanged"
+        "`1day` is four bytes; D-0077's `15min` is the five that sets the bound"
     );
-    // D-0015: minute bars only, until a minute-level result earns the upgrade.
+    // D-0077 added the intraday rungs, so 300s is now the legal `5min` and no
+    // longer a refusal. 45s is absent from the table and takes its place.
     assert_eq!(
-        Timeframe::from_secs(300),
-        Err(PathError::UnknownTimeframe { secs: 300 }),
+        Timeframe::from_secs(45),
+        Err(PathError::UnknownTimeframe { secs: 45 }),
     );
+    assert_eq!(Timeframe::from_secs(300), Ok(Timeframe::MINUTE_5));
     assert_eq!(
         Timeframe::from_secs(0),
         Err(PathError::UnknownTimeframe { secs: 0 }),
@@ -1843,13 +1854,22 @@ fn a_maximal_path_fits_the_declared_bound() {
         .max_by_key(|f| f.extension().len())
         .expect("a non-empty table");
     assert_eq!(fattest.extension().len(), MAX_EXTENSION_LEN);
+    // And the longest RUNG, found the same way. It was hardcoded to `1min`
+    // while every rung was four bytes, which made the maximal path one byte
+    // short of MAX_LEN the moment D-0077 added `15min`.
+    let slowest_name = Timeframe::KNOWN
+        .iter()
+        .copied()
+        .max_by_key(|tf| tf.as_str().len())
+        .expect("a non-empty table");
+    assert_eq!(slowest_name.as_str().len(), MAX_TIMEFRAME_LEN);
 
     let path = StorePath::new(PathParts {
         vendor: widest,
         exchange: &longest,
         segment: &longest,
         symbol: &longest,
-        timeframe: Timeframe::MINUTE_1,
+        timeframe: slowest_name,
         month: YearMonth::new(9999, 12).expect("a real month"),
         file: fattest,
     })
@@ -1858,15 +1878,17 @@ fn a_maximal_path_fits_the_declared_bound() {
     // Exactly, not merely within: the bound is the length of the longest legal
     // path, so a bound that drifted in either direction fails here.
     assert_eq!(path.to_string().len(), MAX_LEN);
-    // 106: MAX_VENDOR_LEN went 5 -> 8 when the archive feeds gained store
-    // prefixes, and MAX_LEN is derived from it. Asserted exactly, so the
-    // derivation cannot drift silently.
-    assert_eq!(MAX_LEN, 106);
+    // 107: MAX_VENDOR_LEN went 5 -> 8 when the archive feeds gained store
+    // prefixes, and MAX_TIMEFRAME_LEN went 4 -> 5 with D-0077's `15min`.
+    // MAX_LEN is derived from both. Asserted exactly, so the derivation cannot
+    // drift silently.
+    assert_eq!(MAX_LEN, 107);
     assert_eq!(
         path.to_string(),
         format!(
-            "bars/{}/{longest}/{longest}/{longest}/1min/9999-12{}",
+            "bars/{}/{longest}/{longest}/{longest}/{}/9999-12{}",
             widest.as_str(),
+            slowest_name.as_str(),
             fattest.extension(),
         ),
     );
@@ -2018,4 +2040,130 @@ fn assert_distinct<E: std::fmt::Display + std::fmt::Debug>(all: &[E]) {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// The intraday rungs added beside 1min and 1day. D-0015 built the seam for
+// exactly this: a rung is a directory name and a `timeframe_secs`, so nothing
+// below the path layer changes.
+// ---------------------------------------------------------------------------
+
+/// Every rung's name and seconds agree, and `from_secs` finds each one.
+#[test]
+fn every_known_timeframe_round_trips_through_its_own_seconds() {
+    for tf in Timeframe::KNOWN {
+        let found = Timeframe::from_secs(tf.secs()).expect("a KNOWN rung resolves by its seconds");
+        assert_eq!(found, *tf, "{} did not resolve to itself", tf.as_str());
+    }
+}
+
+/// No two rungs share a length or a directory name. A collision would put two
+/// bar lengths in one directory, and the header would be the only thing that
+/// disagreed.
+#[test]
+fn no_two_timeframes_share_a_length_or_a_name() {
+    let n = Timeframe::KNOWN.len();
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (a, b) = (Timeframe::KNOWN[i], Timeframe::KNOWN[j]);
+            assert_ne!(
+                a.secs(),
+                b.secs(),
+                "{} and {} share a length",
+                a.as_str(),
+                b.as_str()
+            );
+            assert_ne!(
+                a.as_str(),
+                b.as_str(),
+                "two rungs share the name {}",
+                a.as_str()
+            );
+        }
+    }
+}
+
+/// An unknown length is refused by name rather than given a derived directory.
+/// `docs/02-store-format.md` — a directory no reader looks for is data written
+/// into a hole.
+#[test]
+fn an_unlisted_length_is_refused_and_not_invented() {
+    for secs in [0_u32, 1, 45, 120, 7_200, 86_399] {
+        assert!(
+            Timeframe::from_secs(secs).is_err(),
+            "{secs}s resolved to a rung that is not in KNOWN"
+        );
+    }
+}
+
+/// The alignment split the gap-leg rule depends on. The fold grid is anchored
+/// at IST midnight and the open is 555 minutes past it, so a rung aligns
+/// exactly when its length divides 555. This is arithmetic, not a convention,
+/// and a rule that reads "the first candle of the day" reads a STUB on the two
+/// rungs that fail it.
+#[test]
+fn only_the_rungs_that_divide_555_start_a_session_on_time() {
+    assert!(Timeframe::MINUTE_1.aligns_with_the_open());
+    assert!(Timeframe::MINUTE_3.aligns_with_the_open(), "555/3 = 185");
+    assert!(Timeframe::MINUTE_5.aligns_with_the_open(), "555/5 = 111");
+    assert!(Timeframe::MINUTE_15.aligns_with_the_open(), "555/15 = 37");
+
+    assert!(
+        !Timeframe::MINUTE_30.aligns_with_the_open(),
+        "555/30 = 18.5"
+    );
+    assert!(
+        !Timeframe::MINUTE_60.aligns_with_the_open(),
+        "555/60 = 9.25"
+    );
+    assert!(
+        !Timeframe::DAY_1.aligns_with_the_open(),
+        "a day does not start at 09:15"
+    );
+
+    // And the property the assertions above are instances of.
+    for tf in Timeframe::KNOWN {
+        let by_arithmetic = tf.secs() % 60 == 0 && 555 % (tf.secs() / 60) == 0;
+        assert_eq!(
+            tf.aligns_with_the_open(),
+            by_arithmetic,
+            "{} disagrees with 555 % minutes == 0",
+            tf.as_str()
+        );
+    }
+}
+
+/// **Every rung's length, pinned exactly.** `MINUTE_30` could be changed from
+/// 1,800 seconds to 1,860 and every other test still passed — a 31-minute bar
+/// filed in the directory called `30min`, with the header agreeing and nothing
+/// disagreeing. The name and the arithmetic must both be nailed, because the
+/// directory name is what a reader trusts and the seconds are what the fold uses.
+#[test]
+fn every_rung_length_and_name_is_pinned_exactly() {
+    for (tf, secs, name) in [
+        (Timeframe::MINUTE_1, 60_u32, "1min"),
+        (Timeframe::MINUTE_3, 180, "3min"),
+        (Timeframe::MINUTE_5, 300, "5min"),
+        (Timeframe::MINUTE_15, 900, "15min"),
+        (Timeframe::MINUTE_30, 1_800, "30min"),
+        (Timeframe::MINUTE_60, 3_600, "60min"),
+        (Timeframe::DAY_1, 86_400, "1day"),
+    ] {
+        assert_eq!(tf.secs(), secs, "{name} is not {secs} seconds");
+        assert_eq!(tf.as_str(), name, "the rung of {secs}s is not named {name}");
+        // And the name agrees with the arithmetic, so a renamed rung is caught
+        // even if its seconds are right.
+        if name.ends_with("min") {
+            let minutes: u32 = name
+                .trim_end_matches("min")
+                .parse()
+                .expect("a minute count");
+            assert_eq!(minutes * 60, secs, "{name} does not mean {minutes} minutes");
+        }
+    }
+    assert_eq!(
+        Timeframe::KNOWN.len(),
+        7,
+        "a rung was added or removed; D-0077 is the entry that has to change"
+    );
 }

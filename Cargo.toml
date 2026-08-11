@@ -29,6 +29,8 @@ members = [
     "crates/costs",
     "crates/lake",
     "crates/telemetry",
+    "crates/vocab",
+    "crates/indicators",
 ]
 
 [workspace.package]
@@ -89,6 +91,13 @@ aws-config  = "1"
 aws-sdk-ssm = "1"
 
 [profile.release]
+# Silent wrapping is not an acceptable answer to an arithmetic mistake in a
+# backtesting engine: a wrapped price is a plausible number that is wrong, which is
+# exactly what CLAUDE.md S4 bans. Without this, `debug` panicked on overflow and
+# `release` wrapped, so the two profiles disagreed about what a bug is. Costs a
+# branch per arithmetic op; the sweep's hot path is `ConditionMask::hits`, which is
+# bitwise and unaffected.
+overflow-checks = true
 opt-level     = 3
 lto           = "fat"
 codegen-units = 1

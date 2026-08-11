@@ -1,0 +1,33 @@
+[package]
+name         = "indicators"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Bars in, condition bits out. The only crate that computes a vocabulary position."
+
+# ---------------------------------------------------------------------------
+# TWO ARROWS, AND CLAUDE.md §5 DRAWS NEITHER.
+#
+# §5's graph lists `indicators` as a child of `core`, alongside `store` and
+# `vocab` rather than downstream of them. Taken literally that forbids both lines
+# below — and an indicator crate that can see neither a bar nor a mask cannot
+# compute a condition, which is the only thing it exists to do.
+#
+# `store` is taken for `store::format::Bar`, the 56-byte record. `vocab` is taken
+# for `ConditionMask`, `Tolerance` and `table::set_near` — the position numbers and
+# the band are that crate's to own, and duplicating them here is exactly the
+# silent divergence §3.8 exists to prevent.
+#
+# This is the same class of gap as the undeclared `api -> telemetry` and
+# `pull -> telemetry` arrows: a real edge in code that §5's picture does not draw.
+# It needs a decisions entry drawing all four, and it is REPORTED here rather than
+# quietly taken. Nothing else is added: no HTTP, no calendar, no vendor.
+# ---------------------------------------------------------------------------
+[dependencies]
+store = { path = "../store", version = "0.1.0" }
+vocab = { path = "../vocab", version = "0.1.0" }
+
+[lints]
+workspace = true

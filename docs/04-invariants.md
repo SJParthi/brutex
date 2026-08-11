@@ -59,7 +59,8 @@ the crate where the gap matters, and `docs/06-limits.md` §18 records the rest.
 | S-03 | A reader never observes a record beyond `n_valid` | `store::fault::commit_counter_publishes_last` — the module was written `store::loom::`, and there is **no `loom` module and no `loom` dependency**; the test is a plain `#[test]` walking all 65 commit prefixes | ✓ |
 | S-04 | A crash between data write and counter publish loses the tail and corrupts nothing | `store::fault::kill_between_write_and_commit` | — |
 | S-05 | A full disk during append returns `Err`, never a signal | **PROVEN AT THE CLASSIFIER, NOT AT THE KERNEL.** `store::file::a_full_disk_mid_write_is_returned_and_never_signalled` · `store::file::every_classified_kind_gets_its_own_name` — a scripted host returns `ErrorKind::StorageFull` part way through a write and the loop hands back `StoreError::DiskFull` as a **value**, which is the whole argument for banning a writable mapping. That loop is the only write path `append` has. **UNVERIFIED: that a real full disk produces that kind on this store's write.** No test in this repository fills a filesystem, and `crates/store/tests/write.rs` names this and the read-only mount as the two conditions it will not fake. The row named a `fault` module test that exists in no file | ◐ |
-| S-06 | A flipped bit in any block is detected on the next read of that block | `store::fault::bitflip_detected` | — |
+| S-06 | A flipped bit in any block is detected on the next read of that block — **of a block that carries a checksum, and this build writes none** | **PROVEN AS AN ALGORITHM, NOT AS A PROPERTY OF ANY FILE ON DISK.** `store::fault::bitflip_detected` walks every bit of every byte of a block and `block::verify` names each one — but it builds its header with `Header::genesis(7, 60, FLAG_CHECKSUMS)`, the flag **set in memory**. `store::file::initialise` passes `Header::genesis(symbol_id, timeframe_secs, 0)` — flag **clear** — so `FLAG_CHECKSUMS` is set nowhere in production, the `FileKind::Checksums` sidecar is never created, and `block::seal`/`block::verify` have no production caller. Every file this build has written is therefore **uncovered**: a lost write to the record extent is undetectable, because an all-zero record is a legal flat bar whose open interest is a real zero. `crates/store/src/file.rs` §"This build writes files with no block checksums, on purpose" discloses exactly this and says what closing it needs — a sidecar entry naming the record count it covers, which is a `docs/02-store-format.md` change with a decision entry behind it. What **is** true of a real file today is S-06b | ◐ |
+| S-06b | A verification request against a file this build wrote is **refused, not answered** — the flag is clear, so `block::verify` returns `ChecksumsAbsent` rather than reporting a healthy file | `store::format::FormatError::ChecksumsAbsent`, reached through `block::verify`; `docs/02-store-format.md` §6 provides for the state | ✓ |
 | S-07 | A file whose length does not divide by the stride truncates to the last whole record and logs | `store::fault::ragged_tail_truncates_loudly` | — |
 | S-08 | `i64::MIN` in `open_interest` is never confused with `0`, and round-trips as null through the record image | `store::unit::oi_sentinel_distinct` — the module was written `store::proptest::`, and **no `proptest` dependency exists**; it is a plain `#[test]`, and it proves the *distinctness* half only. The *round-trip* half is `store::unit::decoding_the_image_returns_the_record_byte_for_byte` (S-18), which walks `i64::MIN` in every field | ✓ |
 | S-09 | Opening a file with an unknown `format_version` refuses; it never guesses | `store::unit::unknown_version_refuses` | — |
@@ -75,12 +76,14 @@ the crate where the gap matters, and `docs/06-limits.md` §18 records the rest.
 | S-19 | A buffer shorter than 56 bytes is refused by length and never completed with invented zeros | `store::unit::a_short_record_is_refused_and_never_completed_with_zeros` | ✓ |
 | S-20 | `BLOCK_LEN == RECORD_STRIDE × RECORDS_PER_BLOCK == 56 × 73 == 4088`, and the last record of a block ends exactly on the block boundary — so no record straddles | `store::geometry::no_record_straddles_a_block` (5,000 indices), plus **three** compile-time pins in `store::format` that can actually fail: `BLOCK_LEN == 4088`, `RECORDS_PER_BLOCK == 73`, `BLOCK_LEN == 56 * 73`. **The closed-form assertion the source comment points at cannot fail and proves nothing** — see below | ✓ |
 | S-21 | Decoding a record reads exactly 56 bytes: a 1 MiB buffer of `0xFF` past the record gives the same answer as the bare 56 bytes. Behavioural, not a timing measurement | `store::unit::decoding_reads_exactly_fifty_six_bytes_however_long_the_buffer_is` | ✓ |
+| S-22 | The two doors into a month agree by construction: `open_or_create` and `open_existing` both reach the four checks through `BarFile::validated`, so a month refused by one is refused by the other with the **same** `StoreError` — asserted for a symbol mismatch and for a timeframe mismatch, as values and not by shape | `store::write::the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refuses` | ✓ |
+| S-23 | **All six** `telemetry::emit` sites in this crate reach a file, each driven through the production call that owns it — `Header::read_region` for the unreadable region and the walk-back, `Header::commit` for the refused commit, `block::verify` for both block events, `BarFile::append` for the committed batch — and **no other line is written**: the six drives produce exactly six records, so an emit added to a path documented as silent (the ordinary header read, the commit that succeeds, the block that verifies) fails the same test that a deleted emit does. The target, the sentence and the **level** of each are asserted, the last because each site's doc comment argues for the level it chose and `store.append` at `Debug` is what keeps a backfill from writing a line per bar. Not one of these was proven before: each could have been deleted outright and every gate stayed green. The events are **never constructed by the test** — the mistake that made a set of `pull.member` tests worthless was fabricating an `Event` with a production target on a locally-opened `Sink`, which proves the sink works and nothing about the emit | `store::emits::every_emit_in_this_crate_reaches_the_log_through_its_production_call` | ✓ |
 
 ## Vocabulary and indicators
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| V-01 | Condition bit indices are stable across releases | `vocab::golden::bit_table_frozen` (byte-frozen fixture) | — |
+| V-01 | Condition bit indices are stable across releases | `vocab::table::the_table_is_a_contiguous_run_of_indices`, `vocab::table::a_tombstone_keeps_its_index_and_always_evaluates_false` | Was `vocab::golden::bit_table_frozen`, which existed in no file. Gate 10 skipped the row while `crates/vocab` was not a workspace member and went red the moment it became one — D-0080. |
 | V-02 | At bar *i* the evaluator reads no bar `> i` | `indicators::barrier::no_lookahead` (index-guarded accessor) | — |
 | V-03 | Bits `0..=(i)` are identical whether bars `i+1..` are absent, mutated, or extreme | `indicators::proptest::suffix_independence` | — |
 | V-04 | Time-of-day and VWAP bits are cleared on a daily timeframe | `indicators::unit::daily_mask_clears` | — |
@@ -293,6 +296,40 @@ unchanged and is still where every boundary is asserted at the microsecond.
 | P-35 | Against a vendor honouring less than it publishes, the allowance converges into `1..=honoured` and never passes the published ceiling; when the refusals stop it walks back up to that ceiling | `pull::unit::the_allowance_converges_onto_the_rate_the_vendor_actually_honours` | ✓ |
 | P-36 | A TOTP secret past `MAX_SECRET_LEN` is refused **before** a single character is decoded, so the only loop in `pull::totp` is bounded by a constant — proven with an over-long secret whose tail is not base32, so a bound moved after the loop would refuse it under a different name — and the bound is `>` and not `>=` | `pull::totp::the_length_bound_is_checked_before_a_single_character_is_decoded` | ✓ |
 
+| P-37 | The fold grid's origin is the **IST day**, not the UTC day: a bar stamped 00:00 IST keeps its own calendar date through `fold`, and 00:00 IST and 23:59 IST of the same session land in one bucket | `pull::unit::a_daily_bucket_is_an_ist_day_so_a_midnight_ist_bar_keeps_its_own_date` | ✓ |
+| P-38 | Anchoring that grid to IST leaves the minute rung byte-for-byte unchanged, because 60 divides `IST_OFFSET_SECS` — pinned across negative, zero and boundary instants | `pull::unit::anchoring_the_grid_to_ist_leaves_the_minute_rung_byte_for_byte_unchanged` | ✓ |
+
+| P-39 | **Twenty of this crate's twenty-one `telemetry::emit` sites reach a file**, each driven through the shipped call that owns it — `Governor::record_throttled`, `CredentialConfig::load`, `split_window`, `base32_decode`, `Selection::of`, `Manifest::{open, image}`, `csv::decode`, `archive::read_dir`, `fetch::land`, `ingest::from_dir`, `CredentialReader::{read, reread_after_rejection}` and `HttpSource::window_async` against a loopback socket — and each record is found by target, sentence and one field, with a sequence number no earlier than the one the sink would have stamped before the call. The events are **never constructed by the test**: fabricating an `Event` with a production target on a locally-opened `Sink` is exactly what made the `pull.member` tests in `crates/api/src/logs.rs` worthless. Two of the sites are also proven **silent** where their own doc comments promise silence — a selection that dropped nothing and a re-run that moved nothing each write no line at all | `pull::emit_sites::every_emit_site_in_this_crate_reaches_a_file` | ✓ |
+
+P-39 is D-0075's other half. The 21 emit sites landed with the telemetry
+dependency and not one had a test that called the production helper and then
+looked in the file; each could have been deleted outright and every gate stayed
+green, which was demonstrated by suppressing `ingest::note_landed`, renaming
+`pull.http` to `pull.https` and dropping `work::note_narrowed`'s quiet guard —
+the first two fail this test naming the file and line, the third fails its
+absence half. One test and not twenty, because `telemetry::install` writes a
+per-process `OnceLock` and refuses a second call, so a test binary gets exactly
+one sink. The floor is `Trace` and that is load-bearing: seven of these targets
+speak below `Info`, so at the default floor the test would assert nothing while
+appearing to pass.
+
+**The twenty-first is `crates/pull/src/ssm.rs:678`, `pull.ssm`, and it is not
+covered.** That `emit` is written inline in the body of the `async` function
+that POSTs to Parameter Store, after `send().await` and after the status check —
+there is no `note_*` helper to drive and no host to substitute, so reaching it
+needs a live signed HTTPS call to AWS. `CLAUDE.md` §3 rule 6: named here rather
+than left for a coverage report to find. Extracting it into a helper, the shape
+every other module in this crate already uses, is what would make it provable.
+
+P-37 and P-38 are D-0070. The grid was anchored at the Unix epoch, so every
+day-wide bucket edge fell at UTC midnight — 05:30 **inside** the IST session it
+was meant to contain. A daily candle stamped 00:00 IST of D is 18:30 UTC of
+D−1, and flooring it to that grid re-stamped it at 00:00 UTC of D−1: every
+daily bar moved back one calendar day. `crate::ingest`'s month guard saw it only
+where the shift crossed a month boundary and stored a wrong answer silently
+everywhere else. P-38 exists because the fix must be provably inert at the rung
+that holds the engine's real data.
+
 P-36 added by the gate 12 sweep. The counter half of that module's cost claim
 is not a new row: `pull::totp::the_rfc_6238_sha1_vectors_reproduce_exactly`
 already pins it, because RFC 6238's `T = 20,000,000,000` vector is a counter
@@ -487,6 +524,14 @@ Added by D-0038. Every row here is proven by a test that runs today.
 | A-27 | The coverage grid's axis comes out strictly ascending in one stated order whatever order the censuses were read in, and a series two vendors both hold is one row — so a page ordinal names the same instrument after a restart | `api::census::the_axis_is_sorted_and_deduplicated_whatever_order_the_censuses_arrive_in` | ✓ |
 | A-28 | `StoreFilter::keeps` searches a haystack bounded by the **type**: a symbol one byte past `SYMBOL_CAPACITY` is refused at construction, so no longer haystack can ever be handed to it | `api::census::the_symbol_arm_searches_a_haystack_the_symbol_type_bounds` | ✓ |
 | A-29 | The unfiltered `/store` page **borrows** the held table — the same allocation, not an equal copy — and only a filter that narrows owns its selection | `api::census::the_unfiltered_page_borrows_the_table_and_copies_nothing` | ✓ |
+| A-30 | A month's percentage change is integer basis points — 1.25% is `125` — computed with no float at any step, and a month that closed where it opened is a real `0` rather than an unknown | `api::server::a_month_that_moved_1_25_percent_is_125_basis_points_and_a_flat_month_is_a_real_zero` | ✓ |
+| A-31 | Basis points round **half away from zero in both directions**, so a gain and its mirror-image loss print the same magnitude; the fixture is an exact 312.5 bp tie, not a rounding accident | `api::server::basis_points_round_half_away_from_zero_in_both_directions` | ✓ |
+| A-32 | Basis points are carried as `i64` because `i32` overflows on an ordinary price: a base of ₹0.01 and a close of ₹2,147.50 is 2,147,490,000 bp | `api::server::basis_points_do_not_fit_i32_and_an_ordinary_price_proves_it` | ✓ |
+| A-33 | A base of zero paisa is refused rather than divided by, and a move whose ×10,000 leaves `i64` is refused rather than wrapped — both bounds asserted at the boundary, not near it | `api::server::a_base_of_zero_paisa_is_refused_rather_than_divided_by` · `api::server::a_move_that_leaves_i64_is_refused_rather_than_wrapped` | ✓ |
+| A-34 | **No instrument that a corporate action can re-base renders a percentage while no threshold is sourced.** Cash and F&O are refused in *both* columns whatever their closes say and whether or not the neighbouring month is held; only an index, which never splits, renders — and the permanent reason outranks every temporary one | `api::server::no_equity_month_renders_a_number_while_no_threshold_is_sourced` | ✓ |
+| A-35 | An unknown percentage is `null` and one of five named reason codes on the wire — never `0`, never a missing key, and never a number and a reason together | `api::server::every_row_carries_a_number_or_a_named_reason_and_never_both` · `api::server::a_month_with_no_close_recorded_is_unknown_and_never_zero` | ✓ |
+| A-36 | An instrument's first held month renders its own change and `no_earlier_month` for the previous one; a census gap is **not** searched past — the row one month back is probed and that is all | `api::server::an_instruments_first_month_has_a_change_and_no_previous_change` · `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file` | ✓ |
+| A-37 | `/store.json` prices a row and its neighbour from the census alone: the fixture's manifest path does not exist on disk, so no bar file can have been opened | `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file` | ✓ |
 
 A-27 through A-29 added by the gate 12 sweep. All three are properties
 `crates/api/src/census.rs` already argued for at length in prose and none of
@@ -1083,7 +1128,7 @@ expired contract in there the lake is the only copy, so a file that is damaged
 must be *named*, never guessed at and never fatal — a reader that dies on one
 file takes the sweep that was part-way through the other 115 with it.
 
-**This section was one row and is now seven, and it is still not the crate's
+**This section was one row and is now eight, and it is still not the crate's
 full set.** The rest of `lake`'s invariants are not in this file yet. That is a
 gap and it is written down rather than papered over; see `docs/06-limits.md`.
 
@@ -1096,6 +1141,7 @@ gap and it is written down rather than papered over; see `docs/06-limits.md`.
 | L-05 | A leaf that is not a flat `OPTIONAL` primitive — nested, `REQUIRED` or `REPEATED` — is refused as `UnsupportedColumnShape` **at the schema gate**, before a page is decompressed, naming the column and both levels | `lake::refusals::a_nested_column_is_refused_rather_than_silently_decoding_to_all_null`, `lake::refusals::a_required_or_repeated_leaf_is_refused_by_name_rather_than_read_as_flat` | ✓ |
 | L-06 | Two distinct lake directory names never parse to one `InstrumentKey`. The month's case tolerance is injective over the twelve tokens; the strike carries no tolerance at all, and a leading zero is refused | `lake::contract::the_month_case_tolerance_is_injective_and_can_never_alias_two_contracts`, `lake::contract::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract`, `lake::refusals::a_leading_zero_strike_is_refused_rather_than_aliased_onto_another_contract` | ✓ |
 | L-07 | Every refusal above fires on **damage only**: 1,737 real lake files across both layouts and seven years decode to the identical digest they did before the refusals existed | `lake::real_lake_regression::a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest` | ◐ |
+| L-08 | Each of this crate's three `emit` sites **reaches a file**, driven through its production entry point and read back off disk. One line per file and no more; a schema refusal names the column and precedes the `lake.file` line for the same file; the level and the row count move with the outcome, so an empty lake and an unreadable one are not one line | `lake::page::a_refused_page_writes_its_reason_to_the_log`, `lake::events::every_file_this_reader_opens_or_refuses_writes_its_line_to_the_log` | ✓ |
 
 L-01 is not a hypothetical. `parquet`'s own `ColumnChunkMetaData::byte_range`
 ends in `assert!(col_start >= 0 && col_len >= 0)`, and the reader called it. A
@@ -1135,6 +1181,24 @@ rows, 189 F&O and 1,548 cash/index, and every per-file digest and the whole-run
 digest `5bb7cad9d96bb347` were byte-identical before and after the refusals were
 added. That is the measurement that says these refusals cost nothing on sound
 data; it is not a claim about CI.
+
+**L-08 is about the events, and it exists because every refusal above was
+provable while the record of it was not.** CI gate 18 mutated one `emit` to
+`()` — deleting it outright — and the whole suite stayed green, which was a true
+statement about all three of this crate's emit sites and about 54 of the
+workspace's 56. Every test in `synthetic.rs` and `refusals.rs` asserts on the
+`Result` and none asserts that anything was *recorded*, so the lines an operator
+reads at hour eleven of a backfill could have been deleted with no gate
+noticing. The three sites are covered from two test binaries and not one,
+because `telemetry::install` writes a per-process `OnceLock` and refuses a
+second call: the page site is proven from the lib target, and `tests/events.rs`
+— its own binary, its own process, its own `OnceLock` — writes six Parquet
+fixtures to a temporary directory and drives `LakeFile::open` over each. It must
+be `open` and not `from_bytes`: the `lake.file` line lives on the path-taking
+entry point, and the entry point every other test in the crate uses emits
+nothing at all. The floor is `Trace`, because a successful open speaks at
+`Debug` and the default `Info` floor would filter the line the test is there to
+find.
 
 ### Complexity rows for the lake reader
 
@@ -1291,6 +1355,54 @@ What has changed since it was written is the sentence that used to follow it —
 "`crates/telemetry` carries no bench … CI gate 14 refuses this crate for exactly
 that reason". The bench exists now and the three rows below are it.
 
+### The control surface and the writer's own losses
+
+Two invariants added after a sweep of `crates/telemetry`'s exports for items
+with **no caller outside the crate** — the shape `telemetry::tail` wore before
+`/logs` existed. The sweep found nineteen; seventeen are limits and seams that
+are correctly internal-facing. Two were features that had been built, tested,
+mutation-checked, and never wired to anything.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| T-02 | `BRUTEX_LOG_LEVEL` carries the per-subsystem syntax through to the sink: a bare word is the global floor, `target=level` raises one subtree, the longest matching prefix wins, and an unreadable clause is **named in the banner** rather than silently dropped | `api::server::the_log_level_env_parses_a_global_floor_and_per_subsystem_overrides` | ✓ |
+| T-03 | What the WRITER lost reaches both `/logs` and `/logs.json`: a non-zero `dropped` or `rotation_failures` renders as a fault naming the count, a healthy sink states its zero explicitly, and no sink at all is `null` rather than a zeroed object | `api::logs::a_sink_that_lost_events_says_so_on_the_page_and_in_the_json` | ✓ |
+| T-04 | An override the operator asked for and did not get is named: the ceiling note fires **only** when a clause was actually dropped, and it names the clause rather than counting it — exactly `MAX_TARGET_LEVELS` applied announces nothing | `api::server::the_override_ceiling_is_named_only_when_something_was_actually_dropped` | ✓ |
+| T-05 | A per-target floor can be raised **above** the global floor to silence a subsystem, not only lowered to amplify one: events that pass `fast_floor` are still filtered by `level_for`, and the subsystem still speaks at or above its own floor | `telemetry::sink::a_target_floor_can_raise_one_subsystem_above_the_global_floor_and_silence_it` | ✓ |
+| T-06 | The roll decision's two boundaries are `>` and not `>=`: a first event larger than the whole bound does **not** roll an empty file (which would spend a rotation and, at `keep_files = 2`, discard half the history to make room in a file that was already empty) | `telemetry::sink::a_first_event_larger_than_the_whole_bound_does_not_roll_an_empty_file` | ✓ |
+| T-07 | An event that fills the file **exactly** to its bound does not roll — the bound is derived from a measured line, and the next event still rolls, so the test cannot be passed by a sink that has stopped rotating | `telemetry::sink::an_event_that_fills_the_file_exactly_to_its_bound_does_not_roll` | ✓ |
+| T-08 | A roll that cannot complete is attempted **once** and never re-attempted: `roll` unlinks the oldest file and renames the rest up *before* the step that fails, so a re-attempt shifts the whole set again and `keep_files` further events empty the retained history one file per event | `telemetry::sink::a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event` | ✓ |
+| T-09 | A torn write is terminated with a newline, so a partial line cannot fuse with the NEXT event — the fragment stays visible as one `malformed` line and exactly one event is counted lost | `telemetry::sink::a_torn_write_is_terminated_so_the_next_event_is_not_fused_onto_it` | ✓ |
+| T-10 | Only `NotFound` is success in a rotation: an unlink or a rename that refuses for any other reason is a **failed** roll, counted and loud — never swallowed into a successful one | `telemetry::sink::a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed` | ✓ |
+| T-11 | Either half of `Health::is_loud` makes a sink loud on its own — a failed roll with nothing dropped is still loud, which every other test in the file masked | `telemetry::sink::each_half_of_is_loud_is_load_bearing_on_its_own` | ✓ |
+| T-12 | A reopened sink resumes the byte count of the file it found, so the footprint bound survives a restart rather than allowing prior size **plus** the bound | `telemetry::sink::a_reopened_sink_resumes_the_byte_count_of_the_file_it_found` | ✓ |
+| T-13 | `Query::since` is inclusive: the record sitting exactly on the boundary is returned, not treated as the end of the walk | `telemetry::tail::since_returns_the_record_that_sits_exactly_on_the_boundary` | ✓ |
+| T-14 | The reader's two constants are pinned as **relations** — `READ_BLOCK` holds many events and is a fraction of a file; `DEFAULT_MAX_SCAN_BYTES` equals one file's bound and is less than the whole window — so a value change that breaks the design fails rather than moving the expectation with it | `telemetry::tail::the_readers_constants_hold_the_relations_they_were_chosen_for` | ✓ |
+
+**Why T-02 is an invariant and not a feature note.** `Config::with_target_level`,
+`Sink::level_for` and `MAX_TARGET_LEVELS` existed with tests and no surviving
+mutants. Nothing parsed them out of the environment, so
+`BRUTEX_LOG_LEVEL=info,pull=debug` did not select anything — it failed to parse
+as a level word and fell back to `Info`. Every gate in §9 was green over a
+feature no operator could reach. The invariant is the **wiring**, which is the
+part no unit test in `crates/telemetry` can see.
+
+**Why T-03 needs a hand-built `Health`.** `dropped` rises when a write fails,
+`rotation_failures` when a rename does. Neither is reachable from a unit test,
+so the loud branch would otherwise be a branch that only ever renders in
+production — where it is least useful to discover it is wrong. `Health`'s fields
+are `pub`, so the test states the sink's condition directly instead of trying to
+cause it. The quiet branch asserts the zero is **printed**: an absent banner and
+a banner this page forgot to render are indistinguishable to an operator.
+
+**What T-03 closes.** `telemetry::tail` reads what reached the file and is
+structurally incapable of reporting what never got there. A page built from the
+tail alone shows `0 events` for two opposite worlds — nothing happened, and
+everything was thrown away. `Health::dropped`'s own doc comment says *"this is
+the number a page must show"*; no page showed it, and `Health::is_loud` had no
+caller anywhere in the workspace. `CLAUDE.md` §4 bans a fallback that hides a
+failure, and a sink that drops events behind a clean page is that fallback.
+
 ### Complexity rows for the event stream
 
 Enforced by gate 8, `crates/telemetry/benches/ratio.rs`, against the same **3.0×
@@ -1313,3 +1425,63 @@ doing exactly what `sink.rs` says it does. C-T-03 measured **1.011×** and
 events and 8,192 at 100,000** — one `READ_BLOCK` either way, unchanged by a file
 a hundred times larger. That equality is asserted in the bench, not just
 printed. No figure from a CI runner is claimed, because none was taken.
+
+## Every emit site in `crates/api` — proven, or named
+
+`crates/api` holds **twenty-six** `telemetry::emit` calls: twenty-five in the
+LIB target and one in `main.rs`, which is its own test binary. Before this
+sweep, exactly the one in `main.rs` was proven — the other twenty-five were
+*executed* by tests and asserted nothing, because `telemetry::emit` answers
+`Emitted::NotInstalled` when no sink is installed and every site discards its
+return under the name `_dropped_when_filtered`. A site could be reached by a
+hundred tests, write nothing, and no assertion anywhere would move. That is
+`CLAUDE.md` §4's "a test that asserts nothing" wearing a coverage report as a
+disguise, and it is the same shape S-23 and P-39 record for `crates/store` and
+`crates/pull`.
+
+**Never a fabricated event.** The tests in `crates/api/src/logs.rs` that look
+like they cover `pull.member` build their own `Event` with a production target
+on a locally-opened `Sink`. That proves the sink works and says nothing about
+the emit — every row below drives the shipped call instead.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| A-38 | **Twenty-two of this crate's twenty-five LIB emit sites reach a file**, each driven through the shipped call that owns it — `census::read_vendor`, `master::load`, `merge::merge`, `Catalog::build`, `Journal::{append, look, page}`, `bars::{open, page}`, `ingest::parse_spot`, `Assets::{new, respond}`, `Control::{pause, resume}`, the `/audit.json` handler, `broker_run`, `note_member_failure`, a served HTTP request through the `note_request` layer, and `run` itself — and each record is found by target, sentence and one field it could only have got from that drive, at a sequence number no earlier than the one the sink would have stamped before the call. The **level** is asserted on every row, because four sites choose theirs from a condition and a flipped ternary is invisible to every other kind of test | `api::emitted::every_reachable_emit_site_puts_a_record_in_the_file` · `api::server::the_run_events_and_the_request_event_reach_the_installed_sink` · `api::server::run_serves_until_the_signal_and_exits_zero` | ✓ |
+| A-39 | **The three sites whose doc comments promise silence are silent.** `Assets::note_missing` fires on a doubling, so the 1st and 2nd miss write a line and the 3rd writes nothing; `bars::note_unreadable_records` writes nothing for a page where every record read; `audit::note_looked` writes nothing for an absent journal and nothing for a whole one. Without this, every one of those guards could be deleted and A-38 would still pass — and a scanner walking a wordlist would roll the run's own beginning out of the 64 MiB window, which is the shape D-0072 forbids | `api::emitted::the_silent_arms_stay_silent` | ✓ |
+| A-40 | The three sites that are **not** proven are named with the reason rather than left for a coverage report, and the arithmetic is asserted: the sites proven here, plus the sites proven in `server::tests`, plus the sites named as unreachable, are exactly the twenty-five in the LIB target. A site added with no row fails the count | `api::emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten` | ✓ |
+
+### The three that are not proven, and why
+
+All three sit past a socket, inside `broker_run`'s per-instrument loop:
+`pull.spot instrument refused`, `pull.http vendor refused a window`, and
+`pull.chunk answered`. Reaching any of them needs a non-empty universe **and**
+a live vendor — `Site::broker` is `Live` only from `Site::serving`, and the
+reason each event exists to carry is the vendor's own words. A test that reached
+them would authenticate against Dhan, which is the failure `Site::broker`'s own
+doc comment records and which a previous version of this suite committed. They
+become reachable the day a recorded transport exists for `pull::fetch`; there is
+none, and inventing one would be a second definition of the vendor's wire.
+
+### One sink, because `install` is a process singleton
+
+`telemetry::install` refuses a second call, so a test binary has exactly one
+installed sink and every assertion about a production emit is an assertion about
+*that* sink. `crates/api/src/emitted.rs` owns it — one directory, one `Trace`
+floor — and `logs.rs`'s handler test and `server.rs`'s `run` test both take it
+from there rather than installing their own. The floor is load-bearing:
+`api.request served` is `Debug` for a request that is neither a 4xx nor a 5xx,
+so at the default `Info` floor that site writes nothing on the ordinary path and
+a test asserting against it would be asserting the floor. `emitted::sink`
+asserts that the sink it hands back is the one it configured, so a future third
+installer fails by name instead of silently changing the directory and the floor
+for every other test — and so that nothing this suite writes can land in the
+operator's own `~/.brutex/store/logs`.
+
+The reads are keyed on the sink's **sequence number**, not on
+`Query::since`. `Sink::emit` reads the clock before it takes the lock, so under
+a parallel test binary two events can be ordered one way by their timestamps and
+the other way in the file — and `since` does not merely filter, it *ends* the
+walk at the first record older than it. One older-stamped line written by a
+concurrent test was enough to stop the walk before the record under assertion;
+measured, it failed about one run in three. `seq` is assigned inside the lock
+and is unbroken across a rotation, so it is the order the file is actually in.

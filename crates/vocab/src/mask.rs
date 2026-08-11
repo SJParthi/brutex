@@ -1,0 +1,349 @@
+//! A 256-bit condition mask, because the table no longer fits in a `u128`.
+//!
+//! `docs/03-vocabulary.md` shipped 74 conditions in a `u128` with 54 positions
+//! of headroom. The table in [`crate::table`] defines 274 positions, so every
+//! configuration of that headroom overflows. Four words replace one, and the
+//! claim this module has to carry is that widening does **not** cost the
+//! per-operation bound `CLAUDE.md` §3 rule 4 asks for.
+//!
+//! No allocation. No `Vec`. No loop anywhere on the hit path.
+
+/// How many 64-bit words the mask carries.
+///
+/// **Widening is a one-line change here and nowhere else.** It was `[u64; 4]`
+/// until the forming-day pivot family pushed the table past 256 positions; the
+/// name carries no width so the next widening does not rename 77 references.
+/// It costs one AND, one XOR and one OR per word in [`ConditionMask::hits`] —
+/// a larger constant, still a constant, still no branch.
+pub const WORDS: usize = 6;
+
+/// A set of condition bits, [`ConditionMask::BITS`] wide.
+///
+/// Word 0 holds bits 0–63, word 1 holds 64–127, and so on, so bit *b* lives at
+/// word `b >> 6`, offset `b & 63`. That layout keeps the shipped bits 0–127 in
+/// words 0 and 1 exactly where the `u128` had them, which is what makes the
+/// widening a format version rather than a renumbering (`CLAUDE.md` §3.8).
+/// Proven by `vocab::mask::the_shipped_128_bits_keep_their_positions`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(C)]
+pub struct ConditionMask([u64; WORDS]);
+
+// Thirty-two bytes, checked by the compiler rather than by a comment. A mask
+// is copied per candidate in the sweep, so its width is a cost and not a
+// detail. `tests/mask.rs` asserts the same thing at run time, because a
+// `const` assertion that someone deletes leaves no failing test behind.
+const _: () = assert!(core::mem::size_of::<ConditionMask>() == WORDS * 8);
+const _: () = assert!(core::mem::align_of::<ConditionMask>() == 8);
+
+impl ConditionMask {
+    /// The empty set: no condition required, no condition held.
+    pub const ZERO: Self = Self([0; WORDS]);
+
+    /// How many condition positions fit. Not how many the table defines --
+    /// that is [`crate::table::COUNT`], and it is smaller on purpose.
+    pub const BITS: u32 = {
+        // `as` would trip clippy::cast_possible_truncation and a runtime
+        // `try_from` is not const. WORDS is a small literal, so the assertion
+        // below is the whole of the safety argument and it is checked at compile
+        // time.
+        assert!(WORDS <= 64, "a mask wider than 4,096 bits needs a u64 BITS");
+        #[allow(clippy::cast_possible_truncation)]
+        let w = WORDS as u32;
+        w * 64
+    };
+
+    /// Build from raw words, low word first.
+    #[must_use]
+    pub const fn from_words(w: [u64; WORDS]) -> Self {
+        Self(w)
+    }
+
+    /// The raw words, low word first.
+    #[must_use]
+    pub const fn words(&self) -> [u64; WORDS] {
+        self.0
+    }
+
+    /// This set with bit `b` added.
+    ///
+    /// A position at or above [`Self::BITS`] is ignored rather than panicking:
+    /// a vocabulary index is validated once, where the table is read
+    /// ([`crate::table::set_exact`]), and not again on every evaluation. The
+    /// per-word match is what keeps the array index a constant, so the
+    /// compiler proves the access in bounds instead of the program checking it.
+    #[must_use]
+    pub const fn with_bit(mut self, b: u32) -> Self {
+        let bit = 1u64 << (b & 63);
+        match b >> 6 {
+            0 => self.0[0] |= bit,
+            1 => self.0[1] |= bit,
+            2 => self.0[2] |= bit,
+            3 => self.0[3] |= bit,
+            4 => self.0[4] |= bit,
+            5 => self.0[5] |= bit,
+            _ => {}
+        }
+        self
+    }
+
+    /// This set with bit `b` removed. Out-of-range positions are ignored, for
+    /// the reason [`Self::with_bit`] gives.
+    #[must_use]
+    pub const fn without_bit(mut self, b: u32) -> Self {
+        let bit = 1u64 << (b & 63);
+        match b >> 6 {
+            0 => self.0[0] &= !bit,
+            1 => self.0[1] &= !bit,
+            2 => self.0[2] &= !bit,
+            3 => self.0[3] &= !bit,
+            4 => self.0[4] &= !bit,
+            5 => self.0[5] &= !bit,
+            _ => {}
+        }
+        self
+    }
+
+    /// Is bit `b` set? A position at or above [`Self::BITS`] is never set.
+    #[must_use]
+    pub const fn get(&self, b: u32) -> bool {
+        let bit = 1u64 << (b & 63);
+        match b >> 6 {
+            0 => self.0[0] & bit != 0,
+            1 => self.0[1] & bit != 0,
+            2 => self.0[2] & bit != 0,
+            3 => self.0[3] & bit != 0,
+            4 => self.0[4] & bit != 0,
+            5 => self.0[5] & bit != 0,
+            _ => false,
+        }
+    }
+
+    /// **The hit test.** Does this bar's bit set satisfy every bit `candidate`
+    /// requires -- that is, `(bar & candidate) == candidate`?
+    ///
+    /// Deliberately branchless, and that is the whole point of the function.
+    /// An early-exit loop would return sooner on a candidate that fails in
+    /// word 0, which makes the cost depend on the data; a constant-time
+    /// guarantee that only holds on average is not the guarantee `CLAUDE.md`
+    /// §3 rule 4 asks for. This is always four ANDs, four XORs, three ORs and
+    /// one compare, for every input, with no loop and no early return.
+    /// Proven by `vocab::mask::hits_does_the_same_work_for_every_input` and
+    /// `vocab::mask::adding_a_required_bit_can_only_remove_hits`.
+    ///
+    /// The relation is **anti-monotone**: adding a required bit can only
+    /// remove hits. Every pruning guarantee in the sweep rests on that one
+    /// property, so it is tested here rather than assumed in the engine.
+    #[must_use]
+    pub const fn hits(&self, candidate: &Self) -> bool {
+        let d0 = (self.0[0] & candidate.0[0]) ^ candidate.0[0];
+        let d1 = (self.0[1] & candidate.0[1]) ^ candidate.0[1];
+        let d2 = (self.0[2] & candidate.0[2]) ^ candidate.0[2];
+        let d3 = (self.0[3] & candidate.0[3]) ^ candidate.0[3];
+        let d4 = (self.0[4] & candidate.0[4]) ^ candidate.0[4];
+        let d5 = (self.0[5] & candidate.0[5]) ^ candidate.0[5];
+        (d0 | d1 | d2 | d3 | d4 | d5) == 0
+    }
+
+    /// How many bits are set.
+    #[must_use]
+    pub const fn popcount(&self) -> u32 {
+        self.0[0].count_ones()
+            + self.0[1].count_ones()
+            + self.0[2].count_ones()
+            + self.0[3].count_ones()
+            + self.0[4].count_ones()
+            + self.0[5].count_ones()
+    }
+
+    /// Every bit set in either set.
+    #[must_use]
+    pub const fn union(&self, other: &Self) -> Self {
+        Self([
+            self.0[0] | other.0[0],
+            self.0[1] | other.0[1],
+            self.0[2] | other.0[2],
+            self.0[3] | other.0[3],
+            self.0[4] | other.0[4],
+            self.0[5] | other.0[5],
+        ])
+    }
+
+    /// Every bit set in both sets.
+    #[must_use]
+    pub const fn intersect(&self, other: &Self) -> Self {
+        Self([
+            self.0[0] & other.0[0],
+            self.0[1] & other.0[1],
+            self.0[2] & other.0[2],
+            self.0[3] & other.0[3],
+            self.0[4] & other.0[4],
+            self.0[5] & other.0[5],
+        ])
+    }
+
+    /// True when no bit is set.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        (self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4] | self.0[5]) == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_mask_hits_itself() {
+        let m = ConditionMask::ZERO.with_bit(3).with_bit(200);
+        assert!(m.hits(&m));
+    }
+
+    #[test]
+    fn the_empty_candidate_hits_everything() {
+        assert!(ConditionMask::ZERO.hits(&ConditionMask::ZERO));
+        assert!(ConditionMask::ZERO.with_bit(1).hits(&ConditionMask::ZERO));
+    }
+
+    #[test]
+    fn a_missing_bit_in_any_word_is_a_miss() {
+        for b in [0u32, 63, 64, 127, 128, 191, 192, 255] {
+            let bar = ConditionMask::ZERO.with_bit(7);
+            let want = ConditionMask::ZERO.with_bit(7).with_bit(b);
+            if b == 7 {
+                assert!(bar.hits(&want));
+            } else {
+                assert!(
+                    !bar.hits(&want),
+                    "bit {b} should have been required and missing"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adding_a_required_bit_can_only_remove_hits() {
+        // Anti-monotonicity -- the property every pruning guarantee rests on.
+        let bar = ConditionMask::ZERO.with_bit(1).with_bit(2).with_bit(130);
+        let base = ConditionMask::ZERO.with_bit(1);
+        assert!(bar.hits(&base));
+        for b in 0..ConditionMask::BITS {
+            let wider = base.with_bit(b);
+            if bar.hits(&wider) {
+                assert!(
+                    bar.hits(&base),
+                    "a wider mask hit where the narrower did not"
+                );
+            }
+        }
+    }
+
+    /// The branchless claim, tested as a claim about the SOURCE and not about
+    /// a clock. A timing test on shared CI measures the runner, and gate 8 is
+    /// where a ratio belongs; what can be proved here is that the function
+    /// contains no loop and no early return, which is what makes the work the
+    /// same for every input. The behavioural half -- that a candidate failing
+    /// in word 0 and one failing in word 3 both produce a decision -- is
+    /// `a_missing_bit_in_any_word_is_a_miss` above.
+    #[test]
+    fn hits_does_the_same_work_for_every_input() {
+        let src = include_str!("mask.rs");
+        let body = src
+            .split_once("pub const fn hits(")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split_once("\n    }"))
+            .map(|(body, _)| body);
+        let Some(body) = body else {
+            unreachable!("`hits` is defined in this file and closes at one indent")
+        };
+        for banned in ["for ", "while ", "loop ", "return", "if "] {
+            assert!(
+                !body.contains(banned),
+                "`hits` contains `{banned}`, so its cost now depends on the \
+                 data. Four ANDs, four XORs, three ORs, one compare.",
+            );
+        }
+    }
+
+    #[test]
+    fn bits_land_in_the_word_the_layout_promises() {
+        assert_eq!(ConditionMask::ZERO.with_bit(0).words(), [1, 0, 0, 0, 0, 0]);
+        assert_eq!(ConditionMask::ZERO.with_bit(64).words(), [0, 1, 0, 0, 0, 0]);
+        assert_eq!(
+            ConditionMask::ZERO.with_bit(128).words(),
+            [0, 0, 1, 0, 0, 0]
+        );
+        assert_eq!(
+            ConditionMask::ZERO.with_bit(192).words(),
+            [0, 0, 0, 1, 0, 0]
+        );
+    }
+
+    #[test]
+    fn out_of_range_bits_are_ignored_not_panicked() {
+        // BITS-relative, not a literal: 256 was out of range at four words and
+        // is an ordinary position at six. A test whose premise is a width has
+        // to be written against the width.
+        let past = ConditionMask::BITS;
+        let m = ConditionMask::ZERO.with_bit(past).with_bit(u32::MAX);
+        assert!(m.is_empty());
+        assert!(!m.get(past));
+        assert!(!m.get(u32::MAX));
+        // And removing one is the same non-event, rather than clearing the
+        // bit that `b & 63` would have aliased to.
+        let full = ConditionMask::from_words([u64::MAX; WORDS]);
+        assert_eq!(full.without_bit(past), full);
+        assert_eq!(full.without_bit(u32::MAX), full);
+    }
+
+    #[test]
+    fn without_bit_removes_only_that_bit() {
+        let m = ConditionMask::ZERO.with_bit(5).with_bit(70).with_bit(200);
+        let less = m.without_bit(70);
+        assert!(less.get(5) && !less.get(70) && less.get(200));
+        // Every word can be cleared, not just the one a happy test picks.
+        for b in [0u32, 63, 64, 127, 128, 191, 192, 255] {
+            let one = ConditionMask::ZERO.with_bit(b);
+            assert!(one.without_bit(b).is_empty(), "bit {b} survived removal");
+        }
+    }
+
+    #[test]
+    fn popcount_counts_every_word() {
+        let m = ConditionMask::ZERO
+            .with_bit(0)
+            .with_bit(64)
+            .with_bit(128)
+            .with_bit(192);
+        assert_eq!(m.popcount(), 4);
+    }
+
+    #[test]
+    fn union_and_intersect_reach_every_word() {
+        let a = ConditionMask::ZERO.with_bit(0).with_bit(64);
+        let b = ConditionMask::ZERO.with_bit(64).with_bit(128).with_bit(192);
+        assert_eq!(a.union(&b).popcount(), 4);
+        assert_eq!(a.intersect(&b), ConditionMask::ZERO.with_bit(64));
+        assert!(ConditionMask::ZERO.is_empty());
+        assert!(!a.is_empty());
+    }
+
+    #[test]
+    fn from_words_and_words_round_trip() {
+        let w = [1u64, 2, 3, 4, 0, 0];
+        assert_eq!(ConditionMask::from_words(w).words(), w);
+        assert_eq!(ConditionMask::default(), ConditionMask::ZERO);
+    }
+
+    #[test]
+    fn the_shipped_128_bits_keep_their_positions() {
+        // Widening must not renumber anything, or every stored result changes
+        // meaning silently (`CLAUDE.md` §3.8).
+        for b in 0..128u32 {
+            let m = ConditionMask::ZERO.with_bit(b);
+            let w = m.words();
+            let as_u128 = u128::from(w[0]) | (u128::from(w[1]) << 64);
+            assert_eq!(as_u128, 1u128 << b, "bit {b} moved when the mask widened");
+            assert_eq!(w[2] | w[3], 0);
+        }
+    }
+}

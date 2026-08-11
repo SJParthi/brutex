@@ -1,0 +1,29 @@
+[package]
+name         = "vocab"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "The condition bit table and the 256-bit mask. Bit index is identity. Depends on nothing."
+
+# ---------------------------------------------------------------------------
+# THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.
+#
+# `CLAUDE.md` §5 gives this crate one permitted arrow, `vocab -> core`, and it
+# is not taken: nothing here needs a price, a symbol or a calendar. A bit is a
+# `u16` position and a name is a `&'static str`. The whole crate is the table,
+# the mask and the four operations over them.
+#
+# The consequence worth stating is the one §5 cares about: with no arrow at
+# all this crate cannot participate in a cycle, and it compiles anywhere
+# `core` does -- including `wasm32-unknown-unknown`, where the browser will
+# eventually need the same bit names the sweep used.
+#
+# Adding a line below requires an entry in docs/05-decisions.md naming what it
+# replaces.
+# ---------------------------------------------------------------------------
+[dependencies]
+
+[lints]
+workspace = true

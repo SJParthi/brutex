@@ -96,9 +96,35 @@ const _: () = assert!(MAX_SEGMENT_LEN == SYMBOL_CAPACITY);
 ///
 /// The timeframe is not caller text — it is one of [`Timeframe::KNOWN`], so
 /// its bound is the longest name in that table rather than
-/// [`MAX_SEGMENT_LEN`]. `store::unit::a_maximal_path_fits_the_declared_bound`
-/// checks the table against it.
-pub const MAX_TIMEFRAME_LEN: usize = 4;
+/// [`MAX_SEGMENT_LEN`].
+///
+/// Written down and then **checked against the table**, for the same reason
+/// [`MAX_VENDOR_LEN`] is: a computed maximum would silently widen [`MAX_LEN`]
+/// the day a longer rung appeared, where the assertion below is a compile error
+/// at the moment [`Timeframe::KNOWN`] changes.
+///
+/// It was `4` while the table held only `1min` and `1day`. The intraday rungs
+/// lifted it to `5` — `15min`, `30min` and `60min` all reach it.
+/// `store::unit::a_maximal_path_fits_the_declared_bound` proves the bound is
+/// reached and not merely sufficient.
+pub const MAX_TIMEFRAME_LEN: usize = 5;
+
+const _: () = {
+    // Named one by one rather than looped, for the reason `Vendor::ALL` is
+    // destructured above: a new rung must be a COMPILE ERROR here, not a name
+    // a loop silently accepts. Indexing the slice would also trip
+    // `clippy::indexing_slicing`, which this workspace denies.
+    assert!(Timeframe::DAY_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_1.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_3.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_5.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_15.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_30.name.len() <= MAX_TIMEFRAME_LEN);
+    assert!(Timeframe::MINUTE_60.name.len() <= MAX_TIMEFRAME_LEN);
+    // The bound must be REACHED, or it is loose rather than tight.
+    assert!(Timeframe::MINUTE_15.name.len() == MAX_TIMEFRAME_LEN);
+};
+const _: () = assert!(MAX_TIMEFRAME_LEN <= MAX_SEGMENT_LEN);
 
 /// The longest vendor segment.
 ///
@@ -306,6 +332,50 @@ impl Timeframe {
         name: "1min",
     };
 
+    /// Three-minute bars.
+    ///
+    /// # Why three, which is not a power of anything
+    ///
+    /// The operator's gap-leg rule reads *yesterday's last candle* against
+    /// *today's first candle*, and three minutes is the rung it is written for.
+    /// It is also the coarsest rung that divides the session cleanly: the fold
+    /// grid is anchored at IST midnight and the open is 555 minutes past it, so
+    /// a rung aligns with 09:15 exactly when it divides 555. One, three, five
+    /// and fifteen do. **Thirty and sixty do not** — 555/30 = 18.5 — which
+    /// leaves their first bar of the day a 15- and 45-minute stub. A rule that
+    /// names "the first candle" means something different on those two rungs,
+    /// and the difference is not a rounding error.
+    pub const MINUTE_3: Self = Self {
+        secs: 180,
+        name: "3min",
+    };
+
+    /// Five-minute bars. Divides 555; no stub at either end of the session.
+    pub const MINUTE_5: Self = Self {
+        secs: 300,
+        name: "5min",
+    };
+
+    /// Fifteen-minute bars. The coarsest rung that still divides 555.
+    pub const MINUTE_15: Self = Self {
+        secs: 900,
+        name: "15min",
+    };
+
+    /// Thirty-minute bars. **Leaves a 15-minute stub at the open** — 555/30 is
+    /// 18.5 — so the session's first bar is half length. See [`Self::MINUTE_3`].
+    pub const MINUTE_30: Self = Self {
+        secs: 1_800,
+        name: "30min",
+    };
+
+    /// Sixty-minute bars. **Stubs at BOTH ends** — a 45-minute first bar and a
+    /// 30-minute last bar. See [`Self::MINUTE_3`].
+    pub const MINUTE_60: Self = Self {
+        secs: 3_600,
+        name: "60min",
+    };
+
     /// One-day bars — what a backfill lands FIRST.
     ///
     /// # Why this exists beside the minute
@@ -336,7 +406,32 @@ impl Timeframe {
     /// The daily rung is FIRST because a backfill lands it first, and because
     /// `from_secs` walks this list — an order that matches the order things are
     /// written costs nothing and reads honestly.
-    pub const KNOWN: &'static [Self] = &[Self::DAY_1, Self::MINUTE_1];
+    pub const KNOWN: &'static [Self] = &[
+        Self::DAY_1,
+        Self::MINUTE_1,
+        Self::MINUTE_3,
+        Self::MINUTE_5,
+        Self::MINUTE_15,
+        Self::MINUTE_30,
+        Self::MINUTE_60,
+    ];
+
+    /// The number of minutes from IST midnight to the NSE open, 09:15.
+    ///
+    /// A rung's bars align with the open exactly when its length divides this.
+    const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
+
+    /// Does a session's first bar on this rung start exactly at 09:15?
+    ///
+    /// False means the rung's opening bar is a stub, because the fold grid is
+    /// anchored at IST midnight rather than at the open. A rule that reads "the
+    /// first candle of the day" is reading a partial bar on those rungs, and
+    /// [`Self::MINUTE_3`] records why that matters.
+    #[must_use]
+    pub const fn aligns_with_the_open(self) -> bool {
+        self.secs.is_multiple_of(60)
+            && Self::OPEN_MINUTES_PAST_IST_MIDNIGHT.is_multiple_of(self.secs / 60)
+    }
 
     /// The timeframe of `secs` seconds.
     ///

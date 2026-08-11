@@ -1,0 +1,1159 @@
+//! The candlestick patterns — all 62.
+//!
+//! Vocabulary positions 153–177 and 198–234. Every one is `Kind::Plain`: a
+//! pattern is true or false on the bars themselves and needs no band.
+//!
+//! # The thresholds are conventions, and that is stated rather than hidden
+//!
+//! A pattern predicate cannot be written without numbers. "A small body", "a long
+//! lower wick", "a gap" — each needs a threshold, and **no tracked document in
+//! this repository defines any of them.** `CLAUDE.md` §3 rule 1 forbids inventing
+//! a number and passing it off as measured, so every threshold this module needs is
+//! gathered into [`Thresholds`] in one place, named, given a value, and labelled
+//! **UNVERIFIED**. They are the widely-used classical conventions and they are not
+//! traceable to NSE or to any source `docs/00-charter.md` records.
+//!
+//! That is the honest position and it is different from silence in two ways a
+//! reader can act on: the numbers are in one struct rather than scattered through
+//! 62 predicates, and changing one is a single edit whose blast radius is the
+//! struct's own documentation.
+//!
+//! Contrast position 63 `narrow_cpr_day`, which this crate refuses to compute at
+//! all: there, "narrow" has no conventional value either, and unlike a hammer the
+//! pattern literature offers none. Refusing is right when no convention exists;
+//! declaring is right when one does.
+//!
+//! # Integers only, and no division
+//!
+//! Every ratio is cross-multiplied. `body ≤ range/10` is written
+//! `body * 10 ≤ range`, and products go through `i128` so a price at the edge of
+//! `i64` cannot overflow the comparison. Not one `f32` or `f64`.
+//!
+//! # Cost
+//!
+//! A fixed five-bar ring, 62 predicates each a bounded number of integer
+//! comparisons, no allocation, and no loop whose length depends on the data. Five
+//! bars is the deepest any classical pattern reaches (rising three methods, mat
+//! hold, breakaway, ladder bottom), so the state is `5 × 56` bytes and never grows.
+
+use store::format::Bar;
+use vocab::ConditionMask;
+
+/// How deep the deepest pattern reaches. Five bars: rising three methods, mat
+/// hold, breakaway and ladder bottom all need five.
+pub const LOOKBACK: usize = 5;
+
+/// The first pattern position, and the first of the appended block.
+pub const PATTERN_FIRST: u16 = 153;
+/// Where the appended 37 begin.
+pub const PATTERN_APPENDED_FIRST: u16 = 198;
+
+/// Every threshold the 62 predicates need, in thousandths.
+///
+/// **UNVERIFIED.** These are the classical conventions. None is traceable to NSE,
+/// to a vendor, or to any source `docs/00-charter.md` records, and none has been
+/// measured against this repository's own data. They are gathered here so the set
+/// is auditable in one place and a change is one edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Thresholds {
+    /// A body this small relative to its range is a doji. 100 = 10%.
+    pub doji_body: i64,
+    /// A body this large relative to its range is a long body. 700 = 70%.
+    pub long_body: i64,
+    /// A wick this small relative to its range is "no wick". 50 = 5%.
+    pub tiny_wick: i64,
+    /// A body this small relative to its range is a "small body" — looser than a
+    /// doji, and what harami and star patterns mean. 300 = 30%.
+    pub small_body: i64,
+    /// A wick must be at least this many thousandths of the body to count as
+    /// "long" for a hammer or shooting star. 2000 = twice the body.
+    pub long_wick_vs_body: i64,
+    /// For a high wave candle, each shadow must be at least this many thousandths
+    /// of the **range**. 300 = 30% each side.
+    ///
+    /// Measured against the range and not the body on purpose. Position 227's
+    /// original predicate used two `_vs_body` ratios, which are **vacuous when the
+    /// body is zero**: `upper * 1000 >= 0 * 3000` is `upper >= 0`, true for every
+    /// bar. So every `open == close` doji set 227 whatever its shadows looked like,
+    /// including an upper-91%/lower-9% shooting-star shape — the opposite of "long
+    /// shadows on both sides". A ratio against the body cannot express this
+    /// pattern; only one against the range can.
+    pub high_wave_shadow: i64,
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self::CLASSICAL
+    }
+}
+
+impl Thresholds {
+    /// The classical set. **UNVERIFIED** — see the struct documentation.
+    pub const CLASSICAL: Self = Self {
+        doji_body: 100,
+        long_body: 700,
+        tiny_wick: 50,
+        small_body: 300,
+        long_wick_vs_body: 2000,
+        high_wave_shadow: 300,
+    };
+}
+
+/// One bar reduced to the quantities every predicate is written in.
+///
+/// All `i128`, because a product of two `i64` prices does not fit an `i64` and the
+/// alternative is a comparison that is correct only for small prices.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Shape {
+    open: i128,
+    high: i128,
+    low: i128,
+    close: i128,
+    /// `|close - open|`.
+    body: i128,
+    /// `high - low`. Never negative: a bar with `high < low` is refused upstream.
+    range: i128,
+    /// `high - max(open, close)`.
+    upper: i128,
+    /// `min(open, close) - low`.
+    lower: i128,
+}
+
+impl Shape {
+    fn of(bar: &Bar) -> Self {
+        let open = i128::from(bar.open);
+        let high = i128::from(bar.high);
+        let low = i128::from(bar.low);
+        let close = i128::from(bar.close);
+        let top = if open > close { open } else { close };
+        let bottom = if open < close { open } else { close };
+        Self {
+            open,
+            high,
+            low,
+            close,
+            body: (close - open).abs(),
+            range: high - low,
+            upper: high - top,
+            lower: bottom - low,
+        }
+    }
+
+    const fn bullish(&self) -> bool {
+        self.close > self.open
+    }
+    const fn bearish(&self) -> bool {
+        self.close < self.open
+    }
+    const fn top(&self) -> i128 {
+        if self.open > self.close {
+            self.open
+        } else {
+            self.close
+        }
+    }
+    const fn bottom(&self) -> i128 {
+        if self.open < self.close {
+            self.open
+        } else {
+            self.close
+        }
+    }
+    /// The body's midpoint. `midpoint` and not `(a + b) / 2`: the sum of two
+    /// prices near the edge of the type overflows, and clippy is right that the
+    /// hand-written form is a latent bug even where these values cannot reach it.
+    const fn mid(&self) -> i128 {
+        self.open.midpoint(self.close)
+    }
+
+    /// `body * 1000 <= range * permille`, the cross-multiplied form of
+    /// `body <= range * permille/1000`.
+    fn body_at_most(&self, permille: i64) -> bool {
+        self.body * 1000 <= self.range * i128::from(permille)
+    }
+    fn body_at_least(&self, permille: i64) -> bool {
+        self.body * 1000 >= self.range * i128::from(permille)
+    }
+    fn upper_at_most(&self, permille: i64) -> bool {
+        self.upper * 1000 <= self.range * i128::from(permille)
+    }
+    fn lower_at_most(&self, permille: i64) -> bool {
+        self.lower * 1000 <= self.range * i128::from(permille)
+    }
+    /// A shadow at least `permille/1000` of the RANGE. Unlike the `_vs_body`
+    /// ratios this stays meaningful on a zero-body bar.
+    fn upper_vs_range(&self, permille: i64) -> bool {
+        self.upper * 1000 >= self.range * i128::from(permille)
+    }
+    fn lower_vs_range(&self, permille: i64) -> bool {
+        self.lower * 1000 >= self.range * i128::from(permille)
+    }
+    /// A wick at least `permille/1000` of the body.
+    fn lower_vs_body(&self, permille: i64) -> bool {
+        self.lower * 1000 >= self.body * i128::from(permille)
+    }
+    fn upper_vs_body(&self, permille: i64) -> bool {
+        self.upper * 1000 >= self.body * i128::from(permille)
+    }
+    fn is_doji(&self, thr: Thresholds) -> bool {
+        self.range > 0 && self.body_at_most(thr.doji_body)
+    }
+    fn is_long(&self, thr: Thresholds) -> bool {
+        self.range > 0 && self.body_at_least(thr.long_body)
+    }
+    fn is_small(&self, thr: Thresholds) -> bool {
+        self.range > 0 && self.body_at_most(thr.small_body)
+    }
+}
+
+/// The last five bars, and the 62 positions they decide.
+///
+/// Fixed size. It does not grow with the number of bars seen, which is the whole
+/// of the constant-space argument for this family.
+#[derive(Clone, Copy, Debug)]
+pub struct Patterns {
+    ring: [Bar; LOOKBACK],
+    /// How many bars have been folded, saturating at [`LOOKBACK`].
+    depth: usize,
+    /// Where the next bar goes.
+    next: usize,
+    /// The IST day of the most recent bar, so a session boundary can break a
+    /// pattern rather than let it straddle an overnight gap.
+    session_day: i64,
+    thresholds: Thresholds,
+}
+
+const _: () = assert!(core::mem::size_of::<Patterns>() <= 400);
+
+impl Default for Patterns {
+    fn default() -> Self {
+        Self::new(Thresholds::CLASSICAL)
+    }
+}
+
+const EMPTY_BAR: Bar = Bar {
+    ts_micros: 0,
+    open: 0,
+    high: 0,
+    low: 0,
+    close: 0,
+    volume: 0,
+    open_interest: i64::MIN,
+};
+
+impl Patterns {
+    /// A new detector with the given thresholds.
+    #[must_use]
+    pub const fn new(thresholds: Thresholds) -> Self {
+        Self {
+            ring: [EMPTY_BAR; LOOKBACK],
+            depth: 0,
+            next: 0,
+            session_day: i64::MIN,
+            thresholds,
+        }
+    }
+
+    /// The thresholds in force.
+    #[must_use]
+    pub const fn thresholds(&self) -> Thresholds {
+        self.thresholds
+    }
+
+    /// How many bars of history are available, up to [`LOOKBACK`].
+    #[must_use]
+    pub const fn depth(&self) -> usize {
+        self.depth
+    }
+
+    /// Bar `n` back from the newest. `0` is the newest.
+    fn back(&self, n: usize) -> Option<&Bar> {
+        if n >= self.depth {
+            return None;
+        }
+        let len = self.ring.len();
+        let idx = (self.next + len - 1 - n) % len;
+        self.ring.get(idx)
+    }
+
+    /// The full per-bar step: **fold, then emit.**
+    ///
+    /// The opposite order from the anchor families, and deliberately: a pattern is
+    /// a statement about a run of bars *including the newest one*. An anchor is a
+    /// reference price a bar is measured against and must exclude it; a pattern is
+    /// a description of the bars themselves and must include it. That distinction
+    /// is the one D-0080's block comment records.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Corrupt`] for a record that is not a bar. It is neither folded nor
+    /// emitted for.
+    pub fn step(&mut self, bar: &Bar) -> Result<ConditionMask, crate::Corrupt> {
+        if bar.high < bar.low {
+            return Err(crate::Corrupt::HighBelowLow);
+        }
+        if bar.high.checked_sub(bar.low).is_none() {
+            return Err(crate::Corrupt::RangeOverflows);
+        }
+        let day = crate::ist_day(bar.ts_micros);
+        if day != self.session_day {
+            // A pattern must not straddle an overnight gap: 15:29 Friday and 09:15
+            // Monday are not adjacent bars, and every multi-bar predicate here
+            // assumes adjacency. Clearing the ring is what makes that true.
+            self.depth = 0;
+            self.next = 0;
+            self.session_day = day;
+        }
+        if let Some(slot) = self.ring.get_mut(self.next) {
+            *slot = *bar;
+        }
+        self.next = (self.next + 1) % self.ring.len();
+        if self.depth < LOOKBACK {
+            self.depth += 1;
+        }
+        Ok(self.bits())
+    }
+
+    /// The 62 positions for the current ring.
+    ///
+    /// # Cost
+    ///
+    /// 62 predicates over at most five bars. Both counts are compile-time
+    /// constants, no allocation, no division.
+    #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "62 named predicates in one table is the readable form; splitting \
+                  them across helpers hides which position each one sets"
+    )]
+    pub fn bits(&self) -> ConditionMask {
+        let thr = self.thresholds;
+        let mut mask = ConditionMask::ZERO;
+        let Some(c0) = self.back(0) else {
+            return mask;
+        };
+        let bar0 = Shape::of(c0);
+        if bar0.range <= 0 {
+            // A single-price bar. Only the four-price doji is defined on it, and
+            // that one is defined precisely by the zero range.
+            if bar0.open == bar0.close && bar0.high == bar0.low {
+                return set(mask, 225);
+            }
+            return mask;
+        }
+
+        // ---- one-bar patterns -------------------------------------------------
+        let hammer_shape = bar0.is_small(thr)
+            && bar0.lower_vs_body(thr.long_wick_vs_body)
+            && bar0.upper_at_most(thr.tiny_wick);
+        let star_shape = bar0.is_small(thr)
+            && bar0.upper_vs_body(thr.long_wick_vs_body)
+            && bar0.lower_at_most(thr.tiny_wick);
+        if hammer_shape {
+            mask = set(mask, 153);
+        }
+        if star_shape {
+            mask = set(mask, 154);
+        }
+        if bar0.is_doji(thr)
+            && bar0.lower_vs_body(thr.long_wick_vs_body)
+            && bar0.upper_at_most(thr.tiny_wick)
+        {
+            mask = set(mask, 174);
+        }
+        if bar0.is_doji(thr)
+            && bar0.upper_vs_body(thr.long_wick_vs_body)
+            && bar0.lower_at_most(thr.tiny_wick)
+        {
+            mask = set(mask, 175);
+        }
+        if bar0.is_doji(thr)
+            && !bar0.upper_at_most(thr.tiny_wick)
+            && !bar0.lower_at_most(thr.tiny_wick)
+        {
+            mask = set(mask, 224);
+            // A rickshaw man is a long-legged doji whose body sits mid-range.
+            let centred =
+                (bar0.mid() - bar0.high.midpoint(bar0.low)).abs() * 1000 <= bar0.range * 100;
+            if centred {
+                mask = set(mask, 226);
+            }
+        }
+        // A high wave candle is a small body with VERY LONG shadows on both sides.
+        //
+        // The two `_vs_body` tests alone do not say that. They are ratios against
+        // the body, so on a zero-body bar `upper * 1000 >= body * 3000` reduces to
+        // `0 >= 0`, which is true — and a four-price doji (open == high == low ==
+        // close, both shadows of length zero) satisfied every clause and set 227.
+        // The bit then meant "long shadows" on a bar with no shadows at all, which
+        // is the opposite of the pattern. Requiring neither shadow to be tiny is
+        // the same guard 224 already uses one branch above, and it is what makes
+        // the ratio tests mean what their names say.
+        if bar0.is_doji(thr)
+            && bar0.upper_vs_range(thr.high_wave_shadow)
+            && bar0.lower_vs_range(thr.high_wave_shadow)
+        {
+            mask = set(mask, 227);
+        }
+        if bar0.is_small(thr)
+            && !bar0.is_doji(thr)
+            && bar0.upper * 1000 >= bar0.range * 200
+            && bar0.lower * 1000 >= bar0.range * 200
+        {
+            mask = set(mask, 171);
+        }
+        if bar0.is_long(thr)
+            && bar0.upper_at_most(thr.tiny_wick)
+            && bar0.lower_at_most(thr.tiny_wick)
+        {
+            mask = set(mask, if bar0.bullish() { 172 } else { 173 });
+        }
+        if bar0.is_long(thr) && bar0.bullish() && bar0.lower_at_most(thr.tiny_wick) {
+            mask = set(mask, 204);
+        }
+        if bar0.is_long(thr) && bar0.bearish() && bar0.upper_at_most(thr.tiny_wick) {
+            mask = set(mask, 205);
+        }
+
+        // ---- two-bar patterns -------------------------------------------------
+        let Some(c1) = self.back(1) else {
+            return mask;
+        };
+        let bar1 = Shape::of(c1);
+
+        // A hanging man is a hammer after an advance; an inverted hammer that
+        // follows one is a shooting star. Prior direction is the only difference,
+        // which is why they are separate positions and not separate shapes.
+        if hammer_shape && bar1.bullish() {
+            mask = set(mask, 155);
+        }
+        if star_shape && bar1.bullish() {
+            mask = set(mask, 156);
+        }
+        if bar1.bearish() && bar0.bullish() && bar0.open <= bar1.close && bar0.close >= bar1.open {
+            mask = set(mask, 157);
+        }
+        if bar1.bullish() && bar0.bearish() && bar0.open >= bar1.close && bar0.close <= bar1.open {
+            mask = set(mask, 158);
+        }
+        if bar1.bearish()
+            && bar0.bullish()
+            && bar0.top() <= bar1.open
+            && bar0.bottom() >= bar1.close
+        {
+            mask = set(mask, 159);
+        }
+        if bar1.bullish()
+            && bar0.bearish()
+            && bar0.top() <= bar1.close
+            && bar0.bottom() >= bar1.open
+        {
+            mask = set(mask, 160);
+        }
+        if bar1.bearish()
+            && bar0.bullish()
+            && bar0.open < bar1.low
+            && bar0.close > bar1.mid()
+            && bar0.close < bar1.open
+        {
+            mask = set(mask, 161);
+        }
+        if bar1.bullish()
+            && bar0.bearish()
+            && bar0.open > bar1.high
+            && bar0.close < bar1.mid()
+            && bar0.close > bar1.open
+        {
+            mask = set(mask, 162);
+        }
+        if bar0.high == bar1.high && (bar0.bullish() != bar1.bullish()) {
+            mask = set(mask, 169);
+        }
+        if bar0.low == bar1.low && (bar0.bullish() != bar1.bullish()) {
+            mask = set(mask, 170);
+        }
+        if bar1.bearish() && bar0.bullish() && bar0.open > bar1.open {
+            mask = set(mask, 202);
+        }
+        if bar1.bullish() && bar0.bearish() && bar0.open < bar1.open {
+            mask = set(mask, 203);
+        }
+        if (bar1.bearish() && bar0.bullish() || bar1.bullish() && bar0.bearish())
+            && bar0.close == bar1.close
+        {
+            mask = set(mask, if bar0.bullish() { 206 } else { 207 });
+        }
+        if bar1.bullish() && bar0.bullish() && bar0.open == bar1.open {
+            mask = set(mask, 208);
+        }
+        if bar1.bearish() && bar0.bearish() && bar0.open == bar1.open {
+            mask = set(mask, 209);
+        }
+        if bar1.bearish() && bar0.bullish() && bar0.open < bar1.low && bar0.close == bar1.low {
+            mask = set(mask, 210);
+        }
+        if bar1.bearish()
+            && bar0.bullish()
+            && bar0.open < bar1.low
+            && bar0.close > bar1.low
+            && bar0.close <= bar1.close
+        {
+            mask = set(mask, 211);
+        }
+        if bar1.bearish()
+            && bar0.bullish()
+            && bar0.open < bar1.low
+            && bar0.close > bar1.close
+            && bar0.close < bar1.mid()
+        {
+            mask = set(mask, 212);
+        }
+        if bar1.bearish() && bar0.bearish() && bar0.close == bar1.close {
+            mask = set(mask, 229);
+        }
+        if bar1.bullish()
+            && bar0.bullish()
+            && bar0.is_small(thr)
+            && bar1.is_small(thr)
+            && bar0.body == bar1.body
+        {
+            mask = set(mask, 228);
+        }
+
+        // ---- three-bar patterns ----------------------------------------------
+        let Some(c2) = self.back(2) else {
+            return mask;
+        };
+        let bar2 = Shape::of(c2);
+
+        if bar2.bearish()
+            && bar2.is_long(thr)
+            && bar1.is_small(thr)
+            && bar0.bullish()
+            && bar0.close > bar2.mid()
+        {
+            mask = set(mask, 163);
+        }
+        if bar2.bullish()
+            && bar2.is_long(thr)
+            && bar1.is_small(thr)
+            && bar0.bearish()
+            && bar0.close < bar2.mid()
+        {
+            mask = set(mask, 164);
+        }
+        if bar2.bullish()
+            && bar1.bullish()
+            && bar0.bullish()
+            && bar1.close > bar2.close
+            && bar0.close > bar1.close
+        {
+            mask = set(mask, 165);
+            if bar1.body < bar2.body && bar0.body < bar1.body {
+                mask = set(mask, 231);
+            }
+            if bar0.is_small(thr) && bar1.is_long(thr) {
+                mask = set(mask, 232);
+            }
+        }
+        if bar2.bearish()
+            && bar1.bearish()
+            && bar0.bearish()
+            && bar1.close < bar2.close
+            && bar0.close < bar1.close
+        {
+            mask = set(mask, 166);
+            if bar0.open == bar1.open && bar1.open == bar2.open {
+                mask = set(mask, 230);
+            }
+        }
+        if bar2.bearish()
+            && bar1.bullish()
+            && bar1.top() <= bar2.open
+            && bar1.bottom() >= bar2.close
+            && bar0.bullish()
+            && bar0.close > bar2.open
+        {
+            mask = set(mask, 167);
+        }
+        if bar2.bullish()
+            && bar1.bearish()
+            && bar1.top() <= bar2.close
+            && bar1.bottom() >= bar2.open
+            && bar0.bearish()
+            && bar0.close < bar2.open
+        {
+            mask = set(mask, 168);
+        }
+        if bar2.bearish()
+            && bar1.is_doji(thr)
+            && bar1.high < bar2.low
+            && bar0.bullish()
+            && bar0.low > bar1.high
+        {
+            mask = set(mask, 198);
+        }
+        if bar2.bullish()
+            && bar1.is_doji(thr)
+            && bar1.low > bar2.high
+            && bar0.bearish()
+            && bar0.high < bar1.low
+        {
+            mask = set(mask, 199);
+        }
+        if bar2.bullish()
+            && bar1.bullish()
+            && bar0.bearish()
+            && bar1.low > bar2.high
+            && bar0.close < bar1.low
+            && bar0.close > bar2.bottom()
+        {
+            mask = set(mask, 213);
+        }
+        if bar2.bearish()
+            && bar1.bearish()
+            && bar0.bullish()
+            && bar1.high < bar2.low
+            && bar0.close > bar1.high
+            && bar0.close < bar2.top()
+        {
+            mask = set(mask, 214);
+        }
+        if bar2.bullish()
+            && bar1.bullish()
+            && bar0.bullish()
+            && bar1.low > bar2.high
+            && bar0.open == bar1.open
+            && bar0.body == bar1.body
+        {
+            mask = set(mask, 215);
+        }
+        if bar2.bearish() && bar1.bullish() && bar0.bearish() && bar0.close == bar2.close {
+            mask = set(mask, 217);
+        }
+        if bar2.bearish()
+            && bar2.is_long(thr)
+            && bar1.bearish()
+            && bar1.open < bar2.close
+            && bar0.bullish()
+            && bar0.open < bar1.close
+            && bar0.close > bar1.open
+        {
+            mask = set(mask, 221);
+        }
+        if bar2.is_doji(thr) && bar1.is_doji(thr) && bar0.is_doji(thr) {
+            mask = set(mask, if bar0.close > bar2.close { 233 } else { 234 });
+        }
+
+        // ---- four- and five-bar patterns -------------------------------------
+        let Some(c3) = self.back(3) else {
+            return mask;
+        };
+        let bar3 = Shape::of(c3);
+        if bar3.bearish()
+            && bar2.bearish()
+            && bar1.bearish()
+            && bar0.bullish()
+            && bar0.close > bar3.open
+        {
+            mask = set(mask, 200);
+        }
+        if bar3.bullish()
+            && bar2.bullish()
+            && bar1.bullish()
+            && bar0.bearish()
+            && bar0.close < bar3.open
+        {
+            mask = set(mask, 201);
+        }
+        if bar3.bearish()
+            && bar2.bearish()
+            && bar1.bearish()
+            && bar1.upper > 0
+            && bar0.bearish()
+            && bar0.high > bar1.high
+        {
+            mask = set(mask, 220);
+        }
+
+        let Some(c4) = self.back(4) else {
+            return mask;
+        };
+        let bar4 = Shape::of(c4);
+        if bar4.bullish()
+            && bar4.is_long(thr)
+            && bar2.bearish()
+            && bar1.bearish()
+            && bar3.bearish()
+            && bar0.bullish()
+            && bar0.close > bar4.close
+        {
+            mask = set(mask, 176);
+        }
+        if bar4.bearish()
+            && bar4.is_long(thr)
+            && bar2.bullish()
+            && bar1.bullish()
+            && bar3.bullish()
+            && bar0.bearish()
+            && bar0.close < bar4.close
+        {
+            mask = set(mask, 177);
+        }
+        if bar4.bullish()
+            && bar4.is_long(thr)
+            && bar3.bullish()
+            && bar2.is_small(thr)
+            && bar1.is_small(thr)
+            && bar0.bullish()
+            && bar0.close > bar3.high
+        {
+            mask = set(mask, 216);
+        }
+        if bar4.bearish()
+            && bar3.bearish()
+            && bar2.bearish()
+            && bar1.bearish()
+            && bar0.bullish()
+            && bar0.close > bar2.high
+        {
+            mask = set(mask, 218);
+        }
+        if bar4.bullish()
+            && bar3.bullish()
+            && bar2.bullish()
+            && bar1.bullish()
+            && bar0.bearish()
+            && bar0.close < bar2.low
+        {
+            mask = set(mask, 219);
+        }
+        if bar4.bearish()
+            && bar4.is_long(thr)
+            && bar3.bearish()
+            && bar2.bearish()
+            && bar1.bearish()
+            && bar0.bullish()
+            && bar0.close > bar3.high
+        {
+            mask = set(mask, 222);
+        }
+        if bar4.bullish()
+            && bar4.is_long(thr)
+            && bar3.bullish()
+            && bar2.bullish()
+            && bar1.bullish()
+            && bar0.bearish()
+            && bar0.close < bar3.low
+        {
+            mask = set(mask, 223);
+        }
+        mask
+    }
+}
+
+/// Set a plain position, ignoring a refusal.
+///
+/// A refusal means this module and the table disagree about a position number,
+/// which `pattern::every_position_is_a_live_plain_pattern` makes a test failure.
+fn set(mask: ConditionMask, index: u16) -> ConditionMask {
+    vocab::table::set_exact(mask, index).unwrap_or(mask)
+}
+
+/// Every position this module can set: 153–177 and 198–234.
+#[must_use]
+pub fn positions() -> [u16; 62] {
+    let mut out = [0u16; 62];
+    let mut i = 0;
+    let mut index = PATTERN_FIRST;
+    while index <= 177 {
+        if let Some(slot) = out.get_mut(i) {
+            *slot = index;
+        }
+        i += 1;
+        index += 1;
+    }
+    index = PATTERN_APPENDED_FIRST;
+    while index <= 234 {
+        if let Some(slot) = out.get_mut(i) {
+            *slot = index;
+        }
+        i += 1;
+        index += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mk(ts: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
+        Bar {
+            ts_micros: ts,
+            open,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// Minute `m` of IST day 30,000.
+    fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
+        let ts = (30_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000;
+        mk(ts, open, high, low, close)
+    }
+
+    fn ok(p: &mut Patterns, bar: &Bar) -> ConditionMask {
+        let Ok(m) = p.step(bar) else {
+            unreachable!("this fixture bar is sane")
+        };
+        m
+    }
+
+    /// All 62 positions are live, plain, and named `pat_*`.
+    #[test]
+    fn every_position_is_a_live_plain_pattern() {
+        let mut seen = std::collections::BTreeSet::new();
+        for index in positions() {
+            assert!(seen.insert(index), "position {index} appears twice");
+            let Some(def) = vocab::table::definition(index) else {
+                unreachable!("position {index} is not in the table")
+            };
+            assert!(vocab::table::is_live(index), "position {index} is not live");
+            assert_eq!(
+                def.kind,
+                vocab::Kind::Plain,
+                "position {index} (`{}`) needs a tolerance and a pattern has none",
+                def.name,
+            );
+            assert!(
+                def.name.starts_with("pat_"),
+                "position {index} is `{}`, not a pattern",
+                def.name,
+            );
+        }
+        assert_eq!(seen.len(), 62);
+    }
+
+    /// The ring covers exactly 153..=177 and 198..=234, with no stray index.
+    #[test]
+    fn the_position_set_is_the_two_pattern_blocks() {
+        let owned = positions();
+        for index in 153..=177u16 {
+            assert!(owned.contains(&index), "{index} missing from the plan");
+        }
+        for index in 198..=234u16 {
+            assert!(owned.contains(&index), "{index} missing from the plan");
+        }
+        for index in [152u16, 178, 197, 235] {
+            assert!(!owned.contains(&index), "{index} is not a pattern position");
+        }
+    }
+
+    /// The primitives, on a bar chosen so every quantity is a round number.
+    #[test]
+    fn the_shape_primitives_are_what_they_say() {
+        // open 100, high 130, low 90, close 110
+        let shape = Shape::of(&mk(0, 100, 130, 90, 110));
+        assert_eq!(shape.body, 10);
+        assert_eq!(shape.range, 40);
+        assert_eq!(shape.upper, 20, "high - max(open, close)");
+        assert_eq!(shape.lower, 10, "min(open, close) - low");
+        assert!(shape.bullish() && !shape.bearish());
+        assert_eq!(shape.top(), 110);
+        assert_eq!(shape.bottom(), 100);
+        // body 10 of range 40 is 250 permille: a small body, not a doji at 100.
+        assert!(shape.body_at_most(250) && !shape.body_at_most(249));
+    }
+
+    /// Nothing fires with no history, and nothing with a single bar beyond the
+    /// one-bar patterns.
+    #[test]
+    fn an_empty_detector_emits_nothing() {
+        let p = Patterns::default();
+        assert!(p.bits().is_empty());
+        assert_eq!(p.depth(), 0);
+    }
+
+    /// A four-price doji is the only pattern defined on a zero-range bar.
+    #[test]
+    fn a_single_price_bar_is_a_four_price_doji_and_nothing_else() {
+        let mut p = Patterns::default();
+        let m = ok(&mut p, &at(0, 100, 100, 100, 100));
+        assert!(m.get(225), "the four-price doji did not fire");
+        assert_eq!(m.popcount(), 1, "a single-price bar lit something else too");
+    }
+
+    /// A hammer: small body at the top, long lower wick, no upper wick.
+    #[test]
+    fn a_hammer_fires_and_a_hanging_man_needs_a_prior_advance() {
+        let hammer = at(1, 118, 120, 100, 120);
+        let mut p = Patterns::default();
+        let m = ok(&mut p, &hammer);
+        assert!(m.get(153), "the hammer did not fire");
+        assert!(!m.get(155), "a hanging man fired with no prior bar");
+
+        // After an up bar, the same shape is also a hanging man.
+        let mut q = Patterns::default();
+        let _ = ok(&mut q, &at(0, 100, 112, 99, 110));
+        let m2 = ok(&mut q, &hammer);
+        assert!(
+            m2.get(153) && m2.get(155),
+            "the hanging man did not fire after an advance"
+        );
+    }
+
+    /// Bullish engulfing: a down bar then an up bar whose body covers it.
+    #[test]
+    fn bullish_and_bearish_engulfing_are_not_transposed() {
+        let mut p = Patterns::default();
+        let _ = ok(&mut p, &at(0, 110, 112, 98, 100));
+        let m = ok(&mut p, &at(1, 99, 116, 98, 114));
+        assert!(m.get(157), "bullish engulfing did not fire");
+        assert!(!m.get(158), "bearish engulfing fired on a bullish setup");
+
+        let mut q = Patterns::default();
+        let _ = ok(&mut q, &at(0, 100, 112, 98, 110));
+        let m2 = ok(&mut q, &at(1, 112, 114, 96, 98));
+        assert!(m2.get(158), "bearish engulfing did not fire");
+        assert!(!m2.get(157));
+    }
+
+    /// **A pattern must not straddle an overnight gap.** Friday 15:29 and Monday
+    /// 09:15 are not adjacent bars, and every multi-bar predicate assumes they are.
+    #[test]
+    fn a_new_session_clears_the_ring() {
+        let mut p = Patterns::default();
+        let _ = ok(&mut p, &at(0, 110, 112, 98, 100));
+        assert_eq!(p.depth(), 1);
+        let mut next_day = at(0, 99, 116, 98, 114);
+        next_day.ts_micros += 1_440 * 60_000_000;
+        let m = ok(&mut p, &next_day);
+        assert_eq!(p.depth(), 1, "the ring survived a session boundary");
+        assert!(
+            !m.get(157),
+            "an engulfing pattern was found across an overnight gap",
+        );
+    }
+
+    /// Only the 62 positions this module owns are ever set, over a long walk.
+    #[test]
+    fn nothing_outside_the_sixty_two_positions_is_set() {
+        let owned = positions();
+        let mut p = Patterns::default();
+        let mut union = ConditionMask::ZERO;
+        let mut px = 2_500_000i64;
+        for m in 0..600 {
+            let drift = (m * 37) % 401 - 200;
+            let open = px;
+            let close = px + drift;
+            let high = open.max(close) + (m * 13) % 90;
+            let low = open.min(close) - (m * 17) % 90;
+            px = close;
+            union = union.union(&ok(&mut p, &at(m, open, high, low, close)));
+        }
+        for index in 0..ConditionMask::BITS {
+            if union.get(index) {
+                let as_u16 = u16::try_from(index).unwrap_or(u16::MAX);
+                assert!(
+                    owned.contains(&as_u16),
+                    "position {index} is not this module's"
+                );
+            }
+        }
+    }
+
+    /// A bullish and a bearish version of the same pattern can never both fire.
+    #[test]
+    fn opposite_polarity_patterns_never_co_occur() {
+        let pairs = [
+            (157u32, 158u32),
+            (159, 160),
+            (161, 162),
+            (163, 164),
+            (165, 166),
+            (167, 168),
+            (172, 173),
+            (198, 199),
+            (200, 201),
+            (202, 203),
+            (204, 205),
+            (206, 207),
+            (208, 209),
+            (213, 214),
+            (222, 223),
+            (233, 234),
+        ];
+        let mut p = Patterns::default();
+        let mut px = 2_500_000i64;
+        for m in 0..900 {
+            let drift = (m * 53) % 601 - 300;
+            let open = px;
+            let close = px + drift;
+            let high = open.max(close) + (m * 29) % 120;
+            let low = open.min(close) - (m * 31) % 120;
+            px = close;
+            let mask = ok(&mut p, &at(m % 370, open, high, low, close));
+            for (bull, bear) in pairs {
+                assert!(
+                    !(mask.get(bull) && mask.get(bear)),
+                    "positions {bull} and {bear} fired on the same bar at m={m}",
+                );
+            }
+        }
+    }
+
+    /// A corrupt record is refused and folded into nothing.
+    #[test]
+    fn a_corrupt_bar_is_refused_and_not_folded() {
+        let mut p = Patterns::default();
+        assert_eq!(
+            p.step(&at(0, 100, 90, 110, 105)),
+            Err(crate::Corrupt::HighBelowLow)
+        );
+        assert_eq!(p.depth(), 0, "a refused bar was folded in");
+        assert_eq!(
+            p.step(&at(0, 0, i64::MAX, i64::MIN, 0)),
+            Err(crate::Corrupt::RangeOverflows),
+        );
+        assert_eq!(p.depth(), 0);
+    }
+
+    /// Prices at the edge of the type do not overflow the cross-multiplied ratios.
+    #[test]
+    fn extreme_but_representable_prices_do_not_overflow() {
+        let mut p = Patterns::default();
+        let wide = i64::MAX / 4;
+        let _ = ok(&mut p, &at(0, 0, wide, -wide, wide / 2));
+        let _ = ok(&mut p, &at(1, wide / 2, wide, -wide, -wide / 2));
+        let _ = p.bits();
+    }
+
+    /// Same bars, same bits, byte for byte.
+    #[test]
+    fn the_same_bars_give_the_same_bits() {
+        let run = || {
+            let mut p = Patterns::default();
+            let mut px = 2_500_000i64;
+            (0..300)
+                .map(|m| {
+                    let drift = (m * 41) % 301 - 150;
+                    let open = px;
+                    let close = px + drift;
+                    let high = open.max(close) + (m * 19) % 70;
+                    let low = open.min(close) - (m * 23) % 70;
+                    px = close;
+                    ok(&mut p, &at(m, open, high, low, close)).words()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(run(), run());
+    }
+
+    /// The thresholds are one struct, and the default is the classical set.
+    #[test]
+    fn the_thresholds_are_gathered_and_defaulted() {
+        let thr = Thresholds::default();
+        assert_eq!(thr, Thresholds::CLASSICAL);
+        assert_eq!(thr.doji_body, 100);
+        assert_eq!(thr.long_body, 700);
+        assert_eq!(thr.tiny_wick, 50);
+        assert_eq!(thr.small_body, 300);
+        assert_eq!(thr.long_wick_vs_body, 2000);
+        // And a detector carries whatever it was given, so a future decision entry
+        // can change the numbers without touching 62 predicates.
+        let custom = Thresholds {
+            doji_body: 50,
+            ..Thresholds::CLASSICAL
+        };
+        assert_eq!(Patterns::new(custom).thresholds().doji_body, 50);
+    }
+}
+
+#[cfg(test)]
+mod degenerate {
+    use super::*;
+    use store::format::Bar;
+
+    fn bar(ts: i64, o: i64, h: i64, l: i64, c: i64) -> Bar {
+        Bar {
+            ts_micros: ts,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// A one-sided doji is not a high wave candle.
+    ///
+    /// This is the input that exposed the defect, and finding it took two attempts.
+    /// The first version of this test used a four-price doji — which `is_doji`
+    /// already excludes via `range > 0`, so the test passed without exercising the
+    /// fix at all. A test that cannot fail is the §4 sin, so here is the real case:
+    ///
+    /// `open == close`, range 110, upper shadow 100 (91% of range), lower shadow 10
+    /// (9%). Body is zero, so the original `upper * 1000 >= body * 3000` reduced to
+    /// `100 >= 0` and `lower * 1000 >= body * 3000` to `10 >= 0` — both vacuously
+    /// true. Position 227, "very long shadows on BOTH sides", fired on a
+    /// shooting-star shape. Every `open == close` bar set it, whatever its shape.
+    #[test]
+    fn a_one_sided_doji_is_not_a_high_wave_candle() {
+        let mut p = Patterns::new(Thresholds::default());
+        let lopsided = bar(0, 2_500_000, 2_500_100, 2_499_990, 2_500_000);
+        let Ok(mask) = p.step(&lopsided) else {
+            unreachable!("a sane bar is not corrupt")
+        };
+        assert!(
+            !mask.get(227),
+            "the lower shadow is 9% of range; 227 claims long shadows on BOTH sides"
+        );
+    }
+
+    /// A four-price doji sets nothing in this family either.
+    #[test]
+    fn a_four_price_doji_is_not_a_high_wave_candle() {
+        let mut p = Patterns::new(Thresholds::default());
+        let flat = bar(0, 2_500_000, 2_500_000, 2_500_000, 2_500_000);
+        let Ok(mask) = p.step(&flat) else {
+            unreachable!("a zero-range bar is not corrupt")
+        };
+        assert!(!mask.get(227), "no range means no shadows");
+    }
+
+    /// A symmetric zero-body doji with long shadows both sides IS a high wave.
+    #[test]
+    fn a_symmetric_zero_body_doji_with_long_shadows_is_a_high_wave() {
+        let mut p = Patterns::new(Thresholds::default());
+        let wave = bar(0, 2_500_000, 2_500_050, 2_499_950, 2_500_000);
+        let Ok(mask) = p.step(&wave) else {
+            unreachable!("a sane bar is not corrupt")
+        };
+        assert!(
+            mask.get(227),
+            "50% shadow each side, zero body: this is the pattern"
+        );
+    }
+
+    /// The bit still fires on a bar that genuinely has the shape.
+    ///
+    /// Without this half, the fix above could be "never set 227" and stay green.
+    #[test]
+    fn a_real_high_wave_candle_still_sets_the_bit() {
+        let mut p = Patterns::new(Thresholds::default());
+        // Tiny body at mid-range, long shadows either side.
+        let wave = bar(0, 2_500_000, 2_530_000, 2_470_000, 2_500_100);
+        let Ok(mask) = p.step(&wave) else {
+            unreachable!("a sane bar is not corrupt")
+        };
+        assert!(
+            mask.get(227),
+            "a small body with long shadows both sides IS a high wave"
+        );
+    }
+}
