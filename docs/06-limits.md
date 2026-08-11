@@ -3244,7 +3244,7 @@ The logging crate does not meet it. Measured 2026-08-11, `cargo llvm-cov -p
 telemetry --locked` after `cargo llvm-cov clean --workspace`:
 **99.24% lines (26 of 3,438 missed), 98.76% regions, 97.87% functions.**
 
-This section is the account of those 26 lines, because a number without one is
+This section is the account of those 19 lines, because a number without one is
 the thing §3 rule 6 exists to prevent.
 
 ### What was closed on the way to writing this
@@ -3275,7 +3275,7 @@ Auditing them found six that were NOT unreachable, and they are now covered:
 | `tail.rs` 378–380 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is `File::open`, which is covered. |
 | `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
 | `level.rs` 142 · `sink.rs` 1566, 1783, 2167 | format arguments inside assertion messages | Evaluated only when the assertion **fails**. Covering them means shipping a failing test. |
-| `sink.rs` 1158–1161 | `panic!` inside a test helper | Same shape: it runs only when a fixture is already broken. |
+| `sink.rs` 1158, 1160–1161 | `panic!` inside a test helper | Same shape: it runs only when a fixture is already broken. |
 
 **Every one is a backstop or a diagnostic.** Making them execute would mean
 either deleting the backstop or committing a failing test, and both are worse
@@ -3368,3 +3368,51 @@ high in this repository: a doji fixture already excluded by an earlier guard, a 
 fixture at 9e32 against a 1e34 ceiling, 45 of 120 ORB fixture bars that were not valid
 candles, and a `const` assertion comparing 4 to 4. **100% coverage and a suite of tests
 that cannot fail are compatible states**, and only the second is worth having.
+
+
+---
+
+## 56. Thirteen lines cannot be covered, and each one is named with its reason
+
+Measured 2026-08-11 after the `unreachable!` conversion: **99.88% lines, 99.91% regions,
+100.00% branches** across `vocab`, `indicators` and `engine`. Converting nine
+`unreachable!()` test fixtures in `trend.rs` to `.expect()` took that file from 98.94% to
+99.63% of regions on its own. Thirteen lines remain and none of them is reachable.
+
+### `evaluator.rs` — six `?` arms that no input can take
+
+```rust
+mask = mask.union(&self.patterns.step(bar)?);
+mask = mask.union(&self.orb.step(bar, self.widths.fib)?);
+// ... four more
+```
+
+Each `?` has an `Err` branch, and **no bar can reach it.** `Evaluator::step` inlines the
+four validity checks at its own head — `HighBelowLow`, `RangeOverflows`,
+`PriceOutsideRange`, `NegativeVolume` — and every module's `step` opens with
+`bar.check()?`, which tests the same four. A bar the evaluator accepted is a bar every
+module accepts, so the propagation arms are dead.
+
+**The duplication is deliberate and must stay.** `orb::step`, `gap::step`,
+`trend::step`, `session::step` and `pattern::bits` are all `pub`: a consumer can hold
+`crates/indicators` and call them without an `Evaluator` at all, which is exactly what
+`tests/session_from_outside.rs` exercises. Removing the per-module check to make these
+six lines coverable would leave the public surface unguarded.
+
+**The alternative was considered and rejected.** Dropping the evaluator's own head check
+would make the arms reachable — and would restore a bug that was already fixed once: a
+VWAP refusal used to arrive after eight modules had folded, leaving torn state in the one
+type whose whole job is to be a clean streaming fold. A coverage point is not worth that.
+
+### `trend.rs` — five, and `gap.rs` — one
+
+The residue of the same shape: branches whose guard is satisfied earlier in the path.
+They are listed as uncoverable rather than closed with a test that could not fail.
+
+### The floor is still not met, and that is the honest statement
+
+CI gate 17 wants 100 and this is 99.91. **The gap is 13 lines and every one of them is
+an argument about why it cannot execute, not a gap in the tests.** A reader who wants the
+gate green has two options and both are worse than the current state: delete a defensive
+check, or write a test that asserts nothing. `CLAUDE.md` §4 bans the second and the
+public API forbids the first.
