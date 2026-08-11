@@ -130,6 +130,60 @@ impl core::error::Error for TotpError {}
 /// [`TotpError`] for an empty secret, one past [`MAX_SECRET_LEN`], or one
 /// holding a character the alphabet does not contain.
 pub fn base32_decode(secret: &str) -> Result<Vec<u8>, TotpError> {
+    let decoded = decode_alphabet(secret);
+    if let Err(why) = &decoded {
+        note_refusal(why, secret.len());
+    }
+    decoded
+}
+
+/// Why a refused secret is worth a line, and why the line cannot carry any of
+/// it.
+///
+/// A refusal here is terminal for the run: no code means no exchange, and no
+/// exchange means the pull does not authenticate. Without this event that
+/// failure arrives at the vendor as a rejected code and nothing anywhere says
+/// the secret never decoded in the first place — the operator debugs the
+/// broker instead of the one line of configuration that is actually wrong.
+///
+/// **Nothing that arrived is written back out.** `CLAUDE.md` §8 keeps every
+/// parameter path out of a tracked file because this repository is public, and
+/// a log is a file an operator pastes into an issue; a shared secret is the
+/// value at the end of one of those paths and inherits the rule with room to
+/// spare. So the line carries the KIND of refusal and the LENGTH, and stops.
+///
+/// [`TotpError::NotBase32`] carries the offending byte and its `Display` shows
+/// it, because an operator fixing their own configuration is looking at the
+/// secret anyway. This does not pass that byte along. It is a character of the
+/// credential as supplied, and "it is not a character the alphabet decodes" is
+/// an argument about the key, not about the string it was pasted from. `fault`
+/// says which of the three things went wrong, which is what a reader needs to
+/// choose between "the file has no secret", "the field ran into the next one"
+/// and "somebody transcribed an O as a zero".
+///
+/// The length is the exception the rule already grants: a count is not a value,
+/// and `chars` against `max` is the whole diagnosis for the over-long case.
+fn note_refusal(why: &TotpError, len: usize) {
+    let fault = match *why {
+        TotpError::Empty => "empty",
+        TotpError::TooLong { .. } => "too-long",
+        TotpError::NotBase32 { .. } => "not-base32",
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.totp", "the shared secret will not decode")
+            .with("fault", telemetry::Value::Str(fault))
+            .with("chars", telemetry::Value::Uint(len as u64))
+            .with("max", telemetry::Value::Uint(MAX_SECRET_LEN as u64)),
+    );
+}
+
+/// The decode itself, with no observation in it.
+///
+/// Split out so there is exactly ONE place a refusal becomes a log line, and
+/// so that place sees a `TotpError` rather than the secret. Four early returns
+/// each writing their own event would be four chances to reach for the input
+/// while it is still in scope; here it is not in scope at all.
+fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
     if secret.is_empty() {
         return Err(TotpError::Empty);
     }

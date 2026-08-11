@@ -366,6 +366,91 @@ pub fn from_dir(
 /// See [`from_window`] for the broker's side of that.
 #[must_use]
 pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
+    from_members_inner(members, store_root, plan)
+}
+
+/// The fold ratio, once per member — never per snapshot.
+///
+/// **This is the number that would have named D-0070 on the day it landed.** A
+/// daily pull folding N rows into N bars means the vendor already sent one bar
+/// per day and the bucket is only ever re-stamping them, so `folded = 0` on a
+/// `1day` rung is the signature of the whole defect. Nothing wrote it down, and
+/// it took decoding bar files by hand to see it.
+///
+/// `bucket_secs` travels with it because the bucket WIDTH is the other half:
+/// 86,400 against an IST offset of 19,800 is the misalignment itself.
+fn note_fold(
+    member: &Member,
+    snapshots: usize,
+    bars: usize,
+    folded: usize,
+    bucket: crate::fold::Bucket,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::debug("pull.fold", "folded")
+            .with("instrument", telemetry::Value::Str(&member.instrument))
+            .with("snapshots", telemetry::Value::Uint(snapshots as u64))
+            .with("bars", telemetry::Value::Uint(bars as u64))
+            .with("folded", telemetry::Value::Uint(folded as u64))
+            .with(
+                "bucket_secs",
+                telemetry::Value::Uint(u64::from(bucket.secs())),
+            ),
+    );
+}
+
+/// One member landed, on the rolling log.
+///
+/// # Why the result is discarded, and why that is not the swallow §4 bans
+///
+/// [`telemetry::emit`] returns whether the event reached a file, and at the
+/// call sites in `crates/api` that answer is asserted, because those events are
+/// `Error` and an `Error` that cannot be written is the defect the event exists
+/// to remove. This one is `Debug`. A `Debug` event is *supposed* to be dropped
+/// on a normal run — the sink's `min_level` is `Info` unless the operator
+/// raises it — so asserting it was written would fire on every clean pull.
+///
+/// # Why `Debug` and not `Info`
+///
+/// The sink keeps [`telemetry::DEFAULT_KEEP_FILES`] files of
+/// [`telemetry::DEFAULT_MAX_FILE_BYTES`], a 64 MiB window. A one-minute
+/// backfill is ~62,600 members, so writing one line each at `Info` would roll
+/// the run's own first hour out of the window before the run finished — the
+/// evidence would destroy itself. `Info` carries the run; `Debug` carries the
+/// members, for the one run an operator is actually diagnosing.
+fn note_landed(member: &Member, landed: &Landed) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::debug("pull.member", "landed")
+            .with("instrument", telemetry::Value::Str(&member.instrument))
+            .with("bars", telemetry::Value::Uint(landed.bars as u64))
+            .with("folded", telemetry::Value::Uint(landed.folded as u64))
+            .with("rows", telemetry::Value::Uint(member.rows.len() as u64))
+            .with(
+                "dropped",
+                telemetry::Value::Uint(u64::from(landed.census.total())),
+            ),
+    );
+}
+
+/// One member that did not land, on the rolling log — **at `Error`**.
+///
+/// This is the only surface that gets every reason. The audit journal keeps
+/// `failures.first()` in a fixed 68-byte note, and the run's receipt shows
+/// five; neither is the full set. Before this existed, a run that refused ten
+/// members wrote nothing at all and the cause was recovered by decoding bar
+/// files by hand.
+fn note_not_landed(member: &Member, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.member", "did not land")
+            .with("instrument", telemetry::Value::Str(&member.instrument))
+            .with("rows", telemetry::Value::Uint(member.rows.len() as u64))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// [`from_members`]'s body, split only so the two `note_*` helpers can sit
+/// beside it rather than between its documentation and its signature.
+fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
     let Plan { vendor, .. } = plan;
     let mut done = Ingested {
         members: members.len(),
@@ -417,6 +502,7 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
     // are not in it and cannot be got back from it, only from the bar files.
     let repairing = census.degraded_reason().is_some();
     if let Some(why) = census.degraded_reason() {
+        note_census_degraded(&census_path, &why.to_string());
         done.failures.push(Failure {
             instrument: census_path.display().to_string(),
             why: format!(
@@ -442,6 +528,12 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
         done.rows_read += member.rows.len();
         match one(member, store_root, plan) {
             Ok(landed) => {
+                // ONE EVENT PER MEMBER, WHICH IS THE GRANULARITY THAT WAS
+                // MISSING. Per-row would be millions on a one-minute backfill
+                // and would roll the run's own beginning out of an 8 MB x 8
+                // file window before it finished; per-run is what the receipt
+                // already says. The member is the unit an operator resumes at.
+                note_landed(member, &landed);
                 done.bars_stored += landed.bars;
                 done.rows_folded += landed.folded;
                 // The census is folded so the totals describe the RUN. A
@@ -471,26 +563,36 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
                         // already holds and the append refuses it. Swallowing
                         // this would leave a store that disagrees with its own
                         // counter and no record of when it started.
-                        Err(why) => done.failures.push(Failure {
-                            instrument: member.instrument.clone(),
-                            why: format!(
-                                "{} holds {} bar(s) the census does not count: {why}",
-                                member.instrument, held.entry.rows
-                            ),
-                        }),
+                        Err(why) => {
+                            // THE STORE DISAGREES WITH ITS OWN COUNTER. Named
+                            // in the log as well as on the receipt, because a
+                            // later run refetches a month already on disk.
+                            note_bars_not_counted(&member.instrument, held.entry.rows, &why);
+                            done.failures.push(Failure {
+                                instrument: member.instrument.clone(),
+                                why: format!(
+                                    "{} holds {} bar(s) the census does not count: {why}",
+                                    member.instrument, held.entry.rows
+                                ),
+                            });
+                        }
                     }
                 }
             }
-            Err(why) => done.failures.push(Failure {
-                instrument: member.instrument.clone(),
-                why,
-            }),
+            Err(why) => {
+                note_not_landed(member, &why);
+                done.failures.push(Failure {
+                    instrument: member.instrument.clone(),
+                    why,
+                });
+            }
         }
     }
 
     // ONE INSTALL, AFTER THE LOOP — and none at all when nothing changed, so
     // a re-run of the same folder leaves the census byte for byte as it was.
     if let Err(why) = install_census(&census_lock, &census_path, &census, &appends, publish) {
+        note_census_unpublished(&census_path, appends.len(), &why);
         done.failures.push(Failure {
             instrument: census_path.display().to_string(),
             why: format!(
@@ -513,15 +615,73 @@ pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> In
 /// perfectly. Three arms of [`from_members`] end this way and they were three
 /// copies of it, which is three places for one of them to start reporting zero.
 fn refused_whole(members: &[Member], about: &Path, why: String) -> Ingested {
+    let rows_read = members.iter().map(|member| member.rows.len()).sum();
+    // THE WHOLE RUN REFUSED, AND UNTIL NOW THE LOG SAID NOTHING.
+    //
+    // The receipt carried this and the log did not, so an operator reading
+    // `/logs` after a backfill that landed nothing saw a quiet file. Three arms
+    // of `from_members` end here — an unwritable rung, a contended lock, an
+    // unreadable census — and each is the end of the run, not of one member.
+    //
+    // `Error`, so it clears the default `Info` floor, and once per run, so
+    // D-0075's 64 MiB window arithmetic is untouched.
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.run", "refused")
+            .with("about", telemetry::Value::Str(&about.display().to_string()))
+            .with("members", telemetry::Value::Uint(members.len() as u64))
+            .with("rows_read", telemetry::Value::Uint(rows_read as u64))
+            .with("why", telemetry::Value::Str(&why)),
+    );
     Ingested {
         members: members.len(),
-        rows_read: members.iter().map(|member| member.rows.len()).sum(),
+        rows_read,
         failures: vec![Failure {
             instrument: about.display().to_string(),
             why,
         }],
         ..Ingested::default()
     }
+}
+
+/// The census loaded from a torn commit, and what loaded is a prefix.
+///
+/// `Warn` and once per run. Months a newer generation had committed are not in
+/// it and can only be got back from the bar files.
+fn note_census_degraded(census: &Path, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.census", "loaded degraded")
+            .with(
+                "census",
+                telemetry::Value::Str(&census.display().to_string()),
+            )
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// Bars are on disk and the census that counts them was not published.
+///
+/// A later run refetches months this one already stored, and the append refuses
+/// them. `Error`, once per run.
+fn note_census_unpublished(census: &Path, slices: usize, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.census", "not published")
+            .with(
+                "census",
+                telemetry::Value::Str(&census.display().to_string()),
+            )
+            .with("slices", telemetry::Value::Uint(slices as u64))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// The store holds bars its own counter does not know about.
+fn note_bars_not_counted(instrument: &str, bars: u64, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.census", "bars not counted")
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("bars", telemetry::Value::Uint(bars))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// One window fetched from a broker, through the same path a folder takes.
@@ -693,6 +853,13 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // paths rather than about bars — so it is refused here by name rather than
     // silently filing December into November.
     //
+    // THE FOLD RATIO, ONCE — never per snapshot. This is the number that
+    // would have named D-0070 on the day it landed: a daily pull folding N
+    // rows into N bars means the vendor already sent one bar per day, and the
+    // bucket is only ever re-stamping them. `rows_folded = 0` on a 1day rung
+    // is the signature, and nothing wrote it down.
+    note_fold(member, snapshots, landed.bars.len(), folded, bucket);
+
     // `fold` returns at least one bar for an input that had at least one, and
     // the empty input already returned above — but the type does not say so,
     // and the arm that says "this cannot happen" is a `Landed` with nothing in

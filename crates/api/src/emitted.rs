@@ -38,15 +38,17 @@
 //! on the ordinary path, and a test asserting against it would be asserting the
 //! floor rather than the emit.
 //!
-//! # What is proven elsewhere, and what is not proven at all
+//! # What is proven elsewhere, and what is no longer unproven at all
 //!
-//! Five sites live behind functions private to [`crate::server`] or behind a
-//! layer only a served request drives, so `server::tests` proves them against
-//! **this same sink**. Three more need a socket to a live vendor and are named,
-//! with the reason, in
-//! [`the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten`].
-//! `CLAUDE.md` §3 rule 6: said out loud, not left for a coverage report to
-//! find.
+//! Eight sites live behind functions private to [`crate::server`], behind a
+//! layer only a served request drives, or past a socket, so `server::tests`
+//! proves them against **this same sink**. Three of those eight were listed
+//! here for a long time as unreachable without a live vendor; none of them
+//! actually was, and
+//! [`the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten`]
+//! keeps each claim struck through beside what turned out to be true. That list
+//! is now empty. `CLAUDE.md` §3 rule 6: said out loud, not left for a coverage
+//! report to find.
 
 #![allow(
     clippy::expect_used,
@@ -474,7 +476,7 @@ fn cases() -> Vec<Case> {
                 "target=emit-site-probe&from=2026-08-03&to=2026-08-07",
                 Day::new(2026, 8, 10).expect("a real day"),
             )
-            .expect_err("that is not one of the three spot targets");
+            .expect_err("that is not a spot target this build takes");
             assert!(why.to_string().contains("emit-site-probe"), "{why}");
         }),
         mine: Box::new(|record| {
@@ -874,8 +876,18 @@ fn the_silent_arms_stay_silent() {
     let root = fixture("emit-silence-bars");
     let from = mark();
     clean_month_reads_every_row(&root);
+    // FIELD-FILTERED, like every other absence assertion in this file, and for
+    // a reason this one alone had missed. The sibling test in this same binary
+    // — `every_reachable_emit_site_puts_a_record_in_the_file` — drives a row
+    // that emits this exact target AND this exact message. libtest runs the two
+    // in parallel by default, so a sequence-plus-target-plus-message filter can
+    // catch the OTHER test's record inside this window and fail an assertion
+    // about a guard that behaved perfectly. The `file` field carries this
+    // fixture's own directory, which no other test writes.
     assert!(
-        landed(from, "api.bars", "records unreadable").is_empty(),
+        landed(from, "api.bars", "records unreadable")
+            .iter()
+            .all(|record| !says(record, "file", "emit-silence-bars")),
         "a page where every record read must write nothing"
     );
 
@@ -954,50 +966,109 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
     assert!(faults.is_empty(), "and nothing is wrong with it");
 }
 
-/// **THE THREE SITES THIS BINARY CANNOT REACH, NAMED RATHER THAN FORGOTTEN.**
+/// Counts every `telemetry::emit` call in the LIB target, from the source.
 ///
-/// `CLAUDE.md` §3 rule 6. Each of these is a live `telemetry::emit` in
-/// `crates/api/src/server.rs` that no test drives, and the reason is a property
-/// of the site rather than of the test. All three sit past the socket:
+/// **Because the alternative was a constant compared to a constant.** This
+/// accounting test used to read `assert_eq!(17 + 5 + 3, 25)` with all four
+/// hardcoded, so adding a twenty-sixth emit — or deleting one — failed nothing.
+/// That is the shape `docs/04-invariants.md` S-20 already records once in this
+/// repository, and `CLAUDE.md` §4 bans a test that asserts nothing. In a module
+/// whose entire premise is that unproven emit sites are worthless, it was the
+/// wrong place to keep one.
 ///
-/// | line | event | why not |
+/// Comment lines are skipped, which is what lets this module's own prose name
+/// the function without inflating its own count. `main.rs` is skipped because
+/// it is the BIN target, with its own install and its own test.
+fn lib_emit_sites() -> usize {
+    // THE NEEDLE IS ASSEMBLED, NOT WRITTEN. Spelled as one literal it would
+    // appear in this very file on a line that is not a comment, and this
+    // function would count itself — it did, and reported twenty-six. `concat!`
+    // is resolved by the compiler, so the string is identical while the
+    // contiguous text never appears in the source being scanned. The original
+    // version of this test hand-counted for exactly this reason and said so;
+    // this is that observation, mechanised instead of trusted.
+    const NEEDLE: &str = concat!("telemetry", "::", "emit", "(");
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
+        .expect("the crate's own src is readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .filter(|path| path.file_name().is_some_and(|name| name != "main.rs"))
+        .collect();
+    paths.sort();
+    assert!(
+        paths.len() > 8,
+        "read only {} source file(s) — the layout changed and this stopped counting",
+        paths.len()
+    );
+    paths
+        .iter()
+        .map(|path| {
+            let text = std::fs::read_to_string(path).expect("a tracked source file");
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .map(|line| line.matches(NEEDLE).count())
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// **THE SITES THIS BINARY CANNOT REACH — AND THERE ARE NOW NONE.**
+///
+/// **It was three, then two, and it is zero.** The name is left as it was
+/// because `docs/05-decisions.md` cites it and that ledger is append-only; what
+/// the test asserts is the accounting, and the accounting has moved. Every
+/// striking-out below is kept rather than deleted, because the useful part is
+/// what each row USED to claim and why that turned out to be wrong.
+///
+/// `CLAUDE.md` §3 rule 6. All three sat past the socket, and every one was
+/// reached without a vendor, a credential or a byte of real data:
+///
+/// | line | event | why it was listed, and what was actually true |
 /// |---|---|---|
-/// | 2840 | `pull.spot instrument refused` | inside `broker_run`'s per-instrument loop, past `broker_window`. Reaching it needs a non-empty universe **and** a socket to a vendor: `Site::broker` is `Live` only from `Site::serving`, and the refusal it logs is the vendor's. A test that reached it would authenticate against Dhan, which is the failure `Site::broker`'s own doc comment records — one that a previous version of this suite committed and was caught by a live `DH-905`. |
-/// | 3254 | `pull.http vendor refused a window` | inside `with_retry`'s error map, one layer below the same socket. The field it exists to carry is the vendor's own words, so there is nothing to assert without a vendor. |
-/// | 3293 | `pull.chunk answered` | the success path of that loop. It needs a window of bars a vendor actually returned. |
+/// | ~~2840~~ | ~~`pull.spot instrument refused`~~ | **REACHED.** It claimed to need a non-empty universe **and** a socket to a vendor, "because the refusal it logs is the vendor's". Only the first half held. The loop emits for whatever `broker_window` refuses, and that function refuses a rung the feed does not declare on its fourth statement — above the credential file, above `AwsIdentity::discover`, above every byte of network. Dhan declares `Day1` alone and a form with no `granularity` field means `Minute1`, so `served` refuses by name. Driven by `api::server::the_refused_instrument_site_is_driven_over_a_real_universe` over a universe of exactly one index. |
+/// | ~~3254~~ | ~~`pull.http vendor refused a window`~~ | **REACHED.** It needed a SOCKET, not a recorded transport — and `crates/pull` had already established the loopback listener as this workspace's way of supplying one. Driven through the shipped `fetch_chunks` against a 503 by `api::server::the_two_sites_past_the_socket_are_driven_over_a_real_one`. |
+/// | ~~3293~~ | ~~`pull.chunk answered`~~ | **REACHED.** "It needs a window of bars a vendor actually returned" — and a loopback listener returns one, provided the bytes are the shape the SHIPPED descriptor declares rather than a shape invented for the test. Same test, second listener, answering 200 with Dhan's own parallel-array response. |
 ///
-/// They become reachable the day a recorded-transport fake exists for
-/// `pull::fetch`. There is none, and inventing one here would be a second
-/// definition of the vendor's wire — the failure `CLAUDE.md` §3 rule 1 names.
-/// Until then this is an honest three, not a rounding of twenty-five up to
-/// twenty-five.
+/// The lesson the three of them share is one sentence: **an "unreachable" list
+/// is worth re-reading rather than trusting.** Each entry was written in good
+/// faith and each named a dependency the site did not actually have. A recorded
+/// transport fake for `pull::fetch` — the thing all three were said to be
+/// waiting on — was never needed and still does not exist.
 ///
 /// This test asserts the accounting rather than the prose: the sites this
 /// binary drives plus the sites it names must be every site in the LIB target.
+/// [`UNREACHABLE`] staying at zero is not decoration — a site added tomorrow
+/// with no test fails the sum here until somebody decides which column it is in.
 #[test]
 fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// Sites driven from `server::tests`, because the functions holding them
-    /// are private to that module or need a bound listener:
+    /// are private to that module, need a bound listener, or sit past a socket:
     /// `note_run_started`, `note_run_finished`, `note_member_failure`,
-    /// `logs::note_request` through a served request, and `api.serve listening`
-    /// through `run` itself.
-    const REACHED_IN_SERVER_TESTS: usize = 5;
-    /// The rows of the table above.
-    const UNREACHABLE: usize = 3;
-    /// Every `telemetry::emit` call in the LIB target.
-    ///
-    /// Twenty-six calls exist under `crates/api/src`; one of them is in
-    /// `main.rs`, which is the BIN target and has its own test and its own
-    /// install, leaving twenty-five here. **A grep for the call will report one
-    /// more than that** — this module's own prose names the function, and a
-    /// count that quietly included its own documentation would be the kind of
-    /// number `CLAUDE.md` §3 rule 1 is about. The figure is by inspection of
-    /// the twelve modules that hold one.
-    const LIB_SITES: usize = 25;
+    /// `logs::note_request` through a served request, `api.serve listening`
+    /// through `run` itself, `pull.http vendor refused a window` and
+    /// `pull.chunk answered` through the shipped `fetch_chunks` against two
+    /// loopback listeners, and `pull.spot instrument refused` through
+    /// `broker_run` over a universe of one.
+    const REACHED_IN_SERVER_TESTS: usize = 8;
+    /// The rows of the table above, every one of them struck through.
+    const UNREACHABLE: usize = 0;
+    // COUNTED FROM THE SOURCE, not declared. A twenty-sixth emit added
+    // anywhere under `crates/api/src` fails this test until somebody decides
+    // which of the three columns it belongs in, which is the whole point of
+    // the accounting.
+    let lib_sites = lib_emit_sites();
+    assert_eq!(
+        lib_sites, 25,
+        "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
+         change, move the row into the table above or into the unreachable list \
+         and update this figure in the same commit"
+    );
 
     assert_eq!(
         SITES_HERE + REACHED_IN_SERVER_TESTS + UNREACHABLE,
-        LIB_SITES,
+        lib_sites,
         "every emit site is proven here, proven in server::tests, or named above"
     );
 }

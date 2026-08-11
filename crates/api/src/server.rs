@@ -796,13 +796,28 @@ async fn instruments_json(
             // `universe` and `held` travel with the row so the browser can
             // GROUP without asking again: F&O vs NIFTY Total Market vs index is
             // the distinction the operator reads, and it is a bitset here.
-            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"bars":{bars},"href":{}}}"#,
+            //
+            // TWO UNIVERSE FIELDS, AND BOTH ARE LOAD-BEARING.
+            //   `universe`  — the frozen one. `index`, `fno`, `ntm`, those
+            //                 joined by `+`, or `other`, and never anything
+            //                 else. The pages in production split it on `+`;
+            //                 widening it would change a field they already
+            //                 read. See `universe_label`.
+            //   `universes` — the whole set, one token per bit, including the
+            //                 four NIFTY tiers D-0089 appended. A new reader
+            //                 uses this and needs no split; an old reader never
+            //                 sees it. See `universe_tokens`.
+            // The second is not a rename of the first and the first is not
+            // deprecated by the second: an instrument's membership is a set,
+            // and the string can only ever be a lossy view of it.
+            r#"{{"symbol":{},"key":{},"kind":{},"exchange":{},"segment":{},"universe":{},"universes":{},"bars":{bars},"href":{}}}"#,
             render::json_string(key.underlying.as_str()),
             render::json_string(&canonical),
             render::json_string(&format!("{:?}", key.kind)),
             render::json_string(key.exchange.as_str()),
             render::json_string(key.segment.as_str()),
             render::json_string(&universe_label(entry.universe)),
+            universes_json(entry.universe),
             render::json_string(&format!(
                 "/instruments?q={}",
                 render::query_value(&canonical)
@@ -943,6 +958,111 @@ async fn feeds_json(
 ///
 /// `open_interest` is `i64::MIN` when the vendor sent none — the null sentinel
 /// §7 reserves. It becomes JSON `null` rather than a number, because zero means
+/// The rung a bars request names, defaulting to the one-minute grid.
+///
+/// # Why a default at all, and why THIS one
+///
+/// `?timeframe=` is absent on every link written before the store held a
+/// second rung, so refusing an absent value would break bookmarks and the
+/// chart's own range strip. One minute is the rung the store has always held
+/// and the only one those callers could have meant.
+///
+/// A value that is PRESENT and unknown is refused by name rather than
+/// defaulted: `?timeframe=1hour` is a question about a rung this store has no
+/// directory for, and answering it with one-minute bars would file the answer
+/// under a length nobody asked for. `CLAUDE.md` §4.
+///
+/// The bars page with no rows and a named trouble, at a given status.
+///
+/// Extracted so the handler stays inside the workspace's 100-line ceiling: the
+/// refusal arms all render the SAME page shape and differ only in the sentence
+/// and the status, and repeating the eleven-field literal per arm is how two of
+/// them drift apart.
+/// The six parts that address one bar file, as the page renders them.
+///
+/// Grouped because they travel together and are meaningless apart: a refusal
+/// that names five of six is what sent the operator to `…/1min/…` for a store
+/// holding `1day`. Passing them as one value also keeps `empty_bars_page`
+/// inside the workspace's argument ceiling — the lint and the design agree.
+struct BarsAddress<'a> {
+    symbol: &'a str,
+    segment: &'a str,
+    vendor: &'a str,
+    month: &'a str,
+    timeframe: &'a str,
+}
+
+fn empty_bars_page(
+    status: axum::http::StatusCode,
+    site: &Site,
+    at: &BarsAddress<'_>,
+    trouble: &str,
+) -> (axum::http::StatusCode, String) {
+    (
+        status,
+        render::bars_page(&render::BarsView {
+            symbol: at.symbol,
+            segment: at.segment,
+            vendor: at.vendor,
+            month: at.month,
+            rows: &[],
+            total: 0,
+            page: 0,
+            last_page: 0,
+            timeframe: at.timeframe,
+            trouble: Some(trouble),
+            store_root: &site.store_root.display().to_string(),
+        }),
+    )
+}
+
+/// The rung a bars request names, defaulting to the one-minute grid.
+///
+/// # Why a default at all, and why THIS one
+///
+/// `?timeframe=` is absent on every link written before the store held a
+/// second rung, so refusing an absent value would break bookmarks. One minute
+/// is the rung the store has always held and the only one those callers could
+/// have meant.
+///
+/// A value that is PRESENT and unknown is refused BY NAME rather than
+/// defaulted: `?timeframe=1hour` is a question about a rung this store has no
+/// directory for, and answering it with one-minute bars would file the answer
+/// under a length nobody asked for. `CLAUDE.md` §4.
+///
+/// # Errors
+///
+/// The named rung has no directory in this store.
+///
+/// One comparison per known rung — two — so this is constant work.
+fn timeframe_param(query: &str) -> Result<store::path::Timeframe, String> {
+    let raw = param(query, "timeframe");
+    if raw.is_empty() {
+        return Ok(store::path::Timeframe::MINUTE_1);
+    }
+    // THE STORE'S OWN LIST, NOT A SECOND COPY.
+    //
+    // This named `MINUTE_1` and `DAY_1` directly, under a comment claiming the
+    // store had no such list. It does: `Timeframe::KNOWN` (store/src/path.rs),
+    // which `Timeframe::from_secs` already walks. Naming them here made exactly
+    // the second list the comment said it was avoiding — and a third rung added
+    // to `KNOWN` would have been silently unreachable from the wire.
+    store::path::Timeframe::KNOWN
+        .iter()
+        .copied()
+        .find(|t| t.as_str() == raw)
+        .ok_or_else(|| {
+            format!(
+                "{raw:?} is not a rung this store has a directory for. It holds {}.",
+                store::path::Timeframe::KNOWN
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )
+        })
+}
+
 /// zero and writing 0 for "not sent" is a lie in the data.
 async fn bars_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
@@ -983,12 +1103,17 @@ async fn bars_json(
     else {
         return refuse(format!("{raw_month:?} is not a YYYY-MM month"));
     };
+    let timeframe = match timeframe_param(query) {
+        Ok(tf) => tf,
+        Err(why) => return refuse(why),
+    };
     let file = match bars::open(
         &site.store_root,
         vendor,
         &param(query, "exchange"),
         &param(query, "segment"),
         &param(query, "symbol"),
+        timeframe,
         month,
     ) {
         Ok(file) => file,
@@ -1072,6 +1197,338 @@ pub(crate) fn census_now(
     (censuses, entries)
 }
 
+/// Why one percentage is not a number.
+///
+/// **Five reasons, five different sentences on screen.** A single `null`
+/// covering all of them would collapse five distinct facts into one, which is
+/// the fallback that hides a failure `CLAUDE.md` §4 bans — "degrade loudly and
+/// name the reason". Each variant's [`Unknown::code`] is what goes on the wire
+/// and what the page keys its prose off; the page never invents a sentence for
+/// a code it does not know.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unknown {
+    /// The instrument can be split, bonused or otherwise re-based, and no
+    /// threshold that would detect it is sourced anywhere in this repository.
+    ///
+    /// **This is checked FIRST, ahead of whether a close was even recorded.**
+    /// It is a standing property of the instrument, not of today's data: an
+    /// operator told "no close recorded" would re-ingest the month and expect a
+    /// number, and for an equity none would ever arrive. The permanent reason
+    /// outranks the temporary one.
+    CorporateActionUnverified,
+    /// The census holds the month and no close was ever read for it — a
+    /// version-1 entry, or a version-2 one written before the file was priced.
+    /// `pull::manifest::Closes::UNKNOWN`, D-0067.
+    NotRecorded,
+    /// The previous month is not in this census. The first month an instrument
+    /// holds is the ordinary case; a gap in the middle is the other one.
+    NoEarlierMonth,
+    /// The base of the ratio is zero paisa. `CLAUDE.md` §7 makes zero a real
+    /// price, and `docs/02-store-format.md` §3 makes an all-zero record a legal
+    /// flat bar, so this arm is reachable rather than defensive — and a ratio
+    /// with no base is undefined, never `0`, never `∞`.
+    BaseNotPositive,
+    /// The move times 10,000 leaves `i64`. Refused rather than wrapped.
+    Overflow,
+}
+
+impl Unknown {
+    /// The wire code. `snake_case`, stable, and the page's key.
+    const fn code(self) -> &'static str {
+        match self {
+            Self::CorporateActionUnverified => "corporate_action_unverified",
+            Self::NotRecorded => "not_recorded",
+            Self::NoEarlierMonth => "no_earlier_month",
+            Self::BaseNotPositive => "base_not_positive",
+            Self::Overflow => "overflow",
+        }
+    }
+}
+
+/// Whether a corporate action can re-base this segment's prices.
+///
+/// `docs/05-decisions.md` D-0018, in its own words: **"Indices never split;
+/// equities do."** An index is a computed level, so a constituent's split moves
+/// the divisor and not the level. Cash equities split, bonus and consolidate.
+/// F&O contracts are written on those equities and NSE adjusts the contract
+/// when the underlying is adjusted, so a derivative inherits the hazard.
+///
+/// The match is exhaustive on purpose: a fourth segment fails to compile here
+/// rather than defaulting into whichever answer was written last.
+const fn can_be_rebased(segment: brutex_core::instrument::Segment) -> bool {
+    match segment {
+        brutex_core::instrument::Segment::Index => false,
+        brutex_core::instrument::Segment::Cash | brutex_core::instrument::Segment::Fno => true,
+    }
+}
+
+/// Basis points between two paisa closes, in integer arithmetic throughout.
+///
+/// `CLAUDE.md` §7: prices are paisa integers, never a float. A ratio derived
+/// from money is the same arithmetic and gets the same treatment —
+/// `clippy::float_arithmetic` is a workspace deny (D-0061) and no `f64` appears
+/// at any step here. **A month that moved 1.25% is `125`.**
+///
+/// # Rounding: half AWAY FROM ZERO, not half up
+///
+/// §7's half-up rule is about snapping a *price* to the tick grid at the *write
+/// boundary*. This is neither a price nor a write. Half-up would render −0.5 bp
+/// as `0` and +0.5 bp as `1`, so a gain and its mirror-image loss would print
+/// different magnitudes — visible the moment the column is sorted. Away from
+/// zero is symmetric. D-0069.
+///
+/// # Why `i64` and not `i32`
+///
+/// `i32` is unsafe and the counterexample uses only values the store can hold:
+/// a base of `1` paisa and a last close of ₹2,147.50 — an ordinary NSE share
+/// price — gives 2,147,490,000 bp, past `i32::MAX`. Proven by
+/// `api::server::basis_points_do_not_fit_i32_and_an_ordinary_price_proves_it`.
+///
+/// # Preconditions, carried by the type rather than by a comment
+///
+/// Both arguments come from `pull::manifest::Closes::paisa`, and
+/// `Closes::known` refuses every negative, so both are in `0..=i64::MAX`. That
+/// is what makes the subtraction below unable to overflow, and it is why there
+/// is no `checked_sub` arm no input could ever enter.
+///
+/// # Errors
+///
+/// [`Unknown::BaseNotPositive`] when the base is zero, [`Unknown::Overflow`]
+/// when the scaled move leaves `i64`.
+fn basis_points(first_paisa: i64, last_paisa: i64) -> Result<i64, Unknown> {
+    // A RATIO NEEDS A BASE, AND ZERO IS NOT ONE. Not rendered as 0.00%, not as
+    // infinity, not as an empty cell that means five other things.
+    if first_paisa <= 0 {
+        return Err(Unknown::BaseNotPositive);
+    }
+    // Both operands are in `0..=i64::MAX`, so this is in `-i64::MAX ..=
+    // i64::MAX` and cannot overflow. See the precondition above.
+    let delta = last_paisa - first_paisa;
+    let Some(scaled) = delta.checked_mul(10_000) else {
+        return Err(Unknown::Overflow);
+    };
+    // `first_paisa >= 1`, so neither the divide-by-zero nor the `i64::MIN / -1`
+    // case exists. Rust truncates toward zero, so the remainder carries the
+    // sign of `scaled` and the correction below is away from zero.
+    let whole = scaled / first_paisa;
+    let rest = scaled % first_paisa;
+    let (step, magnitude) = if rest >= 0 { (1, rest) } else { (-1, -rest) };
+    // `magnitude * 2 >= first_paisa`, written as a subtraction because
+    // `magnitude < first_paisa` makes `first_paisa - magnitude` safe and the
+    // doubling would not be.
+    if magnitude >= first_paisa - magnitude {
+        // Rounding at all requires `first_paisa >= 2` — at a base of 1 the
+        // remainder is always 0 — so `|whole| <= i64::MAX / 2` here and the
+        // step cannot overflow.
+        return Ok(whole + step);
+    }
+    Ok(whole)
+}
+
+/// One month's own percentage change: its first close to its last close.
+///
+/// # Why intra-month and not month-over-month
+///
+/// A row of this table is an instrument-**month**, so "previous % change" is
+/// the previous month's *same statistic*, not the previous bar's. Given that,
+/// the month's own change is a property of the row itself: it needs no
+/// neighbour, it is defined for an instrument's first held month, and the
+/// "previous" column costs one probe instead of two. D-0069 records the
+/// alternative and what it was measured to cost.
+///
+/// # `closes` is an `Option`, and that is what makes both columns one function
+///
+/// `None` is "the census does not hold that month" — reachable only from the
+/// **previous**-month call site, because the current month is in hand by the
+/// time this is asked about it. Passing the census's answer rather than a
+/// pre-decided verdict is what puts the corporate-action gate ahead of the
+/// missing-neighbour case in *both* columns. It has to be: an equity told
+/// `no_earlier_month` invites an operator to ingest the previous month and wait
+/// for a number that a sourced threshold, not a pull, is what unlocks.
+///
+/// # Errors
+///
+/// [`Unknown::CorporateActionUnverified`] for anything that can be re-based,
+/// [`Unknown::NoEarlierMonth`] when the census holds no such month,
+/// [`Unknown::NotRecorded`] when it holds the month and no close, and whatever
+/// [`basis_points`] refuses.
+fn month_change(
+    segment: brutex_core::instrument::Segment,
+    closes: Option<pull::manifest::Closes>,
+) -> Result<i64, Unknown> {
+    // FIRST, AND UNCONDITIONALLY. `docs/05-decisions.md` D-0018 decided the
+    // behaviour — refuse the window loudly, never back-adjust from a source no
+    // vendor has been verified to supply — and grep finds zero implementation
+    // of the detector in `crates/`. No threshold is sourced in this repository,
+    // so an equity's percentage is refused rather than printed with a caveat
+    // beside it: the number travels and the caveat does not.
+    if can_be_rebased(segment) {
+        return Err(Unknown::CorporateActionUnverified);
+    }
+    let Some(closes) = closes else {
+        return Err(Unknown::NoEarlierMonth);
+    };
+    let Some((first, last)) = closes.paisa() else {
+        return Err(Unknown::NotRecorded);
+    };
+    basis_points(first, last)
+}
+
+/// The month before this one, or `None` at the first month the store addresses.
+///
+/// Arithmetic on the calendar, never a loop over it, and there is deliberately
+/// **no** `next`: `CLAUDE.md` §3 rule 7 says a computation at month N may read
+/// months 0..N, and the cheapest enforcement is that the function that walks
+/// forward does not exist.
+fn month_before(month: store::path::YearMonth) -> Option<store::path::YearMonth> {
+    let (year, ordinal) = if month.month() > 1 {
+        (month.year(), month.month() - 1)
+    } else {
+        // `YearMonth::new` refuses a year below 1970, and that refusal is this
+        // function's `None`: 1970-01 has no month before it that the store can
+        // name. `month.year()` is at least 1970, so the subtraction is safe.
+        (month.year() - 1, 12)
+    };
+    store::path::YearMonth::new(year, ordinal).ok()
+}
+
+/// The census row for one key — the counters and the closes in **one probe**.
+///
+/// `pull::manifest::Manifest::held` is one hash probe into a table the load
+/// walk built once, so this reads `rows` and both closes for the cost the old
+/// `rows_for` paid for `rows` alone. Proven by
+/// `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file`.
+fn held_row(
+    census: &census::VendorCensus,
+    key: &pull::manifest::EntryKey,
+) -> Option<pull::manifest::Held> {
+    match census.state {
+        census::Census::Held { ref manifest } => manifest.held(key),
+        census::Census::Absent | census::Census::Unreadable { .. } => None,
+    }
+}
+
+/// One row of `/store.json`, appended to `out`.
+///
+/// Written as `"chg_bps": <n>, "chg_why": null` **or** `"chg_bps": null,
+/// "chg_why": "<code>"` — both keys always present, exactly one of them a
+/// value. A key that is sometimes absent makes "unknown" and "the field does
+/// not exist in this build" the same thing on the wire, and the browser cannot
+/// tell them apart.
+fn write_change(out: &mut String, key: &str, change: Result<i64, Unknown>) {
+    match change {
+        Ok(bps) => {
+            let _ = write!(out, r#","{key}_bps":{bps},"{key}_why":null"#);
+        }
+        Err(why) => {
+            let _ = write!(
+                out,
+                r#","{key}_bps":null,"{key}_why":{}"#,
+                render::json_string(why.code())
+            );
+        }
+    }
+}
+
+/// The body of `/store.json` for one feed.
+///
+/// Split out of the handler so every arm is reachable from a test without a
+/// socket — the same argument this module's own header makes about `main.rs`.
+///
+/// # Cost
+///
+/// **Two hash probes per row and no syscall**: this month's row, and the same
+/// series at [`month_before`]. Crossing a month crosses a manifest *entry*, not
+/// a file — no `open`, no `stat`, no `pread`, because the census is already
+/// resident. Proven by
+/// `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file`.
+///
+/// What is **not** constant is the caller: `census_now` re-reads and re-walks
+/// every manifest per request, which is O(entries) and was before this existed.
+/// `docs/06-limits.md` §41 records it rather than this comment hiding it.
+fn store_body(
+    censuses: &[census::VendorCensus],
+    entries: &[(census::Series, store::path::YearMonth)],
+    feed: Vendor,
+) -> String {
+    // ONE LOOKUP FOR THE WHOLE RESPONSE, not one per row. `Vendor::ALL` is four
+    // long so the old per-row `find` was cheap, but it was O(vendors) inside an
+    // O(entries) loop for a value that cannot change between iterations — and
+    // a feed with no census at all is now one comparison rather than one per
+    // entry that could never match.
+    let Some(census) = censuses.iter().find(|c| c.vendor == feed) else {
+        return String::from("[]");
+    };
+    let mut out = String::from("[");
+    let mut n = 0usize;
+    for (series, month) in entries {
+        let Some(row) = held_row(census, &series.at(*month)) else {
+            continue;
+        };
+        if n > 0 {
+            out.push(',');
+        }
+        n += 1;
+        // THE ROW'S OWN RUNG, NOT A LITERAL.
+        //
+        // This wrote `"timeframe":"1min"` on every row, unconditionally, while
+        // `Series` has carried the real `Timeframe` since D-0055 and the store
+        // has filed under `1day/` and `1min/` accordingly. The consequences all
+        // landed on the reader, and all of them looked like data faults:
+        //
+        //   * `/db`'s TF column was a sort control over one repeated value —
+        //     20,516 identical cells that could never differ.
+        //   * `/db`'s completeness divided DAILY bars by a 375-bar MINUTE
+        //     session, so a complete 1day month read as ~99.7% missing.
+        //   * the Markets chart asked for `…/1min/2021-08.bin` for an
+        //     instrument stored under `1day/`, and answered "That read failed"
+        //     about a file that was never supposed to exist.
+        //
+        // The store was right the whole time. `Timeframe::as_str` is the SAME
+        // word the path segment uses — `1min`, `1day` — so a reader that keys
+        // off this string and a reader that keys off the directory cannot
+        // disagree again.
+        // THE WINDOW THIS MONTH ACTUALLY COVERS, not just how many bars it
+        // holds. The census has carried `first_ts_micros` and `last_ts_micros`
+        // per entry since it was written; nothing put them on the wire, so a
+        // reader could say "21 bars" and not "09 Aug 2021 to 31 Aug 2021".
+        // Deriving them from the month name would be a guess — a month holding
+        // one bar covers one day, and which day is a fact only the entry has.
+        //
+        // Microseconds, unconverted. The browser owns the IST rendering, the
+        // same way it owns the decimal point on basis points: one encoding on
+        // the wire, one place that formats it. `CLAUDE.md` §7's reasoning
+        // applied to time rather than money.
+        let _ = write!(
+            out,
+            r#"{{"instrument":{},"month":{},"timeframe":{},"rows":{},"first_ts":{},"last_ts":{}"#,
+            render::json_string(&series.to_string()),
+            render::json_string(&month.to_string()),
+            render::json_string(series.timeframe.as_str()),
+            row.entry.rows,
+            row.entry.first_ts_micros,
+            row.entry.last_ts_micros
+        );
+        write_change(
+            &mut out,
+            "chg",
+            month_change(series.segment, Some(row.closes)),
+        );
+        // THE PREVIOUS MONTH IS A PROBE, NOT A SCAN, AND NOT AN ASSUMPTION. A
+        // month the census does not hold is `no_earlier_month` — never zero,
+        // and never this month's number repeated.
+        let before = month_before(*month).and_then(|at| held_row(census, &series.at(at)));
+        write_change(
+            &mut out,
+            "prev_chg",
+            month_change(series.segment, before.map(|held| held.closes)),
+        );
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
 /// What the store holds for ONE feed, as JSON, for the DB page.
 ///
 /// `?feed=<wire>` — and one feed only. No response from this endpoint ever
@@ -1082,6 +1539,24 @@ pub(crate) fn census_now(
 /// display exactly as it does for prices. `CLAUDE.md` §7 bans the float for
 /// money; a ratio derived from money is the same arithmetic and gets the same
 /// treatment.
+///
+/// **That paragraph was a promise nothing kept.** It described this shape while
+/// the response carried four fields and no price at all; D-0067 put the two
+/// closes in the census and D-0069 made the arithmetic real. Four fields carry
+/// it now, and every one of them is total:
+///
+/// | Field | Meaning |
+/// |---|---|
+/// | `chg_bps` | this month's first close to its last close, in basis points — `125` is +1.25% — or `null` |
+/// | `chg_why` | `null` when `chg_bps` is a number, otherwise the reason code it is not |
+/// | `prev_chg_bps` | the **previous month's** same statistic, or `null` |
+/// | `prev_chg_why` | the reason `prev_chg_bps` is `null`, or `null` |
+///
+/// Exactly one of each pair is non-`null`, always, on every row. An unknown
+/// percentage is `null` and a named reason — it is **never** `0`, because zero
+/// is a real month that closed where it opened. The five codes are
+/// [`Unknown::code`]: `corporate_action_unverified`, `not_recorded`,
+/// `no_earlier_month`, `base_not_positive`, `overflow`.
 async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -1093,35 +1568,12 @@ async fn store_json(
     // FRESH, NOT THE STARTUP SNAPSHOT. See `census_now`.
     let (censuses, entries) = census_now(&site);
 
-    let mut out = String::from("[");
-    let mut n = 0usize;
-    for (series, month) in &entries {
-        let Some(rows) = censuses
-            .iter()
-            .find(|c| c.vendor == feed)
-            .and_then(|c| c.rows_for(&series.at(*month)))
-        else {
-            continue;
-        };
-        if n > 0 {
-            out.push(',');
-        }
-        n += 1;
-        let _ = write!(
-            out,
-            r#"{{"instrument":{},"month":{},"timeframe":"1m","rows":{}}}"#,
-            render::json_string(&series.to_string()),
-            render::json_string(&month.to_string()),
-            rows
-        );
-    }
-    out.push(']');
     (
         [(
             axum::http::header::CONTENT_TYPE,
             "application/json; charset=utf-8",
         )],
-        out,
+        store_body(&censuses, &entries, feed),
     )
 }
 
@@ -1341,7 +1793,10 @@ pub struct Site {
     ///
     /// Counted once, here, rather than folded over the universe per request:
     /// the form shows a real number and the page still costs O(rows shown).
-    pub targets: [usize; 3],
+    /// Sized from the enum, not from a literal. It was `[usize; 3]` and D-0105
+    /// appended four targets; a hand-written length is a second place the
+    /// target count lives, and the shorter of the two silently drops the tail.
+    pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
     pub store_root: PathBuf,
@@ -1379,13 +1834,22 @@ impl Site {
     /// Assembles the derived counts once, from parts a caller already holds.
     #[must_use]
     pub fn new(read: Read, censuses: Vec<census::VendorCensus>, store_root: PathBuf) -> Self {
-        let mut targets = [0usize; 3];
+        let mut targets = [0usize; ingest::SpotTarget::ALL.len()];
         for (key, entry) in &read.merged.by_key {
             for (slot, target) in ingest::SpotTarget::ALL.into_iter().enumerate() {
-                let counted = match target {
-                    ingest::SpotTarget::Swept => key.is_sweepable(),
-                    _ => entry.universe.contains(target.universe()),
-                };
+                // THE TARGET'S OWN PREDICATE, not a second copy of it.
+                //
+                // This was `match target { Swept => key.is_sweepable(), _ =>
+                // entry.universe.contains(target.universe()) }` — a CATCH-ALL,
+                // and the one site the compiler could not have pointed at when
+                // D-0105 appended four variants. It happened to be right for
+                // them, which is the problem: a `_` arm decides for every
+                // variant that will ever exist, including the ones whose
+                // membership is not a single bit test. `SpotTarget::names` is
+                // what `broker_run` filters the run by, so counting with
+                // anything else is how a form comes to show a number no run
+                // will match — the exact defect `names` was added to remove.
+                let counted = target.names(key, entry.universe);
                 if counted && let Some(n) = targets.get_mut(slot) {
                     *n += 1;
                 }
@@ -1431,9 +1895,12 @@ impl Site {
             broker: Broker::Refused,
             targets,
             store_root,
-            // NOT STARTED HERE. This is the controls and the status only; the
-            // task that acts on them is spawned by `run_in`.
-            autopilot: autopilot::Control::new(),
+            // NOT STARTED HERE, AND PAUSED UNLESS ASKED. This is the controls
+            // and the status only; the task that acts on them is spawned by
+            // `run_in`. `Control::serving` reads `BRUTEX_AUTOPILOT` and leaves
+            // the flag set unless it says `run`, so starting this binary to
+            // look at a page does not thereby contact a vendor.
+            autopilot: autopilot::Control::serving(),
             loaded_at: ingest::epoch_secs(std::time::SystemTime::now()),
         }
     }
@@ -1933,6 +2400,15 @@ async fn spot_answer(
 fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
+        // NOT ON THE WIRE ON THIS PATH. An archive addresses a FILE and a
+        // landing record addresses bars already in hand, so no request
+        // parameter is built from this and no vendor ever sees it. Stated
+        // anyway because `BarRequest` has no `Default` — a field that can be
+        // omitted is a field a later caller omits by accident.
+        listing: pull::vendor::Listing::Equity,
+        // THE TEMPLATE'S WINDOW, AND EVERY BODY OVERRIDES IT BELOW. Landing a
+        // body against this value is the defect the loop's comment names; it
+        // stands here only because `BarRequest` has no `Default`.
         window: landed.window,
         // THE OPERATOR'S RUNG, NOT A LITERAL — and it is the one field that
         // decides three things at once: which directory the bars land in, how
@@ -1973,7 +2449,28 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         segment: landed.segment,
     };
     let mut done = pull::ingest::Ingested::default();
-    for body in &landed.bodies {
+    for (chunk, body) in &landed.bodies {
+        // EACH BODY IS FILTERED AGAINST THE WINDOW IT WAS FETCHED FOR.
+        //
+        // One `BarRequest` was built above and reused for every body, carrying
+        // the operator's whole multi-year range — so `pull::fetch::land`'s
+        // `request.window.verdict(..)` compared a one-month answer against a
+        // five-year window and `BeforeWindow`/`AfterWindow` were unreachable
+        // for every row of every chunk. The census that exists to name a row
+        // the vendor should not have sent could not fire, and a run that lost
+        // 80 of 122 members reported `0 rows dropped`.
+        //
+        // Rebuilt per body rather than mutated: `Plan` is `Copy` and holds
+        // `&BarRequest`, so the borrow must outlive nothing but this iteration.
+        let request = pull::fetch::BarRequest {
+            window: *chunk,
+            instrument_id: request.instrument_id.clone(),
+            ..request
+        };
+        let plan = pull::ingest::Plan {
+            request: &request,
+            ..plan
+        };
         done.absorb(pull::ingest::from_window(
             body,
             &landed.instrument,
@@ -2129,6 +2626,91 @@ pub(crate) struct BrokerRun {
     pub took: u64,
 }
 
+/// The run's **resolved** parameters, at `Info`, before the first request.
+///
+/// The form says `2020-01-01` and the vendor's history floor clamps it; the
+/// form says "swept indices" and the target filter decides what that resolved
+/// to. An operator reading a log needs the second number in each pair, and
+/// neither was written anywhere: the ingest page shows a figure it labels an
+/// **estimate**, and the page is gone when the process restarts.
+///
+/// The result is discarded for the reason `pull::ingest`'s `note_*` helpers
+/// give — a level-filtered event legitimately reaches no file.
+fn note_run_started(asked: &ingest::SpotRequest, instruments: usize) {
+    // STAMP EVERY LATER EVENT WITH THIS RUN, before the first of them.
+    //
+    // A log file spanning three backfills is three interleaved stories, and an
+    // operator who hands the folder to somebody who was not here needs to take
+    // one. The id is the start instant in milliseconds — monotonic on any sane
+    // clock, unique unless two runs begin in the same millisecond, and readable
+    // as a timestamp by a human who has nothing else to go on.
+    //
+    // Set on the SINK rather than threaded through every note helper, for the
+    // reason `emit` reads a global at all: a parameter on every function
+    // between here and a leaf is one somebody forgets, and the site they forget
+    // is the one being diagnosed. Cleared by `note_run_finished`.
+    if let Some(sink) = telemetry::global() {
+        sink.set_run(telemetry::now_millis().unsigned_abs());
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.run", "started")
+            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+            .with("target", telemetry::Value::Str(asked.target.label()))
+            .with("rung", telemetry::Value::Str(asked.granularity.dir()))
+            .with(
+                "from",
+                telemetry::Value::Str(&asked.window.from().to_string()),
+            )
+            .with("to", telemetry::Value::Str(&asked.window.to().to_string()))
+            .with("instruments", telemetry::Value::Uint(instruments as u64)),
+    );
+}
+
+/// The run's own verdict, on the one surface that survives a restart.
+///
+/// `Warn` when the books do not balance, because that is the sentence the
+/// receipt puts in red and the log had no equivalent of. Every figure is the
+/// one the receipt renders, so the two can be compared rather than reconciled.
+fn note_run_finished(out: &BrokerRun, balanced: bool) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if balanced && out.total.failures.is_empty() {
+                telemetry::Level::Info
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.run",
+            if balanced {
+                "finished"
+            } else {
+                "finished — BOOKS DO NOT BALANCE"
+            },
+        )
+        .with("attempted", telemetry::Value::Uint(out.attempted as u64))
+        .with("reached", telemetry::Value::Uint(out.reached as u64))
+        .with("members", telemetry::Value::Uint(out.total.members as u64))
+        .with(
+            "rows_read",
+            telemetry::Value::Uint(out.total.rows_read as u64),
+        )
+        .with(
+            "bars_stored",
+            telemetry::Value::Uint(out.total.bars_stored as u64),
+        )
+        .with(
+            "failed",
+            telemetry::Value::Uint(out.total.failures.len() as u64),
+        )
+        .with("took_micros", telemetry::Value::Uint(out.took)),
+    );
+    // CLEARED AFTER THE LAST EVENT OF THE RUN, so a served request that arrives
+    // between backfills is not filed under the one that just ended. An event
+    // outside a run carries no run, and says so by omitting the key.
+    if let Some(sink) = telemetry::global() {
+        sink.set_run(0);
+    }
+}
+
 /// The universe, one instrument at a time — the whole of what a spot pull does.
 ///
 /// # Why this is its own function
@@ -2144,6 +2726,55 @@ pub(crate) struct BrokerRun {
 ///
 /// O(universe) requests, which is the work itself. The stop check is one
 /// relaxed atomic load per instrument.
+/// One member that reached the vendor and still did not land: logged, then
+/// recorded against the run.
+///
+/// # Why this exists at all
+///
+/// Every `telemetry::emit` site in this workspace sat on a **refusal** path, so
+/// a member that reached the vendor and died at the store took the silent arm.
+/// The only record was [`crate::autopilot`]'s `fail`, an in-memory ring bounded
+/// by `MAX_FAILURES` that dies with the process. Measured: a run that refused
+/// 10 of 16 members in 18 seconds wrote **zero** log lines — both lines in
+/// `logs/events.ndjson` were `api.serve listening` — and after a restart
+/// nothing anywhere named which months had failed. The cause was reconstructed
+/// by decoding bar files by hand, which is not a diagnostic procedure.
+///
+/// # Why it is not per row
+///
+/// One event per failed **member**, and the member count is bounded by the
+/// chunk count. A per-row event on a one-minute backfill would be millions and
+/// would make the rolling sink the thing deciding what the operator gets to
+/// know. See D-0072.
+///
+/// # Why it lives here and not in `crates/pull`
+///
+/// `crates/pull` declares no telemetry dependency and does not gain one: that
+/// would add an edge `CLAUDE.md` §5's graph does not carry. The event is
+/// emitted at the `api` layer, beside the two that were already here.
+fn note_member_failure(
+    failure: &pull::ingest::Failure,
+    month: &str,
+    asked: &ingest::SpotRequest,
+    site: &Site,
+) {
+    let noted = telemetry::emit(
+        &telemetry::Event::error("pull.spot", "member did not land")
+            .with("instrument", telemetry::Value::Str(&failure.instrument))
+            .with("month", telemetry::Value::Str(month))
+            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+            .with("rung", telemetry::Value::Str(asked.granularity.dir()))
+            .with("why", telemetry::Value::Str(&failure.why)),
+    );
+    debug_assert!(
+        noted.is_written() || telemetry::global().is_none(),
+        "a member that reached the vendor and did not land is the failure this \
+         event exists to name"
+    );
+    site.autopilot
+        .fail(&failure.instrument, month, &failure.why);
+}
+
 pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
@@ -2174,7 +2805,16 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
         .merged
         .by_key
         .iter()
-        .filter(|(_, entry)| crate::catalog::tracked(entry.universe))
+        // TRACKED **AND** NAMED BY THE TARGET THE OPERATOR CHOSE.
+        //
+        // `tracked` alone is the whole 765-name surface, so every run swept
+        // everything and the three-way control on the form decided nothing but
+        // the label on the receipt. `Swept indices` said 2, and 360ONE was
+        // request 1 of 785. Both predicates now bind: `tracked` is what the
+        // engine may hold, `names` is what this request asked for.
+        .filter(|(key, entry)| {
+            crate::catalog::tracked(entry.universe) && asked.target.names(key, entry.universe)
+        })
         .map(|(key, _)| *key)
         .collect();
     // Sorted so a run is reproducible: `HashMap` order is not stable between
@@ -2182,6 +2822,7 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // every restart.
     targets.sort_unstable_by_key(|k| k.underlying);
 
+    note_run_started(asked, targets.len());
     let mut out = BrokerRun {
         attempted: targets.len(),
         ..BrokerRun::default()
@@ -2232,6 +2873,34 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
         match broker_window(asked, instrument, site).await {
             Err(why) => {
                 let why = format!("{}: {why}", instrument.underlying);
+                // THE WHOLE REASON, WHERE IT IS NOT TRUNCATED.
+                //
+                // The audit journal is a FIXED 256-byte stride, so a refusal
+                // longer than the record is cut off — and these are: the
+                // journal reports `note_bytes: 635` beside a note that stops
+                // mid-sentence, exactly where the vendor's own words begin.
+                // The operator is then told a request failed and not why, which
+                // is the state this whole session was spent diagnosing by hand.
+                //
+                // The rolling log has no such stride, so the reason lands whole
+                // here and the journal keeps its constant-width record. Two
+                // surfaces, each doing what its format can actually do.
+                let emitted = telemetry::emit(
+                    &telemetry::Event::error("pull.spot", "instrument refused")
+                        .with(
+                            "instrument",
+                            telemetry::Value::Str(&instrument.underlying.to_string()),
+                        )
+                        .with("month", telemetry::Value::Str(&month))
+                        .with("feed", telemetry::Value::Str(asked.feed.wire()))
+                        .with("index", telemetry::Value::Uint(index as u64 + 1))
+                        .with("of", telemetry::Value::Uint(targets.len() as u64))
+                        .with("why", telemetry::Value::Str(&why)),
+                );
+                debug_assert!(
+                    emitted.is_written() || telemetry::global().is_none(),
+                    "a refusal that cannot be logged is the defect this event exists to remove"
+                );
                 site.autopilot
                     .fail(&instrument.underlying.to_string(), &month, &why);
                 out.refused.push(why);
@@ -2245,8 +2914,7 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
                 // socket worked and the store did not. Both belong on the page;
                 // only naming the first would hide the disk.
                 for failure in &landed_one.failures {
-                    site.autopilot
-                        .fail(&failure.instrument, &month, &failure.why);
+                    note_member_failure(failure, &month, asked, site);
                 }
                 out.total.absorb(landed_one);
             }
@@ -2257,6 +2925,8 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // process lived.
     site.autopilot.publish(|status| status.now = None);
     out.took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let balanced = out.total.balances();
+    note_run_finished(&out, balanced);
     out
 }
 
@@ -2293,7 +2963,17 @@ struct BrokerWindow {
     /// than that cap is several requests and several answers. It was one field
     /// and one request, which is why a multi-year range was handed whole to a
     /// vendor that would not serve it.
-    bodies: Vec<pull::fetch::RawWindow>,
+    ///
+    /// EACH BODY CARRIES THE WINDOW IT WAS FETCHED FOR. It was a bare
+    /// `Vec<RawWindow>`, and `RawWindow` is `{ rows }` — so the chunk boundary
+    /// `fetch_chunks` had just computed died at that return, and `land_one` had
+    /// nothing left to filter a body against but the operator's whole range.
+    /// `Window::verdict` could then never answer `BeforeWindow` or
+    /// `AfterWindow` for any row of any chunk, which is why a run that lost 80
+    /// of 122 members reported `0 rows dropped` from a counter that could not
+    /// fire. A counter that cannot be non-zero reporting zero is the fallback
+    /// that hides a failure `CLAUDE.md` §4 bans.
+    bodies: Vec<(pull::session::Window, pull::fetch::RawWindow)>,
     /// Which instrument they are.
     instrument: String,
     /// The URL they came from, for the receipt.
@@ -2548,9 +3228,12 @@ async fn fetch_chunks(
     site: &Site,
     source: &pull::http::HttpSource,
     instrument_id: &str,
+    // BESIDE THE ID, because they are read from the same master row and the
+    // vendor requires both. See the `listing` field on the request below.
+    listing: pull::vendor::Listing,
     // BY REFERENCE: `HttpSpec` is 280 bytes and only one field is read.
     spec: &pull::vendor::HttpSpec,
-) -> Result<Vec<pull::fetch::RawWindow>, String> {
+) -> Result<Vec<(pull::session::Window, pull::fetch::RawWindow)>, String> {
     // CLAMPED TO THE FEED'S HISTORY FLOOR BEFORE ANYTHING IS SPLIT.
     //
     // Asking below the floor is not an error the vendor reports usefully: it
@@ -2584,6 +3267,13 @@ async fn fetch_chunks(
 
         let request = pull::fetch::BarRequest {
             instrument_id: instrument_id.to_owned(),
+            // THE CLASS TRAVELS WITH THE ID, FROM THE SAME MASTER ROW.
+            //
+            // Separating them is precisely how 750 NIFTY-Total-Market equities
+            // came to be asked for inside Dhan's INDEX segment: the id was
+            // resolved per instrument and the segment was a fixed word. Both
+            // are properties of the one row, so both are read from it.
+            listing,
             window: *chunk,
             // The rung goes ON THE WIRE for a feed that spells one, and it is
             // the same rung the answer is filed under. A feed with no recorded
@@ -2591,10 +3281,38 @@ async fn fetch_chunks(
             // `pull::fetch::FetchError::RungNotSpellable`.
             granularity: asked.granularity,
         };
-        bodies.push(
+        bodies.push((
+            // THE CHUNK'S OWN WINDOW, travelling with the answer it belongs to
+            // rather than being recomputed — or, as it was, discarded.
+            *chunk,
             with_retry(source, &request, asked.feed, site)
                 .await
                 .map_err(|why| {
+                    // THE VENDOR'S OWN WORDS, IN THEIR OWN FIELD.
+                    //
+                    // Logging the wrapped string below loses them: telemetry
+                    // bounds a string value at MAX_STR_VALUE_BYTES (128) to keep
+                    // an event O(1) in space, and the prose is longer than that
+                    // before `{why}` is even reached — so the operator got a
+                    // sentence about chunk counts and nothing about the failure.
+                    //
+                    // Emitted here, unwrapped, the reason is the whole field and
+                    // fits. The bound stays where it is; what changes is that
+                    // the field carries the answer rather than the preamble.
+                    let noted = telemetry::emit(
+                        &telemetry::Event::error("pull.http", "vendor refused a window")
+                            .with("instrument_id", telemetry::Value::Str(instrument_id))
+                            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+                            .with("chunk", telemetry::Value::Uint(nth as u64 + 1))
+                            .with("of", telemetry::Value::Uint(chunks.len() as u64))
+                            .with("from", telemetry::Value::Str(&chunk.from().to_string()))
+                            .with("to", telemetry::Value::Str(&chunk.to().to_string()))
+                            .with("vendor_said", telemetry::Value::Str(&why)),
+                    );
+                    debug_assert!(
+                        noted.is_written() || telemetry::global().is_none(),
+                        "the vendor's reason is the one field this event exists to carry"
+                    );
                     format!(
                         "the broker did not answer with a window. This was \
                          request {} of {}, covering {}..={} — the chunks before \
@@ -2607,6 +3325,28 @@ async fn fetch_chunks(
                         chunk.to()
                     )
                 })?,
+        ));
+        // ONE LINE PER REQUEST THAT ACTUALLY WENT OUT, at `Trace`.
+        //
+        // The refusal path has been logged since `pull.http` existed; the
+        // SUCCESS path never was, so a run that was merely slow and a run that
+        // was silently returning nothing looked identical from the log. The
+        // row count is what tells those two apart.
+        //
+        // `Trace` and not `Debug`: a one-minute backfill is ~62,600 chunks, and
+        // members are already at `Debug`. An operator who wants the wire turns
+        // the floor all the way down for one run and accepts that the 64 MiB
+        // window holds less of it.
+        let rows = bodies.last().map_or(0, |(_, body)| body.rows.len());
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::trace("pull.chunk", "answered")
+                .with("instrument_id", telemetry::Value::Str(instrument_id))
+                .with("feed", telemetry::Value::Str(asked.feed.wire()))
+                .with("chunk", telemetry::Value::Uint(nth as u64 + 1))
+                .with("of", telemetry::Value::Uint(chunks.len() as u64))
+                .with("from", telemetry::Value::Str(&chunk.from().to_string()))
+                .with("to", telemetry::Value::Str(&chunk.to().to_string()))
+                .with("rows", telemetry::Value::Uint(rows as u64)),
         );
     }
     Ok(bodies)
@@ -2641,6 +3381,42 @@ const THROTTLE_ATTEMPTS: u32 = 6;
 /// 250 ms, then 1 s. Two waits, bounded, because the caller is an HTTP request
 /// an operator is holding open — a run that backs off for a minute to recover
 /// one chunk has lost the operator's attention and the connection. The rate
+/// Refuses a rung the feed does not declare, **by name**.
+///
+/// # Why this is a function and not a line in `broker_window`
+///
+/// `Feed::serves` existed and had NO caller outside its own tests, so the
+/// `granularities` row in `crate::vendor` was documentation rather than a gate.
+/// Withdrawing Dhan's `Minute1` there — because that vendor's `bars_path` is
+/// pinned to its DAILY endpoint and the request carries no `interval` field —
+/// therefore changed nothing: `autopilot::round` pins `Granularity::Minute1`
+/// for every feed, so a minute request still reached the daily endpoint and its
+/// daily candles were filed under `1min/`.
+///
+/// Silent wrong data in an append-only store is the outcome `CLAUDE.md` §4
+/// singles out: the month cannot be prepended, the bars look plausible, and no
+/// later reader can tell them from real one-minute bars.
+///
+/// # Errors
+///
+/// The feed's descriptor does not declare this rung.
+///
+/// One bitmask test — constant work, and it runs before the credential read so
+/// a request that will not be issued costs no round-trip to ap-south-1.
+fn served(feed: pull::vendor::Feed, rung: pull::vendor::Granularity) -> Result<(), String> {
+    if feed.serves(rung) {
+        return Ok(());
+    }
+    Err(format!(
+        "{} does not serve {rung} bars. Nothing was sent: this feed's request \
+         carries no interval field and its bars path is pinned to one rung, so \
+         a request for another would be answered with a DIFFERENT bar length \
+         and filed under the one you asked for. Pick a rung this feed declares, \
+         or record the endpoint in `pull::vendor` first.",
+        feed.display()
+    ))
+}
+
 /// governor already handles *sustained* throttling; this handles the blip.
 async fn with_retry(
     source: &pull::http::HttpSource,
@@ -2760,6 +3536,8 @@ async fn broker_window(
             asked.feed.display()
         ));
     };
+
+    served(asked.feed, asked.granularity)?;
 
     // ONE INSTRUMENT IS ALL THIS PATH CAN ADDRESS, AND IT NOW SAYS SO.
     //
@@ -2897,6 +3675,22 @@ async fn broker_window(
     // by the vendor's own discriminant, so resolving an instrument costs the
     // same at 800 as at one — the measured 19 ns against the 1,236 ns walk this
     // replaced (D-0039).
+    // THE CLASS, FROM THE SAME PROBE THAT FINDS THE ID.
+    //
+    // `Universe::INDEX` is set by the decoder from the master's own instrument
+    // column, so this is the vendor's answer rather than a guess from the
+    // symbol's shape. Everything the operator sweeps is either an NSE index or
+    // an NTM cash equity — `catalog::tracked` admits exactly those two — so the
+    // else-arm is Equity rather than a third refusal path that cannot be hit.
+    let listing = site
+        .read
+        .merged
+        .by_key
+        .get(instrument)
+        .filter(|e| e.universe.contains(brutex_core::universe::Universe::INDEX))
+        .map_or(pull::vendor::Listing::Equity, |_| {
+            pull::vendor::Listing::Index
+        });
     let Some(instrument_id) = site
         .read
         .merged
@@ -2914,7 +3708,7 @@ async fn broker_window(
         ));
     };
 
-    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), &spec).await?;
+    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), listing, &spec).await?;
 
     let Some(store_vendor) = feed.store_vendor() else {
         return Err(format!(
@@ -2998,7 +3792,14 @@ fn landed_answer(
     }
     let record = audit::Record::of_run(audit::Scope::Spot, now, took, source, window, done);
     let verdict = record.outcome.label();
-    facts.push(recorded_fact(journal, &record));
+    facts.extend(recorded_with_failures(
+        journal,
+        &record,
+        audit::Scope::Spot,
+        now,
+        window,
+        &done.failures,
+    ));
     let reason = if done.balances() {
         "The run finished and every row is accounted for. Bars are on disk, \
          the manifest counts them, and this run is on the record at /audit."
@@ -3109,6 +3910,68 @@ fn recorded_fact(journal: &audit::Journal, record: &audit::Record) -> (&'static 
     }
 }
 
+/// The run's record, then one more for every member that did not land.
+///
+/// # Why the failures are separate records
+///
+/// [`audit::Record::of_run`] keeps `failures.first()` and nothing else — the
+/// note is a fixed 68 bytes because the stride is fixed, which is what makes an
+/// append O(1) and the file scannable without an index — the stride is proved by
+/// `api::audit::every_failed_member_gets_its_own_record_at_the_same_stride` and
+/// the index-free count by
+/// `api::audit::appending_creates_the_directory_and_the_count_is_the_length_divided`.
+/// A run that refused ten
+/// members therefore left nine reasons nowhere on disk, and which months had
+/// failed had to be worked out by decoding bar files by hand.
+///
+/// One extra [`audit::Kind::MemberFailure`] record per failure puts every
+/// failed (instrument, month) pair in the journal at the same stride. Bounded
+/// by the member count, which is bounded by the chunk count — never by rows.
+///
+/// A failure record that cannot be written does **not** overwrite the run's own
+/// "Recorded" line: the run landing and the detail landing are two facts, and
+/// collapsing them would let a partial write read as a clean one. See D-0073.
+fn recorded_with_failures(
+    journal: &audit::Journal,
+    record: &audit::Record,
+    scope: audit::Scope,
+    now: std::time::SystemTime,
+    window: pull::session::Window,
+    failures: &[pull::ingest::Failure],
+) -> Vec<(&'static str, String)> {
+    let mut facts = vec![recorded_fact(journal, record)];
+    if failures.is_empty() {
+        return facts;
+    }
+    let mut written = 0usize;
+    let mut first_refusal = None;
+    for failure in failures {
+        let detail =
+            audit::Record::member_failure(scope, now, &failure.instrument, window, &failure.why);
+        match journal.append(&detail) {
+            Ok(()) => written = written.saturating_add(1),
+            Err(why) => {
+                if first_refusal.is_none() {
+                    first_refusal = Some(why);
+                }
+            }
+        }
+    }
+    facts.push((
+        "Failures recorded",
+        first_refusal.map_or_else(
+            || format!("{written} of {} — each on its own record", failures.len()),
+            |why| {
+                format!(
+                    "{written} of {} — the rest are NOT on disk: {why}",
+                    failures.len()
+                )
+            },
+        ),
+    ));
+    facts
+}
+
 /// Ingests one local vendor folder into the store.
 ///
 /// Split out so the handler stays a handler. Every knob comes from
@@ -3162,6 +4025,12 @@ fn run_local(
     })?;
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
+        // NOT ON THE WIRE ON THIS PATH. An archive addresses a FILE and a
+        // landing record addresses bars already in hand, so no request
+        // parameter is built from this and no vendor ever sees it. Stated
+        // anyway because `BarRequest` has no `Default` — a field that can be
+        // omitted is a field a later caller omits by accident.
+        listing: pull::vendor::Listing::Equity,
         window,
         // THE OPERATOR'S RUNG HERE TOO, and this path is where a rung the store
         // cannot carry is actually reachable: both archive feeds are
@@ -3414,7 +4283,17 @@ fn audit_row(entry: audit::Entry) -> render::AuditRow {
             ordinal: entry.ordinal,
             fault: None,
             when: ist_stamp(record.at_unix_secs),
-            scope: record.scope.label().to_owned(),
+            // THE KIND IS ON THE PAGE, because a member record's counters are
+            // all zero by design — they belong to the run — and a row of zeros
+            // with no label reads as a run that did nothing rather than as one
+            // member that did not land. A `Run` row is unchanged, byte for
+            // byte, which is what keeps every existing assertion true.
+            scope: match record.kind {
+                audit::Kind::Run => record.scope.label().to_owned(),
+                audit::Kind::MemberFailure => {
+                    format!("{} · {}", record.scope.label(), record.kind.label())
+                }
+            },
             outcome: record.outcome.label().to_owned(),
             loud: record.outcome.is_loud(),
             source: if record.source_was_cut() {
@@ -3648,6 +4527,10 @@ fn bars_refusal(
             total: 0,
             page: 0,
             last_page: 0,
+            // NO RUNG WAS PARSED on this path — the request failed before it.
+            // The minute grid is what an absent `?timeframe=` means everywhere
+            // else, so the links this page renders stay consistent with it.
+            timeframe: store::path::Timeframe::MINUTE_1.as_str(),
             trouble: Some(trouble),
             store_root: &site.store_root.display().to_string(),
         }),
@@ -3659,26 +4542,26 @@ fn bars_refusal(
 /// Every failure arm here names what it looked for: an unreadable month must
 /// say *which path*, because "no data" and "the wrong path" send an operator to
 /// opposite places — the same distinction `census::Census` draws between absent
+/// A query parameter, or `fallback` when it is absent or empty.
+///
+/// The two spellings this route needs — an absent `?segment=` means INDEX and
+/// an absent `?exchange=` means NSE, because those are the only values the
+/// engine surface has (`CLAUDE.md` §1). Written once so the two cannot drift.
+fn param_or(query: &str, name: &str, fallback: &str) -> String {
+    let raw = param(query, name);
+    if raw.is_empty() {
+        fallback.to_owned()
+    } else {
+        raw
+    }
+}
+
 /// and unreadable.
 #[must_use]
 pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
     let symbol = param(query, "symbol");
-    let segment = {
-        let raw = param(query, "segment");
-        if raw.is_empty() {
-            "INDEX".to_owned()
-        } else {
-            raw
-        }
-    };
-    let exchange = {
-        let raw = param(query, "exchange");
-        if raw.is_empty() {
-            "NSE".to_owned()
-        } else {
-            raw
-        }
-    };
+    let segment = param_or(query, "segment", "INDEX");
+    let exchange = param_or(query, "exchange", "NSE");
     // ONE PARSER, shared with the pull form. This route had its own copy that
     // compared with `==` while `ingest::parse_vendor` used
     // `eq_ignore_ascii_case`, so `?vendor=Groww` meant a different vendor here
@@ -3718,28 +4601,47 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
         );
     };
 
+    // A NAMED-BUT-UNKNOWN RUNG IS THE PAGE'S OWN REFUSAL, not a default. The
+    // same page shape the missing-file arm below renders, carrying this
+    // sentence instead — so an operator who typed a rung sees why, on the page
+    // they asked for, rather than one-minute bars they did not.
+    let timeframe = match timeframe_param(query) {
+        Ok(tf) => tf,
+        Err(why) => {
+            return empty_bars_page(
+                axum::http::StatusCode::BAD_REQUEST,
+                site,
+                &BarsAddress {
+                    symbol: &symbol,
+                    segment: &segment,
+                    vendor: vendor.as_str(),
+                    month: &month.to_string(),
+                    timeframe: store::path::Timeframe::MINUTE_1.as_str(),
+                },
+                &why,
+            );
+        }
+    };
     match bars::open(
         &site.store_root,
         vendor,
         &exchange,
         &segment,
         &symbol,
+        timeframe,
         month,
     ) {
-        Err(why) => (
+        Err(why) => empty_bars_page(
             axum::http::StatusCode::NOT_FOUND,
-            render::bars_page(&render::BarsView {
+            site,
+            &BarsAddress {
                 symbol: &symbol,
                 segment: &segment,
                 vendor: vendor.as_str(),
                 month: &month.to_string(),
-                rows: &[],
-                total: 0,
-                page: 0,
-                last_page: 0,
-                trouble: Some(&why),
-                store_root: &site.store_root.display().to_string(),
-            }),
+                timeframe: timeframe.as_str(),
+            },
+            &why,
         ),
         Ok(file) => {
             // `n_valid` is a header field, so the page count is a division and
@@ -3761,6 +4663,7 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
                     total,
                     page,
                     last_page,
+                    timeframe: timeframe.as_str(),
                     trouble: trouble.as_deref(),
                     store_root: &site.store_root.display().to_string(),
                 }),
@@ -3865,6 +4768,24 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         )
         .route("/autopilot/pause", axum::routing::post(autopilot::pause))
         .route("/autopilot/resume", axum::routing::post(autopilot::resume))
+        // THE ONE CONTROL, AND WHY IT IS NOT AT `/autopilot`. That path is the
+        // front end's own page, served by the fallback below; a `post`-only
+        // route there makes `GET /autopilot` answer 405, because axum's method
+        // router answers a matched path itself and never reaches
+        // `Router::fallback`. See `autopilot::control`.
+        .route(
+            "/autopilot/control",
+            axum::routing::post(autopilot::control),
+        )
+        // WHAT THE NEXT SWEEP IS WAITING ON, and what a queue request is
+        // answered with. Both are served from memory and neither reads the
+        // store — see `ingest::status_json` for why that is deliberate, and
+        // `ingest::queue` for why nothing is ever queued.
+        .route(
+            "/ingest/status.json",
+            axum::routing::get(crate::ingest::status_json),
+        )
+        .route("/ingest/queue", axum::routing::post(crate::ingest::queue))
         // THE AUDIT'S TWO. `/audit.json` is what the browser console reads and
         // `/audit` is the no-script page, unchanged. Before the JSON route
         // existed the console fetched the PAGE and parsed its table back out
@@ -3874,6 +4795,14 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         .route("/audit", axum::routing::get(audit_get))
         .route("/store", axum::routing::get(store_get))
         .route("/bars", axum::routing::get(bars_get))
+        // THE LOG, READABLE FROM THE APPLICATION THAT WROTE IT.
+        //
+        // `telemetry::tail` — a complete, bounded reader — had NO caller
+        // anywhere in this workspace, so the first question after a failed pull
+        // ("what did it say?") had no answer inside the thing that said it.
+        // See `crate::logs`.
+        .route("/logs", axum::routing::get(crate::logs::logs_page))
+        .route("/logs.json", axum::routing::get(crate::logs::logs_json))
         .route("/health", axum::routing::get(health))
         // THE FRONT END, LAST. A fallback rather than a `/*path` route, so
         // every line above keeps winning and nothing on disk can shadow one.
@@ -3881,6 +4810,7 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             let assets = std::sync::Arc::clone(&assets);
             async move { assets.respond(request.method(), request.uri().path()) }
         })
+        .layer(axum::middleware::from_fn(crate::logs::note_request))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .with_state(site)
 }
@@ -3966,8 +4896,295 @@ pub async fn run(args: &[String], shutdown: Shutdown) -> u8 {
     run_in(&masters_dir(), args, shutdown).await
 }
 
-/// The store root a served process reads its manifests from.
+/// The environment variable naming where the rolling log is written.
+pub const LOG_DIR_ENV: &str = "BRUTEX_LOGS";
+
+/// The environment variable that decides how much is written.
 ///
+/// One of `trace`, `debug`, `info`, `warn`, `error`, case-insensitive.
+pub const LOG_LEVEL_ENV: &str = "BRUTEX_LOG_LEVEL";
+
+/// The quietest level this process writes, and the sentence that says why.
+///
+/// # Why this is an environment variable and not a constant
+///
+/// `crates/pull` now emits at `Debug` on the per-member path and `Trace` on the
+/// per-chunk one. Those are the events an operator wants **while diagnosing**
+/// and never during a clean backfill: the sink keeps
+/// [`telemetry::DEFAULT_KEEP_FILES`] files of
+/// [`telemetry::DEFAULT_MAX_FILE_BYTES`] each — a 64 MiB window — and a
+/// one-minute backfill is ~62,600 requests, so writing every chunk would roll
+/// the run's own beginning out of the window before it finished. The evidence
+/// would destroy itself.
+///
+/// So the default stays `Info` and the operator turns it up for one run. A
+/// filtered event costs one relaxed atomic load and touches no clock, no lock
+/// and no buffer, which is what makes instrumenting every corner affordable
+/// rather than a tax on the quiet path.
+///
+/// # An unreadable word is `Info` AND SAYS SO
+///
+/// Never a silent fallback (`CLAUDE.md` §4): the returned sentence names what
+/// was found and what was used, and the caller prints it beside the log path.
+fn served_log_level() -> (telemetry::Config, String) {
+    log_level_from(
+        std::env::var_os(LOG_LEVEL_ENV)
+            .as_deref()
+            .map(|raw| raw.to_string_lossy().into_owned())
+            .as_deref(),
+    )
+}
+
+/// [`served_log_level`] with the environment as an argument, so a test owns it.
+///
+/// Split for the reason [`log_dir_from`] is split, and it is the same reason:
+/// a function that reads the environment can only be tested by mutating the
+/// environment, which is process-global, races every other test in the binary,
+/// and is `unsafe` under edition 2024 — which every crate here forbids
+/// outright. The parser is the part worth testing and it takes a string.
+fn log_level_from(raw: Option<&str>) -> (telemetry::Config, String) {
+    let dir = std::path::PathBuf::new();
+    let Some(raw) = raw else {
+        return (
+            telemetry::Config::new(dir),
+            format!(
+                "the default; set {LOG_LEVEL_ENV}=debug, or {LOG_LEVEL_ENV}=info,pull=debug for one subsystem"
+            ),
+        );
+    };
+    let text = raw.to_ascii_lowercase();
+    let mut config = telemetry::Config::new(dir);
+    let mut global: Option<telemetry::Level> = None;
+    let mut targets: Vec<String> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+
+    for clause in text.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        // `target=level` is an override; a bare word is the global floor. The
+        // split is on the FIRST `=` only, so a target may not contain one —
+        // and a dotted subsystem name never does.
+        match clause.split_once('=') {
+            Some((target, word)) => {
+                let (target, word) = (target.trim(), word.trim());
+                if let Some(level) = telemetry::Level::of_label(word)
+                    && !target.is_empty()
+                {
+                    // `Config::with_target_level` DROPS silently past
+                    // `MAX_TARGET_LEVELS` — its own doc says so. The length is
+                    // the only signal it offers, so the caller has to look, and
+                    // an override the operator asked for and did not get is
+                    // `CLAUDE.md` §4's silent fallback if nobody says which.
+                    let before = config.target_levels.len();
+                    config = config.with_target_level(target, level);
+                    if config.target_levels.len() > before {
+                        targets.push(format!("{target}={word}"));
+                    } else {
+                        dropped.push(format!("{target}={word}"));
+                    }
+                } else {
+                    unreadable.push(clause.to_owned());
+                }
+            }
+            None => {
+                if let Some(level) = telemetry::Level::of_label(clause) {
+                    global = Some(level);
+                } else {
+                    unreadable.push(clause.to_owned());
+                }
+            }
+        }
+    }
+
+    if let Some(level) = global {
+        config = config.with_min_level(level);
+    }
+    // NEVER A SILENT FALLBACK. Anything unreadable is named beside what was
+    // used, and the caller prints the whole sentence next to the log path —
+    // `CLAUDE.md` §4. An operator who mistypes `pul=debug` gets told, rather
+    // than getting a quiet `info` and wondering where the lines went.
+    let mut note = match global {
+        Some(level) => format!("floor {} from {LOG_LEVEL_ENV}", level.label()),
+        None => format!("floor info (default), {LOG_LEVEL_ENV} named no bare level"),
+    };
+    if !targets.is_empty() {
+        let _ = write!(note, "; per subsystem: {}", targets.join(" "));
+    }
+    if !unreadable.is_empty() {
+        let _ = write!(
+            note,
+            "; IGNORED as unreadable: {} — a level is one of {}",
+            unreadable.join(" "),
+            telemetry::LEVELS
+                .iter()
+                .map(|l| l.label())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    // NAMED, AND ONLY WHEN IT HAPPENED. This tested
+    // `target_levels.len() == MAX_TARGET_LEVELS`, which is true of an operator
+    // who wrote exactly eight overrides and had every one of them applied — so
+    // it announced "later ones were dropped" when nothing had been. A false
+    // alarm is the same defect as a silent drop wearing the other face: both
+    // leave the reader's belief about the log wrong, and the one that cries
+    // wolf also teaches them to stop reading the banner.
+    if !dropped.is_empty() {
+        let _ = write!(
+            note,
+            "; DROPPED past the {}-override ceiling: {}",
+            telemetry::MAX_TARGET_LEVELS,
+            dropped.join(" ")
+        );
+    }
+    (config, note)
+}
+
+/// The environment variable that suppresses opening a browser on start.
+pub const NO_OPEN_ENV: &str = "BRUTEX_NO_OPEN";
+
+/// Opens the operator's browser at `url`, and returns what happened.
+///
+/// # Why this is not a violation of `CLAUDE.md` §2
+///
+/// §2 forbids "any `build.rs` that invokes an external process". This is not a
+/// build script: nothing here runs during `cargo build`, and gate 2 greps
+/// `*build.rs` for exactly that reason. The bare-machine promise §2 protects —
+/// that `cargo build`, `cargo test` and `cargo clippy` pass with no foreign
+/// toolchain — is untouched, because the only thing spawned here is the
+/// operating system's own URL handler, at run time, on a machine that by
+/// definition already has a browser the operator is about to look at.
+///
+/// # Why it is opt-OUT rather than opt-in
+///
+/// The whole stated run procedure is one click, and a procedure whose last step
+/// is "now go and type the address yourself" is not one click. A default that
+/// has to be enabled would leave every fresh clone in the state this function
+/// exists to remove.
+///
+/// # Why a failure is reported rather than swallowed
+///
+/// There is no browser on a CI runner, in a container, or over SSH, and the
+/// spawn fails there. That is not an error worth stopping a server for — but a
+/// silent failure would leave an operator waiting for a window that is never
+/// coming, so the caller prints the URL. `CLAUDE.md` §4: degrade loudly and
+/// name the reason.
+fn open_in_browser(url: &str) -> Result<(), String> {
+    open_unless_suppressed(url, std::env::var_os(NO_OPEN_ENV).as_deref())
+}
+
+/// [`open_in_browser`] with the opt-out as an argument, so a test owns it.
+///
+/// Split out because the workspace denies `unsafe_code` and `std::env::set_var`
+/// is `unsafe` in edition 2024 — so the suppression arm is untestable while the
+/// variable is read inside the function. That constraint pushed toward the same
+/// shape [`log_dir_from`] already has, and the lint was right: a function that
+/// reads process-global state is one no test can pin without racing every other
+/// test in the binary.
+fn open_unless_suppressed(url: &str, suppressed: Option<&std::ffi::OsStr>) -> Result<(), String> {
+    if suppressed.is_some() {
+        return Err(format!("{NO_OPEN_ENV} is set"));
+    }
+    // THE HANDLER IS THE PLATFORM'S, NEVER A BROWSER BY NAME. Naming a browser
+    // picks one the operator may not use and may not have; the OS already knows
+    // which one they chose.
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("open", &[])
+    } else if cfg!(target_os = "windows") {
+        ("cmd", &["/C", "start", ""])
+    } else {
+        ("xdg-open", &[])
+    };
+    std::process::Command::new(program)
+        .args(args)
+        .arg(url)
+        // DETACHED. The child is the operator's browser and outlives this
+        // process; inheriting stdout would interleave its noise with the
+        // banner, and waiting on it would block the server behind a window.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|why| format!("{program}: {why}"))
+}
+
+/// Where the rolling log goes: `BRUTEX_LOGS`, else `./logs` when the process
+/// was started from a Cargo workspace, else beneath the store.
+///
+/// # Why the working directory is consulted at all
+///
+/// Every other path in this binary is deliberately independent of where it was
+/// launched from, because a path that moves with the shell is a path no test
+/// can pin. This one is the exception, and the reason is the operator rather
+/// than the code: the whole run procedure is *press Run in the IDE*, and the
+/// IDE runs the binary with the working directory set to the project root. A
+/// log written beneath the store lands in `~/.brutex`, which is not in the
+/// project tree and therefore not somewhere the operator can see it without
+/// leaving the window they are already looking at.
+///
+/// THE PROBE IS FOR `Cargo.toml`, NOT FOR A NAME. Testing that the directory
+/// is *called* `brutex` would write logs into any directory that happened to
+/// share the name, and would stop working the moment the checkout was renamed.
+/// A `Cargo.toml` in the working directory means the process was started from
+/// a Rust project root, which is exactly the condition the IDE creates and a
+/// bare `./api` from `$HOME` does not.
+///
+/// The fallback is beneath the store rather than the current directory,
+/// because a server started from `/` or from a read-only directory must still
+/// log somewhere it can write, and the store root is already required to be
+/// writable for the process to do anything at all.
+fn served_log_dir(store_root: &Path) -> PathBuf {
+    log_dir_from(
+        std::env::var_os(LOG_DIR_ENV),
+        std::env::current_dir().ok().as_deref(),
+        store_root,
+    )
+}
+
+/// Whether `dir` is the root of a Cargo **workspace**, not merely a crate.
+///
+/// # Why the probe is `[workspace]` and not the file's existence
+///
+/// The first version of this tested `dir.join("Cargo.toml").is_file()`, which is
+/// true in the workspace root AND in every one of the eight crate directories
+/// beneath it. `cargo test -p api` runs with the working directory set to
+/// `crates/api`, so the test suite created `crates/api/logs/` on every run — an
+/// untracked directory holding a `.ndjson`, which is on no gate 1 allowlist. One
+/// `git add -A` would have turned that into the build failure `CLAUDE.md` §2
+/// describes, from a test run.
+///
+/// A `[workspace]` table appears in exactly one manifest per tree, which is the
+/// property actually wanted: *this is the top*.
+///
+/// THE READ IS FALLIBLE AND A FAILURE IS `false`. An unreadable manifest is not
+/// a workspace root as far as this question goes, and the caller's fallback —
+/// beneath the store — is always writable or the process could not serve at all.
+fn is_workspace_root(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("Cargo.toml")).is_ok_and(|text| {
+        text.lines()
+            .any(|line| line.trim_start().starts_with("[workspace]"))
+    })
+}
+
+/// [`served_log_dir`] with the environment and the working directory as
+/// arguments, so a test owns both.
+///
+/// Split out for the reason [`run_in`] is split from [`run`]: a function that
+/// reads the environment can only be tested by mutating the environment, which
+/// is process-global and races every other test in the binary.
+fn log_dir_from(
+    named: Option<std::ffi::OsString>,
+    cwd: Option<&Path>,
+    store_root: &Path,
+) -> PathBuf {
+    if let Some(named) = named {
+        return PathBuf::from(named);
+    }
+    match cwd {
+        Some(cwd) if is_workspace_root(cwd) => cwd.join("logs"),
+        _ => telemetry::dir_beneath_store(store_root),
+    }
+}
+
 /// Read here rather than threaded through [`run_in`] for the same reason
 /// [`masters_dir`] is read in [`run`]: the environment is consulted once, at
 /// the edge, and everything below takes a path.
@@ -3997,9 +5214,46 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
         Ok(Command::Serve(addr)) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
                 let store_root = served_store_root();
+                // THE LOG IS OPENED BEFORE THE FIRST LINE IS PRINTED.
+                //
+                // Installed here rather than inside `Site::serving` because a
+                // failure to open it must be visible in the banner the operator
+                // is already reading, and because every line below this one is
+                // an event worth keeping. `install` is idempotent per process
+                // and returns the sink; a second call in the same process is
+                // the one that is refused, not the first.
+                //
+                // A LOG THAT CANNOT BE OPENED DOES NOT STOP THE SERVER, AND
+                // SAYS SO. Refusing to serve because the log directory is
+                // unwritable would take the whole application down for the one
+                // subsystem whose absence costs no correctness — but a silent
+                // fallback to no logging is exactly what `CLAUDE.md` §4 bans,
+                // so the reason is named on stdout where the operator sees it.
+                let log_dir = served_log_dir(&store_root);
+                // The ENV DECIDES THE LEVELS AND THE CALLER DECIDES THE
+                // DIRECTORY. `served_log_level` builds a template it cannot
+                // know the path for, so the directory is set here, where it is
+                // known, rather than threaded into a parser.
+                let (asked, level_note) = served_log_level();
+                let logging = telemetry::install(&telemetry::Config {
+                    dir: log_dir.clone(),
+                    ..asked
+                });
                 println!("brutex api listening on http://{addr}/");
                 println!("  masters: {}", dir.display());
                 println!("  store:   {}", store_root.display());
+                match &logging {
+                    Ok(sink) => {
+                        println!(
+                            "  log:     {} (rolling, {} files x {} MiB ceiling)",
+                            sink.path().display(),
+                            telemetry::DEFAULT_KEEP_FILES,
+                            telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
+                        );
+                        println!("  level:   {level_note}");
+                    }
+                    Err(why) => println!("  log:     NOT WRITABLE — {why}"),
+                }
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
@@ -4017,10 +5271,91 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
                 let site = Loaded::new(Site::serving(dir, &store_root));
-                println!(
-                    "  autopilot: starting in {}s — http://{addr}/autopilot.json",
-                    autopilot::GRACE_SECS
+                // THE BANNER NAMES THE STATE IT IS IN, NOT THE ONE IT WOULD BE
+                // IN IF THE OPERATOR HAD OPTED IN.
+                //
+                // This line was unconditional, and `Control::serving` pauses
+                // unless `BRUTEX_AUTOPILOT=run` — so on the DEFAULT
+                // configuration the terminal announced a backfill starting in
+                // twenty seconds while `/autopilot.json` said `paused` and
+                // nothing was ever asked of a vendor. The two surfaces
+                // disagreed about the only fact the operator opens the page
+                // for, and the terminal is the one they see first.
+                //
+                // The false half was not the countdown, it was the absence of
+                // the condition: a message about a grace window is true only
+                // for a run that is going to happen. `CLAUDE.md` §4 bans a
+                // fallback that hides a failure; announcing work that will not
+                // start is the same defect wearing the opposite sign.
+                let flying_on_start = autopilot::flies_on_startup();
+                if flying_on_start {
+                    println!(
+                        "  autopilot: starting in {}s — http://{addr}/autopilot.json",
+                        autopilot::GRACE_SECS
+                    );
+                } else {
+                    println!(
+                        "  autopilot: PAUSED — nothing will be asked of any vendor. \
+                         Set {}={} to fly on start, or press Resume at http://{addr}/autopilot",
+                        autopilot::AUTOPILOT_ENV,
+                        autopilot::AUTOPILOT_RUN
+                    );
+                }
+                // THE SAME FACTS THE BANNER PRINTED, AS ONE STRUCTURED RECORD.
+                //
+                // Deliberately a duplicate rather than a replacement. The
+                // banner is for the person watching the Run window and scrolls
+                // away; this is for the reader who arrives afterwards asking
+                // what this process was configured to do, and it is the record
+                // that survives the terminal being closed. Both are cheap and
+                // only one of them is durable.
+                // THE RETURN VALUE IS READ, NOT DROPPED. `emit` is `#[must_use]`
+                // and returns which of four things happened; discarding it here
+                // would reintroduce, in the very first event this binary writes,
+                // the defect that `Journal::append` still carries — a write
+                // whose failure is unobservable. If the FIRST event cannot be
+                // written then no later one can either, so this is the single
+                // most informative place to check it.
+                let first = telemetry::emit(
+                    &telemetry::Event::info("api.serve", "listening")
+                        .with("addr", telemetry::Value::Str(&addr.to_string()))
+                        .with(
+                            "store",
+                            telemetry::Value::Str(&store_root.display().to_string()),
+                        )
+                        .with("masters", telemetry::Value::Str(&dir.display().to_string()))
+                        .with("web_built", telemetry::Value::Bool(front.built()))
+                        .with("autopilot_flies", telemetry::Value::Bool(flying_on_start)),
                 );
+                if !first.is_written() {
+                    println!("  log:     FIRST EVENT NOT WRITTEN — {first:?}");
+                }
+                // THE LAST STEP OF THE RUN PROCEDURE, PERFORMED RATHER THAN
+                // PRINTED. The listener is already bound above, so the address
+                // handed to the browser answers before the browser can ask —
+                // opening it earlier would race the bind and show a refusal
+                // page on a server that was about to work.
+                let home = format!("http://{addr}/");
+                // PORT ZERO IS NEVER OPENED.
+                //
+                // `0` is the ask-the-kernel-for-any-port marker, so the URL
+                // built from it addresses nothing — a browser sent there
+                // answers `ERR_UNSAFE_PORT` and nothing else. Every caller that
+                // binds `:0` is a harness rather than an operator, and this
+                // guard is why running the suite no longer opens a window on
+                // the desktop of whoever ran it.
+                //
+                // The check is on the ADDRESS rather than on a test flag: a
+                // flag has to be remembered by every future harness, and the
+                // one that forgets is the one that opens the window.
+                if addr.port() == 0 {
+                    println!("  opening: skipped — port 0 addresses nothing");
+                } else {
+                    match open_in_browser(&home) {
+                        Ok(()) => println!("  opening: {home}"),
+                        Err(why) => println!("  opening: NOT OPENED ({why}) — go to {home}"),
+                    }
+                }
                 // SPAWNED, NOT AWAITED. The listener is already bound and
                 // `serve` is entered on the next line, so the first request is
                 // answered while the autopilot is still counting down its grace
@@ -5585,6 +6920,265 @@ mod tests {
         assert_eq!(store_html(&site, day(2026, 8, 7), 99, "show=gaps"), last);
     }
 
+    /// THE REGRESSION THIS PINS. `log_dir_from`'s first version probed for
+    /// `Cargo.toml`, which every crate directory also has — so `cargo test -p
+    /// api` wrote `crates/api/logs/events.ndjson`, an untracked file whose
+    /// extension is on no gate 1 allowlist. This asserts the crate directory is
+    /// NOT mistaken for the top, which is the half that was wrong.
+    #[test]
+    fn a_crate_directory_is_not_a_workspace_root_and_does_not_take_the_log() {
+        let store = std::path::Path::new("/store");
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // `crates/api` — has a Cargo.toml, has no `[workspace]`.
+        assert!(
+            repo.join("Cargo.toml").is_file(),
+            "the premise: it is a manifest"
+        );
+        assert!(
+            !is_workspace_root(repo),
+            "a crate is not the workspace root"
+        );
+        assert_eq!(
+            log_dir_from(None, Some(repo), store),
+            telemetry::dir_beneath_store(store),
+            "a crate directory falls back to the store, never to ./logs"
+        );
+
+        // The workspace root two levels up — has `[workspace]`.
+        let root = repo
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/api has two parents");
+        assert!(is_workspace_root(root), "the workspace root is recognised");
+        assert_eq!(
+            log_dir_from(None, Some(root), store),
+            root.join("logs"),
+            "the workspace root takes ./logs, which is what pressing Run does"
+        );
+    }
+
+    /// THE PER-SUBSYSTEM SYNTAX REACHES THE SINK, AND A TYPO IS NEVER SILENT.
+    ///
+    /// `Config::with_target_level` and `Sink::level_for` were built, tested and
+    /// mutation-checked in `crates/telemetry` — and nothing parsed the
+    /// environment into them, so the whole feature was unreachable from the
+    /// operator. That is the same "built with no caller" shape
+    /// `telemetry::tail` wore before `/logs` existed.
+    #[test]
+    fn the_log_level_env_parses_a_global_floor_and_per_subsystem_overrides() {
+        // Absent: the default, and the sentence names the syntax.
+        let (config, note) = log_level_from(None);
+        assert_eq!(config.min_level, telemetry::Level::Info);
+        assert!(config.target_levels.is_empty());
+        assert!(
+            note.contains("pull=debug"),
+            "the default names the syntax: {note}"
+        );
+
+        // A bare word is the global floor, exactly as before this feature.
+        let (config, note) = log_level_from(Some("debug"));
+        assert_eq!(config.min_level, telemetry::Level::Debug);
+        assert!(config.target_levels.is_empty());
+        assert!(note.contains("debug"), "{note}");
+
+        // THE POINT: one subsystem loud, the rest at the global floor.
+        let (config, note) = log_level_from(Some("info,pull=debug,pull.chunk=trace"));
+        assert_eq!(config.min_level, telemetry::Level::Info);
+        assert_eq!(config.target_levels.len(), 2);
+        let sink = telemetry::Sink::open(&telemetry::Config {
+            dir: crate::scratch::path("log-level-env"),
+            ..config
+        })
+        .expect("opens");
+        assert_eq!(sink.level_for("pull"), telemetry::Level::Debug);
+        assert_eq!(
+            sink.level_for("pull.member"),
+            telemetry::Level::Debug,
+            "children inherit"
+        );
+        assert_eq!(
+            sink.level_for("pull.chunk"),
+            telemetry::Level::Trace,
+            "longest wins"
+        );
+        assert_eq!(
+            sink.level_for("api.request"),
+            telemetry::Level::Info,
+            "the rest stay quiet"
+        );
+        assert!(
+            note.contains("pull=debug"),
+            "the banner says what it applied: {note}"
+        );
+
+        // A TYPO IS NAMED, NOT SWALLOWED. `CLAUDE.md` §4: an operator who
+        // writes `pul=debg` must be told, not handed a quiet `info` and left
+        // wondering where the lines went.
+        let (config, note) = log_level_from(Some("info,pull=debg,notalevel"));
+        assert_eq!(config.min_level, telemetry::Level::Info);
+        assert!(
+            config.target_levels.is_empty(),
+            "an unreadable level sets nothing"
+        );
+        assert!(note.contains("IGNORED"), "and it is reported: {note}");
+        assert!(
+            note.contains("debg") && note.contains("notalevel"),
+            "by name: {note}"
+        );
+
+        // Whitespace and case are the operator's, not a refusal.
+        let (config, _) = log_level_from(Some(" INFO , PULL = TRACE "));
+        assert_eq!(config.min_level, telemetry::Level::Info);
+        assert_eq!(config.target_levels.len(), 1);
+    }
+
+    /// **THE CEILING IS REPORTED WHEN IT BITES, AND NOT WHEN IT DOES NOT.**
+    ///
+    /// `telemetry::Config::with_target_level` drops silently past
+    /// [`telemetry::MAX_TARGET_LEVELS`] — its own doc says so — so the banner is
+    /// the only place an operator can learn that an override they typed is not
+    /// in force. This pins both halves, and the second is the one that was
+    /// wrong: the note used to fire on
+    /// `target_levels.len() == MAX_TARGET_LEVELS`, which is also true when
+    /// every one of exactly eight overrides was applied. Somebody who used
+    /// their whole budget correctly was told "later ones were dropped".
+    #[test]
+    fn the_override_ceiling_is_named_only_when_something_was_actually_dropped() {
+        let max = telemetry::MAX_TARGET_LEVELS;
+
+        // EXACTLY AT THE CEILING, NOTHING DROPPED. No alarm.
+        let full: Vec<String> = (0..max).map(|n| format!("t{n}=debug")).collect();
+        let (config, note) = log_level_from(Some(&format!("info,{}", full.join(","))));
+        assert_eq!(config.target_levels.len(), max, "all {max} applied");
+        assert!(
+            !note.contains("DROPPED"),
+            "nothing was dropped, so nothing may be announced: {note}"
+        );
+
+        // ONE PAST IT. The overflow is named, and named BY NAME so the operator
+        // knows which subsystem is not in force rather than only that one is.
+        let over: Vec<String> = (0..=max).map(|n| format!("t{n}=debug")).collect();
+        let (config, note) = log_level_from(Some(&format!("info,{}", over.join(","))));
+        assert_eq!(config.target_levels.len(), max, "the ceiling still holds");
+        assert!(note.contains("DROPPED"), "{note}");
+        assert!(
+            note.contains(&format!("t{max}=debug")),
+            "the dropped override is named, not merely counted: {note}"
+        );
+        assert!(
+            !note.contains(&format!("; per subsystem: t{max}=debug")),
+            "and it is NOT also listed as applied: {note}"
+        );
+
+        // A dropped override and an unreadable one are different faults and are
+        // reported separately — an operator who sees only one message must not
+        // have to guess which of the two happened.
+        let (_, note) = log_level_from(Some(&format!("info,{},bad=nope", over.join(","))));
+        assert!(note.contains("DROPPED"), "{note}");
+        assert!(note.contains("IGNORED as unreadable"), "{note}");
+        assert!(note.contains("bad=nope"), "{note}");
+    }
+
+    #[test]
+    fn zz_probe_duplicate_banner() {
+        let (config, note) = log_level_from(Some("pull=debug,pull=trace"));
+        println!("A targets={:?}", config.target_levels);
+        println!("A note={note}");
+
+        let max = telemetry::MAX_TARGET_LEVELS;
+        let mut clauses: Vec<String> = (0..max).map(|_| "pull=debug".to_owned()).collect();
+        clauses.push("api=trace".to_owned());
+        let (config, note) = log_level_from(Some(&clauses.join(",")));
+        println!(
+            "B len={} targets={:?}",
+            config.target_levels.len(),
+            config.target_levels
+        );
+        println!("B note={note}");
+
+        let (config, note) = log_level_from(Some("info,pull=debug,pull=trace,pull=warn"));
+        let sink = telemetry::Sink::open(&telemetry::Config {
+            dir: crate::scratch::path("zz-probe-dup"),
+            ..config
+        })
+        .expect("opens");
+        println!("C live pull={:?}", sink.level_for("pull"));
+        println!("C note={note}");
+    }
+
+    /// The two arms that do not depend on the filesystem at all.
+    #[test]
+    fn the_log_directory_prefers_the_environment_and_falls_back_to_the_store() {
+        let store = std::path::Path::new("/store");
+        assert_eq!(
+            log_dir_from(
+                Some(std::ffi::OsString::from("/named/elsewhere")),
+                None,
+                store
+            ),
+            std::path::Path::new("/named/elsewhere"),
+            "an explicit BRUTEX_LOGS wins over every probe"
+        );
+        // The named path wins even when the working directory IS a workspace root,
+        // so an operator can move the log off a synced directory without moving
+        // the checkout.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("crates/api has two parents");
+        assert_eq!(
+            log_dir_from(Some(std::ffi::OsString::from("/named")), Some(root), store),
+            std::path::Path::new("/named"),
+        );
+        assert_eq!(
+            log_dir_from(None, None, store),
+            telemetry::dir_beneath_store(store),
+            "no variable and no working directory falls back to the store"
+        );
+    }
+
+    /// A directory with no manifest at all is not a workspace root, and the
+    /// read failing is `false` rather than a panic.
+    #[test]
+    fn a_directory_with_no_manifest_is_not_a_workspace_root() {
+        assert!(!is_workspace_root(std::path::Path::new(
+            "/nonexistent-uCe1r"
+        )));
+        let store = std::path::Path::new("/store");
+        assert_eq!(
+            log_dir_from(
+                None,
+                Some(std::path::Path::new("/nonexistent-uCe1r")),
+                store
+            ),
+            telemetry::dir_beneath_store(store),
+        );
+    }
+
+    /// `BRUTEX_NO_OPEN` is honoured, and the refusal names the variable rather
+    /// than reporting a spawn that never happened.
+    ///
+    /// The spawning arm is deliberately not exercised: asserting it would open
+    /// a browser window on the machine running the suite, and a test with a
+    /// visible side effect on the operator's desktop is one they will disable.
+    #[test]
+    fn the_browser_is_not_opened_when_the_operator_said_not_to() {
+        let why = open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("1")))
+            .expect_err("it must refuse when the variable is set");
+        assert!(
+            why.contains(NO_OPEN_ENV),
+            "the refusal names the variable that caused it: {why}"
+        );
+        // AN EMPTY VALUE STILL SUPPRESSES. `var_os` returns `Some("")` for
+        // `BRUTEX_NO_OPEN=`, and an operator who wrote that meant "off" — the
+        // test pins the presence rule rather than a truthiness one.
+        assert!(
+            open_unless_suppressed("http://127.0.0.1:8080/", Some(std::ffi::OsStr::new("")))
+                .is_err(),
+            "presence suppresses, whatever the value"
+        );
+    }
+
     #[test]
     fn the_store_root_comes_from_the_environment_or_defaults_under_home() {
         assert_eq!(
@@ -5682,10 +7276,15 @@ mod tests {
             )),
         );
         let built = site("targetcounts", &dir);
+        // RELIANCE is in all four published tiers as well as the Total Market,
+        // so the four counters D-0105 appended are 1 each and the fixture
+        // proves them without gaining a row. The two numbers that are NOT one
+        // are the ones a mutant would have to move.
         assert_eq!(
             built.targets,
-            [1, 2, 1],
-            "one swept, two index series, one Total Market constituent"
+            [1, 2, 1, 1, 1, 1, 1],
+            "one swept, two index series, one Total Market constituent, and \
+             RELIANCE once in each of the 500, 200, 100 and 50"
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -5702,10 +7301,20 @@ mod tests {
             Box::pin(async move { stopper.accept().await.map(|_| ()) }),
         ));
 
+        // ALL SEVEN, END TO END: the slug goes on the wire, the parser takes
+        // it, the receipt echoes the label and the count beside it is the one
+        // `Site::new` counted for that slot. The four tiers are here because a
+        // slug that parses and then reports another target's population is the
+        // defect this test was written for, and appending variants is exactly
+        // when a positional lookup goes wrong.
         for (slug, label, covered) in [
             ("swept", "Swept indices", 1),
             ("indices", "Reference indices", 2),
             ("equities", "NIFTY Total Market equities", 1),
+            ("n500", "NIFTY 500 equities", 1),
+            ("n200", "NIFTY 200 equities", 1),
+            ("n100", "NIFTY 100 equities", 1),
+            ("n50", "NIFTY 50 equities", 1),
         ] {
             let form = format!("target={slug}&from=2022-01-08&to=2022-01-08");
             let out = post(addr, "/pull/spot", &form).await;
@@ -5857,7 +7466,12 @@ mod tests {
         let empty = masters("nomasters", None, None);
         let site = site("nomasters", &empty);
         assert_eq!(site.series.len(), 2, "the engine surface, exactly");
-        assert_eq!(site.targets, [0, 0, 0], "and no target has members");
+        assert_eq!(
+            site.targets,
+            [0; ingest::SpotTarget::ALL.len()],
+            "and no target has members — all seven, sized off the enum so an \
+             eighth cannot be forgotten here"
+        );
 
         let html = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(
@@ -5965,11 +7579,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The whole path through `run`, and the first event that path writes.
+    ///
+    /// # Why it takes the shared sink FIRST, on its first line
+    ///
+    /// `run_in` installs a sink of its own, over the SERVED log directory —
+    /// `BRUTEX_LOG_DIR`, or the operator's real store root — at the floor
+    /// `BRUTEX_LOG_LEVEL` names. In this test binary that made the process
+    /// global a race: whichever of `run_in` and [`crate::emitted::sink`] got
+    /// there first decided both the directory every other test reads and the
+    /// floor every other test's events have to clear, and at the default `Info`
+    /// floor a `Debug` site writes nothing at all. Taking the shared sink here,
+    /// before `run` is entered, is what makes the binary deterministic —
+    /// `run_in`'s install is then refused, which is the refusal working, and it
+    /// prints the reason in the banner rather than swallowing it.
+    ///
+    /// The refusal is also why nothing this suite writes can land in the
+    /// operator's own `~/.brutex/store/logs`.
+    ///
+    /// # And the event
+    ///
+    /// `api.serve listening` is the record that answers *what was this process
+    /// configured to do* after the terminal that printed the banner is closed.
+    /// The site already checks its own `Emitted` — `if !first.is_written()` —
+    /// but with no sink installed that check passes vacuously, which is exactly
+    /// the state `crates/api/src/emitted.rs` was written to end.
     #[tokio::test]
     async fn run_serves_until_the_signal_and_exits_zero() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
         // The server binds an ephemeral port, accepts nothing, and stops --
         // which is the whole path through `run` minus the waiting.
         assert_eq!(run(&argv(&["serve", "127.0.0.1:0"]), fired()).await, OK);
+
+        let listening = crate::emitted::landed(from, "api.serve", "listening");
+        let mine = listening
+            .iter()
+            .find(|record| crate::emitted::says(record, "addr", "127.0.0.1:"))
+            .expect("the process's own configuration is the first thing it writes");
+        assert_eq!(mine.level, telemetry::Level::Info);
+        // The two flags, not the two PATHS: `store` and `masters` are read off
+        // the machine this suite happens to run on, so asserting them would be
+        // asserting somebody's home directory.
+        assert!(
+            mine.field("web_built").is_some() && mine.field("autopilot_flies").is_some(),
+            "a reader arriving afterwards must be able to tell whether this \
+             process was serving a front end and whether it was flying: {mine:?}"
+        );
     }
 
     #[tokio::test]
@@ -6575,6 +8231,96 @@ mod tests {
             json.starts_with('[') && json.ends_with(']'),
             "and it is an array"
         );
+    }
+
+    /// The wire says every universe a row is in, and the old field never moves.
+    ///
+    /// D-0089 landed NIFTY 50 / 100 / 200 / 500 as `Universe` bits 3–6 and
+    /// wired none of it: `/instruments.json` still answered one word out of
+    /// `index|fno|ntm|other`, so four rows on `/` and `/db` shipped DISABLED
+    /// with "no endpoint carries this membership" written on them. The data was
+    /// there and the API could not say it.
+    ///
+    /// Two fields now, and this test is the reason both exist. `universes`
+    /// carries the set. `universe` is frozen at the three words a running page
+    /// already splits on `+` — widening it would have been the quiet kind of
+    /// break, because the string would still parse and would still group, and
+    /// only a reader comparing or bookmarking the whole value would notice.
+    ///
+    /// Pinned on a value with a NEW bit and no old one — a bare `NIFTY_50` —
+    /// because that is the only shape that can tell "the compatibility field is
+    /// pinned to three" apart from "the new bits happen to travel with `ntm`",
+    /// which every real constituent does.
+    #[tokio::test]
+    async fn the_wire_carries_every_membership_and_the_frozen_field_never_widens() {
+        use brutex_core::universe::Universe;
+
+        // Nothing at all: the array is empty, the word is `other`. The two
+        // spellings of "no membership" are deliberate and are not equal.
+        assert_eq!(universe_label(Universe::NONE), "other");
+        assert!(universe_tokens(Universe::NONE).is_empty());
+        assert_eq!(universes_json(Universe::NONE), "[]");
+
+        // Everything: the frozen field is STILL exactly three words.
+        let every = UNIVERSE_TOKENS
+            .iter()
+            .fold(Universe::NONE, |acc, (bit, _)| acc.union(*bit));
+        assert_eq!(
+            universe_label(every),
+            "index+fno+ntm",
+            "the compatibility field is pinned to the three universes that \
+             existed before D-0089, whatever else the row is in"
+        );
+        assert_eq!(
+            universe_tokens(every),
+            ["index", "fno", "ntm", "n500", "n200", "n100", "n50"],
+            "and the array carries all seven, in bit order"
+        );
+
+        // A new bit ALONE cannot reach the frozen field.
+        assert_eq!(universe_label(Universe::NIFTY_50), "other");
+        assert_eq!(universe_tokens(Universe::NIFTY_50), ["n50"]);
+        assert_eq!(universes_json(Universe::NIFTY_50), r#"["n50"]"#);
+
+        // And the two fields cannot disagree about how a bit is spelled,
+        // because both read `UNIVERSE_TOKENS`.
+        for (bit, token) in UNIVERSE_TOKENS.into_iter().take(LEGACY_UNIVERSE_TOKENS) {
+            assert_eq!(universe_label(bit), token, "one spelling per bit");
+        }
+
+        // Now the endpoint, on real membership rather than synthesised bits.
+        let dir = agreeing("unijson");
+        let site = site("unijson", &dir);
+        let loaded: Loaded = std::sync::Arc::new(site);
+        let (_headers, json) = instruments_json(
+            axum::extract::State(loaded),
+            "/instruments.json?feed=groww".parse().expect("a legal uri"),
+        )
+        .await;
+
+        // RELIANCE is in all six equity lists — that is what the exchange's own
+        // constituent files say, and it is why the four tiers were worth
+        // wiring: `fno+ntm` was the whole answer this endpoint could give.
+        assert!(
+            json.contains(
+                r#""universe":"fno+ntm","universes":["fno","ntm","n500","n200","n100","n50"]"#
+            ),
+            "RELIANCE must carry its four tiers in the array and none of them \
+             in the frozen word: {json}"
+        );
+        // NIFTY is an index and an F&O underlying, and a constituent of
+        // nothing: an index is not a share. Both fields say so.
+        assert!(
+            json.contains(r#""universe":"index+fno","universes":["index","fno"]"#),
+            "an index names no tier: {json}"
+        );
+        // Every row carries both. `"universe":` is not a substring of
+        // `"universes":` — the byte after `universe` differs — so these two
+        // counts are independent.
+        let frozen = json.matches(r#""universe":"#).count();
+        let full = json.matches(r#""universes":"#).count();
+        assert_eq!(frozen, json.matches(r#""symbol":"#).count());
+        assert_eq!(full, frozen, "neither field is optional");
     }
 
     /// A transport blip is retried; a vendor's answer is not.
@@ -7691,6 +9437,569 @@ mod tests {
             "UNCHECKED is one of the words that makes a note loud: {stale}"
         );
     }
+
+    /// A vendor on loopback that answers once, and reports it was reached.
+    ///
+    /// Raw sockets and hand-written HTTP, for the reason `crates/pull`'s own
+    /// socket tests give: this workspace does not widen a dependency for a test.
+    ///
+    /// **THE DOC COMMENT THAT USED TO SIT HERE BELONGED TO ANOTHER TEST.** The
+    /// prose about four emit sites and a `Trace` floor was written for
+    /// [`the_run_events_and_the_request_event_reach_the_installed_sink`], and
+    /// this function was later inserted BETWEEN that comment and the item it
+    /// documented — so the test lost its explanation and this helper acquired
+    /// one about events it does not emit. Rust attaches a doc block to whatever
+    /// item follows it, silently. The block is back on its own test below; this
+    /// note is here so the same insertion is not made again.
+    fn loopback_vendor(answer: &'static str) -> (String, std::sync::mpsc::Receiver<()>) {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            while let Ok((mut stream, _)) = socket.accept() {
+                let mut buf = [0u8; 4096];
+                drop(stream.read(&mut buf));
+                let _reached = tx.send(());
+                drop(stream.write_all(answer.as_bytes()));
+                drop(stream.flush());
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    /// **THE TWO SITES PAST THE SOCKET, DRIVEN OVER A REAL ONE.**
+    ///
+    /// `crates/api/src/emitted.rs` names three emit sites it cannot reach and
+    /// says they "become reachable the day a recorded-transport fake exists for
+    /// `pull::fetch`". Two of them do not need one. They need a SOCKET, and
+    /// `crates/pull` already established that a loopback listener is how this
+    /// workspace supplies one — `pull::emit_sites::drive_http` does exactly
+    /// this against a 503.
+    ///
+    /// So `pull.http vendor refused a window` and `pull.chunk answered` are
+    /// proven here, through the shipped `fetch_chunks`, against a vendor this
+    /// test opened. Nothing is faked about the wire: the bytes on it are the
+    /// bytes a vendor would send, and the code under test is the code that runs
+    /// in production.
+    ///
+    /// # The success path needs a body the SHIPPED decoder accepts
+    ///
+    /// The 503 half only had to be refused. The 200 half has to be *decoded*,
+    /// by `pull::http::decode_body` reading the real Dhan descriptor — so the
+    /// bytes below are that descriptor's own shape and not a shape invented
+    /// here: `ResponseShape::ParallelArrays { envelope: None }`, six arrays
+    /// named by its `FieldNames`, prices in rupees and no `open_interest` array
+    /// at all, because that row deliberately leaves the name `None` (a spot
+    /// index has none, and an absent array is not a zero — `CLAUDE.md` §7).
+    /// Getting any of that wrong fails the decode, and a decode that fails
+    /// never reaches the emit — which is what makes this a test of the site
+    /// rather than of the fixture.
+    ///
+    /// The third — `pull.spot instrument refused` — is driven by
+    /// [`the_refused_instrument_site_is_driven_over_a_real_universe`], which
+    /// needs a non-empty universe and no socket at all.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "two emit sites, two loopback vendors and ONE installed sink. \
+                  Split in two, both halves would still have to agree about a \
+                  sink that is a process singleton, and the second would repeat \
+                  the descriptor surgery the first already performs -- which is \
+                  the coupling this test exists inside rather than around."
+    )]
+    #[tokio::test]
+    async fn the_two_sites_past_the_socket_are_driven_over_a_real_one() {
+        /// One bar, in the shape the SHIPPED Dhan descriptor declares: parallel
+        /// arrays with no envelope, prices in rupees, and no `open_interest`
+        /// array because that row leaves the name `None`. See the second half
+        /// of this test for why every one of those is load-bearing.
+        ///
+        /// At the top of the function rather than beside its use, because
+        /// clippy denies an item after a statement — an item is in scope from
+        /// the start of the block whatever line it is written on, and a reader
+        /// who believes otherwise is the defect that lint exists for.
+        const BODY: &str = concat!(
+            r#"{"open":[24500.75],"high":[24501.50],"low":[24499.25],"#,
+            r#""close":[24500.50],"volume":[250],"timestamp":[1751337900]}"#
+        );
+
+        // Installs (or adopts) the process sink, so `landed` below reads the
+        // one `telemetry::emit` actually reaches.
+        let _sink = crate::emitted::sink();
+        let dir = masters("chunks", None, None);
+        let site = Site::serving(&dir, &store_root("chunks"));
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        // A REFUSAL: the vendor answers 503, so `with_retry` gives up and the
+        // error map writes the line that carries the vendor's own words.
+        let (url, reached) = loopback_vendor(
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 9\r\n\r\ntoo busy\n",
+        );
+        let pull::vendor::Transport::Http(shipped) =
+            pull::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("this feed authenticates, so its transport is HTTP")
+        };
+        let spec = pull::vendor::HttpSpec {
+            // Leaked for the reason `crates/pull`'s socket tests leak theirs: a
+            // descriptor's base URL is `&'static str` and a port known only at
+            // run time has to outlive the borrow.
+            base_url: Box::leak(url.into_boxed_str()),
+            ..shipped
+        };
+        let source = pull::http::HttpSource::new(spec, "shhh".to_owned()).expect("a client");
+
+        let from = crate::emitted::mark();
+        let answered = fetch_chunks(
+            &asked,
+            &site,
+            &source,
+            "13",
+            pull::vendor::Listing::Index,
+            &spec,
+        )
+        .await;
+        assert!(answered.is_err(), "a 503 is a refusal");
+        assert!(
+            reached
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the loopback vendor was contacted, so there was an answer to write down"
+        );
+        let refused = crate::emitted::landed(from, "pull.http", "vendor refused a window");
+        assert!(
+            !refused.is_empty(),
+            "the refusal reaches the log, carrying the vendor's own words in \
+             their own field — the whole reason that site exists"
+        );
+        assert!(
+            refused
+                .iter()
+                .any(|r| crate::emitted::says(r, "instrument_id", "13")),
+            "and it names the instrument it was asking about: {refused:?}"
+        );
+
+        // AN ANSWER: a second vendor, on its own port, returning one bar in the
+        // shape THIS descriptor declares. `fetch_chunks` decodes it and writes
+        // the `pull.chunk answered` line — the site that tells a run which was
+        // merely slow apart from a run that was silently returning nothing, and
+        // the row count is the field that does it. `BODY` is at the top of the
+        // function; it is this vendor's own response shape.
+        //
+        // Leaked for the same reason the base URL below is: `loopback_vendor`
+        // hands its bytes to a thread that outlives this frame, and the length
+        // header has to be computed rather than written, or a body edited by
+        // one byte would hang the client instead of failing the assertion.
+        let answer: &'static str = Box::leak(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{BODY}",
+                BODY.len()
+            )
+            .into_boxed_str(),
+        );
+        let (url, served) = loopback_vendor(answer);
+        let spec = pull::vendor::HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..shipped
+        };
+        let source = pull::http::HttpSource::new(spec, "shhh".to_owned()).expect("a client");
+
+        let from = crate::emitted::mark();
+        let window = fetch_chunks(
+            &asked,
+            &site,
+            &source,
+            "1333",
+            pull::vendor::Listing::Index,
+            &spec,
+        )
+        .await
+        .expect("a 200 in this descriptor's own shape decodes to a window");
+        assert_eq!(
+            window.len(),
+            1,
+            "three days is one chunk at this feed's 90-day cap, so one request \
+             went out and one answer came back"
+        );
+        assert!(
+            served
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok(),
+            "the loopback vendor was contacted, so the row count below is one \
+             it actually sent"
+        );
+        assert_eq!(
+            window.first().map(|(_, body)| body.rows.len()),
+            Some(1),
+            "one bar on the wire is one row after the shipped decode: {window:?}"
+        );
+
+        let chunks = crate::emitted::landed(from, "pull.chunk", "answered");
+        let mine: Vec<&telemetry::Record> = chunks
+            .iter()
+            .filter(|r| crate::emitted::says(r, "instrument_id", "1333"))
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "the success path writes its own line; before this it wrote nothing \
+             and a run returning empty windows was indistinguishable from a slow \
+             one. {} record(s) landed on that target in the window.",
+            chunks.len()
+        );
+        for record in mine {
+            assert_eq!(
+                record.level,
+                telemetry::Level::Trace,
+                "`Trace`, deliberately: ~62,600 chunks on a one-minute backfill, \
+                 so an operator opts in to the wire rather than drowning in it"
+            );
+            assert!(
+                crate::emitted::counts(record, "rows", 1),
+                "the ROW COUNT is the field that tells a slow run from an empty \
+                 one, and it is the vendor's own: {record:?}"
+            );
+            assert!(
+                crate::emitted::counts(record, "chunk", 1)
+                    && crate::emitted::counts(record, "of", 1),
+                "and it says which request of how many this was: {record:?}"
+            );
+        }
+    }
+
+    /// **THE SITE INSIDE `broker_run`'S LOOP, DRIVEN OVER A REAL UNIVERSE.**
+    ///
+    /// `pull.spot instrument refused` is the last of the three
+    /// `crates/api/src/emitted.rs` listed as out of reach. Its entry claimed it
+    /// needed "a non-empty universe **and** a socket to a vendor", and the
+    /// second half was wrong in a way worth writing down: the loop emits for
+    /// **whatever** [`broker_window`] refuses, and that function refuses a rung
+    /// the feed does not declare on its FOURTH statement — above the credential
+    /// file, above `AwsIdentity::discover`, above every byte of network.
+    ///
+    /// So this drives it with no socket and no credential at all. Dhan's
+    /// descriptor declares `Day1` and nothing else — its `bars_path` is pinned
+    /// to the daily endpoint and its request carries no `interval` field, so
+    /// `Minute1` is withdrawn there rather than silently answered with
+    /// five-minute candles — and `Minute1` is what a form with no `granularity`
+    /// field means. `served` refuses by name, and the refusal is what the site
+    /// under test writes down.
+    ///
+    /// # Why a universe of exactly one
+    ///
+    /// The loop runs once per instrument the target names, so one row is one
+    /// emit and `index`/`of` are `1`/`1` — figures an assertion can pin. The
+    /// sibling test drives the same `broker_run` over an EMPTY universe to
+    /// prove the run-level events fire either side of a loop that never opens;
+    /// between the two, both states of that loop are covered.
+    ///
+    /// # What this proves that the audit journal cannot
+    ///
+    /// The journal is a fixed 256-byte stride and cuts a refusal off mid-word,
+    /// which is exactly why this event exists. The `why` field carries the
+    /// vendor's own sentence, and the assertion below reads it back out of the
+    /// file rather than trusting that it was passed in.
+    #[tokio::test]
+    async fn the_refused_instrument_site_is_driven_over_a_real_universe() {
+        let _sink = crate::emitted::sink();
+        // ONE SWEEPABLE INDEX, from both masters, so `merge` yields one key and
+        // `SpotTarget::Swept` names it. `is_sweepable` demands the INDEX
+        // segment and the INDEX kind, which is what these two rows carry.
+        let dir = masters(
+            "emit-refused",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let site = Site::serving(&dir, &store_root("emit-refused"));
+        assert_eq!(
+            site.read.merged.by_key.len(),
+            1,
+            "the premise: the loop under test runs exactly once"
+        );
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        let from = crate::emitted::mark();
+        let out = broker_run(&asked, &site).await;
+        assert!(
+            out.blocked.is_none(),
+            "a serving site reaches the loop: {out:?}"
+        );
+        assert_eq!(out.attempted, 1, "one instrument was named: {out:?}");
+        assert_eq!(
+            out.reached, 0,
+            "and the feed does not serve this rung, so none was fetched: {out:?}"
+        );
+        assert_eq!(
+            out.refused.len(),
+            1,
+            "one refusal, recorded against its own instrument: {out:?}"
+        );
+
+        let refused = crate::emitted::landed(from, "pull.spot", "instrument refused");
+        // FILTERED ON THE REASON, not on the instrument: `says` is a
+        // `contains`, and "NIFTY" is a substring of "BANKNIFTY". The rung
+        // refusal is this test's own and no other test in the binary writes it.
+        let mine: Vec<&telemetry::Record> = refused
+            .iter()
+            .filter(|r| crate::emitted::says(r, "why", "does not serve"))
+            .collect();
+        assert!(
+            !mine.is_empty(),
+            "the production call wrote no refusal to the file. {} record(s) \
+             landed on that target in the window; either the emit is gone or \
+             the loop never opened.",
+            refused.len()
+        );
+        for record in mine {
+            assert_eq!(
+                record.level,
+                telemetry::Level::Error,
+                "an instrument that will not pull is the line an operator is \
+                 woken for: {record:?}"
+            );
+            assert!(
+                crate::emitted::says(record, "instrument", "NIFTY")
+                    && crate::emitted::says(record, "feed", "dhan"),
+                "it names the instrument and the feed: {record:?}"
+            );
+            assert!(
+                crate::emitted::counts(record, "index", 1)
+                    && crate::emitted::counts(record, "of", 1),
+                "and where in the run it happened: {record:?}"
+            );
+            assert!(
+                crate::emitted::says(record, "why", "NIFTY: "),
+                "the reason begins with the instrument, whole, in the one \
+                 surface that has no 256-byte stride to cut it: {record:?}"
+            );
+        }
+    }
+
+    /// **THE RUN'S OWN EVENTS REACH THE FILE, AND SO DOES EVERY REQUEST'S.**
+    ///
+    /// Four production `telemetry::emit` sites live behind functions this
+    /// module keeps private — [`note_run_started`], [`note_run_finished`],
+    /// [`note_member_failure`] — or behind a `tower` layer that only a served
+    /// request drives: `logs::note_request`. Each was executed by tests and
+    /// asserted nothing, because `telemetry::emit` answers `NotInstalled` when
+    /// there is no sink and every one of these discards its return. Delete any
+    /// of the four calls and, before this test, nothing anywhere failed.
+    ///
+    /// The sink is [`crate::emitted::sink`] — the single install this binary
+    /// owns, at a `Trace` floor. The floor is load-bearing for the last of the
+    /// four: `api.request served` is `Debug` for a request that is neither a
+    /// 4xx nor a 5xx, so under the default `Info` floor the ordinary path
+    /// writes nothing and an assertion about it would be an assertion about the
+    /// floor.
+    ///
+    /// # No socket reaches a vendor
+    ///
+    /// [`broker_run`] returns before [`note_run_started`] unless
+    /// [`Site::broker`] is [`Broker::Live`], which only [`Site::serving`] sets —
+    /// so the run is driven through `serving`, over masters that hold **no**
+    /// instruments. The target list is then empty, the per-instrument loop does
+    /// not execute, and the two run-level events are written either side of a
+    /// loop that opens nothing. The site INSIDE that loop is driven by
+    /// [`the_refused_instrument_site_is_driven_over_a_real_universe`], which
+    /// supplies the one instrument this run deliberately does not have.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "four emit sites against ONE installed sink and ONE bound \
+                  listener. Split into four tests it would bind four listeners \
+                  and start four servers to assert four lines, and all four \
+                  would still have to agree about a sink that is a process \
+                  singleton -- which is the coupling this test exists inside \
+                  rather than around."
+    )]
+    #[tokio::test]
+    async fn the_run_events_and_the_request_event_reach_the_installed_sink() {
+        let sink = crate::emitted::sink();
+        let empty = masters("emit-run", None, None);
+        let site = Site::serving(&empty, &store_root("emit-run"));
+        assert!(
+            site.read.merged.by_key.is_empty(),
+            "the premise: no instrument, so nothing is asked of any vendor"
+        );
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past");
+
+        let from = crate::emitted::mark();
+        let out = broker_run(&asked, &site).await;
+        assert_eq!(out.attempted, 0, "an empty universe attempts nothing");
+        assert!(
+            out.blocked.is_none(),
+            "and it was not refused before it began"
+        );
+
+        let started = crate::emitted::landed(from, "pull.run", "started");
+        let mine = started
+            .iter()
+            .find(|record| {
+                crate::emitted::counts(record, "instruments", 0)
+                    && crate::emitted::says(record, "from", "2026-08-03")
+            })
+            .expect("note_run_started must put the RESOLVED parameters in the file");
+        assert_eq!(mine.level, telemetry::Level::Info);
+        assert!(
+            crate::emitted::says(mine, "rung", "1min")
+                && crate::emitted::says(mine, "target", asked.target.label()),
+            "the resolved rung and target are the numbers an operator needs: {mine:?}"
+        );
+
+        let finished = crate::emitted::landed(from, "pull.run", "finished");
+        let mine = finished
+            .iter()
+            .find(|record| crate::emitted::counts(record, "attempted", 0))
+            .expect("note_run_finished must put the run's own verdict in the file");
+        assert_eq!(
+            mine.level,
+            telemetry::Level::Info,
+            "a run with no failures and balanced books is Info, not Warn"
+        );
+        assert!(
+            crate::emitted::counts(mine, "failed", 0)
+                && crate::emitted::counts(mine, "bars_stored", 0),
+            "{mine:?}"
+        );
+
+        // A MEMBER THAT REACHED THE VENDOR AND DIED AT THE STORE. Driven
+        // directly because the only other way in is through a live socket, and
+        // it is the one site in this file whose `debug_assert` already demands
+        // `is_written` — which, with no sink installed, was vacuous.
+        let from = crate::emitted::mark();
+        note_member_failure(
+            &pull::ingest::Failure {
+                instrument: "EMITMEMBER".to_owned(),
+                why: "the store refused the month".to_owned(),
+            },
+            "2026-08",
+            &asked,
+            &site,
+        );
+        let failed = crate::emitted::landed(from, "pull.spot", "member did not land");
+        let mine = failed
+            .iter()
+            .find(|record| crate::emitted::says(record, "instrument", "EMITMEMBER"))
+            .expect("a member that did not land is the failure this event exists to name");
+        assert_eq!(
+            mine.level,
+            telemetry::Level::Error,
+            "the socket worked and the disk did not, which is an error"
+        );
+        assert!(
+            crate::emitted::says(mine, "month", "2026-08")
+                && crate::emitted::says(mine, "why", "the store refused the month"),
+            "{mine:?}"
+        );
+
+        // EVERY HTTP REQUEST, ONCE, THROUGH THE LAYER RATHER THAN THE HANDLER.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stopper = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let stop_addr = stopper.local_addr().expect("addr");
+        let served = tokio::spawn(serve(
+            listener,
+            router_serving(
+                Loaded::new(Site::load(&empty, &store_root("emit-request"))),
+                front("emit-request"),
+            ),
+            Box::pin(async move { stopper.accept().await.map(|_| ()) }),
+        ));
+
+        let from = crate::emitted::mark();
+        // A path with no extension is the client-routed shell, so this is a
+        // 200 — the arm the DEFAULT floor would have swallowed.
+        let shell = get(addr, "/emit-request-probe").await;
+        assert!(shell.contains("200 OK"), "{shell}");
+        // A path that names a file is a 404, which is the `Warn` arm.
+        let missing = get(addr, "/emit-request-probe.js").await;
+        assert!(missing.contains("404 Not Found"), "{missing}");
+
+        let served_events = crate::emitted::landed(from, "api.request", "served");
+        let ordinary = served_events
+            .iter()
+            .find(|record| {
+                record.field("path").and_then(telemetry::OwnedValue::as_str)
+                    == Some("/emit-request-probe")
+            })
+            .expect("every request writes one line, including the ones that worked");
+        assert_eq!(
+            ordinary.level,
+            telemetry::Level::Debug,
+            "a request that worked is detail, and detail is Debug"
+        );
+        assert!(
+            crate::emitted::counts(ordinary, "status", 200)
+                && crate::emitted::says(ordinary, "method", "GET")
+                && ordinary.field("micros").is_some(),
+            "{ordinary:?}"
+        );
+
+        let refused = served_events
+            .iter()
+            .find(|record| crate::emitted::says(record, "path", "/emit-request-probe.js"))
+            .expect("and so does the one that answered 404");
+        assert_eq!(
+            refused.level,
+            telemetry::Level::Warn,
+            "a 4xx is louder than a request that worked"
+        );
+        assert!(
+            crate::emitted::counts(refused, "status", 404),
+            "{refused:?}"
+        );
+
+        // THE QUERY STRING IS NEVER ON THE LINE. `note_request` logs the path
+        // and deliberately not the query, and this repository is public.
+        let from = crate::emitted::mark();
+        let _ignored = get(addr, "/emit-request-probe?secret=emit-site-probe").await;
+        let with_query = crate::emitted::landed(from, "api.request", "served");
+        let carried = with_query
+            .iter()
+            .find(|record| {
+                record.field("path").and_then(telemetry::OwnedValue::as_str)
+                    == Some("/emit-request-probe")
+            })
+            .expect("the request with a query string is still one line");
+        assert!(
+            carried
+                .fields
+                .iter()
+                .all(|(_, value)| value.as_str() != Some("emit-site-probe")),
+            "the PATH is logged and the query is not — this repository is \
+             public and a form carries operator input: {carried:?}"
+        );
+
+        let _stop = std::net::TcpStream::connect(stop_addr).expect("stop");
+        served
+            .await
+            .expect("the server task must not panic")
+            .expect("and must stop cleanly");
+        assert!(
+            !sink.health().is_loud(),
+            "nothing was dropped while proving these sites: {:?}",
+            sink.health()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -7763,13 +10072,20 @@ mod broker_target_tests {
         }
     }
 
-    /// The three targets, and which of them this build can actually address.
+    /// The seven targets, and which of them this build can actually address.
     #[test]
     fn only_the_swept_target_names_a_single_instrument_this_path_can_reach() {
         // Swept is the two engine-surface indices; the guard lets it through
-        // and `broker_window` fetches the first. The other two name sets whose
+        // and `broker_window` fetches the first. The other SIX name sets whose
         // members cannot be addressed at all without a parameter map.
-        assert_eq!(ingest::SpotTarget::ALL.len(), 3);
+        //
+        // D-0105 took this from three to seven and moved nothing else here.
+        // That is the point: the four NIFTY tiers are REQUESTABLE and, on the
+        // broker path, refused by name for the same reason `equities` always
+        // was — one instrument per request, and no parameter map to name it.
+        // A new target does not widen what this path can reach and does not
+        // widen what the engine sweeps.
+        assert_eq!(ingest::SpotTarget::ALL.len(), 7);
         let served: Vec<_> = ingest::SpotTarget::ALL
             .into_iter()
             .filter(|t| *t == ingest::SpotTarget::Swept)
@@ -7783,26 +10099,807 @@ mod broker_target_tests {
     }
 }
 
-/// The universe a listing belongs to, as one word the browser can group by.
+/// Every universe bit, with the one word the wire spells it as.
 ///
-/// `Universe` is a bitset and an instrument can be in several — a NIFTY Total
-/// Market equity that also has F&O contracts is in both. The label names the
-/// most specific membership an operator sorts by, because a browser grouping
-/// on "index, F&O, NTM" wants one bucket per row and not a set.
+/// **The single spelling table.** Two lists of these words is how one of them
+/// says `ntm` while the other says `total_market` and a browser filter matches
+/// nothing — so the compatibility field and the full field below are both
+/// generated from THIS array and cannot disagree about a bit's name.
+///
+/// Ordered by bit position ascending. The order is fixed so a response is
+/// byte-identical between reloads (`CLAUDE.md` §3 rule 5) and for no other
+/// reason: membership is a SET, the array is not a ranking, and nothing may
+/// read position 0 as "the most important universe". `core::universe` says the
+/// same thing about the bits themselves.
+///
+/// The first [`LEGACY_UNIVERSE_TOKENS`] entries are the three universes that
+/// existed before D-0089, in the order [`universe_label`] has always emitted
+/// them. Appending to this array is how a new universe reaches the wire;
+/// REORDERING the first three changes a shipped field and is forbidden by the
+/// same append-only rule that governs the bits (§3 rule 8).
+const UNIVERSE_TOKENS: [(brutex_core::universe::Universe, &str); 7] = [
+    (brutex_core::universe::Universe::INDEX, "index"),
+    (brutex_core::universe::Universe::FNO, "fno"),
+    (brutex_core::universe::Universe::TOTAL_MARKET, "ntm"),
+    (brutex_core::universe::Universe::NIFTY_500, "n500"),
+    (brutex_core::universe::Universe::NIFTY_200, "n200"),
+    (brutex_core::universe::Universe::NIFTY_100, "n100"),
+    (brutex_core::universe::Universe::NIFTY_50, "n50"),
+];
+
+/// How many of [`UNIVERSE_TOKENS`] the compatibility field may name.
+///
+/// Three: `index`, `fno`, `ntm`. Pinned so that appending an eighth universe
+/// widens [`universe_tokens`] and leaves [`universe_label`] alone, which is the
+/// whole content of the compatibility promise.
+const LEGACY_UNIVERSE_TOKENS: usize = 3;
+
+/// The universe a listing belongs to, as the ONE string old readers parse.
+///
+/// # This field is frozen, and that is its job
+///
+/// `universe` on `/instruments.json` has always been `index`, `fno`, `ntm`,
+/// those joined by `+`, or `other`. A running page splits it on `+` and tests
+/// membership against exactly those words. D-0089 appended four bits —
+/// NIFTY 50 / 100 / 200 / 500 — and this function deliberately does **not**
+/// emit them: a row that started answering `fno+ntm+n500+n200+n100+n50` would
+/// still parse, and would still group correctly under `split('+')`, but any
+/// reader comparing the whole string, or grouping by it, or writing it into a
+/// bookmark, would silently change behaviour. The new memberships travel in
+/// [`universe_tokens`] instead, so an old reader keeps working and a new one
+/// gets the full set.
+///
+/// `Universe` is a bitset and an instrument is in several at once — a NIFTY
+/// Total Market equity that also has F&O contracts is in both — which is why
+/// this was never expressive enough and why the array field exists. It stays
+/// because deleting a shipped field is a change to somebody else's page.
 fn universe_label(u: brutex_core::universe::Universe) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    if u.contains(brutex_core::universe::Universe::INDEX) {
-        parts.push("index");
-    }
-    if u.contains(brutex_core::universe::Universe::FNO) {
-        parts.push("fno");
-    }
-    if u.contains(brutex_core::universe::Universe::TOTAL_MARKET) {
-        parts.push("ntm");
-    }
+    let parts: Vec<&str> = UNIVERSE_TOKENS
+        .iter()
+        .take(LEGACY_UNIVERSE_TOKENS)
+        .filter(|(bit, _)| u.contains(*bit))
+        .map(|(_, token)| *token)
+        .collect();
     if parts.is_empty() {
         "other".to_owned()
     } else {
         parts.join("+")
+    }
+}
+
+/// Every universe a listing belongs to, as the JSON array `universes`.
+///
+/// # Why an array beside a string
+///
+/// Membership is a set: a NIFTY 50 name is also in the 100, the 200, the 500
+/// and the Total Market, and it is usually an F&O underlying too. One word
+/// cannot say that, and `universe_label`'s `+` join said it only by convention
+/// — a reader had to know to split. An array says it in the type.
+///
+/// An instrument in nothing yields `[]`. The compatibility field spells that
+/// same fact `"other"`, because a field that must always be one token has to
+/// put *something* there; the array does not, and inventing an `"other"`
+/// element would make emptiness look like a membership.
+///
+/// # Cost
+///
+/// Seven `contains` — one mask and one compare each — over a table whose length
+/// is a compile-time constant, plus one `Vec` of at most seven `&'static str`.
+/// Nothing is looked up by symbol: `entry.universe` was computed once by
+/// `core::universe::of_instrument` when the masters were merged, so the
+/// per-row cost here does not include the six `MemberIndex` probes that
+/// produced it, and it does not grow with the instrument set.
+///
+/// O(1) per row **by construction and UNVERIFIED as a measurement**: no bench
+/// times this function, so what is claimed above is the shape of the loop and
+/// not a number. `docs/06-limits.md` §11 carries the admission rather than this
+/// comment carrying a bound nobody took.
+fn universe_tokens(u: brutex_core::universe::Universe) -> Vec<&'static str> {
+    UNIVERSE_TOKENS
+        .iter()
+        .filter(|(bit, _)| u.contains(*bit))
+        .map(|(_, token)| *token)
+        .collect()
+}
+
+/// The `universes` array, escaped, as one JSON value.
+///
+/// Every element goes through [`render::json_string`] like every other value in
+/// this document — the tokens are compile-time literals and could be written
+/// raw, and the day one is not a literal is the day a raw write is a hole.
+fn universes_json(u: brutex_core::universe::Universe) -> String {
+    let mut out = String::from("[");
+    for (n, token) in universe_tokens(u).into_iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        out.push_str(&render::json_string(token));
+    }
+    out.push(']');
+    out
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod percentage_tests {
+    use super::*;
+    use brutex_core::instrument::{Exchange, Segment};
+    use brutex_core::symbol::Symbol;
+    use pull::manifest::{Closes, Entry, EntryKey, Held, Manifest};
+    use store::path::{Timeframe, YearMonth};
+
+    fn month(year: u16, ordinal: u8) -> YearMonth {
+        YearMonth::new(year, ordinal).expect("a month")
+    }
+
+    fn series(segment: Segment, symbol: &str) -> census::Series {
+        series_at(segment, symbol, Timeframe::MINUTE_1)
+    }
+
+    /// The same series, at a rung the caller names.
+    ///
+    /// `series` hardcoded `MINUTE_1`, which is fine for the arithmetic tests
+    /// below — and is exactly why no test in this module could see a writer
+    /// that hardcoded the same word.
+    fn series_at(segment: Segment, symbol: &str, timeframe: Timeframe) -> census::Series {
+        census::Series {
+            exchange: Exchange::Nse,
+            segment,
+            symbol: Symbol::new(symbol).expect("a symbol"),
+            timeframe,
+        }
+    }
+
+    fn key(series: census::Series, at: YearMonth) -> EntryKey {
+        series.at(at)
+    }
+
+    /// A census held entirely in memory, at a path that does not exist.
+    ///
+    /// The path is deliberately a name nothing ever writes: every assertion
+    /// below that reads a close therefore reads it from the manifest, and a
+    /// change that reached for a bar file would fail rather than pass slowly.
+    fn census_of(rows: &[(census::Series, YearMonth, u64, Closes)]) -> census::VendorCensus {
+        let mut manifest = Manifest::open(Vendor::Groww, &[], &[]).expect("a genesis census");
+        for &(series, at, bars, closes) in rows {
+            manifest
+                .record_held(Held::new(
+                    Entry {
+                        key: key(series, at),
+                        rows: bars,
+                        first_ts_micros: 1_751_350_800_000_000,
+                        last_ts_micros: 1_751_363_940_000_000,
+                    },
+                    closes,
+                ))
+                .expect("records");
+        }
+        census::VendorCensus {
+            vendor: Vendor::Groww,
+            path: PathBuf::from("/nonexistent/percentage-tests/groww.man"),
+            state: census::Census::Held {
+                manifest: Box::new(manifest),
+            },
+        }
+    }
+
+    fn priced(first: i64, last: i64) -> Closes {
+        Closes::known(first, last).expect("two prices")
+    }
+
+    /// The one row `store_body` produced, so an assertion names a field rather
+    /// than a substring of the whole array.
+    fn only_row(body: &str) -> String {
+        let inner = body
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .expect("a JSON array");
+        assert!(
+            !inner.contains("},{"),
+            "this helper is for a single-row body: {body}"
+        );
+        inner.to_owned()
+    }
+
+    /// A feed refuses a rung it does not declare, and the refusal names both.
+    ///
+    /// The regression this pins is a whole class. `Feed::serves` existed with
+    /// NO caller outside its own tests, so withdrawing Dhan's `Minute1` from
+    /// its `granularities` row was documentation and not a gate.
+    /// `autopilot::round` pins `Minute1` for every feed, so the withdrawn rung
+    /// still reached that vendor's DAILY endpoint and its daily candles were
+    /// filed under `1min/` — silent wrong data in an append-only store.
+    #[test]
+    fn a_feed_refuses_a_rung_it_does_not_declare_and_names_both() {
+        use pull::vendor::{Feed, Granularity};
+
+        assert_eq!(
+            served(Feed::Dhan, Granularity::Day1),
+            Ok(()),
+            "the rung this feed's bars path is pinned to must be admitted"
+        );
+        let why = served(Feed::Dhan, Granularity::Minute1)
+            .expect_err("a rung this feed cannot address must refuse");
+        assert!(
+            why.contains("Dhan"),
+            "the refusal names the feed, so the operator knows which descriptor \
+             row to amend: {why}"
+        );
+        assert!(
+            why.contains(&Granularity::Minute1.to_string()),
+            "and names the rung that was asked for: {why}"
+        );
+
+        // EVERY DECLARED RUNG IS ADMITTED, for every feed. A gate that refuses
+        // what the descriptor declares is the opposite failure and just as
+        // quiet — the pull simply never happens.
+        for feed in Feed::ALL {
+            for rung in Granularity::ALL {
+                assert_eq!(
+                    served(feed, rung).is_ok(),
+                    feed.serves(rung),
+                    "{} and {rung} must agree with the descriptor's own row",
+                    feed.display()
+                );
+            }
+        }
+    }
+
+    /// `?timeframe=` defaults, resolves, and refuses BY NAME.
+    ///
+    /// The parser gates every bars read on both routes. It had no test at all —
+    /// its three branches, including the refusal sentence its own doc comment
+    /// promises, were unproven. This test was also lost once to a stray
+    /// `git checkout` and is re-stated here rather than assumed.
+    #[test]
+    fn the_rung_parameter_defaults_to_minutes_and_refuses_an_unknown_rung_by_name() {
+        assert_eq!(
+            timeframe_param(""),
+            Ok(store::path::Timeframe::MINUTE_1),
+            "an absent rung is the grid every pre-D-0055 link meant"
+        );
+        assert_eq!(
+            timeframe_param("symbol=NIFTY&month=2026-07"),
+            Ok(store::path::Timeframe::MINUTE_1),
+            "absent AMONG other params is still absent"
+        );
+        assert_eq!(
+            timeframe_param("timeframe=1min"),
+            Ok(store::path::Timeframe::MINUTE_1)
+        );
+        assert_eq!(
+            timeframe_param("timeframe=1day"),
+            Ok(store::path::Timeframe::DAY_1),
+            "the rung the whole store currently holds must be reachable"
+        );
+
+        let why = timeframe_param("timeframe=1hour").expect_err("an unheld rung must refuse");
+        assert!(
+            why.contains("1hour"),
+            "the refusal names what was asked: {why}"
+        );
+        assert!(
+            why.contains("1min") && why.contains("1day"),
+            "and names what this store does hold, so the operator can retry: {why}"
+        );
+
+        // EVERY KNOWN RUNG IS REACHABLE FROM THE WIRE. A rung added to
+        // `Timeframe::KNOWN` and not here is a directory the store writes and
+        // no request can name.
+        for tf in store::path::Timeframe::KNOWN {
+            assert_eq!(
+                timeframe_param(&format!("timeframe={}", tf.as_str())),
+                Ok(*tf),
+                "{} is in Timeframe::KNOWN and must be requestable",
+                tf.as_str()
+            );
+        }
+    }
+
+    /// **A STORE ROW NAMES THE RUNG IT IS STORED AT, NEVER A FIXED WORD.**
+    ///
+    /// `store_body` wrote `"timeframe":"1min"` as a literal on every row while
+    /// `Series` carried the real `Timeframe`. Every test in this module built
+    /// its series at `MINUTE_1`, so all 321 of them agreed with the literal and
+    /// none of them could tell the difference — the writer was reverted to the
+    /// literal and the suite stayed green.
+    ///
+    /// This test builds a `DAY_1` series specifically so it cannot: it asserts
+    /// the row says `1day` AND that it does not say `1min`, which is what makes
+    /// reverting the writer a failure rather than a wash.
+    #[test]
+    fn a_store_row_names_the_rung_it_is_stored_at_and_never_a_fixed_word() {
+        let daily = series_at(Segment::Index, "NIFTY", Timeframe::DAY_1);
+        let at = month(2026, 7);
+        let census = census_of(&[(daily, at, 23, priced(10_000_000, 10_125_000))]);
+        let body = only_row(&store_body(&[census], &[(daily, at)], Vendor::Groww));
+        assert!(
+            body.contains(r#""timeframe":"1day""#),
+            "a 1day series must say 1day: {body}"
+        );
+        assert!(
+            !body.contains(r#""timeframe":"1min""#),
+            "a 1day series must not say 1min: {body}"
+        );
+
+        // The other rung, from the same writer, so the assertion above is
+        // reading the field and not a word that happens to be everywhere.
+        let minute = series_at(Segment::Index, "NIFTY", Timeframe::MINUTE_1);
+        let census = census_of(&[(minute, at, 8_250, priced(10_000_000, 10_125_000))]);
+        let body = only_row(&store_body(&[census], &[(minute, at)], Vendor::Groww));
+        assert!(
+            body.contains(r#""timeframe":"1min""#),
+            "a 1min series must say 1min: {body}"
+        );
+    }
+
+    /// **EVERY RUNG THE STORE KNOWS IS REACHABLE FROM THE WIRE.**
+    ///
+    /// `timeframe_param` had no test at all: an absent value defaulting to
+    /// one minute, a named rung, and a refusal by name were three behaviours
+    /// its doc comment promised and nothing checked.
+    ///
+    /// The last assertion is the one that matters after D-0055: it walks
+    /// `Timeframe::KNOWN` rather than naming rungs, so a third rung added to
+    /// the store is either reachable here or this test fails.
+    #[test]
+    fn every_rung_the_store_knows_is_reachable_from_the_wire_and_an_unknown_one_is_refused() {
+        // Absent, not empty-and-present: the bookmark case.
+        assert_eq!(timeframe_param(""), Ok(Timeframe::MINUTE_1));
+        assert_eq!(
+            timeframe_param("symbol=NIFTY&month=2026-07"),
+            Ok(Timeframe::MINUTE_1),
+            "an absent rung is the one-minute grid, so old links keep working"
+        );
+        assert_eq!(timeframe_param("timeframe=1min"), Ok(Timeframe::MINUTE_1));
+        assert_eq!(
+            timeframe_param("timeframe=1day"),
+            Ok(Timeframe::DAY_1),
+            "the rung 100% of the data on disk is stored at"
+        );
+
+        // PRESENT AND UNKNOWN IS REFUSED BY NAME, never defaulted.
+        let why = timeframe_param("timeframe=1hour").expect_err("no 1hour directory");
+        assert!(
+            why.contains("1hour"),
+            "the refusal names what was asked: {why}"
+        );
+        assert!(
+            why.contains("1min") && why.contains("1day"),
+            "the refusal names what the store does hold: {why}"
+        );
+
+        // EVERY member of the store's own list, so a new rung cannot be added
+        // to `KNOWN` and left unreachable from the wire.
+        for rung in Timeframe::KNOWN {
+            assert_eq!(
+                timeframe_param(&format!("timeframe={}", rung.as_str())),
+                Ok(*rung),
+                "{} is in Timeframe::KNOWN and must be askable",
+                rung.as_str()
+            );
+        }
+    }
+
+    /// **A MONTH THAT MOVED 1.25% IS 125, AND A FLAT MONTH IS A REAL ZERO.**
+    ///
+    /// The comment on `store_json` promised integer basis points for years
+    /// before anything computed one. This is the arithmetic that comment
+    /// describes, in the units it names: ₹100.00 to ₹101.25 is `125`.
+    ///
+    /// The flat case is the other half and it is not decoration. Zero basis
+    /// points is a month that closed where it opened — a fact — and the whole
+    /// design of the `null`-plus-reason wire shape exists so that fact is never
+    /// confused with "nobody knows". If `0` could mean both, the column would
+    /// be unreadable on exactly the rows an operator looks hardest at.
+    #[test]
+    fn a_month_that_moved_1_25_percent_is_125_basis_points_and_a_flat_month_is_a_real_zero() {
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(10_000, 10_125))),
+            Ok(125),
+            "₹100.00 to ₹101.25 is +1.25%, which is 125 basis points"
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(10_000, 9_875))),
+            Ok(-125),
+            "and the same move down is -125, sign carried by the number itself"
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(295_050, 295_050))),
+            Ok(0),
+            "a month that closed where it opened is ZERO, not unknown"
+        );
+    }
+
+    /// **HALF ROUNDS AWAY FROM ZERO, AND IT DOES SO IN BOTH DIRECTIONS.**
+    ///
+    /// `CLAUDE.md` §7's half-up rule governs snapping a PRICE to the tick grid
+    /// at the WRITE boundary. A percentage is neither. Under half-up, +0.5 bp
+    /// renders `1` and -0.5 bp renders `0` — a gain and its mirror-image loss
+    /// printing different magnitudes, which is visible the moment the column is
+    /// sorted and inexplicable when it is noticed.
+    ///
+    /// The fixture is an exact tie by construction: a base of 32 paisa and a
+    /// one-paisa move is 10,000/32 = 312.5 basis points exactly, so nothing
+    /// here depends on a rounding accident. A half-up implementation returns
+    /// `313` and `-312` and fails the second assertion alone.
+    #[test]
+    fn basis_points_round_half_away_from_zero_in_both_directions() {
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(32, 33))),
+            Ok(313),
+            "312.5 bp exactly, rounded away from zero"
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(32, 31))),
+            Ok(-313),
+            "-312.5 bp exactly, rounded away from zero — NOT -312"
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(32, 34))),
+            Ok(625),
+            "and a move that divides exactly is not nudged"
+        );
+    }
+
+    /// **A BASE OF ZERO IS REFUSED, NOT DIVIDED BY.**
+    ///
+    /// `docs/02-store-format.md` §3: "An all-zero record is a legal flat bar",
+    /// so a first close of zero paisa is a state the format permits and this is
+    /// a check rather than a defensive comment. A ratio against it is undefined
+    /// — it is not `0`, it is not infinity, and it is not an empty cell that
+    /// means four other things.
+    #[test]
+    fn a_base_of_zero_paisa_is_refused_rather_than_divided_by() {
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(0, 500))),
+            Err(Unknown::BaseNotPositive)
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(0, 0))),
+            Err(Unknown::BaseNotPositive),
+            "zero to zero is still no base, and 0% would be an invention"
+        );
+        assert_eq!(Unknown::BaseNotPositive.code(), "base_not_positive");
+    }
+
+    /// **A MOVE THAT LEAVES `i64` IS REFUSED, NOT WRAPPED.**
+    ///
+    /// The scaling by 10,000 is the only step that can overflow, and the bound
+    /// is exact: it fits while `|delta| <= i64::MAX / 10_000 =
+    /// 922,337,203,685,477` paisa. Both sides of that boundary are asserted, so
+    /// the arm is a bound and not a guess.
+    #[test]
+    fn a_move_that_leaves_i64_is_refused_rather_than_wrapped() {
+        let widest = i64::MAX / 10_000;
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(1, widest + 1))),
+            Ok(widest * 10_000),
+            "a base of one paisa makes the delta the whole value; this one fits"
+        );
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(1, widest + 2))),
+            Err(Unknown::Overflow),
+            "one paisa further and the scaled move leaves i64"
+        );
+        assert_eq!(Unknown::Overflow.code(), "overflow");
+    }
+
+    /// **BASIS POINTS DO NOT FIT `i32`, AND AN ORDINARY PRICE PROVES IT.**
+    ///
+    /// `i32::MAX` is 2,147,483,647 basis points, which sounds unreachable until
+    /// the base is small: a first close of one paisa and a last close of
+    /// ₹2,147.50 — an utterly ordinary NSE share price — is 2,147,490,000 basis
+    /// points. A one-paisa base is garbage data, and the store can hold it;
+    /// `CLAUDE.md` §3 rule 6 does not permit claiming a bound that is not
+    /// enforced. So the value is computed and carried as `i64`.
+    #[test]
+    fn basis_points_do_not_fit_i32_and_an_ordinary_price_proves_it() {
+        let over = month_change(Segment::Index, Some(priced(1, 214_750))).expect("a number");
+        assert_eq!(over, 2_147_490_000);
+        assert!(
+            over > i64::from(i32::MAX),
+            "{over} is past i32::MAX = {}, from a base of ₹0.01 and a close of ₹2,147.50",
+            i32::MAX
+        );
+    }
+
+    /// **NO EQUITY RENDERS A NUMBER WHILE NO THRESHOLD IS SOURCED.**
+    ///
+    /// `docs/05-decisions.md` D-0018 already decided this: a suspected
+    /// corporate action is refused loudly, never back-adjusted from a source no
+    /// vendor has been verified to supply. No threshold exists anywhere in this
+    /// repository, so every segment that can be re-based is refused and only
+    /// an index — which never splits — renders.
+    ///
+    /// **The gate outranks the data, and the third assertion is why.** An
+    /// equity whose closes ARE recorded is still refused; an equity whose
+    /// closes are NOT recorded is refused for the corporate action rather than
+    /// for the missing close, because an operator told "no close recorded"
+    /// would re-ingest the month and wait forever for a number.
+    #[test]
+    fn no_equity_month_renders_a_number_while_no_threshold_is_sourced() {
+        assert_eq!(
+            month_change(Segment::Index, Some(priced(10_000, 10_125))),
+            Ok(125),
+            "an index never splits, so it renders"
+        );
+        assert_eq!(
+            month_change(Segment::Cash, Some(priced(10_000, 10_125))),
+            Err(Unknown::CorporateActionUnverified),
+            "the same two prices under a segment that can split are refused"
+        );
+        assert_eq!(
+            month_change(Segment::Fno, Some(priced(10_000, 10_125))),
+            Err(Unknown::CorporateActionUnverified),
+            "a contract is adjusted when its underlying is, so it inherits the hazard"
+        );
+        assert_eq!(
+            month_change(Segment::Cash, Some(Closes::UNKNOWN)),
+            Err(Unknown::CorporateActionUnverified),
+            "the permanent reason outranks the temporary one"
+        );
+        // AND IT OUTRANKS THE MISSING NEIGHBOUR TOO, which is the arm that
+        // makes the Prev column consistent. An equity whose previous month is
+        // simply absent must not read `no_earlier_month`: that sends an
+        // operator to ingest a month, and no pull will ever make this cell a
+        // number. Only a sourced threshold will.
+        assert_eq!(
+            month_change(Segment::Cash, None),
+            Err(Unknown::CorporateActionUnverified)
+        );
+        assert_eq!(
+            month_change(Segment::Index, None),
+            Err(Unknown::NoEarlierMonth),
+            "for an index, an absent neighbour is exactly what it says"
+        );
+        assert_eq!(
+            Unknown::CorporateActionUnverified.code(),
+            "corporate_action_unverified"
+        );
+        assert!(
+            !can_be_rebased(Segment::Index)
+                && can_be_rebased(Segment::Cash)
+                && can_be_rebased(Segment::Fno)
+        );
+    }
+
+    /// **A MONTH WITH NO CLOSE RECORDED IS UNKNOWN, AND NEVER ZERO.**
+    ///
+    /// Every version-1 census entry reads back this way, and so does every
+    /// month this build committed before it read a bar file — D-0067. On the
+    /// wire it is `null` and a code, so the browser cannot render it as a
+    /// number by accident.
+    #[test]
+    fn a_month_with_no_close_recorded_is_unknown_and_never_zero() {
+        assert_eq!(
+            month_change(Segment::Index, Some(Closes::UNKNOWN)),
+            Err(Unknown::NotRecorded)
+        );
+        let nifty = series(Segment::Index, "NIFTY");
+        let at = month(2026, 7);
+        let body = store_body(
+            &[census_of(&[(nifty, at, 8_250, Closes::UNKNOWN)])],
+            &[(nifty, at)],
+            Vendor::Groww,
+        );
+        let row = only_row(&body);
+        assert!(
+            row.contains(r#""chg_bps":null,"chg_why":"not_recorded""#),
+            "unknown on the wire is null and a reason: {row}"
+        );
+        assert!(
+            !row.contains(r#""chg_bps":0"#),
+            "and it is never a zero: {row}"
+        );
+    }
+
+    /// **THE MONTH BEFORE JANUARY IS THE DECEMBER BEFORE IT, AND 1970-01 HAS
+    /// NONE.**
+    ///
+    /// The year boundary is the case a naive `month - 1` gets wrong, and the
+    /// floor is the case an unchecked one gets wrong. There is no `month_after`
+    /// on purpose — `CLAUDE.md` §3 rule 7 forbids look-ahead, and a function
+    /// that does not exist cannot be called.
+    #[test]
+    fn the_month_before_january_is_december_and_the_first_month_has_none() {
+        assert_eq!(month_before(month(2026, 8)), Some(month(2026, 7)));
+        assert_eq!(month_before(month(2026, 1)), Some(month(2025, 12)));
+        assert_eq!(
+            month_before(month(1970, 1)),
+            None,
+            "1970-01 is the first month the store can name"
+        );
+        assert_eq!(month_before(month(1970, 2)), Some(month(1970, 1)));
+    }
+
+    /// **AN INSTRUMENT'S FIRST MONTH HAS A CHANGE AND NO PREVIOUS CHANGE.**
+    ///
+    /// This is the property that decided the reading. Because `Δ %` is the
+    /// month's own first close to its own last close, it is defined for every
+    /// held month including the first — and only the "previous" column has a
+    /// missing-neighbour case. That case is `no_earlier_month`, spelled out,
+    /// and it is not `0.00%`.
+    #[test]
+    fn an_instruments_first_month_has_a_change_and_no_previous_change() {
+        let nifty = series(Segment::Index, "NIFTY");
+        let first = month(2026, 6);
+        let second = month(2026, 7);
+        let census = census_of(&[
+            (nifty, first, 8_250, priced(10_000, 10_125)),
+            (nifty, second, 8_250, priced(10_000, 10_500)),
+        ]);
+        let body = store_body(
+            &census_slice(&census),
+            &[(nifty, second), (nifty, first)],
+            Vendor::Groww,
+        );
+
+        assert!(
+            body.contains(r#""chg_bps":500,"chg_why":null,"prev_chg_bps":125,"prev_chg_why":null"#),
+            "July renders its own +5.00% and June's +1.25% beside it: {body}"
+        );
+        assert!(
+            body.contains(r#""chg_bps":125,"chg_why":null,"prev_chg_bps":null,"prev_chg_why":"no_earlier_month""#),
+            "June has its own number and NO previous — not a zero: {body}"
+        );
+        assert!(
+            !body.contains(r#""prev_chg_bps":0"#),
+            "a missing neighbour is never rendered as no change: {body}"
+        );
+    }
+
+    /// One census as the slice `store_body` takes.
+    fn census_slice(census: &census::VendorCensus) -> [census::VendorCensus; 1] {
+        [census.clone()]
+    }
+
+    /// **A ROW AND ITS NEIGHBOUR COST TWO PROBES AND NO FILE.**
+    ///
+    /// Two things are asserted, and each is the falsifiable half of a claim the
+    /// doc comments make.
+    ///
+    /// **No file.** The census is built in memory and its `path` names a
+    /// directory that does not exist. Every number below therefore came out of
+    /// the manifest. A change that reached for a bar file to price a month
+    /// would fail here rather than pass slowly, which is the difference between
+    /// this design and the 17.5 GB route D-0067 measured and rejected.
+    ///
+    /// **One month back, never a search.** June and August are held and July is
+    /// not. August's previous change is `no_earlier_month` — it does NOT walk
+    /// back to June. That is what makes the lookup a probe: a scan would find
+    /// June, print a number spanning two months, and label it as one.
+    #[test]
+    fn a_row_and_its_neighbour_cost_two_probes_and_no_file() {
+        let nifty = series(Segment::Index, "NIFTY");
+        let june = month(2026, 6);
+        let august = month(2026, 8);
+        let census = census_of(&[
+            (nifty, june, 8_250, priced(10_000, 10_125)),
+            (nifty, august, 8_250, priced(10_000, 10_200)),
+        ]);
+        assert!(
+            !census.path.exists(),
+            "the fixture must not have a file behind it, or it proves nothing"
+        );
+        let body = store_body(
+            &census_slice(&census),
+            &[(nifty, august), (nifty, june)],
+            Vendor::Groww,
+        );
+        assert!(
+            body.contains(r#""chg_bps":200,"chg_why":null,"prev_chg_bps":null,"prev_chg_why":"no_earlier_month""#),
+            "August reads July, finds nothing, and stops — it does not reach June: {body}"
+        );
+        assert!(
+            !body.contains(r#""chg_bps":200,"chg_why":null,"prev_chg_bps":125"#),
+            "reaching past the gap would print a June number on an August row: {body}"
+        );
+    }
+
+    /// **EVERY ROW CARRIES A NUMBER OR A NAMED REASON, AND NEVER BOTH.**
+    ///
+    /// The wire shape is total: both keys of each pair are present on every
+    /// row, and exactly one of them is non-`null`. A key that is sometimes
+    /// absent makes "unknown" and "this build has no such field" the same thing
+    /// in the browser, and a row carrying both would be a number with an
+    /// excuse — which is the shape `CLAUDE.md` §4 bans.
+    #[test]
+    fn every_row_carries_a_number_or_a_named_reason_and_never_both() {
+        let nifty = series(Segment::Index, "NIFTY");
+        let reliance = series(Segment::Cash, "RELIANCE");
+        let june = month(2026, 6);
+        let july = month(2026, 7);
+        let census = census_of(&[
+            (nifty, june, 8_250, priced(10_000, 10_125)),
+            (nifty, july, 8_250, Closes::UNKNOWN),
+            (reliance, june, 8_250, priced(295_050, 310_025)),
+            (reliance, july, 8_250, priced(310_025, 62_005)),
+        ]);
+        let body = store_body(
+            &census_slice(&census),
+            &[
+                (nifty, july),
+                (reliance, july),
+                (nifty, june),
+                (reliance, june),
+            ],
+            Vendor::Groww,
+        );
+
+        // Four rows, four of each key, and no key ever missing.
+        for field in [
+            "\"chg_bps\":",
+            "\"chg_why\":",
+            "\"prev_chg_bps\":",
+            "\"prev_chg_why\":",
+        ] {
+            assert_eq!(
+                body.matches(field).count(),
+                4,
+                "{field} appears on every row exactly once: {body}"
+            );
+        }
+        // A number and a reason never co-occur: every `_bps` that is a number
+        // is followed by a `_why` of null, and vice versa.
+        assert_eq!(
+            body.matches("_bps\":null").count() + body.matches("_why\":null").count(),
+            8,
+            "one of each pair is null on every row, and only one: {body}"
+        );
+
+        assert!(
+            body.contains(
+                r#""chg_bps":null,"chg_why":"not_recorded","prev_chg_bps":125,"prev_chg_why":null"#
+            ),
+            "an unpriced index month is unknown and its priced neighbour is not: {body}"
+        );
+        // THE 80% FALL D-0018 IS ABOUT. ₹3,100.25 to ₹620.05 is a 1:5 split
+        // read as an -8,000 bp crash, and it is exactly the number this page
+        // must never print.
+        assert!(
+            body.contains(r#""chg_bps":null,"chg_why":"corporate_action_unverified","prev_chg_bps":null,"prev_chg_why":"corporate_action_unverified""#),
+            "the equity is refused in both columns, by name: {body}"
+        );
+        assert!(
+            !body.contains("-8000"),
+            "the fabricated crash never reaches the wire: {body}"
+        );
+    }
+
+    /// **A FEED WITH NO CENSUS IS AN EMPTY ARRAY, NOT A ROW OF ZEROES.**
+    ///
+    /// The page renders "nothing stored for this feed" off an empty array and
+    /// names where the rows actually are. It has no way to distinguish a zeroed
+    /// row from a real one, so there must never be a zeroed row.
+    #[test]
+    fn a_feed_with_no_census_is_an_empty_array() {
+        let nifty = series(Segment::Index, "NIFTY");
+        let at = month(2026, 7);
+        let census = census_of(&[(nifty, at, 8_250, priced(10_000, 10_125))]);
+        assert_eq!(
+            store_body(&census_slice(&census), &[(nifty, at)], Vendor::Dhan),
+            "[]",
+            "a feed this store has never held answers with nothing"
+        );
+        assert_eq!(
+            store_body(&[], &[(nifty, at)], Vendor::Groww),
+            "[]",
+            "and so does a store with no censuses at all"
+        );
+        // A MONTH THE CENSUS DOES NOT HOLD IS SKIPPED, not emitted empty.
+        assert_eq!(
+            store_body(
+                &census_slice(&census),
+                &[(nifty, month(2026, 5))],
+                Vendor::Groww
+            ),
+            "[]"
+        );
     }
 }

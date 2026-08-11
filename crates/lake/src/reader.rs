@@ -79,7 +79,28 @@ impl LakeFile {
         let raw = fs::read(path).map_err(|e| LakeError::Io {
             reason: e.to_string(),
         })?;
-        Self::from_bytes(raw)
+        let bytes = raw.len();
+        let opened = Self::from_bytes(raw);
+        // ONE LINE PER FILE. Never per row, and never per row group here —
+        // a parquet row group holds tens of thousands of rows and this lake
+        // holds millions, so a finer event would roll a run out of the 64 MiB
+        // window before it finished. D-0075.
+        //
+        // THE TWO OUTCOMES ARE NOT INTERCHANGEABLE, which is why the level
+        // moves. A lake file that opens and holds nothing is an ordinary state.
+        // One that will NOT open is a file on disk this build cannot read —
+        // and before this line, both reached a page as the same silence.
+        let (level, said, rows) = match &opened {
+            Ok(file) => (telemetry::Level::Debug, "opened", file.num_rows()),
+            Err(_) => (telemetry::Level::Error, "refused", 0),
+        };
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::new(level, "lake.file", said)
+                .with("path", telemetry::Value::Str(&path.display().to_string()))
+                .with("bytes", telemetry::Value::Uint(bytes as u64))
+                .with("rows", telemetry::Value::Int(rows)),
+        );
+        opened
     }
 
     /// Same as [`LakeFile::open`], for bytes already in hand.

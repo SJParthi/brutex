@@ -2221,6 +2221,9 @@ impl Manifest {
         entries: &[u8],
     ) -> Result<Self, ManifestError> {
         if header_region.is_empty() && entries.is_empty() {
+            // THE ONE OUTCOME NOTHING DOWNSTREAM CAN TELL APART FROM AN EMPTY
+            // STORE. See `note_census_absent` for why an absence earns a line.
+            note_census_absent(vendor);
             return Ok(Self::genesis(vendor));
         }
         Self::load(vendor, header_region, entries)
@@ -2293,6 +2296,26 @@ impl Manifest {
     /// reported is the **newest** one's: that is the state a writer published,
     /// and `ManifestError` is `Copy` and does not nest.
     pub fn load(
+        vendor: Vendor,
+        header_region: &[u8],
+        entries: &[u8],
+    ) -> Result<Self, ManifestError> {
+        let loaded = Self::walk_generations(vendor, header_region, entries);
+        // WHICHEVER GENERATION ANSWERED, AND WHAT IT COUNTS. The decision below
+        // is made once per file and reported once per file; see
+        // `note_census_load` for what an operator could not ask before.
+        note_census_load(vendor, entries.len(), &loaded);
+        loaded
+    }
+
+    /// [`Manifest::load`] without the line it leaves behind.
+    ///
+    /// Split out so the report is written in exactly one place and cannot miss
+    /// an arm: this body returns from four of them, and a `telemetry::emit`
+    /// repeated beside each would be four chances to describe the outcome
+    /// differently — or to forget one, which is the arm an operator would then
+    /// never see.
+    fn walk_generations(
         vendor: Vendor,
         header_region: &[u8],
         entries: &[u8],
@@ -2812,6 +2835,11 @@ impl Manifest {
         for held in &self.log {
             out.extend_from_slice(&held.image());
         }
+        // THE WHOLE-FILE WRITE, AS ONE LINE, AFTER THE BYTES EXIST AND BEFORE
+        // ANYBODY IS HANDED THEM. Not inside the loop above: an image at the
+        // design ceiling is 2,097,152 entries, and a line each would roll this
+        // run's own beginning out of a 64 MiB sink before it finished.
+        note_census_imaged(self, out.len());
         out
     }
 
@@ -2844,6 +2872,202 @@ impl Manifest {
     pub const fn offset_of(ordinal: u64) -> Result<u64, ManifestError> {
         Layout::CURRENT.offset_of(ordinal)
     }
+}
+
+/// The line a vendor's census leaves behind when there was no file to load.
+///
+/// # What was invisible before
+///
+/// That the counter is starting from nothing. A genesis census counts no
+/// months, so the next run refetches every month this vendor has ever held —
+/// correct when the store really is empty, and the beginning of a disaster when
+/// it is not. **Bars on disk with a census that does not count them is the one
+/// outcome [`crate::ingest`] calls worse than refusing**: the refetched month
+/// is appended to a bar file that already holds it, and the append correctly
+/// refuses. A store disagreeing with its own counter must not be silent.
+///
+/// This module cannot tell the two apart and never will: confirming a census
+/// against `bars/` is the ~248,000-file walk the whole layer exists to avoid,
+/// as the module header says. What it can do is say which of the two it
+/// assumed, so an operator who sees `outcome=absent` beside a vendor that has
+/// been pulling for a year has the fact, rather than a silent refetch and a
+/// refused append three layers away.
+///
+/// # Bounded, and quiet on purpose
+///
+/// One line per open — per vendor, per call — never per entry, because the
+/// census this reports on holds none.
+///
+/// Debug rather than info: `/store.json` opens a census on **every request**,
+/// so at the default floor this alone would be a line per poll. The outcomes
+/// that must survive that floor are the faults, and [`note_census_load`] puts
+/// them at warn and error.
+fn note_census_absent(vendor: Vendor) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(telemetry::Level::Debug, "pull.manifest", "census absent")
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("outcome", telemetry::Value::Str("absent"))
+            .with("version", telemetry::Value::Uint(u64::from(FORMAT_VERSION)))
+            // Zero, and it means zero: a genesis census really does hold no
+            // entries. The `-1` in `note_census_load` is the other fact — a
+            // census whose count could not be read at all.
+            .with("entries", telemetry::Value::Uint(0)),
+    );
+}
+
+/// The one line a census load leaves behind, whichever generation answered.
+///
+/// # What was invisible before
+///
+/// How much this vendor's counter claims, and whether anything had to be
+/// stepped over to reach it. [`Manifest::degraded_reason`] has carried that
+/// fault since D-0036, but only as far as a caller that thought to read it: a
+/// census loaded degraded inside an HTTP handler reached nobody at all, and a
+/// census **refused** reached whoever rendered the error and no further. An
+/// operator can now answer, without opening the file, "did this vendor's
+/// counter survive the last crash, and how many instrument-months does it
+/// still claim".
+///
+/// That is the question worth answering because bars on disk with a census that
+/// does not count them is the one outcome [`crate::ingest`] calls worse than
+/// refusing — the next run refetches a month the store already holds and the
+/// append correctly refuses it. A store disagreeing with its own counter must
+/// not be silent, and a refusal that only a return value ever saw was silent.
+///
+/// # Bounded by the file, never by the census
+///
+/// One line per load. The walk it reports on decodes up to [`MAX_ENTRIES`]
+/// entries and one of them is never reported on its own; the four counters here
+/// are the aggregate that walk already computed, which is why this costs no
+/// pass of its own.
+///
+/// # A refusal has no counters, and writes `-1` rather than zero
+///
+/// `CLAUDE.md` §3 rule 1. A census that could not be read is not a census that
+/// counts nothing, and a zero here would be read as an empty store by the same
+/// operator this line exists for — which is exactly the confusion the whole
+/// module is about.
+fn note_census_load(vendor: Vendor, region_bytes: usize, loaded: &Result<Manifest, ManifestError>) {
+    let (level, outcome, fault) = match loaded {
+        Ok(census) => match census.degraded {
+            None => (telemetry::Level::Debug, "held", None),
+            // It loaded, having stepped over damage. `CLAUDE.md` §4 admits
+            // degrading loudly and naming the reason; warn is that loudness.
+            Some(stepped_over) => (telemetry::Level::Warn, "degraded", Some(stepped_over)),
+        },
+        Err(refusal) => (telemetry::Level::Error, "refused", Some(*refusal)),
+    };
+    let held = loaded.as_ref().ok();
+    let (version, generation, entries, keys, rows) = match held {
+        Some(census) => (
+            telemetry::Value::Uint(u64::from(census.loaded_version)),
+            telemetry::Value::Uint(census.header.generation),
+            telemetry::Value::Uint(census.header.n_valid),
+            telemetry::Value::Uint(census.header.n_keys),
+            telemetry::Value::Uint(census.header.total_rows),
+        ),
+        None => (
+            telemetry::Value::Int(-1),
+            telemetry::Value::Int(-1),
+            telemetry::Value::Int(-1),
+            telemetry::Value::Int(-1),
+            telemetry::Value::Int(-1),
+        ),
+    };
+    // `region_bytes` is the entry region's length, not its contents: a census
+    // that refuses for `CounterExceedsRegion` is a file somebody truncated, and
+    // the length is the number that says so. The bytes themselves are never
+    // logged — a whole region is an unbounded field.
+    let line = telemetry::Event::new(level, "pull.manifest", "census load")
+        .with("vendor", telemetry::Value::Str(vendor.as_str()))
+        .with("outcome", telemetry::Value::Str(outcome))
+        .with("version", version)
+        .with("generation", generation)
+        .with("entries", entries)
+        .with("keys", keys)
+        .with("rows", rows)
+        .with("region_bytes", telemetry::Value::Uint(region_bytes as u64));
+    let reason = fault.map(|why| why.to_string());
+    let _dropped_when_filtered = telemetry::emit(&match reason.as_deref() {
+        // The refusal in the words the type already renders, so the line and
+        // the returned error cannot drift into two different sentences.
+        Some(why) => line.with("reason", telemetry::Value::Str(why)),
+        // Absent rather than an empty string: "no fault" and "a fault with
+        // nothing to say" are different facts, and a key that is not there says
+        // the first one without the reader having to know which.
+        None => line,
+    });
+}
+
+/// The line a whole-file census image leaves behind.
+///
+/// # What was invisible before
+///
+/// That the census was replaced **whole**, and how large the replacement was.
+/// This is the repair, the upgrade, and the first write — the only shape of
+/// write this module produces that restates bytes a previous run published —
+/// and until now it was indistinguishable, from outside, from the incremental
+/// append that leaves every earlier entry untouched. An operator looking at a
+/// census that lost a month can now ask which run rewrote the file.
+///
+/// # Its absence is a fact too, and that is the point
+///
+/// A run that recorded nothing installs nothing: `pull::ingest::install_census`
+/// returns before an image is ever built, so **no line appears here at all**
+/// and the file on disk is left byte for byte as it was — `CLAUDE.md` §3 rule
+/// 5. When a line does appear, `generation` is the counter the `census load`
+/// line printed for the same vendor plus one per month this run recorded, so
+/// the pair says exactly how much moved. Neither number was recoverable before
+/// without diffing the file.
+///
+/// `from_version` beside `version` names the upgrade rather than implying it:
+/// 1 → 2 rewrites every version-1 entry at the stride this build writes, which
+/// is the one install that restates entries nobody touched.
+///
+/// # Bounded, and info rather than debug
+///
+/// One line per image — reached once per vendor per run, past the caller's own
+/// "nothing moved" gate — never per entry: an image at the design ceiling holds
+/// 2,097,152 of them and a line each would roll this run's own beginning out of
+/// a 64 MiB sink before it finished. A whole-file rewrite of the store's
+/// counter is a milestone, so it sits at the default floor where the run that
+/// did it can be found later.
+fn note_census_imaged(census: &Manifest, bytes: usize) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            telemetry::Level::Info,
+            "pull.manifest",
+            "census image built",
+        )
+        .with(
+            "vendor",
+            telemetry::Value::Str(census.header.vendor.as_str()),
+        )
+        // Always the version this build WRITES, never the loaded one:
+        // `Manifest::image` publishes at `Layout::CURRENT` on every path.
+        .with("version", telemetry::Value::Uint(u64::from(FORMAT_VERSION)))
+        .with(
+            "from_version",
+            telemetry::Value::Uint(u64::from(census.loaded_version)),
+        )
+        .with(
+            "generation",
+            telemetry::Value::Uint(census.header.generation),
+        )
+        // The log, counted — not the log itself. A `Vec` of entries is an
+        // unbounded field and its length is the fact worth keeping.
+        .with("entries", telemetry::Value::Uint(census.log.len() as u64))
+        .with("keys", telemetry::Value::Uint(census.header.n_keys))
+        .with("rows", telemetry::Value::Uint(census.header.total_rows))
+        .with("bytes", telemetry::Value::Uint(bytes as u64))
+        // True when this image is the recovery of a torn commit rather than an
+        // ordinary publish, which is the case where the file about to be
+        // replaced is known to be damaged.
+        .with(
+            "repairing",
+            telemetry::Value::Bool(census.degraded.is_some()),
+        ),
+    );
 }
 
 /// What one walk of the entry region produced.

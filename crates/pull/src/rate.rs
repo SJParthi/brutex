@@ -641,6 +641,37 @@ impl Governor {
         for window in self.windows.iter_mut().flatten() {
             window.relax();
         }
+        // THE ONE STATE CHANGE THAT COSTS THE OPERATOR TIME, AND IT WAS
+        // INVISIBLE. The ingest page says so in as many words — "Rate governor
+        // — not observable … No route reports its state, so this page never
+        // claims to read it" — so a run that slowed to a crawl behind a vendor
+        // throttle looked identical to one that was merely slow.
+        //
+        // `Warn`, not `Debug`: a multiplicative decrease means the vendor
+        // refused for rate and every span just backed off. That is not detail,
+        // it is the reason the next hour is slower.
+        //
+        // The three allowances are read AFTER the decrease, so the line says
+        // what the governor will actually permit from here. `Option` is
+        // rendered as its number or as -1, because a span this vendor
+        // publishes no bound for is a recorded fact (`CLAUDE.md` §3 rule 1)
+        // and must not read as a zero allowance.
+        let permitted = |span: WindowSpan| -> i64 { self.permitted(span).map_or(-1, i64::from) };
+        // The result is discarded for the reason `crate::ingest`'s `note_*`
+        // helpers give: a level-filtered event legitimately reaches no file, so
+        // asserting it was written would fire on any run quieter than `Warn`.
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("pull.rate", "throttled — every span backed off")
+                .with(
+                    "per_second",
+                    telemetry::Value::Int(permitted(WindowSpan::Second)),
+                )
+                .with(
+                    "per_minute",
+                    telemetry::Value::Int(permitted(WindowSpan::Minute)),
+                )
+                .with("per_day", telemetry::Value::Int(permitted(WindowSpan::Day))),
+        );
     }
 
     /// The published ceiling for a span, or `None` if that span is unbounded.

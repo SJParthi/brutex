@@ -63,6 +63,18 @@
 //! D-0036 they carried derives, so the path this type was careful not to hold
 //! was printable from the type that does hold it. P-11 and P-18.
 //!
+//! # And nothing here ever logs one either
+//!
+//! [`note_read`] and [`note_reread`] write the credential's *lifecycle* to the
+//! rolling log: which vendor, which field **name**, whether the source answered,
+//! how many bytes it answered with, and — the one that was invisible — whether a
+//! re-read came back holding the same dead token. They are built from the same
+//! three facts [`CredentialHalt`] is allowed to carry, and from nothing else.
+//! There is no path segment on any of these lines, no assembled path, and no
+//! [`Secret::expose`]: `CLAUDE.md` §8 keeps a literal parameter path out of every
+//! tracked file because this repository is public, and a log is a file an
+//! operator pastes into an issue. A length is safe; the value never is.
+//!
 //! # What this port cannot tell, and says so
 //!
 //! [`SsmSecretSource::read`] always passes `with_decryption: true`, and it has
@@ -382,13 +394,19 @@ impl<S: SecretSource> CredentialReader<S> {
         vendor: Vendor,
         path: &CredentialPath<'_>,
     ) -> Result<Secret, CredentialHalt> {
-        self.source
-            .read(path)
-            .map_err(|cause| CredentialHalt::Refused {
-                vendor,
-                field: path.field().to_owned(),
-                cause,
-            })
+        // Noted BEFORE the mapping, over the source's own answer. The mapped
+        // halt has exactly two variants and only one of them can be produced
+        // here, so a note taken after the `map_err` would have to match on an
+        // arm no input can reach -- a branch the coverage gate counts and no
+        // test can enter. `SecretError` has no such arm: both of its outcomes
+        // are on the line below.
+        let answer = self.source.read(path);
+        note_read(vendor, path.field(), &answer);
+        answer.map_err(|cause| CredentialHalt::Refused {
+            vendor,
+            field: path.field().to_owned(),
+            cause,
+        })
     }
 
     /// Re-reads a credential the vendor has just rejected.
@@ -410,7 +428,13 @@ impl<S: SecretSource> CredentialReader<S> {
         rejected: &Secret,
     ) -> Result<Secret, CredentialHalt> {
         let fresh = self.read(vendor, path)?;
-        if fresh == *rejected {
+        // The comparison IS the mechanism (see this module's header), so it is
+        // the one thing the log has to carry. `note_read` above has already
+        // said the parameter answered and how long the answer was; only this
+        // line can say whether the answer is a different token.
+        let rotated = fresh != *rejected;
+        note_reread(vendor, path.field(), rotated);
+        if !rotated {
             return Err(CredentialHalt::DeadToken {
                 vendor,
                 field: path.field().to_owned(),
@@ -418,4 +442,112 @@ impl<S: SecretSource> CredentialReader<S> {
         }
         Ok(fresh)
     }
+}
+
+/// One credential read, on the rolling log — and NOT the credential.
+///
+/// # Why this exists
+///
+/// A pull that dies on its credential is one of the two commonest ways a
+/// backfill ends, and until this line the log could not distinguish "the token
+/// was read and it is 41 bytes" from "the parameter store refused" from "the
+/// read never happened at all". The halt names the fault to the *caller*; an
+/// operator reading the log an hour later has only what was written down.
+///
+/// # THE THREE FIELDS ARE THE THREE FACTS A HALT MAY ALREADY CARRY
+///
+/// [`CredentialHalt`] carries the vendor and the field **name** and refuses to
+/// carry anything else, for the reason its own doc comment gives: an error is
+/// the thing most likely to be logged, pasted into an issue and pushed to a
+/// public repository. That is this line's budget too — a log *is* that paste,
+/// arriving one step earlier. So: no `org`, no `env`, no vendor **path**
+/// segment, no assembled path, and no [`Secret::expose`]. The vendor here is
+/// [`Vendor::as_str`], a public broker name that `crates/core` has tracked
+/// since its first commit, and it is not the vendor's parameter path segment —
+/// [`crate::config`]'s header is careful about exactly that distinction.
+///
+/// # Why a refusal reports a length of `-1` and never `0`
+///
+/// `0` is a real answer here: [`SecretError::Empty`] is a parameter that exists
+/// and holds nothing, which is a different operator action from a read that
+/// never produced a value at all. A refusal that wrote `byte_len: 0` would be
+/// indistinguishable on the page from the one fault this crate goes out of its
+/// way to name separately.
+///
+/// `why` is the [`SecretError`]'s own rendering, which is the sentence written
+/// to send an operator somewhere: denied means the role is wrong, missing means
+/// the path is.
+fn note_read(vendor: Vendor, field: &str, answer: &Result<Secret, SecretError>) {
+    match answer {
+        Ok(secret) => {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::info("pull.secret", "credential read")
+                    .with("vendor", telemetry::Value::Str(vendor.as_str()))
+                    .with("field", telemetry::Value::Str(field))
+                    .with("byte_len", telemetry::Value::count(secret.byte_len())),
+            );
+        }
+        Err(cause) => {
+            // Owned for the length of the emit, on a path that halts a run --
+            // one bounded allocation against a pull that is about to stop.
+            let why = cause.to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error("pull.secret", "credential refused")
+                    .with("vendor", telemetry::Value::Str(vendor.as_str()))
+                    .with("field", telemetry::Value::Str(field))
+                    .with("byte_len", telemetry::Value::Int(-1))
+                    .with("why", telemetry::Value::Str(&why)),
+            );
+        }
+    }
+}
+
+/// The verdict on a re-read, and the loudest quiet failure in the crate.
+///
+/// # Why this is the line that had to exist
+///
+/// `CLAUDE.md` §8: this repository never mints a token; a stale one is re-read,
+/// and if the re-read returns the same dead value the pull halts. That halt is
+/// the single most confusing way a backfill ends — the credential is *present*,
+/// it is *readable*, it is the right length, every check this crate performs
+/// passes, and the run stops anyway. Nothing here can fix it: the token has to
+/// be rotated in the system that owns it, and until then every retry reads the
+/// same corpse. Without this line the log showed a successful credential read
+/// followed by silence.
+///
+/// # `Warn` for the dead token, not `Error`
+///
+/// It is the level for "carried on, somebody should know" — and somebody is the
+/// person with access to the vendor's console, who is not necessarily the
+/// person watching this run. The refusal that stops the pull is already an
+/// `Error` from [`note_read`] when the *read* fails; a re-read that succeeded
+/// and returned the same bytes is a different fact and it deserves its own
+/// word. It is above the default `info` floor either way, so it is on the page
+/// without anyone having asked for it.
+///
+/// # The rotated case is logged too
+///
+/// A rotation that landed is the good outcome and it is the one that explains
+/// why the *next* thousand requests started working. One line per credential
+/// rejection, which is bounded by the number of vendors a run authenticates
+/// against, not by anything the data can grow.
+fn note_reread(vendor: Vendor, field: &str, rotated: bool) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if rotated {
+                telemetry::Level::Info
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.secret",
+            if rotated {
+                "re-read returned a different value; the rotation landed"
+            } else {
+                "re-read returned the SAME value; the token is dead and nothing here mints one"
+            },
+        )
+        .with("vendor", telemetry::Value::Str(vendor.as_str()))
+        .with("field", telemetry::Value::Str(field))
+        .with("rotated", telemetry::Value::Bool(rotated)),
+    );
 }

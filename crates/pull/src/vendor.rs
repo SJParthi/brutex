@@ -1209,6 +1209,51 @@ pub struct Auth {
 /// adding a vendor is a ROW in this file: Dhan wants `securityId` and
 /// `exchangeSegment`, Groww wants `groww_symbol` and `segment`, and the code
 /// that puts them on the wire never learns either name.
+/// What KIND of listing an instrument is, in words no vendor owns.
+///
+/// # The defect this type exists to remove
+///
+/// Both brokers require the request to name the instrument's class as well as
+/// its id, and each spells it differently. The descriptor carried
+/// `Fixed("IDX_I")` and `Fixed("INDEX")` for Dhan and `Fixed("CASH")` for
+/// Groww — correct for exactly one class each, wrong for the other. Measured
+/// consequence: every one of the 750 NIFTY-Total-Market equities was asked for
+/// inside Dhan's INDEX segment, and the broker answered no window for all of
+/// them. Groww is hardcoded the opposite way and cannot address an index.
+///
+/// The class is a property of the INSTRUMENT, not of the feed, so it is named
+/// once here and each descriptor maps it to its own words. `CLAUDE.md` §5:
+/// adding a broker is a row in this file, not an edit in the request builder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Listing {
+    /// An index — NIFTY, BANKNIFTY. No ISIN, and it never splits.
+    Index,
+    /// A cash-segment equity on the main board.
+    Equity,
+}
+
+/// One feed's words for one listing class.
+///
+/// TWO words, not one, because Dhan needs both an `exchangeSegment` and an
+/// `instrument` and neither is derivable from the other: `IDX_I` pairs with
+/// `INDEX`, `NSE_EQ` with `EQUITY`. A feed that names only a segment leaves
+/// [`Self::kind`] empty rather than repeating the segment into it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ListingWords {
+    /// Which listing class these words are for.
+    pub listing: Listing,
+    /// This feed's word for the segment.
+    pub segment: &'static str,
+    /// This feed's word for the instrument kind; empty when it names none.
+    pub kind: &'static str,
+}
+
+/// Where one request parameter's value comes from.
+///
+/// Naming the fields in the descriptor rather than in the request builder keeps
+/// `CLAUDE.md`'s rule that adding a vendor is a ROW in this file: Dhan wants
+/// `securityId` and `exchangeSegment`, Groww wants `groww_symbol` and
+/// `segment`, and the code that puts them on the wire never learns either name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParamValue {
     /// The window's first day, in this feed's [`DateFormat`].
@@ -1238,6 +1283,20 @@ pub enum ParamValue {
     /// spelling to derive it from — `"1day"`, `"1d"` and `"day"` are all
     /// plausible and only one of them is a request.
     Granularity,
+    /// The **segment** word for the instrument's own [`Listing`] class.
+    ///
+    /// A `Fixed` word here is a claim that every instrument this feed is ever
+    /// asked for is the same class, and neither broker's universe satisfies
+    /// that: the operator's surface is 750 cash equities *and* the NSE index
+    /// series. A class this feed records no word for is **refused by name**,
+    /// for the reason [`Self::Granularity`] gives.
+    Segment,
+    /// The **instrument-kind** word for the instrument's own [`Listing`] class.
+    ///
+    /// Separate from [`Self::Segment`] because Dhan requires both and they are
+    /// two different enums in its own annexure. A descriptor that asks for this
+    /// where [`ListingWords::kind`] is empty is refused rather than sent blank.
+    Kind,
 }
 
 /// One named request parameter.
@@ -1524,6 +1583,14 @@ pub struct HttpSpec {
     ///
     /// Empty means the request names nothing but its window, which is the state
     /// that made Dhan answer `DH-905 securityId is required`.
+    /// This feed's words for each listing class it has been verified against.
+    ///
+    /// A class absent from this table is one no document states a word for,
+    /// and a request for it is refused by name rather than guessed at. See
+    /// [`HttpSpec::listing_words`].
+    pub listings: &'static [ListingWords],
+    /// Every named parameter this feed's bars request carries, and where each
+    /// one's value comes from.
     pub params: &'static [Param],
     /// Headers this feed requires beyond the credential.
     pub extra_headers: &'static [(&'static str, &'static str)],
@@ -1560,6 +1627,24 @@ impl HttpSpec {
             .iter()
             .find(|(at, _)| *at as u8 == rung as u8)
             .map(|(_, word)| *word)
+    }
+
+    /// This feed's words for a listing class, or `None` when it records none.
+    ///
+    /// `None` is the honest answer for a class this feed has never been
+    /// verified against. Groww's documentation states `CASH` and `FNO` for
+    /// `segment` and says nothing about an index, so an index request is
+    /// refused by name rather than sent a guessed word — `CLAUDE.md` §3 rule 1.
+    ///
+    /// CONSTANT WORK, not a scan. The table's length is the number of listing
+    /// classes — two — so this costs the same against a universe of 800 as
+    /// against one. Same shape as [`Self::granularity_token`] above.
+    #[must_use]
+    pub fn listing_words(&self, listing: Listing) -> Option<ListingWords> {
+        self.listings
+            .iter()
+            .find(|w| w.listing as u8 == listing as u8)
+            .copied()
     }
 }
 
@@ -1915,9 +2000,97 @@ impl fmt::Display for Feed {
     }
 }
 
+/// What a vendor MEANS by a bar of a given rung.
+///
+/// # Why a field and not an assumption
+///
+/// Two vendors were storing daily bars for the same instrument into
+/// `bars/<vendor>/NSE/INDEX/BANKNIFTY/1day/`. The paths are isolated —
+/// `docs/04-invariants.md` X-12, and the first path segment is a [`Vendor`]
+/// rather than a string, so neither can write into the other's directory. What
+/// isolation does **not** do is stop two directories with the same name holding
+/// two different definitions of the thing inside them.
+///
+/// Measured on 2026-08-07, BANKNIFTY, both vendors, same day:
+///
+/// | | open | high | low | close |
+/// |---|---|---|---|---|
+/// | Dhan `1day` | 57,882.00 | 57,994.45 | 57,686.55 | 57,746.45 |
+/// | Groww `1day` | **58,063.65** | **58,063.65** | 57,688.30 | 57,746.45 |
+///
+/// Groww's open is Dhan's *previous session's close*, to the paisa, and its
+/// high is `max(previous close, the day's high)`. The rule holds across a
+/// request boundary — July's last close is August's first open, and those are
+/// two separate HTTP responses that never meet in memory — so it is the
+/// vendor's convention and not this repository's arithmetic.
+///
+/// Neither vendor is wrong. They answer two different questions, and nothing in
+/// the type system said so. This field says so.
+///
+/// # What it is not
+///
+/// It is not a normaliser. Recording the convention does not convert one into
+/// the other; it makes the difference **declarable**, so a reader can refuse to
+/// compare two rungs that do not mean the same thing, and a vendor added later
+/// has to state which it is rather than inheriting whatever the last one did.
+/// `CLAUDE.md` §3 rule 1 — an unstated assumption about a vendor is exactly the
+/// invention this repository forbids. See D-0077.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BarConvention {
+    /// The bar covers one exchange session: open is the session's **first**
+    /// print, close is its last. Dhan's `/v2/charts/historical`.
+    SessionOpenToClose,
+    /// The bar begins at the **previous** session's closing print and ends at
+    /// this session's. Groww's `/v1/historical/candles` at `1day`.
+    ///
+    /// Its high and low therefore include that earlier print, which is why a
+    /// gap-down day reads as `open == high`.
+    PreviousCloseToClose,
+}
+
+impl BarConvention {
+    /// What the page calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::SessionOpenToClose => "session open to close",
+            Self::PreviousCloseToClose => "previous close to close",
+        }
+    }
+
+    /// Whether two feeds' bars of the same rung describe the same interval.
+    ///
+    /// The one question a caller comparing two vendors has to ask, and the
+    /// reason this enum exists rather than a comment.
+    #[must_use]
+    pub const fn comparable_with(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::SessionOpenToClose, Self::SessionOpenToClose)
+                | (Self::PreviousCloseToClose, Self::PreviousCloseToClose)
+        )
+    }
+}
+
 /// One feed, entirely as data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Descriptor {
+    /// What this feed means by a **daily** bar.
+    ///
+    /// Only the day rung is recorded, because only the day rung has been
+    /// measured. Groww's one-minute bars fold to a correct session candle —
+    /// 1,875 records over five sessions, exactly 375 each, and the folded
+    /// open matches Dhan's within 13 paisa — so the minute rung is believed
+    /// [`BarConvention::SessionOpenToClose`] at both vendors and is **not**
+    /// declared here, because `believed` is not `measured`. D-0077.
+    ///
+    /// (Backticks, not quotes, and deliberately: gate 1d scans every
+    /// double-quoted lower-case token under `crates/pull` for an undeclared
+    /// path segment, and it cannot tell prose from a literal. Quoting a word
+    /// for emphasis would put it on the allowlist beside real vendor wire
+    /// names, which is the dilution that makes such a list stop meaning
+    /// anything. Backticks are also the better markdown.)
+    pub day_bar: BarConvention,
     /// Which feed this row describes. Pinned to its index at compile time.
     pub feed: Feed,
     /// The operator-facing name.
@@ -1939,6 +2112,10 @@ pub struct Descriptor {
 // --- the rows --------------------------------------------------------------
 
 const DHAN: Descriptor = Descriptor {
+    // MEASURED against Groww on the same instrument and the same five sessions:
+    // Dhan's open is the session's first print. 2026-08-07 BANKNIFTY —
+    // O 57,882.00, and Groww's own chart agrees with it to the paisa.
+    day_bar: BarConvention::SessionOpenToClose,
     feed: Feed::Dhan,
     display: "Dhan",
     wire: "dhan",
@@ -1963,7 +2140,27 @@ const DHAN: Descriptor = Descriptor {
             close: "close",
             volume: "volume",
             timestamp: "timestamp",
-            open_interest: Some("open_interest"),
+            // NOT NAMED, BECAUSE THIS VENDOR DOES NOT ALWAYS SEND IT.
+            //
+            // It was `Some("open_interest")`, which is a claim that the array
+            // is in every answer. This vendor's own field table says otherwise:
+            // `open_interest | int | No | Open interest (for F&O instruments)`.
+            // A spot index carries no open interest, so the array is simply
+            // absent — and the decoder, correctly, refuses an answer missing an
+            // array the descriptor named. Both swept indices failed on it:
+            // "the vendor's answer has no array named \"open_interest\" where
+            // the descriptor says the bars are."
+            //
+            // The decoder was right and this row was wrong. `CLAUDE.md` §7 is
+            // why it cannot be papered over instead: `i64::MIN` is the null and
+            // zero means zero, so filling an absent array with zeros would read
+            // back later as real open interest of nothing.
+            //
+            // The engine surface is NSE spot — two indices and the cash
+            // constituents — and none of it has open interest. When the
+            // expired-F&O path is modelled this becomes a per-listing question
+            // rather than a per-feed one, exactly like `listings` above.
+            open_interest: None,
         },
         timestamps: TimestampEncoding::EpochSecondsUtc,
         prices: PriceScale::Rupees,
@@ -2000,8 +2197,28 @@ const DHAN: Descriptor = Descriptor {
         pooling: Pooling::PerVendor,
         // Read first-hand from dhanhq.co/docs/v2/historical-data. All three are
         // marked REQUIRED there, and their absence is exactly what DH-905
-        // reports. `IDX_I` and `INDEX` are the index-spot pair from the
-        // Annexure; a wider surface needs more rows here, not more code.
+        // reports.
+        //
+        // BOTH CLASSES, FROM THE ANNEXURE, NOT FROM ONE OF THEM.
+        //
+        // `Fixed("IDX_I")` and `Fixed("INDEX")` stood here and were correct for
+        // the two swept indices and wrong for all 750 NIFTY-Total-Market
+        // equities — which were asked for inside the index segment and answered
+        // with no window, every time. The words below are quoted from Dhan's own
+        // annexure: Exchange Segment gives `IDX_I` = Index and `NSE_EQ` = NSE
+        // Equity Cash; Instrument gives `INDEX` and `EQUITY`.
+        listings: &[
+            ListingWords {
+                listing: Listing::Index,
+                segment: "IDX_I",
+                kind: "INDEX",
+            },
+            ListingWords {
+                listing: Listing::Equity,
+                segment: "NSE_EQ",
+                kind: "EQUITY",
+            },
+        ],
         params: &[
             Param {
                 name: "securityId",
@@ -2009,11 +2226,11 @@ const DHAN: Descriptor = Descriptor {
             },
             Param {
                 name: "exchangeSegment",
-                value: ParamValue::Fixed("IDX_I"),
+                value: ParamValue::Segment,
             },
             Param {
                 name: "instrument",
-                value: ParamValue::Fixed("INDEX"),
+                value: ParamValue::Kind,
             },
             Param {
                 name: "fromDate",
@@ -2026,13 +2243,36 @@ const DHAN: Descriptor = Descriptor {
         ],
         extra_headers: &[],
     }),
-    // ONLY the two rungs the verified contract covers. The wider ladder this
-    // broker's documentation advertises was NOT read live, so it is not
-    // written down here — an unserved rung refuses by name, and adding one is
-    // a one-row diff the day it is confirmed. UNVERIFIED, deliberately narrow.
-    granularities: GranularitySet::EMPTY
-        .with(Granularity::Minute1)
-        .with(Granularity::Day1),
+    // ONE RUNG, BECAUSE ONE PATH IS ALL `bars_path` CAN HOLD.
+    //
+    // `Minute1` was declared here and it was NOT servable, in the worst way a
+    // rung can be unservable: it did not fail. `bars_path` is a single field
+    // pinned to `/v2/charts/historical`, which this vendor's documentation
+    // names as the DAILY endpoint — the minute endpoint is `/charts/intraday`,
+    // a different path. A `Minute1` request therefore fetched DAILY bars and
+    // filed them under `1min/`, and nothing anywhere raised a word about it.
+    // The vendor also defaults `interval` to 5 minutes when the field is
+    // omitted, and this request carries no `interval` field at all, so even
+    // against the correct path the answer would have been five-minute candles
+    // filed as one-minute.
+    //
+    // Silent wrong data in an append-only store is worse than a refusal: the
+    // month cannot be prepended and the bars look plausible. So the rung is
+    // withdrawn until the intraday path is implemented.
+    //
+    // THIS ROW ONLY BITES BECAUSE SOMETHING READS IT. When it was first
+    // withdrawn the comment here claimed a function named `is_served` refused
+    // the rung by name — no such function existed, and `Feed::serves` had no
+    // caller outside this file's own tests, so the withdrawal changed nothing
+    // at all. `api::server::broker_window` now calls `serves` beside its
+    // transport check, before the credential read, and refuses by name.
+    // `CLAUDE.md` §4 — degrade loudly and name the reason, never a fallback
+    // that hides a failure.
+    //
+    // Restoring it is not a one-row diff: it needs `bars_path` to become a
+    // per-rung table and an `interval` parameter whose word comes from
+    // `granularity_tokens`. UNVERIFIED until both exist.
+    granularities: GranularitySet::EMPTY.with(Granularity::Day1),
     segments: SegmentSet::EMPTY
         .with(Segment::Index)
         .with(Segment::Cash)
@@ -2041,6 +2281,19 @@ const DHAN: Descriptor = Descriptor {
 };
 
 const GROWW: Descriptor = Descriptor {
+    // MEASURED, AND IT IS NOT THE SAME BAR DHAN RETURNS. Groww's daily candle
+    // begins at the PREVIOUS session's closing print. 2026-08-07 BANKNIFTY —
+    // O 58,063.65, which is 2026-08-06's close exactly; H 58,063.65, which is
+    // max(that close, the day's real high of 57,994.45). The rule holds across
+    // a request boundary — July's last close is August's first open, and those
+    // are two separate HTTP responses that never meet in memory — so it is the
+    // vendor's convention and not this repository's arithmetic.
+    //
+    // Its MINUTE feed is a different matter and is believed correct: 1,875
+    // bars over five sessions, exactly 375 each, folding to an open within 13
+    // paisa of Dhan's. Only this rung is declared, because only this rung was
+    // measured. D-0077.
+    day_bar: BarConvention::PreviousCloseToClose,
     feed: Feed::Groww,
     display: "Groww",
     wire: "groww",
@@ -2105,18 +2358,66 @@ const GROWW: Descriptor = Descriptor {
         // from groww.in/trade-api/docs/curl/historical-data, which is where
         // `1minute` came from.
         //
-        // THE DAY SPELLING IS NOT HERE BECAUSE NOBODY WROTE IT DOWN. `1day`,
-        // `1d` and `day` are all plausible and only one of them is a request;
-        // `CLAUDE.md` §3 rule 1 forbids picking. Until it is read live and
-        // recorded, a daily pull against this feed refuses by name — which is
-        // also what keeps a month-wide window from being sent against the
-        // 30-day one-minute cap above.
-        granularity_tokens: &[(Granularity::Minute1, "1minute")],
+        // THE DAY SPELLING IS `1day`, AND IT IS NOW SOURCED RATHER THAN
+        // GUESSED. This comment used to say `1day`, `1d` and `day` were all
+        // plausible and that §3 rule 1 forbade picking — correct at the time,
+        // and the answer has since been read from the vendor's own annexure:
+        // `GrowwAPI.CANDLE_INTERVAL_DAY` has the value **`1day`**, in the same
+        // table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this
+        // row already carried. One table, both words, same capture. D-0076.
+        //
+        // The remaining rungs in that table (`2minute` … `4hour`, `1week`,
+        // `1month`) are deliberately absent: `store::path::Timeframe` has a
+        // directory for two rungs, and a token for a rung the store cannot
+        // file is a request whose answer has nowhere to go.
+        granularity_tokens: &[
+            (Granularity::Minute1, "1minute"),
+            (Granularity::Day1, "1day"),
+        ],
         pooling: Pooling::PerRequestKind,
         // Read first-hand from groww.in/trade-api/docs/curl/historical-data.
         // `trading_symbol` is the deprecated endpoint's name for it; the live
         // one takes `groww_symbol`, and the SAME master row spells the two
         // differently — NSE-NIFTY-30Sep25-24650-CE against NIFTY25SEP24650CE.
+        // AN INDEX IS REQUESTED UNDER `CASH`, AND THE VENDOR SAYS SO IN WORDS.
+        //
+        // This table held ONE class for a long time, and the refusal it caused
+        // was correct: a live run against `Swept indices` refused both NIFTY
+        // and BANKNIFTY with `FetchError::ListingNotSpellable` before the
+        // socket, because nothing recorded what segment an index goes under.
+        // §3 rule 1 forbade guessing, and a guessed word would have been
+        // answered by the vendor with *something* that would have been filed
+        // as bars.
+        //
+        // The answer is now sourced. Groww's live-data page states it
+        // directly: **"Use the segment value FNO for derivatives and CASH for
+        // stocks and index."** So an index and an equity take the SAME segment
+        // word, which is why both rows below carry `CASH` rather than one of
+        // them carrying something this repository invented. D-0076.
+        //
+        // `kind` STAYS EMPTY FOR BOTH, and that is a fact about the request
+        // rather than an omission. Groww's annexure does carry an
+        // instrument-type alphabet — `EQ`, `IDX`, `FUT`, `CE`, `PE` — but the
+        // historical-candles request schema is `exchange`, `segment`,
+        // `trading_symbol`, `start_time`, `end_time`, `interval_in_minutes`
+        // and nothing else. There is no field for a kind, so there is no word
+        // to put in one. Compare Dhan, whose request carries `instrument` and
+        // therefore needs `INDEX`/`EQUITY`.
+        //
+        // `exchange` stays Fixed: NSE is the only exchange this engine sweeps
+        // (CLAUDE.md §1), so it does not vary with the instrument's class.
+        listings: &[
+            ListingWords {
+                listing: Listing::Index,
+                segment: "CASH",
+                kind: "",
+            },
+            ListingWords {
+                listing: Listing::Equity,
+                segment: "CASH",
+                kind: "",
+            },
+        ],
         params: &[
             Param {
                 name: "exchange",
@@ -2124,7 +2425,7 @@ const GROWW: Descriptor = Descriptor {
             },
             Param {
                 name: "segment",
-                value: ParamValue::Fixed("CASH"),
+                value: ParamValue::Segment,
             },
             Param {
                 // The live endpoint takes `groww_symbol`; only the
@@ -2179,6 +2480,12 @@ const TRUEDATA_INDEX: ColumnLayout = ColumnLayout {
 };
 
 const TRUE_DATA: Descriptor = Descriptor {
+    // UNMEASURED, AND DECLARED AS THE SESSION BAR BECAUSE THAT IS WHAT AN
+    // ARCHIVE FILE HOLDS. This feed is a local folder of vendor files, not an
+    // endpoint that aggregates anything, so there is no vendor-side bucketing
+    // to get wrong. If that ever stops being true this row is the place it is
+    // said. D-0077.
+    day_bar: BarConvention::SessionOpenToClose,
     feed: Feed::TrueData,
     display: "TrueData",
     wire: "truedata",
@@ -2237,6 +2544,9 @@ const GDFL_FNO: ColumnLayout = ColumnLayout {
 const GDFL_HEADER: &str = "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
 
 const GDFL: Descriptor = Descriptor {
+    // As TRUE_DATA: a local archive of vendor files, so the bar is whatever
+    // the file holds and nothing re-buckets it. D-0077.
+    day_bar: BarConvention::SessionOpenToClose,
     feed: Feed::Gdfl,
     display: "Global Datafeeds",
     wire: "gdfl",
@@ -2568,12 +2878,95 @@ mod tests {
                 "{}: no day-level cap is recorded in docs/00-charter.md §4",
                 feed.display()
             );
+            // THE DAILY WORD IS NOW A PER-FEED FACT, NOT A BLANKET ABSENCE.
+            //
+            // This assertion used to be `None` for every feed, with the reason
+            // that `1day`, `1d` and `day` were all plausible and §3 rule 1
+            // forbade picking. That was right until the vendor's own annexure
+            // was read: `GrowwAPI.CANDLE_INTERVAL_DAY` has the value `1day`,
+            // from the same table that gives `1minute`. So the rule the test
+            // enforces is unchanged — a word appears here only when a source
+            // records it — and what changed is that one source now exists.
+            //
+            // Dhan stays `None`, and for a different reason that this
+            // assertion keeps pinned: its request carries **no interval field
+            // at all** (five params: securityId, exchangeSegment, instrument,
+            // fromDate, toDate), so there is nothing to spell a rung with and
+            // `granularity_tokens` is empty by construction. D-0076.
+            let expected_day_word = match feed {
+                Feed::Groww => Some("1day"),
+                _ => None,
+            };
             assert_eq!(
                 spec.granularity_token(Granularity::Day1),
-                None,
-                "{}: no daily interval word is recorded anywhere in this \
-                 repository — 1day, 1d and day are all plausible and only one \
-                 of them is a request",
+                expected_day_word,
+                "{}: a daily interval word appears here only when a source \
+                 records it — Groww's annexure gives `1day`, and no other \
+                 feed's does",
+                feed.display()
+            );
+        }
+    }
+
+    /// EVERY FEED SAYS WHAT IT MEANS BY A DAILY BAR, AND TWO THAT DISAGREE
+    /// ARE NOT COMPARABLE.
+    ///
+    /// This is the test that turns D-0077 from a comment into a guarantee. The
+    /// store already isolates vendors by path — `docs/04-invariants.md` X-12,
+    /// and the first path segment is a `Vendor` rather than a string, so no
+    /// feed can write into another's directory. Isolation is not the whole
+    /// problem: `dhan/…/1day/` and `groww/…/1day/` are isolated AND hold two
+    /// different definitions of a day, which is how a wrong open reached disk
+    /// without any gate noticing.
+    #[test]
+    fn every_feed_declares_what_it_means_by_a_daily_bar() {
+        // The measured pair, and the reason this enum exists.
+        assert_eq!(
+            Feed::Dhan.descriptor().day_bar,
+            BarConvention::SessionOpenToClose,
+            "Dhan's open is the session's first print — 2026-08-07 BANKNIFTY \
+             O 57,882.00, which its own chart agrees with"
+        );
+        assert_eq!(
+            Feed::Groww.descriptor().day_bar,
+            BarConvention::PreviousCloseToClose,
+            "Groww's daily candle starts at the PREVIOUS close — 2026-08-07 \
+             BANKNIFTY O 58,063.65, which is 08-06's close to the paisa"
+        );
+
+        // AND THEREFORE THEY MUST NOT BE COMPARED. A reader that puts these
+        // two side by side is comparing two different intervals and calling
+        // the difference a vendor disagreement.
+        assert!(
+            !Feed::Dhan
+                .descriptor()
+                .day_bar
+                .comparable_with(Feed::Groww.descriptor().day_bar),
+            "the whole point: these two rungs are not the same bar"
+        );
+        assert!(
+            Feed::Dhan
+                .descriptor()
+                .day_bar
+                .comparable_with(Feed::TrueData.descriptor().day_bar),
+            "two session bars are comparable with each other"
+        );
+
+        // EVERY feed, including any added later. A new `Feed` variant cannot
+        // reach this line without the compiler having already demanded the
+        // field — `Descriptor` has no `Default` — so this asserts the weaker
+        // remaining thing: that the value round-trips and carries a label an
+        // operator can read.
+        for feed in Feed::ALL {
+            let said = feed.descriptor().day_bar;
+            assert!(
+                !said.label().is_empty(),
+                "{}: a convention with no words is one nobody can act on",
+                feed.display()
+            );
+            assert!(
+                said.comparable_with(said),
+                "{}: a convention is comparable with itself",
                 feed.display()
             );
         }
@@ -3285,8 +3678,20 @@ mod tests {
                 );
             }
         }
-        assert!(Feed::Dhan.serves(Granularity::Minute1));
         assert!(Feed::Dhan.serves(Granularity::Day1));
+        // THIS ASSERTION IS INVERTED FROM WHAT IT USED TO BE, and the inversion
+        // is the point. It read `assert!(Feed::Dhan.serves(Minute1))`, which
+        // pinned a rung the descriptor could not actually serve: `bars_path` is
+        // one field holding this vendor's DAILY endpoint, so a `Minute1`
+        // request fetched daily bars and filed them under `1min/`. The test
+        // passed the whole time, because it asked whether the row DECLARED the
+        // rung and never whether the request could carry it.
+        assert!(
+            !Feed::Dhan.serves(Granularity::Minute1),
+            "the minute rung needs the intraday path and an interval field; \
+             until both exist it must refuse by name rather than file daily \
+             bars as minute bars"
+        );
         assert!(
             !Feed::Dhan.serves(Granularity::Minute5),
             "an unserved rung refuses by name; the wider ladder was never read live"
@@ -3455,7 +3860,19 @@ mod tests {
             "and the other broker's arrays are at the top level"
         );
 
-        assert!(dhan.fields.open_interest.is_some());
+        // BOTH BROKERS NAME NO OPEN-INTEREST ARRAY, and the assertion is
+        // inverted from what it was. It read `assert!(dhan…is_some())`, pinning
+        // a claim this vendor's own field table contradicts — `open_interest`
+        // is documented "for F&O instruments", and a spot index answer simply
+        // has no such array. Both swept indices were refused on it.
+        //
+        // Named here rather than left implicit because restoring it is a real
+        // decision: the day the expired-F&O path is modelled, open interest
+        // becomes a per-LISTING question, not a per-feed one.
+        assert_eq!(
+            dhan.fields.open_interest, None,
+            "this vendor sends open interest only for F&O; the spot surface has none"
+        );
         assert_eq!(
             groww.fields.open_interest, None,
             "absent open interest becomes the null sentinel; zero means zero"

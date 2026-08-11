@@ -94,3 +94,14 @@ pub mod totp;
 
 pub mod vendor;
 pub mod work;
+
+/// Every `telemetry::emit` in this crate, proved to reach a file.
+///
+/// A test module and nothing else — it compiles away entirely outside
+/// `cfg(test)` and no shipped item names it. It is a module of its own rather
+/// than a `mod tests` inside one of the fifteen above because
+/// [`telemetry::install`] refuses a second call, so a crate with 21 emit sites
+/// gets exactly ONE install and therefore exactly one test that can read them
+/// back. See its own header for what it drives and for the one site it cannot.
+#[cfg(test)]
+mod emit_sites;

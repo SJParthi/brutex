@@ -18,7 +18,7 @@ repository keeps finding in audits.
 |---|---|---|
 `core` | **nothing** | `Instrument`, `Isin`, `Symbol`, `Price`, `Vendor`, the universe. The nouns. |
 `vocab` | **nothing** | The bit table, `ConditionMask`, `Tolerance`. The alphabet. |
-`indicators` | **`vocab` only** | Candle in, condition bits out. Nine position sources, 234 positions. |
+`indicators` | **`vocab` only** | Candle in, condition bits out. Ten position sources, 238 positions. |
 `engine` | **`vocab` only** | The Apriori ladder. Bit vectors in, frequent combinations out. |
 `greeks` | **nothing** | Black-Scholes, integer-safe. Already shared. |
 `costs` | **`core` only** | Brokerage, STT, stamp duty, GST, slippage. Paisa integers. |
@@ -109,8 +109,8 @@ is append-only rather than tidy.
 
 ### The width is checked by the compiler, not by review
 
-`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 276
-allocated positions — 108 free. Adding conditions consumes headroom, and when it runs out:
+`ConditionMask` is `[u64; WORDS]`, currently 6 words = 384 bits, against 280
+allocated positions — 104 free. Adding conditions consumes headroom, and when it runs out:
 
 ```rust
 const _: () = assert!(COUNT <= ConditionMask::BITS as usize, ...);
@@ -127,9 +127,9 @@ because nothing compiles until `WORDS` is widened in the same change.
 
 ### The set of positions is derived, never listed
 
-`indicators::evaluator::Evaluator::positions()` is the union of the nine position
-sources' own `positions()` — eight modules plus the current-day Fibonacci rung range,
-234 positions in total. Adding a position to a module adds it to the evaluator with no
+`indicators::evaluator::Evaluator::positions()` is the union of the ten position sources'
+own `positions()` — eight modules, the current-day Fibonacci rung range, and the four the
+evaluator computes from its own session bookkeeping — 238 positions in total. Adding a position to a module adds it to the evaluator with no
 second edit, so the two cannot drift. A hand-maintained list is exactly the kind of
 thing that goes stale silently.
 
@@ -173,7 +173,7 @@ Per candle, the shared core does a fixed amount of work with no allocation:
 
 | Operation | Cost | Bounded by |
 |---|---|---|
-Condition lookup | O(1) | direct index into a fixed array of 276 |
+Condition lookup | O(1) | direct index into a fixed array of 280 |
 Mask evaluation | O(1) | 6 ANDs, 6 XORs, 5 ORs, 1 compare — branchless, no early exit, identical for a true and a false answer |
 One candle through every module | O(1) | a fixed set of fixed-size states, no allocation; `size_of::<Evaluator>()` is asserted at compile time |
 Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |

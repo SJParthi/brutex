@@ -102,6 +102,7 @@ pub async fn audit_json(
         ingest::parse_vendor(&asked)
     };
     let Some(feed) = feed else {
+        note_feed_refused(&asked);
         return (
             axum::http::StatusCode::BAD_REQUEST,
             json(),
@@ -115,6 +116,7 @@ pub async fn audit_json(
             ),
         );
     };
+    note_page_ignored(query);
     (
         axum::http::StatusCode::OK,
         json(),
@@ -126,6 +128,98 @@ pub async fn audit_json(
             ingest::today_ist(),
         ),
     )
+}
+
+/// A request this route turned away, on the machine rather than only on the
+/// wire.
+///
+/// # What was invisible
+///
+/// The refusal existed in exactly one place: the body of the 400. That body
+/// goes to whoever asked, and whoever asks here is a browser poll or a `curl`
+/// — the console renders its own sentence into a tab that is closed an hour
+/// later, and a script prints nothing at all. `logs::note_request` records the
+/// path and the status and **deliberately never the query string**, so the
+/// machine's whole memory of a refused poll was `GET /audit.json 400`. The one
+/// fact that decides what to do next was not in it.
+///
+/// The two reasons want opposite fixes and are indistinguishable from the
+/// status code. *Absent* is a caller that never sends `feed` — a front end
+/// built against an older route, and a bug on this side of the wire. *Unknown*
+/// is a wire this build cannot read: a typo, or a binary older than the vendor
+/// row somebody is asking it for.
+///
+/// # Why the wire itself is quoted, and why that is not a leak
+///
+/// `feed` names a vendor and can name nothing else. §8's credentials are read
+/// from Parameter Store inside `crates/pull` and never travel through a query
+/// string, and the value is bounded twice — by what a URL can carry and by the
+/// sink, which cuts a string at [`telemetry::MAX_STR_VALUE_BYTES`] and sets
+/// `cut` when it does. It is the same argument `api.ingest form refused`
+/// already makes for quoting back a refused form value. Without it the line
+/// says a parameter was wrong and still cannot say what arrived, which is most
+/// of the reason to write it.
+///
+/// # Cost
+///
+/// `Warn` — the server answered, the answer named its own refusal, and nothing
+/// on disk is wrong; somebody still has to know. Bounded by REQUESTS, and only
+/// the refused ones: a poll that succeeds emits nothing here, which is what
+/// makes it safe on a route a console re-reads every few seconds for twelve
+/// hours.
+fn note_feed_refused(asked: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.audit.json", "request refused")
+            .with("param", telemetry::Value::Str("feed"))
+            .with("wire", telemetry::Value::Str(asked))
+            .with(
+                "why",
+                telemetry::Value::Str(if asked.is_empty() {
+                    "absent, and this route never guesses one"
+                } else {
+                    "not a wire this build reads"
+                }),
+            )
+            .with("accepted", telemetry::Value::count(Vendor::ALL.len())),
+    );
+}
+
+/// A `page` nobody could read, and the newest page answered instead.
+///
+/// [`crate::server::page_number`] defaults an unparseable page to zero, and
+/// that default is defensible — a page number selects a VIEW and can never
+/// change what the data says — but it is **invisible**. `?page=banana` and
+/// `?page=0` produce byte-identical answers, so a pager writing a value this
+/// server cannot parse looks exactly like an operator asking for the newest
+/// runs on purpose, and the answer carries `"page":0` in both cases to confirm
+/// it. Nothing else on the machine keeps the query string. Taking the default
+/// and then saying so is `CLAUDE.md` §4 on fallbacks: degrade loudly and name
+/// the reason, never silently.
+///
+/// The text is re-read here rather than taken from `page_number`'s return
+/// value because the return value is precisely where the fact is lost.
+///
+/// # Cost
+///
+/// `Warn`, at most once per request, and only for a `page` that was present
+/// and unreadable — an absent `page` is the ordinary case (the console omits
+/// it for the first page) and is silent. Mutually exclusive with
+/// [`note_feed_refused`], which returns before a page is ever looked at, so one
+/// request is at most one line from this module however mangled the query is.
+fn note_page_ignored(query: &str) {
+    let asked = param(query, "page");
+    if asked.is_empty() || asked.parse::<usize>().is_ok() {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.audit.json", "page ignored")
+            .with("param", telemetry::Value::Str("page"))
+            .with("asked", telemetry::Value::Str(&asked))
+            .with(
+                "why",
+                telemetry::Value::Str("not a whole number; answered the newest page"),
+            ),
+    );
 }
 
 /// Every feed wire this build accepts, as one comma-separated sentence.
@@ -608,5 +702,45 @@ mod tests {
     #[test]
     fn a_page_reads_at_most_the_records_it_shows() {
         assert_eq!(audit::MAX_PAGE_RECORDS, 200);
+    }
+
+    /// A feed that was named and could not be read is a DIFFERENT fault from
+    /// one that was never sent, and both leave by their own name.
+    ///
+    /// The empty case is the other test above; this one drives the arm that
+    /// separates "your caller forgot the parameter" from "this build has no
+    /// such vendor", which is the split [`note_feed_refused`] exists to record.
+    #[tokio::test]
+    async fn a_named_feed_this_build_cannot_read_is_refused_by_name() {
+        let site: Loaded = std::sync::Arc::new(site("unknownfeed"));
+        let (code, _headers, body) = audit_json(
+            axum::extract::State(site),
+            "/audit.json?feed=nasdaq"
+                .parse::<axum::http::Uri>()
+                .expect("uri"),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.contains("nasdaq"), "{body}");
+        assert!(body.contains("groww"), "and lists what would have worked");
+    }
+
+    /// A page nobody could parse is answered, not refused — and noticed.
+    ///
+    /// The answer is byte-identical to `?page=0`, which is the whole reason
+    /// [`note_page_ignored`] exists: the response cannot carry the difference,
+    /// so the log has to.
+    #[tokio::test]
+    async fn an_unreadable_page_is_answered_with_the_newest_page() {
+        let site: Loaded = std::sync::Arc::new(site("badpage"));
+        let (code, _headers, body) = audit_json(
+            axum::extract::State(site),
+            "/audit.json?feed=groww&page=banana"
+                .parse::<axum::http::Uri>()
+                .expect("uri"),
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::OK);
+        assert_eq!(field(&body, r#""page":"#), "0");
     }
 }

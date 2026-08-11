@@ -68,7 +68,7 @@ use telemetry::{Config, Level, OwnedValue, Query};
 
 /// The seven cash columns, in the order and the types the lake writes them.
 ///
-/// Kept flat and complete here so that each fixture below is one *named*
+/// Written out in full here so that each fixture below is one *named*
 /// departure from a file that opens, and the event it produces can be read as
 /// the consequence of that departure and nothing else.
 const CASH: [(&str, PhysicalType); 7] = [

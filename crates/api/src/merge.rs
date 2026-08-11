@@ -387,6 +387,43 @@ pub fn merge(sources: &[Source]) -> Merged {
         }
     }
     out.eligibility = disputes.into_values().flatten().collect();
+    // THE MERGED UNIVERSE, AND THE TWO WAYS IT CAN BE WRONG.
+    //
+    // Everything downstream — the target filter, the sweep surface, what a
+    // pull asks the vendor for — is decided by `by_key`. A conflict means two
+    // vendors gave one key two different ISINs; an eligibility dispute means
+    // one vendor kept an instrument the other declined. Neither refuses the
+    // run: both are recorded and the run proceeds, which is right, and is
+    // exactly why they must be visible somewhere that survives the page.
+    //
+    // `Warn` when either list is non-empty, because a silently disputed
+    // universe is a run whose scope nobody agreed on. `Info` when clean.
+    //
+    // Counts only — the lists themselves are unbounded and already rendered on
+    // `/instruments`. A log line must not carry a list whose length is the
+    // universe's.
+    let any_disagreement = !out.conflicts.is_empty() || !out.eligibility.is_empty();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if any_disagreement {
+                telemetry::Level::Warn
+            } else {
+                telemetry::Level::Info
+            },
+            "api.merge",
+            "universe merged",
+        )
+        .with("sources", telemetry::Value::Uint(sources.len() as u64))
+        .with("keys", telemetry::Value::Uint(out.by_key.len() as u64))
+        .with(
+            "conflicts",
+            telemetry::Value::Uint(out.conflicts.len() as u64),
+        )
+        .with(
+            "eligibility_disputes",
+            telemetry::Value::Uint(out.eligibility.len() as u64),
+        ),
+    );
     out
 }
 

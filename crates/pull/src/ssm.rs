@@ -661,6 +661,26 @@ pub async fn get_parameter(
             kind: SecretError::Empty,
         });
     }
+    // THE CREDENTIAL READ HAPPENED — AND NOT ONE BYTE OF THE CREDENTIAL.
+    //
+    // `CLAUDE.md` §8 keeps the parameter PATH out of every tracked file because
+    // this repository is public; a log is a file an operator pastes into an
+    // issue, so it gets the same treatment. What is written is the region, the
+    // status, and the LENGTH — enough to tell "the token is there and it is
+    // 41 characters" from "the token is there and it is empty" without the
+    // value ever reaching a sink, a rotation, or a screenshot.
+    //
+    // The `name` is deliberately absent: it IS the parameter path.
+    //
+    // `Info`, and once per run. A pull that dies on its credential is the most
+    // common way a backfill ends, and until this line the log said nothing at
+    // all about whether the secret was ever read.
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.ssm", "credential read")
+            .with("region", telemetry::Value::Str(region))
+            .with("status", telemetry::Value::Uint(u64::from(status.as_u16())))
+            .with("value_len", telemetry::Value::Uint(value.len() as u64)),
+    );
     Ok(value)
 }
 

@@ -544,23 +544,59 @@ indicators and the gap-leg spreadsheet the design comes from.
 | 275 | `neutral_cpr_day` | — | live |
 
 
+
+### The close against the day's own open — bits 276–277
+
+| Bit | Name | Fires when |
+|---|---|---|
+| 276 | `close_above_day_open` | `close > ` this session's first bar's open |
+| 277 | `close_below_day_open` | `close < ` this session's first bar's open |
+
+**A flat close sets neither.** Equality is a third state, exactly as D-0109 locked for 37
+and 38 and as 30/31 already did for the bar's own open.
+
+`Evaluator.running_open` was written on the first bar of every session and **read nowhere in
+the repository** — a field maintained for a question the vocabulary could not ask. It is the
+level every percent-change quote is measured against, and "up on the day" was inexpressible:
+bits 40–43 give position within the day's *range*, which is a different question, and 30–31
+compare the close to the *bar's* own open.
+
+No threshold, so nothing here is UNVERIFIED.
+
+### The market structure in force — bits 278–279
+
+| Bit | Name | Fires when |
+|---|---|---|
+| 278 | `structure_up_in_force` | the last break was upward |
+| 279 | `structure_down_in_force` | the last break was downward |
+
+Bits 56–59 are **break events** — `bos_up`, `bos_down`, `choch_up`, `choch_down` — each true
+only on the handful of bars where a level was taken out. `Structure::last` holds which
+direction is in force *between* those events, which is the regime, and it was unpublished: a
+sweep could ask "did structure break up on this bar" and could not ask "is the structure
+up".
+
+**Neither is set before the first break.** There is no structure yet, and §4 forbids a bit
+evaluating to "probably". Same source and same latch as 56–59, so no new formula and no
+threshold.
+
 ---
 
 ## 8. Headroom, restated
 
 | | |
 |---|---|
-| positions allocated | 276 (0–275) |
-| live | 234 |
+| positions allocated | 280 (0–279) |
+| live | 238 |
 | retired (duplicated a live position) | 3 — bits 6, 19, 25 |
 | **void** (definitionally constant) | **39** — bits 235–273, D-0080 |
 | declaring `Kind::Near`, needing a tolerance | 81 live, of 97 allocated |
 | mask type | `ConditionMask`, `[u64; 6]` |
 | mask width | 384 bits |
-| free positions | 108 |
+| free positions | 104 |
 
 The first five rows account for every allocated position exactly once:
-234 + 3 + 39 = 276. If a future append breaks that sum, this table is the stale
+238 + 3 + 39 = 280. If a future append breaks that sum, this table is the stale
 copy and the table in `crates/vocab/src/table.rs` is the truth.
 
 **§6 above is superseded and kept for the record.** It said 74 live bits in a

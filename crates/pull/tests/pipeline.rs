@@ -112,6 +112,7 @@ fn window() -> Window {
 fn request() -> BarRequest {
     BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: window(),
         granularity: pull::vendor::Granularity::Minute1,
     }
@@ -1266,6 +1267,7 @@ fn a_member_whose_bars_cross_a_month_boundary_is_refused_by_name() {
     let dir = folder_of(&scratch, &[("NIFTY", across)]);
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(
             Day::new(2022, 10, 31).expect("a real date"),
             Day::new(2022, 11, 1).expect("a real date"),

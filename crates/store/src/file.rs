@@ -596,37 +596,22 @@ impl BarFile {
             len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
         }
 
-        let header = read_header(&bars, &bars_path, len)?;
-        let layout = refused(Layout::for_version(header.format_version), &bars_path)?;
-        let extra = layout.ragged_tail_bytes(len);
-        if extra != 0 {
-            return Err(StoreError::RaggedTail {
-                path: bars_path,
-                len,
-                extra,
-            });
-        }
-        if header.symbol_id != symbol_id {
-            return Err(StoreError::SymbolMismatch {
-                path: bars_path,
-                stored: header.symbol_id,
-                asked: symbol_id,
-            });
-        }
-        if header.timeframe_secs != timeframe_secs {
-            return Err(StoreError::TimeframeMismatch {
-                path: bars_path,
-                stored: header.timeframe_secs,
-                asked: timeframe_secs,
-            });
-        }
-        Ok(Self {
-            bars,
-            bars_path,
-            layout,
-            header,
-            _lock: Some(lock),
-        })
+        // THE SAME DOOR AS `open_existing`, AND NOW ACTUALLY THE SAME CODE.
+        //
+        // `open_existing`'s doc says of these two: "both call [`Self::validated`]
+        // so they cannot drift into disagreeing about what a well-formed month
+        // is." That sentence was FALSE. `validated` had exactly one caller —
+        // `open_existing` — and this function carried its own copy of the four
+        // checks, twenty-eight lines that happened to be byte-for-byte identical.
+        //
+        // Nothing was wrong with the values, and that is precisely why it was
+        // worth fixing: the comment asserted a guarantee that no mechanism
+        // enforced, so the two agreed only for as long as nobody edited one of
+        // them. A promise kept by coincidence is the shape `CLAUDE.md` §4 calls
+        // a fallback that hides a failure — it reads as safe and refuses
+        // nothing. The duplicate is gone and the sentence is now true by
+        // construction rather than by inspection.
+        Self::validated(bars, bars_path, Some(lock), len, symbol_id, timeframe_secs)
     }
 
     /// Open a month that already exists, **without creating anything**.
@@ -659,14 +644,14 @@ impl BarFile {
     /// them, which is the property that matters.
     ///
     /// Every validation after the open is the same one `open_or_create`
-    /// performs, and both call [`Self::validated`] so they cannot drift into
+    /// performs, and both call `Self::validated` so they cannot drift into
     /// disagreeing about what a well-formed month is.
     ///
     /// # Errors
     ///
     /// [`StoreError::NotABarPath`] for a non-bar path, [`StoreError::Missing`]
     /// when the month does not exist, [`StoreError::Locked`] when a writer holds
-    /// it, and whatever [`Self::validated`] refuses.
+    /// it, and whatever `Self::validated` refuses.
     pub fn open_existing(
         root: &Path,
         path: StorePath<'_>,

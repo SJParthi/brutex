@@ -1079,3 +1079,99 @@ fn every_content_refusal_names_the_numbers_it_refused() {
         (StoreError::ImpossibleBar { at: 2 }, "impossible OHLC"),
     ]);
 }
+
+// ===========================================================================
+// The two doors
+// ===========================================================================
+
+/// **BOTH DOORS AGREE, AND NOW BY CONSTRUCTION RATHER THAN BY COINCIDENCE.**
+///
+/// `BarFile::open_existing`'s doc has always claimed of itself and
+/// `open_or_create`: "both call `Self::validated` so they cannot drift into
+/// disagreeing about what a well-formed month is." **That sentence was false.**
+/// `validated` had exactly one caller, and `open_or_create` carried its own
+/// copy of the four checks — twenty-eight lines that happened to be byte for
+/// byte identical.
+///
+/// Nothing was wrong with the values, which is exactly why it was worth fixing
+/// and why this test exists. The comment asserted a guarantee that no mechanism
+/// enforced, so the two agreed only until somebody edited one of them. The
+/// duplicate is gone; this pins the property the sentence promises.
+///
+/// It also covers a door that had **no test at all**. A coverage measurement on
+/// 2026-08-10 found `open_existing` and `validated` dark at 40 of 40 lines,
+/// while `/bars` — a routed, shipping, user-facing read path — sits on top of
+/// them.
+#[test]
+fn the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refuses() {
+    let scratch = Scratch::new("both-doors");
+    let root = scratch.root();
+
+    // ABSENT IS `Missing`, AND THE READER CREATES NOTHING LOOKING.
+    // The module header promises "nothing, ever — it creates no directory, no
+    // bar file and no lock". A reader that conjured a lock file into being
+    // would be performing the very write this door exists to avoid.
+    let absent = BarFile::open_existing(root, bars_path(), SYMBOL);
+    assert!(
+        matches!(absent, Err(StoreError::Missing { .. })),
+        "an absent month is Missing, not an empty file: {absent:?}"
+    );
+    let lock_path = StorePath::new(parts(FileKind::Lock))
+        .expect("a legal path")
+        .to_path_buf(root);
+    assert!(
+        !bars_path().to_path_buf(root).exists(),
+        "the reader created a bar file"
+    );
+    assert!(!lock_path.exists(), "the reader created a lock file");
+
+    // Write a month through the writer door, then release its exclusive lock.
+    {
+        let mut writer = open(root).expect("the writer creates the month");
+        assert_eq!(
+            writer.append(&batch(0, 3)).expect("appends"),
+            Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            }
+        );
+    }
+
+    // The reader door opens what the writer wrote and sees the same records.
+    let reader = BarFile::open_existing(root, bars_path(), SYMBOL).expect("opens what was written");
+    assert_eq!(reader.records(), 3, "the reader sees the committed records");
+    assert_eq!(reader.header().symbol_id, SYMBOL);
+    assert_eq!(reader.layout(), Layout::V2);
+    drop(reader);
+
+    // THE SHARED VALIDATION, WHICH IS THE WHOLE POINT. A month whose stored
+    // symbol is not the one asked for must be refused by BOTH doors, with the
+    // SAME error — that is the sentence, expressed as an assertion. Compared as
+    // values rather than by shape, so a door that refused for a different
+    // reason, or named a different id, fails here.
+    let other = SYMBOL + 1;
+    let by_writer = outcome(BarFile::open_or_create(root, bars_path(), other));
+    let by_reader = outcome(BarFile::open_existing(root, bars_path(), other));
+    assert!(
+        matches!(by_writer, Err(StoreError::SymbolMismatch { .. })),
+        "the writer door must refuse a symbol mismatch: {by_writer:?}"
+    );
+    assert_eq!(
+        by_writer, by_reader,
+        "the two doors disagreed about the same month — which is precisely the \
+         drift `validated` exists to make impossible"
+    );
+
+    // And the same for the timeframe, so the agreement is not one lucky arm.
+    let other_tf = PathParts {
+        timeframe: Timeframe::DAY_1,
+        ..parts(FileKind::Bars)
+    };
+    let other_tf = StorePath::new(other_tf).expect("a legal path");
+    let w = outcome(BarFile::open_or_create(root, other_tf, SYMBOL));
+    let r = outcome(BarFile::open_existing(root, other_tf, SYMBOL));
+    assert_eq!(
+        w, r,
+        "a different timeframe is a different month to one door and not the other"
+    );
+}

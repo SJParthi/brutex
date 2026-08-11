@@ -48,3 +48,63 @@ fn emitting_with_no_sink_installed_is_reported_and_is_not_a_panic() {
     assert!(telemetry::global().is_none());
     assert!(!Emitted::NotInstalled.is_written());
 }
+
+/// **`admits` WITH NOWHERE TO GO IS `false`, AND `emit_if!` EVALUATES NOTHING.**
+///
+/// [`telemetry::admits`] is the free function [`telemetry::emit_if`] gates on —
+/// the whole mechanism that keeps a filtered event O(1) rather than
+/// O(call-site fields). It had **no test at all**: `Sink::admits` was covered
+/// and the free function that every macro expansion actually calls was not,
+/// which is the "built and unreachable from a test" shape this crate has
+/// already recorded twice.
+///
+/// The no-sink answer must be `false`. `true` would mean the macro evaluates
+/// every argument in a binary that never configured logging — the exact cost it
+/// exists to avoid, paid by the process least able to use the result.
+///
+/// The bound itself is proved by
+/// `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`, which
+/// counts side effects rather than timing them, and measured flat by
+/// `telemetry::bench::a_filtered_event_touches_nothing_and_stays_flat` (C-T-02).
+
+#[test]
+fn admits_with_no_sink_is_false_and_the_macro_evaluates_nothing() {
+    assert!(
+        telemetry::global().is_none(),
+        "this binary installs nothing, so nothing can be installed"
+    );
+
+    for level in telemetry::LEVELS {
+        assert!(
+            !telemetry::admits(level, "pull.member"),
+            "{level}: an event with nowhere to go is not admitted"
+        );
+    }
+    assert!(
+        !telemetry::admits(Level::Error, ""),
+        "including an empty target"
+    );
+
+    // AND THE MACRO HONOURS IT. The counter can only move if the argument ran.
+    let evaluated = std::sync::atomic::AtomicU64::new(0);
+    let count = || {
+        evaluated.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        7_u64
+    };
+    let outcome = telemetry::emit_if!(
+        Level::Error,
+        "pull.member",
+        "did not land",
+        "bars" => telemetry::Value::Uint(count()),
+    );
+    assert_eq!(
+        outcome,
+        Emitted::Filtered,
+        "no sink means the gate refuses before the event is built"
+    );
+    assert_eq!(
+        evaluated.load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "and the argument never ran — which is the whole point of the macro"
+    );
+}

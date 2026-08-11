@@ -1803,6 +1803,9 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 | I-14 | `warmed_up` is a **conjunction**, so the slowest family decides. Five 30-bar sessions fills `Prev5` while the 200-period EMA has seen 150 candles, and the signal must be false. Reducing it to the session count alone left every test green until this row asserted the run-level signal directly instead of the per-bar one | `indicators::evaluator::the_slowest_family_decides_and_it_is_not_always_prev5` | ✓ |
 | I-15 | The signals report the boundary the five-session ladder imposes: false at four completed sessions, true at five with the longest window closed | `indicators::evaluator::the_evaluator_reports_when_every_family_can_finally_answer` | ✓ |
 
+| I-16 | 276/277 compare the close to the **session's** open, and a flat close sets **neither** — nor does the session's first bar, which has no session open to compare against yet | `indicators::evaluator::the_close_against_the_session_open_sets_at_most_one_bit` | ✓ |
+| I-17 | 278/279 report the structure **in force between** breaks, not only on the bars where 56–59 fire. Without that distinction they are a duplicate of the break events and every other test still passes | `indicators::evaluator::the_structure_in_force_is_reported_between_breaks_and_not_before_the_first` | ✓ |
+
 **I-10 and I-11 both fail on the obvious slip**, which is why the verdict is taken on
 `self.day` and not `today`: asking about the session that is *starting* rather than the one
 that just *ended* inverts the fix, so the Muhurat session would poison the anchor and the

@@ -242,6 +242,7 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
     let store_root = scratch.store();
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: window(),
         granularity: pull::vendor::Granularity::Minute1,
     };
@@ -331,6 +332,7 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
     let store_root = scratch.store();
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
@@ -370,6 +372,7 @@ fn idempotent_repull_leaves_the_file_byte_identical() {
     let store_root = scratch.store();
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: window(),
         granularity: pull::vendor::Granularity::Minute1,
     };
@@ -420,6 +423,7 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
 
     let narrow = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
@@ -433,6 +437,7 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
 
     let wider = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(
             Day::new(2022, 10, 4).expect("2022-10-04"),
             Day::new(2022, 10, 4).expect("2022-10-04"),

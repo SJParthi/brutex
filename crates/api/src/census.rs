@@ -275,6 +275,29 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
             }
         }
     };
+    // THE COUNTER'S OWN STATE, NAMED — held, absent, or unreadable.
+    //
+    // These three are not interchangeable and the difference decides what the
+    // next run does. **Absent** is the ordinary state before a first pull.
+    // **Unreadable** is the dangerous one: the bars may be on disk while the
+    // census that counts them is not, so a later run refetches a month the
+    // store already holds and the append correctly refuses it — a store that
+    // disagrees with its own counter, which `crate::ingest`'s header calls the
+    // one outcome worse than refusing outright.
+    //
+    // `Warn` for unreadable, `Info` otherwise. One event per vendor at startup,
+    // so four lines per process — bounded by `Vendor::ALL` and by nothing else.
+    let (level, said) = match state {
+        Census::Held { .. } => (telemetry::Level::Info, "held"),
+        Census::Absent => (telemetry::Level::Info, "absent"),
+        Census::Unreadable { .. } => (telemetry::Level::Warn, "unreadable"),
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(level, "api.census", "read")
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("state", telemetry::Value::Str(said))
+            .with("path", telemetry::Value::Str(&path.display().to_string())),
+    );
     VendorCensus {
         vendor,
         path,

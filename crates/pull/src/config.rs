@@ -231,6 +231,50 @@ pub fn default_config_path(home: &Path) -> PathBuf {
     out
 }
 
+/// The credential configuration was read, or it was not — and NEITHER used to
+/// leave a line.
+///
+/// # Why this is the highest-value event in the crate
+///
+/// `CLAUDE.md` §8: the real path segments live in a local, untracked file, and
+/// "a missing or malformed configuration halts the pull loudly — there is no
+/// default and no fallback". *Loudly* meant an HTML page. Close the tab and the
+/// run that never started left no trace anywhere on the machine, which is the
+/// worst shape a failure can have: nothing happened, and nothing said why.
+///
+/// # WHAT IS NOT LOGGED, AND THIS IS THE WHOLE POINT
+///
+/// **Not the path's contents. Not one segment of it.** §8 forbids a literal
+/// parameter path in any tracked file precisely because this repository is
+/// public, and a log is a file an operator pastes into an issue — it inherits
+/// that rule rather than escaping it. What is written is the FILE the config
+/// was read from, how many vendors it named, and the refusal's own kind. That
+/// is enough to tell "the file is missing" from "the file is there and names
+/// no vendor" without the org, the environment or the vendor path appearing.
+///
+/// CI gate 1c walks every tracked file for a literal path; this event is
+/// designed so that gate would have nothing to find even if the log were
+/// tracked.
+fn note_load(path: &Path, parsed: &Result<CredentialConfig, ConfigError>) {
+    let (level, said, vendors) = match parsed {
+        Ok(config) => (
+            telemetry::Level::Info,
+            "loaded",
+            config.vendors.len() as u64,
+        ),
+        // ERROR, because a run cannot start without it. The refusal's Display
+        // is the operator's next action — it names the file and the fault, and
+        // `ConfigError` is written so that none of its variants can carry a
+        // path segment into a message.
+        Err(_) => (telemetry::Level::Error, "refused", 0),
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(level, "pull.config", said)
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("vendors", telemetry::Value::Uint(vendors)),
+    );
+}
+
 /// Why one segment is not a path segment.
 ///
 /// Every variant names what was wrong. A refusal that says only "invalid" sends
@@ -725,7 +769,9 @@ impl CredentialConfig {
             path: path.to_path_buf(),
             kind: std::io::ErrorKind::InvalidData,
         })?;
-        Self::parse(&text)
+        let parsed = Self::parse(&text);
+        note_load(path, &parsed);
+        parsed
     }
 
     /// Validates configuration text that is already in memory.

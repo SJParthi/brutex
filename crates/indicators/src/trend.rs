@@ -823,6 +823,16 @@ impl TrendState {
         self.fast.warm() && self.slow.warm() && self.supertrend.warm()
     }
 
+    /// The market-structure direction currently in force, for positions 278–279.
+    ///
+    /// `None` before the first break: there is no structure yet, and
+    /// `docs/03-vocabulary.md` §4 forbids a bit evaluating to "probably". Bits 56–59 are the
+    /// break EVENTS; this is the regime between them, and it was computed and unpublished.
+    #[must_use]
+    pub const fn structure_in_force(&self) -> Option<Trend> {
+        self.structure.in_force()
+    }
+
     /// The fourteen positions for one closing price.
     ///
     /// # Cost

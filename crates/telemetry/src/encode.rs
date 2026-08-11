@@ -39,10 +39,22 @@ use crate::value::Value;
 /// `out` is appended to and never cleared here: the sink owns the buffer and
 /// its lifetime, and a function that cleared somebody else's buffer would be a
 /// surprise waiting for a second caller.
-pub(crate) fn line(out: &mut Vec<u8>, seq: u64, at_unix_millis: i64, event: &Event<'_>) {
+pub(crate) fn line(out: &mut Vec<u8>, seq: u64, at_unix_millis: i64, run: u64, event: &Event<'_>) {
     let mut cut = false;
     out.extend_from_slice(b"{\"seq\":");
     push_padded(out, seq, 1);
+    // THE RUN THIS EVENT BELONGS TO, OMITTED WHEN THERE IS NONE.
+    //
+    // A log file spanning three backfills cannot be split into three without
+    // this, and splitting it is the first thing a reader who did not run the
+    // job has to do. Zero means "no run is in progress" — a serving process
+    // logging a request belongs to no backfill — and the key is left off the
+    // line entirely rather than written as `0`, so a reader never has to decide
+    // whether zero is a run identifier or the absence of one.
+    if run != 0 {
+        out.extend_from_slice(b",\"run\":");
+        push_padded(out, run, 1);
+    }
     out.extend_from_slice(b",\"ts\":\"");
     push_rfc3339(out, at_unix_millis);
     out.extend_from_slice(b"\",\"ms\":");
@@ -185,12 +197,14 @@ fn push_capped(out: &mut Vec<u8>, text: &str, cap: usize) -> bool {
 )]
 mod tests {
     use super::{line, push_float};
-    use crate::event::{Event, MAX_FIELDS, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES};
+    use crate::event::{
+        Event, MAX_FIELDS, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES, MAX_TARGET_BYTES,
+    };
     use crate::value::Value;
 
     fn rendered(event: &Event<'_>, seq: u64, millis: i64) -> String {
         let mut out = Vec::new();
-        line(&mut out, seq, millis, event);
+        line(&mut out, seq, millis, 0, event);
         String::from_utf8(out).expect("a line is UTF-8")
     }
 
@@ -332,5 +346,45 @@ mod tests {
         assert!(out.contains("\"seq\":18446744073709551615"), "{out}");
         assert!(out.contains("\"ms\":-1"), "{out}");
         assert!(out.contains("\"ts\":\"1969-12-31T23:59:59.999Z\""), "{out}");
+    }
+
+    /// **AN OVER-LONG TARGET SETS `cut`, LIKE EVERY OTHER TRUNCATION.**
+    ///
+    /// `line` accumulates `cut |= push_capped(..)` for the target, the message
+    /// and each value. Mutating the TARGET one to `&=` survived: `cut` is
+    /// `false` when the target is reached, so `&=` pins it false forever — the
+    /// target is still truncated on the line, but the line no longer says so,
+    /// and a reader shows a shortened subsystem name as though it were whole.
+    ///
+    /// It survived because `MAX_TARGET_BYTES` appeared nowhere but its own
+    /// definition: no test had ever emitted a target longer than 48 bytes.
+    #[test]
+    fn a_target_past_its_ceiling_is_truncated_and_the_line_admits_it() {
+        let long = "a".repeat(MAX_TARGET_BYTES * 2);
+        let mut out = Vec::new();
+        line(&mut out, 1, 0, 0, &Event::info(&long, "m"));
+        let text = String::from_utf8(out).expect("ascii");
+
+        assert!(
+            text.contains(r#""cut":true"#),
+            "the target was cut, so the line must say so: {text}"
+        );
+        let decoded = crate::record::Record::decode(text.trim_end().as_bytes()).expect("decodes");
+        assert!(decoded.cut, "and a reader sees the flag");
+        assert_eq!(
+            decoded.target.len(),
+            MAX_TARGET_BYTES,
+            "the target really is truncated to its ceiling"
+        );
+
+        // A target INSIDE the ceiling sets nothing, which is what separates
+        // `|=` from an unconditional `true`.
+        let mut out = Vec::new();
+        line(&mut out, 1, 0, 0, &Event::info("short.target", "m"));
+        let text = String::from_utf8(out).expect("ascii");
+        assert!(
+            !text.contains(r#""cut":true"#),
+            "a target that fits raises no flag: {text}"
+        );
     }
 }

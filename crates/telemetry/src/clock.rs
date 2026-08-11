@@ -294,4 +294,68 @@ mod tests {
             "0 -1 -9223372036854775808 9223372036854775807"
         );
     }
+
+    /// **THE PRE-YEAR-0 ERA IS ASSERTED AS A DATE, NOT AS A MINUS SIGN.**
+    ///
+    /// `civil_from_days` floors towards the era start with `shifted - 146_096`,
+    /// and BOTH mutations of that operator survived. The one test that reached
+    /// the branch — `a_year_outside_four_digits_widens_or_signs_rather_than_lying`
+    /// — only asserted the rendering starts with `-`, and every mutant keeps the
+    /// year negative while producing a wholly different date.
+    ///
+    /// Measured: `civil_from_days(-800_000)` is `(-221, 9, 4)` as written and
+    /// `(-219, -2, -26)` with `-` mutated to `+` — a year adrift, and a month
+    /// and day that are not dates at all. Asserting the tuple is what tells
+    /// those apart.
+    #[test]
+    fn the_negative_era_yields_a_real_date_and_not_merely_a_negative_year() {
+        // Deep in the negative era, where the floor correction is load-bearing.
+        assert_eq!(civil_from_days(-800_000), (-221, 9, 4));
+
+        // The era boundary itself: day 0 of the shifted calendar.
+        assert_eq!(civil_from_days(-719_468), (0, 3, 1));
+
+        // And the epoch, so a mutation cannot pass by breaking only one side.
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+
+        // Every result must be a real date, which is the property the sign
+        // assertion could never express.
+        for days in [-800_000_i64, -719_468, -365, 0, 365, 800_000] {
+            let (_y, m, d) = civil_from_days(days);
+            assert!(
+                (1..=12).contains(&m),
+                "month {m} from {days} is not a month"
+            );
+            assert!((1..=31).contains(&d), "day {d} from {days} is not a day");
+        }
+    }
+
+    /// **YEAR ZERO IS `0000`, NOT `-0000`.**
+    ///
+    /// `push_rfc3339` writes a leading `-` when `year < 0`. Mutating that to
+    /// `<= 0` differs at exactly one year — 0 — and the suite covered year 1 and
+    /// negative years while stepping straight over it. The sign rule was
+    /// therefore unproven at its only interesting boundary.
+    #[test]
+    fn year_zero_carries_no_sign() {
+        // 0000-03-01 is day -719_468; render an instant inside that day.
+        let millis = -719_468_i64 * MILLIS_PER_DAY;
+        let mut out = Vec::new();
+        push_rfc3339(&mut out, millis);
+        let text = String::from_utf8(out).expect("ascii");
+        assert!(
+            text.starts_with("0000-03-01"),
+            "year zero is not negative and must not be signed: {text}"
+        );
+        assert!(!text.starts_with('-'), "{text}");
+
+        // A FULL YEAR earlier is year -1, and that one IS signed — so the rule
+        // still fires where it should. (One day earlier is 0000-02-29, which is
+        // still year zero: the era begins in March, not January, which is
+        // exactly the sort of thing this test exists to keep honest.)
+        let mut out = Vec::new();
+        push_rfc3339(&mut out, millis - 400 * MILLIS_PER_DAY);
+        let text = String::from_utf8(out).expect("ascii");
+        assert!(text.starts_with('-'), "the year before 0 is signed: {text}");
+    }
 }

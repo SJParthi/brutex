@@ -1116,6 +1116,41 @@ pub fn split_window(window: Window, cap_days: Option<u32>) -> Result<Vec<Window>
         // that already fit.
         start = end.saturating_add(1);
     }
+    // THE CHUNK PLAN, RESOLVED — one line, whatever the plan's size.
+    //
+    // This function decides how many vendor requests a run will make and where
+    // every boundary falls, and it was completely invisible. The entire opening
+    // diagnosis of D-0070 was reconstructing THIS: that a five-year window at
+    // the day rung becomes 61 month-shaped chunks because `cap_days` is `None`
+    // and the month is the only bound. That is now one line instead of an
+    // afternoon.
+    //
+    // `Debug` and bounded: one event per SPLIT, not per chunk. A split happens
+    // once per instrument, so the count is bounded by the universe and never by
+    // the window's length.
+    //
+    // `cap_days` is rendered as -1 when the vendor published none, never 0 —
+    // "this vendor bounds nothing here" and "this vendor allows nothing" are
+    // different facts and `CLAUDE.md` §3 rule 1 will not let them share a
+    // number.
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::debug("pull.split", "window split")
+            .with("from", telemetry::Value::Str(&window.from().to_string()))
+            .with("to", telemetry::Value::Str(&window.to().to_string()))
+            .with(
+                "cap_days",
+                telemetry::Value::Int(cap_days.map_or(-1, i64::from)),
+            )
+            .with("chunks", telemetry::Value::Uint(chunks.len() as u64))
+            .with(
+                "first_chunk_to",
+                telemetry::Value::Str(
+                    &chunks
+                        .first()
+                        .map_or_else(String::new, |c| c.to().to_string()),
+                ),
+            ),
+    );
     Ok(chunks)
 }
 

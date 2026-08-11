@@ -140,6 +140,18 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // testing.
         window_caps: &[],
         granularity_tokens: &[],
+        listings: &[
+            pull::vendor::ListingWords {
+                listing: pull::vendor::Listing::Index,
+                segment: "IDX_I",
+                kind: "INDEX",
+            },
+            pull::vendor::ListingWords {
+                listing: pull::vendor::Listing::Equity,
+                segment: "NSE_EQ",
+                kind: "EQUITY",
+            },
+        ],
         params: &[
             Param {
                 name: "securityId",
@@ -206,6 +218,7 @@ fn request() -> BarRequest {
     BarRequest {
         // NIFTY at Dhan, from their own worked example.
         instrument_id: "13".to_owned(),
+        listing: pull::vendor::Listing::Equity,
         window: window(),
         granularity: pull::vendor::Granularity::Minute1,
     }

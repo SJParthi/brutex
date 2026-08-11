@@ -10237,3 +10237,138 @@ Muhurat date"*. The charter's mechanism was the right idea described in the wron
 `today` instead of `self.day` inverts the fix — the Muhurat session would poison the anchor
 and the regular day after it would be discarded — and both new tests fail on that slip, so
 it is guarded rather than merely commented.
+
+## D-0111 · 2026-08-11 · The logger cannot read a bar, and that is now structural rather than careful
+
+**Number taken as max+1 and asserted free before writing** (`D-0110` was the
+highest in the tree; two sessions share it).
+
+The owner's constraint, in their words: no real bars, no pull, and *"even
+suppose if the data or bars pulled by mistake also, then nowhere the issue of
+this should happen"*. Read carefully that is not a request to be careful. It is
+a requirement that the logger be **incapable** of reading real data, so that
+whether or not bars are sitting on the disk changes nothing about it.
+
+Being true today is not the same as being enforced, so gate 21 enforces it in
+two clauses, because either alone is weak.
+
+**Clause A — `crates/telemetry` declares no dependencies.** The manifest's
+`[dependencies]` table is empty and the gate fails if anything appears in it.
+This is the load-bearing half: a crate that cannot name `store`, `core`,
+`pull` or a vendor client cannot call them, so it cannot read a bar, a
+manifest or a census however it is later edited. Verified structurally rather
+than by inspection — `CLAUDE.md` §5 puts the crate graph under law, and this
+is that law applied to the one crate every other crate emits into.
+
+**Clause B — the production file-opening surface is declared.** Six sites, and
+they are the whole of it:
+
+| File | Construct | Count | What it opens |
+|---|---|---|---|
+| `sink.rs` | `OpenOptions::new` | 2 | the sink's own append target |
+| `sink.rs` | `fs::remove_file` | 1 | dropping the oldest rolled file |
+| `sink.rs` | `fs::rename` | 1 | rolling within its own directory |
+| `tail.rs` | `File::open` | 2 | reading back its own file set |
+
+Every one takes a path built from the sink's own directory plus `BASENAME` and
+`EXTENSION`. `dir_beneath_store` is pure path arithmetic — `root.join("telemetry")`
+— so the logger writes *beside* the store, never into it, and reads nothing there.
+
+Declared by **construct and count, never by line number**, for the reason gates
+1d and 20 give: a line number is invalidated by editing a comment above it, and
+a declaration that rots on reformatting is one nobody keeps honest.
+
+**The window is asserted, not assumed.** The gate scans everything before the
+first `#[cfg(test)]` and treats the rest as test code. That is only sound while
+there is exactly one such block per file, so the gate counts them and refuses
+when there is more than one — naming itself as the thing to fix, not the file.
+This is the defect gate 19 shipped with in its first version: a scanning window
+that had drifted off the region it was supposed to cover, while still printing a
+verdict. An unsound window that reports PASS is worse than no gate.
+
+**Proved to bite, three ways, before being believed.** Adding
+`store = { path = "../store" }` to the manifest fails clause A. Adding one
+`fs::read_to_string` to `tail.rs` above its test module fails clause B naming
+the new construct. Adding a second `#[cfg(test)]` fails the soundness check.
+Each file was then restored and verified byte-identical by md5, and the gate
+returned green.
+
+**What it does not claim.** It does not prove the *path* handed to those six
+sites is always the sink's own — that is a data-flow question a static scan
+cannot answer, and saying otherwise would be the kind of overclaim §3 rule 6
+forbids. What it guarantees is that the set of places the logger can open a file
+is fixed, small, and cannot grow without somebody writing down what the new one
+opens and why.
+
+
+---
+
+## D-0112 · 2026-08-11 · Four positions append at 276–279: the close against the session's own open, and the market structure in force
+
+**Status: locked.** `plain(276..=279)` in `crates/vocab/src/table.rs`, computed in
+`Evaluator::step`. `NEXT_FREE` 276 → 280, `LIVE` 234 → 238, free headroom 108 → 104.
+`VOCAB_VERSION` stays **3** — an append cannot change the meaning of an existing bit.
+
+### Why these four and not the other three that were considered
+
+`docs/03-vocabulary.md` §7 requires an appended position's formula to trace to
+`docs/09-design-sources.md`. Five gaps were on the list; **two were appendable and three
+were not**, and the difference is whether the predicate needs a NUMBER nobody can source.
+
+| Candidate | Appended? | Why |
+|---|---|---|
+close vs the session's open | **yes** | a comparison; no threshold |
+market structure in force | **yes** | the latch 56–59 already advance; no threshold, same source |
+side-of-rung for the prev-5 and gap ladders | no | 22 positions, and worth its own decision |
+bar range against ATR | no | needs "how much bigger", which no source gives |
+first/last five minutes, day of week | no | derivable, but a finer time bucketing is a design choice not a defect fix |
+
+The precedent for appending with a missing number is 274/275: the CPR width cut points had
+no source, so they were appended, marked **UNVERIFIED** at their definition, made
+caller-supplied, and recorded in `docs/09-design-sources.md` §5. **Neither of today's two
+needs that note**, which is what makes them the clean subset.
+
+### 276–277 — the close against the day's own open
+
+`Evaluator.running_open` was written on the first bar of every session and **read nowhere in
+the repository**. A field maintained for a question the vocabulary could not ask.
+
+It is the level every percent-change quote is measured against, and "up on the day" was
+inexpressible. Bits 40–43 give position within the day's *range*, which is a different
+question; 30–31 compare the close to the *bar's* own open.
+
+**A flat close sets neither**, which is D-0109's rule. On a paisa tick grid exact equality is
+common rather than a measure-zero curiosity, and equality swept into `else` is the defect
+D-0099 records **five** occurrences of. `set_side` matches on `Ordering` so the compiler
+checks the equality arm exists.
+
+**The session's first bar sets neither either.** `running_open` is that bar's own open, so
+there is no session open to compare against yet — that bar's close against its own open is
+30/31's question. Guarded, because "compare a bar to itself and always report above" is the
+obvious way to get this wrong.
+
+### 278–279 — the market structure in force
+
+56–59 are break **events**: `bos_up`, `bos_down`, `choch_up`, `choch_down`, each true only on
+the handful of bars where a level was taken out. `Structure::last` holds which direction is
+in force **between** those events — the regime — and it was computed and unpublished. A
+sweep could ask "did structure break up on this bar" and could not ask "is the structure
+up", which is the more useful of the two for a combination.
+
+Same source and same latch as 56–59, so no new formula. **Neither is set before the first
+break**: there is no structure yet, and §4 forbids a bit evaluating to "probably".
+
+The test that matters here asserts the regime fires on bars where **no** event does. Without
+that, 278/279 could be a duplicate of 56–59 and every test would pass — which is exactly what
+happens when the emission is gated on the event, measured.
+
+### The append mechanism, second use, and what it cost
+
+274/275 was the first use and turned five tests red. This turned **nine** red across two
+crates: three hardcoded counts in `vocab`'s lib, six in its integration tests, and then three
+in `indicators`' boundary-document guard once the positions started firing. Every one was a
+mechanism doing its job, and one of them —
+`the_shipped_74_are_the_document_character_for_character` — refused with *"position 276
+appears in no row of docs/03-vocabulary.md — an undocumented condition is one nobody can
+audit"*, which is the check that forced §7's two new subsections to exist before the code
+could ship.

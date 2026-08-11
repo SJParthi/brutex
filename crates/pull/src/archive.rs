@@ -225,6 +225,87 @@ fn instrument_name(path: &std::path::Path) -> String {
     }
 }
 
+/// What one walk passed over, in plain integers.
+///
+/// A struct rather than two adjacent `u64`: two numbers of the same type
+/// transpose without a compiler complaint, and a ghost count reported as a
+/// non-CSV count sends an operator to the wrong vendor.
+///
+/// **These are counted separately on purpose.** A `__MACOSX` stub and a stray
+/// `README.txt` are both "not a bar", and they mean opposite things: 12,145 of
+/// the first is a folder that was re-zipped on a Mac and is behaving exactly as
+/// expected, while one of the second is a folder somebody assembled by hand.
+#[derive(Debug, Clone, Copy)]
+struct Passed {
+    /// `__MACOSX` stubs and `AppleDouble` shadows — [`csv::is_ghost`].
+    ghosts: u64,
+    /// Entries that are not a `.csv` file at all: subdirectories, and anything
+    /// with another extension.
+    skipped: u64,
+}
+
+/// One walked folder, on the rolling log — at `Info`.
+///
+/// # THE EVENT THAT TELLS "IT DID NOTHING" FROM "THERE WAS NOTHING"
+///
+/// A walk over an empty folder and a walk over the wrong folder both returned
+/// an empty vector in silence, and every symptom downstream was the same: no
+/// bars, no refusal, no reason. `dir` and `members` answer it on one line.
+///
+/// # Why `Info`, when the members themselves are `Debug`
+///
+/// This fires ONCE PER FOLDER, not once per file. A one-minute backfill is
+/// ~62,600 members and `crate::ingest` logs each at `Debug` for exactly that
+/// reason — but there is one walk, so it can afford the level an operator sees
+/// without asking. It is the run's own milestone: the moment the import knows
+/// how much work it has.
+///
+/// # Why the ghosts are counted here after being skipped silently everywhere
+/// # else
+///
+/// The paragraph above [`read_dir`] is about the *census*, which describes
+/// bars: 12,145 `__MACOSX` entries in it would drown the numbers it exists to
+/// report. A log line is the other thing. `GDFL.zip` lists 24,292 entries and
+/// holds 12,133 CSVs, and the whole `is_ghost` rule was found by getting that
+/// subtraction wrong — so the two halves of it are now written down where the
+/// walk that performs it can be checked against them.
+///
+/// `rows` is the sum over members, walked once. The walk is already O(members)
+/// — the module doc says so plainly — so this adds no order and answers "the
+/// folder held files and every one of them was empty", which `members` alone
+/// cannot.
+fn note_walked(dir: &Path, members: &[Member], passed: Passed) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.archive", "folder walked")
+            .with("dir", telemetry::Value::Str(&dir.display().to_string()))
+            .with("members", telemetry::Value::Uint(members.len() as u64))
+            .with("rows", telemetry::Value::Uint(total_rows(members) as u64))
+            .with("ghosts", telemetry::Value::Uint(passed.ghosts))
+            .with("skipped", telemetry::Value::Uint(passed.skipped)),
+    );
+}
+
+/// One folder that refused, on the rolling log — at `Error`.
+///
+/// A malformed member refuses the **whole walk**, so this is the end of the
+/// import and not a note about one file. `members` is how many had already
+/// been accepted when it stopped, which is the number that separates "the
+/// eleventh file of twelve thousand is corrupt" from "the first one is" — the
+/// error itself names the file and never says how far the walk got.
+///
+/// `why` is the [`ArchiveError`]'s own rendering. It leads with the path,
+/// which is what an operator needs to open next; a 128-byte ceiling trims the
+/// tail of the sentence and the encoder flags the line when it does, so a
+/// shortened reason is never mistaken for the whole one.
+fn note_refused(dir: &Path, members: &[Member], why: &ArchiveError) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.archive", "folder refused")
+            .with("dir", telemetry::Value::Str(&dir.display().to_string()))
+            .with("members", telemetry::Value::Uint(members.len() as u64))
+            .with("why", telemetry::Value::Str(&why.to_string())),
+    );
+}
+
 /// Every real CSV directly inside `dir`, decoded.
 ///
 /// Ghost members are skipped silently *by design* — they are not data and
@@ -242,6 +323,40 @@ fn instrument_name(path: &std::path::Path) -> String {
 /// O(members) — a bulk import visits every file, and that is inherent. One file
 /// is open at a time and peak memory is one file's rows, not the directory's.
 pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveError> {
+    let mut out = Vec::new();
+    let mut passed = Passed {
+        ghosts: 0,
+        skipped: 0,
+    };
+    // ONE EVENT PER FOLDER, ON EITHER OUTCOME, AND `out` IS BORROWED RATHER
+    // THAN RETURNED so that a refusal can still say how many members had been
+    // accepted when it stopped. The loop inside walks files and counts in two
+    // plain integers; nothing in it logs.
+    match walk(dir, columns, &mut out, &mut passed) {
+        Ok(()) => {
+            note_walked(dir, &out, passed);
+            Ok(out)
+        }
+        Err(why) => {
+            note_refused(dir, &out, &why);
+            Err(why)
+        }
+    }
+}
+
+/// [`read_dir`]'s walk, split out for one reason: the two `note_*` helpers
+/// must report what it found whether it finished or refused, and a `?` on the
+/// way past cannot do that.
+///
+/// # Errors
+///
+/// Whatever [`read_dir`] documents; this is its body.
+fn walk(
+    dir: &Path,
+    columns: Columns,
+    out: &mut Vec<Member>,
+    passed: &mut Passed,
+) -> Result<(), ArchiveError> {
     if !dir.is_dir() {
         return Err(ArchiveError::NotADirectory {
             path: dir.to_path_buf(),
@@ -252,7 +367,6 @@ pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveErro
         detail: e.to_string(),
     })?;
 
-    let mut out = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| ArchiveError::Unreadable {
             path: dir.to_path_buf(),
@@ -260,12 +374,16 @@ pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveErro
         })?;
         let path = entry.path();
 
-        // THE GHOST FILTER, before anything is opened.
+        // THE GHOST FILTER, before anything is opened. Counted in a plain
+        // integer rather than logged: `GDFL.zip` holds 12,145 of these, and one
+        // line each would bury the walk's own result in its own noise.
         let name = path.to_string_lossy();
         if csv::is_ghost(&name) {
+            passed.ghosts = passed.ghosts.saturating_add(1);
             continue;
         }
         if !path.is_file() || path.extension().is_none_or(|e| e != "csv") {
+            passed.skipped = passed.skipped.saturating_add(1);
             continue;
         }
         // A member must stay under the directory it was walked from. `..` in a
@@ -308,7 +426,7 @@ pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveErro
     // §3 rule 5, same inputs same outputs. This orders the MEMBERS, never the
     // rows inside one, whose file order carries information.
     out.sort_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    Ok(())
 }
 
 /// How many rows a walk produced, across every member.

@@ -86,6 +86,22 @@ impl LakePageReader {
     /// plausible-looking values for the rows that survived. Comparing against
     /// the header turns silent corruption into a refusal.
     fn decompress(&self, body: &[u8], expect: usize) -> PqResult<Bytes> {
+        let out = self.decode(body, expect);
+        if let Err(why) = &out {
+            note_body(self.codec, body.len(), expect, &why.to_string());
+        }
+        out
+    }
+
+    /// The decompression itself.
+    ///
+    /// Split out of [`LakePageReader::decompress`] so the refusal is recorded
+    /// in one place instead of at each of the four `return`s below. Nothing is
+    /// recorded on the success arms, and that asymmetry is the whole design:
+    /// this function runs once per PAGE, a page holds thousands of rows, and a
+    /// line per decoded page would roll a backfill's own beginning out of the
+    /// 64 MiB window long before it finished. D-0075.
+    fn decode(&self, body: &[u8], expect: usize) -> PqResult<Bytes> {
         match self.codec {
             Codec::Uncompressed => {
                 if body.len() != expect {
@@ -112,6 +128,44 @@ impl LakePageReader {
             }
         }
     }
+}
+
+/// Records a page body that would not decompress, at the moment it refuses.
+///
+/// **THIS IS THE SILENT-CORRUPTION BOUNDARY AND IT USED TO BE MUTE.** `ruzstd`
+/// answers a truncated frame with a short buffer, and a short page decodes into
+/// plausible prices for the rows that survived; the length check above is what
+/// turns that into a refusal, and this line is what leaves a record of it. The
+/// refusal itself reaches a caller as a `ParquetError` wrapped in
+/// [`crate::error::LakeError::PageDecode`] — but a caller that logs only the
+/// file, or discards the error to move to the next one, leaves nothing on disk
+/// saying a page of an irreplaceable file failed to decode.
+///
+/// The compressed and expected sizes are on the line because together they say
+/// which fault it is: a body far shorter than the chunk claimed is a truncated
+/// write, and a body of the right size that decodes to the wrong length is bit
+/// rot.
+///
+/// **Bounded by failure, not by data.** Only the refusing arm calls this, and a
+/// refusal ends the row group, the column and the read — so the worst case is
+/// one line per file that will not decode, never one per page.
+///
+/// Both halves are proved. That a refusal writes exactly this line:
+/// `lake::page::a_refused_page_writes_its_reason_to_the_log`. That a refusal
+/// really does end the read rather than being skipped past — which is what
+/// turns "one per page" into "one per file":
+/// `lake::page::a_truncated_chunk_is_refused_rather_than_read_short`.
+fn note_body(codec: Codec, compressed: usize, expect: usize, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("lake.page", "page body would not decompress")
+            .with("codec", telemetry::Value::Str(&codec.to_string()))
+            .with(
+                "compressed_bytes",
+                telemetry::Value::Uint(compressed as u64),
+            )
+            .with("want_bytes", telemetry::Value::Uint(expect as u64))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// Maps a thrift encoding id onto `parquet`'s enum.
@@ -242,6 +296,17 @@ impl PageReader for LakePageReader {
                     // them, across F&O, cash and index — contains one, and
                     // guessing at a layout this reader has never seen would be
                     // the silent fallback CLAUDE.md section 4 bans.
+                    //
+                    // NO EVENT HERE, AND THE REASON IS THE COVERAGE GATE, not
+                    // the emit rules — a page-type refusal is terminal for the
+                    // chunk, the row group and the read, so one line would be
+                    // bounded exactly as `note_body` below is. But no test
+                    // reaches this arm: no lake file holds a v2 page, and
+                    // building one synthetically belongs in
+                    // `crates/lake/tests/refusals.rs`. An emit added ahead of
+                    // that test is eight lines and one function that
+                    // `--fail-under-lines 100` counts as uncovered. The event
+                    // and the test that reaches it must land together.
                     return Err(ParquetError::General(format!(
                         "page type {} is not one this reader implements; refusing rather than skipping the page",
                         other.0
@@ -285,6 +350,150 @@ impl PageReader for LakePageReader {
 )]
 mod tests {
     use super::*;
+
+    /// AN UNCOMPRESSED PAGE MUST BE EXACTLY THE LENGTH ITS HEADER CLAIMS.
+    ///
+    /// CI gate 18 mutated this `!=` to `==` and the whole suite stayed green,
+    /// which meant the check decided nothing. The consequence is not cosmetic:
+    /// a page shorter than its header claims is a **silent short read** — the
+    /// column decodes fewer values than the row group says it holds, and this
+    /// crate's own `refusals.rs` header records what that cost last time
+    /// (2,080 fabricated nulls, the first at a row whose true value was 1,400).
+    ///
+    /// Both directions are driven, because `!=` is two failures: a body
+    /// shorter than the header and a body longer than it are each a
+    /// disagreement, and `<` would have caught only one.
+    #[test]
+    fn an_uncompressed_page_whose_length_disagrees_with_its_header_is_refused() {
+        let reader = LakePageReader::new(Bytes::new(), 0, Codec::Uncompressed);
+        let body = [1u8, 2, 3, 4];
+
+        // The agreeing case, which is what stops the whole body being replaced
+        // by an unconditional refusal.
+        let ok = reader
+            .decode(&body, body.len())
+            .expect("4 bytes, header says 4");
+        assert_eq!(&ok[..], &body[..], "the bytes pass through untouched");
+
+        // SHORT. The header promises more than the page carries.
+        let short = reader.decode(&body, body.len() + 1).unwrap_err();
+        assert!(
+            short.to_string().contains("4 bytes") && short.to_string().contains('5'),
+            "the refusal names BOTH numbers so an operator need not guess \
+             which side is wrong, got: {short}"
+        );
+
+        // LONG. The page carries more than the header accounts for — equally a
+        // disagreement, and the reason this is `!=` and not `<`.
+        let long = reader.decode(&body, body.len() - 1).unwrap_err();
+        assert!(
+            long.to_string().contains("4 bytes") && long.to_string().contains('3'),
+            "a long page disagrees exactly as much as a short one, got: {long}"
+        );
+    }
+
+    /// AND THE ZSTD PATH HAS ITS OWN LENGTH CHECK, WHICH ALSO DECIDED NOTHING.
+    ///
+    /// A second `!=`, on a different arm, and CI gate 18 mutated it to `==`
+    /// with the suite still green. It matters more than the uncompressed one:
+    /// a decompressor can legitimately produce a different length from the
+    /// header, and if that disagreement is not refused the column decodes a
+    /// short page and the reader fabricates the rest.
+    ///
+    /// The frame below is a minimal zstd frame built BY HAND — magic, a
+    /// single-segment header, one last raw block — because `ruzstd` decodes and
+    /// does not encode, and adding an encoder to reach one branch would be a
+    /// dependency bought for a test.
+    #[test]
+    fn a_zstd_page_that_decodes_to_the_wrong_length_is_refused() {
+        // 28 B5 2F FD  magic
+        // 20           frame header: single segment, 1-byte content size
+        // 04           content size = 4
+        // 21 00 00     block header: last block, raw, size 4  (1 | 4<<3 = 33)
+        // 41 42 43 44  "ABCD"
+        let frame: &[u8] = &[
+            0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x04, 0x21, 0x00, 0x00, b'A', b'B', b'C', b'D',
+        ];
+        let reader = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+
+        let ok = reader
+            .decode(frame, 4)
+            .expect("the hand-built frame decodes to its four bytes");
+        assert_eq!(&ok[..], b"ABCD", "and to exactly those bytes");
+
+        let wrong = reader.decode(frame, 5).unwrap_err();
+        assert!(
+            wrong.to_string().contains("decoded to 4 bytes") && wrong.to_string().contains('5'),
+            "the refusal names what was decoded AND what was promised, got: {wrong}"
+        );
+    }
+
+    /// THE EVENT ITSELF REACHES A FILE — and until this test, nothing in the
+    /// workspace asserted that of any of its 56 emit sites.
+    ///
+    /// CI gate 18 mutated `note_body` to `()` — deleting the emit outright —
+    /// and the entire suite stayed green. That was a true statement about
+    /// every event this repository writes: each one could have been removed
+    /// and no gate would have noticed. An observation nothing observes is
+    /// worth what an untested branch is worth, and `CLAUDE.md` §4's ban on a
+    /// test that asserts nothing is the same rule wearing the other mask.
+    ///
+    /// # Why a global sink is safe HERE
+    ///
+    /// `telemetry::install` writes a per-process `OnceLock`, so a test that
+    /// installs one races anything else in the same binary that asserts on the
+    /// global — which is why `crates/telemetry` gives that scenario its own
+    /// test binary. **No other test in THIS binary — `crates/lake`'s lib
+    /// target — installs, reads or asserts on the global**, so there is
+    /// nothing here to race. If one ever does, this test moves to its own
+    /// binary for the reason that file states.
+    ///
+    /// `tests/events.rs` installs one too, and that is not a collision:
+    /// cargo compiles every file under `tests/` into its own binary and runs
+    /// it as its own process, so its `OnceLock` is a different one. It covers
+    /// the crate's other two emit sites, in `schema.rs` and `reader.rs`, which
+    /// this test's opening paragraph was true of when it was written.
+    #[test]
+    fn a_refused_page_writes_its_reason_to_the_log() {
+        let dir = std::env::temp_dir().join(format!("brutex-lake-log-{}", std::process::id()));
+        let _ignored = std::fs::remove_dir_all(&dir);
+        // `Trace` so the FLOOR is not what decides the outcome: this test is
+        // about whether the event is emitted at all, and filtering is already
+        // `telemetry::sink`'s to prove.
+        let Ok(sink) = telemetry::install(
+            &telemetry::Config::new(&dir).with_min_level(telemetry::Level::Trace),
+        ) else {
+            // Another binary in this process installed first. Refusing to
+            // assert is right: a test that silently measures somebody else's
+            // sink is worse than one that does not run.
+            return;
+        };
+
+        let reader = LakePageReader::new(Bytes::new(), 0, Codec::Uncompressed);
+        let refused = reader.decompress(&[1, 2, 3, 4], 5).unwrap_err();
+        assert!(
+            refused.to_string().contains("4 bytes"),
+            "the premise: the page was refused, got {refused}"
+        );
+
+        let text = std::fs::read_to_string(sink.path()).expect("the sink wrote a file");
+        assert!(
+            text.contains(r#""target":"lake.page""#),
+            "THE EVENT REACHED THE FILE. Without this line the emit is \
+             deletable and every gate stays green. File held:\n{text}"
+        );
+        assert!(
+            text.contains(r#""want_bytes":5"#) && text.contains(r#""compressed_bytes":4"#),
+            "and carried BOTH numbers, so an operator need not guess which \
+             side is wrong: {text}"
+        );
+        assert!(
+            text.contains("UNCOMPRESSED"),
+            "and the codec, because zstd and uncompressed fail differently: \
+             {text}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn codec_renders_its_name() {

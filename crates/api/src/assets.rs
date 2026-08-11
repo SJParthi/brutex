@@ -44,6 +44,7 @@
 //!   canonicalised root, which is what catches a symlink pointing out of it.
 
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse as _, Response};
@@ -306,6 +307,159 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response {
     answer(status, "text/html; charset=utf-8", html.into_bytes())
 }
 
+/// The most entries the startup walk visits before it stops counting.
+///
+/// A ceiling, not an expectation. The built front end is a few dozen files in
+/// a handful of directories; a tree orders of magnitude past that means
+/// [`WEB_ENV`] names something which is not a bundle, and walking it would make
+/// the cost of *starting this server* a function of whatever happens to be on
+/// the operator's disk. Bounded by structure and never by data — the walk is
+/// once per process either way, and this is what keeps the once from being
+/// expensive. Reaching it is reported, not hidden: see [`Tree::capped`].
+const MAX_WALK: u64 = 100_000;
+
+/// What the built asset directory actually holds, counted once at startup.
+///
+/// **Counts, never names.** The file list under a bundle grows with the front
+/// end, and half of it is `_app/immutable/…` with a content hash in the name,
+/// so a line carrying the list would be a field whose width is somebody else's
+/// decision. Four integers answer the only question the log is being asked:
+/// *is there a real build there, or a directory that merely exists.*
+#[derive(Debug, Clone, Copy)]
+struct Tree {
+    /// Entries at any depth that are not directories.
+    files: u64,
+    /// Directories below the root, not counting the root itself.
+    dirs: u64,
+    /// Directories that would not open and entries the filesystem would not
+    /// describe. Counted rather than swallowed: a walk that answered `files:0`
+    /// for a bundle it could not read would be `CLAUDE.md` §4's banned shape,
+    /// a failure reported as an ordinary empty result.
+    unreadable: u64,
+    /// Whether the walk stopped at its own ceiling, which makes every count
+    /// above it a floor rather than a total. `CLAUDE.md` §3 rule 6.
+    capped: bool,
+}
+
+/// Every entry under `root`, counted and never named.
+///
+/// Split from [`walk`] for the reason [`web_dir_from`] is split from
+/// [`web_dir`]: both outcomes have to be testable, and no fixture a test can
+/// build on a normal disk holds [`MAX_WALK`] entries.
+///
+/// Iterative rather than recursive, and keyed on [`std::fs::DirEntry::file_type`],
+/// which does **not** follow a symlink — a link pointing at its own parent is
+/// one entry here and not an infinite descent. That is the same fact
+/// [`Assets::resolve`] canonicalises for: a symlink is the one thing in a
+/// directory tree that turns a walk which terminates on paper into one that
+/// does not.
+fn walk_within(root: &Path, limit: u64) -> Tree {
+    let mut tree = Tree {
+        files: 0,
+        dirs: 0,
+        unreadable: 0,
+        capped: false,
+    };
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if tree.files.saturating_add(tree.dirs) >= limit {
+            tree.capped = true;
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            tree.unreadable = tree.unreadable.saturating_add(1);
+            continue;
+        };
+        for entry in entries {
+            match entry.and_then(|found| found.file_type().map(|kind| (kind, found))) {
+                Ok((kind, found)) if kind.is_dir() => {
+                    tree.dirs = tree.dirs.saturating_add(1);
+                    stack.push(found.path());
+                }
+                Ok(_) => tree.files = tree.files.saturating_add(1),
+                Err(_) => tree.unreadable = tree.unreadable.saturating_add(1),
+            }
+        }
+    }
+    tree
+}
+
+/// Every entry under `root`, up to [`MAX_WALK`] of them.
+fn walk(root: &Path) -> Tree {
+    walk_within(root, MAX_WALK)
+}
+
+/// A count that was taken, or the absence of one.
+///
+/// `-1` and never `0`. A directory that was never walked does not hold zero
+/// files — it holds no count, and `CLAUDE.md` §3 rule 1 is that the two are
+/// different facts. An operator reading `files:0` off a run where the tree was
+/// never there would go looking for an empty bundle that does not exist.
+fn counted(value: Option<u64>) -> telemetry::Value<'static> {
+    value.map_or(telemetry::Value::Int(-1), telemetry::Value::Uint)
+}
+
+/// A fact that was established, or the absence of one — see [`counted`].
+///
+/// `false` is a claim about the world and `null` is the admission that nobody
+/// looked. `shell:false` on a run with no asset directory would say the shell
+/// is missing from a build, when there is no build to be missing from.
+fn known(value: Option<bool>) -> telemetry::Value<'static> {
+    value.map_or(telemetry::Value::Null, telemetry::Value::Bool)
+}
+
+/// Where the front end was looked for and what was found there, once.
+///
+/// # What was invisible before
+///
+/// A front end that is silently not being served looks exactly like a broken
+/// one from the browser: a blank page either way. The 503 page names the
+/// directory, but only to whoever loads it — nothing outside the browser said
+/// which path this process resolved, and `BRUTEX_WEB` pointing at a second
+/// checkout, or a binary copied off the machine that built it, produced a
+/// server that ran perfectly and served a page from nowhere. An operator can
+/// now answer *which directory is this process serving, and does it hold a
+/// build* from the log alone, before a browser is opened.
+///
+/// The counts are what separate the two failures that look identical. A
+/// directory that exists with `files:1` is a checkout with an empty `build/`;
+/// `shell:false` is a bundle whose `index.html` never got written; and
+/// `unreadable` above zero is a permission problem wearing the costume of an
+/// empty build.
+///
+/// # What it costs
+///
+/// One walk of a few dozen entries, once per process, bounded by [`MAX_WALK`]
+/// rather than by the tree. Nothing per request, and nothing per file served —
+/// `CLAUDE.md` §3 rule 4 is about the per-operation cost, and this is not on an
+/// operation.
+fn note_front_end(named: &Path, root: Option<&Path>) {
+    let tree = root.map(walk);
+    let shell = root.map(|dir| dir.join(INDEX).is_file());
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if root.is_some() {
+                telemetry::Level::Info
+            } else {
+                telemetry::Level::Warn
+            },
+            "api.assets",
+            if root.is_some() {
+                "front end found"
+            } else {
+                "front end NOT on disk — every page answers 503"
+            },
+        )
+        .with("path", telemetry::Value::Str(&named.display().to_string()))
+        .with("built", telemetry::Value::Bool(root.is_some()))
+        .with("files", counted(tree.map(|held| held.files)))
+        .with("dirs", counted(tree.map(|held| held.dirs)))
+        .with("unreadable", counted(tree.map(|held| held.unreadable)))
+        .with("capped", known(tree.map(|held| held.capped)))
+        .with("shell", known(shell)),
+    );
+}
+
 /// The front end on disk, and everything that decides what a path answers.
 #[derive(Debug)]
 pub struct Assets {
@@ -318,6 +472,11 @@ pub struct Assets {
     root: Option<PathBuf>,
     /// The type-ahead script. A source file beside the build, not inside it.
     typeahead: PathBuf,
+    /// How many requests have named an asset that is not on disk. Held so the
+    /// warning in [`Assets::note_missing`] can fire on a doubling rather than
+    /// on every request, which is the difference between a diagnostic and a
+    /// denial of service against this server's own log.
+    missing: AtomicU64,
 }
 
 impl Assets {
@@ -333,10 +492,16 @@ impl Assets {
         let root = std::fs::canonicalize(&named)
             .ok()
             .filter(|resolved| resolved.is_dir());
+        // ONCE PER PROCESS, AND THE ONLY PLACE THIS ANSWER EXISTS. See
+        // [`note_front_end`]: the directory this server resolved was written
+        // nowhere outside the 503 page, so "the front end is not being served"
+        // and "the front end is broken" were the same observation.
+        note_front_end(&named, root.as_deref());
         Self {
             named,
             root,
             typeahead: web.join(TYPEAHEAD),
+            missing: AtomicU64::new(0),
         }
     }
 
@@ -466,11 +631,62 @@ impl Assets {
         }
     }
 
+    /// One request that named an asset the build did not emit.
+    ///
+    /// # What was invisible before
+    ///
+    /// A stale `index.html` pointing at a hashed chunk the bundler no longer
+    /// writes is the front end's quietest failure: the shell loads, the page
+    /// stays blank, and the whole record is a 404 in a browser console nobody
+    /// is watching. The server said nothing at all — the 404 body names the
+    /// path, and then it is gone with the response. An operator can now answer
+    /// *did the browser ask this server for a file that is not in the build*
+    /// after the fact, which is when the question is usually asked.
+    ///
+    /// # Why it is not one line per request
+    ///
+    /// [`Assets::respond`] is reachable by anything that can open a socket, so
+    /// the rate of this event is set by the caller rather than by this
+    /// repository. A scanner walking a wordlist would write a line per probe
+    /// and roll the run's own beginning out of the sink's 64 MiB window —
+    /// evidence destroying itself, which is the shape D-0072 forbids and the
+    /// reason a per-request `warn` is not simply added here.
+    ///
+    /// So the line fires on a **doubling**: the 1st miss, the 2nd, the 4th,
+    /// the 8th. A million probes cost twenty lines, the first miss is still
+    /// immediate rather than batched, and each line carries the running total
+    /// so the count is read off the line instead of counted from the file.
+    /// `docs/06-limits.md` should record that misses between doublings are
+    /// summarised and not individually named — the path on the line is the
+    /// path of *that* miss, and the ones in between are only a number.
+    ///
+    /// The counter is one relaxed atomic add on a path that has already failed.
+    /// A request that is served never touches it.
+    fn note_missing(&self, raw_path: &str) {
+        let seen = self
+            .missing
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        if !seen.is_power_of_two() {
+            return;
+        }
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::warn("api.assets", "no such asset")
+                .with("path", telemetry::Value::Str(raw_path))
+                .with(
+                    "root",
+                    telemetry::Value::Str(&self.named.display().to_string()),
+                )
+                .with("seen", telemetry::Value::Uint(seen)),
+        );
+    }
+
     /// A path that looks like an asset, and is not there.
     ///
     /// Honest about which path, because a 404 that does not name what it could
     /// not find sends the reader to the wrong file.
     fn not_found(&self, raw_path: &str) -> Response {
+        self.note_missing(raw_path);
         answer(
             StatusCode::NOT_FOUND,
             "text/plain; charset=utf-8",
@@ -1002,6 +1218,87 @@ mod tests {
                 assert_ne!(a, b, "two refusals must not read the same");
             }
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // 7. WHAT THE LOG GETS TOLD. The counts behind `api.assets`, and the gate
+    //    that keeps a scanner from writing the run's own beginning away.
+    // ---------------------------------------------------------------------
+
+    /// The startup walk counts every depth, stops where it is told to, and says
+    /// so when it stopped.
+    #[test]
+    fn the_walk_counts_every_depth_and_reports_its_own_ceiling() {
+        let dir = furnished("walk");
+        let root = dir.join(BUILD_DIR);
+
+        let whole = walk_within(&root, MAX_WALK);
+        assert_eq!(whole.files, 2, "index.html and app.js");
+        assert_eq!(whole.dirs, 3, "_app, immutable, entry");
+        assert_eq!(whole.unreadable, 0);
+        assert!(!whole.capped, "nothing this small reaches the ceiling");
+        assert_eq!(
+            walk(&root).files,
+            whole.files,
+            "one reader, one answer — `walk` is `walk_within` at MAX_WALK"
+        );
+
+        // THE CEILING FIRES AND SAYS SO. A count that stopped early and looked
+        // like a total is `CLAUDE.md` §3 rule 6's banned shape.
+        let clipped = walk_within(&root, 1);
+        assert!(clipped.capped, "the walk stopped at its own limit");
+        assert!(
+            clipped.files.saturating_add(clipped.dirs) < whole.files + whole.dirs,
+            "and stopped short: {clipped:?} against {whole:?}"
+        );
+
+        // A ROOT THAT WILL NOT OPEN IS NOT AN EMPTY ROOT. Counted, so the line
+        // cannot read `files:0` for a bundle nobody could look inside.
+        let refused = walk_within(&root.join(INDEX), MAX_WALK);
+        assert_eq!(refused.unreadable, 1, "{refused:?}");
+        assert_eq!(refused.files, 0, "and it counted nothing it did not see");
+    }
+
+    /// A count nobody took is `-1`, and a fact nobody established is `null`.
+    ///
+    /// Zero and false are claims about the world. `CLAUDE.md` §3 rule 1: an
+    /// absent measurement is not a measurement of zero.
+    #[test]
+    fn a_count_that_was_never_taken_is_not_a_count_of_zero() {
+        assert_eq!(counted(Some(0)), telemetry::Value::Uint(0));
+        assert_eq!(counted(Some(36)), telemetry::Value::Uint(36));
+        assert_eq!(counted(None), telemetry::Value::Int(-1));
+        assert_eq!(known(Some(true)), telemetry::Value::Bool(true));
+        assert_eq!(known(Some(false)), telemetry::Value::Bool(false));
+        assert_eq!(known(None), telemetry::Value::Null);
+    }
+
+    /// **Every miss is counted; only a doubling is written.**
+    ///
+    /// The counter is what makes the warning bounded by structure rather than
+    /// by whoever is opening sockets, and the response is what proves the gate
+    /// never reaches the client: a probe that happens to land on the third miss
+    /// must read exactly like one that lands on the fourth.
+    #[tokio::test]
+    async fn a_missing_asset_is_counted_every_time_and_the_answer_never_varies() {
+        let dir = furnished("missing-count");
+        let assets = Assets::new(&dir);
+        let mut answers = Vec::new();
+        for n in 1..=5u64 {
+            let (status, mime, body) = get(&assets, "/gone.js").await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+            assert_eq!(
+                assets.missing.load(Ordering::Relaxed),
+                n,
+                "miss {n} was not counted, so the total on the line would lie"
+            );
+            answers.push((mime, body));
+        }
+        assert!(
+            answers.windows(2).all(|pair| pair[0] == pair[1]),
+            "the doubling gate decides what is LOGGED and must not decide what \
+             is SERVED: {answers:?}"
+        );
     }
 
     #[test]

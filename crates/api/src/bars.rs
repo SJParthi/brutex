@@ -134,6 +134,54 @@ pub fn ist_day(ts_micros: i64) -> String {
         .map_or_else(|| "—".to_owned(), |day| day.to_string())
 }
 
+/// A refused read, named on the record instead of only in the reply body.
+///
+/// # What was invisible
+///
+/// `/bars.json` answered `400` on every call and the refusal existed in exactly
+/// one place: the body of that reply. A browser showed a red box, the operator
+/// reported "the chart is empty", and **nothing on the machine could say which
+/// of the six path segments was wrong** — or even whether the month was absent,
+/// the timeframe directory was, or the path had failed validation before any
+/// file was touched. Reproducing it was the only way to find out, and a
+/// reproduction needs the query string nobody wrote down.
+///
+/// The pair that actually disagrees is `(timeframe, month)`. D-0055 made the
+/// rung a control on the form, so a daily backfill lands in `1day/` while a
+/// reader asking for `1min/` gets a truthful refusal about a file that was never
+/// meant to exist — see [`open`]'s own note. This line carries both, so the
+/// answer is a `grep` rather than a re-run.
+///
+/// `Warn`, not `Error`: the server answered, the page named the refusal, and
+/// nothing on disk is wrong. Someone still has to know.
+///
+/// **Once per refused request, and never once per bar.** A read that succeeds
+/// emits nothing here at all, and [`page`] below reads up to [`PAGE_BARS`]
+/// records without a line per record — a month is ~7,500 rows and a per-row
+/// event would roll the request's own beginning out of the sink before it
+/// finished.
+fn note_refused(
+    vendor: Vendor,
+    exchange: &str,
+    segment: &str,
+    symbol: &str,
+    timeframe: Timeframe,
+    month: YearMonth,
+    why: &str,
+) {
+    let month_text = month.to_string();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.bars", "read refused")
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("exchange", telemetry::Value::Str(exchange))
+            .with("segment", telemetry::Value::Str(segment))
+            .with("symbol", telemetry::Value::Str(symbol))
+            .with("timeframe", telemetry::Value::Str(timeframe.as_str()))
+            .with("month", telemetry::Value::Str(&month_text))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
 /// One month of one instrument, opened for reading.
 ///
 /// # Errors
@@ -147,6 +195,15 @@ pub fn open(
     exchange: &str,
     segment: &str,
     symbol: &str,
+    // THE RUNG IS AN ARGUMENT, NOT A LITERAL.
+    //
+    // This was `Timeframe::MINUTE_1`, so every chart read looked under
+    // `1min/` whatever the store actually held. A daily backfill lands in
+    // `1day/` — D-0055 made the rung a control on the form and the writer
+    // honours it — so the reader answered "…/1min/2021-08.bin does not exist"
+    // about a file that was never meant to. The refusal was truthful and the
+    // question was wrong.
+    timeframe: Timeframe,
     month: YearMonth,
 ) -> Result<BarFile, String> {
     let path = StorePath::new(PathParts {
@@ -154,11 +211,20 @@ pub fn open(
         exchange,
         segment,
         symbol,
-        timeframe: Timeframe::MINUTE_1,
+        timeframe,
         month,
         file: FileKind::Bars,
     })
-    .map_err(|why| format!("{symbol} {month}: {why}"))?;
+    .map_err(|why| {
+        // REFUSED BEFORE ANY FILE WAS TOUCHED. This arm is the path itself
+        // failing validation, which reads on the page exactly like a month that
+        // is not held — and they send an operator to two different places.
+        let refusal = format!("{symbol} {month}: {why}");
+        note_refused(
+            vendor, exchange, segment, symbol, timeframe, month, &refusal,
+        );
+        refusal
+    })?;
     // THE SYMBOL ID IS DERIVED THE WAY `pull::ingest` DERIVES IT. The store
     // stamps it into the header on create and verifies it on every reopen, so a
     // reader that folded the hash differently would be refused by the file
@@ -183,7 +249,71 @@ pub fn open(
     // collapses "there is no such month" into "this month holds nothing", which
     // are different answers to an operator, and it made the missing-month arm
     // below unreachable. A `Missing` refusal now names the path it looked for.
-    BarFile::open_existing(store_root, path, symbol_id).map_err(|why| why.to_string())
+    BarFile::open_existing(store_root, path, symbol_id).map_err(|why| {
+        // THE MONTH IS NOT HELD, or the timeframe has no directory beneath the
+        // symbol, or the header cross-check refused this reader. All three
+        // arrive here as one string and all three are worth a line: the first is
+        // ordinary, the second means the rung on the form does not match the rung
+        // on disk, and the third means a file this build cannot read.
+        let refusal = why.to_string();
+        note_refused(
+            vendor, exchange, segment, symbol, timeframe, month, &refusal,
+        );
+        refusal
+    })
+}
+
+/// The records this page asked for and did not get, as **one** line.
+///
+/// # Why a count and a single reason, and not a line per record
+///
+/// [`page`] skips a record the file refuses so that one damaged row does not
+/// blank the other 199, and the page names the gap. That is the right behaviour
+/// and it is also how a decaying month stays invisible to everyone who is not
+/// looking at that exact page: nothing outside the reply ever hears about it.
+///
+/// A line per faulted record is not available. A minute-month is ~7,500 records
+/// and a file going bad goes bad in runs, so a line per fault would cost up to
+/// [`PAGE_BARS`] events for one request — enough to push the request's own
+/// earlier lines out of a 64 MiB sink.
+///
+/// **That figure is UNVERIFIED and stays that way on purpose.** It is arithmetic
+/// about a design that was rejected and therefore never existed to measure; no
+/// such code was ever written, so there is nothing to run. It is recorded as the
+/// reason for the shape below, not as a measurement. `CLAUDE.md` §3 rule 6, and
+/// `docs/06-limits.md` §44.
+///
+/// **What IS bounded here, structurally:** this function has exactly one call
+/// site — [`read_page`], outside every loop — and it returns on the first line
+/// when `faults` is empty and otherwise emits once. So the real cost is at most
+/// one event per request regardless of how many records a file refuses, which is
+/// the property the shape was chosen for.
+///
+/// The faults were already counted in a
+/// `Vec` the caller renders; this reports its length and the first reason, which
+/// is the same bargain `pull`'s member failures strike.
+///
+/// Silent on a clean page: a request where every record read costs one branch on
+/// an empty `Vec` and emits nothing.
+fn note_unreadable_records(file: &BarFile, faults: &[String], rows: usize, skip: usize) {
+    let Some(first) = faults.first() else {
+        return;
+    };
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.bars", "records unreadable")
+            .with(
+                "file",
+                telemetry::Value::Str(&file.path().display().to_string()),
+            )
+            .with("faults", telemetry::Value::Uint(faults.len() as u64))
+            .with("rows", telemetry::Value::Uint(rows as u64))
+            .with("skip", telemetry::Value::Uint(skip as u64))
+            .with("n_valid", telemetry::Value::Uint(file.header().n_valid))
+            // THE FIRST REASON ONLY, and the count says how many there were.
+            // Every reason would be a field whose size grows with the damage,
+            // which is the one thing a bounded line cannot carry.
+            .with("first", telemetry::Value::Str(first)),
+    );
 }
 
 /// One page of bars, read by index.
@@ -209,9 +339,13 @@ pub fn page(file: &BarFile, skip: usize, take: usize) -> (Vec<Bar>, Vec<String>)
         }
         match file.read_record(index) {
             Ok(bar) => rows.push(bar),
+            // COUNTED IN THE `Vec`, NOT EMITTED HERE. This arm is inside the
+            // per-record loop; a line placed at it would be bounded by the data
+            // and not by the request. The aggregate is one call below.
             Err(why) => faults.push(format!("record {index}: {why}")),
         }
     }
+    note_unreadable_records(file, &faults, rows.len(), skip);
     (rows, faults)
 }
 
@@ -441,7 +575,15 @@ mod tests {
         std::fs::create_dir_all(&root).expect("a scratch root");
 
         let month = YearMonth::new(2025, 7).expect("a real month");
-        let outcome = open(&root, Vendor::Dhan, "NSE", "INDEX", "NOTAREALSYMBOL", month);
+        let outcome = open(
+            &root,
+            Vendor::Dhan,
+            "NSE",
+            "INDEX",
+            "NOTAREALSYMBOL",
+            Timeframe::MINUTE_1,
+            month,
+        );
 
         let why = outcome.expect_err(
             "a month nobody has ever written must refuse, not be conjured into \

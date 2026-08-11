@@ -348,7 +348,7 @@ impl TradeDay {
     /// [`CostError::OrdinalOutsideWindow`] for an ordinal outside
     /// [`Self::MIN`]..=[`Self::MAX`]. The check comes **first**, which is what
     /// makes the published algorithm's negative-era correction unreachable and
-    /// therefore honestly absent — see [`days_from_civil`] for the same
+    /// therefore honestly absent — see `days_from_civil` for the same
     /// argument in the other direction.
     ///
     /// # Examples

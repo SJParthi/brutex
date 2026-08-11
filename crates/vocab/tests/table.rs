@@ -180,7 +180,7 @@ fn the_shipped_74_are_the_document_character_for_character() {
 /// unchanged and quietly renumbers everything after it.
 #[test]
 fn the_table_is_a_contiguous_run_of_indices() {
-    assert_eq!(COUNT, 276);
+    assert_eq!(COUNT, 280);
     let seen: BTreeSet<u16> = TABLE.iter().map(|d| d.index).collect();
     assert_eq!(seen.len(), COUNT, "an index is repeated");
     for (position, def) in TABLE.iter().enumerate() {
@@ -193,8 +193,8 @@ fn the_table_is_a_contiguous_run_of_indices() {
         );
     }
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(275));
-    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 276");
+    assert_eq!(seen.last().copied(), Some(279));
+    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 280");
 }
 
 /// **No two live positions share a name.** Two rows with one name is two
@@ -214,8 +214,8 @@ fn no_two_live_positions_share_a_name() {
     }
     assert_eq!(
         by_name.len(),
-        234,
-        "276 positions, less three tombstones and less 39 void forming-pivot rows"
+        238,
+        "280 positions, less three tombstones and less 39 void forming-pivot rows"
     );
 }
 
@@ -317,7 +317,7 @@ fn no_live_row_occupies_a_retired_position() {
         );
     }
     let last = TABLE.last().expect("the table is not empty");
-    assert_eq!(last.index, 275);
+    assert_eq!(last.index, 279);
     assert_eq!(
         usize::from(NEXT_FREE),
         COUNT,
@@ -382,7 +382,7 @@ fn every_name_is_snake_case_ascii() {
 /// difference, and every name after the seam means the wrong thing.
 #[test]
 fn the_appended_groups_start_and_end_where_they_are_specified() {
-    let groups: [(u16, u16, &str); 14] = [
+    let groups: [(u16, u16, &str); 16] = [
         (74, 85, "_band"),
         (86, 105, "orb"),
         (106, 109, "near_fib_bull_"),
@@ -397,6 +397,8 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
         (198, 234, "pat_"),
         (235, 273, "forming_pivot_"),
         (274, 275, "cpr_day"),
+        (276, 277, "day_open"),
+        (278, 279, "in_force"),
     ];
     let mut covered = 0;
     for (first, last, marker) in groups {
@@ -421,8 +423,8 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
             );
         }
     }
-    assert_eq!(covered, 202, "the appended range is 74..=275");
-    assert_eq!(COUNT - 74, 202);
+    assert_eq!(covered, 206, "the appended range is 74..=279");
+    assert_eq!(COUNT - 74, 206);
 }
 
 /// The eleven-rung Fibonacci ladders are eleven rungs, in one order, three

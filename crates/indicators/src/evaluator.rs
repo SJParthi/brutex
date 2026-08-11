@@ -97,6 +97,21 @@ impl Widths {
     }
 }
 
+/// Set `above` or `below`, and neither when the two are equal.
+///
+/// A `match` on the ordering rather than an `if` chain: `Ordering` has exactly three
+/// variants, so the compiler checks the equality arm exists instead of a reader having to
+/// notice it does. Equality setting NEITHER bit is the rule D-0109 locked — five occurrences
+/// of the opposite mistake were found and fixed across this crate, and on a paisa tick grid
+/// exact equality is common rather than a measure-zero curiosity.
+fn set_side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> ConditionMask {
+    match value.cmp(&level) {
+        core::cmp::Ordering::Greater => vocab::table::set_exact(mask, above).unwrap_or(mask),
+        core::cmp::Ordering::Less => vocab::table::set_exact(mask, below).unwrap_or(mask),
+        core::cmp::Ordering::Equal => mask,
+    }
+}
+
 /// The IST days that are **not** regular trading sessions.
 ///
 /// # What this is for, and the defect it closes
@@ -436,6 +451,27 @@ impl Evaluator {
             }
         }
 
+        // ── 276–279: two predicates from state this type already held ───────────
+        //
+        // Both read the session's own bookkeeping rather than a module's, which is why they
+        // live here and not in one. `running_open` was written on the first bar of every
+        // session and read NOWHERE until this block existed.
+        //
+        // Read BEFORE the fold, like every other anchor: `running_open` is the session's
+        // first bar's open, and on that first bar there is no session open yet to compare
+        // against — `seeded` is false and neither bit is set. On the first bar the close
+        // against its own open is bits 30/31's question, not this one's.
+        if self.seeded {
+            mask = set_side(mask, bar.close, self.running_open, 276, 277);
+        }
+        if let Some(direction) = self.trend.structure_in_force() {
+            let index = match direction {
+                crate::trend::Trend::Up => 278,
+                crate::trend::Trend::Down => 279,
+            };
+            mask = vocab::table::set_exact(mask, index).unwrap_or(mask);
+        }
+
         // ── fold last: the day's extremes are an anchor and must exclude the bar ─
         if self.seeded {
             if bar.high > self.running_high {
@@ -605,7 +641,8 @@ impl Evaluator {
     ///
     /// The union of nine sources' own `positions()` — eight modules and the current-day
     /// Fibonacci rung range — so it cannot drift from them: adding a position to a
-    /// module adds it here. 234 positions today, which is every live bit in the table.
+    /// module adds it here, plus the four this type computes itself. 238 positions today,
+    /// which is every live bit in the table.
     #[must_use]
     pub fn positions() -> Vec<u16> {
         let mut all: Vec<u16> = Vec::new();
@@ -617,6 +654,11 @@ impl Evaluator {
         all.extend(crate::vwap::positions());
         all.extend(crate::gap::GapFib::positions());
         all.extend(crate::trend::TrendState::positions());
+        // 276–279 are computed HERE rather than in a module, because both read the session
+        // bookkeeping this type owns: `running_open` and the structure latch. So they are
+        // named here too — `only_live_positions_are_ever_emitted` compares what `step` emits
+        // against this list, and it caught their absence the moment they started firing.
+        all.extend([276, 277, 278, 279]);
         let last = crate::CURDAY_FIRST
             .saturating_add(u16::try_from(crate::CURDAY_RUNGS.len()).unwrap_or(0))
             .saturating_sub(1);
@@ -689,8 +731,8 @@ mod tests {
         let all = Evaluator::positions();
         assert_eq!(
             all.len(),
-            234,
-            "234 positions are computable — every live one"
+            238,
+            "238 positions are computable — every live one"
         );
         let mut sorted = all.clone();
         sorted.sort_unstable();
@@ -1576,6 +1618,129 @@ mod tests {
         assert!(
             !e.every_family_can_answer(),
             "a 30-bar session cannot have closed a 60-minute window"
+        );
+    }
+
+    /// 276/277 compare the close to the SESSION's open, and a flat close sets neither.
+    ///
+    /// `running_open` was written on the first bar of every session and read nowhere in the
+    /// repository — a field maintained for a question the vocabulary could not ask. Bits
+    /// 40–43 give position within the day's RANGE, which is a different question, and 30/31
+    /// compare the close to the BAR's own open.
+    ///
+    /// The flat case is the one that has gone wrong five times in this crate: equality swept
+    /// into `else` made `close_below_*` fire on a bar that was exactly at the level. Here it
+    /// sets neither, which is what D-0109 locked.
+    #[test]
+    fn the_close_against_the_session_open_sets_at_most_one_bit() {
+        let day = 24_000_i64;
+        let at = |m: i64, open: i64, close: i64| Candle {
+            ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+            open,
+            high: open.max(close) + 300,
+            low: open.min(close) - 300,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        // The session's first bar opens at 2_500_000. On it, `seeded` is false and there is
+        // no session open to compare against yet, so neither bit may be set.
+        let first = e.step(&at(0, 2_500_000, 2_500_900)).expect("a sane candle");
+        assert!(
+            !first.get(276) && !first.get(277),
+            "the first bar of a session compared itself to a session open that did not exist \
+             yet"
+        );
+
+        // Above.
+        let up = e.step(&at(1, 2_500_900, 2_501_500)).expect("a sane candle");
+        assert!(
+            up.get(276),
+            "a close above the session open did not set 276"
+        );
+        assert!(!up.get(277), "and must not also set 277");
+
+        // Below.
+        let down = e.step(&at(2, 2_501_500, 2_499_000)).expect("a sane candle");
+        assert!(
+            down.get(277),
+            "a close below the session open did not set 277"
+        );
+        assert!(!down.get(276), "and must not also set 276");
+
+        // Exactly ON it: neither.
+        let flat = e.step(&at(3, 2_499_000, 2_500_000)).expect("a sane candle");
+        assert!(
+            !flat.get(276) && !flat.get(277),
+            "a close exactly at the session open set a direction bit, which is the equality \
+             swept into `else` that D-0109 records five occurrences of"
+        );
+    }
+
+    /// 278/279 report the structure in force BETWEEN breaks, not only on them.
+    ///
+    /// Bits 56–59 are break events, each true on the handful of bars where a level was taken
+    /// out. `Structure::last` held the regime between them and was unpublished — a sweep
+    /// could ask "did structure break up on this bar" and could not ask "is the structure
+    /// up". Neither bit is set before the first break, because there is no structure yet.
+    #[test]
+    fn the_structure_in_force_is_reported_between_breaks_and_not_before_the_first() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let mut saw_event_without_regime = false;
+        let mut saw_regime_without_event = false;
+        let mut ever_set = false;
+
+        for m in 0..90_i64 {
+            let within = m % 22;
+            let close = match m / 22 {
+                0 => 2_400_000 + within * 9_000,
+                1 => 2_600_000 - within * 10_000,
+                2 => 2_380_000 + within * 11_000,
+                _ => 2_620_000 - within * 12_000,
+            };
+            let bar = Candle {
+                ts_micros: 25_000 * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                open: close,
+                high: close + 800,
+                low: close - 800,
+                close,
+                volume: 0,
+                open_interest: i64::MIN,
+            };
+            let mask = e.step(&bar).expect("a sane candle");
+            let event = mask.get(56) || mask.get(57) || mask.get(58) || mask.get(59);
+            let regime = mask.get(278) || mask.get(279);
+            if regime {
+                ever_set = true;
+                if !event {
+                    saw_regime_without_event = true;
+                }
+            }
+            if event && !regime {
+                saw_event_without_regime = true;
+            }
+            assert!(
+                !(mask.get(278) && mask.get(279)),
+                "both structure directions were in force at once on bar {m}"
+            );
+        }
+
+        assert!(
+            ever_set,
+            "the structure was never in force, so this proves nothing"
+        );
+        assert!(
+            saw_regime_without_event,
+            "278/279 were set only on the bars where 56-59 fired, which makes them a \
+             duplicate of the break events rather than the regime between them — the whole \
+             reason they were appended"
+        );
+        assert!(
+            !saw_event_without_regime,
+            "a break event fired on a bar where no direction was in force, so the latch is \
+             advancing after the emit rather than before"
         );
     }
 }

@@ -58,6 +58,11 @@ fn run(dir: &std::path::Path, arg: &str) -> (Option<i32>, String, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_api"))
         .arg(arg)
         .env("BRUTEX_MASTERS", dir)
+        // NO WINDOW ON THE OPERATOR'S DESKTOP. This spawns the REAL
+        // binary, which opens the browser at its own address on start.
+        // The port guard in `run_in` already covers `:0`, and this
+        // covers every other address a future case might pass.
+        .env(brutex_api_no_open(), "1")
         .output()
         .expect("the binary must run");
     (
@@ -129,4 +134,10 @@ fn the_binary_refuses_an_argument_it_does_not_understand() {
     assert_eq!(code, Some(2), "a misuse is not a failure");
     assert!(err.contains("unknown argument"), "{err}");
     assert!(err.contains("usage:"), "{err}");
+}
+
+/// The variable name that suppresses the browser, read from the crate rather
+/// than spelled again here so a rename cannot leave this test opening windows.
+fn brutex_api_no_open() -> &'static str {
+    api::server::NO_OPEN_ENV
 }

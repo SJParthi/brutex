@@ -78,6 +78,201 @@ fn cost_ps<T>(reps: u32, mut op: impl FnMut() -> T) -> u128 {
     best
 }
 
+/// Every sample from one run, sorted, so a percentile can be read off it.
+///
+/// **WHY THIS EXISTS BESIDE [`cost_ps`].** `cost_ps` is `min` over [`TRIALS`] of
+/// a MEAN, taken on sinks built with [`NO_ROTATION`]. Both halves of that hide
+/// the thing `CLAUDE.md` §3 rule 4 is about: `min` discards the trial containing
+/// a roll, and `NO_ROTATION` guarantees there is no roll to discard. So the
+/// existing rows prove FLATNESS across file size — a real and useful property —
+/// and are not evidence of a worst-case bound.
+///
+/// A mean cannot express a worst case. This keeps every sample, and
+/// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b)
+/// is the row that
+/// uses it to gate the flatness claim at p99 under the same ceiling.
+struct Dist {
+    ns: Vec<u128>,
+}
+
+impl Dist {
+    /// Times `op` once per rep, retaining every sample.
+    fn of<T>(reps: u32, mut op: impl FnMut() -> T) -> Self {
+        let mut ns = Vec::with_capacity(reps as usize);
+        for _ in 0..reps {
+            let start = Instant::now();
+            black_box(op());
+            ns.push(start.elapsed().as_nanos());
+        }
+        ns.sort_unstable();
+        Self { ns }
+    }
+
+    /// The sample at `q` thousandths, or zero for an empty run.
+    fn at(&self, permille: usize) -> u128 {
+        if self.ns.is_empty() {
+            return 0;
+        }
+        let last = self.ns.len() - 1;
+        let idx = (self.ns.len() * permille / 1_000).min(last);
+        self.ns.get(idx).copied().unwrap_or(0)
+    }
+
+    fn max(&self) -> u128 {
+        self.ns.last().copied().unwrap_or(0)
+    }
+
+    /// Prints the shape. Never fails a gate — it REPORTS, because there is no
+    /// agreed ceiling for these yet and inventing one would be the same mistake
+    /// in the other direction.
+    fn report(&self, label: &str) {
+        println!(
+            "  {label:<52} p50 {:>10} ns  p99 {:>10} ns  max {:>10} ns  n={}",
+            self.at(500),
+            self.at(990),
+            self.max(),
+            self.ns.len()
+        );
+    }
+}
+
+/// **THE FLATNESS CLAIM, AT p99 INSTEAD OF AT THE MEAN.**
+///
+/// C-T-01 asserts that one `emit` costs the same with 1,000, 10,000 and 100,000
+/// events already in the file. It proves that with `min` over twenty trials of a
+/// MEAN, and a mean cannot see a tail: an emit that occasionally took a thousand
+/// times longer would move it by a fraction of a percent and the row would stay
+/// green.
+///
+/// **This gate invents no new threshold, which is the point.** It applies the
+/// SAME [`CEILING_PERMILLE`] to the SAME claim, measured with a statistic that
+/// can actually fail — the 99th percentile of the per-call distribution. If the
+/// tail starts growing with the size of the file, the flatness claim is false
+/// and this is the row that says so.
+///
+/// Rotation stays out of it, and stays a report rather than a gate
+/// (`the_worst_case_is_named_rather_than_averaged_away`), because there is no
+/// agreed ceiling for what a roll may cost and inventing one here would be the
+/// same mistake in the other direction: a number with no evidence behind it,
+/// tuned later until it passes.
+fn the_tail_is_flat_in_the_size_of_the_file_too() -> bool {
+    let mut ok = true;
+    let at = |preload: u32, name: &str| -> u128 {
+        let (sink, dir) = loaded(name, preload);
+        let d = Dist::of(4_000, || {
+            sink.emit(&Event::info("bench", "one timed event"))
+        });
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+        d.at(990)
+    };
+    let small = at(SMALL, "p99-small");
+    let medium = at(MEDIUM, "p99-medium");
+    let large = at(LARGE, "p99-large");
+
+    ok &= ratio(
+        "C-T-01b emit p99: 1,000 -> 10,000 events in file",
+        small,
+        medium,
+    );
+    ok &= ratio(
+        "C-T-01b emit p99: 1,000 -> 100,000 events in file",
+        small,
+        large,
+    );
+    ok
+}
+
+/// **THE WORST CASE, WITH ROTATION INSIDE THE TIMED REGION.**
+///
+/// The three rows above answer "is the cost flat in the size of the file". This
+/// answers the different question `CLAUDE.md` §3 rule 4 actually asks: what does
+/// the most expensive single call cost, at the SHIPPED configuration, where
+/// rolls happen.
+///
+/// It is a report and not a gate. The design is O(1) — a roll is at most
+/// `2 * keep_files` syscalls with `keep_files` a compile-time `u8`, and no term
+/// is a function of events already logged — but the CONSTANT was never
+/// measured, and every document describing this crate quotes a ratio of means as
+/// though it were a bound. Naming the number is the fix; picking a ceiling for
+/// it is a separate decision with no evidence behind it yet. The numbers it
+/// prints are recorded in `docs/06-limits.md` §46; the flatness claim beside
+/// them IS gated, by
+/// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b).
+fn the_worst_case_is_named_rather_than_averaged_away() {
+    println!("worst case — shipped config, rotation INSIDE the timed region");
+
+    // ORDINARY: the shipped bound, but too few events to roll.
+    let dir = scratch("dist-ordinary");
+    let Ok(sink) = Sink::open(&Config::new(dir.clone())) else {
+        refuse("a sink over a scratch directory")
+    };
+    let ordinary = Dist::of(20_000, || sink.emit(&Event::info("bench", "ordinary")));
+    ordinary.report("emit, shipped config, no roll reached");
+    drop(sink);
+    let _ignored = std::fs::remove_dir_all(&dir);
+
+    // ROLLING: a bound small enough that a roll lands inside the samples.
+    let dir = scratch("dist-rolling");
+    let Ok(sink) = Sink::open(
+        &Config::new(dir.clone())
+            .with_max_file_bytes(telemetry::MIN_FILE_BYTES)
+            .with_keep_files(8),
+    ) else {
+        refuse("a rolling sink over a scratch directory")
+    };
+    let rolling = Dist::of(20_000, || sink.emit(&Event::info("bench", "rolling")));
+    rolling.report("emit, 1 KiB x 8 — every few events ROLLS");
+    println!(
+        "  {:<52} {}x the median ordinary emit",
+        "the rolling max, against the ordinary p50",
+        if ordinary.at(500) == 0 {
+            0
+        } else {
+            rolling.max() / ordinary.at(500)
+        }
+    );
+    let health = sink.health();
+    println!(
+        "  {:<52} {} rotation(s), {} dropped",
+        "and it really did roll", health.rotations, health.dropped
+    );
+    drop(sink);
+    let _ignored = std::fs::remove_dir_all(&dir);
+
+    // CONTENDED: crates/api is a multi-threaded runtime, and every number in
+    // every document describing this sink is single-threaded.
+    for threads in [1_usize, 4, 8] {
+        let dir = scratch(&format!("dist-threads-{threads}"));
+        let Ok(opened) = Sink::open(&Config::new(dir.clone())) else {
+            refuse("a sink over a scratch directory")
+        };
+        let sink = std::sync::Arc::new(opened);
+        let per = 4_000_u32;
+        let worst = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..threads)
+                .map(|_| {
+                    let sink = std::sync::Arc::clone(&sink);
+                    scope.spawn(move || {
+                        Dist::of(per, || sink.emit(&Event::info("bench", "contended")))
+                    })
+                })
+                .collect();
+            handles.into_iter().filter_map(|h| h.join().ok()).fold(
+                Dist { ns: Vec::new() },
+                |mut all, d| {
+                    all.ns.extend(d.ns);
+                    all.ns.sort_unstable();
+                    all
+                },
+            )
+        });
+        worst.report(&format!("emit, {threads} thread(s), shipped config"));
+        drop(sink);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Prints one measurement and returns whether it stayed under the ceiling.
 fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
     if base_ps == 0 {
@@ -235,6 +430,10 @@ fn main() {
     ok &= emit_cost_does_not_grow_with_the_file();
     ok &= a_filtered_event_touches_nothing_and_stays_flat();
     ok &= the_tail_is_flat_in_the_size_of_the_file();
+    ok &= the_tail_is_flat_in_the_size_of_the_file_too();
+    println!();
+    the_worst_case_is_named_rather_than_averaged_away();
+    println!();
     if ok {
         println!("all ratios within the ceiling");
     } else {

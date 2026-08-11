@@ -113,6 +113,14 @@ const OFF_SOURCE_LEN: usize = 112;
 const OFF_NOTE_LEN: usize = 114;
 const OFF_SOURCE_KEPT: usize = 116;
 const OFF_NOTE_KEPT: usize = 117;
+/// Which shape this record is — see [`Kind`].
+///
+/// **Byte 118 was reserved and zero in every record ever written**, and
+/// [`Kind::Run`] is code `0`, so every existing journal decodes unchanged and
+/// the stride does not move. That is the whole reason a new record shape did
+/// not need a new file version: `CLAUDE.md` §4 bans a dynamic schema, and this
+/// is not one — it is a discriminator in space the format already had.
+const OFF_KIND: usize = 118;
 const OFF_SOURCE: usize = 120;
 const OFF_NOTE: usize = 184;
 const OFF_CRC: usize = 252;
@@ -122,6 +130,73 @@ const OFF_CRC: usize = 252;
 const _: () = assert!(OFF_SOURCE + SOURCE_CAPACITY == OFF_NOTE);
 const _: () = assert!(OFF_NOTE + NOTE_CAPACITY == OFF_CRC);
 const _: () = assert!(OFF_CRC + 4 == RECORD_LEN);
+
+/// Which shape a record is: the run itself, or one member that did not land.
+///
+/// # Why a second shape and not a longer note
+///
+/// A run's note is [`NOTE_CAPACITY`] bytes and holds the **first** failure
+/// only. A live run refused 10 of 16 members and the journal kept one reason;
+/// the other nine were unrecoverable from disk, so nothing on the machine could
+/// say which months had failed. Widening the note is not available — `CLAUDE.md`
+/// §4 bans a dynamic schema, and the fixed stride is what makes
+/// [`Journal::append`] O(1) and the file scannable at `ordinal * RECORD_LEN`
+/// — proved by `api::audit::every_failed_member_gets_its_own_record_at_the_same_stride`,
+/// which writes a run and its failures and asserts each lands one whole
+/// `RECORD_LEN` after the last, and by
+/// `api::audit::appending_creates_the_directory_and_the_count_is_the_length_divided`,
+/// which recovers the count by dividing the file length rather than reading it
+/// without an index.
+///
+/// So the run record is followed by **one more fixed-stride record per failed
+/// member**. The stride is unchanged, the append is still one `write_all` of
+/// [`RECORD_LEN`] bytes, and every failure is on disk. Bounded by the member
+/// count, which is bounded by the chunk count — never by rows. See D-0073.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// The run as a whole. Code `0`, which is what the reserved byte already
+    /// held, so every record written before this existed is one of these.
+    Run,
+    /// One member that reached the vendor and did not land. `source` carries
+    /// the instrument, `note` its reason, and the day fields the month asked
+    /// for.
+    MemberFailure,
+}
+
+impl Kind {
+    /// The byte written at [`OFF_KIND`].
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Run => 0,
+            Self::MemberFailure => 1,
+        }
+    }
+
+    /// The kind a byte names, or [`None`] for one this build does not know.
+    ///
+    /// Refused rather than defaulted to [`Self::Run`]: a record written by a
+    /// later build carries fields this one cannot read, and rendering it as a
+    /// run would put invented numbers on the operator's page. `CLAUDE.md` §4 —
+    /// degrade loudly and name the reason.
+    #[must_use]
+    pub const fn of_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::Run),
+            1 => Some(Self::MemberFailure),
+            _ => None,
+        }
+    }
+
+    /// What the page calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::MemberFailure => "member",
+        }
+    }
+}
 
 /// Which form the run came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -403,6 +478,12 @@ pub const DROP_REASONS: [DropReason; 4] = [
 /// One pull, as it is written down.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
+    /// Whether this is the run or one member that did not land.
+    ///
+    /// Every constructor but [`Record::member_failure`] makes a [`Kind::Run`],
+    /// and code `0` is what the reserved byte already held — so a journal
+    /// written before this field existed decodes as runs, unchanged.
+    pub kind: Kind,
     /// When the answer was written, in epoch seconds.
     pub at_unix_secs: i64,
     /// How long the run took, measured across the call that did the work.
@@ -450,6 +531,7 @@ impl Record {
         note: &str,
     ) -> Self {
         Self {
+            kind: Kind::Run,
             at_unix_secs: crate::ingest::epoch_secs(at),
             elapsed_micros: 0,
             scope,
@@ -515,6 +597,7 @@ impl Record {
             Outcome::Stored
         };
         Self {
+            kind: Kind::Run,
             at_unix_secs: crate::ingest::epoch_secs(at),
             elapsed_micros,
             scope,
@@ -532,6 +615,56 @@ impl Record {
             source_bytes: saturating_len(source),
             note: keep(&note, NOTE_CAPACITY),
             note_bytes: saturating_len(&note),
+        }
+    }
+
+    /// One member that reached the vendor and did not land, as its own record.
+    ///
+    /// # What this recovers, and what it still cannot
+    ///
+    /// [`Self::of_run`] keeps `done.failures.first()` and nothing else, because
+    /// the note is [`NOTE_CAPACITY`] bytes and the stride is fixed. A run that
+    /// refused 10 members left 9 reasons nowhere on disk, so no process on the
+    /// machine could say which months had failed — it had to be worked out by
+    /// decoding bar files.
+    ///
+    /// One of these per failure puts **every failed (instrument, month) pair**
+    /// in the journal. The reason is still cut at [`NOTE_CAPACITY`] and
+    /// `note_bytes` still says by how much — that half is answered by the
+    /// `pull.spot` `member did not land` event, whose field is not stride-bound.
+    /// Two surfaces, each doing what its format can actually do.
+    ///
+    /// The counters are zero on purpose: they belong to the run, and repeating
+    /// them here would give a reader two places to add up the same numbers from
+    /// and two answers when they drifted. `elapsed_micros` is zero for the same
+    /// reason — a member is not separately timed.
+    #[must_use]
+    pub fn member_failure(
+        scope: Scope,
+        at: SystemTime,
+        instrument: &str,
+        window: Window,
+        why: &str,
+    ) -> Self {
+        Self {
+            kind: Kind::MemberFailure,
+            at_unix_secs: crate::ingest::epoch_secs(at),
+            elapsed_micros: 0,
+            scope,
+            outcome: Outcome::Failed,
+            members: 0,
+            rows_read: 0,
+            bars_stored: 0,
+            rows_folded: 0,
+            counted: 0,
+            drops: Drops::default(),
+            failures: 1,
+            from_days: window.from().days_from_epoch(),
+            to_days: window.to().days_from_epoch(),
+            source: keep(instrument, SOURCE_CAPACITY),
+            source_bytes: saturating_len(instrument),
+            note: keep(why, NOTE_CAPACITY),
+            note_bytes: saturating_len(why),
         }
     }
 
@@ -556,6 +689,7 @@ impl Record {
         write_at(&mut out, OFF_VERSION, VERSION.to_le_bytes());
         write_at(&mut out, OFF_SCOPE, [self.scope.code()]);
         write_at(&mut out, OFF_OUTCOME, [self.outcome.code()]);
+        write_at(&mut out, OFF_KIND, [self.kind.code()]);
         write_at(&mut out, OFF_AT, self.at_unix_secs.to_le_bytes());
         write_at(&mut out, OFF_ELAPSED, self.elapsed_micros.to_le_bytes());
         write_at(&mut out, OFF_MEMBERS, self.members.to_le_bytes());
@@ -626,6 +760,13 @@ impl Record {
         let Some(outcome) = Outcome::of_code(outcome_code) else {
             return Err(RecordFault::UnknownOutcome { code: outcome_code });
         };
+        // REFUSED, NOT DEFAULTED TO `Run`. A record a later build wrote carries
+        // fields this one cannot read; rendering it as a run would put invented
+        // numbers on the operator's page, which is worse than a named refusal.
+        let kind_code = byte(image, OFF_KIND);
+        let Some(kind) = Kind::of_code(kind_code) else {
+            return Err(RecordFault::UnknownKind { code: kind_code });
+        };
         let source = text(
             image,
             OFF_SOURCE,
@@ -634,6 +775,7 @@ impl Record {
         )?;
         let note = text(image, OFF_NOTE, byte(image, OFF_NOTE_KEPT), NOTE_CAPACITY)?;
         Ok(Self {
+            kind,
             at_unix_secs: i64::from_le_bytes(le8(image, OFF_AT)),
             elapsed_micros: u64::from_le_bytes(le8(image, OFF_ELAPSED)),
             scope,
@@ -688,6 +830,15 @@ pub enum RecordFault {
         /// The byte found.
         code: u8,
     },
+    /// A record-kind byte outside the two this build writes.
+    ///
+    /// Byte 118 was reserved and zero before [`Kind`] existed, and `0` is
+    /// [`Kind::Run`], so this cannot fire on an older journal. It fires on one
+    /// written by a LATER build, which is exactly when guessing would be worst.
+    UnknownKind {
+        /// The byte found.
+        code: u8,
+    },
     /// A kept length past the field it names.
     KeptPastCapacity {
         /// The length the record claims.
@@ -714,6 +865,14 @@ impl std::fmt::Display for RecordFault {
             }
             Self::UnknownOutcome { code } => {
                 write!(f, "outcome byte {code} is not one this build writes")
+            }
+            Self::UnknownKind { code } => {
+                write!(
+                    f,
+                    "record-kind byte {code} is not one this build writes — a \
+                     later build wrote this record and it is not read rather \
+                     than being rendered as a run it is not"
+                )
             }
             Self::KeptPastCapacity { kept, capacity } => {
                 write!(f, "kept length {kept} past a {capacity}-byte field")
@@ -802,7 +961,7 @@ impl Journal {
     /// `crates/api/src/census.rs` gives about an absent manifest.
     #[must_use]
     pub fn look(&self) -> Log {
-        match std::fs::metadata(&self.path) {
+        let log = match std::fs::metadata(&self.path) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Log::Absent,
             Err(e) => Log::Unreadable {
                 reason: e.to_string(),
@@ -817,7 +976,9 @@ impl Journal {
                     torn: if spare == 0 { None } else { Some(spare) },
                 }
             }
-        }
+        };
+        note_looked(&self.path, &log);
+        log
     }
 
     /// Appends one record and makes it durable.
@@ -839,6 +1000,25 @@ impl Journal {
     /// the arms can be injected. That is the available fix and it is not built
     /// here. `CLAUDE.md` §3 rule 6: said, rather than left to be found.
     pub fn append(&self, record: &Record) -> Result<(), String> {
+        // ONE LINE WHEN THE RUN DOES NOT MAKE IT ONTO THE RECORD, and none when
+        // it does. The refusal below is already returned to the caller and
+        // rendered on the answer page — but the answer page is a browser tab
+        // somebody has to still be looking at, and this is the surface whose
+        // whole purpose is to survive the process. A pull that wrote 9.8 MB of
+        // bars and lost its own receipt left nothing anywhere.
+        //
+        // Bounded by the append, which is bounded by the run and its failed
+        // members — never by rows. See [`Kind::MemberFailure`].
+        self.appended(record)
+            .inspect_err(|why| note_append_failed(&self.path, record, why))
+    }
+
+    /// The append itself, so the refusal has exactly one place to be noticed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::append`], which is the only caller and adds the line.
+    fn appended(&self, record: &Record) -> Result<(), String> {
         let named =
             |what: &str, e: &std::io::Error| format!("{}: {what} — {e}", self.path.display());
         if let Some(dir) = self.path.parent() {
@@ -881,6 +1061,25 @@ impl Journal {
     /// still an `unwrap`. It is named here rather than left for a coverage
     /// report to find, per `CLAUDE.md` §3 rule 6.
     pub fn page(&self, records: u64, skip: u64, take: u64) -> Result<Vec<Entry>, String> {
+        // A REFUSED READ, ONCE PER REQUEST — not once per record. A record that
+        // will not decode is an `Entry` carrying its own fault and is deliberately
+        // silent here: a page is up to `MAX_PAGE_RECORDS` of them, and a line
+        // each would make the volume a function of how damaged the file is, which
+        // is exactly when the earlier lines matter most.
+        //
+        // This arm is the whole read failing — the journal gone between the look
+        // and the seek, or shorter than the count says. The page then shows no
+        // runs at all, which reads on screen like a server that has never pulled.
+        self.read_page(records, skip, take)
+            .inspect_err(|why| note_page_refused(&self.path, records, skip, take, why))
+    }
+
+    /// The read itself, so the refusal has exactly one place to be noticed.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::page`], which is the only caller and adds the line.
+    fn read_page(&self, records: u64, skip: u64, take: u64) -> Result<Vec<Entry>, String> {
         let take = take.min(MAX_PAGE_RECORDS);
         let end = records.saturating_sub(skip);
         let start = end.saturating_sub(take);
@@ -925,6 +1124,116 @@ impl Journal {
         out.reverse();
         Ok(out)
     }
+}
+
+/// A run that is **not on the record at all**, said somewhere that is not the
+/// record.
+///
+/// # Why this is the loudest line in the file
+///
+/// Everything else this module reports is a run whose receipt exists and cannot
+/// be believed. This is the one state where the receipt does not exist: the
+/// pull ran, bars reached the store, and the journal — the surface whose entire
+/// argument is that it survives a restart — took nothing. The refusal is
+/// returned and painted on the answer page, and that page is a browser tab
+/// somebody has to still be looking at. Once it is closed, a full disk or a
+/// file where the `audit/` directory has to be leaves **no trace on the machine
+/// that a run happened**, while the store quietly disagrees with a journal that
+/// never heard about it.
+///
+/// `Error`, and it is the only `Error` here. `CLAUDE.md` §4 — degrade loudly.
+///
+/// Bounded by the append: one per run, plus one per failed member, and never by
+/// rows. `source` and `note` are already cut to the record's own field widths,
+/// so no field here grows with anything.
+fn note_append_failed(path: &Path, record: &Record, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("api.audit", "record not appended")
+            .with("path", telemetry::Value::Str(&path.display().to_string()))
+            .with("kind", telemetry::Value::Str(record.kind.label()))
+            .with("scope", telemetry::Value::Str(record.scope.label()))
+            .with("outcome", telemetry::Value::Str(record.outcome.label()))
+            .with("source", telemetry::Value::Str(&record.source))
+            .with("at_unix_secs", telemetry::Value::Int(record.at_unix_secs))
+            .with("bars_stored", telemetry::Value::Uint(record.bars_stored))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
+/// A journal that cannot be measured, or one whose tail is half a record.
+///
+/// # What was invisible
+///
+/// Both states are already named on the page — [`Log::is_loud`] exists for
+/// exactly that. But the page is where an operator goes *after* they suspect
+/// something, and a tear is a thing nobody suspects: the whole records before it
+/// still read, every row renders, and the only symptom is that the newest run is
+/// not there. This puts the byte count somewhere it can be found without anyone
+/// having gone looking, and it dates the tear to the first read after it
+/// happened rather than to whenever the page is next opened.
+///
+/// `Warn`, not `Error`: nothing that was written is lost, and the surface
+/// continued. [`note_append_failed`] is the error case, because that one is a
+/// record that never reached the file.
+///
+/// **Silent on the ordinary states.** An absent journal is the state before the
+/// first pull, and a whole file is the state the other 99.99% of the time —
+/// neither emits, so this costs one branch per look and nothing else. Bounded by
+/// the request, since a look is one `metadata` call on the render path.
+fn note_looked(path: &Path, log: &Log) {
+    match *log {
+        // A tear is the loud half of a `Held`: the records before it are fine,
+        // which is why it can sit there unnoticed.
+        Log::Held {
+            records,
+            bytes,
+            torn: Some(spare),
+        } => {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::warn("api.audit", "journal tail is torn")
+                    .with("path", telemetry::Value::Str(&path.display().to_string()))
+                    .with("records", telemetry::Value::Uint(records))
+                    .with("bytes", telemetry::Value::Uint(bytes))
+                    .with("torn_bytes", telemetry::Value::Uint(spare))
+                    .with("record_len", telemetry::Value::Uint(RECORD_LEN_U64)),
+            );
+        }
+        Log::Unreadable { ref reason } => {
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::warn("api.audit", "journal unreadable")
+                    .with("path", telemetry::Value::Str(&path.display().to_string()))
+                    .with("why", telemetry::Value::Str(reason)),
+            );
+        }
+        // ABSENT IS NOT A FAULT and a whole file is not news. Emitting either
+        // would put a line on every render of every audit page, which is the
+        // fastest way to make the two above unfindable.
+        Log::Absent | Log::Held { torn: None, .. } => {}
+    }
+}
+
+/// A page of the journal that could not be read at all.
+///
+/// Distinct from a record that will not decode, which stays silent because a
+/// page holds up to [`MAX_PAGE_RECORDS`] of them and each already renders its
+/// own fault in its own row. This is the read itself refusing — the file gone
+/// between the look and the seek, or shorter than the count claimed — and its
+/// symptom on screen is an audit surface showing no runs, which is
+/// indistinguishable from a server that has never pulled.
+///
+/// The three numbers are the ones needed to tell a vanished file from a
+/// disagreement between the count and the length. `Warn`: the request was
+/// answered and named its refusal; nothing written was lost. One per refused
+/// request.
+fn note_page_refused(path: &Path, records: u64, skip: u64, take: u64, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("api.audit", "journal page refused")
+            .with("path", telemetry::Value::Str(&path.display().to_string()))
+            .with("records", telemetry::Value::Uint(records))
+            .with("skip", telemetry::Value::Uint(skip))
+            .with("take", telemetry::Value::Uint(take))
+            .with("why", telemetry::Value::Str(why)),
+    );
 }
 
 /// The most records one call will ever read.
@@ -1201,6 +1510,96 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         dir
+    }
+
+    /// THE NINE REASONS THAT USED TO BE NOWHERE.
+    ///
+    /// `of_run` keeps `failures.first()` and the stride is fixed, so a run that
+    /// refused ten members left nine reasons off the disk entirely — which
+    /// months had failed had to be recovered by decoding bar files. One
+    /// `MemberFailure` record per failure puts every (instrument, month) pair
+    /// in the journal at the same stride.
+    #[test]
+    fn every_failed_member_gets_its_own_record_at_the_same_stride() {
+        let why = "bars span 2025-12 to 2026-01; the store addresses one month \
+                   per file and splitting is the caller's decision, not this one's";
+        let record = Record::member_failure(Scope::Spot, at(9), "BANKNIFTY", window(), why);
+
+        assert_eq!(record.kind, Kind::MemberFailure);
+        assert_eq!(record.outcome, Outcome::Failed);
+        assert_eq!(record.source, "BANKNIFTY", "the instrument is recoverable");
+        assert_eq!(record.failures, 1);
+        assert_eq!(
+            (record.members, record.rows_read, record.bars_stored),
+            (0, 0, 0),
+            "the counters belong to the run; repeating them here would give a \
+             reader two places to add the same numbers up from"
+        );
+        assert!(
+            record.note_was_cut(),
+            "the premise: this reason is longer than the note field, which is \
+             why the `pull.spot` event carries the untruncated one"
+        );
+        assert_eq!(
+            usize::from(record.note_bytes),
+            why.len(),
+            "and says by how much"
+        );
+
+        let image = record.image();
+        assert_eq!(
+            image.len(),
+            RECORD_LEN,
+            "SAME STRIDE — the append stays O(1)"
+        );
+        assert_eq!(image[OFF_KIND], 1);
+        assert_eq!(
+            Record::decode(&image).expect("its own bytes"),
+            record,
+            "round-trips field for field"
+        );
+    }
+
+    /// A journal written before `Kind` existed must decode unchanged.
+    ///
+    /// Byte 118 was reserved and zero, and `Kind::Run` is code 0 — so this is
+    /// not a compatibility hope, it is arithmetic. Proven by zeroing the byte
+    /// on a real run record, which is exactly what an older writer left there.
+    #[test]
+    fn a_record_written_before_the_kind_byte_existed_still_reads_as_a_run() {
+        let record = Record::of_run(Scope::Spot, at(1), 2, "src", window(), &run());
+        let mut image = record.image();
+        assert_eq!(
+            image[OFF_KIND], 0,
+            "a run writes the byte an older build left"
+        );
+
+        // Re-stamp it exactly as a pre-`Kind` writer would: byte 118 untouched
+        // at zero, and the CRC recomputed over the record it actually wrote.
+        image[OFF_KIND] = 0;
+        let crc = crc32c(&covered(&image));
+        image[OFF_CRC..].copy_from_slice(&crc.to_le_bytes());
+
+        let back = Record::decode(&image).expect("an older journal still reads");
+        assert_eq!(back.kind, Kind::Run);
+        assert_eq!(back, record, "and nothing else moved");
+    }
+
+    /// A kind this build does not know is REFUSED, never rendered as a run.
+    #[test]
+    fn a_record_kind_from_a_later_build_is_refused_rather_than_guessed() {
+        let record = Record::of_run(Scope::Spot, at(1), 2, "src", window(), &run());
+        let mut image = record.image();
+        image[OFF_KIND] = 7;
+        let crc = crc32c(&covered(&image));
+        image[OFF_CRC..].copy_from_slice(&crc.to_le_bytes());
+
+        assert_eq!(
+            Record::decode(&image),
+            Err(RecordFault::UnknownKind { code: 7 }),
+            "guessing would put a later build's fields on the page as a run's \
+             numbers, which is worse than a named refusal"
+        );
     }
 
     #[test]

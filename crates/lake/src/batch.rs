@@ -210,6 +210,99 @@ mod tests {
         )
     }
 
+    /// EVERY COLUMN IS CHECKED, AND EACH ONE ALONE IS ENOUGH TO REFUSE.
+    ///
+    /// `from_cash_columns` guards seven parallel columns with one `||` chain.
+    /// A chain like that is only as good as the test that exercises each
+    /// disjunct **on its own**: with every column wrong, `||` and `&&` behave
+    /// identically and the test passes either way.
+    ///
+    /// CI gate 18 measured exactly that. Thirteen mutants survived this one
+    /// function — six `||` turned to `&&`, six `!=` turned to `==`, and the
+    /// whole body replaced by `None` — because nothing drove a single mismatch.
+    /// One case per column is what kills them.
+    ///
+    /// This matters beyond the score. A parquet file whose columns disagree in
+    /// length is a **silent short read**: `Batch::row` would answer for every
+    /// index the shortest column has and stop, and the caller would receive a
+    /// truncated day it could not tell from a real one.
+    #[test]
+    fn one_short_column_is_enough_to_refuse_and_every_column_is_checked() {
+        const N: usize = 3;
+        let ts = || -> Vec<i64> { vec![1, 2, 3] };
+        let ints = |n: usize| -> Vec<i64> { (0..n).map(|i| i64::try_from(i).unwrap()).collect() };
+        let px = |n: usize| -> Vec<Paisa> { ints(n).into_iter().map(Paisa::from_raw).collect() };
+
+        // THE HAPPY PATH FIRST, which is what kills `-> None`: a well-formed
+        // set of columns must produce a batch, not a refusal.
+        let ok = Batch::from_cash_columns(ts(), px(N), px(N), px(N), px(N), ints(N), ints(N))
+            .expect("seven columns of equal length are a batch");
+        assert_eq!(ok.len(), N);
+        assert!(
+            !ok.is_empty(),
+            "three rows is not empty — this is what stops `is_empty` from \
+             being replaced by a constant `true`"
+        );
+
+        // AND NOW ONE COLUMN AT A TIME. Each case leaves the other five
+        // correct, so only the named disjunct can fire. Under `&&` every one
+        // of these would build a batch and short-read.
+        let short = N - 1;
+        assert!(
+            Batch::from_cash_columns(ts(), px(short), px(N), px(N), px(N), ints(N), ints(N))
+                .is_none(),
+            "a short OPEN column alone must refuse"
+        );
+        assert!(
+            Batch::from_cash_columns(ts(), px(N), px(short), px(N), px(N), ints(N), ints(N))
+                .is_none(),
+            "a short HIGH column alone must refuse"
+        );
+        assert!(
+            Batch::from_cash_columns(ts(), px(N), px(N), px(short), px(N), ints(N), ints(N))
+                .is_none(),
+            "a short LOW column alone must refuse"
+        );
+        assert!(
+            Batch::from_cash_columns(ts(), px(N), px(N), px(N), px(short), ints(N), ints(N))
+                .is_none(),
+            "a short CLOSE column alone must refuse"
+        );
+        assert!(
+            Batch::from_cash_columns(ts(), px(N), px(N), px(N), px(N), ints(short), ints(N))
+                .is_none(),
+            "a short VOLUME column alone must refuse"
+        );
+        assert!(
+            Batch::from_cash_columns(ts(), px(N), px(N), px(N), px(N), ints(N), ints(short))
+                .is_none(),
+            "a short OPEN INTEREST column alone must refuse"
+        );
+
+        // LONGER IS ALSO A DISAGREEMENT. `!=` rather than `<`: a column with a
+        // row the timestamps do not have is a row nothing can address.
+        assert!(
+            Batch::from_cash_columns(ts(), px(N + 1), px(N), px(N), px(N), ints(N), ints(N))
+                .is_none(),
+            "a LONG column disagrees exactly as much as a short one"
+        );
+
+        // AND ZERO ROWS IS A LEGAL BATCH, not a refusal. An empty row group is
+        // an ordinary parquet state, and `is_empty` must say so.
+        let empty = Batch::from_cash_columns(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("seven empty columns agree");
+        assert!(empty.is_empty(), "no rows is empty");
+        assert_eq!(empty.len(), 0);
+    }
+
     #[test]
     fn row_lookup_does_not_scan() {
         // 2,480 rows is the real row count of the sample file

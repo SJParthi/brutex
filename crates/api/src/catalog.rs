@@ -152,6 +152,18 @@ enum Lead {
     /// The agreed ISIN. `None` sorts first, exactly as `Option` orders.
     Isin(Option<Isin>),
     /// The universe membership bits.
+    ///
+    /// **This one DID move when D-0089 appended four bits, and the movement is
+    /// correct.** Sorting by `universe.bits()` orders rows by what they are
+    /// members of, so a row that gained four memberships sorts somewhere new —
+    /// RELIANCE went from `0b000_0110` to `0b111_1110`. D-0089 recorded that
+    /// four new bits "change no byte of any response"; that holds for every
+    /// rendered cell and not for `?sort=universe`, and D-0090 corrects it.
+    ///
+    /// Masking this back to the low three bits would pin the order at the cost
+    /// of sorting by a membership the row no longer has — a column that lies
+    /// quietly rather than reorders visibly, which §4's "degrade loudly" row
+    /// puts on the wrong side.
     Bits(u32),
     /// The instrument kind.
     Kind(Kind),
@@ -218,6 +230,33 @@ impl Selection {
 }
 
 /// Which universe pill is selected.
+///
+/// # Pinned to three universes, deliberately, and here is the price
+///
+/// D-0089 appended four `Universe` bits — NIFTY 50 / 100 / 200 / 500 — and
+/// D-0090 wired them onto `/instruments.json` as the `universes` array. This
+/// enum does **not** grow with them, and the decision is stated rather than
+/// left to be discovered:
+///
+/// * [`Self::slot`] indexes the precomputed order table. Four more pills is
+///   `SETS` 8 → 16, 96 orders instead of 48, and ~2.2 MB at the real universe
+///   instead of ~1.1 MB — the trade this module's header argues for, doubled.
+/// * The pill counts live in [`crate::render::UniverseCounts`], a four-field
+///   struct rendered by the pill row. Eight pills is eight fields and eight
+///   labels, in a module this change does not own.
+///
+/// Neither is hard; both are a different change from wiring the wire. What
+/// matters is that this one is **inert** under new bits rather than quietly
+/// wrong: [`Self::admits`] asks `contains` for one named bit, so a row that
+/// gained four memberships passes exactly the pills it passed before, and
+/// [`tracked`] is unmoved for the same reason.
+///
+/// The visible cost: `/instruments?u=n50` selects [`Self::Every`], the same as
+/// any unrecognised pill, so the server-rendered page shows every row rather
+/// than fifty. That is the pre-existing stale-bookmark rule, and under a name
+/// the data can now answer it reads as a filter that did nothing. The browser
+/// pages filter on the `universes` array and are unaffected.
+/// `api::catalog::the_pill_filter_is_pinned_to_three_universes` is the test.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pill {
     /// No pill: every row in scope.
@@ -255,6 +294,11 @@ impl Pill {
     const ALL: [Self; 4] = [Self::Every, Self::Fno, Self::Ntm, Self::Index];
 
     /// Whether a membership passes this pill.
+    ///
+    /// One `contains` against one NAMED bit, never a comparison of whole
+    /// bitsets: that is what makes this inert under the four bits D-0089
+    /// appended. A row that is now `fno+ntm+n500+n200+n100+n50` answers this
+    /// exactly as it did when it was `fno+ntm`.
     fn admits(self, u: Universe) -> bool {
         match self {
             Self::Every => true,
@@ -271,6 +315,13 @@ impl Pill {
 /// uses. It shipped the whole master — 2,780 listings — while the page beside
 /// it said 785, so the type-ahead offered instruments the operator's own
 /// universe excludes.
+///
+/// **The four NIFTY tiers do not widen this and must not.** Every published
+/// constituent of the 50, the 100, the 200 and the 500 is also a NIFTY Total
+/// Market constituent — `core::universe::the_published_tiers_nest_one_inside_the_next`
+/// checks that symbol by symbol against the exchange's own files — so naming
+/// them here would add no instrument and would instead make the tracked scope
+/// depend on a nesting property rather than on the two lists that define it.
 pub(crate) fn tracked(u: Universe) -> bool {
     u.contains(Universe::TOTAL_MARKET) || u.contains(Universe::INDEX)
 }
@@ -371,7 +422,7 @@ impl Catalog {
             .count();
         let trigrams = build_trigrams(&text);
 
-        Self {
+        let built = Self {
             rows: rows.into_boxed_slice(),
             text: text.into_boxed_slice(),
             longest,
@@ -379,7 +430,9 @@ impl Catalog {
             counts,
             both_tracked,
             trigrams,
-        }
+        };
+        note_built(&built);
+        built
     }
 
     /// How many instruments the catalog holds, over every scope.
@@ -566,6 +619,74 @@ impl Catalog {
     }
 }
 
+/// The index this process actually built, once, where it is built.
+///
+/// # Why here and NOT in [`tracked`] or [`Catalog::page`]
+///
+/// [`tracked`] is asked once per instrument while the orders are filtered, and
+/// [`Catalog::page`] runs on every request. An event in either would be paced
+/// by data and by traffic: at 2,787 instruments one line per membership test is
+/// ~107,000 lines per load, which rolls the sink's whole 64 MiB window and
+/// destroys the evidence it was written to preserve. [`Catalog::build`] runs
+/// **once per master load** — twice in the life of a process that never
+/// reloads — so this is the summary point, and the per-instrument predicate
+/// stays silent.
+///
+/// # What was invisible before it
+///
+/// Two numbers that only exist in this module and nowhere on disk. The first is
+/// the **tracked scope**: `api.merge` already logs how many keys the vendors
+/// agreed on, but not how many of them survive the default filter, which is the
+/// count every page and every spot pull is actually drawn from — and a target
+/// that says 2 while the run sweeps 765 is the exact defect this module's own
+/// docstring records. The second is the **size of the trade**: the header of
+/// this file argues that 48 precomputed orders are worth about 1.1 MB at the
+/// real universe, and `docs/06-limits.md` §24 repeats the claim. Nothing
+/// measured it. `order_entries` is that number in machine words, from the
+/// process that built it, so the documented estimate can be checked rather than
+/// believed.
+///
+/// `Info`: a once-per-startup milestone, above the default floor, and cheap
+/// because summing 48 slice lengths is 48 reads and not a walk of the universe.
+fn note_built(catalog: &Catalog) {
+    let (tracked_counts, both) = catalog.dashboard_counts();
+    // COUNTS, NEVER THE LISTS. The rows, the orders and the trigram postings
+    // are each as long as the universe; a log line carrying one of them would
+    // be a field whose length grows with the instrument set.
+    let order_entries: usize = catalog.orders.iter().map(|o| o.len()).sum();
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("api.catalog", "index built")
+            .with(
+                "instruments",
+                telemetry::Value::Uint(catalog.rows.len() as u64),
+            )
+            .with("tracked", telemetry::Value::Uint(tracked_counts.all as u64))
+            .with("fno", telemetry::Value::Uint(tracked_counts.fno as u64))
+            .with("ntm", telemetry::Value::Uint(tracked_counts.ntm as u64))
+            .with(
+                "index_series",
+                telemetry::Value::Uint(tracked_counts.index as u64),
+            )
+            .with("both_vendors", telemetry::Value::Uint(both as u64))
+            .with(
+                "orders",
+                telemetry::Value::Uint(catalog.orders.len() as u64),
+            )
+            .with(
+                "order_entries",
+                telemetry::Value::Uint(order_entries as u64),
+            )
+            .with(
+                "trigrams",
+                telemetry::Value::Uint(catalog.trigrams.len() as u64),
+            )
+            .with(
+                "longest_name",
+                telemetry::Value::Uint(catalog.longest as u64),
+            ),
+    );
+}
+
 /// Builds the `SETS × COLUMNS` orders.
 ///
 /// Each column is sorted **once** over the whole universe and then filtered
@@ -604,6 +725,11 @@ fn build_orders(rows: &[Row]) -> Box<[Box<[usize]>]> {
 }
 
 /// The pill counts for one scope.
+///
+/// Three counters plus the total, pinned to [`Pill`]'s three universes for the
+/// reason that enum's doc gives — the shape is [`UniverseCounts`], which the
+/// pill row renders, and a count with no pill to sit under is a number nothing
+/// displays.
 fn count(rows: &[Row], all: bool) -> UniverseCounts {
     rows.iter().filter(|r| all || tracked(r.universe)).fold(
         UniverseCounts::default(),
@@ -788,6 +914,118 @@ mod tests {
         assert!(Pill::Fno.admits(Universe::FNO) && !Pill::Fno.admits(Universe::INDEX));
         assert!(Pill::Ntm.admits(Universe::TOTAL_MARKET) && !Pill::Ntm.admits(Universe::FNO));
         assert!(Pill::Index.admits(Universe::INDEX) && !Pill::Index.admits(Universe::NONE));
+    }
+
+    /// Four new bits change no pill, no count and no page — on purpose.
+    ///
+    /// D-0089 appended NIFTY 50 / 100 / 200 / 500 to `core::universe` and said
+    /// this module "still admits three universes". That was a claim about code
+    /// nobody had run against a row carrying the new bits. This is that row.
+    ///
+    /// The pinning is not laziness — see [`Pill`]'s doc for what four more
+    /// pills would cost — and it is not silent either: the cost is that
+    /// `?u=n50` selects EVERYTHING, which this test states rather than hides.
+    /// The browser pages filter on `/instruments.json`'s `universes` array
+    /// (D-0090) and never ask this enum.
+    #[test]
+    fn the_pill_filter_is_pinned_to_three_universes() {
+        let tiers = Universe::NIFTY_500
+            .union(Universe::NIFTY_200)
+            .union(Universe::NIFTY_100)
+            .union(Universe::NIFTY_50);
+        // The same four instruments as `mixed`, with every tier bit set on the
+        // two equities that could carry one.
+        let tiered = catalog(&[
+            (index("NIFTY"), Universe::INDEX, both(), None),
+            (
+                equity("RELIANCE"),
+                Universe::TOTAL_MARKET.union(Universe::FNO).union(tiers),
+                both(),
+                Some(isin("INE002A01018")),
+            ),
+            (
+                equity("ZZZTRACKED"),
+                Universe::TOTAL_MARKET.union(tiers),
+                VendorSet::EMPTY.with(Vendor::Groww),
+                Some(isin("INE009A01021")),
+            ),
+            (
+                equity("OUTSIDER"),
+                Universe::NONE,
+                VendorSet::EMPTY.with(Vendor::Dhan),
+                None,
+            ),
+        ]);
+        let plain = mixed();
+        for all in [false, true] {
+            // `n50` and `n500` are the names the data can now answer and this
+            // filter cannot. They parse to `Every`, which is the stale-bookmark
+            // rule, and they must therefore select the same rows as no pill.
+            for pill in ["", "fno", "ntm", "idx", "n50", "n500"] {
+                let sel = Selection::new(all, pill, "");
+                assert_eq!(
+                    names(&tiered.page(sel, 0)),
+                    names(&plain.page(sel, 0)),
+                    "the tier bits moved a page: all={all} pill={pill:?}"
+                );
+            }
+            let sel = Selection::new(all, "", "");
+            assert_eq!(
+                tiered.counts(sel),
+                plain.counts(sel),
+                "and they moved a count: all={all}"
+            );
+            assert_eq!(
+                Pill::parse("n50"),
+                Pill::Every,
+                "a tier name is an unrecognised pill and shows every row"
+            );
+        }
+        assert_eq!(
+            tiered.dashboard_counts(),
+            plain.dashboard_counts(),
+            "the dashboard is drawn from the same three universes"
+        );
+    }
+
+    /// The universe COLUMN is the one thing the new bits do move.
+    ///
+    /// `Lead::Bits` sorts on `universe.bits()`, so a row that gained four
+    /// memberships sorts somewhere new. That is the column doing its job — it
+    /// orders by what a row is a member of — and it is also the one sentence
+    /// D-0089 got wrong when it said four new bits "change no byte of any
+    /// response". D-0090 corrects the ledger; this pins the behaviour.
+    #[test]
+    fn the_universe_column_orders_by_every_bit_including_the_appended_ones() {
+        let by_universe = Selection::new(false, "", "universe");
+        // TOTAL_MARKET (0b100) sorts before FNO|TOTAL_MARKET (0b110).
+        assert_eq!(
+            names(&mixed().page(by_universe, 0)),
+            ["NSE-NIFTY", "NSE-ZZZTRACKED", "NSE-RELIANCE"],
+            "before: the index, then the plain constituent, then the underlying"
+        );
+        // Give the plain constituent a NIFTY 50 membership — bit 6 — and it
+        // sorts past the F&O underlying, because it now IS in more lists.
+        let promoted = catalog(&[
+            (index("NIFTY"), Universe::INDEX, both(), None),
+            (
+                equity("RELIANCE"),
+                Universe::TOTAL_MARKET.union(Universe::FNO),
+                both(),
+                Some(isin("INE002A01018")),
+            ),
+            (
+                equity("ZZZTRACKED"),
+                Universe::TOTAL_MARKET.union(Universe::NIFTY_50),
+                VendorSet::EMPTY.with(Vendor::Groww),
+                Some(isin("INE009A01021")),
+            ),
+        ]);
+        assert_eq!(
+            names(&promoted.page(by_universe, 0)),
+            ["NSE-NIFTY", "NSE-RELIANCE", "NSE-ZZZTRACKED"],
+            "after: the appended bit is part of the ordering, visibly"
+        );
     }
 
     #[test]

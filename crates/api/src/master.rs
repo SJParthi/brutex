@@ -365,7 +365,62 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             Err(e) => out.errors.push((n + 2, e.to_string())),
         }
     }
+    // THE UNIVERSE, AS IT ACTUALLY PARSED — one line for a file of ~100,000
+    // rows, never one per row.
+    //
+    // A wrong universe is the quietest way a run goes wrong: nothing refuses,
+    // nothing fails, the pull simply asks for a different set of instruments
+    // than the operator believes it did. `Swept indices` sending 785 requests
+    // instead of 2 was exactly that, and the only trace it left was a receipt
+    // nobody kept. The kept count and the skip tally are what make a changed
+    // vendor master visible on the day it changes rather than a month later.
+    //
+    // `Info` and once per master file, so two lines per process start.
+    note_parsed(path, vendor, &out);
     Ok(out)
+}
+/// The universe, as it actually parsed — one line for a file of ~100,000 rows.
+///
+/// # Why a count and not a row
+///
+/// A wrong universe is the quietest way a run goes wrong: nothing refuses,
+/// nothing fails, the pull simply asks the vendor for a different set of
+/// instruments than the operator believes it did. `Swept indices` sending 785
+/// requests instead of 2 was exactly that, and the only trace it left was a
+/// receipt nobody kept.
+///
+/// Per row would be ~100,000 lines per vendor per start. These seven counts are
+/// what actually changes when a vendor edits its master, and they are what make
+/// that edit visible on the day it happens rather than a month later.
+///
+/// `Info`, once per master file — two lines per process start.
+fn note_parsed(path: &std::path::Path, vendor: Vendor, out: &Loaded) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("api.master", "parsed")
+            .with("vendor", telemetry::Value::Str(vendor.as_str()))
+            .with("path", telemetry::Value::Str(&path.display().to_string()))
+            .with("kept", telemetry::Value::Uint(out.kept.len() as u64))
+            .with(
+                "duplicate_keys",
+                telemetry::Value::Uint(out.duplicate_keys as u64),
+            )
+            .with(
+                "skipped",
+                telemetry::Value::Uint(out.skipped_total() as u64),
+            )
+            .with(
+                "declined",
+                telemetry::Value::Uint(out.declined.len() as u64),
+            )
+            .with(
+                "row_errors",
+                telemetry::Value::Uint(out.errors.len() as u64),
+            )
+            .with(
+                "unrecognised_classes",
+                telemetry::Value::Uint(out.unrecognised.len() as u64),
+            ),
+    );
 }
 
 #[cfg(test)]

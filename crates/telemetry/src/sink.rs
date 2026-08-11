@@ -112,7 +112,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use crate::clock::now_millis;
@@ -142,6 +142,13 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// enough that no operator has to think about it. It is also ~260,000 events
 /// of history, which is several backfills.
 pub const DEFAULT_KEEP_FILES: u8 = 8;
+
+/// The most per-subsystem level overrides one sink will hold.
+///
+/// Bounded so the lookup is bounded: resolving a target walks this array at
+/// most once, so the cost is a constant and not a function of how many
+/// subsystems exist. Eight is more than the taxonomy has targets today.
+pub const MAX_TARGET_LEVELS: usize = 8;
 
 /// The smallest file bound this crate accepts.
 ///
@@ -265,6 +272,11 @@ pub struct Config {
     pub keep_files: u8,
     /// The quietest level that is written at all.
     pub min_level: Level,
+    /// Per-subsystem floors, longest dotted prefix wins.
+    ///
+    /// Empty is the default and costs nothing: with no overrides the hot path
+    /// is the same single relaxed atomic load it always was.
+    pub target_levels: Vec<(String, Level)>,
 }
 
 impl Config {
@@ -276,6 +288,7 @@ impl Config {
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             keep_files: DEFAULT_KEEP_FILES,
             min_level: Level::Info,
+            target_levels: Vec::new(),
         }
     }
 
@@ -294,6 +307,46 @@ impl Config {
     }
 
     /// The same configuration with a different floor.
+    #[must_use]
+    /// The same configuration with a floor for ONE subsystem and everything
+    /// beneath it.
+    ///
+    /// `("pull", Level::Debug)` covers `pull`, `pull.http` and
+    /// `pull.http.retry` — and never `pullover`, because the prefix match
+    /// requires the dot. The longest matching prefix wins, so
+    /// `("pull", Debug)` beside `("pull.chunk", Trace)` gives the chunk path
+    /// its own floor without lifting the rest of the crate to `Trace`.
+    ///
+    /// # Why this exists
+    ///
+    /// With one global floor an operator has two settings: `Info`, which hides
+    /// the per-member detail that explains a failure, and `Debug`, which turns
+    /// on every `api.request` line as well. On a 62,600-member backfill the
+    /// second is not a choice — it rolls the run's own beginning out of the
+    /// window. Per-subsystem is what makes "verbose for the pull, quiet for
+    /// everything else" expressible.
+    ///
+    /// Silently ignored past [`MAX_TARGET_LEVELS`]: a bounded array is what
+    /// keeps the lookup constant, and an operator who writes nine overrides
+    /// gets the first eight rather than a refusal to start.
+    pub fn with_target_level(mut self, target: impl Into<String>, level: Level) -> Self {
+        if self.target_levels.len() < MAX_TARGET_LEVELS {
+            self.target_levels.push((target.into(), level));
+        }
+        self
+    }
+
+    /// The quietest level ANY event could need to pass, across the global floor
+    /// and every override.
+    ///
+    /// This is the number the hot path compares against, so that a config with
+    /// no overrides costs exactly what it cost before this feature existed:
+    /// one relaxed atomic load and a comparison.
+    fn fast_floor(&self) -> Level {
+        lowest_floor(self.min_level, &self.target_levels)
+    }
+
+    /// The same configuration with a different global floor.
     #[must_use]
     pub const fn with_min_level(mut self, level: Level) -> Self {
         self.min_level = level;
@@ -331,6 +384,42 @@ impl Config {
         }
         None
     }
+}
+
+/// The quietest level ANY event could need, across a global floor and a set of
+/// per-target overrides.
+///
+/// **ONE IMPLEMENTATION, CALLED BY BOTH WRITERS OF THE PAIR** — by
+/// [`Config::fast_floor`] at construction and by [`Sink::set_min_level`] at
+/// runtime. "The fast floor is the minimum of the global floor and every
+/// override" is precisely the invariant [`Sink::floors`] packs into one word to
+/// protect, and an invariant with two copies of its arithmetic has two chances
+/// to drift. The two copies were real: this body was duplicated verbatim inside
+/// `set_min_level`.
+///
+/// `min_by_key` RATHER THAN A HAND-WRITTEN COMPARISON, and the reason is a
+/// measurement. `if level.rank() < lowest.rank()` mutates to `<=` with
+/// **identical behaviour**: `rank` is injective, so equal ranks mean equal
+/// levels and both arms return the same value. That is an equivalent mutant —
+/// one no test can ever kill — and CI gate 18 would have reported it as a
+/// surviving mutant forever. Moving the comparison into `std` removes the
+/// mutable operator instead of suppressing the finding.
+fn lowest_floor(global: Level, overrides: &[(String, Level)]) -> Level {
+    core::iter::once(global)
+        .chain(overrides.iter().map(|&(_, level)| level))
+        .min_by_key(|level| level.rank())
+        .unwrap_or(global)
+}
+
+/// The two floors as ONE word: the global floor in the high byte, the fast
+/// floor in the low byte.
+///
+/// Through `to_be_bytes`/`from_be_bytes` rather than a shift and a cast because
+/// `clippy::cast_possible_truncation` is denied workspace-wide and the shift
+/// form needs exactly the truncating cast it names. The bytes form compiles to
+/// the same instruction and cannot be wrong about which half is which.
+const fn packed(global: Level, fast: Level) -> u16 {
+    u16::from_be_bytes([global.rank(), fast.rank()])
 }
 
 /// The directory a telemetry set lives in, beneath a store root.
@@ -412,8 +501,42 @@ struct Inner {
     bytes: u64,
     /// The sequence number of the last event written.
     seq: u64,
+    /// The `ms` of the last event written, and the floor the next one is
+    /// clamped to.
+    ///
+    /// **This exists so that `ms` order IS file order.** The clock used to be
+    /// read before the lock was taken, which put `seq` in lock-acquisition
+    /// order and `ms` in pre-lock order — two orders that disagree the moment
+    /// one thread is preempted between the two lines. `tail`'s `since` filter
+    /// ends the whole walk at the first record older than the floor, on the
+    /// stated grounds that "events are in time order", so a single inversion
+    /// silently truncated the result and `Tail::missing` could not report it:
+    /// `missing_between` returns `None` whenever a `since` filter is present.
+    ///
+    /// Clamping rather than merely moving the call also absorbs a clock STEPPED
+    /// BACKWARDS by NTP, which moving it alone would not. The cost is one
+    /// comparison and one store, both inside a critical section that already
+    /// formats and appends the line.
+    last_at: i64,
     /// Rendered here and reused. Cleared, never freed.
     buf: Vec<u8>,
+}
+
+impl Inner {
+    /// The timestamp for the next line: never earlier than the last one's.
+    ///
+    /// Split out of [`Sink::emit`] so that a clock which STEPS BACKWARDS can be
+    /// tested without owning one. `now_millis` reads the host clock, and a test
+    /// cannot move the host clock — so the only way to prove the clamp is to
+    /// hand it the reading directly. Proved by
+    /// `a_backward_clock_cannot_move_ms_backwards`.
+    ///
+    /// One comparison and one store. O(1), and called with the lock already
+    /// held.
+    fn stamp(&mut self, now: i64) -> i64 {
+        self.last_at = now.max(self.last_at);
+        self.last_at
+    }
 }
 
 /// The event stream's writer.
@@ -424,7 +547,82 @@ pub struct Sink {
     dir: PathBuf,
     max_file_bytes: u64,
     keep_files: u8,
-    min_level: AtomicU8,
+    /// Per-subsystem floors, longest dotted prefix wins. Empty is the default.
+    ///
+    /// Read-only after construction, so no lock and no atomic: the hot path
+    /// borrows it and walks at most [`MAX_TARGET_LEVELS`] entries.
+    target_levels: Vec<(String, Level)>,
+    /// The run every event is stamped with, or zero for none.
+    ///
+    /// **A LOG SPANNING THREE BACKFILLS CANNOT BE SPLIT INTO THREE WITHOUT
+    /// THIS**, and splitting it is the first thing a reader who did not run the
+    /// job has to do. Held on the sink rather than threaded through every
+    /// call site for the reason `emit` reads a global at all: a parameter on
+    /// every function between `main` and a note helper is a parameter somebody
+    /// forgets, and the one they forget is the site being diagnosed.
+    ///
+    /// One relaxed atomic load per event, which is the same cost as the level
+    /// gate beside it. O(1), and it cannot grow — the flatness of the emit path
+    /// with this load on it is held by
+    /// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b),
+    /// and the split it buys by
+    /// `telemetry::tail::a_log_holding_several_runs_splits_back_into_them` (T-22).
+    run: AtomicU64,
+
+    /// Set once a roll has failed, and never cleared.
+    ///
+    /// **THE WINDOW IS DESTROYED BY RE-ATTEMPTING, NOT BY FAILING ONCE.**
+    /// `roll` unlinks the oldest file, renames the middle ones up, and only
+    /// then moves the current file aside. Every one of those steps can fail,
+    /// and each returns early — leaving `inner.bytes` past the bound, so the
+    /// NEXT event meets the same roll condition and shifts the whole set again.
+    /// And the next. Measured against a rename that could not complete, with
+    /// `keep_files = 5`: file sizes went `[930, 927, 926, 926, 926]` to
+    /// `[1862, 927, 926, 0, 0]` in two events — the retained history emptied
+    /// one file per event while the sink reported only that rolling had failed.
+    ///
+    /// So the first failure stops rotation for the life of the sink. The
+    /// current file then grows past its bound, which is the documented
+    /// degradation and is visible in [`Health::current_bytes`] — and the events
+    /// already on disk survive, which is the whole point of keeping them.
+    rotation_broken: AtomicBool,
+
+    /// **BOTH FLOORS, IN ONE WORD, BECAUSE TWO WORDS COULD DISAGREE.**
+    ///
+    /// High byte: the global floor, which is what [`Sink::min_level`] reports.
+    /// Low byte: the fast floor, `min(global, every override)`, which is the
+    /// ONLY thing [`Sink::emit`]'s first test reads — an event below it is
+    /// rejected on one relaxed atomic load, exactly as before per-subsystem
+    /// floors existed, so a sink with no overrides pays nothing for the
+    /// feature. Only an event that passes it is worth resolving a specific
+    /// target for.
+    ///
+    /// **THEY WERE TWO ATOMICS AND `set_min_level` WROTE THEM ONE AFTER THE
+    /// OTHER.** Two callers racing interleave those four stores, and one of the
+    /// orderings leaves the pair describing two *different* floors — for the
+    /// life of the sink, or until somebody sets the level again. A
+    /// barrier-synchronised probe on this tree, reading only at the instant no
+    /// thread was writing, saw it at rounds 2023, 2597, 5275 and 6269 of four
+    /// million: `min_level()` reporting `error` while a `trace` event was still
+    /// admitted, and the reverse. Rare, real, and silent — the operator who
+    /// lowered the floor gets no debug lines and a `min_level()` that agrees
+    /// with what they asked for.
+    ///
+    /// One word cannot tear: every state a reader can observe is a word some
+    /// `set_min_level` wrote, whole. **It costs `emit` nothing** — the fast
+    /// path is one relaxed atomic load either way, and taking the low byte is a
+    /// truncation the compiler folds into the comparison it already made.
+    ///
+    /// *A `Mutex` around the pair was the other candidate and is the larger
+    /// change for the same result.* It would sit on the level-setting path
+    /// rather than the emit path, so its cost is paid by a rare caller — but it
+    /// adds a third lock to a type whose `Debug` already refuses to take the
+    /// first two, and it fixes only the durable crossing: a reader that loads
+    /// the two atomics separately can still see them mid-flight, and closing
+    /// *that* means taking the lock in `emit`, which is the one place this
+    /// crate cannot afford one. Packing removes both windows and adds no lock.
+    /// See D-0101.
+    floors: AtomicU16,
     inner: Mutex<Inner>,
     written: AtomicU64,
     dropped: AtomicU64,
@@ -454,7 +652,7 @@ impl Sink {
     /// The sequence number resumes from the last readable line of the current
     /// file, so a restart continues the stream rather than starting a second
     /// one at zero. That read is one block from the end and nothing more; see
-    /// [`resume_seq`].
+    /// `resume_seq`.
     ///
     /// # Errors
     ///
@@ -510,11 +708,19 @@ impl Sink {
             dir: config.dir.clone(),
             max_file_bytes: config.max_file_bytes,
             keep_files: config.keep_files,
-            min_level: AtomicU8::new(config.min_level.rank()),
+            target_levels: config.target_levels.clone(),
+            run: AtomicU64::new(0),
+            rotation_broken: AtomicBool::new(false),
+            floors: AtomicU16::new(packed(config.min_level, config.fast_floor())),
             inner: Mutex::new(Inner {
                 target,
                 bytes,
                 seq,
+                // ZERO, NOT `now_millis()`. A resumed sink must not claim the
+                // events already in the file happened at the moment it opened;
+                // the first event written clamps against a floor of zero, which
+                // any real clock clears.
+                last_at: 0,
                 buf: Vec::with_capacity(512),
             }),
             written: AtomicU64::new(0),
@@ -552,12 +758,64 @@ impl Sink {
 
     /// The quietest level currently written.
     ///
-    /// One relaxed load. The stored rank is always one this crate wrote — the
-    /// only writer is [`Sink::set_min_level`], which takes a [`Level`] — so
-    /// the `unwrap_or` is a backstop no caller can drive.
+    /// The floor that applies to one target: the LONGEST matching dotted
+    /// prefix among the overrides, or the global floor when none matches.
+    ///
+    /// `"pull"` covers `pull`, `pull.http` and `pull.http.retry`; it does NOT
+    /// cover `pullover`, because the match requires the dot — the same rule
+    /// [`crate::tail::Query::target`] already uses, so a filter written for
+    /// the reader means the same thing as one written for the writer.
+    ///
+    /// Longest wins so `("pull", Debug)` and `("pull.chunk", Trace)` compose:
+    /// the chunk path gets its own floor without lifting the rest of the
+    /// crate. Bounded by [`MAX_TARGET_LEVELS`], so this is a constant number
+    /// of prefix comparisons of a bounded-length target.
+    pub fn level_for(&self, target: &str) -> Level {
+        let mut best: Option<(usize, Level)> = None;
+        for (prefix, level) in &self.target_levels {
+            // NO LENGTH GUARD, BECAUSE THE DOT ALREADY IS ONE. A byte at
+            // `prefix.len()` exists only when `target` is strictly longer, so
+            // `target.len() > prefix.len()` was implied by the line below it
+            // and never decided anything — CI gate 18 found it by mutating `>`
+            // to `>=` and watching the whole suite stay green. Redundant code
+            // removed rather than the finding suppressed.
+            let covers = target == prefix
+                || (target.starts_with(prefix.as_str())
+                    && target.as_bytes().get(prefix.len()) == Some(&b'.'));
+            // `>=`, SO THE LAST REGISTRATION OF A TARGET WINS.
+            //
+            // `with_target_level` does not reject a repeat, so two entries can
+            // carry the same prefix — and until CI gate 18 mutated this
+            // operator, nothing decided which of them applied. `>=` makes a
+            // later call override an earlier one, which is the useful
+            // direction: a caller building a config in layers expects the last
+            // word to be the one that counts. Pinned by
+            // `a_repeated_target_takes_its_last_registration`.
+            if covers && best.is_none_or(|(len, _)| prefix.len() >= len) {
+                best = Some((prefix.len(), *level));
+            }
+        }
+        best.map_or_else(|| self.min_level(), |(_, level)| level)
+    }
+
+    /// The global floor, as one relaxed load.
+    ///
+    /// The stored rank is always one this crate wrote — the only writers are
+    /// construction and [`Sink::set_min_level`], both of which take a
+    /// [`Level`] — so the `unwrap_or` is a backstop no caller can drive.
     #[must_use]
     pub fn min_level(&self) -> Level {
-        Level::of_rank(self.min_level.load(Ordering::Relaxed)).unwrap_or(Level::Trace)
+        let [global, _fast] = self.floors.load(Ordering::Relaxed).to_be_bytes();
+        Level::of_rank(global).unwrap_or(Level::Trace)
+    }
+
+    /// The lowest floor any target could have, as one relaxed load.
+    ///
+    /// The low half of [`Sink::floors`], and the whole of `emit`'s fast reject.
+    /// The same backstop applies for the same reason.
+    fn fast_floor(&self) -> Level {
+        let [_global, fast] = self.floors.load(Ordering::Relaxed).to_be_bytes();
+        Level::of_rank(fast).unwrap_or(Level::Trace)
     }
 
     /// Changes the floor, for every thread, without a lock.
@@ -566,7 +824,72 @@ impl Sink {
     /// wrong should be able to turn debug on without restarting the process
     /// that is halfway through it.
     pub fn set_min_level(&self, level: Level) {
-        self.min_level.store(level.rank(), Ordering::Relaxed);
+        // AND THE FAST FLOOR WITH IT, OR THE MOVE DOES NOTHING.
+        //
+        // `emit`'s first test is the fast floor, so leaving it behind here
+        // makes a runtime lowering silently ineffective — the sink reports the
+        // new `min_level()` and keeps filtering at the old one.
+        // `an_event_below_the_floor_is_filtered_and_never_reaches_the_file`
+        // caught exactly that: it lowers the floor to `Trace` and asserts the
+        // next `trace` event is written.
+        //
+        // The fast floor is the MINIMUM of the global floor and every override,
+        // so a subsystem pinned lower than the new global keeps its own floor
+        // reachable.
+        //
+        // **AND BOTH IN ONE STORE.** This was two stores into two atomics, and
+        // two callers racing interleaved them into a pair that described two
+        // different floors — see `Sink::floors`, which is one word for exactly
+        // this reason. There is no interleaving of a single relaxed store, so
+        // the last writer's pair is the pair, whole.
+        self.floors.store(
+            packed(level, lowest_floor(level, &self.target_levels)),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Stamps every later event with `run`. Zero clears it.
+    ///
+    /// Set when a run begins and cleared when it ends, so events outside a run
+    /// — a served request, a startup line — carry no run and say so by
+    /// omission rather than by a zero a reader has to interpret.
+    pub fn set_run(&self, run: u64) {
+        self.run.store(run, Ordering::Relaxed);
+    }
+
+    /// The run every event is currently stamped with, or zero for none.
+    #[must_use]
+    pub fn run(&self) -> u64 {
+        self.run.load(Ordering::Relaxed)
+    }
+
+    /// Whether an event at `level` from `target` would be written.
+    ///
+    /// **THE GATE, WITHOUT AN EVENT TO GATE.** [`Sink::emit`] is a function, so
+    /// by the time it can look at the level the caller has already built the
+    /// whole `Event` — a 12-slot array initialised on the stack, plus every
+    /// argument expression evaluated. The level check is cheap; getting to it
+    /// is not.
+    ///
+    /// Measured, one binary, one harness: a filtered event through
+    /// `Sink::emit` cost **6,750 ps with no fields and 14,146 ps with three** —
+    /// it DOUBLES with the number of fields at the call site. That is
+    /// O(call-site fields), and `CLAUDE.md` §3 rule 4 asks for O(1).
+    ///
+    /// This is the same two checks `emit` runs, exposed so [`crate::emit_if`]
+    /// can run them BEFORE the arguments are evaluated. It reads one relaxed
+    /// atomic and, only when overrides exist, walks at most
+    /// [`MAX_TARGET_LEVELS`] bounded prefixes — O(1) in everything, including
+    /// how many fields the caller was about to attach. Proved by
+    /// `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`, which
+    /// counts side effects rather than timing them: an argument that did not
+    /// run cannot increment a counter.
+    #[must_use]
+    pub fn admits(&self, level: Level, target: &str) -> bool {
+        if !level.at_least(self.fast_floor()) {
+            return false;
+        }
+        self.target_levels.is_empty() || level.at_least(self.level_for(target))
     }
 
     /// Writes one event.
@@ -574,10 +897,25 @@ impl Sink {
     /// Never panics and never propagates a failure; the module documentation
     /// says how a failure is surfaced instead.
     pub fn emit(&self, event: &Event<'_>) -> Emitted {
-        if !event.level().at_least(self.min_level()) {
+        // THE FAST REJECT, UNCHANGED. One relaxed atomic load and a comparison
+        // against the lowest floor any target could have. With no overrides
+        // that value IS the global floor, so a sink that does not use the
+        // feature pays exactly what it paid before the feature existed.
+        //
+        // The load is 16 bits wide now rather than 8 — both floors share one
+        // word so they cannot be observed crossed, see `Sink::floors` — and
+        // taking the low half is a truncation, not a branch.
+        if !event.level().at_least(self.fast_floor()) {
             return Emitted::Filtered;
         }
-        let at = now_millis();
+        // AND ONLY THEN, THE SPECIFIC FLOOR. An event that cleared the lowest
+        // bar may still be below its OWN subsystem's, which is the whole point
+        // of a per-target level: `pull=debug` must not also lift `api.request`.
+        // Bounded by `MAX_TARGET_LEVELS`, and skipped entirely when empty.
+        if !self.target_levels.is_empty() && !event.level().at_least(self.level_for(event.target()))
+        {
+            return Emitted::Filtered;
+        }
         // A POISONED LOCK IS RECOVERED FROM, NOT PROPAGATED. Poisoning means
         // another thread panicked while holding this mutex. What is behind it
         // is a destination, a byte count and a scratch buffer, none of which a
@@ -586,14 +924,31 @@ impl Sink {
         // guaranteed to lose the events that explain the panic.
         let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let inner = &mut *guard;
+        // THE CLOCK IS READ HERE, INSIDE THE LOCK, AND CLAMPED. Reading it
+        // before the lock put `seq` in lock-acquisition order and `ms` in
+        // pre-lock order; a thread preempted between the two lines then wrote a
+        // line whose `ms` was lower than the line before it. `tail`'s `since`
+        // filter ends the walk at the first record older than the floor because
+        // it trusts time order, so one inversion silently truncated the answer.
+        // See `Inner::last_at`. Proved by `ms_never_goes_backwards_in_the_file`.
+        let at = inner.stamp(now_millis());
         inner.seq = inner.seq.saturating_add(1);
         inner.buf.clear();
-        line(&mut inner.buf, inner.seq, at, event);
+        line(
+            &mut inner.buf,
+            inner.seq,
+            at,
+            self.run.load(Ordering::Relaxed),
+            event,
+        );
         let span = u64::try_from(inner.buf.len()).unwrap_or(u64::MAX);
-        if inner.bytes > 0
+        if !self.rotation_broken.load(Ordering::Relaxed)
+            && inner.bytes > 0
             && inner.bytes.saturating_add(span) > self.max_file_bytes
             && let Err(why) = self.roll(inner)
         {
+            // NEVER AGAIN, for this sink. See `rotation_broken`.
+            self.rotation_broken.store(true, Ordering::Relaxed);
             // The roll failed, so the current file will exceed its bound.
             // The event is still written: losing it because a RENAME failed
             // would be the worse of the two, and a bound that has been
@@ -610,6 +965,27 @@ impl Sink {
                 Emitted::Written
             }
             Err(e) => {
+                // THE FRAGMENT IS TERMINATED BEFORE THE LOCK IS RELEASED.
+                //
+                // `write_all` reports the error, not how many bytes reached the
+                // file first. A disk that fills mid-line therefore leaves a
+                // PARTIAL line with no newline — and the next event, appended at
+                // that offset, fuses onto it. One unparseable line, and **two**
+                // events lost where `dropped` counts one.
+                //
+                // Measured on a real 2 MB volume driven to genuine ENOSPC: 132
+                // lines written, the file 14 bytes longer than the sink's own
+                // count, the last byte not a newline; after space was freed,
+                // three further events all returned `Written` and the reader
+                // then found 134 records for 135 writes, with `dropped` still
+                // saying 1.
+                //
+                // One byte closes it: the fragment becomes its own line, which
+                // the reader counts as `malformed` — visible, and exactly one
+                // event's worth — and the next event starts clean. If this
+                // write fails too there is nothing further to lose; the file is
+                // already unwritable and the next append will say so.
+                let _terminated = inner.target.append(b"\n");
                 drop(guard);
                 let why = format!(
                     "{}: cannot append the event — {e}",
@@ -794,12 +1170,13 @@ fn resume_seq(path: &Path) -> u64 {
 )]
 mod tests {
     use super::{
-        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, MIN_FILE_BYTES, Sink, Target,
-        current_path, dir_beneath_store, paths_newest_first, rotated_path,
+        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, Health, MIN_FILE_BYTES, Sink,
+        Target, current_path, dir_beneath_store, paths_newest_first, rotated_path,
     };
     use crate::event::{Event, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES};
-    use crate::level::Level;
+    use crate::level::{LEVELS, Level};
     use crate::record::Record;
+    use crate::value::Value;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -917,6 +1294,108 @@ mod tests {
         );
     }
 
+    /// **The clamp, against a clock that runs backwards.**
+    ///
+    /// `now_millis` reads the host clock and a test cannot move the host clock,
+    /// so [`Inner::stamp`] takes the reading as an argument and this hands it a
+    /// sequence no real clock would produce. Without the clamp the third call
+    /// returns 999 and the file holds a line older than the one before it,
+    /// which is exactly what ends `tail`'s `since` walk early.
+    #[test]
+    fn a_backward_clock_cannot_move_ms_backwards() {
+        let mut inner = Inner {
+            target: Box::new(NullTarget),
+            bytes: 0,
+            seq: 0,
+            last_at: 0,
+            buf: Vec::new(),
+        };
+
+        assert_eq!(inner.stamp(1_000), 1_000, "a fresh sink takes the clock");
+        assert_eq!(inner.stamp(1_001), 1_001, "forward is taken verbatim");
+        assert_eq!(
+            inner.stamp(999),
+            1_001,
+            "a clock stepped BACKWARDS by NTP is clamped to the last stamp, \
+             because `tail` ends its `since` walk at the first older record"
+        );
+        assert_eq!(inner.stamp(1_001), 1_001, "equal is not an inversion");
+        assert_eq!(inner.stamp(1_002), 1_002, "and it moves on afterwards");
+        assert_eq!(
+            inner.last_at, 1_002,
+            "the floor is the last value handed out, not the last one read"
+        );
+    }
+
+    /// **The floor a resumed sink starts from is zero, not the current clock.**
+    ///
+    /// A sink reopened on an existing file must not claim the events already in
+    /// it happened when it opened. Zero is below every real reading, so the
+    /// first event after a resume takes the clock unchanged.
+    #[test]
+    fn a_resumed_sink_does_not_stamp_the_present_onto_the_past() {
+        let dir = scratch("resume-stamp");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        let before = crate::clock::now_millis();
+        assert_eq!(
+            sink.emit(&Event::info("api.server", "first")),
+            Emitted::Written
+        );
+        let written = lines_of(&current_path(&dir));
+        assert_eq!(written.len(), 1);
+        assert!(
+            written[0].at_unix_millis >= before,
+            "the first event after open takes the real clock, not a floor: \
+             {} < {before}",
+            written[0].at_unix_millis
+        );
+    }
+
+    /// **Every line in the file is at least as new as the line before it, with
+    /// eight threads racing.**
+    ///
+    /// This is the property `tail`'s `since` filter depends on, asserted end to
+    /// end rather than on the helper alone. It is a race, so it cannot PROVE
+    /// the absence of an inversion — it is a regression net, and the
+    /// deterministic proof is `a_backward_clock_cannot_move_ms_backwards`.
+    /// Recorded that way rather than claimed as more than it is.
+    #[test]
+    fn ms_never_goes_backwards_in_the_file() {
+        let dir = scratch("ms-order");
+        let sink = std::sync::Arc::new(Sink::open(&Config::new(&dir)).expect("opens"));
+
+        let mut hands = Vec::new();
+        for t in 0..8u32 {
+            let mine = std::sync::Arc::clone(&sink);
+            hands.push(std::thread::spawn(move || {
+                for i in 0..40u32 {
+                    let _ = mine.emit(&Event::info("api.request", "served").with("t", t * 100 + i));
+                }
+            }));
+        }
+        for h in hands {
+            h.join().expect("no thread panicked");
+        }
+
+        let written = lines_of(&current_path(&dir));
+        assert_eq!(written.len(), 8 * 40, "every event landed");
+        for pair in written.windows(2) {
+            assert!(
+                pair[1].at_unix_millis >= pair[0].at_unix_millis,
+                "seq {} has ms {} but seq {} before it has ms {} — an inversion \
+                 like this ends `tail`'s `since` walk and returns nothing",
+                pair[1].seq,
+                pair[1].at_unix_millis,
+                pair[0].seq,
+                pair[0].at_unix_millis
+            );
+            assert!(
+                pair[1].seq > pair[0].seq,
+                "seq must be strictly increasing in file order"
+            );
+        }
+    }
+
     #[test]
     fn a_configuration_that_could_not_work_is_refused_by_name_rather_than_clamped() {
         let dir = scratch("refuse");
@@ -998,6 +1477,405 @@ mod tests {
         );
         assert!(sink.sync().is_ok());
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ONE SUBSYSTEM LOUD, THE REST QUIET — the whole reason per-target floors
+    /// exist.
+    ///
+    /// With a single global floor an operator has two settings: `Info`, which
+    /// hides the per-member detail that explains a failure, and `Debug`, which
+    /// also turns on every `api.request` line. On a 62,600-member backfill the
+    /// second is not a choice — it rolls the run's own beginning out of a
+    /// 64 MiB window. This is the test that "verbose for the pull, quiet for
+    /// everything else" is actually expressible.
+    #[test]
+    fn a_target_floor_lifts_one_subsystem_without_lifting_the_rest() {
+        let dir = scratch("targetlevel");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_min_level(Level::Info)
+                .with_target_level("pull", Level::Debug),
+        )
+        .expect("opens");
+
+        // The global floor is untouched and still reported as itself.
+        assert_eq!(sink.min_level(), Level::Info);
+
+        // The named subsystem, and everything BENEATH it, is now audible.
+        assert_eq!(sink.emit(&Event::debug("pull", "member")), Emitted::Written);
+        assert_eq!(
+            sink.emit(&Event::debug("pull.member", "landed")),
+            Emitted::Written,
+            "a dotted child inherits its parent's floor"
+        );
+        assert_eq!(
+            sink.emit(&Event::debug("pull.http.retry", "again")),
+            Emitted::Written,
+            "and so does a grandchild"
+        );
+
+        // EVERYTHING ELSE IS UNCHANGED. This is the half that makes the
+        // feature worth having: `pull=debug` must not also lift api.request.
+        assert_eq!(
+            sink.emit(&Event::debug("api.request", "served")),
+            Emitted::Filtered,
+            "an unnamed subsystem keeps the GLOBAL floor"
+        );
+        // AND THE PREFIX MATCH REQUIRES THE DOT. `pull` must never swallow
+        // `pullover` — a subsystem name that is a prefix of another one is an
+        // accident waiting to happen, and the same rule `tail::Query` uses.
+        assert_eq!(
+            sink.emit(&Event::debug("pullover", "not ours")),
+            Emitted::Filtered,
+            "a prefix without the dot is a DIFFERENT subsystem"
+        );
+
+        assert_eq!(
+            lines_of(&sink.path()).len(),
+            3,
+            "three written, two filtered"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **AN OVERRIDE CAN ALSO SILENCE, AND THAT IS THE HARDER DIRECTION.**
+    ///
+    /// Every other test here makes a subsystem LOUDER than the global floor.
+    /// The reverse — raise one subsystem above the floor to shut it up — is the
+    /// other half of what `Config::with_target_level`'s doc promises ("verbose
+    /// for the pull, quiet for everything else"), and until this test nothing
+    /// proved it worked.
+    ///
+    /// It is the harder direction because of the fast path. `fast_floor` is the
+    /// **minimum** across the global floor and every override, so when an
+    /// override is quieter than the floor the minimum is the floor itself, and
+    /// `fast_floor` admits the event. Nothing is filtered until `level_for` is
+    /// consulted afterwards. An `emit` that treated `fast_floor` as the whole
+    /// decision — or that only consulted `level_for` when an override was
+    /// lower — would pass every existing test in this file and write the very
+    /// lines the operator asked to be rid of.
+    ///
+    /// This is the real operator request: on a 62,600-member backfill, run the
+    /// pull at `debug` and silence the per-request log, which at `debug` is one
+    /// line per asset fetch and drowns the run.
+    #[test]
+    fn a_target_floor_can_raise_one_subsystem_above_the_global_floor_and_silence_it() {
+        let dir = scratch("silence");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_min_level(Level::Debug)
+                .with_target_level("api.request", Level::Error),
+        )
+        .expect("opens");
+
+        assert_eq!(sink.min_level(), Level::Debug, "the global floor is Debug");
+        assert_eq!(
+            sink.level_for("api.request"),
+            Level::Error,
+            "and the override is QUIETER than it"
+        );
+
+        // The global floor still governs everything unnamed.
+        assert_eq!(
+            sink.emit(&Event::debug("pull.member", "landed")),
+            Emitted::Written,
+            "the rest of the workspace is audible at Debug"
+        );
+
+        // THE SILENCED SUBSYSTEM. Each of these passes `fast_floor` (Debug) and
+        // must be stopped by `level_for` alone.
+        for level in [Level::Debug, Level::Info, Level::Warn] {
+            assert_eq!(
+                sink.emit(&Event::new(level, "api.request", "served")),
+                Emitted::Filtered,
+                "{level} from a subsystem floored at Error must not be written,                  even though the GLOBAL floor would have admitted it"
+            );
+        }
+        // ...and its children are silenced with it.
+        assert_eq!(
+            sink.emit(&Event::warn("api.request.slow", "took a while")),
+            Emitted::Filtered,
+            "a dotted child inherits the raised floor too"
+        );
+        // But the subsystem is not muted outright: at or above its own floor it
+        // still speaks, which is the difference between quieting and losing.
+        assert_eq!(
+            sink.emit(&Event::error("api.request", "500")),
+            Emitted::Written,
+            "an Error from the silenced subsystem still reaches the file"
+        );
+
+        let lines = lines_of(&sink.path());
+        assert_eq!(lines.len(), 2, "one pull line and one api.request error");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE TWO ROTATION BOUNDARIES, WHICH ARE BOTH `>` AND NOT `>=`.**
+    ///
+    /// The roll decision is `inner.bytes > 0 && inner.bytes + span >
+    /// max_file_bytes`. Mutation testing found BOTH comparisons surviving —
+    /// every existing rotation test drives the count well past the bound, so
+    /// nothing pinned either edge, and either could have been `>=` for the life
+    /// of the crate without a test noticing.
+    ///
+    /// They are different bugs and both are silent:
+    ///
+    /// * `bytes > 0` guards an EMPTY file. As `>=` a first event larger than
+    ///   the whole bound would roll a zero-byte file out of the way before
+    ///   writing — spending a rotation, and on a `keep_files` of 2 discarding
+    ///   one of the two files the operator has, to make room in a file that was
+    ///   already empty. The event does not fit either way; rolling first only
+    ///   destroys history.
+    /// * `bytes + span > max` decides an EXACT fit. As `>=` an event that fills
+    ///   the file precisely to its bound would roll first and leave the previous
+    ///   file one event short of its own ceiling, forever.
+    #[test]
+    fn a_first_event_larger_than_the_whole_bound_does_not_roll_an_empty_file() {
+        let dir = scratch("rollempty");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+
+        // A line genuinely larger than the whole bound. It has to be built from
+        // the CEILINGS rather than one long string: `MAX_STR_VALUE_BYTES` caps a
+        // field value at 128 bytes and `MAX_MESSAGE_BYTES` a message at 256, so
+        // a single padded field silently stops growing — which is exactly how
+        // the first version of this test passed while provoking nothing.
+        let pad = "x".repeat(MAX_STR_VALUE_BYTES);
+        let message = "m".repeat(MAX_MESSAGE_BYTES);
+        let mut event = Event::error("roll", &message);
+        for key in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] {
+            event = event.with(key, Value::Str(&pad));
+        }
+
+        assert!(sink.emit(&event).is_written());
+        let span = sink.health().current_bytes;
+        // THE PREMISE, ASSERTED. Without this the test can quietly become a
+        // test of nothing the moment a ceiling moves.
+        assert!(
+            span > MIN_FILE_BYTES,
+            "the fixture must exceed the {MIN_FILE_BYTES}-byte bound to provoke \
+             the guard at all; it is {span}"
+        );
+
+        assert_eq!(
+            sink.health().rotations,
+            0,
+            "an EMPTY file must not be rolled: there is nothing to make room \
+             for, and on keep_files=2 the roll would throw away half the history"
+        );
+        assert!(
+            !rotated_path(&dir, 1).exists(),
+            "and no rotated file was created"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other edge: an event that fits EXACTLY stays in the current file.
+    ///
+    /// The bound is DERIVED from a measured line rather than the line padded to
+    /// a chosen bound — the first attempt did the latter and could not work,
+    /// because `MAX_STR_VALUE_BYTES` truncates a field value at 128 bytes, so
+    /// the padding silently stopped growing. Measuring one line on a probe sink
+    /// and opening the real one at exactly twice that width makes the second
+    /// event land precisely on the bound, with no arithmetic about the line
+    /// format that this test has no business knowing.
+    #[test]
+    fn an_event_that_fills_the_file_exactly_to_its_bound_does_not_roll() {
+        // Five padded fields, so one line comfortably clears MIN_FILE_BYTES / 2
+        // and the derived bound is legal.
+        let pad = "y".repeat(100);
+        let event = || {
+            Event::info("roll", "exact")
+                .with("a", Value::Str(&pad))
+                .with("b", Value::Str(&pad))
+                .with("c", Value::Str(&pad))
+                .with("d", Value::Str(&pad))
+                .with("e", Value::Str(&pad))
+        };
+
+        let probe_dir = scratch("rollprobe");
+        let span = {
+            let probe = Sink::open(
+                &Config::new(&probe_dir)
+                    .with_max_file_bytes(MIN_FILE_BYTES * 64)
+                    .with_keep_files(2),
+            )
+            .expect("opens");
+            assert!(probe.emit(&event()).is_written());
+            probe.health().current_bytes
+        };
+        assert!(
+            span * 2 >= MIN_FILE_BYTES,
+            "the derived bound {} must clear the {MIN_FILE_BYTES}-byte floor",
+            span * 2
+        );
+
+        let dir = scratch("rollexact");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(span * 2)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+
+        assert!(sink.emit(&event()).is_written());
+        assert_eq!(sink.health().current_bytes, span, "one line, measured");
+
+        // THE EXACT FIT. `bytes + span == max`, which is not `> max`, so this
+        // must NOT roll. Under `>=` it would, and the previous file would be
+        // left one event short of its own ceiling forever.
+        assert!(sink.emit(&event()).is_written());
+        assert_eq!(
+            sink.health().current_bytes,
+            span * 2,
+            "the fixture is only meaningful if it lands EXACTLY on the bound"
+        );
+        assert_eq!(
+            sink.health().rotations,
+            0,
+            "a file filled exactly to its bound has not exceeded it"
+        );
+
+        // And the next event, which cannot fit, DOES roll — so this cannot be
+        // passed by a sink that has stopped rotating altogether.
+        assert!(sink.emit(&event()).is_written());
+        assert_eq!(sink.health().rotations, 1, "the next event rolls");
+
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&probe_dir);
+    }
+
+    /// THE LONGEST MATCHING PREFIX WINS, so floors compose instead of fighting.
+    #[test]
+    fn the_most_specific_target_floor_is_the_one_that_applies() {
+        let dir = scratch("longest");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_min_level(Level::Error)
+                .with_target_level("pull", Level::Debug)
+                .with_target_level("pull.chunk", Level::Trace),
+        )
+        .expect("opens");
+
+        assert_eq!(sink.level_for("pull.chunk"), Level::Trace, "longest wins");
+        assert_eq!(
+            sink.level_for("pull.member"),
+            Level::Debug,
+            "falls to `pull`"
+        );
+        assert_eq!(
+            sink.level_for("api.request"),
+            Level::Error,
+            "falls to global"
+        );
+
+        // The chunk path can go to Trace WITHOUT lifting the rest of the crate,
+        // which is the composition this rule buys.
+        assert_eq!(
+            sink.emit(&Event::trace("pull.chunk", "answered")),
+            Emitted::Written
+        );
+        assert_eq!(
+            sink.emit(&Event::trace("pull.member", "too quiet")),
+            Emitted::Filtered,
+            "`pull` is Debug, so a Trace beneath it is still filtered"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A SINK WITH NO OVERRIDES BEHAVES EXACTLY AS IT DID BEFORE THE FEATURE.
+    ///
+    /// The fast path is one relaxed atomic load against `min(global,
+    /// overrides)`. With no overrides that value IS the global floor, so this
+    /// pins that the feature costs nothing when unused — and that
+    /// `set_min_level` moves BOTH numbers. The first version of this feature
+    /// moved only the global one, so a runtime lowering was silently ignored
+    /// while `min_level()` reported the new value.
+    #[test]
+    fn no_overrides_is_the_old_behaviour_and_the_floor_still_moves_at_runtime() {
+        let dir = scratch("nooverride");
+        let sink = Sink::open(&Config::new(&dir).with_min_level(Level::Warn)).expect("opens");
+        assert_eq!(sink.level_for("anything"), Level::Warn);
+        assert_eq!(sink.emit(&Event::info("t", "quiet")), Emitted::Filtered);
+
+        sink.set_min_level(Level::Trace);
+        assert_eq!(sink.level_for("anything"), Level::Trace);
+        assert_eq!(
+            sink.emit(&Event::trace("t", "now kept")),
+            Emitted::Written,
+            "lowering the floor must lower the FAST floor with it"
+        );
+
+        // And with an override present, a global raise must not silence a
+        // subsystem pinned lower than it.
+        let dir2 = scratch("nooverride2");
+        let pinned = Sink::open(
+            &Config::new(&dir2)
+                .with_min_level(Level::Info)
+                .with_target_level("pull", Level::Trace),
+        )
+        .expect("opens");
+        pinned.set_min_level(Level::Error);
+        assert_eq!(pinned.level_for("pull"), Level::Trace, "the pin survives");
+        assert_eq!(
+            pinned.emit(&Event::trace("pull", "still heard")),
+            Emitted::Written
+        );
+        assert_eq!(
+            pinned.emit(&Event::warn("api", "below the new global")),
+            Emitted::Filtered
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+        let _ignored = std::fs::remove_dir_all(&dir2);
+    }
+
+    /// THE OVERRIDE LIST IS BOUNDED, WHICH IS WHAT KEEPS THE LOOKUP CONSTANT.
+    #[test]
+    fn target_floors_past_the_ceiling_are_dropped_rather_than_refused() {
+        let mut config = Config::new(Path::new("/tmp/never-opened"));
+        for n in 0..(crate::MAX_TARGET_LEVELS + 4) {
+            config = config.with_target_level(format!("t{n}"), Level::Trace);
+        }
+        assert_eq!(
+            config.target_levels.len(),
+            crate::MAX_TARGET_LEVELS,
+            "a bounded array is what makes resolving a target a constant, and \
+             an operator who writes nine gets the first eight rather than a \
+             refusal to start"
+        );
+    }
+
+    /// A REPEATED TARGET TAKES ITS LAST REGISTRATION.
+    ///
+    /// Found by CI gate 18 on its first run: `>` versus `>=` in `level_for`
+    /// survived the suite, which meant nothing decided what a repeated target
+    /// meant. `with_target_level` does not reject a repeat, so the case is
+    /// reachable and had to be chosen rather than left to the operator that
+    /// happened to be written first.
+    #[test]
+    fn a_repeated_target_takes_its_last_registration() {
+        let sink = Sink::open(
+            &Config::new(scratch("repeat"))
+                .with_min_level(Level::Error)
+                .with_target_level("pull", Level::Warn)
+                .with_target_level("pull", Level::Trace),
+        )
+        .expect("opens");
+        assert_eq!(
+            sink.level_for("pull"),
+            Level::Trace,
+            "the LAST registration wins — a config built in layers expects the \
+             last word to count"
+        );
+        assert_eq!(
+            sink.level_for("pull.member"),
+            Level::Trace,
+            "and its children inherit that same last word"
+        );
     }
 
     /// A QUIETER EVENT COSTS A LOAD AND A COMPARISON, AND NOTHING ELSE.
@@ -1289,17 +2167,30 @@ mod tests {
         assert_eq!(sink.health().rotation_failures, 0);
 
         brittle.refuse();
-        // Every one of these attempts a roll, and every roll now fails at
-        // `reopen`. The event is attempted anyway — losing it because a RENAME
-        // failed would be the worse of the two — and is Dropped here only
-        // because the append refuses as well.
+        // The FIRST of these attempts a roll and fails at `reopen`. The event is
+        // attempted anyway — losing it because a RENAME failed would be the
+        // worse of the two — and is Dropped here only because the append
+        // refuses as well.
+        //
+        // The four after it do NOT attempt a roll, and that is the fix rather
+        // than a regression. This assertion used to read `rotation_failures ==
+        // 5` — "counted, every time" — which was an accurate description of the
+        // defect: every event re-entered `roll`, and `roll` unlinks the oldest
+        // file and renames the rest UP before it reaches the step that failed.
+        // Re-attempting therefore shifted the whole retained set once per
+        // event. Measured against a rename that could not complete, at
+        // `keep_files = 5`: `[930, 927, 926, 926, 926]` became
+        // `[1862, 927, 926, 0, 0]` in two events.
+        //
+        // One failure, counted once, and then rotation stops for the life of
+        // the sink. See `Sink::rotation_broken`.
         for _ in 0..5 {
             assert_eq!(emit_fat(&sink), Emitted::Dropped);
         }
         let health = sink.health();
         assert_eq!(
-            health.rotation_failures, 5,
-            "a roll that could not happen is counted, every time: {health:?}"
+            health.rotation_failures, 1,
+            "a roll is attempted ONCE and never re-attempted: {health:?}"
         );
         assert_eq!(health.dropped, 5, "and every event is still accounted for");
         assert_eq!(health.rotations, 4, "no failed roll was counted as a roll");
@@ -1310,6 +2201,596 @@ mod tests {
                 .as_deref()
                 .is_some_and(|said| said.contains("cannot append the event")),
             "the most recent failure is the most recent one: {health:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A target that keeps the bytes it accepted, and can stop half-way.
+    ///
+    /// `write_all` reports an error without saying how much reached the file
+    /// first, which is exactly what a disk filling mid-line does. Neither
+    /// [`Brittle`] (which accepts nothing once refusing) nor a real filesystem
+    /// (which needs a full volume) can produce that state on demand.
+    #[derive(Debug, Default)]
+    struct HalfWay {
+        wrote: std::sync::Mutex<Vec<u8>>,
+        /// Bytes to accept on the next append before refusing. `None` accepts all.
+        cut_at: std::sync::Mutex<Option<usize>>,
+    }
+
+    impl Target for Arc<HalfWay> {
+        fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            let cut = self.cut_at.lock().map_or(None, |mut c| c.take());
+            let mut wrote = self
+                .wrote
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(n) = cut {
+                wrote.extend_from_slice(bytes.get(..n).unwrap_or(bytes));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::StorageFull,
+                    "no space left on device",
+                ));
+            }
+            wrote.extend_from_slice(bytes);
+            Ok(())
+        }
+        fn sync(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn reopen(&mut self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **A TORN WRITE DOES NOT SWALLOW THE NEXT EVENT.**
+    ///
+    /// `write_all` says it failed, never how many bytes landed first. A disk
+    /// that fills mid-line leaves a partial line with no newline, and the next
+    /// event — appended at that offset — FUSES onto it. One unparseable line,
+    /// and **two** events lost where `dropped` counts one.
+    ///
+    /// Measured on a real 2 MB volume driven to genuine ENOSPC before the fix:
+    /// 132 lines written, the file 14 bytes longer than the sink's own running
+    /// count, the last byte not a newline; after space was freed the reader
+    /// found 134 records for 135 writes and `dropped` still said 1.
+    ///
+    /// The fix is one byte — a newline after a failed append — so the fragment
+    /// becomes its own line the reader counts as `malformed`, and the next event
+    /// starts clean.
+    #[test]
+    fn a_torn_write_is_terminated_so_the_next_event_is_not_fused_onto_it() {
+        let dir = scratch("torn");
+        let half = Arc::new(HalfWay::default());
+        let sink =
+            Sink::with_target(&Config::new(&dir), Box::new(Arc::clone(&half))).expect("opens");
+
+        assert!(sink.emit(&Event::info("torn", "first")).is_written());
+
+        // The next append accepts 20 bytes and then refuses, mid-line.
+        *half.cut_at.lock().expect("the lock") = Some(20);
+        assert_eq!(
+            sink.emit(&Event::info("torn", "torn-away")),
+            Emitted::Dropped
+        );
+
+        assert!(sink.emit(&Event::info("torn", "after")).is_written());
+
+        // THE DOUBLE'S OTHER TWO METHODS. `Target` has three, and a double that
+        // implements one is not standing in for a target — `sync` and `reopen`
+        // are on the path a real sink takes and were never exercised here, so a
+        // change to either would have gone unnoticed through this fixture.
+        assert!(sink.sync().is_ok(), "a barrier through the double succeeds");
+        assert!(
+            sink.emit(&Event::info("torn", "after the sync"))
+                .is_written(),
+            "and the sink is still usable after one"
+        );
+
+        // AND A ROLL, which is the third method. A double that never reopens is
+        // not standing in for a target on the one path where rotation happens.
+        let rolled = Sink::with_target(
+            &Config::new(scratch("torn-roll"))
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+            Box::new(Arc::clone(&half)),
+        )
+        .expect("opens");
+        let wide = "z".repeat(MAX_STR_VALUE_BYTES);
+        let fat = "r".repeat(MAX_MESSAGE_BYTES);
+        for _ in 0..8 {
+            assert!(
+                rolled
+                    .emit(
+                        &Event::info("torn", &fat)
+                            .with("a", Value::Str(&wide))
+                            .with("b", Value::Str(&wide))
+                    )
+                    .is_written()
+            );
+        }
+        assert!(
+            rolled.health().rotations > 0,
+            "the double's `reopen` really was called: {:?}",
+            rolled.health()
+        );
+
+        let bytes = half.wrote.lock().expect("the lock").clone();
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+
+        // THE POINT: the survivor is on a line of its OWN. Without the fix the
+        // fragment and this event share one unparseable line.
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("\"after\"") && Record::decode(line.as_bytes()).is_ok()),
+            "the event after a torn write must be readable on its own line: {lines:#?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| Record::decode(line.as_bytes()).is_err()),
+            "and the fragment is still visible as one malformed line, not erased"
+        );
+        assert_eq!(sink.health().dropped, 1, "exactly one event was lost");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **EITHER HALF OF `is_loud` ALONE MAKES A SINK LOUD.**
+    ///
+    /// `is_loud` is `dropped > 0 || rotation_failures > 0`, and mutating the
+    /// SECOND comparison survived this crate's suite: every existing test that
+    /// had a rotation failure also had `dropped > 0`, so the first disjunct hid
+    /// the second. A sink that failed every roll and dropped nothing would have
+    /// reported itself healthy — and `/logs` renders exactly this flag.
+    ///
+    /// Each half is therefore asserted in isolation, which is the only shape
+    /// that can tell them apart.
+    #[test]
+    fn each_half_of_is_loud_is_load_bearing_on_its_own() {
+        let quiet = Health {
+            path: PathBuf::from("events.ndjson"),
+            written: 10,
+            dropped: 0,
+            rotations: 2,
+            rotation_failures: 0,
+            last_error: None,
+            current_bytes: 100,
+            next_seq: 11,
+        };
+        assert!(!quiet.is_loud(), "nothing wrong is not loud");
+
+        let dropped_only = Health {
+            dropped: 1,
+            ..quiet.clone()
+        };
+        assert!(
+            dropped_only.is_loud(),
+            "a lost event alone must be loud, with no rotation failure beside it"
+        );
+
+        let rolls_only = Health {
+            rotation_failures: 1,
+            ..quiet.clone()
+        };
+        assert!(
+            rolls_only.is_loud(),
+            "and a failed roll alone must be loud, with NOTHING dropped — the \
+             case every other test in this file accidentally masked"
+        );
+    }
+
+    /// **A REOPENED SINK RESUMES ITS BYTE COUNT, OR ITS BOUND IS A LIE.**
+    ///
+    /// `Sink::open` seeds the running count from `FileTarget::len()`. Replacing
+    /// that with `0` survived the whole suite: nothing asserted that a restart
+    /// picks up where it left off. Under the mutation the current file is
+    /// allowed to grow to its prior size PLUS the bound before rolling, so the
+    /// crate's headline claim — a fixed ceiling on its own footprint — fails
+    /// after the first restart, which is the ordinary case for a long-lived
+    /// operator process.
+    #[test]
+    fn a_reopened_sink_resumes_the_byte_count_of_the_file_it_found() {
+        let dir = scratch("resume-bytes");
+        let before = {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            for n in 0..5u32 {
+                assert!(sink.emit(&Event::info("t", "m").with("n", n)).is_written());
+            }
+            sink.health().current_bytes
+        };
+        assert!(before > 0, "the premise: something was written");
+
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert_eq!(
+            again.health().current_bytes,
+            before,
+            "a reopened sink must measure the file it found, not start from zero \
+             — otherwise the bound is only honoured until the first restart"
+        );
+        let on_disk = std::fs::metadata(current_path(&dir)).expect("stat").len();
+        assert_eq!(
+            again.health().current_bytes,
+            on_disk,
+            "and the number it resumes is the file's real length"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **ONLY "IT WAS NOT THERE" IS SUCCESS. EVERY OTHER ERROR IS A FAILURE.**
+    ///
+    /// `remove_if_present` and `rename_if_present` treat `NotFound` as success,
+    /// because the set is sparse until it has rolled `keep_files` times.
+    /// Replacing either guard with `true` — making EVERY error a success —
+    /// survived the whole suite. A roll that could not unlink or could not
+    /// rename would then return `Ok`, `rotation_failures` would stay 0, and
+    /// `health()` would report a healthy sink while the set grew past its bound
+    /// unchecked. That is the silent fallback `CLAUDE.md` §4 bans, in the one
+    /// place whose entire job is bounding this crate's footprint.
+    ///
+    /// A DIRECTORY where a log file belongs is the portable way to make each
+    /// call fail with something that is not `NotFound`: `remove_file` on a
+    /// directory refuses on every platform this builds for, and a rename onto a
+    /// non-empty directory refuses likewise. No `chflags`, no permission games,
+    /// no root.
+    #[test]
+    fn a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // (a) THE UNLINK. A directory sits where the oldest file belongs.
+        let dir = scratch("roll-unlink-refuses");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+        )
+        .expect("opens");
+        let oldest = rotated_path(&dir, 1);
+        std::fs::create_dir_all(oldest.join("not-empty")).expect("a directory in the way");
+
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let wide = "y".repeat(MAX_STR_VALUE_BYTES);
+        let emit_fat = |sink: &Sink| {
+            sink.emit(
+                &Event::info("t", &fat)
+                    .with("pad_a", wide.as_str())
+                    .with("pad_b", wide.as_str()),
+            )
+        };
+        for _ in 0..4 {
+            let _outcome = emit_fat(&sink);
+        }
+        let health = sink.health();
+        assert_eq!(
+            health.rotation_failures, 1,
+            "an unlink that refused for a reason other than absence is a FAILED \
+             roll, not a successful one: {health:?}"
+        );
+        assert!(
+            health.is_loud(),
+            "and the sink says so, because a page reads this flag"
+        );
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|said| said.contains("cannot delete the oldest file")),
+            "named by the step that refused: {health:?}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+
+        // (b) THE RENAME, ISOLATED FROM THE UNLINK.
+        //
+        // The oldest file is unlinked FIRST, so any fixture that makes the
+        // unlink fail never reaches a rename — the first version of this half
+        // put a directory in the way and passed for that wrong reason. The
+        // isolation is: a read-only directory with the oldest slot ABSENT, so
+        // `remove_if_present` returns `NotFound` -> `Ok` (which a read-only
+        // directory permits, because nothing is removed) and the rename is the
+        // first call that can refuse.
+        let dir = scratch("roll-rename-refuses");
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(3),
+        )
+        .expect("opens");
+        // EXACTLY one natural roll: the first event fits, the second does not,
+        // so `.1` becomes a real file and `.2` is never reached. A third event
+        // would roll again and occupy `.2`, which is what made the first
+        // version of this fixture fail its own premise.
+        for _ in 0..2 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        assert!(rotated_path(&dir, 1).exists(), "the premise: .1 is a file");
+        assert!(!rotated_path(&dir, 2).exists(), "and .2 is absent");
+        assert_eq!(sink.health().rotation_failures, 0, "nothing has failed yet");
+
+        let mut ro = std::fs::metadata(&dir).expect("the dir").permissions();
+        ro.set_mode(0o555);
+        std::fs::set_permissions(&dir, ro).expect("read-only");
+        for _ in 0..3 {
+            let _outcome = emit_fat(&sink);
+        }
+        let health = sink.health();
+        let mut rw = std::fs::metadata(&dir).expect("the dir").permissions();
+        rw.set_mode(0o755);
+        std::fs::set_permissions(&dir, rw).expect("restore");
+
+        assert_eq!(
+            health.rotation_failures, 1,
+            "a rename that refused is a FAILED roll: {health:?}"
+        );
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|said| said.contains("cannot roll")),
+            "and it is the RENAME that is named, not the unlink: {health:?}"
+        );
+        assert!(health.is_loud());
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **`is_written` IS FALSE FOR EVERY OUTCOME THAT IS NOT A WRITE.**
+    ///
+    /// Mutating it to `true` survived: every call site asserted the happy
+    /// answer, so a predicate that always said "written" passed the suite. It
+    /// is the value `emit`'s callers branch on and the one the emit-site proofs
+    /// in three other crates rest on, so "always true" would have made those
+    /// proofs vacuous too.
+    #[test]
+    fn is_written_is_true_only_for_a_write() {
+        assert!(Emitted::Written.is_written());
+        assert!(
+            !Emitted::Filtered.is_written(),
+            "a filtered event is not written"
+        );
+        assert!(
+            !Emitted::Dropped.is_written(),
+            "and a dropped one certainly is not"
+        );
+        assert!(
+            !Emitted::NotInstalled.is_written(),
+            "nor is one with nowhere to go"
+        );
+    }
+
+    /// **`resume_seq` READS FAR ENOUGH BACK FOR A LINE OF ANY LEGAL WIDTH.**
+    ///
+    /// Its block is `64 * 1024`, and its doc says the last complete line is
+    /// always inside it "unless one line is larger than the block, which the
+    /// ceilings in `crate::event` make impossible". Mutating `*` to `+` makes
+    /// the block **1088 bytes** — and the event ceilings permit a line far wider
+    /// than that: a 256-byte message plus twelve 128-byte values is over 1800.
+    /// The mutant survived because the reopen test wrote five short lines.
+    ///
+    /// A restart that cannot find a complete line resumes the sequence at ZERO,
+    /// so every number in the file repeats — which is the one thing a sequence
+    /// exists to prevent.
+    #[test]
+    fn a_restart_resumes_the_sequence_after_a_line_of_the_widest_legal_shape() {
+        let dir = scratch("resume-wide");
+        let wide = "w".repeat(MAX_STR_VALUE_BYTES);
+        let message = "m".repeat(MAX_MESSAGE_BYTES);
+        let span = {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            let mut event = Event::info("t", &message);
+            for key in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"] {
+                event = event.with(key, Value::Str(&wide));
+            }
+            assert!(sink.emit(&event).is_written());
+            sink.health().current_bytes
+        };
+        assert!(
+            span > 1088,
+            "the premise: one legal line is wider than the mutated block would \
+             be, or this proves nothing. It is {span} bytes"
+        );
+
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert_eq!(
+            again.health().next_seq,
+            2,
+            "the sequence resumes after the one line already on disk; a block \
+             too small to hold it would restart at 1 and repeat every number"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A FILTERED EVENT EVALUATES NOTHING — WHICH IS THE WHOLE POINT.**
+    ///
+    /// `Sink::emit` is a function, so a caller reaches it having already built
+    /// the entire `Event` and evaluated every argument. Measured in one binary
+    /// against `tracing`'s macro: a filtered event cost **6,750 ps with no
+    /// fields and 14,146 ps with three** — it DOUBLES with the field count,
+    /// while `tracing` stayed at 270 / 250 ps. That is O(call-site fields)
+    /// against `CLAUDE.md` §3 rule 4's O(1), and it is the only measured O(1)
+    /// violation on the write path. The bound this restores is the one
+    /// `telemetry::bench::a_filtered_event_touches_nothing_and_stays_flat`
+    /// (C-T-02) measures, and this test is what makes it true of a call site
+    /// with fields on it rather than only of a bare one.
+    ///
+    /// `emit_if!` closes it by gating on [`Sink::admits`] before the arguments
+    /// exist. This asserts the property by COUNTING SIDE EFFECTS rather than by
+    /// timing: a counter incremented inside an argument expression can only
+    /// move if that expression ran. Timing would measure this machine; a
+    /// counter measures the semantics.
+    #[test]
+    fn a_filtered_event_never_evaluates_its_arguments() {
+        let dir = scratch("emit-if");
+        let sink = Sink::open(&Config::new(&dir).with_min_level(Level::Error)).expect("opens");
+
+        let evaluated = std::sync::atomic::AtomicU64::new(0);
+        let count = || {
+            evaluated.fetch_add(1, Ordering::Relaxed);
+            7_u64
+        };
+
+        // ONE SHAPE, DRIVEN BOTH WAYS. Written as two separate `if`s, each
+        // would leave its other arm unexecuted forever — the branch that proves
+        // the gate lets an event THROUGH and the branch that proves it holds one
+        // back are the same code, and a test that only ever takes one of them is
+        // half a test.
+        let gated = |level: Level| -> Emitted {
+            if sink.admits(level, "t") {
+                sink.emit(&Event::new(level, "t", "m").with("n", Value::Uint(count())))
+            } else {
+                Emitted::Filtered
+            }
+        };
+
+        // BELOW the floor: the argument must not run.
+        assert!(
+            !sink.admits(Level::Debug, "t"),
+            "the premise: Debug is below Error"
+        );
+        let outcome = gated(Level::Debug);
+        assert_eq!(outcome, Emitted::Filtered);
+        assert_eq!(
+            evaluated.load(Ordering::Relaxed),
+            0,
+            "a filtered event evaluated an argument — the cost is then a \
+             function of how many the call site has, which is not O(1)"
+        );
+
+        // AT the floor: the SAME closure, and now the other arm runs.
+        assert!(sink.admits(Level::Error, "t"));
+        let outcome = gated(Level::Error);
+        assert_eq!(outcome, Emitted::Written);
+        assert_eq!(
+            evaluated.load(Ordering::Relaxed),
+            1,
+            "and a written event evaluates it exactly once — not zero, not twice"
+        );
+
+        // `admits` agrees with `emit` on every rung, which is what makes the
+        // gate safe to trust: a gate that disagreed would silently drop events.
+        for level in LEVELS {
+            let would = sink.admits(level, "t");
+            let did = sink.emit(&Event::new(level, "t", "agree")).is_written();
+            assert_eq!(
+                would, did,
+                "{level}: admits said {would} and emit did {did} — a gate that \
+                 disagrees with the thing it gates loses events"
+            );
+        }
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The run getter answers what the setter stored, including the clear.
+    ///
+    /// `Sink::run` was added with the stamp and had no test: the WRITE side was
+    /// proven end-to-end by `telemetry::tail::a_log_holding_several_runs_splits_back_into_them`,
+    /// and the read-back accessor an operator surface would call was never
+    /// exercised. Small, but it is the shape this crate has recorded three
+    /// times now — a thing built and reachable from nothing.
+    #[test]
+    fn the_run_getter_answers_what_was_stamped_and_what_was_cleared() {
+        let dir = scratch("run-getter");
+        let sink = Sink::open(&Config::new(&dir)).expect("opens");
+        assert_eq!(sink.run(), 0, "a fresh sink belongs to no run");
+
+        sink.set_run(1_786_197_791_427);
+        assert_eq!(sink.run(), 1_786_197_791_427);
+
+        sink.set_run(0);
+        assert_eq!(
+            sink.run(),
+            0,
+            "and zero clears it rather than being a run id"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE RETAINED WINDOW SURVIVES A ROLL THAT CANNOT COMPLETE.**
+    ///
+    /// This is the property `Sink::rotation_broken` exists for, and it is
+    /// asserted on the FILES rather than on a counter — a counter cannot tell
+    /// you that history is still there.
+    ///
+    /// `roll` unlinks the oldest file and renames the rest UP *before* it
+    /// reaches the step that fails, so every re-attempt shifts the whole set
+    /// again. With rotation left to re-attempt, `keep_files` further events
+    /// empty every retained file in turn. Measured before the fix, at
+    /// `keep_files = 5`: `[930, 927, 926, 926, 926]` to `[1862, 927, 926, 0, 0]`
+    /// in two events.
+    ///
+    /// **WHICH ASSERTION DISCRIMINATES, stated so this is not read as proving
+    /// more than it does.** On a read-only directory the *first* step — the
+    /// unlink — already refuses, so the shift never begins and the file sizes
+    /// hold even without the fix. The assertion that fails without it is the
+    /// re-attempt count: 20 rather than 1. That count is the mechanism, and the
+    /// sizes are the consequence — they are asserted anyway so that a future
+    /// fixture in which the chain fails half-way (a single unrenameable file,
+    /// which needs `chflags` and is not portable) cannot regress silently.
+    #[test]
+    fn a_roll_that_cannot_complete_does_not_empty_the_history_one_file_per_event() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("roll-keeps-history");
+        // A REAL sink on REAL files: the property is about bytes that survive on
+        // disk, and `Brittle` is an in-memory target with no files to keep.
+        let sink = Sink::open(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(4),
+        )
+        .expect("opens");
+
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let wide = "y".repeat(MAX_STR_VALUE_BYTES);
+        let emit_fat = |sink: &Sink| {
+            sink.emit(
+                &Event::info("t", &fat)
+                    .with("pad_a", wide.as_str())
+                    .with("pad_b", wide.as_str()),
+            )
+        };
+
+        // Fill the set so there is a history to lose.
+        for _ in 0..8 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        let sizes = |dir: &Path| -> Vec<u64> {
+            (1..4)
+                .map(|n| std::fs::metadata(rotated_path(dir, n)).map_or(0, |meta| meta.len()))
+                .collect()
+        };
+        let kept = sizes(&dir);
+        assert!(
+            kept.iter().all(|&len| len > 0),
+            "the premise: the window holds events before anything fails: {kept:?}"
+        );
+
+        // A READ-ONLY DIRECTORY: the rename and the unlink both refuse, which is
+        // the real condition an operator hits on a mount gone read-only.
+        let mut ro = std::fs::metadata(&dir).expect("the dir").permissions();
+        ro.set_mode(0o555);
+        std::fs::set_permissions(&dir, ro).expect("make it read-only");
+
+        for _ in 0..20 {
+            let _outcome = emit_fat(&sink);
+        }
+
+        let after = sizes(&dir);
+
+        // Restore BEFORE asserting, so a failure still leaves a removable tree.
+        let mut rw = std::fs::metadata(&dir).expect("the dir").permissions();
+        rw.set_mode(0o755);
+        std::fs::set_permissions(&dir, rw).expect("restore");
+
+        assert_eq!(
+            after, kept,
+            "twenty events after the first failed roll, and every retained file \
+             is byte-for-byte the size it was. Before the fix these emptied one \
+             per event: {kept:?} -> {after:?}"
+        );
+        assert_eq!(
+            sink.health().rotation_failures,
+            1,
+            "and the failure is reported once, not twenty times"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
     }
@@ -1413,6 +2894,109 @@ mod tests {
         std::fs::write(current_path(&dir), b"not this format at all\n").expect("clobbered");
         let third = Sink::open(&Config::new(&dir)).expect("re-opens");
         assert_eq!(third.health().next_seq, 1);
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE TWO FLOORS ARE ONE WORD, SO NOTHING CAN OBSERVE THEM CROSSED.**
+    ///
+    /// `set_min_level` used to store the global floor into one atomic and then
+    /// compute and store the fast floor into another. Two callers racing
+    /// interleave those four stores, and one ordering leaves the pair
+    /// describing two *different* floors until somebody sets the level again.
+    /// A barrier-synchronised probe on this tree — two setters, one observer,
+    /// and reads taken only at the instant no thread was writing — saw it at
+    /// rounds 2023, 2597, 5275 and 6269 of four million, in both directions:
+    /// `min_level()` saying `error` while a `trace` event was still admitted,
+    /// and `min_level()` saying `trace` while `trace` was filtered. Rare, real,
+    /// and silent: an operator who lowers the floor mid-backfill gets no debug
+    /// lines and a `min_level()` that agrees with what they asked for.
+    ///
+    /// **THIS TEST IS DETERMINISTIC, AND THAT IS THE POINT.** A loop racing two
+    /// threads fails only sometimes — 74 rounds one run and 17,715 the next —
+    /// so it reports the scheduler rather than the code, and a suite that
+    /// sometimes goes red for no change is a suite nobody reads. The property
+    /// that holds after the fix is structural rather than statistical: the only
+    /// mutator is ONE store of ONE word, so the only states any reader can
+    /// observe are the words `set_min_level` wrote, and this asserts every one
+    /// of those words is consistent — high byte the global floor, low byte
+    /// `min(global, every override)` — for all five levels, with an override
+    /// below the floor and one above it, plus the word the constructor wrote.
+    ///
+    /// It reads `floors` directly, as ONE load, rather than through
+    /// `min_level()` and `admits()`, which are two loads at two instants and
+    /// could only ever be compared by racing them. **Splitting the pair back
+    /// into two atomics does not make this test flaky — it stops it
+    /// compiling**, which is the loudest failure a regression can be given.
+    #[test]
+    fn the_two_floors_live_in_one_word_and_are_never_observed_crossed() {
+        let dir = scratch("floors-one-word");
+        // One override BELOW the global floor and one ABOVE it, so the fast
+        // floor is neither trivially the global floor nor trivially an
+        // override: it is `min(global, Debug)` at every rung.
+        let sink = Sink::with_target(
+            &Config::new(&dir)
+                .with_min_level(Level::Info)
+                .with_target_level("pull", Level::Debug)
+                .with_target_level("api.request", Level::Error),
+            Box::new(Arc::new(Brittle::default())),
+        )
+        .expect("opens");
+
+        // THE CONSTRUCTOR IS THE OTHER WRITER OF THE PAIR, and it is checked
+        // before anything has been set: a sink born crossed is the same defect
+        // arriving a different way.
+        let [global, fast] = sink.floors.load(Ordering::Relaxed).to_be_bytes();
+        assert_eq!(Level::of_rank(global), Some(Level::Info));
+        assert_eq!(
+            Level::of_rank(fast),
+            Some(Level::Debug),
+            "the fast floor a sink is born with is min(Info, Debug, Error)"
+        );
+
+        for level in LEVELS {
+            sink.set_min_level(level);
+            // ONE LOAD. Whatever a racing reader sees, it sees one of these.
+            let [global, fast] = sink.floors.load(Ordering::Relaxed).to_be_bytes();
+
+            // The expectation is derived through `Ord` rather than through
+            // `rank`, so this is not the implementation checking itself: the
+            // two agree only because `level.rs` pins that they do.
+            let expected = [level, Level::Debug, Level::Error]
+                .into_iter()
+                .min()
+                .expect("three levels");
+
+            assert_eq!(
+                Level::of_rank(global),
+                Some(level),
+                "the high byte is the global floor that was just set"
+            );
+            assert_eq!(
+                Level::of_rank(fast),
+                Some(expected),
+                "and the low byte, in the SAME word, is min(global, overrides) \
+                 — a pair that disagreed is the defect this packing removes"
+            );
+            assert_eq!(
+                sink.min_level(),
+                level,
+                "and what the sink reports is that same high byte"
+            );
+            // TIED TO BEHAVIOUR, so this is not a test of a representation.
+            // A subsystem pinned at Debug stays audible however high the
+            // global floor goes — which needs the low byte to have moved with
+            // the high one, in this store, not the next.
+            assert!(
+                sink.admits(Level::Debug, "pull"),
+                "a subsystem pinned at Debug is still admitted with the global \
+                 floor at {level}"
+            );
+            assert_eq!(
+                sink.admits(Level::Debug, "unnamed"),
+                Level::Debug.at_least(level),
+                "while an unnamed subsystem is governed by the global floor"
+            );
+        }
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 

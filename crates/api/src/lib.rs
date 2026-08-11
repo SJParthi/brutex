@@ -39,6 +39,7 @@ pub mod calendar;
 pub mod catalog;
 pub mod census;
 pub mod ingest;
+pub mod logs;
 pub mod master;
 pub mod merge;
 pub mod render;
@@ -49,3 +50,10 @@ pub mod server;
 /// fixtures, which is a property of the test suite and not of the server.
 #[cfg(test)]
 pub(crate) mod scratch;
+
+/// The one telemetry sink this test binary installs, and the proof that every
+/// reachable `telemetry::emit` site in this crate reaches a file. Compiled only
+/// under `cfg(test)` — `telemetry::install` is a process singleton, so the sink
+/// has to have exactly one owner and this module is it.
+#[cfg(test)]
+pub(crate) mod emitted;

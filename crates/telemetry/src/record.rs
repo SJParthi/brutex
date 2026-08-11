@@ -29,6 +29,14 @@ pub struct Record {
     /// Its position in the stream, counted from the first event this sink
     /// wrote to the file it is currently appending to.
     pub seq: u64,
+    /// The run this event belongs to, or zero when it belongs to none.
+    ///
+    /// **The key a reader groups by.** A log file spanning three backfills is
+    /// three interleaved stories, and without this it is one unreadable one.
+    /// Zero for an event outside any run — a served request, a startup line —
+    /// because the writer omits the key entirely rather than writing a zero a
+    /// reader would have to interpret.
+    pub run: u64,
     /// When it was written, in milliseconds since the Unix epoch.
     pub at_unix_millis: i64,
     /// The same instant as UTC text, as the line carried it.
@@ -99,6 +107,7 @@ impl Record {
         scan.expect(b'{')?;
 
         let mut seq: Option<u64> = None;
+        let mut run: u64 = 0;
         let mut millis: Option<i64> = None;
         let mut at_utc = String::new();
         let mut level: Option<Level> = None;
@@ -120,6 +129,11 @@ impl Record {
                 scan.skip_space();
                 match key.as_str() {
                     "seq" => seq = Some(unsigned(&mut scan)?),
+                    // ABSENT IS ZERO, NOT A REFUSAL. Every line this crate has
+                    // ever written before today lacks the key, and a decoder
+                    // that refused them would make the whole existing log
+                    // unreadable the moment the writer changed.
+                    "run" => run = unsigned(&mut scan)?,
                     "ms" => millis = Some(signed(&mut scan)?),
                     "ts" => at_utc = scan.string()?,
                     "level" => {
@@ -161,6 +175,7 @@ impl Record {
         }
         Ok(Self {
             seq: seq.ok_or(LineFault::MissingKey { key: "seq" })?,
+            run,
             at_unix_millis: millis.ok_or(LineFault::MissingKey { key: "ms" })?,
             at_utc,
             level: level.ok_or(LineFault::MissingKey { key: "level" })?,
@@ -301,7 +316,7 @@ mod tests {
 
     fn round_trip(event: &Event<'_>) -> Record {
         let mut out = Vec::new();
-        line(&mut out, 9, 1_786_197_791_427, event);
+        line(&mut out, 9, 1_786_197_791_427, 0, event);
         Record::decode(&out).unwrap_or_else(|e| panic!("its own bytes did not decode: {e}"))
     }
 
@@ -596,5 +611,63 @@ mod tests {
             !back.matches(&Event::info("t", "m").with("a", 2u32)),
             "value"
         );
+    }
+
+    /// **THE DECODER'S REFUSAL ARMS, AND THE LITERAL ITS OWN WRITER NEVER EMITS.**
+    ///
+    /// Three lines of `Record::decode` had never run. Each is a refusal path,
+    /// and a decoder's whole contract is what it refuses: `crates/telemetry`
+    /// reads files it did not write — truncated by a full disk, cut by a
+    /// copy, hand-edited, or produced by an older build — so the arms that say
+    /// "this line is not whole" are the ones that matter when the file is
+    /// evidence.
+    ///
+    /// The `false` literal is unreachable from THIS crate's writer by design:
+    /// `encode::line` only emits `"cut":true`, and omits the key otherwise. A
+    /// reader that could not decode `"cut":false` would still be wrong, because
+    /// the reader's job is to accept what the format permits rather than only
+    /// what today's writer happens to produce.
+    #[test]
+    fn a_truncated_line_is_refused_and_an_explicit_false_still_decodes() {
+        // TRUNCATED WHERE A SEPARATOR MUST BE. The line ends immediately after a
+        // complete field, so neither `,` nor `}` follows.
+        let head =
+            br#"{"seq":1,"ts":"x","ms":2,"level":"info","target":"t","msg":"m","fields":{"a":1"#;
+        assert_eq!(
+            Record::decode(head),
+            Err(LineFault::Truncated),
+            "a line that stops after a field is TRUNCATED, not merely unexpected \
+             — the distinction is the reader's only way to tell a cut file from \
+             a corrupt one"
+        );
+
+        // TRUNCATED WHERE A VALUE MUST BE. The key and colon are there and the
+        // scalar is not.
+        let no_value =
+            br#"{"seq":1,"ts":"x","ms":2,"level":"info","target":"t","msg":"m","fields":{"a":"#;
+        assert_eq!(
+            Record::decode(no_value),
+            Err(LineFault::Truncated),
+            "and so is one that stops where a value must start"
+        );
+
+        // A BYTE THAT IS SIMPLY WRONG is a different fault, and must not be
+        // reported as truncation — otherwise every corrupt line reads as a cut
+        // one and an operator looks for the wrong cause.
+        let junk =
+            br#"{"seq":1,"ts":"x","ms":2,"level":"info","target":"t","msg":"m","fields":{"a":1@}}"#;
+        assert!(
+            matches!(Record::decode(junk), Err(LineFault::Unexpected { .. })),
+            "a stray byte is Unexpected, not Truncated"
+        );
+
+        // `"cut":false` — legal in the format, never written by this crate.
+        let explicit_false = br#"{"seq":9,"ts":"x","ms":2,"level":"info","target":"t","msg":"m","cut":false,"fields":{}}"#;
+        let decoded = Record::decode(explicit_false).expect("an explicit false is legal");
+        assert!(
+            !decoded.cut,
+            "and it decodes to false rather than being refused or read as true"
+        );
+        assert_eq!(decoded.seq, 9, "the rest of the line survives it");
     }
 }

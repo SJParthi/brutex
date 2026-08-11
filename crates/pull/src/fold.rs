@@ -115,6 +115,13 @@ impl Bucket {
 /// # Ok::<(), pull::fold::FoldError>(())
 /// ```
 pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
+    // THE GRID'S ORIGIN IS THE IST DAY, NOT THE UTC DAY.
+    //
+    // A CONSTANT AND NOT A PARAMETER, for the reason `CLAUDE.md` §6 gives for
+    // the absent depth parameter: a value that can be set can be set wrongly,
+    // and silently. §1 fixes the engine surface at NSE, so there is exactly one
+    // trading day this store addresses and it is the IST one.
+    const IST_ANCHOR_MICROS: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
     let width = i64::from(bucket.secs()) * 1_000_000;
     let mut out: Vec<Bar> = Vec::new();
     let mut open_at: Option<i64> = None;
@@ -135,7 +142,42 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         // The bucket a snapshot belongs to is arithmetic, not a search:
         // `div_euclid` rather than `/` so a pre-1970 instant floors downward
         // instead of toward zero, which would put it in the bucket after its own.
-        let start = snap.ts_micros.div_euclid(width) * width;
+        //
+        // THE ANCHOR IS WHAT THIS LINE WAS MISSING. Bucketing the bare epoch
+        // puts every edge at UTC midnight, and the day this engine stores is an
+        // IST day: `IST_OFFSET_SECS` is 19,800 and `86_400 % 19_800 != 0`, so a
+        // day-wide edge falls 05:30 INSIDE the session it is meant to contain.
+        //
+        // A vendor stamps a daily candle at 00:00 IST, which is 18:30 UTC the
+        // day BEFORE. Floored to the UTC grid it was re-stamped at 00:00 UTC of
+        // that earlier day, so EVERY DAILY BAR MOVED BACK ONE CALENDAR DAY.
+        // Measured on the store this produced: 86 records, 20 of them stamped
+        // on a SUNDAY and none on a Friday, on an exchange that trades Monday
+        // to Friday. `crate::ingest`'s month guard caught it only where the
+        // shift crossed a month boundary — "bars span 2025-12 to 2026-01" — and
+        // stored a wrong answer SILENTLY everywhere else, which is exactly the
+        // W1 class `crate::fetch` names and says is undetectable once written.
+        //
+        // The minute rung is unchanged BY ARITHMETIC, not by luck: 60 divides
+        // 19,800, so `(t + A).div_euclid(60M) * 60M - A` reduces exactly to
+        // `t.div_euclid(60M) * 60M`. Only a width that does not divide the
+        // offset moves, and `DAY_1` is the only such rung in `Timeframe::KNOWN`.
+        //
+        // Checked at both ends. Saturating here would silently file a bar in
+        // the wrong bucket rather than refuse, which `CLAUDE.md` §4 bans.
+        let shifted =
+            snap.ts_micros
+                .checked_add(IST_ANCHOR_MICROS)
+                .ok_or(FoldError::AnchorOverflow {
+                    ts_micros: snap.ts_micros,
+                })?;
+        let start = shifted
+            .div_euclid(width)
+            .checked_mul(width)
+            .and_then(|edge| edge.checked_sub(IST_ANCHOR_MICROS))
+            .ok_or(FoldError::AnchorOverflow {
+                ts_micros: snap.ts_micros,
+            })?;
 
         if open_at == Some(start) {
             let Some(bar) = out.last_mut() else {
@@ -210,6 +252,19 @@ pub enum FoldError {
         /// The width the input bars already carry, in seconds.
         source_secs: u32,
     },
+    /// A timestamp so near an `i64` end that shifting it onto the IST grid
+    /// leaves the range.
+    ///
+    /// Refused rather than saturated: a saturated instant lands in a bucket
+    /// that is not its own, which files a bar under the wrong month and is the
+    /// silent wrong answer `CLAUDE.md` §4 bans. Unreachable from any real
+    /// vendor row — `i64` microseconds span ±292,000 years — and stated anyway,
+    /// because the arm that says "this cannot happen" is a refusal and not a
+    /// wrap.
+    AnchorOverflow {
+        /// The snapshot's own stamp, before the shift.
+        ts_micros: i64,
+    },
     /// A snapshot's timestamp precedes the one before it.
     ///
     /// Refused rather than sorted. Rows sharing a second carry no tiebreaker,
@@ -244,6 +299,14 @@ impl core::fmt::Display for FoldError {
                  made. Measured cost of allowing it: 20.4% of bars wrong at \
                  90s, worst error Rs 1,147.90. Fold from the raw snapshots \
                  instead, where any width is exact."
+            ),
+            Self::AnchorOverflow { ts_micros } => write!(
+                f,
+                "the snapshot stamped {ts_micros} cannot be shifted onto the \
+                 IST day grid without leaving the range an i64 can hold. \
+                 Refused rather than saturated: a saturated instant lands in a \
+                 bucket that is not its own, which files the bar under the \
+                 wrong month."
             ),
             Self::OutOfOrder {
                 at,

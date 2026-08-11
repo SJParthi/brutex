@@ -772,6 +772,11 @@ fn nav(current: &str) -> String {
         ("/pull", "Ingest", true),
         ("/audit", "Audit", true),
         ("/store", "Store", true),
+        // THE LOG, REACHABLE WITHOUT KNOWING THE URL. `crate::logs` existed
+        // before this line did, which made it a page only somebody who had
+        // read the route table could find — and the operator reaching for it
+        // is by definition the one who has just had a run fail.
+        ("/logs", "Logs", true),
         ("/runs", "Runs", false),
     ] {
         let on = if href == current { " on" } else { "" };
@@ -2283,9 +2288,14 @@ fn coverage_table(view: &StoreView<'_>) -> String {
         let cls = if row.is_held() { "swept" } else { "void" };
         let _ = write!(
             out,
-            "<tr class=\"{cls}\"><td>{}</td><td>{}</td><td>1m</td>",
+            // THE ROW'S OWN RUNG. This column exists to answer "at what bar
+            // length?" and answered "1m" for every row, including the 1day
+            // months that are the only thing on disk. `row.series.timeframe` is
+            // three lines away and is what the directory is named from.
+            "<tr class=\"{cls}\"><td>{}</td><td>{}</td><td>{}</td>",
             escape(&row.series.to_string()),
             escape(&row.month.to_string()),
+            escape(row.series.timeframe.as_str()),
         );
         // EACH COUNT LINKS TO THE BARS IT COUNTS.
         //
@@ -2306,12 +2316,24 @@ fn coverage_table(view: &StoreView<'_>) -> String {
             let cell = count_cell(n);
             let inner = if n.is_some_and(|rows| rows > 0) {
                 format!(
+                    // THE WHOLE KEY, INCLUDING THE RUNG.
+                    //
+                    // A bar file is addressed by (vendor, exchange, segment,
+                    // symbol, TIMEFRAME, month) and this link carried five of
+                    // the six. The sixth defaulted to `1min` at
+                    // `server::timeframe_param`, so the one clickable route to
+                    // the prices page asked for a rung the store does not hold
+                    // — for 100% of the data on disk, which is `1day`. The
+                    // comment on this very link already said "the link carries
+                    // the WHOLE key … defaulting the rest is how it served the
+                    // wrong month"; the rung was the part it did not carry.
                     "<a href=\"/bars?vendor={}&amp;exchange={}&amp;segment={}\
-                     &amp;symbol={}&amp;month={}\">{cell}</a>",
+                     &amp;symbol={}&amp;timeframe={}&amp;month={}\">{cell}</a>",
                     query_value(vendor.as_str()),
                     query_value(row.series.exchange.as_str()),
                     query_value(row.series.segment.as_str()),
                     query_value(row.series.symbol.as_str()),
+                    query_value(row.series.timeframe.as_str()),
                     query_value(&row.month.to_string()),
                 )
             } else {
@@ -2430,6 +2452,13 @@ pub struct BarsView<'a> {
     pub page: usize,
     /// The last page with rows on it.
     pub last_page: usize,
+    /// The rung these bars are read at, as the wire spells it.
+    ///
+    /// Carried so the pager can put it back on every Next and Prev link. The
+    /// `base` below rebuilt the query string from four params and dropped it,
+    /// so a hand-typed `?timeframe=1day` reverted to the 1min default on the
+    /// first page turn — and 404'd, because the store holds no such file.
+    pub timeframe: &'a str,
     /// What went wrong, when something did.
     pub trouble: Option<&'a str>,
     /// Where the file was looked for, so an absence is actionable.
@@ -2451,10 +2480,15 @@ pub fn bars_page(view: &BarsView<'_>) -> String {
     let ok = view.trouble.is_none() && !view.rows.is_empty();
     body.push_str(&hero(
         &format!(
-            "{} · {} · {} · 1 MINUTE",
+            // THE RUNG THIS PAGE WAS READ AT. `BarsView` carries it and the
+            // pager below already uses it; this heading did not, so the one
+            // page whose whole purpose is checkable ground truth mislabelled
+            // its own bar length.
+            "{} · {} · {} · {}",
             escape(view.vendor).to_uppercase(),
             escape(view.segment),
-            escape(view.month)
+            escape(view.month),
+            escape(view.timeframe).to_uppercase()
         ),
         &format!("{}<br>as it is stored.", escape(view.symbol)),
         "Every row below is a record read out of the bar file by index — one          seek and one fixed-length read each, so the last page costs what the          first does. Prices are paisa integers all the way here and are split          into rupees rather than divided, because a float has no business          anywhere near a price.",
@@ -2496,11 +2530,15 @@ pub fn bars_page(view: &BarsView<'_>) -> String {
     // `query_value`, NOT `escape` — see `query_value`'s own docs. `escape`
     // produced `?symbol=GVT&amp;D`, and `server::param` splits on `&`, so a
     // symbol with an ampersand in it became a different, shorter symbol.
+    // THE WHOLE KEY ON EVERY PAGE TURN. A bar file is addressed by six parts
+    // and this rebuilt four of them; the rung fell back to the 1min default,
+    // which for a 1day store is a path that does not exist.
     let base = format!(
-        "/bars?symbol={}&segment={}&vendor={}&month={}",
+        "/bars?symbol={}&segment={}&vendor={}&timeframe={}&month={}",
         query_value(view.symbol),
         query_value(view.segment),
         query_value(view.vendor),
+        query_value(view.timeframe),
         query_value(view.month)
     );
     body.push_str(&pager(&base, view.page, view.last_page));
@@ -4505,6 +4543,10 @@ mod tests {
                     total: 1,
                     page: 0,
                     last_page: 1,
+                    // THE HOSTILE STRING HERE TOO. This case feeds every field
+                    // the same escaping probe, and a rung that travels into a
+                    // pager URL is a field like any other.
+                    timeframe: text,
                     trouble: Some(text),
                     store_root: text,
                 }),
@@ -4832,8 +4874,22 @@ mod store_links_tests {
         // The held count links, and the link carries the WHOLE key: /bars can
         // default nothing but the exchange and the segment, and defaulting the
         // rest is how it served the wrong month.
+        //
+        // THE RUNG IS PART OF THAT KEY, and this assertion did not require it.
+        // `/bars` defaults an absent `timeframe` to 1min, so the link opened a
+        // path the store need not hold — and with a 1day backfill on disk that
+        // is every instrument, 404 on the only clickable route to the prices
+        // page. The test was green throughout, because it pinned five sixths of
+        // an address and called it whole.
         let href = "/bars?vendor=groww&amp;exchange=NSE&amp;segment=INDEX\
-                    &amp;symbol=NIFTY&amp;month=2026-07";
+                    &amp;symbol=NIFTY&amp;timeframe=1min&amp;month=2026-07";
+        // A LITERAL PASSES THE ASSERTION ABOVE. The fixture is a MINUTE_1
+        // series, so `query_value("1min")` and `query_value(series.timeframe)`
+        // render identically — and an auditor's mutation to the literal sat in
+        // this tree with the whole suite green. The daily case below is what
+        // distinguishes the two, and it is the only reason this test proves
+        // anything at all.
+        let _ = &href;
         let href: String = href.split_whitespace().collect();
         assert!(html.contains(&href), "expected {href} in {html}");
 
@@ -4842,6 +4898,49 @@ mod store_links_tests {
             html.matches("/bars?vendor=").count(),
             1,
             "an absent month must not be linked: {html}"
+        );
+
+        // THE DAILY CASE, WHICH IS THE ONLY ONE THAT PROVES ANYTHING.
+        //
+        // Everything above is a MINUTE_1 fixture, so a hardcoded `"1min"` in
+        // the link renders identically to the real field — and a mutation to
+        // exactly that literal survived a full green suite in this tree. The
+        // same page built from a DAY_1 series must say `1day`, in the link and
+        // in the Timeframe column, or neither is reading the row.
+        let daily = crate::census::Series {
+            timeframe: store::path::Timeframe::DAY_1,
+            ..series
+        };
+        let rows = [Coverage {
+            series: daily,
+            month: store::path::YearMonth::new(2026, 7).expect("valid"),
+            rows: vec![(Vendor::Groww, Some(21))],
+        }];
+        let html = store_page(&StoreView {
+            feed: Vendor::Groww,
+            today: pull::session::Day::new(2026, 8, 7).expect("valid"),
+            censuses: &[],
+            rows: &rows,
+            page: 0,
+            last_page: 0,
+            total: 1,
+            notes: &[],
+            filter: None,
+            held: 1,
+            held_only: false,
+        });
+        assert!(
+            html.contains("timeframe=1day"),
+            "a daily row must link to the daily rung, not the minute default \
+             the store has no file for: {html}"
+        );
+        assert!(
+            !html.contains("timeframe=1min"),
+            "and must not offer a rung this row was never stored at: {html}"
+        );
+        assert!(
+            html.contains("<td>1day</td>"),
+            "the Timeframe column must state the row's own rung: {html}"
         );
     }
 }

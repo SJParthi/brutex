@@ -461,3 +461,275 @@ impl fmt::Display for ContractError {
 }
 
 impl std::error::Error for ContractError {}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{ColumnType, ContractError, LakeError};
+    use brutex_core::error::PriceError;
+
+    /// The faults that mean the FILE cannot be read at all, paired with a
+    /// substring only a correct rendering of each can contain.
+    fn file_level_cases() -> Vec<(LakeError, &'static str)> {
+        vec![
+            (
+                LakeError::Io {
+                    reason: "permission denied".to_owned(),
+                },
+                "permission denied",
+            ),
+            (
+                LakeError::NotParquet {
+                    head: [0xFF, 0xD8, 0xFF, 0xE0],
+                    tail: [1, 2, 3, 4],
+                },
+                "ff",
+            ),
+            (
+                LakeError::Truncated {
+                    len: 7,
+                    minimum: 12,
+                },
+                "7 bytes",
+            ),
+            (
+                LakeError::FooterUnreadable {
+                    reason: "thrift ran out".to_owned(),
+                },
+                "thrift ran out",
+            ),
+            (LakeError::NoSuchRowGroup { asked: 9, held: 2 }, "9"),
+            (
+                LakeError::ImpossibleLength {
+                    what: "num_rows",
+                    value: -3,
+                },
+                "num_rows",
+            ),
+        ]
+    }
+
+    /// The faults that mean the file reads but holds something this crate
+    /// refuses — a wrong column, a wrong type, a value it cannot represent.
+    fn content_level_cases() -> Vec<(LakeError, &'static str)> {
+        vec![
+            (
+                LakeError::UnknownCodec {
+                    column: "delta".to_owned(),
+                    codec: "BROTLI".to_owned(),
+                },
+                "BROTLI",
+            ),
+            (LakeError::MissingColumn { name: "vega" }, "vega"),
+            (
+                LakeError::ColumnTypeMismatch {
+                    name: "greeks_provenance_id",
+                    want: ColumnType::Int32,
+                    got: ColumnType::Int64,
+                },
+                "greeks_provenance_id",
+            ),
+            (
+                LakeError::UnexpectedSchema {
+                    columns: 9,
+                    names: vec!["a".to_owned(), "b".to_owned()],
+                },
+                "9 column",
+            ),
+            (
+                LakeError::UnsupportedColumnShape {
+                    name: "open_interest",
+                    max_def_level: 2,
+                    max_rep_level: 0,
+                },
+                "open_interest",
+            ),
+            (
+                LakeError::PageDecode {
+                    column: "close".to_owned(),
+                    reason: "zstd frame refused".to_owned(),
+                },
+                "zstd frame refused",
+            ),
+            (
+                LakeError::ShortColumnChunk {
+                    column: "high",
+                    row: 41,
+                    expected: 100,
+                    arrived: 3,
+                },
+                "high",
+            ),
+            (
+                LakeError::UnexpectedNull {
+                    column: "timestamp",
+                    row: 17,
+                },
+                "timestamp",
+            ),
+            (
+                LakeError::NotRepresentable {
+                    column: "low",
+                    row: 5,
+                    source: PriceError::NotFinite,
+                },
+                "low",
+            ),
+            (
+                LakeError::PartialGreeks {
+                    row: 88,
+                    present: 4,
+                },
+                "88",
+            ),
+        ]
+    }
+
+    /// **EVERY VARIANT RENDERS, AND RENDERS ITS OWN FIELDS.**
+    ///
+    /// Both `Display` impls in this file were dark: a coverage run on
+    /// 2026-08-10 put `lake/src/error.rs` at **24.05% lines**, the worst file in
+    /// the workspace, entirely because nothing ever formatted an error although
+    /// every variant is constructed somewhere.
+    ///
+    /// A never-formatted `Display` is not a cosmetic gap. These arms are a long
+    /// `match` of near-identical `write!` calls, which is the ideal habitat for
+    /// a copy-pasted arm that interpolates the previous variant's field — and
+    /// the result is an error message that confidently names the wrong column
+    /// or the wrong row while the code around it is correct. Nobody discovers
+    /// that until an incident, which is the moment the message is load-bearing.
+    ///
+    /// So this asserts three things, and the second and third are the ones with
+    /// teeth:
+    ///   1. every variant renders something non-empty;
+    ///   2. every rendering is DISTINCT from every other — a duplicated arm
+    ///      fails here;
+    ///   3. each rendering contains its OWN distinguishing field value — an arm
+    ///      that interpolates a neighbour's field fails here.
+    #[test]
+    fn every_error_variant_renders_and_names_its_own_fields() {
+        // (the error, a substring only a CORRECT rendering of it can contain)
+        let mut cases = file_level_cases();
+        cases.extend(content_level_cases());
+
+        let mut rendered: Vec<String> = Vec::new();
+        for (error, must_contain) in cases {
+            let text = error.to_string();
+            assert!(!text.is_empty(), "{error:?} rendered nothing");
+            assert!(
+                text.contains(must_contain),
+                "{error:?} rendered {text:?}, which does not name its own \
+                 {must_contain:?} — the arm is interpolating the wrong field"
+            );
+            rendered.push(text);
+        }
+        let mut unique = rendered.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            rendered.len(),
+            "two variants render identically, so one arm was copied and not \
+             edited: {rendered:#?}"
+        );
+    }
+
+    /// The contract parser's errors, held to the same standard as [`LakeError`].
+    ///
+    /// Separate from the test above because a shared loop over two unrelated
+    /// enums would have to erase both to `Box<dyn Display>` and would then stop
+    /// naming which enum failed.
+    #[test]
+    fn every_contract_error_variant_renders_and_names_its_own_fields() {
+        let cases: Vec<(ContractError, &str)> = vec![
+            (ContractError::TooLong { len: 999 }, "999"),
+            (ContractError::WrongPartCount { found: 3 }, "3"),
+            (
+                ContractError::UnknownExchange {
+                    found: "LSE".to_owned(),
+                },
+                "LSE",
+            ),
+            (
+                ContractError::BadUnderlying {
+                    found: "nifty!".to_owned(),
+                },
+                "nifty!",
+            ),
+            (
+                ContractError::BadExpiryShape {
+                    found: "31XYZ25".to_owned(),
+                },
+                "31XYZ25",
+            ),
+            (
+                ContractError::BadMonth {
+                    found: "XYZ".to_owned(),
+                },
+                "XYZ",
+            ),
+            (
+                ContractError::ImpossibleDate {
+                    day: 31,
+                    month: 2,
+                    year: 2025,
+                },
+                "31",
+            ),
+            (
+                ContractError::BadStrike {
+                    found: "26k".to_owned(),
+                },
+                "26k",
+            ),
+            (
+                ContractError::StrikeNotRepresentable {
+                    rupees: 999_999_999,
+                },
+                "999999999",
+            ),
+            (
+                ContractError::UnknownSide {
+                    found: "XX".to_owned(),
+                },
+                "XX",
+            ),
+        ];
+
+        let mut rendered: Vec<String> = Vec::new();
+        for (error, must_contain) in cases {
+            let text = error.to_string();
+            assert!(!text.is_empty(), "{error:?} rendered nothing");
+            assert!(
+                text.contains(must_contain),
+                "{error:?} rendered {text:?}, which does not name its own \
+                 {must_contain:?}"
+            );
+            rendered.push(text);
+        }
+        let mut unique = rendered.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            rendered.len(),
+            "two variants render identically: {rendered:#?}"
+        );
+    }
+
+    /// The small reporting enum both of the above interpolate.
+    #[test]
+    fn every_column_type_renders_distinctly() {
+        let all = [
+            ColumnType::Int32,
+            ColumnType::Int64,
+            ColumnType::Double,
+            ColumnType::Other,
+        ];
+        let mut seen: Vec<String> = all.iter().map(ToString::to_string).collect();
+        assert!(seen.iter().all(|s| !s.is_empty()));
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), all.len(), "two column types render the same");
+    }
+}

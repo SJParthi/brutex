@@ -89,12 +89,34 @@ impl Selection {
         // largest one an unbounded generic parameter admits. The honest
         // alternative would be to take `&[S]` and lose the callers that build
         // a selection from a filter.
+        //
+        // The three counters are plain integers deliberately. What is being
+        // counted is one name at a time, and one event per name would be one
+        // event per member of a 785-instrument universe; the sink keeps 64 MiB
+        // and a run that logged a line per name would push its own earlier
+        // lines out of the window. So the pass counts, and exactly one line is
+        // written after the pass ends — and only if the pass dropped something.
         let names = names.into_iter();
         let mut seen = HashSet::with_capacity(names.size_hint().0);
-        let names = names
+        let mut asked: u64 = 0;
+        let mut blank: u64 = 0;
+        let mut duplicate: u64 = 0;
+        let names: Vec<String> = names
             .map(Into::into)
-            .filter(|n| !n.is_empty() && seen.insert(n.clone()))
+            .filter(|name: &String| {
+                asked += 1;
+                if name.is_empty() {
+                    blank += 1;
+                    return false;
+                }
+                if seen.insert(name.clone()) {
+                    return true;
+                }
+                duplicate += 1;
+                false
+            })
             .collect();
+        note_narrowed(asked, blank, duplicate, names.len() as u64);
         Self { names }
     }
 
@@ -137,6 +159,44 @@ impl Selection {
         }
         out
     }
+}
+
+/// Why a narrowed selection is the one thing in this file worth a line.
+///
+/// [`Selection::of`] is the only place here that DISCARDS what the caller
+/// asked for and returns no trace of it. Everything else in this module hands
+/// its whole answer back: [`gaps`] returns held and missing and every cell, so
+/// whoever called it can already say what it found, and a second copy of those
+/// numbers in the log would be the same fact written twice. `of` cannot do
+/// that. The duplicates and the empty names are simply gone from the value,
+/// and an operator who pasted 785 instruments and watched 783 get fetched has
+/// nothing anywhere that accounts for the two.
+///
+/// It is silent because dropping them is CORRECT — a duplicate would pull the
+/// same window twice and the store would refuse the second write as not
+/// following the first, so the dedup is preventing a failure rather than
+/// causing one. That is precisely the kind of quiet repair that should still
+/// leave a mark: `warn`, because the run carried on and the list that ran was
+/// not the list that was sent.
+///
+/// **Counted, never listed.** The names grow with the universe, so what is
+/// written is four integers of fixed width and no instrument name at all. The
+/// counts answer the question a list would — how many, and of which kind —
+/// without a field whose length is the universe's.
+///
+/// Nothing is written when nothing was dropped. A clean list is every ordinary
+/// run, and a line that fires on every ordinary run is a line nobody reads.
+fn note_narrowed(asked: u64, blank: u64, duplicate: u64, kept: u64) {
+    if blank == 0 && duplicate == 0 {
+        return;
+    }
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.work", "selection narrowed before it ran")
+            .with("asked", telemetry::Value::Uint(asked))
+            .with("kept", telemetry::Value::Uint(kept))
+            .with("duplicate", telemetry::Value::Uint(duplicate))
+            .with("blank", telemetry::Value::Uint(blank)),
+    );
 }
 
 /// What is missing, and what is already held.

@@ -109,6 +109,12 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
     } else if n == Layout::Fno.column_count() {
         Layout::Fno
     } else {
+        note_shape(
+            "the column count is neither shape the lake holds",
+            "(the whole file)",
+            "7 columns (cash or index) or 17 (F&O)",
+            &format!("{n} columns"),
+        );
         return Err(LakeError::UnexpectedSchema {
             columns: n,
             names: names(schema),
@@ -127,12 +133,24 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
             // The count matched but the names do not: this is a different
             // schema wearing the right size, and reading it positionally would
             // put a rho where a volume belongs.
+            note_shape(
+                "a column is not the one this build expects at that position",
+                s.name,
+                &format!("{} at leaf {i}", s.name),
+                &format!("{} at leaf {i}", col.name()),
+            );
             return Err(LakeError::UnexpectedSchema {
                 columns: n,
                 names: names(schema),
             });
         }
         if got != s.ty {
+            note_shape(
+                "a column holds a physical type this build does not decode",
+                s.name,
+                &s.ty.to_string(),
+                &got.to_string(),
+            );
             return Err(LakeError::ColumnTypeMismatch {
                 name: s.name,
                 want: s.ty,
@@ -154,6 +172,16 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
         // both; see `LakeError::UnsupportedColumnShape` and
         // `docs/06-limits.md`.
         if col.max_def_level() != 1 || col.max_rep_level() != 0 {
+            note_shape(
+                "a column is nested or repeated, and every row of it would read as null",
+                s.name,
+                "definition level 1, repetition level 0",
+                &format!(
+                    "definition level {}, repetition level {}",
+                    col.max_def_level(),
+                    col.max_rep_level()
+                ),
+            );
             return Err(LakeError::UnsupportedColumnShape {
                 name: s.name,
                 max_def_level: col.max_def_level(),
@@ -162,6 +190,38 @@ pub(crate) fn detect(schema: &SchemaDescriptor) -> Result<Layout, LakeError> {
         }
     }
     Ok(layout)
+}
+
+/// Records one shape refusal, naming the column and the expected-versus-found.
+///
+/// **A SHIFTED SCHEMA IS HOW A WRONG PRICE REACHES A READER SILENTLY**, and
+/// until this line existed nothing on disk said which of the four faults had
+/// happened. `lake.file` in [`crate::reader`] records that a path was refused;
+/// it cannot say why, and the four are not interchangeable. A count that is
+/// neither 7 nor 17 is a writer that added a column. The right count under
+/// different names is the dangerous one: read positionally, a `rho` would have
+/// been decoded as a `volume` and no downstream check could catch it. A
+/// `greeks_provenance_id` that turned INT64 decodes garbage rather than
+/// failing. A leaf that gained one optional group passes both the name and the
+/// type check and then reads every row as null. Each of those is a different
+/// remedy, so each gets its own line naming the column.
+///
+/// **Bounded by the file, not by its contents.** [`detect`] runs once per
+/// [`crate::LakeFile`], only the refusing arms call this, and the refusal ends
+/// the open — so the worst case is one line per file an operator cannot read,
+/// never one per row group and never one per row. Proved by
+/// `lake::batch::one_short_column_is_enough_to_refuse_and_every_column_is_checked`:
+/// the first short column refuses and the open stops there, so no second line
+/// can follow it for the same file. The column *names* are
+/// deliberately not on the line: a name list is a field whose width grows with
+/// the file, and the one column that refused is the one worth reading.
+fn note_shape(said: &str, column: &str, want: &str, got: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("lake.schema", said)
+            .with("column", telemetry::Value::Str(column))
+            .with("want", telemetry::Value::Str(want))
+            .with("got", telemetry::Value::Str(got)),
+    );
 }
 
 /// The ordered specification for a layout.

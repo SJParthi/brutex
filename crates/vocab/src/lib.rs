@@ -95,7 +95,7 @@ mod tests {
         // "genuinely different" in the sense the version exists to separate.
         // Retiring, renaming, renumbering or widening the mask would bump it.
         assert_eq!(VOCAB_VERSION, 3);
-        assert_eq!(table::COUNT, 276);
+        assert_eq!(table::COUNT, 280);
         assert_eq!(ConditionMask::BITS, 384);
     }
 

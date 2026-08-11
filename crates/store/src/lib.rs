@@ -58,3 +58,10 @@ pub mod format;
 pub mod header;
 pub mod layout;
 pub mod path;
+
+/// Proof that this crate's six `telemetry::emit` sites reach a file, driven
+/// through the production calls that own them. Compiled only under `cfg(test)`
+/// — it installs the process-wide sink, which is a property of the test binary
+/// and not of the store.
+#[cfg(test)]
+mod emits;

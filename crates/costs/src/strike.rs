@@ -64,7 +64,7 @@ const STEP_REMEDIATION: &str = "source the exchange F&O master (or the circular 
 /// negative one would invert the ladder; neither is guarded at each use,
 /// because neither can exist. Every value in circulation came out of the dated
 /// table in this file, each entry is a named `const` asserted positive at
-/// compile time, and [`Self::new_const`] is crate-private — the same
+/// compile time, and `Self::new_const` is crate-private — the same
 /// unrepresentability argument [`crate::rate::BpsX100`] makes for a rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]

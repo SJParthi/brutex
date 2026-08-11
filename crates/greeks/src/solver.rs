@@ -101,7 +101,7 @@
 //! accepted 8,096 answers of which 15 were wrong by more than `1e-3` of
 //! relative volatility and 5 by more than `1e-2`, worst `5.5e-2`, every one of
 //! them reporting an `uncertainty` inside the `1e-3` bound. The numerator is
-//! now [`crate::bsm::Checked::price_scale`], which accepts 8,068 — 28 fewer —
+//! now `crate::bsm::Checked::price_scale`, which accepts 8,068 — 28 fewer —
 //! and leaves a worst accepted error of `2.2e-4`. D-0046.
 //!
 //! The criterion is still **necessary and not sufficient**, and saying
@@ -166,7 +166,7 @@ const NEWTON_STEP_TOLERANCE: f64 = 1.0e-12;
 ///
 /// "One unit in the last place of the market price" means the last place the
 /// price *actually has*, which is set by the two legs it is a difference of
-/// and not by its own magnitude — see [`crate::bsm::Checked::price_scale`].
+/// and not by its own magnitude — see `crate::bsm::Checked::price_scale`.
 /// Measured over an NSE envelope of 8,759 quotable points, the worst relative
 /// volatility error among the answers this bound accepts is `2.2e-4`, inside
 /// it. Under the old estimator the worst was `5.5e-2`, fifty-five times

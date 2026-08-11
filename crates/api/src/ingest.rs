@@ -35,11 +35,22 @@
 //! makes it unofferable and the parser makes it unrequestable, so a hand-built
 //! `POST` is refused by the same rule that greys the field out.
 //!
+//! # Two routes that answer without running
+//!
+//! [`status_json`] says what the next sweep is waiting on, and [`queue`] says
+//! whether a selection would be accepted. Both are here rather than in
+//! `server.rs` because both are about a request's ADMISSION, which is what this
+//! module already owns — and neither of them opens a socket, reads the store or
+//! writes a byte. D-0092 and D-0094 say why the first is served from memory and
+//! why the second never queues anything.
+//!
 //! # Cost
 //!
 //! Every function here is bounded arithmetic over a form body whose length the
 //! server caps. Membership of the F&O universe is one probe of a compile-time
-//! table (`brutex_core::universe::of_equity`), never a scan.
+//! table (`brutex_core::universe::of_equity`), never a scan. The two routes add
+//! one uncontended lock and one pass over the backfill's feed reports — two
+//! rows on this build — and no I/O of any kind.
 
 use std::fmt;
 use std::time::SystemTime;
@@ -61,10 +72,38 @@ pub const MAX_WINDOW_DAYS: u32 = 3_653;
 
 /// Which instruments a spot pull covers.
 ///
-/// Three fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
-/// at two swept indices; the other two sets are stored and never swept, and
+/// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
+/// at two swept indices; the other six sets are stored and never swept, and
 /// saying which is which on the form is the difference between an operator
 /// knowing what a run will contain and guessing.
+///
+/// # PULLABLE IS NOT SWEPT, and appending here cannot make it so
+///
+/// D-0105 appended the four published NIFTY tiers because the browser could
+/// already SEE them and could not ASK for them. `/instruments.json` has emitted
+/// a `universes` array naming `n500`, `n200`, `n100` and `n50` per row since
+/// D-0089 — measured live at 500/200/100/50 on both feeds — and `/ingest`
+/// disabled those four rows for exactly one reason: no slug existed to put in
+/// the `target` field, so the page hardcoded a null and said so. That was a gap
+/// in the REQUEST vocabulary and in nothing else.
+///
+/// A pull of `n500` therefore **stores** 500 instruments and **sweeps none of
+/// them**. Nothing in this enum is consulted by the sweep: what may be swept is
+/// [`brutex_core::instrument::InstrumentKey::is_sweepable`], a two-element table
+/// in `core`, and [`Self::Swept`] is the one variant that defers to it rather
+/// than keeping a second copy. Widening `CLAUDE.md` §1 is a
+/// `docs/05-decisions.md` entry against THAT table; a row here is not one and
+/// must never be read as one. `a_nifty_tier_target_stores_and_never_sweeps` is
+/// that sentence written as a test.
+///
+/// # Why the slugs are the wire's own words
+///
+/// `n50`, `n100`, `n200` and `n500` are already what `/instruments.json` spells
+/// these universes as — `server::UNIVERSE_TOKENS`, appended by D-0089. One
+/// vocabulary serves both directions, so the token a browser counts a set BY is
+/// the token a pull is requested WITH. A second spelling here (`nifty50`,
+/// `n_50`) would be the defect that table's own doc comment exists to prevent,
+/// arriving from the other end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SpotTarget {
     /// `NSE-NIFTY` and `NSE-BANKNIFTY` — the only two the engine sweeps.
@@ -76,11 +115,125 @@ pub enum SpotTarget {
     Indices,
     /// The NIFTY Total Market constituents. Stored, never swept.
     Equities,
+    /// The published NIFTY 500 constituents. Stored, never swept.
+    Nifty500,
+    /// The published NIFTY 200 constituents. Stored, never swept.
+    Nifty200,
+    /// The published NIFTY 100 constituents. Stored, never swept.
+    Nifty100,
+    /// The published NIFTY 50 constituents. Stored, never swept.
+    ///
+    /// Fifty EQUITIES, and not the index of the same name: `NSE-NIFTY` is the
+    /// spot series [`Self::Swept`] names, and these are the companies underneath
+    /// it. The two sets share a word and no member, which is precisely why both
+    /// are spelled out on the form rather than left to be inferred.
+    Nifty50,
 }
 
 impl SpotTarget {
     /// Every target, in the order the form lists them.
-    pub const ALL: [Self; 3] = [Self::Swept, Self::Indices, Self::Equities];
+    ///
+    /// **APPEND ONLY.** `server::Site::targets` is one counter per slot and
+    /// `spot_answer` reads a slot by position, so reordering this array
+    /// relabels counts that are already on an operator's screen. The four tiers
+    /// go on the end, widest first, which is also the order
+    /// `server::UNIVERSE_TOKENS` lists them in — one reading order for the two
+    /// tables that name the same sets.
+    pub const ALL: [Self; 7] = [
+        Self::Swept,
+        Self::Indices,
+        Self::Equities,
+        Self::Nifty500,
+        Self::Nifty200,
+        Self::Nifty100,
+        Self::Nifty50,
+    ];
+
+    /// Whether this target names `key`, given the universes it belongs to.
+    ///
+    /// # The defect this removes
+    ///
+    /// The run built its instrument list from `catalog::tracked` alone — every
+    /// member of `TOTAL_MARKET` or `INDEX`, 765 names — and never consulted the
+    /// target the operator chose. Selecting *Swept indices*, which the page
+    /// labels "NSE-NIFTY and NSE-BANKNIFTY, the only two swept" beside a
+    /// counter reading **2**, still swept all 765 and began at `360ONE`. The
+    /// label, the counter and the run were three different answers to one
+    /// question.
+    ///
+    /// TWO CONSTANT-TIME TESTS, not a lookup. `is_sweepable` compares against a
+    /// two-element table and `contains` is a bitflag test, so deciding whether
+    /// one instrument is in the target costs the same at 800 as at one — this
+    /// runs once per candidate while building the list, never inside the pull.
+    #[must_use]
+    pub fn names(
+        self,
+        key: &brutex_core::instrument::InstrumentKey,
+        universe: brutex_core::universe::Universe,
+    ) -> bool {
+        match self {
+            // The engine's own predicate, not a second copy of the pair.
+            // Widening what may be swept is a `docs/05-decisions.md` entry, and
+            // it must widen this form at the same moment it widens the engine.
+            Self::Swept => key.is_sweepable(),
+            Self::Indices => universe.contains(brutex_core::universe::Universe::INDEX),
+            Self::Equities => universe.contains(brutex_core::universe::Universe::TOTAL_MARKET),
+            // ONE BIT TEST PER TIER, and the bit was set by
+            // `core::universe::of_equity` reading that tier's own published
+            // file. This asks the constituent list's answer without holding a
+            // copy of the list, so a rebalance lands here the moment `core` is
+            // updated and cannot land in one place and not the other.
+            //
+            // NO CATCH-ALL, deliberately. An eighth target has to be a compile
+            // error in this match: `names` is the only thing that decides which
+            // instruments a request covers, and a `_` arm here would let a new
+            // variant silently inherit some other set's membership.
+            Self::Nifty500 => universe.contains(Universe::NIFTY_500),
+            Self::Nifty200 => universe.contains(Universe::NIFTY_200),
+            Self::Nifty100 => universe.contains(Universe::NIFTY_100),
+            Self::Nifty50 => universe.contains(Universe::NIFTY_50),
+        }
+    }
+
+    /// The published constituent list that DEFINES this target, when a
+    /// published list is what defines it.
+    ///
+    /// Borrowed from `brutex_core::universe`, never copied. The four tiers hand
+    /// back the very consts D-0089 transcribed from NSE's own CSVs, and
+    /// [`Self::Equities`] hands back the Total Market list beside them. A second
+    /// copy in this crate would be a second answer to "who is in the NIFTY 200",
+    /// and the stale one would be whichever nobody remembered to rebalance —
+    /// `CLAUDE.md` §3 rule 1.
+    ///
+    /// # `None` hides nothing
+    ///
+    /// It is not a fallback (`CLAUDE.md` §4). Two targets are defined by
+    /// something that is not a constituent file, and say so rather than
+    /// inventing one:
+    ///
+    /// * [`Self::Swept`] is the ENGINE SURFACE — `InstrumentKey::SWEPT`, two
+    ///   `(exchange, symbol)` pairs. Answering it with a symbol list would put a
+    ///   third copy of §1 in a third crate.
+    /// * [`Self::Indices`] is whatever the vendor master lists as an index
+    ///   series on this build. NSE publishes no file naming that set, so a
+    ///   hardcoded one would be invention and would go stale the day a vendor
+    ///   added a series.
+    ///
+    /// Membership is decided by [`Self::names`] for all seven either way. This
+    /// is the roster, not the predicate, and nothing on the pull path reads it:
+    /// it exists so a test can pin what a tier resolves to against the file it
+    /// came from.
+    #[must_use]
+    pub const fn members(self) -> Option<&'static [&'static str]> {
+        match self {
+            Self::Swept | Self::Indices => None,
+            Self::Equities => Some(&universe::NIFTY_TOTAL_MARKET),
+            Self::Nifty500 => Some(&universe::NIFTY_500),
+            Self::Nifty200 => Some(&universe::NIFTY_200),
+            Self::Nifty100 => Some(&universe::NIFTY_100),
+            Self::Nifty50 => Some(&universe::NIFTY_50),
+        }
+    }
 
     /// The value this target carries on the wire.
     #[must_use]
@@ -89,6 +242,13 @@ impl SpotTarget {
             Self::Swept => "swept",
             Self::Indices => "indices",
             Self::Equities => "equities",
+            // THE WIRE'S OWN WORDS. These four are `server::UNIVERSE_TOKENS`
+            // verbatim — the tokens `/instruments.json` already emits in every
+            // row's `universes` array. One vocabulary, both directions.
+            Self::Nifty500 => "n500",
+            Self::Nifty200 => "n200",
+            Self::Nifty100 => "n100",
+            Self::Nifty50 => "n50",
         }
     }
 
@@ -99,6 +259,10 @@ impl SpotTarget {
             Self::Swept => "Swept indices",
             Self::Indices => "Reference indices",
             Self::Equities => "NIFTY Total Market equities",
+            Self::Nifty500 => "NIFTY 500 equities",
+            Self::Nifty200 => "NIFTY 200 equities",
+            Self::Nifty100 => "NIFTY 100 equities",
+            Self::Nifty50 => "NIFTY 50 equities",
         }
     }
 
@@ -109,15 +273,33 @@ impl SpotTarget {
             Self::Swept => "NSE-NIFTY and NSE-BANKNIFTY — the only two swept",
             Self::Indices => "stored and stamped onto trades; never swept",
             Self::Equities => "stored, never swept",
+            // EVERY TIER SAYS "never swept" IN THE SAME BREATH AS ITS COUNT.
+            // The count is the reason an operator picks the row and the four
+            // words after it are the reason picking it does not widen §1.
+            Self::Nifty500 => "the published 500 constituents — stored, never swept",
+            Self::Nifty200 => "the published 200 constituents — stored, never swept",
+            Self::Nifty100 => "the published 100 constituents — stored, never swept",
+            Self::Nifty50 => {
+                "the published 50 constituents — stored, never swept; these are the \
+                 companies, not the NIFTY index"
+            }
         }
     }
 
     /// Which universe bit selects this target's members.
+    ///
+    /// One NAMED bit each, never a comparison of whole bitsets: an equity in the
+    /// NIFTY 50 carries `fno | ntm | n500 | n200 | n100 | n50` at once, and only
+    /// the named bit decides.
     #[must_use]
     pub const fn universe(self) -> Universe {
         match self {
             Self::Swept | Self::Indices => Universe::INDEX,
             Self::Equities => Universe::TOTAL_MARKET,
+            Self::Nifty500 => Universe::NIFTY_500,
+            Self::Nifty200 => Universe::NIFTY_200,
+            Self::Nifty100 => Universe::NIFTY_100,
+            Self::Nifty50 => Universe::NIFTY_50,
         }
     }
 
@@ -126,6 +308,28 @@ impl SpotTarget {
     pub fn from_slug(slug: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|t| t.slug() == slug)
     }
+}
+
+/// Every legal spot-target slug, comma-separated, for a refusal to name.
+///
+/// **Generated from [`SpotTarget::ALL`], never written out.** The sentence this
+/// replaces read *"is not one of the three spot targets"* and there are seven —
+/// a message that counts by hand is a message that is wrong one commit after
+/// somebody appends, and this one is the operator's only list of what the
+/// `target` field takes. `CLAUDE.md` §4: refuse by name, and the names have to
+/// be the names the parser actually accepts.
+///
+/// Cost: one pass over a compile-time array of seven `&'static str`, paid only
+/// on the refusal path.
+fn target_slugs() -> String {
+    let mut out = String::new();
+    for (n, target) in SpotTarget::ALL.into_iter().enumerate() {
+        if n > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(target.slug());
+    }
+    out
 }
 
 /// Which derivative series an F&O request is for.
@@ -359,9 +563,11 @@ impl fmt::Display for Refusal {
                  bought — there is no endpoint to call and no credential to \
                  read. Name the folder to pull from it."
             ),
-            Self::UnknownTarget { ref got } => {
-                write!(f, "REFUSED · {got:?} is not one of the three spot targets")
-            }
+            Self::UnknownTarget { ref got } => write!(
+                f,
+                "REFUSED · {got:?} is not a spot target. This build takes {}",
+                target_slugs()
+            ),
             Self::UnknownSeries { ref got } => {
                 write!(f, "REFUSED · {got:?} is neither a future nor an option")
             }
@@ -622,12 +828,113 @@ pub fn parse_window(body: &str, today: Day) -> Result<Window, Refusal> {
     Ok(window)
 }
 
+/// Which form control a refusal is about, when it is about one.
+///
+/// The refusal's own text already says what went wrong; this says **where the
+/// operator has to go to fix it**, as one token a `grep` can count. "Which
+/// field is my form failing on" and "which sentence did it print" are different
+/// questions, and only the first survives a message being reworded.
+///
+/// The match is exhaustive with no wildcard arm on purpose. [`Refusal`] is
+/// `#[non_exhaustive]` to the world and total inside this crate, so a variant
+/// added later stops the build here rather than quietly logging a refusal with
+/// no control named — which is exactly the silent drift `CLAUDE.md` §4 bans.
+///
+/// [`Refusal::ClockUnusable`] is the one `None`: nothing the operator typed is
+/// wrong, the machine's clock is, and naming a field would send them to edit a
+/// date that is already fine.
+fn refused_field(why: &Refusal) -> Option<&'static str> {
+    match *why {
+        Refusal::FieldMissing { field }
+        | Refusal::DateNotIso { field, .. }
+        | Refusal::DateImpossible { field, .. } => Some(field),
+        // The pair is wrong, not either end of it. Naming one would be a guess
+        // about which of the two the operator meant to change.
+        Refusal::WindowBackwards { .. } | Refusal::WindowTooLong { .. } => Some("window"),
+        // These three are about the END, and only the end: the start is legal
+        // in every one of them.
+        Refusal::WindowInFuture { .. }
+        | Refusal::WindowReachesToday { .. }
+        | Refusal::WindowOutlivesTheContract { .. } => Some("to"),
+        Refusal::ArchiveFolderMissing { .. } => Some("folder"),
+        Refusal::UnknownTarget { .. } => Some("target"),
+        Refusal::UnknownSeries { .. } => Some("series"),
+        Refusal::UnknownVendor { .. } => Some("vendor"),
+        Refusal::UnknownGranularity { .. } => Some("granularity"),
+        Refusal::BadUnderlying { .. } | Refusal::NotAnFnoUnderlying { .. } => Some("underlying"),
+        Refusal::LiveContract { .. } => Some("expiry"),
+        Refusal::ClockUnusable { .. } => None,
+    }
+}
+
+/// One refused submission, on the one surface that outlives the browser tab.
+///
+/// # What was invisible before this
+///
+/// A refused form got an HTTP 400 and a page of prose, and that was the whole
+/// record. The audit journal takes the run's refusals, but an operator
+/// debugging a form that **never starts a run** is reading a page that is gone
+/// the moment the tab is closed — and a `curl` or a replayed POST never renders
+/// it at all. A question as ordinary as *why did nothing happen when I pressed
+/// Pull* had no answer after the fact. Now it does: the form, the control, and
+/// the refusal's own sentence, timestamped beside the pull events they belong
+/// with.
+///
+/// # Why `Warn` and why one per submission
+///
+/// `Warn` — the request continued as far as an answer and someone should know
+/// it was turned away — sits above the default `Info` floor, so a refusal is
+/// visible with no configuration. It is bounded by SUBMISSIONS, not by data:
+/// one event per press of the button, emitted once at the form boundary rather
+/// than at each of the nested parsers a body passes through, so a refused date
+/// inside a spot form is one line and not three. The accept path emits nothing
+/// here; `pull.run started` already carries it.
+///
+/// # Why no secret can reach this
+///
+/// The fields are a form body's own values — dates, a target slug, a vendor
+/// name, a symbol, a folder. `CLAUDE.md` §8 keeps credentials out of this
+/// module entirely: a token is read from Parameter Store inside `crates/pull`
+/// and never travels through a form. The quoted-back value is bounded twice
+/// over — the server caps the body it will read, and the sink cuts a string
+/// value at [`telemetry::MAX_STR_VALUE_BYTES`] and says it did.
+///
+/// The result is discarded under the name the workspace uses for it: a
+/// level-filtered event legitimately reaches no file, so asserting it was
+/// written would fire on a clean run.
+fn note_refused(form: &str, why: &Refusal) {
+    let text = why.to_string();
+    let event = telemetry::Event::warn("api.ingest", "form refused")
+        .with("form", telemetry::Value::Str(form))
+        .with("why", telemetry::Value::Str(&text));
+    // A refusal that is about one control names it as its own key; one that is
+    // about the machine's clock omits the key rather than inventing a control
+    // that is not at fault. An absent key and a key reading "-" are different
+    // facts and only the first is honest — the same rule as `Int(-1)` for an
+    // absent number.
+    let event = match refused_field(why) {
+        Some(field) => event.with("field", telemetry::Value::Str(field)),
+        None => event,
+    };
+    let _dropped_when_filtered = telemetry::emit(&event);
+}
+
 /// One spot request, out of a form body.
 ///
 /// # Errors
 ///
 /// [`Refusal::UnknownTarget`], or whatever [`parse_window`] refuses.
 pub fn parse_spot(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
+    parse_spot_inner(body, today).inspect_err(|why| note_refused("spot", why))
+}
+
+/// [`parse_spot`]'s body, split so the refusal is noted at exactly one place.
+///
+/// Every early return in here is a refusal, and each one used to need its own
+/// emit to be seen. Wrapping the whole parse instead means one event per
+/// submission by construction — a rule that cannot be broken by adding a
+/// fifteenth `?`.
+fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
     let raw = param(body, "target");
     if raw.is_empty() {
         return Err(Refusal::FieldMissing { field: "target" });
@@ -745,6 +1052,11 @@ pub fn parse_feed(raw: &str) -> Option<pull::vendor::Feed> {
 /// [`Refusal::WindowOutlivesTheContract`], or whatever [`parse_window`]
 /// refuses.
 pub fn parse_fno(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
+    parse_fno_inner(body, today).inspect_err(|why| note_refused("fno", why))
+}
+
+/// [`parse_fno`]'s body, split for the reason [`parse_spot_inner`] is.
+fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
     let typed = param(body, "underlying");
     if typed.is_empty() {
         return Err(Refusal::FieldMissing {
@@ -838,6 +1150,329 @@ pub fn ist_day(at: SystemTime) -> Result<Day, Refusal> {
 pub fn today_ist() -> Result<Day, Refusal> {
     ist_day(SystemTime::now())
 }
+
+// ---------------------------------------------------------------------------
+// THE TWO INGEST ROUTES THAT ANSWER RATHER THAN RUN
+//
+// Everything above this line is a parser. The two handlers below are here
+// rather than in `server.rs` because both are *about* a request's admission —
+// one says what the backfill is waiting on, the other says whether a selection
+// would be accepted — and admission is what this module already owns. Neither
+// opens a socket, reads the store, or writes a byte.
+// ---------------------------------------------------------------------------
+
+/// The JSON content type both routes below answer with.
+fn json_headers() -> [(axum::http::HeaderName, &'static str); 1] {
+    [(
+        axum::http::header::CONTENT_TYPE,
+        "application/json; charset=utf-8",
+    )]
+}
+
+/// `GET /ingest/status.json` — what the next sweep is waiting on.
+///
+/// # It reports the backfill's own last survey, and never re-derives one
+///
+/// The honest answer to "what is the next sweep waiting on" is already computed
+/// once per pass by `autopilot::survey` and published to
+/// [`crate::autopilot::Status`]. This projects that, and it deliberately does
+/// **not** call `census::read_all` or probe a manifest: this is a route a page
+/// polls, and re-reading every manifest per request is the O(entries) cost
+/// D-0039 exists to remove — the same reason `/autopilot.json` is served from
+/// memory. `CLAUDE.md` §3 rule 4.
+///
+/// The price of that is a real staleness, and it is **stated rather than
+/// hidden**: `surveyed` is false until a round finishes, and `blocked_by` then
+/// says so in words and names `/store.json` as the route that does read the
+/// store. An answer of "nothing is waiting" from a backfill that has never
+/// looked would be the §4 fallback.
+///
+/// # Cost
+///
+/// One uncontended lock and one pass over the feed reports — two rows on this
+/// build. No I/O.
+pub async fn status_json(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let paused = site.autopilot.is_paused();
+    let seat = site.autopilot.seat_held();
+    site.autopilot
+        .inspect(|status| {
+            (
+                axum::http::StatusCode::OK,
+                json_headers(),
+                waiting_json(status, paused, seat),
+            )
+        })
+        .unwrap_or_else(|| {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                json_headers(),
+                format!(
+                    r#"{{"surveyed":false,"error":{}}}"#,
+                    crate::render::json_string(
+                        "the autopilot's status lock is poisoned: a previous publisher \
+                         panicked, so what the next sweep is waiting on cannot be read. \
+                         Nothing is guessed here — an empty list would read as \"nothing \
+                         is outstanding\", which is a different fact. Restart the server."
+                    )
+                ),
+            )
+        })
+}
+
+/// The payload, over a status a caller supplies.
+///
+/// Split from the handler so every branch of [`blocked_by`] and every shape of
+/// the feed list is drivable from a test without a `Site`, a store or a
+/// background task.
+fn waiting_json(status: &crate::autopilot::Status, paused: bool, seat: bool) -> String {
+    use std::fmt::Write as _;
+    let js = crate::render::json_string;
+    let mut out = String::with_capacity(1024);
+    let _ = write!(
+        out,
+        r#"{{"surveyed":{},"state":{},"paused":{},"pull_seat":{},"blocked_by":{},"why":{},"cursor":{},"since_unix":{},"due_unix":{},"journal":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"in_flight":"#,
+        !status.feeds.is_empty(),
+        js(status.state()),
+        paused,
+        // A FACT, NOT A VERDICT. `autopilot::round` holds the seat for the whole
+        // of every pass, so a held seat is the backfill's own tick as often as
+        // it is a hand-made pull. Which one is standing off, and why, is
+        // `blocked_by`'s job and not this field's.
+        js(if seat { "held" } else { "free" }),
+        js(&blocked_by(status, paused)),
+        js(&status.why()),
+        js(&status.cursor),
+        status.since_unix,
+        status.due_unix,
+        js(&status.journal),
+        js(&status.target.from),
+        js(&status.target.to),
+        status.target.instruments,
+        js(&status.target.timeframe),
+        js(&status.target.feed),
+    );
+    match status.now {
+        None => out.push_str("null"),
+        Some(ref now) => {
+            let _ = write!(
+                out,
+                r#"{{"instrument":{},"month":{},"index":{},"of":{}}}"#,
+                js(&now.instrument),
+                js(&now.month),
+                now.index,
+                now.of
+            );
+        }
+    }
+    out.push_str(r#","waiting_on":["#);
+    for (n, feed) in status.feeds.iter().enumerate() {
+        if n > 0 {
+            out.push(',');
+        }
+        let _ = write!(
+            out,
+            r#"{{"feed":{},"vendor":{},"month":{},"window":{},"behind":{},"done":{},"attempts":{},"attempts_max":{},"months_done":{},"months_total":{},"stalled_months":{},"last_reason":{},"halted":{}}}"#,
+            js(&feed.feed),
+            js(&feed.vendor),
+            js(&feed.month),
+            js(&feed.window),
+            feed.behind,
+            feed.done,
+            feed.attempts,
+            crate::autopilot::MAX_MONTH_ATTEMPTS,
+            feed.months_done,
+            feed.months_total,
+            feed.stalls.len(),
+            js(&feed.last_reason),
+            js(&feed.halted),
+        );
+    }
+    out.push_str("]}");
+    out
+}
+
+/// The one sentence that answers the question the route is named for.
+///
+/// Four cases, in the order they outrank one another, and every one of them is
+/// read from a published field rather than inferred:
+///
+/// 1. **The operator's pause** outranks everything, because it is the only
+///    state where nothing is being attempted by choice.
+/// 2. **Every feed halted** — a restart is what clears one, so this names it.
+/// 3. **Nothing surveyed** — either the task stopped before its first round
+///    (phase `halted`), or no round has finished yet. Neither is "nothing is
+///    outstanding", and neither is answered with an empty list alone.
+/// 4. Otherwise the backfill's own sentence, which is written on every
+///    transition and is never empty — see [`crate::autopilot::Status::why`].
+fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
+    use crate::autopilot::Phase;
+    if paused {
+        return format!(
+            "the operator's pause. Nothing is asked of any vendor until a resume, and \
+             nothing is lost by waiting — the resume point is the store's own. What the \
+             backfill last said of itself: {}",
+            status.why()
+        );
+    }
+    let halted: Vec<&str> = status
+        .feeds
+        .iter()
+        .filter(|feed| !feed.halted.is_empty())
+        .map(|feed| feed.feed.as_str())
+        .collect();
+    if !status.feeds.is_empty() && halted.len() == status.feeds.len() {
+        return format!(
+            "every feed is halted and a resume does not clear a halt — restarting the \
+             server is what does. The reason is on each row below, verbatim. Halted: {}",
+            halted.join(", ")
+        );
+    }
+    if status.feeds.is_empty() {
+        if status.phase == Phase::Halted {
+            return format!(
+                "nothing, because the backfill task is not running: {}",
+                status.why()
+            );
+        }
+        return format!(
+            "not known here yet. No round has finished in this process, so there is no \
+             survey to report — and this route never reads the store, deliberately, so it \
+             cannot answer from the store either. /store.json is the route that does. What \
+             the backfill says of itself: {}",
+            status.why()
+        );
+    }
+    status.why()
+}
+
+/// `POST /ingest/queue` — **nothing is queued, and this says why.**
+///
+/// # What this route does
+///
+/// It takes the same body `/pull/spot` takes, validates it in full through
+/// [`parse_spot`], and answers. A selection with a bad field is refused by that
+/// field's name. A selection that is legal is echoed back with the exact dates
+/// that would go on the wire, and then refused too — because **there is no
+/// queue in this build to put it in**, and accepting it would be accepting and
+/// dropping it. `CLAUDE.md` §4: degrade loudly and name the reason, or refuse.
+/// Never both silently.
+///
+/// # Why there is no queue, stated in terms a caller can check
+///
+/// There is exactly one pull seat — [`crate::autopilot::Control::take_seat`], a
+/// compare-exchange — and `pull::ingest`'s census lock refuses rather than
+/// queues. Nothing in this process drains a pending list, because no pending
+/// list exists. A route that answered `202 Accepted` would therefore be
+/// answering for work that no code will ever pick up.
+///
+/// # Why it is `501` and not `503`
+///
+/// `503` says *try again later*, which is what `/pull/fno` correctly says about
+/// a transport that is built but unwired. This is not that: deferral is absent
+/// by decision rather than by scheduling, and it stays absent until one is
+/// recorded. See D-0094.
+///
+/// # It cannot start a pull, structurally
+///
+/// No vendor call, no credential read, no store write and no task spawn appears
+/// below. The route is a parser and a sentence.
+pub async fn queue(
+    axum::extract::State(site): axum::extract::State<crate::server::Loaded>,
+    body: String,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let (code, payload) = queue_answer(
+        &body,
+        ist_day(SystemTime::now()),
+        site.autopilot.seat_held(),
+    );
+    (code, json_headers(), payload)
+}
+
+/// [`queue`]'s body, over a day and a seat a caller supplies.
+///
+/// Split from the handler for the reason every dated thing in this module is:
+/// a window gate driven by the machine's clock is a gate no test can pin, and
+/// `CLAUDE.md` §3 rule 5 makes reruns mean the same thing twice.
+fn queue_answer(
+    body: &str,
+    today: Result<Day, Refusal>,
+    seat: bool,
+) -> (axum::http::StatusCode, String) {
+    let js = crate::render::json_string;
+    let refused = |code: axum::http::StatusCode, why: &Refusal| {
+        let field = match refused_field(why) {
+            Some(field) => js(field),
+            // Not a guess and not a blank: the clock is what is wrong, and
+            // naming a control would send an operator to edit a date that is
+            // already correct.
+            None => String::from("null"),
+        };
+        (
+            code,
+            format!(
+                r#"{{"queued":false,"why":{},"field":{}}}"#,
+                js(&why.to_string()),
+                field
+            ),
+        )
+    };
+    let today = match today {
+        Ok(today) => today,
+        // The same code `/pull/spot` answers an unusable clock with, for the
+        // same reason: nothing the operator sent is wrong.
+        Err(why) => {
+            return refused(axum::http::StatusCode::INTERNAL_SERVER_ERROR, &why);
+        }
+    };
+    let asked = match parse_spot(body, today) {
+        Ok(asked) => asked,
+        Err(why) => return refused(axum::http::StatusCode::BAD_REQUEST, &why),
+    };
+    (
+        axum::http::StatusCode::NOT_IMPLEMENTED,
+        format!(
+            r#"{{"queued":false,"why":{},"understood":{{"target":{},"from":{},"to":{},"days":{},"feed":{},"granularity":{}}},"pull_seat":{},"instead":{{"now":"POST /pull/spot","backfill":"GET /ingest/status.json"}}}}"#,
+            js(NO_QUEUE),
+            js(asked.target.slug()),
+            js(&asked.window.from().to_string()),
+            js(&asked.window.to().to_string()),
+            asked.window.days(),
+            js(asked.feed.wire()),
+            js(asked.granularity.dir()),
+            js(if seat { "held" } else { "free" }),
+        ),
+    )
+}
+
+/// The reason a legal selection is still not queued.
+///
+/// One constant, because it is a claim about this build that must be checkable
+/// in one place. Every noun in it is a real name: the seat is
+/// [`crate::autopilot::Control::take_seat`], the lock is `pull::ingest`'s, and
+/// the two routes that DO something are the two it names.
+pub const NO_QUEUE: &str = "REFUSED · the selection is legal and was understood in \
+     full, and nothing was queued, because this build has no queue to put it in. It \
+     is not being held anywhere and no task will pick it up later: there is one pull \
+     seat (api::autopilot::Control::take_seat, a compare-exchange), pull::ingest's \
+     census lock refuses rather than queues, and nothing in this process drains a \
+     pending list. Answering 202 here would be accepting and dropping it, which \
+     CLAUDE.md §4 bans. What exists instead: POST /pull/spot runs exactly this \
+     selection now, synchronously, and answers with the receipt; and the autopilot \
+     backfills the swept indices oldest-first on its own, with GET \
+     /ingest/status.json saying what it is waiting on. Whether a request may be \
+     DEFERRED — accepted now and run later against a vendor with nobody watching — is \
+     a decision this repository has not recorded, and it is the one that has to exist \
+     before this route can answer anything else.";
 
 #[cfg(test)]
 #[allow(
@@ -1119,14 +1754,55 @@ mod tests {
                 "NIFTY Total Market equities",
                 "stored, never swept",
             ),
+            (
+                SpotTarget::Nifty500,
+                "NIFTY 500 equities",
+                "the published 500 constituents — stored, never swept",
+            ),
+            (
+                SpotTarget::Nifty200,
+                "NIFTY 200 equities",
+                "the published 200 constituents — stored, never swept",
+            ),
+            (
+                SpotTarget::Nifty100,
+                "NIFTY 100 equities",
+                "the published 100 constituents — stored, never swept",
+            ),
+            (
+                SpotTarget::Nifty50,
+                "NIFTY 50 equities",
+                "the published 50 constituents — stored, never swept; these are \
+                 the companies, not the NIFTY index",
+            ),
         ] {
             assert_eq!(target.label(), label);
             assert_eq!(target.note(), note);
         }
-        // Only the two swept indices are swept; the other two sets are stored.
+        // EVERY SET BUT THE FIRST SAYS "never swept" IN THE TEXT THE FORM SHOWS.
+        // `CLAUDE.md` §1 is enforced by `is_sweepable`, but an operator reads
+        // the note, and a row that offered 500 instruments without that phrase
+        // is the row that gets mistaken for a widened engine surface.
+        for target in SpotTarget::ALL {
+            if target == SpotTarget::Swept {
+                continue;
+            }
+            assert!(
+                target.note().contains("never swept"),
+                "{} must say so on the form: {}",
+                target.slug(),
+                target.note()
+            );
+        }
+        // Only the two swept indices are swept; every other set is stored, and
+        // each names ONE bit rather than sharing one.
         assert_eq!(SpotTarget::Swept.universe(), Universe::INDEX);
         assert_eq!(SpotTarget::Indices.universe(), Universe::INDEX);
         assert_eq!(SpotTarget::Equities.universe(), Universe::TOTAL_MARKET);
+        assert_eq!(SpotTarget::Nifty500.universe(), Universe::NIFTY_500);
+        assert_eq!(SpotTarget::Nifty200.universe(), Universe::NIFTY_200);
+        assert_eq!(SpotTarget::Nifty100.universe(), Universe::NIFTY_100);
+        assert_eq!(SpotTarget::Nifty50.universe(), Universe::NIFTY_50);
 
         assert_eq!(
             parse_spot("from=2022-01-08&to=2022-02-08", TEST_TODAY),
@@ -1149,6 +1825,273 @@ mod tests {
                     to: day(2022, 1, 8),
                 },
             })
+        );
+    }
+
+    /// One equity key, for driving [`SpotTarget::names`] over a real symbol.
+    ///
+    /// `Segment::Cash` and `Kind::Equity` are what the merged master carries
+    /// for a cash-segment listing, and they are also what makes
+    /// `is_sweepable` answer false — which is the half these tests are about.
+    fn equity(symbol: &str) -> brutex_core::instrument::InstrumentKey {
+        brutex_core::instrument::InstrumentKey {
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment: brutex_core::instrument::Segment::Cash,
+            underlying: Symbol::new(symbol).expect("a published constituent is a legal symbol"),
+            kind: brutex_core::instrument::Kind::Equity,
+        }
+    }
+
+    /// What every NIFTY-tier target has to prove, driven once per tier.
+    ///
+    /// Four tests call this rather than one test looping, so a failure names
+    /// the tier in its own test name and a tier that stops being checked is a
+    /// deleted function rather than a shortened array.
+    ///
+    /// **No fetch, no socket, no store.** Every fact here comes from a
+    /// compile-time table in `brutex_core::universe` and from this crate's own
+    /// parser.
+    fn a_tier_resolves_to_its_published_list(
+        target: SpotTarget,
+        slug: &str,
+        published: &'static [&'static str],
+        bit: Universe,
+        count: usize,
+    ) {
+        // THE SLUG IS THE WIRE'S OWN WORD, both directions. `/instruments.json`
+        // already spells this universe `slug` in every row's `universes` array
+        // (D-0089), and a second spelling here is a set a browser can count and
+        // cannot request — which is the whole defect D-0105 closes.
+        assert_eq!(target.slug(), slug);
+        assert_eq!(SpotTarget::from_slug(slug), Some(target));
+
+        // A REQUEST CARRYING IT PARSES, and carries THIS target rather than a
+        // neighbour's: `from_slug` is a linear find over `ALL` and two variants
+        // answering one slug would be invisible in a per-variant assertion.
+        let body = format!("target={slug}&from=2022-01-08&to=2022-02-08");
+        let asked = parse_spot(&body, TEST_TODAY).expect("a published tier is a real target");
+        assert_eq!(asked.target, target);
+        assert_eq!(asked.window.days(), 32);
+
+        // THE RIGHT COUNT, and the count comes from `core`'s const rather than
+        // from a literal that could drift away from it at the next rebalance.
+        let members = target
+            .members()
+            .expect("a published tier has a published list");
+        assert_eq!(members.len(), count, "{slug} names {count} instruments");
+        assert_eq!(
+            published.len(),
+            count,
+            "and the const it borrows is that long"
+        );
+
+        // THE RIGHT NAMES, element by element and in order. Fifty arbitrary
+        // strings satisfy the count above; only `core`'s own list satisfies
+        // this, and nothing in `crates/api` holds a second copy to satisfy it
+        // with (`CLAUDE.md` §3 rule 1).
+        assert_eq!(
+            members, published,
+            "{slug} must BE core's list, not resemble it"
+        );
+
+        for name in members {
+            // Each name resolves back through core's own membership index to
+            // the bit this target selects on — so the roster and the predicate
+            // are proved to be the same set, not two lists that agree today.
+            let u = universe::of_equity(name);
+            assert!(u.contains(bit), "{name} must carry {slug}'s bit");
+            assert!(
+                target.names(&equity(name), u),
+                "{slug} must name {name} on the pull path"
+            );
+        }
+    }
+
+    /// A tier target resolves to the NIFTY 500 and to nothing else.
+    #[test]
+    fn the_n500_target_resolves_to_the_five_hundred_published_constituents() {
+        a_tier_resolves_to_its_published_list(
+            SpotTarget::Nifty500,
+            "n500",
+            &universe::NIFTY_500,
+            Universe::NIFTY_500,
+            500,
+        );
+    }
+
+    /// A tier target resolves to the NIFTY 200 and to nothing else.
+    #[test]
+    fn the_n200_target_resolves_to_the_two_hundred_published_constituents() {
+        a_tier_resolves_to_its_published_list(
+            SpotTarget::Nifty200,
+            "n200",
+            &universe::NIFTY_200,
+            Universe::NIFTY_200,
+            200,
+        );
+    }
+
+    /// A tier target resolves to the NIFTY 100 and to nothing else.
+    #[test]
+    fn the_n100_target_resolves_to_the_one_hundred_published_constituents() {
+        a_tier_resolves_to_its_published_list(
+            SpotTarget::Nifty100,
+            "n100",
+            &universe::NIFTY_100,
+            Universe::NIFTY_100,
+            100,
+        );
+    }
+
+    /// A tier target resolves to the NIFTY 50 and to nothing else.
+    #[test]
+    fn the_n50_target_resolves_to_the_fifty_published_constituents() {
+        a_tier_resolves_to_its_published_list(
+            SpotTarget::Nifty50,
+            "n50",
+            &universe::NIFTY_50,
+            Universe::NIFTY_50,
+            50,
+        );
+    }
+
+    /// **A tier is STORED and is never SWEPT.** `CLAUDE.md` §1, as a test.
+    ///
+    /// This is the row that would be quietly wrong if a later change read a new
+    /// target as a widened engine surface. The surface is two instruments and
+    /// `InstrumentKey::is_sweepable` is the only thing that says so; a target
+    /// is what a PULL covers, and D-0105 added four of them without touching
+    /// that table.
+    ///
+    /// Driven over every member of all four tiers — 850 keys — because "no
+    /// constituent is sweepable" is a claim about the whole set and a
+    /// spot-check of one name is a claim about one name.
+    #[test]
+    fn a_nifty_tier_target_stores_and_never_sweeps() {
+        for target in [
+            SpotTarget::Nifty500,
+            SpotTarget::Nifty200,
+            SpotTarget::Nifty100,
+            SpotTarget::Nifty50,
+        ] {
+            let members = target.members().expect("a published tier has a list");
+            for name in members {
+                let key = equity(name);
+                assert!(
+                    !key.is_sweepable(),
+                    "{name} is stored by {}, and the engine sweeps NSE-NIFTY and \
+                     NSE-BANKNIFTY only",
+                    target.slug()
+                );
+                // And the swept target does not name it either: the two sets
+                // share a word in the label and no member at all.
+                assert!(
+                    !SpotTarget::Swept.names(&key, universe::of_equity(name)),
+                    "{name} is not on the engine surface"
+                );
+            }
+        }
+
+        // THE ENGINE SURFACE ITSELF IS UNCHANGED, counted rather than asserted
+        // in prose: two pairs in `core`, and the only variant that reads them.
+        assert_eq!(
+            brutex_core::instrument::InstrumentKey::SWEPT.len(),
+            2,
+            "a new spot target must NEVER widen CLAUDE.md §1"
+        );
+        for (exchange, symbol) in brutex_core::instrument::InstrumentKey::SWEPT {
+            let key = brutex_core::instrument::InstrumentKey::index(exchange, symbol)
+                .expect("a swept index is a legal key");
+            assert!(SpotTarget::Swept.names(&key, universe::of_instrument(&key)));
+            // A NIFTY-tier target does not name the INDEX either. `NSE-NIFTY`
+            // is the series; the tier is the companies underneath it.
+            for tier in [
+                SpotTarget::Nifty500,
+                SpotTarget::Nifty200,
+                SpotTarget::Nifty100,
+                SpotTarget::Nifty50,
+            ] {
+                assert!(
+                    !tier.names(&key, universe::of_instrument(&key)),
+                    "{symbol} is an index, not a constituent of {}",
+                    tier.slug()
+                );
+            }
+        }
+    }
+
+    /// The two targets that are NOT defined by a published file say so.
+    ///
+    /// `None` from [`SpotTarget::members`] is a stated absence, not a fallback
+    /// (`CLAUDE.md` §4). `Swept` is the engine surface and `Indices` is
+    /// whatever the vendor master lists — inventing a symbol list for either
+    /// would be a third copy of §1 and a snapshot that goes stale on the next
+    /// vendor addition.
+    #[test]
+    fn the_two_targets_with_no_published_list_return_none_rather_than_an_invented_one() {
+        assert_eq!(SpotTarget::Swept.members(), None);
+        assert_eq!(SpotTarget::Indices.members(), None);
+        // Every other target has one, and the Total Market's is core's too.
+        assert_eq!(
+            SpotTarget::Equities.members(),
+            Some(&universe::NIFTY_TOTAL_MARKET[..])
+        );
+        for target in SpotTarget::ALL {
+            let published = target.members().is_some();
+            assert_eq!(
+                published,
+                !matches!(target, SpotTarget::Swept | SpotTarget::Indices),
+                "{} either has a published list or is one of the two that do not",
+                target.slug()
+            );
+        }
+    }
+
+    /// **An unknown slug is still refused BY NAME**, and the refusal now says
+    /// what the legal ones are.
+    ///
+    /// The four new arms must not turn `UnknownTarget` into a default. This
+    /// drives words that are near-misses for the tiers specifically — the
+    /// spellings a second vocabulary would have invented — plus the old cases
+    /// and the empty field, because a parser that started accepting `nifty50`
+    /// would have two names for one set and no way to say which the store filed
+    /// under. `CLAUDE.md` §4.
+    #[test]
+    fn a_slug_that_is_not_a_target_is_refused_by_name_after_the_tiers_were_added() {
+        for got in [
+            "n25", "n1000", "nifty50", "nifty-50", "N50", "n 50", "n50 ", "50", "ntm", "fno",
+            "index", "*", "all", "mcx", "bse",
+        ] {
+            assert_eq!(SpotTarget::from_slug(got), None, "{got:?} is not a target");
+            let body = format!("target={got}&from=2022-01-08&to=2022-02-08");
+            let why = parse_spot(&body, TEST_TODAY).expect_err("not a target");
+            assert_eq!(
+                why,
+                Refusal::UnknownTarget {
+                    got: got.to_owned()
+                },
+                "{got:?} must refuse as UnknownTarget and not as anything softer"
+            );
+            // BY NAME, both names: what arrived and what would have worked.
+            let text = why.to_string();
+            assert!(
+                text.contains(got),
+                "the refusal quotes what arrived: {text}"
+            );
+            for target in SpotTarget::ALL {
+                assert!(
+                    text.contains(target.slug()),
+                    "the refusal lists {}: {text}",
+                    target.slug()
+                );
+            }
+        }
+        // AND AN EMPTY FIELD IS STILL ITS OWN REFUSAL. "You named nothing" and
+        // "you named a thing that does not exist" are different facts and the
+        // tiers did not merge them.
+        assert_eq!(
+            parse_spot("from=2022-01-08&to=2022-02-08", TEST_TODAY),
+            Err(Refusal::FieldMissing { field: "target" })
         );
     }
 
@@ -1429,7 +2372,11 @@ mod tests {
                 Refusal::UnknownTarget {
                     got: "mcx".to_owned(),
                 },
-                "not one of the three spot targets",
+                // THE LEGAL SLUGS, not a count. The sentence used to say
+                // "one of the three spot targets" and there are seven; the
+                // assertion pins the two ends of the generated list so that
+                // adding an eighth without adding it to `ALL` is visible here.
+                "is not a spot target. This build takes swept, ",
             ),
             (
                 Refusal::UnknownSeries {
@@ -1480,6 +2427,118 @@ mod tests {
         // It is an error, so a caller may propagate it rather than reformat it.
         let as_error: &dyn std::error::Error = &clock;
         assert!(as_error.to_string().contains("REFUSED"));
+    }
+
+    /// Every refusal says which control an operator must change, and the one
+    /// that is not about a control names none rather than guessing.
+    ///
+    /// This is the field a log line is filtered on — `field=to` counts every
+    /// way one date box was wrong, across seventeen differently worded
+    /// sentences. A table rather than a spot check, because an arm that names
+    /// the wrong control is a wrong answer that still looks like an answer.
+    #[test]
+    fn every_refusal_names_the_control_an_operator_must_change() {
+        let d = day(2026, 8, 7);
+        let backwards = SessionError::WindowRunsBackwards { from: d, to: d };
+        let cases: [(Refusal, Option<&str>); 17] = [
+            (Refusal::FieldMissing { field: "from" }, Some("from")),
+            (
+                Refusal::DateNotIso {
+                    field: "to",
+                    got: "08/01/2022".to_owned(),
+                },
+                Some("to"),
+            ),
+            (
+                Refusal::DateImpossible {
+                    field: "expiry",
+                    got: "2023-02-29".to_owned(),
+                    why: SessionError::DayOutOfRange {
+                        day: 29,
+                        month_len: 28,
+                    },
+                },
+                Some("expiry"),
+            ),
+            (Refusal::WindowBackwards { why: backwards }, Some("window")),
+            (
+                Refusal::WindowTooLong {
+                    days: 5_000,
+                    cap: MAX_WINDOW_DAYS,
+                },
+                Some("window"),
+            ),
+            (
+                Refusal::WindowInFuture { to: d, today: d },
+                // The START of every window refusal below is legal; it is the
+                // end that is wrong, and that is the box to change.
+                Some("to"),
+            ),
+            (Refusal::WindowReachesToday { to: d, today: d }, Some("to")),
+            (
+                Refusal::WindowOutlivesTheContract { to: d, expiry: d },
+                Some("to"),
+            ),
+            (
+                Refusal::ArchiveFolderMissing { feed: "TrueData" },
+                Some("folder"),
+            ),
+            (
+                Refusal::UnknownTarget {
+                    got: "mcx".to_owned(),
+                },
+                Some("target"),
+            ),
+            (
+                Refusal::UnknownSeries {
+                    got: "swap".to_owned(),
+                },
+                Some("series"),
+            ),
+            (
+                Refusal::UnknownVendor {
+                    got: "zerodha".to_owned(),
+                },
+                Some("vendor"),
+            ),
+            (
+                Refusal::UnknownGranularity {
+                    got: "hourly".to_owned(),
+                },
+                Some("granularity"),
+            ),
+            (
+                Refusal::BadUnderlying {
+                    got: "NIFTY 100".to_owned(),
+                },
+                Some("underlying"),
+            ),
+            (
+                Refusal::NotAnFnoUnderlying {
+                    symbol: "RAJESHEXPO".to_owned(),
+                },
+                Some("underlying"),
+            ),
+            (
+                Refusal::LiveContract {
+                    expiry: d,
+                    today: d,
+                },
+                Some("expiry"),
+            ),
+            // THE ONE THAT NAMES NOTHING. The operator's form is fine and the
+            // machine's clock is not; sending them to a date box would send
+            // them to edit a value that is already correct.
+            (
+                Refusal::ClockUnusable {
+                    why: SessionError::BeforeEpoch { secs: -1 },
+                },
+                None,
+            ),
+        ];
+        for (refusal, field) in cases {
+            assert_eq!(refused_field(&refusal), field, "{refusal:?}");
+        }
     }
 
     #[test]
@@ -1588,5 +2647,388 @@ mod vendor_parse_tests {
         let said = refusal.to_string();
         assert!(said.contains("zerodha"), "{said}");
         assert!(said.starts_with("REFUSED"), "{said}");
+    }
+}
+
+/// The two routes this module serves, driven through their own handlers.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod route_tests {
+    use super::*;
+
+    use crate::autopilot::{FeedReport, Phase, Status};
+    use crate::server::{Loaded, Site};
+
+    fn day(y: u16, m: u8, d: u8) -> Day {
+        Day::new(y, m, d).expect("a real date")
+    }
+
+    /// An empty site on a store root of its own.
+    ///
+    /// **`name` must differ per test**, for the reason `crate::scratch` gives:
+    /// the path stamps the process, not the test.
+    fn empty_site(name: &str) -> Loaded {
+        let dir = crate::scratch::path(&format!("ingest-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        Loaded::new(Site::load(&dir, &dir))
+    }
+
+    /// A body the parser accepts, with a window long behind any clock.
+    const LEGAL: &str = "target=swept&from=2020-01-01&to=2020-01-31&vendor=groww&granularity=1min";
+
+    /// **A legal selection is not queued, and the answer never once says it
+    /// was.**
+    ///
+    /// The half of `CLAUDE.md` §4 that is easy to fail here is not the refusal
+    /// — it is answering `202 Accepted` for work no code will pick up. There is
+    /// no pending list in this process, so an acceptance would be a receipt for
+    /// nothing.
+    #[test]
+    fn a_legal_selection_is_refused_by_name_rather_than_accepted_and_dropped() {
+        let (code, body) = queue_answer(LEGAL, Ok(day(2026, 8, 10)), false);
+        assert_eq!(code, axum::http::StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert!(body.contains(r#""queued":false"#), "{body}");
+        assert!(!body.contains(r#""queued":true"#), "{body}");
+        // IT ECHOES WHAT WOULD HAVE GONE ON THE WIRE, so a caller can see its
+        // selection was understood and not merely rejected.
+        assert!(body.contains(r#""target":"swept""#), "{body}");
+        assert!(body.contains(r#""from":"2020-01-01""#), "{body}");
+        assert!(body.contains(r#""to":"2020-01-31""#), "{body}");
+        assert!(body.contains(r#""days":31"#), "{body}");
+        assert!(body.contains(r#""granularity":"1min""#), "{body}");
+        // AND IT NAMES WHAT DOES EXIST. A refusal with no route out of it is a
+        // dead end dressed as an answer.
+        assert!(body.contains("POST /pull/spot"), "{body}");
+        assert!(body.contains("GET /ingest/status.json"), "{body}");
+        assert!(body.contains("no queue"), "{body}");
+        assert!(body.contains(r#""pull_seat":"free""#), "{body}");
+
+        let (_, held) = queue_answer(LEGAL, Ok(day(2026, 8, 10)), true);
+        assert!(
+            held.contains(r#""pull_seat":"held""#),
+            "the caller is told a pull is already running: {held}"
+        );
+    }
+
+    /// Every refusal a spot body can earn arrives with the control that owns
+    /// it, so a caller knows where to go.
+    #[test]
+    fn a_refused_selection_names_the_field_and_the_clock_names_none() {
+        let cases = [
+            ("from=2020-01-01&to=2020-01-31", "target"),
+            ("target=swept&from=&to=2020-01-31", "from"),
+            (
+                "target=swept&from=2020-01-01&to=2020-01-31&vendor=zerodha",
+                "vendor",
+            ),
+            ("target=nope&from=2020-01-01&to=2020-01-31", "target"),
+        ];
+        for (body, field) in cases {
+            let (code, answer) = queue_answer(body, Ok(day(2026, 8, 10)), false);
+            assert_eq!(
+                code,
+                axum::http::StatusCode::BAD_REQUEST,
+                "{body} was not refused: {answer}"
+            );
+            assert!(answer.contains(r#""queued":false"#), "{answer}");
+            assert!(
+                answer.contains(&format!(r#""field":"{field}""#)),
+                "{body} must name {field}: {answer}"
+            );
+            assert!(answer.contains("REFUSED"), "{answer}");
+        }
+
+        // THE CLOCK IS THE ONE REFUSAL WITH NO FIELD, and it is `null` rather
+        // than a guessed control: nothing the caller typed is wrong.
+        let (code, answer) = queue_answer(
+            LEGAL,
+            Err(Refusal::ClockUnusable {
+                why: SessionError::YearOutOfRange { year: 70_000 },
+            }),
+            false,
+        );
+        assert_eq!(
+            code,
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "{answer}"
+        );
+        assert!(answer.contains(r#""field":null"#), "{answer}");
+        assert!(answer.contains("clock"), "{answer}");
+    }
+
+    /// **The route writes nothing and reaches no vendor.** Asserted against the
+    /// store root itself rather than against a comment: a queue that "just"
+    /// journalled its request would still be a write this route promises not to
+    /// make, and a pull started here would spend the operator's rate budget.
+    #[tokio::test]
+    async fn queueing_touches_neither_the_store_nor_a_vendor() {
+        let site = empty_site("queue-writes-nothing");
+        let root = site.store_root.clone();
+        let before = std::fs::read_dir(&root).expect("the root exists").count();
+        let (code, headers, body) =
+            queue(axum::extract::State(Loaded::clone(&site)), LEGAL.to_owned()).await;
+        assert_eq!(code, axum::http::StatusCode::NOT_IMPLEMENTED, "{body}");
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        let after = std::fs::read_dir(&root).expect("the root exists").count();
+        assert_eq!(
+            before,
+            after,
+            "a route that answers must not have written to {}",
+            root.display()
+        );
+        assert!(
+            !site.autopilot.seat_held(),
+            "the pull seat was taken and not released, which is a pull that started"
+        );
+    }
+
+    /// A status carrying two feeds, one of which may be halted.
+    fn surveyed(halted: &[&str]) -> Status {
+        Status {
+            phase: Phase::Running,
+            detail: String::from("fetching Groww · 2020-01"),
+            cursor: String::from("2020-01"),
+            feeds: ["Dhan", "Groww"]
+                .into_iter()
+                .map(|feed| FeedReport {
+                    feed: feed.to_owned(),
+                    month: String::from("2020-01"),
+                    window: String::from("2020-01-01..=2020-01-31"),
+                    behind: 2,
+                    halted: if halted.contains(&feed) {
+                        format!("{feed} said no")
+                    } else {
+                        String::new()
+                    },
+                    ..FeedReport::default()
+                })
+                .collect(),
+            ..Status::default()
+        }
+    }
+
+    /// The payload answers the question the route is named for, from the last
+    /// survey and from nothing else.
+    #[test]
+    fn the_status_reports_the_month_the_window_and_what_is_behind() {
+        let json = waiting_json(&surveyed(&[]), false, true);
+        assert!(json.contains(r#""surveyed":true"#), "{json}");
+        // `waiting`, NOT `running`, and that is `Status::state`'s own rule
+        // rather than a slip here: a phase of `Running` with nothing in flight
+        // is between two units, and saying `running` would claim a socket that
+        // is not open. The in-flight case is asserted below.
+        assert!(json.contains(r#""state":"waiting""#), "{json}");
+        assert!(json.contains(r#""pull_seat":"held""#), "{json}");
+        assert!(json.contains(r#""month":"2020-01""#), "{json}");
+        assert!(
+            json.contains(r#""window":"2020-01-01..=2020-01-31""#),
+            "{json}"
+        );
+        assert!(json.contains(r#""behind":2"#), "{json}");
+        assert!(json.contains(r#""attempts_max":3"#), "{json}");
+        assert!(json.contains(r#""feed":"Groww""#), "{json}");
+        assert!(json.contains(r#""in_flight":null"#), "{json}");
+    }
+
+    /// **Four states, four different sentences, and not one of them is an
+    /// empty list meaning "nothing is outstanding".**
+    #[test]
+    fn what_the_sweep_waits_on_is_named_in_every_state() {
+        // 1. The operator's own pause outranks everything.
+        let paused = waiting_json(&surveyed(&[]), true, false);
+        assert!(paused.contains("the operator's pause"), "{paused}");
+        assert!(paused.contains(r#""paused":true"#), "{paused}");
+
+        // 2. Every feed halted names the restart, because a resume does not
+        //    clear one.
+        let dead = waiting_json(&surveyed(&["Dhan", "Groww"]), false, false);
+        assert!(dead.contains("every feed is halted"), "{dead}");
+        assert!(dead.contains("restarting the server"), "{dead}");
+        assert!(dead.contains("Dhan, Groww"), "{dead}");
+
+        // 3. One halted feed is NOT "every feed", and the backfill's own
+        //    sentence is what stands.
+        let half = waiting_json(&surveyed(&["Dhan"]), false, false);
+        assert!(half.contains("fetching Groww"), "{half}");
+        assert!(!half.contains("every feed is halted"), "{half}");
+
+        // 4. Nothing surveyed, and the two reasons for it are different facts.
+        let never = waiting_json(&Status::default(), false, false);
+        assert!(never.contains(r#""surveyed":false"#), "{never}");
+        assert!(never.contains("No round has finished"), "{never}");
+        assert!(
+            never.contains("/store.json"),
+            "and it names the route that does read the store: {never}"
+        );
+        let stopped = waiting_json(
+            &Status {
+                phase: Phase::Halted,
+                detail: String::from("the clock is unusable"),
+                ..Status::default()
+            },
+            false,
+            false,
+        );
+        assert!(
+            stopped.contains("the backfill task is not running"),
+            "{stopped}"
+        );
+        assert!(stopped.contains("the clock is unusable"), "{stopped}");
+    }
+
+    /// The route answers over a real site, and an unreadable status refuses
+    /// rather than reporting an empty list.
+    #[tokio::test]
+    async fn the_status_route_answers_and_refuses_an_unreadable_one() {
+        let site = empty_site("status-route");
+        let (code, headers, body) = status_json(axum::extract::State(Loaded::clone(&site))).await;
+        assert_eq!(code, axum::http::StatusCode::OK, "{body}");
+        assert_eq!(headers[0].1, "application/json; charset=utf-8");
+        assert!(body.contains(r#""surveyed":false"#), "{body}");
+        assert!(body.contains(r#""state":"starting""#), "{body}");
+
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            site.autopilot.publish(|_| panic!("a publisher panicked"));
+        }));
+        assert!(poisoned.is_err(), "the panic has to reach the lock");
+        let (code, _, body) = status_json(axum::extract::State(Loaded::clone(&site))).await;
+        assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE, "{body}");
+        assert!(body.contains("poisoned"), "{body}");
+        assert!(
+            !body.contains(r#""waiting_on":[]"#),
+            "an empty list would read as \"nothing is outstanding\": {body}"
+        );
+    }
+
+    /// One HTTP exchange on a fresh connection, blocking on its own thread —
+    /// the shape `server.rs`'s own route tests use, for the reason they give:
+    /// it needs nothing from `tokio` this crate does not already have.
+    async fn exchange(addr: std::net::SocketAddr, request: String) -> String {
+        tokio::task::spawn_blocking(move || {
+            use std::io::{Read as _, Write as _};
+            let mut socket = std::net::TcpStream::connect(addr).expect("connect");
+            socket.write_all(request.as_bytes()).expect("write");
+            let mut buf = String::new();
+            socket.read_to_string(&mut buf).expect("read");
+            buf
+        })
+        .await
+        .expect("the client thread must not panic")
+    }
+
+    /// **The three routes are registered, and the one that could have shadowed
+    /// the front end does not.**
+    ///
+    /// The last assertion is the load-bearing one. `POST /autopilot` at the
+    /// bare path would make `GET /autopilot` answer 405 — axum's method router
+    /// answers a matched path itself and never reaches `Router::fallback` — and
+    /// that is the operator's autopilot page. The control lives at
+    /// `/autopilot/control` because of it, and this is what stops anyone
+    /// "tidying" it back.
+    #[tokio::test]
+    async fn the_three_routes_answer_and_none_of_them_shadows_the_front_end() {
+        let site = empty_site("routes-registered");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stopper = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let stop_addr = stopper.local_addr().expect("addr");
+        let served = tokio::spawn(crate::server::serve(
+            listener,
+            crate::server::router_serving(
+                site,
+                std::sync::Arc::new(crate::assets::Assets::new(&crate::scratch::path(
+                    "ingest-routes-front",
+                ))),
+            ),
+            Box::pin(async move { stopper.accept().await.map(|_| ()) }),
+        ));
+
+        let get = |path: &str| {
+            exchange(
+                addr,
+                format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n"),
+            )
+        };
+        let post = |path: &str, form: &'static str| {
+            exchange(
+                addr,
+                format!(
+                    "POST {path} HTTP/1.1\r\nHost: t\r\n\
+                     Content-Type: application/x-www-form-urlencoded\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
+                    form.len()
+                ),
+            )
+        };
+
+        let status = get("/ingest/status.json").await;
+        assert!(status.contains("200 OK"), "{status}");
+        assert!(status.contains("application/json"), "{status}");
+        assert!(status.contains(r#""blocked_by""#), "{status}");
+
+        let queued = post("/ingest/queue", LEGAL).await;
+        assert!(queued.contains("501"), "{queued}");
+        assert!(queued.contains(r#""queued":false"#), "{queued}");
+
+        // A GET ON THE QUEUE STARTS NOTHING AND IS NOT A ROUTE. The same rule
+        // `/pull/spot` is held to: a crawler follows links.
+        let crawled = get("/ingest/queue").await;
+        assert!(crawled.contains("405"), "{crawled}");
+
+        let control = post("/autopilot/control", "action=stop").await;
+        assert!(control.contains("200 OK"), "{control}");
+        assert!(control.contains(r#""accepted":true"#), "{control}");
+
+        let refused = post("/autopilot/control", "action=go").await;
+        assert!(refused.contains("400"), "{refused}");
+        assert!(refused.contains("start, stop, resume"), "{refused}");
+
+        // THE PAGE IS STILL THE PAGE. Not 405 — whatever the asset layer says
+        // about a front end that was never built, it is the front end saying it.
+        let page = get("/autopilot").await;
+        assert!(
+            !page.contains("405"),
+            "GET /autopilot must still reach the front end: {page}"
+        );
+
+        let _ = std::net::TcpStream::connect(stop_addr);
+        served
+            .await
+            .expect("task")
+            .expect("a graceful shutdown is not a failure");
+    }
+
+    /// The cell in flight travels, because "waiting on the vendor for X" is the
+    /// most common answer of all.
+    #[test]
+    fn the_cell_in_flight_is_named_when_there_is_one() {
+        let mut status = surveyed(&[]);
+        status.now = Some(crate::autopilot::InFlight {
+            instrument: String::from("NSE-NIFTY"),
+            month: String::from("2020-01"),
+            timeframe: String::from("1min"),
+            feed: String::from("Groww"),
+            since: std::time::Instant::now(),
+            index: 3,
+            of: 9,
+        });
+        let json = waiting_json(&status, false, true);
+        assert!(
+            json.contains(r#""state":"running""#),
+            "a cell on the wire is what makes it running: {json}"
+        );
+        assert!(json.contains(r#""instrument":"NSE-NIFTY""#), "{json}");
+        assert!(json.contains(r#""index":3"#), "{json}");
+        assert!(json.contains(r#""of":9"#), "{json}");
     }
 }

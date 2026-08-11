@@ -43,7 +43,7 @@
 //! on its own, so `grep` works, `tail -f` works, and a machine can parse a
 //! line without seeing the file. The key order is fixed — `seq`, `ts`, `ms`,
 //! `level`, `target`, `msg`, `fields` — so the columns line up for a person;
-//! see [`encode`] for why, and for why the JSON is hand-written rather than
+//! see `encode` for why, and for why the JSON is hand-written rather than
 //! taken from `serde_json`.
 //!
 //! ```text
@@ -67,19 +67,19 @@
 //! (**zero allocations in steady state**), one integer comparison and one
 //! `write` syscall. Nothing scales with how many events came before or how
 //! large the file is. Once per 8 MiB there is a rotation inside the same lock.
-//! [`sink`] states all of it, including what is not free.
+//! `sink` states all of it, including what is not free.
 //!
 //! Nothing is buffered in user space, so a `SIGKILL` loses nothing that
 //! [`Sink::emit`] said it had written. A power cut loses whatever the kernel
 //! had not flushed, because this does not `fsync` per event — deliberately,
-//! and stated in [`sink`].
+//! and stated in `sink`.
 //!
 //! # When it cannot write
 //!
 //! It never takes the caller down, and it never hides the failure: `emit`
 //! returns [`Emitted::Dropped`], [`Sink::health`] carries a running count and
 //! the reason in its own words, and the *first* failure — only the first —
-//! goes to `stderr`. The trade-off is stated in [`sink`]: those events are
+//! goes to `stderr`. The trade-off is stated in `sink`: those events are
 //! genuinely lost and are not queued, because an unbounded in-memory backlog
 //! of a log that cannot be written is how a logger kills its host.
 //!
@@ -130,10 +130,12 @@ pub use crate::level::{LEVELS, Level};
 pub use crate::record::Record;
 pub use crate::sink::{
     BASENAME, Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, EXTENSION, Emitted, FileTarget,
-    Health, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store, paths_newest_first,
-    rotated_path,
+    Health, MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
+    paths_newest_first, rotated_path,
 };
-pub use crate::tail::{DEFAULT_MAX_SCAN_BYTES, MAX_LIMIT, Query, READ_BLOCK, Tail, tail};
+pub use crate::tail::{
+    DEFAULT_MAX_SCAN_BYTES, MAX_LIMIT, MAX_LINE_BYTES, Query, READ_BLOCK, Tail, tail,
+};
 pub use crate::value::{OwnedValue, Value};
 
 use std::sync::OnceLock;
@@ -193,6 +195,73 @@ pub fn install(config: &Config) -> Result<&'static Sink, String> {
 #[must_use]
 pub fn global() -> Option<&'static Sink> {
     GLOBAL.get()
+}
+
+/// Whether the process-wide sink would write an event at `level` from `target`.
+///
+/// [`false`] when nothing is installed, because an event with nowhere to go is
+/// not written. See [`Sink::admits`] for why this exists separately from
+/// [`emit`].
+#[must_use]
+pub fn admits(level: Level, target: &str) -> bool {
+    global().is_some_and(|sink| sink.admits(level, target))
+}
+
+/// Emits an event, evaluating its arguments **only if it would be written**.
+///
+/// # Why a macro when [`emit`] is a function
+///
+/// Because that is the whole difference. `emit` is a function call, so Rust
+/// evaluates every argument and builds the entire `Event` before the level can
+/// be looked at. Measured against `tracing`'s macro in one binary under one
+/// harness:
+///
+/// | filtered event | this crate, via `emit` | `tracing` macro |
+/// |---|---:|---:|
+/// | no fields | 6,750 ps | 270 ps |
+/// | three fields | 14,146 ps | 250 ps |
+///
+/// The bespoke cost **doubles** with the field count and `tracing`'s does not
+/// move. That is O(call-site fields) against `CLAUDE.md` §3 rule 4's O(1), and
+/// it is the only measured O(1) violation on the write path.
+///
+/// This closes it with no new dependency: [`admits`] runs the same two checks
+/// `emit` runs, and the `Event` is only constructed inside the `if`.
+///
+/// # Cost
+///
+/// A filtered event costs one relaxed atomic load, one comparison, and — only
+/// when per-target overrides exist — at most [`MAX_TARGET_LEVELS`] bounded
+/// prefix comparisons. **Nothing else is evaluated.** A written event costs
+/// exactly what [`emit`] costs, because it is [`emit`].
+///
+/// Proved by `telemetry::sink::a_filtered_event_never_evaluates_its_arguments`,
+/// which counts side effects rather than timing them, and measured flat by
+/// `telemetry::bench::a_filtered_event_touches_nothing_and_stays_flat` (C-T-02).
+///
+/// # Examples
+///
+/// ```
+/// use telemetry::{Level, Value, emit_if};
+/// // The `expensive()` call does not happen unless the event is written.
+/// fn expensive() -> u64 { 42 }
+/// let _outcome = emit_if!(Level::Debug, "pull.member", "landed",
+///     "bars" => Value::Uint(expensive()));
+/// ```
+#[macro_export]
+macro_rules! emit_if {
+    ($level:expr, $target:expr, $message:expr $(, $key:expr => $value:expr)* $(,)?) => {{
+        let level = $level;
+        let target = $target;
+        if $crate::admits(level, target) {
+            $crate::emit(
+                &$crate::Event::new(level, target, $message)
+                    $(.with($key, $value))*
+            )
+        } else {
+            $crate::Emitted::Filtered
+        }
+    }};
 }
 
 /// Writes one event to the process-wide sink.

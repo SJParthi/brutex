@@ -87,6 +87,62 @@ impl core::fmt::Debug for HttpSource {
 }
 
 impl HttpSource {
+    /// One request parameter's value, or the refusal that stops the request.
+    ///
+    /// Split out of the request builder because two of the five sources can
+    /// REFUSE, and a refusal here must stop the socket rather than send a
+    /// request that names something other than what the answer will be filed
+    /// under. Extracted as its own function so the builder stays inside the
+    /// workspace's 100-line ceiling — the arms below are the vendor contract,
+    /// and they grow every time a broker is added.
+    fn resolve_param(
+        &self,
+        p: &crate::vendor::Param,
+        request: &BarRequest,
+        from: &str,
+        to: &str,
+    ) -> Result<String, FetchError> {
+        Ok(match p.value {
+            crate::vendor::ParamValue::From => from.to_owned(),
+            crate::vendor::ParamValue::To => to.to_owned(),
+            crate::vendor::ParamValue::InstrumentId => request.instrument_id.clone(),
+            crate::vendor::ParamValue::Fixed(word) => word.to_owned(),
+            crate::vendor::ParamValue::Granularity => self
+                .spec
+                .granularity_token(request.granularity)
+                .ok_or(FetchError::RungNotSpellable {
+                    rung: request.granularity,
+                    field: p.name,
+                })?
+                .to_owned(),
+            // BOTH ARMS REFUSE ON AN EMPTY WORD, not only on a missing row. A
+            // feed that records a class but leaves the field blank would
+            // otherwise send `instrument=`, which the vendor answers — and that
+            // answer would be filed as bars. `CLAUDE.md` §4: never a silent
+            // fallback.
+            crate::vendor::ParamValue::Segment => self
+                .spec
+                .listing_words(request.listing)
+                .map(|w| w.segment)
+                .filter(|word| !word.is_empty())
+                .ok_or(FetchError::ListingNotSpellable {
+                    listing: request.listing,
+                    field: p.name,
+                })?
+                .to_owned(),
+            crate::vendor::ParamValue::Kind => self
+                .spec
+                .listing_words(request.listing)
+                .map(|w| w.kind)
+                .filter(|word| !word.is_empty())
+                .ok_or(FetchError::ListingNotSpellable {
+                    listing: request.listing,
+                    field: p.name,
+                })?
+                .to_owned(),
+        })
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -206,6 +262,56 @@ impl HttpSource {
         };
         (header, value)
     }
+}
+
+/// The wire, as it actually behaved: one line per vendor answer.
+///
+/// # Why this exists
+///
+/// `window_async` was the single darkest place in the workspace — the one spot
+/// that talks to a vendor, saying nothing about any of it. A run that was
+/// throttled, one answered with an empty body and one refused outright all
+/// looked identical from outside, and this session was spent reconstructing by
+/// hand the facts this function now writes down.
+///
+/// # The level is the status
+///
+/// `Trace` when the vendor answered, `Warn` when it did not. One line per
+/// request is ~62,600 on a one-minute backfill, so the ordinary case is off
+/// unless an operator asks for it and the case worth waking up for never is.
+///
+/// # THE URL IS LOGGED AND THE CREDENTIAL IS NOT
+///
+/// `url` is the vendor.s public endpoint. The token travels in a header that
+/// appears in no field here, for the reason `CLAUDE.md` section 8 keeps the
+/// parameter path out of every tracked file: this log is a file an operator
+/// will paste into an issue.
+fn note_answer(url: &str, status: u16, ok: bool, request: &BarRequest) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::new(
+            if ok {
+                telemetry::Level::Trace
+            } else {
+                telemetry::Level::Warn
+            },
+            "pull.http",
+            "vendor answered",
+        )
+        .with("url", telemetry::Value::Str(url))
+        .with("status", telemetry::Value::Uint(u64::from(status)))
+        .with(
+            "instrument_id",
+            telemetry::Value::Str(&request.instrument_id),
+        )
+        .with(
+            "from",
+            telemetry::Value::Str(&request.window.from().to_string()),
+        )
+        .with(
+            "to",
+            telemetry::Value::Str(&request.window.to().to_string()),
+        ),
+    );
 }
 
 /// Turns a vendor body into rows, using only what the descriptor declares.
@@ -714,23 +820,7 @@ impl HttpSource {
             .spec
             .params
             .iter()
-            .map(|p| {
-                let v = match p.value {
-                    crate::vendor::ParamValue::From => from.clone(),
-                    crate::vendor::ParamValue::To => to.clone(),
-                    crate::vendor::ParamValue::InstrumentId => request.instrument_id.clone(),
-                    crate::vendor::ParamValue::Fixed(word) => word.to_owned(),
-                    crate::vendor::ParamValue::Granularity => self
-                        .spec
-                        .granularity_token(request.granularity)
-                        .ok_or(FetchError::RungNotSpellable {
-                            rung: request.granularity,
-                            field: p.name,
-                        })?
-                        .to_owned(),
-                };
-                Ok((p.name, v))
-            })
+            .map(|p| Ok((p.name, self.resolve_param(p, request, &from, &to)?)))
             .collect::<Result<_, FetchError>>()?;
 
         let mut builder = match self.spec.method {
@@ -760,6 +850,7 @@ impl HttpSource {
         })?;
 
         let status = answer.status().as_u16();
+        note_answer(&url, status, answer.status().is_success(), request);
         if !answer.status().is_success() {
             // A REDIRECT IS NOW A REFUSAL, SO IT HAS TO SAY SO IN WORDS.
             //
@@ -1010,6 +1101,18 @@ mod tests {
             // the request used to hardcode. A real vendor row carries more
             // (`securityId`, `exchangeSegment`); the fixtures that care about
             // those name them for themselves.
+            listings: &[
+                crate::vendor::ListingWords {
+                    listing: crate::vendor::Listing::Index,
+                    segment: "IDX_I",
+                    kind: "INDEX",
+                },
+                crate::vendor::ListingWords {
+                    listing: crate::vendor::Listing::Equity,
+                    segment: "NSE_EQ",
+                    kind: "EQUITY",
+                },
+            ],
             params: &[
                 crate::vendor::Param {
                     name: "from",
@@ -1393,6 +1496,7 @@ mod tests {
         let source = HttpSource::new(spec, "SUPERSECRET".to_owned()).expect("a client builds");
         let request = BarRequest {
             instrument_id: String::new(),
+            listing: crate::vendor::Listing::Equity,
             window: crate::session::Window::new(
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
@@ -1459,6 +1563,7 @@ mod tests {
         let source = HttpSource::new(spec, "SUPERSECRET".to_owned()).expect("a client builds");
         let request = BarRequest {
             instrument_id: String::new(),
+            listing: crate::vendor::Listing::Equity,
             window: crate::session::Window::new(
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
@@ -1784,6 +1889,7 @@ mod tests {
     fn one_day() -> BarRequest {
         BarRequest {
             instrument_id: String::new(),
+            listing: crate::vendor::Listing::Equity,
             window: crate::session::Window::new(
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
                 crate::session::Day::new(2025, 7, 1).expect("a real day"),
@@ -1849,6 +1955,18 @@ mod tests {
         let spec = HttpSpec {
             base_url: Box::leak(url.into_boxed_str()),
             method: Method::Get,
+            listings: &[
+                crate::vendor::ListingWords {
+                    listing: crate::vendor::Listing::Index,
+                    segment: "IDX_I",
+                    kind: "INDEX",
+                },
+                crate::vendor::ListingWords {
+                    listing: crate::vendor::Listing::Equity,
+                    segment: "NSE_EQ",
+                    kind: "EQUITY",
+                },
+            ],
             params: &[
                 crate::vendor::Param {
                     name: "from",

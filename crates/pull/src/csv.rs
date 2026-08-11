@@ -321,6 +321,89 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
     crate::session::Day::new(y, m, d).ok()
 }
 
+/// What one pass over a body counted, in plain integers.
+///
+/// A struct rather than two adjacent `u64`, for [`Offsets`]' reason: two
+/// numbers of the same type transpose without a compiler complaint, and a
+/// skipped count reported as a line count is a plausible number.
+///
+/// Neither counter is an atomic and neither allocates. They are incremented in
+/// the per-row loop and read once, after it, which is the only way a per-row
+/// fact reaches the log at all — see [`note_decoded`].
+#[derive(Debug, Clone, Copy)]
+struct Tally {
+    /// Every line the pass looked at, blank ones and the header included.
+    lines: u64,
+    /// The blank lines, plus the header row when the shape declares one.
+    skipped: u64,
+}
+
+/// One decoded file, on the rolling log.
+///
+/// # Why the count is here and not in the loop
+///
+/// [`decode_rows`] runs once per ROW. A one-minute backfill is millions of
+/// them against a sink that keeps 64 MiB, so a line each would roll the run's
+/// own beginning out of the window before the run finished — the evidence
+/// would destroy itself. [`Tally`] is two plain integers incremented in that
+/// pass and this is the single event they pay for, once, where the file ends.
+/// The same shape as [`crate::fetch::land`]'s census.
+///
+/// # Why three counts and not one
+///
+/// `rows_in`, `rows` and `skipped` must add up. A body whose lines exceed its
+/// rows plus its skips is a decoder that dropped something without saying so,
+/// and until this line existed there was no way to see that from outside — a
+/// file that decoded to half its rows and a file that decoded to all of them
+/// were the same silence.
+///
+/// # `fields` and `header` are the SHAPE, and the shape is what mis-parses
+///
+/// The three layouts this module knows are five-without-header,
+/// nine-without-header and ten-with-header, so those two numbers name which
+/// one was applied. A `TrueData` futures file decoded under the index layout
+/// is the failure the module doc opens with — a price column read as a volume
+/// yields a plausible number — and it is now visible on the line rather than
+/// only in the bars weeks later.
+fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::debug("pull.csv", "file decoded")
+            .with("rows_in", telemetry::Value::Uint(tally.lines))
+            .with("rows", telemetry::Value::Uint(rows as u64))
+            .with("skipped", telemetry::Value::Uint(tally.skipped))
+            .with("fields", telemetry::Value::Uint(columns.count() as u64))
+            .with("header", telemetry::Value::Bool(columns.has_header())),
+    );
+}
+
+/// One file that did not decode, on the rolling log — at `Warn`.
+///
+/// # There is no per-row refusal count to report, and that is the design
+///
+/// A malformed line refuses the **whole file**, so the tally of refused rows
+/// is never between zero and all of them: it is one file, and the reason is
+/// the decoder's own words, which name the line. `rows_in` says how far the
+/// pass got before it stopped, which is the one number the error itself does
+/// not carry in a form a consumer can filter on.
+///
+/// `why` is the [`CsvError`]'s rendering, whose facts are at the front —
+/// `line 4: 3 fields, expected 5` — so the 128-byte ceiling on a string field
+/// cuts the essay that follows it and never the numbers.
+///
+/// `Warn` rather than `Error`: whether a refused file ends the run is the
+/// caller's decision, not this module's. [`crate::archive::read_dir`] does end
+/// it, and says so at `Error` for the whole walk.
+fn note_refused(columns: Columns, tally: Tally, why: &CsvError) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.csv", "file refused")
+            .with("rows_in", telemetry::Value::Uint(tally.lines))
+            .with("skipped", telemetry::Value::Uint(tally.skipped))
+            .with("fields", telemetry::Value::Uint(columns.count() as u64))
+            .with("header", telemetry::Value::Bool(columns.has_header()))
+            .with("why", telemetry::Value::Str(&why.to_string())),
+    );
+}
+
 /// Decodes a whole CSV body into rows.
 ///
 /// Timestamps come out as **UTC epoch seconds**, so the result feeds
@@ -347,20 +430,51 @@ fn day_of(text: &str, format: DateFormat) -> Option<crate::session::Day> {
 /// # Ok::<(), pull::csv::CsvError>(())
 /// ```
 pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
+    let mut tally = Tally {
+        lines: 0,
+        skipped: 0,
+    };
+    // ONE EVENT PER FILE, ON EITHER OUTCOME. The pass below is per row and
+    // logs nothing; this is where its two counters are read. A file that
+    // decoded and a file that refused were indistinguishable from outside
+    // before this, and both are the ordinary case on an archive walk.
+    match decode_rows(body, columns, &mut tally) {
+        Ok(rows) => {
+            note_decoded(columns, tally, rows.len());
+            Ok(rows)
+        }
+        Err(why) => {
+            note_refused(columns, tally, &why);
+            Err(why)
+        }
+    }
+}
+
+/// [`decode`]'s pass over the body, split out for one reason: the two `note_*`
+/// helpers must report what it counted whether it finished or refused, and a
+/// `?` inside it cannot do that on the way past.
+///
+/// The counters are incremented here and read exactly once, by the caller,
+/// after the loop has ended.
+fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<RawRow>, CsvError> {
     let at = columns.offsets();
     let want = columns.count();
     let mut rows: Vec<RawRow> = Vec::new();
 
     for (i, raw_line) in body.lines().enumerate() {
         let line_no = i + 1;
+        // A plain integer, not an emit. Millions of these on one backfill.
+        tally.lines = tally.lines.saturating_add(1);
         // CRLF: `lines()` strips `\n` but leaves `\r`, and a trailing `\r`
         // turns the last field into a number that will not parse. Observed in
         // vendor files, so trimmed rather than assumed absent.
         let line = raw_line.trim_end_matches('\r').trim();
         if line.is_empty() {
+            tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
         if i == 0 && columns.has_header() {
+            tally.skipped = tally.skipped.saturating_add(1);
             continue;
         }
         if rows.len() >= MAX_ROWS {

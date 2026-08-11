@@ -1,4 +1,4 @@
-//! The bit table. 276 positions, and the index **is** the identity.
+//! The bit table. 280 positions, and the index **is** the identity.
 //!
 //! # The rule that outranks every other rule in this file
 //!
@@ -41,7 +41,7 @@
 //!
 //! A tombstone **keeps its index forever** and always evaluates false.
 //! Retiring frees nothing: position 6 is still position 6, and the next
-//! condition appends at [`NEXT_FREE`], which is 276 today and only ever grows.
+//! condition appends at [`NEXT_FREE`], which is 280 today and only ever grows.
 //! That is modelled in the type -- [`BitStatus`] --
 //! rather than in a comment, and [`set_exact`] refuses a retired index instead
 //! of setting it.
@@ -158,7 +158,7 @@ const fn retired(index: u16, name: &'static str, kind: Kind, duplicate_of: u16) 
 }
 
 /// The table. Row `i` is position `i`, for every `i`, forever.
-pub const TABLE: [BitDef; 276] = [
+pub const TABLE: [BitDef; 280] = [
     // ---- 0–5. Moving averages. Shipped. ---------------------------------
     plain(0, "close_above_ema20"),
     plain(1, "close_below_ema20"),
@@ -824,6 +824,41 @@ pub const TABLE: [BitDef; 276] = [
     // was written, and it cost two rows and one edit to `LIVE`.
     plain(274, "wide_cpr_day"),
     plain(275, "neutral_cpr_day"),
+    // ---- 276–279. Two threshold-free predicates, appended. ----------------
+    //
+    // Both are derived from state the evaluator ALREADY HOLDS and neither needs a
+    // number, which is what makes them appendable under §3 rule 1. The CPR width
+    // cut points at 274/275 needed a threshold nobody could source, and the
+    // resolution there was to append and record it UNVERIFIED in
+    // `docs/09-design-sources.md` §5. These need no such note: a comparison and a
+    // latch, both already computed.
+    //
+    // 276–277: THE CLOSE AGAINST TODAY'S OWN OPEN. `Evaluator.running_open` was
+    // written on the first bar of every session and READ NOWHERE in the
+    // repository -- a field maintained for a question the vocabulary could not
+    // ask. Every percent-change quote a trader reads is measured against it, and
+    // "up on the day" was inexpressible: 40-43 give position within the day's
+    // RANGE, which is a different question, and 30-31 compare the close to the
+    // BAR's open.
+    //
+    // A flat close sets NEITHER, which is the rule D-0109 locked for 37/38 and
+    // 30/31 already followed: equality is a third state, not a tie broken toward
+    // one side.
+    plain(276, "close_above_day_open"),
+    plain(277, "close_below_day_open"),
+    // 278–279: THE MARKET STRUCTURE IN FORCE. 56-59 are BREAK EVENTS -- bos_up,
+    // bos_down, choch_up, choch_down -- each true on the handful of bars where a
+    // level was taken out. `Structure::last` holds which direction is in force
+    // BETWEEN those events, which is the regime, and it was unpublished: a sweep
+    // could ask "did structure break up on this bar" and could not ask "is the
+    // structure up".
+    //
+    // Same source as 56-59 and no new formula: the latch these read is the latch
+    // those events already advance. Neither is set before the first break, which
+    // is `docs/03-vocabulary.md` §4 -- there is no structure yet, and "probably
+    // up" is not a value a bit may take.
+    plain(278, "structure_up_in_force"),
+    plain(279, "structure_down_in_force"),
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
@@ -833,7 +868,7 @@ pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
 /// appends here, whatever has been retired below it.
-pub const NEXT_FREE: u16 = 276;
+pub const NEXT_FREE: u16 = 280;
 
 // THE TABLE CANNOT OUTGROW THE MASK, enforced at COMPILE time.
 //
@@ -871,7 +906,11 @@ pub const LIVE: ConditionMask =
         // 235–273 are all void. They are the first live positions above 234, so the
         // sentence is now "word 4 carries exactly these two".
         .with_bit(274)
-        .with_bit(275);
+        .with_bit(275)
+        .with_bit(276)
+        .with_bit(277)
+        .with_bit(278)
+        .with_bit(279);
 
 /// The row at `index`, or `None` when the index is past the table.
 #[must_use]
@@ -1010,8 +1049,8 @@ mod tests {
         assert_eq!(LIVE, folded, "the LIVE literal drifted from the table");
         assert_eq!(
             LIVE.popcount(),
-            234,
-            "276 positions, less three tombstones and less the 39 void forming-pivot rows"
+            238,
+            "280 positions, less three tombstones and less the 39 void forming-pivot rows"
         );
     }
 
@@ -1152,7 +1191,7 @@ mod tests {
 
     #[test]
     fn count_and_next_free_agree_with_the_table() {
-        assert_eq!(COUNT, 276);
+        assert_eq!(COUNT, 280);
         assert_eq!(usize::from(NEXT_FREE), COUNT);
     }
 

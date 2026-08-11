@@ -1196,8 +1196,11 @@ fn an_entry_that_is_not_an_entry_is_named() {
         EntryFault::BadSymbol(_)
     ));
     assert_eq!(
-        edit(&|i| i[48..52].copy_from_slice(&300u32.to_le_bytes())),
-        EntryFault::UnknownTimeframe { secs: 300 }
+        // 45 seconds, not 300: D-0077 made 300s the legal `5min` rung, so the
+        // old literal stopped exercising a refusal and started exercising an
+        // acceptance. A length absent from `Timeframe::KNOWN` is the point.
+        edit(&|i| i[48..52].copy_from_slice(&45u32.to_le_bytes())),
+        EntryFault::UnknownTimeframe { secs: 45 }
     );
     assert_eq!(
         edit(&|i| i[54] = 13),
@@ -3944,6 +3947,68 @@ fn from_days_refuses_the_counts_that_overflow_the_epoch_shift() {
     assert_eq!(i64::from(u32::MAX) - 719_468 + 1, 4_294_247_828);
 }
 
+/// Real NSE session boundaries convert to the exact IST wall clock.
+///
+/// # Why this exists beside the edge cases
+///
+/// Every other test of this function pins a BOUNDARY — the epoch itself, IST
+/// midnight on day zero, `i64::MIN`, the `as u32` forgery. None of them pins a
+/// moment the pull will actually meet, and the pull only ever meets one shape
+/// of value: a bar inside an Indian trading session.
+///
+/// The three references below were computed independently of this crate, from
+/// a fixed +05:30 offset, and are stated here as (epoch, expected wall clock)
+/// pairs. A conversion that is off by the offset — the classic failure, where a
+/// vendor's "epoch" turns out to already carry IST — moves 09:15 to 14:45 and
+/// every one of these assertions fails by exactly 5h30m rather than subtly.
+///
+/// THIS IS THE TEST THAT WOULD CATCH A MIS-TYPED FEED. `pull::vendor` declares
+/// Dhan's timestamps `EpochSecondsUtc`, and that vendor's documentation says
+/// only "Epoch timestamp" — it never states the zone. If a feed is ever found
+/// to send IST-shifted epochs, the fix is a new `TimestampEncoding` variant,
+/// and this test is what proves the UTC path still means what it says.
+#[test]
+fn real_nse_session_boundaries_convert_to_the_exact_ist_wall_clock() {
+    // 2024-01-01 09:15:00 IST — a session open. 03:45 UTC.
+    let open = IstMoment::from_epoch_secs(1_704_080_700).expect("a session open is representable");
+    assert_eq!(
+        open.day(),
+        d(2024, 1, 1),
+        "the IST calendar day, not the UTC one"
+    );
+    assert_eq!(
+        open.minute_of_day(),
+        9 * 60 + 15,
+        "09:15 IST — the first minute of the regular session"
+    );
+    assert_eq!(open.second_of_minute(), 0);
+
+    // 2024-01-01 15:29:00 IST — the last minute of the continuous session.
+    let close =
+        IstMoment::from_epoch_secs(1_704_103_140).expect("a session close is representable");
+    assert_eq!(close.day(), d(2024, 1, 1));
+    assert_eq!(close.minute_of_day(), 15 * 60 + 29, "15:29 IST");
+
+    // 2020-01-01 09:15:00 IST — the first day of the stated backfill window.
+    let first =
+        IstMoment::from_epoch_secs(1_577_850_300).expect("the backfill floor is representable");
+    assert_eq!(first.day(), d(2020, 1, 1));
+    assert_eq!(first.minute_of_day(), 9 * 60 + 15);
+
+    // THE OFFSET ITSELF, DEMONSTRATED RATHER THAN ASSERTED. The same instant
+    // read as a UTC wall clock is 5h30m earlier, so a feed whose epoch already
+    // carried IST would land here — 14:45, past a 15:30 close for the late
+    // half of every session, which is the shape the drop counters report as
+    // "at or after the session close".
+    let shifted =
+        IstMoment::from_epoch_secs(1_704_080_700 + IST_OFFSET_SECS).expect("representable");
+    assert_eq!(
+        shifted.minute_of_day(),
+        14 * 60 + 45,
+        "double-applying the offset is exactly 5h30m late, and visibly so"
+    );
+}
+
 /// The `BeforeEpoch` boundary is the **IST instant**, not the sign of the
 /// input — and the module used to claim otherwise.
 #[test]
@@ -4931,6 +4996,7 @@ fn the_timestamp_encoding_is_dispatched_never_assumed() {
     let day = Day::new(2026, 8, 7).expect("a real date");
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(day, day).expect("one day"),
         granularity: pull::vendor::Granularity::Minute1,
     };
@@ -4974,6 +5040,7 @@ fn a_rupee_price_becomes_paisa_and_an_overflow_refuses() {
     let day = Day::new(2026, 8, 7).expect("a real date");
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(day, day).expect("one day"),
         granularity: pull::vendor::Granularity::Minute1,
     };
@@ -5065,6 +5132,7 @@ fn every_row_is_either_a_bar_or_a_counted_drop() {
     let day = Day::new(2026, 8, 7).expect("a real date");
     let request = BarRequest {
         instrument_id: String::new(),
+        listing: pull::vendor::Listing::Equity,
         window: Window::new(day, day).expect("one day"),
         granularity: pull::vendor::Granularity::Minute1,
     };
@@ -5386,6 +5454,137 @@ fn snapshots_sharing_a_second_fold_into_one_bar() {
         "output timestamps strictly increase — which is what the store demands \
          and what raw snapshots could not give it"
     );
+}
+
+/// THE DAY BUCKET IS AN IST DAY, AND THIS IS THE RUN THAT PROVED IT WAS NOT.
+///
+/// A live 1day pull refused 10 of 16 members with "bars span 2025-12 to
+/// 2026-01" and stored 86 bars, 20 of them stamped on a **Sunday** and none on
+/// a Friday, on an exchange that trades Monday to Friday.
+///
+/// The cause was the bucket's origin. `fold` floored to a grid anchored at the
+/// Unix epoch — UTC midnight — while `crate::ingest` derives the month in IST.
+/// `IST_OFFSET_SECS` is 19,800 and `86_400 % 19_800 != 0`, so a daily candle
+/// stamped 00:00 IST of D (= 18:30 UTC of D−1) was re-stamped at 00:00 UTC of
+/// D−1: every daily bar moved back one calendar day. The month guard caught it
+/// only where the shift crossed a month boundary and stored a wrong answer
+/// silently everywhere else.
+#[test]
+fn a_daily_bucket_is_an_ist_day_so_a_midnight_ist_bar_keeps_its_own_date() {
+    use pull::fold::{Bucket, fold};
+    use pull::session::IstMoment;
+    use store::format::Bar;
+
+    // 2026-01-01 00:00:00 IST == 2025-12-31 18:30:00 UTC. This exact instant is
+    // the one the failing run reported: it is the first trading day of January
+    // and the vendor's own left edge for a daily candle.
+    const NEW_YEAR_IST: i64 = 1_767_205_800;
+    assert_eq!(
+        NEW_YEAR_IST + pull::session::IST_OFFSET_SECS,
+        1_767_225_600,
+        "the premise: this epoch second IS midnight IST on 2026-01-01"
+    );
+
+    let at = |s: i64| Bar {
+        ts_micros: s * 1_000_000,
+        open: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        volume: 1,
+        open_interest: i64::MIN,
+    };
+
+    let bars = fold(&[at(NEW_YEAR_IST)], Bucket::DAY).expect("one bar folds");
+    assert_eq!(bars.len(), 1);
+    assert_eq!(
+        bars[0].ts_micros,
+        NEW_YEAR_IST * 1_000_000,
+        "midnight IST is itself an IST-day edge, so the fold must leave it \
+         where it is. The UTC-anchored grid moved it to 1_767_139_200 — \
+         2025-12-31 — which is what produced 'bars span 2025-12 to 2026-01'"
+    );
+
+    // The old grid, computed here rather than quoted, so this stays a refusal
+    // of the actual arithmetic and not of a number that could drift.
+    let width = 86_400_i64 * 1_000_000;
+    let utc_anchored = (NEW_YEAR_IST * 1_000_000).div_euclid(width) * width;
+    assert_eq!(
+        utc_anchored / 1_000_000,
+        1_767_139_200,
+        "the premise: a UTC-anchored grid puts this bar on 2025-12-31"
+    );
+    assert_ne!(
+        bars[0].ts_micros, utc_anchored,
+        "the fold must NOT be anchored at the Unix epoch — that is the bug"
+    );
+
+    let ym = IstMoment::from_epoch_secs(bars[0].ts_micros / 1_000_000)
+        .expect("a real instant")
+        .day()
+        .year_month()
+        .expect("a real month");
+    assert_eq!(
+        ym.to_string(),
+        "2026-01",
+        "the month `crate::ingest` derives from the FOLDED stamp must be the \
+         month the bar actually traded in"
+    );
+
+    // And the bucket spans the whole IST day, not a UTC one: 00:00 IST and
+    // 23:59 IST are the same session and must not split. The UTC grid cut this
+    // pair at 05:30 IST.
+    let same_day =
+        fold(&[at(NEW_YEAR_IST), at(NEW_YEAR_IST + 86_399)], Bucket::DAY).expect("non-decreasing");
+    assert_eq!(
+        same_day.len(),
+        1,
+        "one IST day is one bucket, end to end — got {same_day:?}"
+    );
+}
+
+/// The day-rung fix must be a NO-OP at the minute rung, by arithmetic.
+///
+/// 60 divides 19,800, so `(t + A).div_euclid(60M) * 60M − A` reduces exactly to
+/// `t.div_euclid(60M) * 60M`. This pins that reduction against a spread of
+/// instants — including negative ones, where `div_euclid` is the whole reason
+/// the floor is correct — so a later change to the anchor cannot silently move
+/// the rung that holds the engine's real data.
+#[test]
+fn anchoring_the_grid_to_ist_leaves_the_minute_rung_byte_for_byte_unchanged() {
+    use pull::fold::{Bucket, fold};
+    use store::format::Bar;
+
+    let at = |s: i64| Bar {
+        ts_micros: s * 1_000_000,
+        open: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        volume: 1,
+        open_interest: i64::MIN,
+    };
+
+    for secs in [
+        -19_801_i64,
+        -19_800,
+        -1,
+        0,
+        1,
+        59,
+        60,
+        61,
+        1_767_205_800,
+        1_767_225_600,
+    ] {
+        let bars = fold(&[at(secs)], Bucket::MINUTE).expect("one bar folds");
+        let expect = secs.div_euclid(60) * 60 * 1_000_000;
+        assert_eq!(
+            bars[0].ts_micros, expect,
+            "the minute rung is unmoved by the IST anchor at {secs}s: 60 \
+             divides the 19,800s offset, so the shift cancels exactly"
+        );
+    }
 }
 
 /// Out of order refuses rather than sorting.

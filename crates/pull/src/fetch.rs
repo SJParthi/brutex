@@ -203,6 +203,20 @@ pub enum FetchError {
         /// to amend is named rather than described.
         field: &'static str,
     },
+    /// This feed records no word for the instrument's listing class.
+    ///
+    /// The exact shape of [`Self::RungNotSpellable`], one field over. Groww's
+    /// documentation states `CASH` and `FNO` for `segment` and says nothing
+    /// about an index; sending a guessed word would be answered with
+    /// *something*, and that something would be filed as bars for an
+    /// instrument nobody asked for.
+    ListingNotSpellable {
+        /// The class the instrument belongs to.
+        listing: crate::vendor::Listing,
+        /// The request field that would have carried it, so the descriptor row
+        /// to amend is named rather than described.
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for FetchError {
@@ -249,6 +263,15 @@ impl core::fmt::Display for FetchError {
                  different bar length, and its answer would be filed under \
                  {rung}. UNVERIFIED — record the vendor's own spelling in that \
                  feed's granularity_tokens row and this works the same day."
+            ),
+            Self::ListingNotSpellable { listing, field } => write!(
+                f,
+                "this feed names the instrument's class in the request field \
+                 {field:?} and no word for {listing:?} has been recorded for \
+                 it. Nothing was sent: a guessed word is answered by the vendor \
+                 with something, and that something would be filed as bars. \
+                 UNVERIFIED — record the vendor's own word in that feed's \
+                 listings row and this works the same day."
             ),
         }
     }
@@ -357,6 +380,19 @@ pub struct BarRequest {
     /// at Dhan, `groww_symbol` at Groww — and its absence is precisely what
     /// `DH-905 securityId is required` reports.
     pub instrument_id: String,
+    /// Which class of listing this instrument is.
+    ///
+    /// Carried beside the id because both brokers require the class on the
+    /// wire as well as the id, and the two are read from the SAME master row —
+    /// separating them is how 750 equities came to be asked for inside an
+    /// index segment. [`crate::vendor::ParamValue::Segment`] and
+    /// [`crate::vendor::ParamValue::Kind`] resolve it through the feed's own
+    /// [`crate::vendor::HttpSpec::listing_words`].
+    ///
+    /// Defaults to [`crate::vendor::Listing::Equity`] nowhere: there is no
+    /// `Default` impl, so every construction site states it and a new caller
+    /// cannot inherit a silent wrong answer.
+    pub listing: crate::vendor::Listing,
     /// The inclusive window the operator asked for.
     pub window: Window,
     /// Which rung of the ladder these bars are.
@@ -536,6 +572,45 @@ pub fn land(
         bars.push(bar);
     }
 
+    // THE ROW LEDGER FOR THIS WINDOW, AS AN AGGREGATE.
+    //
+    // Per row would be millions on a one-minute backfill and would roll the
+    // run out of a 64 MiB window; the loop above therefore logs NOTHING and
+    // pays no call per row. `DropCensus` counted every rejection in a plain
+    // integer, and this is that count, once, where the window closes.
+    //
+    // The four reasons are named separately rather than summed, because
+    // "outside the window" and "outside the session" send an operator to two
+    // different places — the caller's chunking and the vendor's clock.
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::debug("pull.land", "window decoded")
+            .with("rows_in", telemetry::Value::Uint(raw.rows.len() as u64))
+            .with("bars_out", telemetry::Value::Uint(bars.len() as u64))
+            .with(
+                "before_window",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::BeforeWindow),
+                )),
+            )
+            .with(
+                "after_window",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::AfterWindow),
+                )),
+            )
+            .with(
+                "before_open",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::BeforeSessionOpen),
+                )),
+            )
+            .with(
+                "at_or_after_close",
+                telemetry::Value::Uint(u64::from(
+                    census.of(crate::session::DropReason::AtOrAfterSessionClose),
+                )),
+            ),
+    );
     Ok(Landed { bars, census })
 }
 
