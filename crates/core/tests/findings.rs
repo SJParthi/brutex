@@ -47,8 +47,9 @@ use std::collections::BTreeMap;
 const LEDGER: &str = include_str!("../../../docs/11-findings.md");
 
 /// The dispositions a row may carry. `OPEN` is a real answer; an empty cell is not.
-const DISPOSITIONS: [&str; 5] = [
+const DISPOSITIONS: [&str; 6] = [
     "FIXED",
+    "PARTLY FIXED",
     "IN PROGRESS",
     "NEEDS A DECISION",
     "OPEN",
@@ -131,13 +132,16 @@ fn every_finding_has_a_disposition() {
 /// `git show <sha>` and read the test that was proved to fail beforehand.
 #[test]
 fn every_fixed_finding_names_a_commit() {
-    for row in rows().iter().filter(|r| r.disposition.starts_with("FIXED")) {
-        let sha: String = row
+    // `contains` and not `starts_with`: `PARTLY FIXED` must name a commit too. Filtering on
+    // the prefix let the partial ones through the moment that disposition was introduced,
+    // which is the check silently narrowing as the vocabulary grows — the same shape as a
+    // parser that stops matching rows it was written before.
+    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
+        let after = row
             .disposition
-            .chars()
-            .skip("FIXED ".len())
-            .take_while(char::is_ascii_hexdigit)
-            .collect();
+            .split_once("FIXED")
+            .map_or("", |(_, rest)| rest.trim_start());
+        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
         assert!(
             sha.len() >= 7,
             "finding {} says {:?} but names no commit. `FIXED` without a sha is a claim \
