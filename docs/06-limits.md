@@ -3328,3 +3328,43 @@ also runs `--fail-under-lines 100` over the whole workspace, and the workspace
 is not at 100%. Gate 20 makes one crate's shortfall *declared and enforced*;
 every other crate's is still just a shortfall. Extending the same declaration
 to them is the path, and it is not taken here.
+
+
+---
+
+## 55. Coverage reached 99.77% of regions, and the 22 lines that remain are named
+
+Measured 2026-08-11, `cargo llvm-cov -p vocab -p indicators -p engine --summary-only`.
+**99.79% lines, 99.77% regions, 100.00% branches.** Thirteen of sixteen files are at
+100.00% on every axis. Three are not, and they are listed here rather than rounded away:
+
+| File | Lines missed | Regions missed |
+|---|---|---|
+`indicators/src/trend.rs` | 14 | 14 |
+`indicators/src/evaluator.rs` | 7 | 1 |
+`indicators/src/gap.rs` | 1 | 0 |
+
+CI gate 17 demands 100 and this is 99.77, so **the gate is still red on these three
+crates** and saying otherwise would be the fallback §4 bans.
+
+**A panic path inside this workspace's own crates can never be covered.**
+`unreachable!("…")` expands to a `panic!` in the crate that wrote it, so llvm-cov counts
+a region a correct build never enters. `.expect("…")` panics inside `std`, which is not
+instrumented. That single difference is the whole explanation for `greeks` sitting at
+100.00% with 0 uses and 64 expects while `vocab` sat at 76.79% with 14 uses and none.
+
+**An assert message with a computed argument is the same defect in miniature.**
+`assert!(cond, "… {} …", case.bars.len())` evaluates the argument only when the
+assertion fails, so it is a region a green run cannot close. Two leaked into
+`pattern.rs` from the coverage work itself and were fixed by hoisting the value to a
+local — `let count = case.bars.len();` — taking that file from 99.86% to 100.00%. The
+failure message is unchanged, so there is no trade here.
+
+### What a green run cannot prove, restated
+
+Region coverage says every branch was entered. It does not say the assertion that
+followed was meaningful. The historical yield of looking for tests that cannot fail is
+high in this repository: a doji fixture already excluded by an earlier guard, a ceiling
+fixture at 9e32 against a 1e34 ceiling, 45 of 120 ORB fixture bars that were not valid
+candles, and a `const` assertion comparing 4 to 4. **100% coverage and a suite of tests
+that cannot fail are compatible states**, and only the second is worth having.
