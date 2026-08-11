@@ -272,6 +272,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine"
+version = "0.1.0"
+dependencies = [
+ "vocab",
+]
+
+[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -645,7 +652,6 @@ dependencies = [
 name = "indicators"
 version = "0.1.0"
 dependencies = [
- "store",
  "vocab",
 ]
 

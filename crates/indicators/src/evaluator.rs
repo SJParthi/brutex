@@ -177,6 +177,44 @@ impl Evaluator {
     /// each re-deriving the same refusal is seven chances to disagree about what a
     /// bar is, and a partially-evaluated bar is worse than a refused one.
     pub fn step(&mut self, bar: &Candle) -> Result<ConditionMask, Corrupt> {
+        // COMMIT ON SUCCESS, and the `?` is what enforces it.
+        //
+        // `stepped` takes `self` BY VALUE and hands back a new evaluator beside the
+        // mask. On the refusal path the `?` below discards that value and `*self` is
+        // never written, so a refused bar cannot leave a trace. This is structural: to
+        // half-apply a bar somebody would have to write a second assignment, not merely
+        // forget an early return.
+        //
+        // WHY IT IS NEEDED, measured rather than argued. `Refused::AccumulatorTooLarge`
+        // is raised by VWAP AFTER the session rollover and seven module folds have
+        // already run. Fed the fixture in this file's own tests -- flat at 5e18 paisa,
+        // volume 1 -- the refusal used to leave: two poisoned EMA accumulators, an
+        // advanced ORB window, a pushed `prev5`, an installed `yesterday`, and
+        // `sessions_completed()` incremented. The NEXT ordinary bar then emitted four
+        // bits a fresh evaluator did not, and over 400 following bars the two never
+        // agreed again. `last_ts` was also unadvanced, so a retried refused bar was
+        // folded again on every retry.
+        //
+        // D-0097 recorded this invariant as holding on the strength of
+        // `a_refused_candle_changes_nothing`. That test walks the CANDLE-VALIDITY path,
+        // which is refused before any fold; it never reached the one refusal that fires
+        // after them. The entry was right about the fix it described and wrong that the
+        // fix was complete.
+        //
+        // Free, because `Evaluator` is `Copy` and `size_of` is held at or below 1792
+        // bytes by the const assertion above -- a 1,664-byte memcpy per bar against a
+        // fold that already costs ~320 ns.
+        let (next, mask) = self.stepped(bar)?;
+        *self = next;
+        Ok(mask)
+    }
+
+    /// [`Self::step`]'s whole body, on a value that is thrown away if it refuses.
+    ///
+    /// Takes `self` by value deliberately: there is no `&mut self` here to half-write.
+    /// A `&mut self` variant is precisely the shape that produced the torn state this
+    /// replaces, so the signature is load-bearing rather than stylistic.
+    fn stepped(mut self, bar: &Candle) -> Result<(Self, ConditionMask), Corrupt> {
         if bar.high < bar.low {
             return Err(Corrupt::HighBelowLow);
         }
@@ -273,7 +311,7 @@ impl Evaluator {
 
         // Nothing outside the live vocabulary may reach a caller: a retired or void
         // position that escaped would be swept as a real condition.
-        Ok(vocab::table::only_live(mask))
+        Ok((self, vocab::table::only_live(mask)))
     }
 
     /// Hand the finished session to the families that need yesterday.
@@ -359,6 +397,15 @@ mod tests {
 
     fn fresh() -> Evaluator {
         Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL)
+    }
+
+    /// An evaluator that will actually run VWAP.
+    ///
+    /// `Availability::Present` is load-bearing for the refusal tests: on index spot the
+    /// verdict is `Absent` and the whole family abstains, so the accumulator ceiling --
+    /// the one refusal that fires after seven modules have folded -- is unreachable.
+    fn fresh_with_volume() -> Evaluator {
+        Evaluator::new(widths(), Availability::Present, Thresholds::CLASSICAL)
     }
 
     /// A synthetic session. Prices wander so bars differ from one another.
@@ -732,9 +779,95 @@ mod tests {
             volume: 1_000,
             open_interest: i64::MIN,
         };
-        assert!(
-            e.step(&ordinary).is_ok(),
-            "an ordinary bar with volume was refused, so the refusal above proves nothing"
+        // THE ASSERTION THIS TEST WAS MISSING. `is_ok()` proves the evaluator still
+        // ANSWERS; it does not prove the refused bar left no trace, and that is exactly
+        // the hole the refusal fell through for as long as this test existed. The only
+        // definition of "changed nothing" that means anything is a comparison against a
+        // FRESH evaluator fed the identical bars.
+        let mut clean = fresh_with_volume();
+        let after = e
+            .step(&ordinary)
+            .expect("an ordinary bar with volume is not refused");
+        let want = clean
+            .step(&ordinary)
+            .expect("an ordinary bar with volume is not refused");
+        assert_eq!(
+            after.words(),
+            want.words(),
+            "the bar after the refusal emits a different mask than the same bar on an \
+             evaluator that never saw the refused one, so the refusal left state behind. \
+             Measured before the fix: four invented bits -- 1 and 3 are close-below-EMA20 \
+             and close-below-EMA200, the poisoned accumulators -- plus 43 and 65."
+        );
+
+        // And it stays true. The poisoning was not a one-bar artefact: before the fix the
+        // two evaluators never agreed again over 400 following bars.
+        for m in 2..12_i64 {
+            let next = Candle {
+                ts_micros: open + m * MINUTE_MICROS,
+                open: 2_500_000,
+                high: 2_500_400 + m,
+                low: 2_499_600 - m,
+                close: 2_500_000 + m,
+                volume: 500,
+                open_interest: i64::MIN,
+            };
+            let a = e.step(&next).expect("an ordinary bar is not a refusal");
+            let b = clean.step(&next).expect("an ordinary bar is not a refusal");
+            assert_eq!(
+                a.words(),
+                b.words(),
+                "bar {m} after the refusal still differs"
+            );
+        }
+    }
+
+    /// A refused bar does not roll a session over.
+    ///
+    /// The refusal fires AFTER the rollover, so a bar on a new IST day could install a
+    /// session — `sessions_completed()` incremented and `has_yesterday()` flipped — on
+    /// the strength of a bar the caller was told was refused. Measured before the fix:
+    /// 0 → 1 and false → true.
+    #[test]
+    fn a_refused_bar_does_not_complete_a_session() {
+        let open = IST_OPEN_UTC_MICROS;
+        let mut e = fresh_with_volume();
+        for m in 0..30_i64 {
+            let bar = Candle {
+                ts_micros: open + m * MINUTE_MICROS,
+                open: 2_500_000,
+                high: 2_500_400,
+                low: 2_499_600,
+                close: 2_500_000,
+                volume: 500,
+                open_interest: i64::MIN,
+            };
+            e.step(&bar).expect("an ordinary session bar");
+        }
+        let sessions = e.sessions_completed();
+        let had = e.has_yesterday();
+
+        // The next IST day, and a bar VWAP must refuse.
+        let huge = Candle {
+            ts_micros: open + DAY_MICROS,
+            open: 5_000_000_000_000_000_000,
+            high: 5_000_000_000_000_000_000,
+            low: 5_000_000_000_000_000_000,
+            close: 5_000_000_000_000_000_000,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        assert_eq!(e.step(&huge), Err(Corrupt::AccumulatorTooLarge));
+        assert_eq!(
+            e.sessions_completed(),
+            sessions,
+            "a refused bar completed a session"
+        );
+        assert_eq!(
+            e.has_yesterday(),
+            had,
+            "a refused bar installed the previous-day levels, so every pivot and \
+             Fibonacci position from here is measured off a bar that was refused"
         );
     }
 

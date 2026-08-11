@@ -881,6 +881,25 @@ impl BarFile {
         fault(self.bars.sync_all(), &self.bars_path, Action::Sync)?;
 
         self.header = commit.header;
+        // THE WRITE ITSELF, ONCE IT IS DURABLE — after the second `sync_all`,
+        // never before. An event emitted ahead of the commit would claim a
+        // durability the file does not have yet, and a crash between the two
+        // would leave a log asserting bars that are not there. That is a worse
+        // failure than silence, which is what this path had.
+        //
+        // `Debug`: this is the per-member write path, so a normal run at the
+        // `Info` floor pays one relaxed atomic load and writes nothing.
+        let _dropped_when_filtered = telemetry::emit(
+            &telemetry::Event::debug("store.append", "committed")
+                .with(
+                    "file",
+                    telemetry::Value::Str(&self.bars_path.display().to_string()),
+                )
+                .with("bars", telemetry::Value::Uint(count))
+                .with("first_index", telemetry::Value::Uint(first_index))
+                .with("n_valid", telemetry::Value::Uint(self.header.n_valid))
+                .with("generation", telemetry::Value::Uint(self.header.generation)),
+        );
         Ok(Appended::Committed {
             first_index,
             n_valid: self.header.n_valid,
