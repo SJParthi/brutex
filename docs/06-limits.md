@@ -3534,3 +3534,55 @@ the loss is still there for anyone who ignores it. `min_hits` remains an absolut
 against a support that warm-up depresses, and no per-position eligibility count is carried
 in the result — a reader of a `Sweep` cannot tell a condition that was rare from one that
 was unanswerable.
+
+
+---
+
+## 60. The findings ledger's first guard checked its shape, not its contents
+
+`crates/core/tests/findings.rs` shipped with seven properties and a claim, in this
+conversation, that nothing could be silently dropped from the ledger. A verification sweep
+applied five edits and **all seven tests passed on every one of them**:
+
+| Edit | Was caught |
+|---|---|
+`REFUTED` with no reason given | no |
+`FIXED deadbeef` — a sha that resolves to nothing | no |
+the one `law` severity downgraded to `gap` | no |
+two rows' **id cells swapped**, so every citation resolves to the wrong finding | no |
+a row **repurposed** — its text replaced, count still 99 | no |
+
+The seven tests check that the document has the right **shape**: a disposition from a closed
+set, a sha-shaped token, unique ids, sums that close. Not one of them could see that it had
+the wrong **content**. An id swap is the worst of the five — every commit message citing
+`F-122234` would silently point at a different defect — and it passed a test literally named
+`finding_ids_are_unique`, because both ids were still unique after the swap.
+
+### What closes it
+
+**A content digest.** FNV-1a 64 over every row's id, severity, finding and location, stored
+in the document and recomputed by the test. Written out rather than depended on: `crates/core`
+declares no dependencies and must not gain one for a test. FNV-1a is not cryptographic and
+does not need to be — this defends against a careless edit, and anyone editing the ledger to
+hide a finding must now edit the digest in the same commit, where a reader sees it.
+
+**The disposition is deliberately excluded from the digest.** It changes legitimately every
+time a finding is worked on, and a digest that had to be updated for each would be updated
+without being read. What must not change silently is what a row *says*.
+
+**`git rev-parse --verify` on every named commit.** The only thing that can tell a real sha
+from a plausible one. It is the single place in that file reaching outside `include_str!`, and
+it prints `SKIPPED` loudly if git is unavailable rather than passing quietly — a test that
+passes because its tool is missing is the fallback §4 bans.
+
+### The lesson, stated plainly
+
+I built that guard specifically to answer "can you assure me nothing is missed", and then
+asserted the assurance on the strength of six mutations I had chosen myself. **Five different
+mutations, chosen by someone else, all passed.** The guard was real and its coverage was
+narrower than the claim I made for it. Choosing your own mutations tests what you already
+thought of.
+
+One of the sweep's five was also mis-targeted and I nearly recorded a false negative: the
+severity downgrade hit the legend table at the top of the document rather than a finding row,
+so the digest was right not to move. Verified by targeting the row itself, where it fails.

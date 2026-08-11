@@ -294,3 +294,143 @@ fn every_killed_finding_carries_its_reason() {
         );
     }
 }
+
+/// FNV-1a 64, so a row's content can be checked without a dependency.
+///
+/// `crates/core` declares no dependencies and must not gain one for a test, so the hash is
+/// written out. FNV-1a is not cryptographic and does not need to be: this defends against an
+/// accidental or careless edit, not against someone who wants to forge a digest — and someone
+/// editing the ledger to hide a finding has to edit the digest line too, which is a visible
+/// diff and the whole point.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Every row's id, severity, finding and location, joined — the content the digest covers.
+///
+/// The DISPOSITION is deliberately excluded: it changes legitimately every time a finding is
+/// worked on, and a digest that had to be updated for each would be updated without being
+/// read. What must not change silently is what a row SAYS.
+fn digest_payload() -> String {
+    LEDGER
+        .lines()
+        .filter(|l| l.starts_with("| `F-"))
+        .map(|l| {
+            let c: Vec<&str> = l.split('|').map(str::trim).collect();
+            format!("{}|{}|{}|{}", c[1], c[2], c[3], c[4])
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The rows are the rows the digest was taken over.
+///
+/// # What this catches that nothing else did
+///
+/// A verification sweep applied five edits to this document and **the other six tests caught
+/// none of them**: swapping two rows' id cells so every citation resolves to the wrong
+/// finding; repurposing a row's text while keeping the count at 99; downgrading the one `law`
+/// severity to `gap`; and two disposition forgeries. The other tests check that the document
+/// has the right SHAPE. None of them could see that it had the wrong CONTENT.
+///
+/// The digest is over id, severity, finding and location — not disposition, which changes
+/// legitimately. So a disposition update needs no digest change, and altering what a row
+/// says does. Regenerating the digest is a one-line visible diff, which is the point: hiding
+/// a finding now requires editing the digest in the same commit, where a reader sees it.
+#[test]
+fn the_rows_are_the_rows_the_digest_covers() {
+    let stated = LEDGER
+        .split("<!-- rows-digest: ")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .expect("the digest marker exists at the end of the document");
+    let actual = format!("{:016x}", fnv1a64(digest_payload().as_bytes()));
+    assert_eq!(
+        stated, actual,
+        "the finding rows do not hash to the digest this document states. A row's id, \
+         severity, text or location changed. If that was deliberate — a correction, or a new \
+         finding appended — recompute the digest in the SAME commit so the change is visible. \
+         If it was not, a finding has been altered or swapped."
+    );
+}
+
+/// A `REFUTED` row carries its reason, exactly as a `FIXED` row carries its commit.
+///
+/// `REFUTED` with nothing after it says a finding was wrong and refuses to say why, which is
+/// the one disposition where the reason IS the content. Caught nothing until now.
+#[test]
+fn every_refuted_finding_carries_its_reason() {
+    for row in rows()
+        .iter()
+        .filter(|r| r.disposition.starts_with("REFUTED"))
+    {
+        let reason = row.disposition.trim_start_matches("REFUTED").trim();
+        assert!(
+            reason.len() >= 20,
+            "finding {} says {:?} and gives no reason. A refutation without one cannot be \
+             checked, and the next reader will raise the finding again.",
+            row.id,
+            row.disposition
+        );
+    }
+}
+
+/// Every commit a row names actually exists in this repository.
+///
+/// `FIXED deadbeef` passed every other test. `git rev-parse --verify` is the only thing that
+/// can tell a real sha from a plausible one, so this test runs it — the single place in this
+/// file that reaches outside `include_str!`.
+///
+/// Skipped, loudly, when git is unavailable: a test that silently passes because its tool is
+/// missing is the fallback §4 bans, so the absence is printed rather than swallowed.
+#[test]
+fn every_named_commit_exists() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/core is two levels below the repository root")
+        .to_owned();
+
+    let mut checked = 0_u32;
+    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
+        let after = row
+            .disposition
+            .split_once("FIXED")
+            .map_or("", |(_, rest)| rest.trim_start());
+        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
+        if sha.len() < 7 {
+            continue; // the sha-presence test owns this case
+        }
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--verify", "--quiet"])
+            .arg(format!("{sha}^{{commit}}"))
+            .output();
+        let Ok(out) = out else {
+            println!(
+                "SKIPPED: git is not runnable here, so {} was not verified",
+                row.id
+            );
+            continue;
+        };
+        assert!(
+            out.status.success(),
+            "finding {} names commit {sha} and `git rev-parse` cannot resolve it. A row marked \
+             FIXED against a commit that does not exist is the worst failure this ledger can \
+             have: it reads as done and points at nothing.",
+            row.id
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no commit was verified, so this test proves nothing — either every FIXED row lost its \
+         sha or git could not run at all"
+    );
+}

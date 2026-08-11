@@ -200,3 +200,4 @@ It does not claim a `FIXED` row is beyond question. It claims a test exists that
 **shown to fail** against the code before the fix — which is a different and smaller
 claim than correctness, and the only one that can be made mechanically.
 
+<!-- rows-digest: d215823742a90839 -->
