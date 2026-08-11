@@ -1795,6 +1795,19 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 | I-08 | `TrendState::bits` is a function of the bar. It took `&mut self` and advanced the market-structure latch from inside the emit, so the same close answered `choch_bearish` then `bos_bearish`. `bits(&self)` makes the old shape a **compile error** | `indicators::trend::bits_is_idempotent_across_a_break_and_a_change_of_character`, `indicators::trend::the_structure_latch_advances_exactly_once_per_candle` | ✓ |
 | I-09 | A change of character **reaches the mask**. I-08's two tests both pass if `step` stops advancing the latch altogether, which makes positions 58 and 59 unreachable and reports every reversal as a continuation. This is the only test in `trend.rs` that fails when the advance is removed | `indicators::trend::a_change_of_character_reaches_the_mask` | ✓ |
 
+| I-10 | A non-regular session's OHLC **never** becomes the previous-day anchor. `docs/00-charter.md` §3 forbids it by name and claimed an "anchor walk restricted to trading days" that did not exist — a grep for holiday/muhurat/trading_calendar over the three crates returned zero hits. Measured before the fix: all 375 bars of the session after a 60-bar day emitted different pivot positions | `indicators::evaluator::a_non_regular_session_never_becomes_the_previous_day_anchor` | ✓ |
+| I-11 | A non-regular session does not advance the five-session rolling window. The second of the charter's three prohibitions: `Prev5` is what positions 110–120 are measured against, and a one-hour OHLC entering it contaminates them for five more sessions | `indicators::evaluator::a_non_regular_session_does_not_advance_the_rolling_window` | ✓ |
+| I-12 | A non-regular session **still emits its own bars**. The charter forbids that hour becoming an anchor, not that it be silenced — it is real trading, and every intraday position on it is a genuine measurement | `indicators::evaluator::a_non_regular_session_still_emits_its_own_bars` | ✓ |
+
+**I-10 and I-11 both fail on the obvious slip**, which is why the verdict is taken on
+`self.day` and not `today`: asking about the session that is *starting* rather than the one
+that just *ended* inverts the fix, so the Muhurat session would poison the anchor and the
+regular day after it would be discarded. Measured, by making that exact change.
+
+**I-12 is the row that stops the fix going too far.** An earlier version of I-10's test
+compared the whole mask and failed — the EMA, ATR and swing ring had legitimately seen the
+60 bars, and the charter says nothing about them. The test was wrong, not the fix.
+
 **I-09 exists because I-08 was not enough**, and that is the general lesson rather than a
 detail of this row. Two tests were written, both passed, and then a plausible refactor slip
 — deleting the latch advance — was applied and **all 216 tests stayed green**. A test suite

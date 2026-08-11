@@ -97,10 +97,131 @@ impl Widths {
     }
 }
 
+/// The IST days that are **not** regular trading sessions.
+///
+/// # What this is for, and the defect it closes
+///
+/// `docs/00-charter.md` §3 states the rule and states it exactly:
+///
+/// > For a bar on any day after a Muhurat session, the previous-day anchor is the OHLC of
+/// > the **last regular trading session strictly before the Muhurat date**. The Muhurat
+/// > day's own OHLC never enters the previous-day anchor, the multi-day rolling history,
+/// > or the previous-session edge.
+///
+/// It then says the mechanism is "an anchor walk restricted to trading days [that] skips
+/// it structurally rather than by a special case that can be forgotten". **No such walk
+/// existed.** The session boundary was an `ist_day` inequality and nothing else, so a
+/// one-hour Muhurat session was a session like any other: its OHLC became the previous-day
+/// anchor, entered `Prev5`, and became the gap family's previous-session edge — the three
+/// things the charter forbids by name.
+///
+/// Measured before this existed: a 375-bar session, then a 60-bar session, then another
+/// 375-bar session, and **all 375 bars of the third emitted a different mask** than the
+/// same session fed without the short day. The whole 44-position pivot ladder and the 15
+/// previous-day Fibonacci rungs were measured off a one-hour session, and `Prev5` stayed
+/// contaminated for five more sessions.
+///
+/// # Why a set of dates and not a rule
+///
+/// A Muhurat date cannot be derived — it is set by the exchange each year against the Hindu
+/// calendar — so §3 rule 1 forbids computing one. The charter records six as **VERIFIED**
+/// and those six are what this holds. A seventh must be added here when the exchange
+/// announces it, and until then the engine treats it as a regular session, which is the
+/// honest failure: wrong in the same direction as before, on one day, and visible.
+///
+/// # Why the exposure is smaller than it looks, and still real
+///
+/// Five of the six never reach disk. `pull::fetch::land` drops every minute bar whose IST
+/// minute-of-day falls outside `[09:15, 15:30)`, and the 2020–2024 sessions are all
+/// **evening** sessions at 18:00 or later — so the pull accidentally implements this rule,
+/// for the unrelated reason that it hardcodes a 15:30 close.
+///
+/// **2025-10-21 is the exception and it is why this is not merely tidiness.** The charter
+/// records it as "an afternoon session, not an evening one", 13:45–14:45 IST: every one of
+/// its 60 bars sits inside the pull's window, so it lands, it becomes the previous-day
+/// anchor, and the prohibition is broken on it. Afternoon Muhurats are now the live
+/// pattern, which makes this forward-looking rather than historical.
+pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 6] = [
+    18_580, // 2020-11-14, 18:15–19:15 IST
+    18_935, // 2021-11-04, 18:15–19:15
+    19_289, // 2022-10-24, 18:15–19:15
+    19_673, // 2023-11-12, 18:00–19:00
+    20_028, // 2024-11-01, 18:00–19:00
+    20_382, // 2025-10-21, 13:45–14:45 — an AFTERNOON session, and the one that lands
+];
+
+/// Which IST days are not regular sessions.
+///
+/// A fixed-size set, checked once per session rollover rather than once per bar. The scan
+/// is bounded by a compile-time length, so it is O(1) under §3 rule 4 — and it is not on
+/// the per-bar path at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Calendar {
+    days: [i64; 8],
+    len: usize,
+}
+
+impl Default for Calendar {
+    fn default() -> Self {
+        Self::charter()
+    }
+}
+
+impl Calendar {
+    /// The six dates `docs/00-charter.md` §3 records as VERIFIED.
+    #[must_use]
+    pub const fn charter() -> Self {
+        // Written out rather than copied from `CHARTER_NON_REGULAR_IST_DAYS` in a loop: the
+        // workspace denies indexing, and a `const fn` cannot iterate. The two are held
+        // equal by the const assertion below, so this cannot silently drift from the
+        // documented source.
+        Self {
+            days: [18_580, 18_935, 19_289, 19_673, 20_028, 20_382, 0, 0],
+            len: 6,
+        }
+    }
+
+    /// Every day is a regular session.
+    ///
+    /// For a caller sweeping a slice that provably contains no non-regular date, and for
+    /// the tests that pin what the contaminated behaviour used to be.
+    #[must_use]
+    pub const fn all_regular() -> Self {
+        Self {
+            days: [0; 8],
+            len: 0,
+        }
+    }
+
+    /// Is this IST day a session whose OHLC must not become an anchor?
+    #[must_use]
+    pub fn is_non_regular(&self, ist_day: i64) -> bool {
+        self.days.iter().take(self.len).any(|d| *d == ist_day)
+    }
+}
+
+/// The two spellings of the charter's six agree.
+///
+/// `Calendar::charter` writes the days out because a `const fn` cannot index an array
+/// under this workspace's lints. That duplication is only safe if something compares them,
+/// and a const assertion is the only thing that can compare them before the code runs.
+const _: () = {
+    assert!(CHARTER_NON_REGULAR_IST_DAYS.len() == 6);
+    let c = Calendar::charter();
+    assert!(c.len == CHARTER_NON_REGULAR_IST_DAYS.len());
+    assert!(c.days[0] == CHARTER_NON_REGULAR_IST_DAYS[0]);
+    assert!(c.days[1] == CHARTER_NON_REGULAR_IST_DAYS[1]);
+    assert!(c.days[2] == CHARTER_NON_REGULAR_IST_DAYS[2]);
+    assert!(c.days[3] == CHARTER_NON_REGULAR_IST_DAYS[3]);
+    assert!(c.days[4] == CHARTER_NON_REGULAR_IST_DAYS[4]);
+    assert!(c.days[5] == CHARTER_NON_REGULAR_IST_DAYS[5]);
+};
+
 /// Every module, and the session bookkeeping that feeds the ones needing yesterday.
 #[derive(Clone, Copy, Debug)]
 pub struct Evaluator {
     widths: Widths,
+    calendar: Calendar,
     /// The IST day of the bar last folded. `i64::MIN` before the first bar.
     day: i64,
     /// True once at least one bar has been folded into the running session.
@@ -143,8 +264,26 @@ impl Evaluator {
     /// wearing a VWAP label.
     #[must_use]
     pub const fn new(widths: Widths, availability: Availability, thresholds: Thresholds) -> Self {
+        Self::with_calendar(widths, availability, thresholds, Calendar::charter())
+    }
+
+    /// An evaluator with an explicit non-regular-session calendar.
+    ///
+    /// [`Self::new`] uses [`Calendar::charter`], which is the right default: the six dates
+    /// are recorded VERIFIED in `docs/00-charter.md` §3, so defaulting to them needs no
+    /// invention, and a caller who forgets this parameter gets the sourced behaviour rather
+    /// than the contaminated one. [`Calendar::all_regular`] is available for a slice that
+    /// provably contains none.
+    #[must_use]
+    pub const fn with_calendar(
+        widths: Widths,
+        availability: Availability,
+        thresholds: Thresholds,
+        calendar: Calendar,
+    ) -> Self {
         Self {
             widths,
+            calendar,
             day: i64::MIN,
             seeded: false,
             last_ts: None,
@@ -250,7 +389,12 @@ impl Evaluator {
         let today = crate::ist_day(bar.ts_micros);
         if today != self.day {
             if self.seeded {
-                self.close_the_books();
+                // The session that just ENDED is `self.day`, not `today`. Asking about the
+                // wrong one is the obvious slip here and it inverts the fix: a Muhurat
+                // session would poison the anchor and the regular day after it would be
+                // discarded instead.
+                let ending_was_regular = !self.calendar.is_non_regular(self.day);
+                self.close_the_books(ending_was_regular);
             }
             self.day = today;
             self.seeded = false;
@@ -315,7 +459,23 @@ impl Evaluator {
     }
 
     /// Hand the finished session to the families that need yesterday.
-    fn close_the_books(&mut self) {
+    /// Hand the finished session to the families that need yesterday — **if it was a
+    /// regular one.**
+    ///
+    /// A non-regular session's bars are emitted exactly like any other bar's: it is a real
+    /// hour of real trading and every intraday position on it is a genuine measurement. What
+    /// it must not do is become an ANCHOR — the previous-day pivot ladder, the five-session
+    /// rolling window, or the gap family's previous-session edge. `docs/00-charter.md` §3
+    /// states that rule and D-0110 records why the mechanism it claimed did not exist.
+    ///
+    /// Skipping the push leaves the previous regular session in place, which is exactly what
+    /// the charter asks for: *"the previous-day anchor is the OHLC of the last regular
+    /// trading session strictly before the Muhurat date"*. No walk is needed, because
+    /// nothing overwrote it.
+    fn close_the_books(&mut self, was_regular: bool) {
+        if !was_regular {
+            return;
+        }
         self.prev5
             .push_completed_session(self.running_high, self.running_low);
         // A session whose levels are unusable leaves `yesterday` as it was rather
@@ -925,5 +1085,198 @@ mod tests {
                 "daily position {p} was set from a session with no usable levels"
             );
         }
+    }
+
+    /// A non-regular session emits its bars and never becomes an anchor.
+    ///
+    /// # The measurement this reproduces
+    ///
+    /// A 375-bar regular session, then a 60-bar session, then another 375-bar session. Before
+    /// the calendar existed, **all 375 bars of the third session emitted a different mask**
+    /// than the same session fed without the short day: the one-hour OHLC had become the
+    /// previous-day anchor, entered `Prev5`, and become the gap family's previous-session
+    /// edge. `docs/00-charter.md` §3 forbids all three by name and claimed the mechanism was
+    /// "an anchor walk restricted to trading days". There was no walk.
+    ///
+    /// The test drives it both ways round the same evaluator type: once with the short day
+    /// declared non-regular, once with `Calendar::all_regular`, and requires them to
+    /// DISAGREE. That second half is what stops this passing for the wrong reason — if the
+    /// calendar were ignored entirely both runs would agree and the assertion would be
+    /// vacuous.
+    #[test]
+    fn a_non_regular_session_never_becomes_the_previous_day_anchor() {
+        // Day 20_382 is 2025-10-21, the afternoon Muhurat, and the one of the charter's six
+        // whose bars pass the pull's 09:15–15:30 window and therefore reach disk.
+        let short_day = 20_382_i64;
+        let session = |day: i64, bars: i64, base: i64| -> Vec<Candle> {
+            (0..bars)
+                .map(|m| {
+                    let p = base + (m % 37) * 100;
+                    Candle {
+                        ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                        open: p,
+                        high: p + 400,
+                        low: p - 400,
+                        close: p + 100,
+                        volume: 0,
+                        open_interest: i64::MIN,
+                    }
+                })
+                .collect()
+        };
+
+        let before = session(short_day - 1, 375, 2_500_000);
+        let shortd = session(short_day, 60, 2_900_000);
+        let after = session(short_day + 1, 375, 2_500_000);
+
+        let run = |calendar: Calendar, include_short: bool| -> Vec<[u64; 6]> {
+            let mut e = Evaluator::with_calendar(
+                widths(),
+                Availability::Absent,
+                Thresholds::CLASSICAL,
+                calendar,
+            );
+            for c in &before {
+                e.step(c).expect("a sane candle");
+            }
+            if include_short {
+                for c in &shortd {
+                    e.step(c).expect("a sane candle");
+                }
+            }
+            after
+                .iter()
+                .map(|c| e.step(c).expect("a sane candle").words())
+                .collect()
+        };
+
+        // WHAT THE CHARTER ACTUALLY FORBIDS, and what it does not.
+        //
+        // §3 names three things: the previous-day anchor, the multi-day rolling history, and
+        // the previous-session edge. It says nothing about the EMA, the ATR, the swing ring
+        // or VWAP — and it should not, because a Muhurat hour is real trading and a
+        // 200-period average that skipped it would be a different kind of lie.
+        //
+        // So this compares the ANCHOR-DERIVED positions only. An earlier version of this
+        // test compared the whole mask and failed, correctly: the trend accumulators had
+        // legitimately seen the 60 bars. The test was wrong, not the fix.
+        let anchored: Vec<u16> = crate::daily::positions().to_vec();
+        let anchor_bits = |masks: &[[u64; 6]]| -> Vec<Vec<u16>> {
+            masks
+                .iter()
+                .map(|w| {
+                    let m = ConditionMask::from_words(*w);
+                    anchored
+                        .iter()
+                        .copied()
+                        .filter(|p| m.get(u32::from(*p)))
+                        .collect()
+                })
+                .collect()
+        };
+
+        let with_short = run(Calendar::charter(), true);
+        let without = run(Calendar::charter(), false);
+        assert_eq!(with_short.len(), without.len(), "both runs emit 375 masks");
+        assert_eq!(
+            anchor_bits(&with_short),
+            anchor_bits(&without),
+            "the day after a non-regular session reports different PIVOT positions when that \
+             session is fed, so its one-hour OHLC is still reaching the previous-day anchor \
+             — which charter §3 forbids by name"
+        );
+
+        // And the calendar is doing the work. Declared regular, the same short day DOES
+        // move the pivot ladder — the contaminated behaviour — and its presence here is what
+        // proves the assertion above is not vacuous.
+        let contaminated = run(Calendar::all_regular(), true);
+        assert_ne!(
+            anchor_bits(&contaminated),
+            anchor_bits(&without),
+            "declaring the short day regular changed no pivot position, so the calendar is \
+             not being consulted and the assertion above would pass with the fix removed"
+        );
+    }
+
+    /// A non-regular session does not advance the five-session rolling window.
+    ///
+    /// The second of the charter's three prohibitions, asserted directly rather than through
+    /// the bits: `Prev5` is what positions 110–120 are measured against, and a one-hour OHLC
+    /// entering it contaminates them for five more sessions.
+    #[test]
+    fn a_non_regular_session_does_not_advance_the_rolling_window() {
+        let short_day = 20_382_i64;
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let feed = |e: &mut Evaluator, day: i64, bars: i64, base: i64| {
+            for m in 0..bars {
+                let p = base + (m % 37) * 100;
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: p,
+                    high: p + 400,
+                    low: p - 400,
+                    close: p + 100,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("a sane candle");
+            }
+        };
+
+        feed(&mut e, short_day - 2, 375, 2_500_000);
+        feed(&mut e, short_day - 1, 375, 2_600_000);
+        let sessions_before = e.sessions_completed();
+        let had_yesterday = e.has_yesterday();
+
+        // The short day, then a bar on the day AFTER it — which is what triggers the
+        // rollover that would push the short session into `Prev5`.
+        feed(&mut e, short_day, 60, 2_900_000);
+        feed(&mut e, short_day + 1, 1, 2_500_000);
+
+        assert_eq!(
+            e.sessions_completed(),
+            sessions_before + 1,
+            "the rolling window advanced twice across a non-regular session and the regular \
+             day after it, so the one-hour OHLC entered Prev5 — the second of the three \
+             things charter §3 forbids"
+        );
+        assert_eq!(
+            e.has_yesterday(),
+            had_yesterday,
+            "yesterday came or went unexpectedly"
+        );
+    }
+
+    /// The short session's own bars are still emitted.
+    ///
+    /// The fix must not silence a real hour of trading. Every intraday position on a
+    /// Muhurat bar is a genuine measurement — what the charter forbids is that hour becoming
+    /// an ANCHOR for the days after it.
+    #[test]
+    fn a_non_regular_session_still_emits_its_own_bars() {
+        let short_day = 20_382_i64;
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let mut any = false;
+        for m in 0..60_i64 {
+            let p = 2_900_000 + (m % 37) * 100;
+            let bar = Candle {
+                ts_micros: short_day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                open: p,
+                high: p + 400,
+                low: p - 400,
+                close: p + 100,
+                volume: 0,
+                open_interest: i64::MIN,
+            };
+            let mask = e.step(&bar).expect("a Muhurat bar is an ordinary bar");
+            if mask.popcount() > 0 {
+                any = true;
+            }
+        }
+        assert!(
+            any,
+            "a non-regular session emitted nothing at all, so the fix silenced a real hour \
+             of trading instead of merely keeping it out of the anchors"
+        );
     }
 }

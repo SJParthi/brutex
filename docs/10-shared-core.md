@@ -181,8 +181,10 @@ Duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
 Nothing in the closure grows with the number of candles fed. That is the property a
 live consumer needs and it is asserted in the build rather than described here:
 `const _: () = assert!(size_of::<Evaluator>() <= 1792)` fails if any module starts
-accumulating. It measures 1664 bytes today, so the assertion has 128 bytes of slack
-and is a live guard rather than a rounded-up number that could never fire.
+accumulating. It measures 1728 bytes today, so the assertion has 64 bytes of slack and is
+a live guard rather than a rounded-up number that could never fire — it was 1664 until the
+non-regular-session `Calendar` was added, and the test that reads this number is what
+refused the stale figure rather than a reader noticing.
 
 **Stated rather than implied (§3 rule 6):** support counting is O(candles) because it
 *is* the measurement, and the Apriori level join is O(|frontier|²), which is that

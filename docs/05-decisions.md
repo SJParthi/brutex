@@ -10151,3 +10151,89 @@ clear. And the pivot fix deleted a test whose second, unnoticed job was pinning 
 near-edge arithmetic, leaving the `i128` widening with no guard at all. Both are closed and
 both were found by the adversarial pass rather than by the agent that made the change,
 which is the argument for having one.
+
+
+---
+
+## D-0110 · 2026-08-11 · The anchor walk `docs/00-charter.md` §3 claims exists did not exist, and the charter's own six dates are what replaces it
+
+**Status: locked.** `Calendar` and `CHARTER_NON_REGULAR_IST_DAYS` in
+`crates/indicators/src/evaluator.rs`. `Evaluator::new` defaults to the charter's six;
+`Evaluator::with_calendar` takes an explicit set. Invariants `I-10`…`I-12`.
+
+### The rule, and the mechanism that was not there
+
+The charter states it exactly, which is why this is a `law` finding rather than a design
+gap:
+
+> For a bar on any day after a Muhurat session, the previous-day anchor is the OHLC of the
+> **last regular trading session strictly before the Muhurat date**. The Muhurat day's own
+> OHLC never enters the previous-day anchor, the multi-day rolling history, or the
+> previous-session edge.
+
+It then explains the mechanism: *"every Muhurat date is also a non-trading date, so an
+anchor walk restricted to trading days skips it structurally rather than by a special case
+that can be forgotten."*
+
+**There was no walk.** The session boundary was an `ist_day` inequality and nothing else, so
+a one-hour Muhurat session was a session like any other. A grep for
+holiday/muhurat/non_trading/trading_calendar/SessionKind across `crates/{indicators,vocab,engine}`
+returned zero hits, and D-0062 records the same absence workspace-wide.
+
+Measured: a 375-bar session, a 60-bar session, then another 375-bar session, and **all 375
+bars of the third emitted a different mask** than the same session fed without the short
+day. The 44-position pivot ladder and the 15 previous-day Fibonacci rungs were measured off
+a one-hour session, and `Prev5` stayed contaminated for five more.
+
+### Six dates, because a Muhurat date cannot be derived
+
+The exchange sets it each year against the Hindu calendar. §3 rule 1 forbids computing one,
+and the charter records six as **VERIFIED** — so those six are the whole set, and the
+operator authorised using them.
+
+`Evaluator::new` defaults to them rather than to an empty calendar. That is deliberate: a
+caller who never learns this parameter exists gets the sourced behaviour, not the
+contaminated one. `Calendar::all_regular()` is available for a slice known to contain none,
+and the tests use it to pin what the contamination looked like.
+
+A seventh date must be added by hand when announced. Until then the engine treats it as a
+regular session — wrong in the same direction as before, on one day, and visible. That is
+the honest failure mode and it is stated rather than papered over.
+
+### The exposure is one date, and it is the forward-looking one
+
+Five of the six never reach disk: `pull::fetch::land` drops every minute bar outside
+`[09:15, 15:30)`, and the 2020–2024 sessions are all **evening** sessions at 18:00 or later.
+The pull accidentally implements this rule, for the unrelated reason that it hardcodes a
+15:30 close. The finder's "six years of poisoned anchors" was wrong and the skeptic caught
+it.
+
+**2025-10-21 is the exception.** The charter records it as *"an afternoon session, not an
+evening one"*, 13:45–14:45 IST: every one of its 60 bars passes the pull's window, so it
+lands, and the prohibition is broken on it. Afternoon Muhurats are now the pattern, which
+makes this forward-looking rather than historical.
+
+### What the fix does NOT do, and why that is right
+
+A non-regular session's bars are still emitted, and every intraday position on them is a
+genuine measurement. It is a real hour of real trading.
+
+The charter forbids three specific things — the previous-day anchor, the rolling history,
+the previous-session edge — and says nothing about the EMA, the ATR, the swing ring or VWAP.
+**Nor should it.** A 200-period average that skipped an hour of trading would be a
+different kind of lie.
+
+This is not a hypothetical distinction: the first version of the test compared the whole
+mask, and failed. The trend accumulators had legitimately seen those 60 bars. **The test was
+wrong, not the fix**, and it now compares the anchor-derived positions only.
+
+### Skipping the push IS the walk
+
+No search backwards is needed. Not pushing leaves the previous regular session's levels in
+place, which is exactly *"the OHLC of the last regular trading session strictly before the
+Muhurat date"*. The charter's mechanism was the right idea described in the wrong shape.
+
+**The verdict is taken on the session that ENDED, not the one starting.** Asking about
+`today` instead of `self.day` inverts the fix — the Muhurat session would poison the anchor
+and the regular day after it would be discarded — and both new tests fail on that slip, so
+it is guarded rather than merely commented.
