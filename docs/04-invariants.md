@@ -1810,6 +1810,8 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 | I-19 | 278 means UP and 279 means DOWN. I-17 passes with the mapping **swapped**, so the regime could have been reported permanently inverted — a sweep asking for "structure up" would get every bar where it was down, which is a false combination rather than a missing one | `indicators::evaluator::the_structure_direction_bits_are_not_swapped` | ✓ |
 | I-20 | `warmed_up` requires the pivot ladder, not only the session count. The four conditions look coupled and are not: `close_the_books` fills `prev5` unconditionally and installs `yesterday` only `if let Ok(levels)`, so five unusable sessions give a full window with no ladder | `indicators::evaluator::warmed_up_is_false_when_the_pivot_ladder_is_absent_despite_five_sessions` | ✓ |
 
+| I-21 | `Calendar::default()` is the charter's six, **not** an empty calendar. `impl Default` was the only uncovered FUNCTION in these three crates, and its body was mutated to `all_regular()` uncaught — the same hole twice: a `Default` nobody exercises is one whose value nobody has checked, and an empty one silently restores the defect D-0110 fixed for every consumer that writes `Calendar::default()` | `indicators::evaluator::the_default_calendar_is_the_charters_six_and_not_an_empty_one` | ✓ |
+
 **I-18, I-19 and I-20 exist because a verification sweep applied mutations that nothing
 caught.** All three fixes were green, tested, and documented; three specific breaks passed
 undetected — a swapped direction mapping, a shifted calendar date, and a deleted conjunct.

@@ -1969,4 +1969,43 @@ mod tests {
              depressed"
         );
     }
+
+    /// `Calendar::default()` is the charter's six, not an empty calendar.
+    ///
+    /// # Two things this closes, both found by a verification sweep
+    ///
+    /// `impl Default for Calendar` was the **only uncovered function** in these three crates —
+    /// function coverage left 100.00% for the first time when it was added, because nothing
+    /// called it. And its body was mutated from `Self::charter()` to `Self::all_regular()` and
+    /// **nothing caught that either.**
+    ///
+    /// The two are the same hole. A `Default` nobody exercises is a `Default` whose value
+    /// nobody has checked, and this one decides whether a caller who reaches for the obvious
+    /// constructor gets the sourced behaviour or the contaminated one. An empty default would
+    /// silently restore the defect D-0110 fixed for every consumer that wrote
+    /// `Calendar::default()`.
+    #[test]
+    fn the_default_calendar_is_the_charters_six_and_not_an_empty_one() {
+        let d = Calendar::default();
+        assert_eq!(
+            d,
+            Calendar::charter(),
+            "`Calendar::default()` is not the charter's six, so a caller reaching for the \
+             obvious constructor gets a calendar that lets a Muhurat session become the \
+             previous-day anchor — the defect D-0110 fixed"
+        );
+        assert_ne!(
+            d,
+            Calendar::all_regular(),
+            "the default is the empty calendar, which is the contaminated behaviour wearing \
+             the name of a safe one"
+        );
+        // And it really does know a charter date, rather than merely comparing equal to
+        // something else that does not.
+        assert!(
+            d.is_non_regular(20_382),
+            "the default calendar does not recognise 2025-10-21, the one Muhurat session whose \
+             bars reach disk"
+        );
+    }
 }

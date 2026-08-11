@@ -461,6 +461,69 @@ impl Day {
         })
     }
 
+    /// This date, `months` whole calendar months earlier.
+    ///
+    /// # Why months and not days
+    ///
+    /// Because a vendor states months. Groww's own interval table gives its
+    /// one-minute history as *"Last 3 months"*, and three months is 89, 90, 91
+    /// or 92 days depending on where in the year you stand — writing it as a
+    /// day count would be a number this repository invented rather than one it
+    /// read. A floor longer than a couple of decades is stated in years
+    /// instead and is carried by [`crate::vendor::HistoryFloor::Rolling`],
+    /// which is why `u8` is wide enough here.
+    ///
+    /// # The day of the month is clamped, never rolled over
+    ///
+    /// The 31st has no counterpart in a 30-day month and 29 February has none
+    /// in a common year. The day is taken **down** to the last day that month
+    /// actually has, using the same `month_len` [`Day::new`] validates
+    /// against, so a clamped date can never be one this build would refuse.
+    /// Rolling forward instead — 31 May less three months as 3 March — would
+    /// move a history floor *later* than the vendor's, which silently refuses
+    /// days the vendor would have answered.
+    ///
+    /// Constant work: two divisions and a comparison, whatever `months` is.
+    ///
+    /// # Errors
+    ///
+    /// [`SessionError::YearOutOfRange`] when the walk lands before
+    /// [`MIN_YEAR`], which is the same refusal [`Day::new`] gives for a date
+    /// this build cannot name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use pull::session::{Day, SessionError};
+    /// assert_eq!(Day::new(2026, 8, 12)?.months_before(3)?, Day::new(2026, 5, 12)?);
+    /// // January less one month is the previous December.
+    /// assert_eq!(Day::new(2026, 1, 31)?.months_before(1)?, Day::new(2025, 12, 31)?);
+    /// // 31 May less three months is the LAST day February has, not 3 March.
+    /// assert_eq!(Day::new(2026, 5, 31)?.months_before(3)?, Day::new(2026, 2, 28)?);
+    /// # Ok::<(), SessionError>(())
+    /// ```
+    pub const fn months_before(self, months: u8) -> Result<Self, SessionError> {
+        // The remainder crosses January when it is at least this month's own
+        // index, and that is the only case a year is borrowed. `+ 12` keeps
+        // the subtraction below inside `u8` — every intermediate here is in
+        // its own narrow type, because a `u16 as u8` is the truncating cast
+        // this workspace denies outright.
+        let rest = months % 12;
+        let (month, borrow) = if self.month <= rest {
+            (self.month + 12 - rest, 1)
+        } else {
+            (self.month - rest, 0)
+        };
+        // SATURATING, AND THE REFUSAL IS `Day::new`'S. A year that saturates to
+        // zero is not a year this build can name, so `new` refuses it by name
+        // with the bound in the message — one refusal site rather than two
+        // that could disagree. `as u16` widens; it cannot truncate.
+        let year = self.year.saturating_sub((months / 12) as u16 + borrow);
+        let len = month_len(year as u32, month);
+        let day = if self.day > len { len } else { self.day };
+        Self::new(year, month, day)
+    }
+
     /// Days since 1970-01-01, by the standard civil-calendar formula.
     ///
     /// Constant time and allocation-free. The era arithmetic is the published

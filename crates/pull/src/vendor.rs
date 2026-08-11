@@ -1456,7 +1456,22 @@ pub struct Budget {
     pub per_day: Option<u32>,
 }
 
-/// The oldest day a feed will answer for, in the two shapes that occur.
+/// The oldest day a feed will answer for, in the four shapes that occur.
+///
+/// # Four, and the last two are not the same fact
+///
+/// [`Self::Unbounded`] is a vendor **stating** that it holds everything —
+/// Dhan's daily page says the data "is available back upto the date of its
+/// inception", Groww's interval table says "Full history" against its day row.
+/// [`Self::Unstated`] is nobody having said anything, which is what every
+/// local archive is: the operator's folder holds whatever they bought.
+///
+/// The two behave identically at a clamp — neither narrows a window — and they
+/// are still different answers to an operator asking *how far back can I ask?*
+/// One is "as far as the instrument goes"; the other is "this repository does
+/// not know, and will not guess". Collapsing them would put a claim the vendor
+/// made and a claim nobody made under one word, which is the invention
+/// `CLAUDE.md` §3 rule 1 forbids and the silent fallback §4 bans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HistoryFloor {
     /// A date that does not move. Groww: 2020-01-01.
@@ -1477,9 +1492,79 @@ pub enum HistoryFloor {
         /// How many years back the window reaches.
         years: u32,
     },
-    /// The vendor publishes no floor. Not a default — an unknown floor is
-    /// UNVERIFIED in the charter and says so there.
+    /// A window that moves with the clock, stated in **months**. Groww's
+    /// one-minute rung: "Last 3 months".
+    ///
+    /// A separate arm rather than a fraction of [`Self::Rolling`] because
+    /// three months is 89, 90, 91 or 92 days depending on where in the year it
+    /// is measured from, and a quarter of a year is not what the vendor wrote.
+    /// Resolved by [`crate::session::Day::months_before`], which clamps the
+    /// day of the month downward rather than rolling it forward.
+    RollingMonths {
+        /// How many whole calendar months back the window reaches.
+        months: u8,
+    },
+    /// The vendor states there is **no** floor: it serves back to the
+    /// instrument's own inception.
+    ///
+    /// A recorded vendor claim, not an absence of one. See the type's header
+    /// for why this is not [`Self::Unstated`].
+    Unbounded,
+    /// Nothing states anything. Not a default and not "no limit" — an unknown
+    /// floor is UNVERIFIED in the charter and says so there.
     Unstated,
+}
+
+/// One claim about how far back a feed answers, and who made it.
+///
+/// # Why the source travels with the number
+///
+/// `CLAUDE.md` §3 rule 1: every claim about a vendor is traceable to a source.
+/// A floor with no attribution is indistinguishable from one somebody typed,
+/// and this repository has two sources that **disagree** — see [`FloorRow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FloorClaim {
+    /// How far back this source says the feed answers.
+    pub floor: HistoryFloor,
+    /// Where the claim was read, in the words an operator can go and check.
+    /// Prose, because it is quoted onto a page and never parsed.
+    pub source: &'static str,
+}
+
+/// How far back **one rung** of one feed answers, with the conflict intact.
+///
+/// # Why this is per rung
+///
+/// Because the shape is not uniform inside a single vendor. Groww's own
+/// interval table gives its day row "Full history" and its one-minute row
+/// "Last 3 months" — a floor keyed on the vendor alone is therefore wrong for
+/// one of that vendor's two rungs, and wrong in the expensive direction: a
+/// 2020-to-today one-minute backfill against a three-month window spends
+/// thousands of requests on days the vendor answers EMPTY, and an empty answer
+/// is indistinguishable from a market holiday.
+///
+/// # Why both claims are carried
+///
+/// The operator stated one set of floors on 11 Aug 2026 and the vendors'
+/// documentation states another, and for three of the four rows below they do
+/// not agree. Averaging them, or taking the newer, or taking the vendor's
+/// because it is "official", would each produce a number no source supports.
+/// So the **stricter** one binds — the later day is the one that refuses first,
+/// and obeying it can only cost requests that would have come back empty — and
+/// the one it displaced stays here, named, beside the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FloorRow {
+    /// Which rung this row is about.
+    pub granularity: Granularity,
+    /// The claim that **binds**: the strictest one recorded for this rung.
+    pub binding: FloorClaim,
+    /// A second claim about the same rung that does not agree. `None` when
+    /// only one source speaks, or when the sources agree and the binding
+    /// claim's `source` names them both.
+    pub contested: Option<FloorClaim>,
+    /// Why [`Self::binding`] binds over [`Self::contested`]. Empty when
+    /// nothing contests it.
+    pub binds_because: &'static str,
 }
 
 /// Whether a feed's budget is shared across request kinds or held per kind.

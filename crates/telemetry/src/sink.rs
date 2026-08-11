@@ -532,7 +532,11 @@ impl Inner {
     /// `a_backward_clock_cannot_move_ms_backwards`.
     ///
     /// One comparison and one store. O(1), and called with the lock already
-    /// held.
+    /// held — it adds a fixed pair of instructions to a critical section that
+    /// already formats and appends a line. The flatness of the emit path
+    /// carrying it is held by
+    /// `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` (C-T-01b),
+    /// the same proof the `run` stamp beside it names.
     fn stamp(&mut self, now: i64) -> i64 {
         self.last_at = now.max(self.last_at);
         self.last_at
