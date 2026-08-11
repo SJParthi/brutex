@@ -560,12 +560,26 @@ impl Structure {
     /// The very first break is a **`BoS`**, not a `CHoCH`: with no prior direction there is
     /// no character to change. Calling it a `CHoCH` would make the first break of every
     /// run a flip, which is an artefact of starting rather than a fact about price.
-    pub fn observe(
-        &mut self,
+    /// # Why this is `&self`, and returns the direction beside the break
+    ///
+    /// It was `observe(&mut self, ..)` and it wrote `self.last` from inside the EMIT.
+    /// Calling it twice on one candle gave two different answers — a first down break
+    /// after an up break returned `ChochBearish`, and the identical call then returned
+    /// `BosBearish`, because the first call had already moved the latch. So
+    /// `TrendState::bits` was not idempotent and any second look at the same bar
+    /// permanently changed the mask the sweep later received.
+    ///
+    /// Classification is now pure and the latch advance is [`Self::advance`], called once
+    /// per candle from `TrendState::step`. The direction travels with the break because
+    /// the caller needs it in order to advance, and re-deriving it would be a second
+    /// place to get the recency tie-break wrong.
+    #[must_use]
+    pub fn classify(
+        &self,
         close: i64,
         swing_high: Option<Swing>,
         swing_low: Option<Swing>,
-    ) -> Option<Break> {
+    ) -> Option<(Break, Trend)> {
         let broke_up = swing_high.is_some_and(|s| close > s.price);
         let broke_down = swing_low.is_some_and(|s| close < s.price);
         // Both at once IS reachable, and the first version of this function said it was
@@ -602,8 +616,18 @@ impl Structure {
             (_, Trend::Up) => Break::BosBullish,
             (_, Trend::Down) => Break::BosBearish,
         };
+        Some((result, direction))
+    }
+
+    /// Advance the in-force direction. Called once per candle, from `TrendState::step`.
+    pub const fn advance(&mut self, direction: Trend) {
         self.last = Some(direction);
-        Some(result)
+    }
+
+    /// The direction currently in force, or `None` before the first break.
+    #[must_use]
+    pub const fn in_force(&self) -> Option<Trend> {
+        self.last
     }
 }
 
@@ -664,6 +688,18 @@ impl TrendState {
     ) -> Result<ConditionMask, crate::Corrupt> {
         candle.check()?;
         let bits = self.bits(candle.close, tolerance);
+        // The latch advance: exactly once per candle, and OUTSIDE the emit. `bits` is
+        // `&self` and idempotent; this is the only line that moves the structure on. It
+        // reads the swings as they stood BEFORE this candle is folded — the same reading
+        // `bits` just used, which is why the classification is not re-derived from a
+        // different state.
+        if let Some((_, direction)) = self.structure.classify(
+            candle.close,
+            self.swings.swing_high(),
+            self.swings.swing_low(),
+        ) {
+            self.structure.advance(direction);
+        }
         self.fold(candle);
         Ok(bits)
     }
@@ -685,7 +721,7 @@ impl TrendState {
     /// Two average comparisons, one stop comparison, two band tests and one structure
     /// classification. No loop over data, no allocation.
     #[must_use]
-    pub fn bits(&mut self, close: i64, tolerance: Tolerance) -> ConditionMask {
+    pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mut mask = ConditionMask::ZERO;
 
         // 0–3: close against each average. A position stays false while its average is
@@ -723,8 +759,8 @@ impl TrendState {
         // 56–59: structure. Read the swings as they stand before this candle is folded.
         let broke =
             self.structure
-                .observe(close, self.swings.swing_high(), self.swings.swing_low());
-        if let Some(b) = broke {
+                .classify(close, self.swings.swing_high(), self.swings.swing_low());
+        if let Some((b, _)) = broke {
             let index = match b {
                 Break::BosBullish => 56,
                 Break::BosBearish => 57,
@@ -776,6 +812,26 @@ fn side(mask: ConditionMask, value: i64, level: i64, above: u16, below: u16) -> 
         core::cmp::Ordering::Less => set(mask, below),
         core::cmp::Ordering::Equal => mask,
     }
+}
+
+#[cfg(test)]
+/// Classify and advance in one call, which is what `observe` used to do.
+///
+/// Several tests below depend on the latch having moved: a `CHoCH` on the second call is
+/// only a `CHoCH` because the first recorded a direction. Splitting the two apart in the
+/// library must not silently change what those tests assert, so the sequence they relied
+/// on is named once here rather than inlined at seven call sites.
+fn step_structure(
+    s: &mut Structure,
+    close: i64,
+    swing_high: Option<Swing>,
+    swing_low: Option<Swing>,
+) -> Option<Break> {
+    let out = s.classify(close, swing_high, swing_low);
+    if let Some((_, direction)) = out {
+        s.advance(direction);
+    }
+    out.map(|(b, _)| b)
 }
 
 #[cfg(test)]
@@ -854,7 +910,7 @@ mod tests {
     /// An unseeded average sets nothing rather than guessing.
     #[test]
     fn nothing_is_emitted_before_the_averages_exist() {
-        let mut t = TrendState::default();
+        let t = TrendState::default();
         let mask = t.bits(2_500_000, tol());
         for index in [0_u16, 1, 2, 3, 4, 5, 64, 65, 72, 73] {
             assert!(
@@ -989,7 +1045,10 @@ mod tests {
             window_span: 10_000,
             confirmed_at: 10,
         });
-        assert_eq!(s.observe(2_501_000, high, None), Some(Break::BosBullish));
+        assert_eq!(
+            step_structure(&mut s, 2_501_000, high, None),
+            Some(Break::BosBullish)
+        );
     }
 
     /// A break the other way, after one, is a `CHoCH`.
@@ -1006,12 +1065,24 @@ mod tests {
             window_span: 10_000,
             confirmed_at: 20,
         });
-        assert_eq!(s.observe(2_501_000, high, low), Some(Break::BosBullish));
-        assert_eq!(s.observe(2_399_000, high, low), Some(Break::ChochBearish));
+        assert_eq!(
+            step_structure(&mut s, 2_501_000, high, low),
+            Some(Break::BosBullish)
+        );
+        assert_eq!(
+            step_structure(&mut s, 2_399_000, high, low),
+            Some(Break::ChochBearish)
+        );
         // And back again.
-        assert_eq!(s.observe(2_501_000, high, low), Some(Break::ChochBullish));
+        assert_eq!(
+            step_structure(&mut s, 2_501_000, high, low),
+            Some(Break::ChochBullish)
+        );
         // Continuing in the same direction is a BoS, not another CHoCH.
-        assert_eq!(s.observe(2_502_000, high, low), Some(Break::BosBullish));
+        assert_eq!(
+            step_structure(&mut s, 2_502_000, high, low),
+            Some(Break::BosBullish)
+        );
     }
 
     /// Breaking neither side reports nothing.
@@ -1028,7 +1099,7 @@ mod tests {
             window_span: 10_000,
             confirmed_at: 20,
         });
-        assert_eq!(s.observe(2_450_000, high, low), None);
+        assert_eq!(step_structure(&mut s, 2_450_000, high, low), None);
     }
 
     /// Every position is live and of the kind the table declares.
@@ -1091,6 +1162,153 @@ mod tests {
             assert_eq!(run(), first, "a rerun disagreed");
         }
     }
+
+    /// `bits` is a function of the bar, so asking twice gives the same answer.
+    ///
+    /// It took `&mut self` and advanced the `Structure` latch from inside the emit.
+    /// Measured on a rising-then-falling series: one bar gave `[1, 3, 4, 59, 65]` and the
+    /// identical call on the same close then gave `[1, 3, 4, 57, 65]` — 59 is
+    /// `choch_bearish` and 57 is `bos_bearish`, so the second read reclassified a change
+    /// of character as a plain break because the first read had already moved the latch.
+    ///
+    /// Anything that looked twice — a debug print, a UI, a second consumer of the same
+    /// evaluator — permanently changed what the sweep later got. `&self` makes that
+    /// unconstructible rather than merely discouraged.
+    #[test]
+    fn bits_is_idempotent_across_a_break_and_a_change_of_character() {
+        let tolerance = tol();
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        let path: [i64; 24] = [
+            2_400_000, 2_410_000, 2_430_000, 2_460_000, 2_500_000, 2_470_000, 2_440_000, 2_450_000,
+            2_480_000, 2_520_000, 2_560_000, 2_530_000, 2_490_000, 2_500_000, 2_540_000, 2_580_000,
+            2_550_000, 2_500_000, 2_450_000, 2_400_000, 2_380_000, 2_420_000, 2_460_000, 2_390_000,
+        ];
+        for (m, close) in path.iter().enumerate() {
+            let minute = i64::try_from(m).expect("24 fits an i64");
+            let bar = candle(minute * 60_000_000, close + 600, close - 600, *close);
+            let first = t.bits(*close, tolerance);
+            let second = t.bits(*close, tolerance);
+            let third = t.bits(*close, tolerance);
+            assert_eq!(
+                first.words(),
+                second.words(),
+                "bar {m}: reading the bits twice gave two different masks"
+            );
+            assert_eq!(
+                first.words(),
+                third.words(),
+                "bar {m}: and a third read differed again"
+            );
+            t.step(&bar, tolerance).expect("a sane candle");
+        }
+    }
+
+    /// The latch advances once per candle, not once per read.
+    ///
+    /// The companion to the test above: `bits` being pure is only worth having if
+    /// something still moves the structure on. Pinned through the public accessor rather
+    /// than the private field.
+    #[test]
+    fn the_structure_latch_advances_exactly_once_per_candle() {
+        let mut s = Structure::new();
+        let high = Swing {
+            price: 2_500_000,
+            confirmed_at: 10,
+            window_span: 1_000,
+        };
+        let low = Swing {
+            price: 2_400_000,
+            confirmed_at: 5,
+            window_span: 1_000,
+        };
+        assert_eq!(
+            s.in_force(),
+            None,
+            "nothing is in force before the first break"
+        );
+
+        // Classifying does not advance, however often it is asked.
+        assert!(s.classify(2_501_000, Some(high), Some(low)).is_some());
+        assert!(s.classify(2_501_000, Some(high), Some(low)).is_some());
+        assert_eq!(
+            s.in_force(),
+            None,
+            "classify moved the latch, so it is not the pure half it claims to be"
+        );
+
+        let (broke, direction) = s
+            .classify(2_501_000, Some(high), Some(low))
+            .expect("a close above the swing high is a break");
+        assert_eq!(
+            broke,
+            Break::BosBullish,
+            "the first break is a BoS, never a CHoCH"
+        );
+        s.advance(direction);
+        assert_eq!(s.in_force(), Some(Trend::Up));
+
+        // And the same shape the other way is a CHoCH every time it is asked.
+        for _ in 0..3 {
+            let (b, _) = s
+                .classify(2_399_000, Some(high), Some(low))
+                .expect("a close below the swing low is a break");
+            assert_eq!(
+                b,
+                Break::ChochBearish,
+                "a down break against an up structure is a CHoCH on every read"
+            );
+        }
+    }
+
+    /// A change of character reaches the mask, which is what proves the latch advances.
+    ///
+    /// # Why this test exists, and what it caught about its own siblings
+    ///
+    /// `bits_is_idempotent_..` and `the_structure_latch_advances_..` both pass if `step`
+    /// stops advancing the latch altogether — measured, by deleting the advance and
+    /// watching every test stay green. With `Structure::last` permanently `None`, the
+    /// classification arm `(_, Trend::Up) => BosBullish` fires for ever and **positions
+    /// 58 and 59 become unreachable**: every change of character is reported as a plain
+    /// break, and a sweep looking for a reversal finds only continuations.
+    ///
+    /// So this drives the public `step` over a rise, a fall through the confirmed swing
+    /// high, a rally and a second fall, and requires a `CHoCH` bit to appear. It is the only
+    /// test in this file that fails when the advance is removed.
+    #[test]
+    fn a_change_of_character_reaches_the_mask() {
+        let tolerance = tol();
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        let mut seen_bos = false;
+        let mut seen_choch = false;
+        for m in 0..60_i64 {
+            // Four legs: up, down through the swing high, up again, down again.
+            let within = m % 15;
+            let close = match m / 15 {
+                0 => 2_400_000 + within * 8_000,
+                1 => 2_520_000 - within * 9_000,
+                2 => 2_385_000 + within * 10_000,
+                _ => 2_535_000 - within * 11_000,
+            };
+            let bar = candle(m * 60_000_000, close + 700, close - 700, close);
+            let mask = t.step(&bar, tolerance).expect("a sane candle");
+            if mask.get(56) || mask.get(57) {
+                seen_bos = true;
+            }
+            if mask.get(58) || mask.get(59) {
+                seen_choch = true;
+            }
+        }
+        assert!(
+            seen_bos,
+            "no break of structure at all, so the series proves nothing"
+        );
+        assert!(
+            seen_choch,
+            "a break in one direction followed by a break in the other never produced a \
+             CHoCH, so `Structure::last` is never advancing — positions 58 and 59 are \
+             unreachable and every reversal is being reported as a continuation"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1120,7 +1338,7 @@ mod double_break {
         // 2_505_000 is above the high AND below the low: both break.
         let mut s = Structure::new();
         assert_eq!(
-            s.observe(2_505_000, older_high, newer_low),
+            step_structure(&mut s, 2_505_000, older_high, newer_low),
             Some(Break::BosBearish),
             "the more recently confirmed swing is the structure in force"
         );
@@ -1143,7 +1361,7 @@ mod double_break {
         });
         let mut s = Structure::new();
         assert_eq!(
-            s.observe(2_505_000, newer_high, older_low),
+            step_structure(&mut s, 2_505_000, newer_high, older_low),
             Some(Break::BosBullish)
         );
     }
@@ -1163,7 +1381,7 @@ mod double_break {
             confirmed_at: 7,
         });
         let mut s = Structure::new();
-        assert_eq!(s.observe(2_505_000, high, low), None);
+        assert_eq!(step_structure(&mut s, 2_505_000, high, low), None);
     }
 
     /// The detector really does stamp its confirmations, and the stamps increase.
@@ -1429,7 +1647,7 @@ mod defaults_and_degenerate_periods {
             confirmed_at: 3,
         });
         assert_eq!(
-            s.observe(2_501_000, high, None),
+            step_structure(&mut s, 2_501_000, high, None),
             Some(Break::BosBullish),
             "the first break out of a defaulted structure is a BoS, never a CHoCH"
         );
@@ -1855,7 +2073,7 @@ mod every_break_is_classified {
         for (last, close, direction, expected) in cases {
             let mut s = Structure { last };
             assert_eq!(
-                s.observe(close, Some(high), Some(low)),
+                step_structure(&mut s, close, Some(high), Some(low)),
                 Some(expected),
                 "a close at {close} with {last:?} behind it must be {expected:?}"
             );
@@ -1870,7 +2088,7 @@ mod every_break_is_classified {
         // A close that reaches neither level breaks nothing and remembers nothing.
         let mut s = Structure::new();
         assert_eq!(
-            s.observe(2_450_000, Some(high), Some(low)),
+            step_structure(&mut s, 2_450_000, Some(high), Some(low)),
             None,
             "a close between the two levels is not a break"
         );
