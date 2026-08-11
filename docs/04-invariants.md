@@ -1774,6 +1774,37 @@ million bars at eight live positions takes minutes and gate 8 runs on every push
 The 10× step is enough to see a drifting constant. Stated rather than implied, per
 §3 rule 6.
 
+
+---
+
+## The indicator fold's four corrected predicates — 2026-08-11
+
+Four positions reported measurements they were not making. Each row below names the test
+that catches it, and every one of those tests was run against the pre-fix code and seen to
+fail there — a guard nobody has watched fail is not known to be a guard.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| I-01 | A flat bar (`close == open`) is **neither** direction, so it sets neither 37 `prior_n_bullish` nor 38 `prior_n_bearish` and it breaks 39's alternation. The ring stored `close > open`, which filed a flat bar as `false` = bearish, so 38 asserted three bearish bars over a run in which 31 `bar_bearish` was never once set | `indicators::session::a_run_of_flat_bars_is_neither_a_bullish_nor_a_bearish_run`, `indicators::session::a_flat_bar_between_two_up_bars_is_not_an_alternation` | ✓ |
+| I-02 | 39 `prior_alternating` stays **clear** on a monotone run. Nothing pinned this: replacing the `differing` test with `true` passed all 22 session tests, so 39 could fire on three consecutive up bars — the same defect as I-01 in the opposite direction | `indicators::session::a_run_of_three_up_bars_sets_prior_n_bullish_on_the_fourth`, `indicators::session::a_run_of_three_down_bars_sets_prior_n_bearish_on_the_fourth` | ✓ |
+| I-03 | A period speaks only on the candle its own period completes. Bit 2 `close_above_ema200` fired on the **second** candle of a run, where the "200-period average" was one candle old — `docs/03-vocabulary.md` §4 says a bit that cannot be evaluated evaluates false, never "probably". The EMISSION is gated on a folded counter, not the accessors, because `Atr::value()` returning `None` stops `SuperTrend::fold` seeding at all | `indicators::trend::the_second_candle_of_a_run_names_no_period_at_all`, `indicators::trend::each_position_speaks_on_the_candle_its_own_period_completes` | ✓ |
+| I-04 | A pivot ladder whose rung leaves `i64` **refuses**, and never clamps. Clamping collapsed R4 onto R5 — two vocabulary positions becoming one predicate — and set six positions measured against levels that do not exist | `indicators::daily::a_rung_past_the_type_refuses_the_whole_ladder` | ✓ |
+| I-05 | A session whose intermediate `high + low + close` needs `i128` still yields **ten distinct rungs**. The i128 widening had no guard at all after I-04's fix deleted the test that pinned the near-edge arithmetic; dropping the widening now makes the pivot come back as −3,074,457,345,618,258,605 | `indicators::daily::a_session_whose_sum_needs_the_widening_still_yields_distinct_rungs` | ✓ |
+| I-06 | A band base that leaves `i64` **abstains by name** rather than saturating, at all **four** sites. A saturated span made the band up to 2× too narrow, and a close inside the missing half set **no bit while nothing refused** | `indicators::orb::a_window_whose_span_leaves_the_type_sets_nothing`, `indicators::fib::a_five_session_span_that_leaves_the_type_sets_nothing`, `indicators::gap::a_leg_whose_length_leaves_the_type_sets_nothing`, `indicators::trend::a_swing_window_whose_span_leaves_the_type_publishes_nothing` | ✓ |
+| I-07 | A refused bar changes **nothing**. `Evaluator::step` used to raise VWAP's accumulator refusal after the session rollover and seven module folds, so the next bar's bits were computed from a bar the caller was told was refused — four invented bits, and no agreement with a clean evaluator over 400 following bars | `indicators::evaluator::an_overflowing_accumulator_reaches_the_caller_as_a_refusal`, `indicators::evaluator::a_refused_bar_does_not_complete_a_session` | ✓ |
+| I-08 | `TrendState::bits` is a function of the bar. It took `&mut self` and advanced the market-structure latch from inside the emit, so the same close answered `choch_bearish` then `bos_bearish`. `bits(&self)` makes the old shape a **compile error** | `indicators::trend::bits_is_idempotent_across_a_break_and_a_change_of_character`, `indicators::trend::the_structure_latch_advances_exactly_once_per_candle` | ✓ |
+| I-09 | A change of character **reaches the mask**. I-08's two tests both pass if `step` stops advancing the latch altogether, which makes positions 58 and 59 unreachable and reports every reversal as a continuation. This is the only test in `trend.rs` that fails when the advance is removed | `indicators::trend::a_change_of_character_reaches_the_mask` | ✓ |
+
+**I-09 exists because I-08 was not enough**, and that is the general lesson rather than a
+detail of this row. Two tests were written, both passed, and then a plausible refactor slip
+— deleting the latch advance — was applied and **all 216 tests stayed green**. A test suite
+that cannot fail on a plausible break is a suite that will not catch the next one. The
+discipline that produced I-02 and I-09 is the same: after a test passes, break the code a
+second way and check something notices.
+
+`docs/06-limits.md` §57 records a false derivation in one of the fixes' own reports, and
+§58 the three things this phase did **not** close.
+
 ## The three routes that answer without running — D-0092, D-0093, D-0094
 
 `GET /ingest/status.json`, `POST /ingest/queue` and `POST /autopilot/control`.
@@ -1822,6 +1853,7 @@ The two rows that touch a disk touch a scratch directory this suite owns.
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | AU-01 | **The boot default FLIES and exactly one byte string holds it on the ground.** An absent `BRUTEX_AUTOPILOT` flies — that is the tracked Run configuration's own state, and the whole of the reported "press Run and nothing happens" defect. Only `pause` grounds it: `PAUSE`, `Pause`, `paused`, ` pause`, `pause `, `pause\n`, `stop`, `false`, `0`, `no`, `off` and the empty string all fly, and `run` is still accepted as a flying value so an existing alias does not silently change meaning. The environment reader and the pure decision are asserted to agree | `api::autopilot::tests::the_boot_default_flies_and_only_the_exact_word_pause_holds_it` | ✓ |
+| AU-01b | **The grace window is a real window on a site that is NOT paused.** Under the old default a served `Control` came up paused, so "nothing is contacted before somebody could say no" was guaranteed by the pause; flying by default moves that whole guarantee onto the countdown, so it is asserted rather than assumed — `grace` on an unpaused site does not return inside 300 ms, publishes `starting` with the Pause instruction while it waits, and journals nothing. `GRACE_SECS >= 5` is additionally a **compile-time** floor beside the constant, so shrinking the consent gate fails the build rather than a test. This is also the margin that keeps `cargo test` off the vendor on the one test that drives `run` end to end: `run_in` spawns `fly` and aborts it the moment `serve` returns, which for an already-resolved shutdown future is microseconds inside a twenty-second window | `api::autopilot::tests::an_unpaused_grace_window_really_waits_before_anything_is_contacted` · `const _: () = assert!(GRACE_SECS >= 5)` in `api::autopilot` | ✓ |
 | AU-02 | **A credential halt requires that NOT ONE instrument was reached.** A sweep that reached 772 of 773 and saw one `status 401` backs off and then stalls — bounded and visible — instead of making the feed terminal for the life of the process; the feed-wide case still takes its one §8 re-read and then halts naming §8. A run blocked before it attempted anything counts as feed-wide, because halting is the direction that costs nothing outside this machine | `api::autopilot::tests::a_credential_reason_from_a_sweep_that_reached_somebody_backs_off_instead_of_halting` | ✓ |
 | AU-03 | **A dead credential arms NO re-check of any kind** — no probe, no schedule, no timer. `CLAUDE.md` §8 forbids minting a token and §4 forbids a retry that hides a permanent fault, so this class is named and left named. Only `Halt::Store` arms anything, and each halt class carries its own distinct word | `api::autopilot::tests::every_halt_class_names_itself_and_only_the_store_class_arms_a_probe` · `api::autopilot::tests::a_credential_reason_from_a_sweep_that_reached_somebody_backs_off_instead_of_halting` | ✓ |
 | AU-04 | **A census halt clears on `Census::Held` and on nothing else.** A manifest an operator repaired puts the feed back on the ladder on the next pass, with no restart, and the page says why; `Census::Unreadable` keeps it terminal and — the narrow rule — `Census::Absent` does **not** revive it, because a census reporting nothing held is not evidence the fault is gone, and a feed revived on it would re-offer months whose bar files `BarFile::append` refuses wholesale | `api::autopilot::tests::a_repaired_manifest_clears_its_own_halt_and_an_absent_one_does_not` | ✓ |

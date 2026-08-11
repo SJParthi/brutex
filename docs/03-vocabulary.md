@@ -569,3 +569,19 @@ in §6 and the sentence *"No other file changes. No migration."* were both true 
 to bit 128 and stop being true at 129 — the mask width is a term in run identity
 (`CLAUDE.md` §3 rule 3), so widening re-keys every historical run rather than
 reinterpreting it. `VOCAB_VERSION` carries that.
+
+
+### What a flat bar does to 37, 38 and 39 — D-0109
+
+A bar with `close == open` is **neither direction**. It sets neither 37 `prior_n_bullish`
+nor 38 `prior_n_bearish`, and it **breaks** 39 `prior_alternating`, because a bar that is
+neither direction cannot be the opposite of its neighbour.
+
+This matches what 30 `bar_bullish` and 31 `bar_up`/31 `bar_bearish` already do for the
+current bar — a flat bar sets neither, and 32 `bar_doji` is what fires instead. The
+prior-direction ring used to store a `bool` and file a flat bar as bearish, so 38 asserted
+three bearish bars over a run in which 31 never fired once. It now stores an
+`Option<Ordering>`.
+
+The rule is recorded here because it was a semantic decision living only in a code
+comment, and masks are built on it.

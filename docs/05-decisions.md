@@ -9830,6 +9830,18 @@ was then restored and verified byte-identical by md5, the run repeated, and the
 gate returned green. A gate that only reacts to edits of its own declaration
 measures nothing, and this one was not trusted until that was ruled out.
 
+**It refuses to render a verdict on data it cannot read.** The step before it
+runs `--fail-under`, so that step exits non-zero on a real shortfall *and* on a
+build failure, and gate 20 runs `if: always()` in both cases. A cleared profile
+makes `cargo llvm-cov report` fail outright, which `set -e` turns into a loud
+stop. The dangerous case is the one in between: a half-written profile still
+lists all five files and simply marks most of their lines uncovered. Measured
+live — a stale profile read 13.96% where a real one read 96.80% — and a
+file-count check does not separate those, because both list five files. So the
+guard is a fraction: past 50% of the crate reading uncovered is not a regression
+anybody introduced, it is a profile nobody can read, and the gate says so in
+those words instead of blaming the last person to touch a test.
+
 **What it does not do, said plainly.** It does not turn the `coverage` job
 green. That job also runs `--fail-under-lines 100` across the workspace, which
 measures 96.80% today. Gate 20 makes one crate's shortfall declared and
@@ -10054,3 +10066,88 @@ reboot, and being *told* rather than having to look. For the first five the
 system now states its condition clearly and, where it can measure a repair,
 resumes on its own. For the sixth, item 1 above is the substitute and it is not
 built yet.
+
+
+---
+
+## D-0109 · 2026-08-11 · A flat bar is neither direction, a period speaks only when it completes, and a rung past the type refuses — four locked choices from the first fix phase
+
+**Status: locked.** Commits `646c6a8`, `934f72a`, `7ab6135`, `33c38b2`. Invariants
+`I-01`…`I-09` in `docs/04-invariants.md`. Findings `F-…` in `docs/11-findings.md`, marked
+`FIXED` with those shas — a row cannot be marked fixed without one.
+
+### 1. A flat bar is neither bullish nor bearish, in the ring as well as on the bar
+
+`SessionState`'s prior-direction ring stored `bool` — `close > open` — which files a flat
+bar as `false`, and `false` was read as bearish. Measured: four bars with `open == close`
+set neither 30 `bar_bullish` nor 31 `bar_bearish` (correctly — 32 `bar_doji` instead), and
+the fourth bar set **38 `prior_n_bearish`**, asserting three bearish bars over a run in
+which `bar_bearish` was never once set.
+
+The ring now stores `Option<Ordering>`: `Less` for 38, `Greater` for 37, and a flat bar
+makes both false. **The choice being locked is not the type, it is the rule**: a flat bar
+is a third state, and the module already treated it as one for the current bar at
+positions 30/31. The ring disagreeing with the bar about the same question was the defect.
+
+**39 `prior_alternating` breaks on a flat bar**, which follows: if a flat bar is neither
+direction it cannot be the opposite of its neighbour. `docs/03-vocabulary.md` names the
+three positions and says nothing about the flat case; it now does.
+
+### 2. A period speaks only on the candle its own period completes
+
+Bit 2 `close_above_ema200` fired on the **second candle of a run**, where the
+"200-period average" was one candle old. Measured: candle 1 close 10,000 paisa, candle 2
+close 20,000, and bar 2 emitted `[0, 2, 64]` — a 20-period average, a 200-period average
+and a 10-period-ATR stop, all three artefacts of the fold's first candle.
+`docs/03-vocabulary.md` §4 is explicit: a bit that cannot be evaluated evaluates **false**,
+never "probably".
+
+**The gate is on the EMISSION, not the accessors**, and that distinction is the locked
+part. Making `Ema::value()`/`Atr::value()` return `None` until `period` folds is the
+obvious fix and it is wrong: `Atr::value()` returning `None` makes `SuperTrend::fold`
+return before seeding, which breaks three existing tests that deliberately drive
+one-candle series. The accessors keep reporting what they hold; `bits` declines to name a
+period that has not elapsed.
+
+### 3. A ladder rung past `i64` refuses the whole ladder
+
+`clamp_i64` saturated a rung onto `i64::MAX` or `i64::MIN`. Measured:
+`from_previous_session(i64::MAX/2, 0, 0)` was **accepted** and produced `r4 == r5`, two
+vocabulary positions collapsed onto one predicate, plus six positions measured against
+levels that do not exist. `clamp_i64`'s own doc claimed "a level pinned at the extreme
+fails every band test" — true for `Kind::Near` through `Tolerance::covers`, false for all
+six plain above/below relations.
+
+Now `Err(Unusable::LevelOverflows)`. **The reason to prefer refusal is not §7** — the
+sentinel argument is rhetorical here, because nothing reads a price of `i64::MIN` as null.
+The reason is that one crate held **two opposite policies for the same overflow**:
+`CurDayFib::rung_level` already refused, three hundred lines from a `clamp_i64` that
+saturated.
+
+### 4. A band base that leaves `i64` abstains by name
+
+Four `saturating_sub` sites computed a band's base from extremes taken across bars. A
+saturated span makes the band up to **2× too narrow**, and a close inside the missing half
+sets **no bit while nothing refuses** — measured on an opening range at ±9.2e18. Now
+`checked_sub` and abstain, matching `Candle::range` and `CurDayFib::range`, which already
+did exactly this. One of the five originally-cited sites was killed by the skeptic:
+`fib.rs`'s previous-day span cannot saturate, because `from_previous_session` already
+refuses a span that does not fit.
+
+### What this entry deliberately does not claim
+
+That the four fixes are correct. It claims each has a test that was **run against the
+pre-fix code and seen to fail there**, which is smaller and checkable. `docs/06-limits.md`
+§57 records that one of the fixes' own reports carried a **false derivation** — it argued
+`cpr_width`'s remaining `saturating_sub` cannot fire, and the measured `band_half` reaches
+6.148e18 against an `i64::MAX/2` of 4.61e18. The conclusion survives by a different
+argument and the stated reason is not inherited. §58 names three things the phase did not
+close, including that `i64::MIN` remains reachable as a price by **computation** rather
+than saturation.
+
+**And two of the fixes needed fixing.** A surviving mutant in the session module — 39
+firing on a monotone run — passed all 22 tests because neither run test asserted it stayed
+clear. And the pivot fix deleted a test whose second, unnoticed job was pinning the
+near-edge arithmetic, leaving the `i128` widening with no guard at all. Both are closed and
+both were found by the adversarial pass rather than by the agent that made the change,
+which is the argument for having one.

@@ -585,7 +585,21 @@ impl SwingDetector {
                 is_low = false;
             }
         }
-        let span = span_high.saturating_sub(span_low);
+        // `checked_sub` and not `saturating_sub`, and the difference is a lost bit rather
+        // than a rounding. The five-candle window's extremes come from FIVE DIFFERENT
+        // BARS, so two of them at opposite ends of `i64` give a true span of up to
+        // 1.84e19 while `saturating_sub` returns `i64::MAX` — a band **half** the real
+        // width. A close inside the missing half then sets no `near_swing` bit and
+        // NOTHING REFUSES, which is the §4 fallback that hides a failure: the sweep is
+        // handed a silent false on a bar the band actually covers.
+        //
+        // On saturation the swing is not published at all. That is the same choice
+        // `Candle::range` and `CurDayFib::range` already make, and it is why the three
+        // sibling sites in `orb.rs`, `fib.rs` and `gap.rs` abstain rather than clamp.
+        // Abstaining loses the swing; saturating loses a bit and says nothing.
+        let Some(span) = span_high.checked_sub(span_low) else {
+            return;
+        };
         if is_high {
             self.high = Some(Swing {
                 price: mid_high,
@@ -1411,6 +1425,43 @@ mod tests {
              CHoCH, so `Structure::last` is never advancing — positions 58 and 59 are \
              unreachable and every reversal is being reported as a continuation"
         );
+    }
+
+    /// A swing window whose span leaves `i64` publishes no swing at all.
+    ///
+    /// The fourth of the four saturating band bases, and the one held back from the agent
+    /// that fixed the other three because it lives in this file beside the warm-up gate.
+    ///
+    /// The window's extremes come from five different bars, so two of them at opposite ends
+    /// of the type give a true span of up to 1.84e19. `saturating_sub` returned
+    /// `i64::MAX` — a band HALF the real width — and a close inside the missing half then
+    /// set no `near_swing` bit while nothing refused. A silent false on a bar the band
+    /// actually covers is the §4 fallback that hides a failure, and it is worse than an
+    /// absent swing because the sweep cannot tell the two apart.
+    #[test]
+    fn a_swing_window_whose_span_leaves_the_type_publishes_nothing() {
+        let mut d = SwingDetector::new();
+        // Five candles. The middle one is the peak, and two of the others sit at opposite
+        // ends of `i64`, so the window's own span cannot be represented.
+        let far_low = i64::MIN / 2 - 1;
+        let far_high = i64::MAX / 2 + 1;
+        let prices = [far_low, far_low + 1, far_high, far_low + 2, far_low + 3];
+        for (m, p) in prices.iter().enumerate() {
+            let minute = i64::try_from(m).expect("five fits an i64");
+            d.fold(&candle(minute * 60_000_000, *p, *p, *p));
+        }
+        assert!(
+            far_high.checked_sub(far_low).is_none(),
+            "the fixture no longer overflows, so it does not test the span guard"
+        );
+        assert_eq!(
+            d.swing_high(),
+            None,
+            "a swing was published from a window whose span cannot be represented, so its \
+             `window_span` is a saturated number and every band scaled against it is up to \
+             twice too narrow"
+        );
+        assert_eq!(d.swing_low(), None, "and neither latch may be published");
     }
 }
 
