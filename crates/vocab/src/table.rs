@@ -22,7 +22,7 @@
 //! | 132–142 | 11 | Fibonacci over the opening gap leg |
 //! | 143–152 | 10 | session-anchored `VWAP` |
 //! | 153–177 | 25 | candlestick patterns, prefixed `pat_` |
-//! | 178–187 | 10 | the fourth and fifth pivot rungs, sourced at `docs/09-design-sources.md` §1, ladder chosen by D-0078 |
+//! | 178–187 | 10 | the fourth and fifth pivot rungs, sourced at `docs/09-design-sources.md` §1, ladder chosen by D-0078 (the CPR R3 ladder) |
 //! | 188–189 | 2 | BC and TC as levels in their own right |
 //! | 190–197 | 8 | VWAP bands 2 and 3, completed |
 //! | 198–234 | 37 | the rest of the classical candlestick set |
@@ -452,7 +452,8 @@ pub const TABLE: [BitDef; 276] = [
     // document in this repository stated their formula, and inventing one is
     // exactly what that rule forbids. The refusal was correct about the REPO
     // and wrong about the world: the operator's own CPR indicator carries the
-    // recurrence, and D-0078 now records it in `docs/00-charter.md` where a
+    // recurrence, and D-0078 (the CPR R3 ladder) now records it in
+    // `docs/00-charter.md` where a
     // formula belongs.
     //
     //   r4 = r3 + r2 - r1  =  P + 2(H - L)
@@ -462,7 +463,8 @@ pub const TABLE: [BitDef; 276] = [
     //
     // The shipped table already named `near_pivot_r5` (54) and
     // `near_pivot_s5` (55) with no formula behind them, so those two bits were
-    // unimplementable rather than merely unused. D-0078 closes that too.
+    // unimplementable rather than merely unused. D-0078 (the CPR R3 ladder)
+    // closes that too.
     //
     // SOURCE: docs/09-design-sources.md §1. NOT docs/00-charter.md — the charter
     // carries no pivot formula, and an earlier version of this comment claimed it

@@ -27,7 +27,7 @@
 //!    conditions and no document defined their band. There are **two** bands,
 //!    because they are fractions of different quantities:
 //!    [`tolerance::TOL_FIB_MILLI`] = 10 thousandths of the session range
-//!    (D-0076, measured) and [`tolerance::TOL_PIVOT_MILLI`] = 500 thousandths
+//!    (D-0076, the `near_*` band, measured) and [`tolerance::TOL_PIVOT_MILLI`] = 500 thousandths
 //!    of the CPR width (D-0079, read off the design source). Returning either to
 //!    the sentinel makes those positions unreachable loudly, with a reason,
 //!    rather than quietly deciding false.

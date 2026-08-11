@@ -84,11 +84,16 @@ impl Widths {
     /// [`vocab::VocabError`] if either pinned width is unusable, which a const
     /// assertion in `vocab::tolerance` already makes impossible — this returns a
     /// `Result` rather than panicking because §9 denies `unwrap` in this workspace.
+    ///
+    /// Written as `and_then` over `map` and not as two `?`, for the reason
+    /// `vocab::tolerance`'s own test helper is: `?` writes the refusal arm **here**,
+    /// and at the pinned widths no input can take it, so it was a region no green run
+    /// could ever execute. `and_then` decides the same thing inside `core` and
+    /// short-circuits identically — the pivot width is not even read when the fib width
+    /// is refused, and a refused fib width is still the error returned.
     pub fn pinned() -> Result<Self, vocab::VocabError> {
-        Ok(Self {
-            fib: vocab::tolerance::pinned_fib()?,
-            pivot: vocab::tolerance::pinned_pivot()?,
-        })
+        vocab::tolerance::pinned_fib()
+            .and_then(|fib| vocab::tolerance::pinned_pivot().map(|pivot| Self { fib, pivot }))
     }
 }
 
@@ -331,17 +336,25 @@ impl Evaluator {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes — a test that \
+              cannot panic cannot fail — and here it buys a second thing. \
+              `unreachable!` expands to a panic inside THIS crate, so llvm-cov counts \
+              a region that can never run and the coverage gate can never reach 100 on \
+              this file. `.expect` panics inside core, which is not instrumented: the \
+              same failure, with the refused value printed beside the message, and no \
+              dead region left behind."
+)]
 mod tests {
     use super::*;
 
     const IST_OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
     const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+    const MINUTE_MICROS: i64 = 60 * 1_000_000;
 
     fn widths() -> Widths {
-        let Ok(w) = Widths::pinned() else {
-            unreachable!("both pinned widths are valid")
-        };
-        w
+        Widths::pinned().expect("both pinned widths are valid")
     }
 
     fn fresh() -> Evaluator {
@@ -405,9 +418,7 @@ mod tests {
         let mut e = fresh();
         for day in 0..3_i64 {
             for bar in &session(20_400 + day, 40) {
-                let Ok(mask) = e.step(bar) else {
-                    unreachable!("a sane bar")
-                };
+                let mask = e.step(bar).expect("a sane bar");
                 assert_eq!(
                     vocab::table::only_live(mask),
                     mask,
@@ -417,9 +428,8 @@ mod tests {
                 let mut bit: u32 = 0;
                 while bit < vocab::ConditionMask::BITS {
                     if mask.get(bit) {
-                        let Ok(index) = u16::try_from(bit) else {
-                            unreachable!("bit < 384")
-                        };
+                        let index =
+                            u16::try_from(bit).expect("bit < ConditionMask::BITS, and that is 384");
                         assert!(
                             claimed.contains(&index),
                             "bit {bit} was set but no module claims it"
@@ -442,19 +452,13 @@ mod tests {
         assert_eq!(e.sessions_completed(), 0);
 
         for bar in &session(20_500, 30) {
-            let Ok(_) = e.step(bar) else {
-                unreachable!("a sane bar")
-            };
+            let _ = e.step(bar).expect("a sane bar");
         }
         assert!(!e.has_yesterday(), "the first session has not ended yet");
 
         // The first bar of the next IST day closes the books on the first.
-        let Some(next) = session(20_501, 1).first().copied() else {
-            unreachable!("one bar")
-        };
-        let Ok(_) = e.step(&next) else {
-            unreachable!("a sane bar")
-        };
+        let next = session(20_501, 1).first().copied().expect("one bar");
+        let _ = e.step(&next).expect("a sane bar");
         assert!(e.has_yesterday(), "day two must see day one's levels");
         assert_eq!(e.sessions_completed(), 1);
     }
@@ -465,9 +469,7 @@ mod tests {
         let mut e = fresh();
         for day in 0..8_i64 {
             for bar in &session(20_600 + day, 5) {
-                let Ok(_) = e.step(bar) else {
-                    unreachable!("a sane bar")
-                };
+                let _ = e.step(bar).expect("a sane bar");
             }
         }
         assert_eq!(
@@ -528,12 +530,267 @@ mod tests {
     fn an_absent_volume_verdict_silences_the_whole_vwap_family() {
         let mut e = fresh();
         for bar in &session(20_800, 60) {
-            let Ok(mask) = e.step(bar) else {
-                unreachable!("a sane bar")
-            };
+            let mask = e.step(bar).expect("a sane bar");
             for p in crate::vwap::positions() {
                 assert!(!mask.get(u32::from(p)), "VWAP position {p} was set");
             }
+        }
+    }
+
+    /// The two pinned widths are two different numbers, and each reaches its own
+    /// family — which is the whole of D-0079.
+    ///
+    /// The Fibonacci ladders measure their band in thousandths of the **session
+    /// range**; the pivot families measure it in thousandths of the **CPR width**. The
+    /// two pins differ by a factor of fifty, so a transposed pair — `fib` carrying the
+    /// pivot width — widens every rung band fiftyfold, and nothing here asserted which
+    /// pin landed in which field.
+    #[test]
+    fn the_two_pinned_widths_are_two_different_numbers() {
+        let w = widths();
+        assert_eq!(
+            w.fib.milli(),
+            10,
+            "the Fibonacci band is 10/1000 of the session range"
+        );
+        assert_eq!(
+            w.pivot.milli(),
+            500,
+            "the pivot band is 500/1000 of the CPR width"
+        );
+        assert_ne!(w.fib, w.pivot, "one number cannot serve both bands");
+    }
+
+    /// A mis-assembled OHLC is refused on **each** of the four ways containment fails.
+    ///
+    /// `open` and `close` are ticks, so both must lie inside the extremes. When one
+    /// does not, every wick length goes negative and every `_at_most` shape predicate
+    /// is satisfied by a negative against a positive bound — the bar comes back
+    /// labelled "no wicks" precisely because its wicks are impossible. The check is a
+    /// chain of four `||` comparisons, so a case that moves one field can only ever
+    /// prove one of them; each case below moves exactly one, and the base fixture is
+    /// asserted legal so the four cannot be satisfied by refusing everything.
+    #[test]
+    fn each_of_the_four_containment_failures_is_refused() {
+        let base = session(21_100, 1).first().copied().expect("one bar");
+        let cases: [(&str, Candle); 4] = [
+            (
+                "open above the high",
+                Candle {
+                    open: base.high + 1,
+                    ..base
+                },
+            ),
+            (
+                "close above the high",
+                Candle {
+                    close: base.high + 1,
+                    ..base
+                },
+            ),
+            (
+                "open below the low",
+                Candle {
+                    open: base.low - 1,
+                    ..base
+                },
+            ),
+            (
+                "close below the low",
+                Candle {
+                    close: base.low - 1,
+                    ..base
+                },
+            ),
+        ];
+        for (name, bar) in cases {
+            let mut e = fresh();
+            assert_eq!(
+                e.step(&bar),
+                Err(Corrupt::PriceOutsideRange),
+                "{name}: a mis-assembled OHLC was evaluated as a bar"
+            );
+            assert_eq!(
+                e.sessions_completed(),
+                0,
+                "{name}: a refused bar started a session"
+            );
+        }
+        let mut e = fresh();
+        assert!(
+            e.step(&base).is_ok(),
+            "the base fixture must itself be legal, or the four cases prove nothing"
+        );
+    }
+
+    /// A repeated or receding timestamp is refused, and refused **before** the
+    /// rollover.
+    ///
+    /// The rollover triggers on `today != self.day` — an inequality — so a bar from an
+    /// earlier IST day would close the books on the **later** session and install it
+    /// as `yesterday`. Every pivot, previous-day and five-session level would then come
+    /// from a session that has not happened yet, which is the look-ahead §3 rule 7
+    /// requires a mechanism against rather than a review. `has_yesterday` is what
+    /// carries that here: it is still false after the refusal.
+    #[test]
+    fn a_receding_timestamp_cannot_install_a_later_session_as_yesterday() {
+        let mut e = fresh();
+        let day_two = session(21_201, 1).first().copied().expect("one bar");
+        let day_one = session(21_200, 1).first().copied().expect("one bar");
+        let _ = e.step(&day_two).expect("a sane bar");
+        assert_eq!(
+            e.step(&day_one),
+            Err(Corrupt::TimestampNotIncreasing),
+            "a bar from the previous IST day was accepted"
+        );
+        assert!(
+            !e.has_yesterday(),
+            "the refused bar closed the books on a LATER session"
+        );
+        assert_eq!(
+            e.sessions_completed(),
+            0,
+            "the refused bar completed a session"
+        );
+        assert_eq!(
+            e.step(&day_two),
+            Err(Corrupt::TimestampNotIncreasing),
+            "a timestamp is not strictly after itself"
+        );
+    }
+
+    /// A negative volume reaches the caller as a refusal, not as a mask with twenty
+    /// positions quietly missing.
+    ///
+    /// `volume` is the one field the four checks above do not read, so the refusal
+    /// comes back from the first module driven. It used to be discarded by an
+    /// `if let Ok(v) = ...` around the VWAP call, which returned the bar as a
+    /// **successful** evaluation indistinguishable from a run that legitimately has no
+    /// volume — the §4 fallback that hides a failure. Zero volume is asserted legal in
+    /// the same test, because §7 says zero is a real zero and refusing it would drop
+    /// real index bars from every run.
+    #[test]
+    fn a_negative_volume_is_a_refusal_and_a_zero_volume_is_not() {
+        let mut e = fresh();
+        let mut bar = session(21_300, 1).first().copied().expect("one bar");
+        bar.volume = -1;
+        assert_eq!(
+            e.step(&bar),
+            Err(Corrupt::NegativeVolume),
+            "a negative volume was evaluated as a bar"
+        );
+
+        bar.volume = 0;
+        let after = e
+            .step(&bar)
+            .expect("zero volume is a real zero, not corruption");
+        let mut clean = fresh();
+        let untouched = clean
+            .step(&bar)
+            .expect("zero volume is a real zero, not corruption");
+        assert_eq!(after, untouched, "the refused bar left state behind");
+    }
+
+    /// An overflowing volume-weighted accumulator reaches the caller as a refusal.
+    ///
+    /// This is the **second** thing that used to be swallowed by the `if let Ok(v)` on
+    /// the VWAP call, and unlike a negative volume it is not checkable from the record
+    /// alone — it depends on what the session has already accumulated, so it cannot be
+    /// hoisted into `Candle::check` and this is the only place it can surface. A bar at
+    /// 5 × 10^18 paisa makes `(high + low + close)²` about 2.25 × 10^38, past `i128`,
+    /// and `Vwap::fold` refuses rather than wrapping.
+    ///
+    /// `Availability::Present` is load-bearing: on index spot the verdict is `Absent`,
+    /// the accumulator is never touched, and this refusal cannot happen at all. The
+    /// second half of the test is an ordinary volume-bearing bar, so the refusal is
+    /// pinned to the magnitude rather than to the verdict.
+    #[test]
+    fn an_overflowing_accumulator_reaches_the_caller_as_a_refusal() {
+        let mut e = Evaluator::new(widths(), Availability::Present, Thresholds::CLASSICAL);
+        let open = 21_500 * DAY_MICROS + IST_OPEN_UTC_MICROS;
+        let huge = Candle {
+            ts_micros: open,
+            open: 5_000_000_000_000_000_000,
+            high: 5_000_000_000_000_000_000,
+            low: 5_000_000_000_000_000_000,
+            close: 5_000_000_000_000_000_000,
+            volume: 1,
+            open_interest: i64::MIN,
+        };
+        assert_eq!(
+            e.step(&huge),
+            Err(Corrupt::AccumulatorTooLarge),
+            "a squared price past i128 came back as a successful evaluation"
+        );
+
+        let ordinary = Candle {
+            ts_micros: open + MINUTE_MICROS,
+            open: 2_500_000,
+            high: 2_500_500,
+            low: 2_499_500,
+            close: 2_500_100,
+            volume: 1_000,
+            open_interest: i64::MIN,
+        };
+        assert!(
+            e.step(&ordinary).is_ok(),
+            "an ordinary bar with volume was refused, so the refusal above proves nothing"
+        );
+    }
+
+    /// A completed session whose own span leaves `i64` leaves `yesterday` **absent**
+    /// rather than half-updated.
+    ///
+    /// Every bar is checked for `high - low` fitting `i64`, and that is not the same
+    /// question as the **session's** span fitting: the running high and the running low
+    /// come from two different bars, so two zero-range bars at opposite ends of the
+    /// type make a session wider than the type. `DailyLevels` refuses such a session,
+    /// and `close_the_books` then keeps the answer it had rather than writing half of a
+    /// new one — stale-and-consistent beats fresh-and-partial. Both halves are
+    /// asserted: `Prev5` does count the session, because it keeps only a pair of
+    /// extremes, and the pivot ladder is not installed.
+    #[test]
+    fn a_session_wider_than_the_type_leaves_yesterday_absent() {
+        const HALF: i64 = i64::MAX / 2;
+        let day = 21_400_i64;
+        let flat = |ts: i64, price: i64| Candle {
+            ts_micros: ts,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        let session_open = |d: i64| d * DAY_MICROS + IST_OPEN_UTC_MICROS;
+
+        let mut e = fresh();
+        let _ = e
+            .step(&flat(session_open(day), -HALF - 2))
+            .expect("a zero-range bar at the bottom of the type is a real bar");
+        let _ = e
+            .step(&flat(session_open(day) + MINUTE_MICROS, HALF + 2))
+            .expect("a zero-range bar at the top of the type is a real bar");
+        // The session now spans (HALF + 2) - (-HALF - 2), which is i64::MAX + 3, while
+        // each of its two bars has a range of zero.
+        let mask = e
+            .step(&flat(session_open(day + 1), 2_500_000))
+            .expect("a sane bar the next day");
+
+        assert_eq!(
+            e.sessions_completed(),
+            1,
+            "the completed session was not handed to Prev5"
+        );
+        assert!(
+            !e.has_yesterday(),
+            "a pivot ladder was built from a span that does not fit i64"
+        );
+        for p in crate::daily::positions() {
+            assert!(
+                !mask.get(u32::from(p)),
+                "daily position {p} was set from a session with no usable levels"
+            );
         }
     }
 }

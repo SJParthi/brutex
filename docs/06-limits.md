@@ -3230,3 +3230,101 @@ position than every other `C-` row in the table and is labelled as such.
 
 Both are the honest form of §3 rule 6: the bound may hold, and it has not been
 measured, and neither of those sentences is allowed to be dropped.
+
+---
+
+## 54. Why `crates/telemetry` is 99.24% and not 100%, line by line
+
+`CLAUDE.md` §9 asks for 100% line and branch coverage, and CI's `Coverage 100%`
+job enforces it with `--fail-under-lines 100 --fail-under-regions 100` and **no
+exclusion mechanism at all** — no ignore-regex, no `continue-on-error`. That job
+is in `ci-ok`'s `needs`, so it is not advisory.
+
+The logging crate does not meet it. Measured 2026-08-11, `cargo llvm-cov -p
+telemetry --locked` after `cargo llvm-cov clean --workspace`:
+**99.24% lines (26 of 3,438 missed), 98.76% regions, 97.87% functions.**
+
+This section is the account of those 26 lines, because a number without one is
+the thing §3 rule 6 exists to prevent.
+
+### What was closed on the way to writing this
+
+Auditing them found six that were NOT unreachable, and they are now covered:
+
+* `telemetry::admits` — the free function `emit_if!` gates on — **had no test at
+  all.** `Sink::admits` was covered; the one every macro expansion actually
+  calls was not. The same "built and unreachable from a test" shape this crate
+  had already recorded for `telemetry::tail` and for per-target levels.
+* `Sink::run` — the getter added with the run stamp, never read back.
+* Two `LineFault::Truncated` arms in `Record::decode`. A first attempt asserted
+  `matches!(.., Truncated | Unexpected)`, which the `Unexpected` arm satisfied —
+  so the lines stayed dark and the test looked green. The fixtures now hit
+  truncation exactly and assert the exact variant.
+* `walk_back`'s "limit reached on the file's FIRST line" return — the one line
+  with no newline before it, handled after the loop. Every other test asked for
+  more events than the file held.
+* `HalfWay::sync` and `reopen` — two thirds of a `Target` double that only ever
+  had `append` called on it.
+
+### The 26 that remain, and why each cannot run
+
+| Where | What | Why it cannot execute |
+|---|---|---|
+| `lib.rs` 178, 187–191 | the concurrent-`install` arm | Needs two `install` calls to interleave inside a few instructions. `OnceLock` is per **process**, so a test cannot retry — it gets one attempt per binary. Already named in the source. |
+| `sink.rs` 1099, 1107 | `resume_seq`'s two `return 0` | `FileTarget::open` creates the file *before* `resume_seq` runs, so the `metadata` it guards cannot fail. |
+| `tail.rs` 378–380 | `file.metadata()` failing | The file is already **open**. `fstat` on a live descriptor does not fail; the reachable error is `File::open`, which is covered. |
+| `clock.rs` 41 | `now_millis`'s pre-epoch arm | Needs a host clock set before 1970. `millis_of` is tested directly with `before_epoch = true`; what is dark is the routing. |
+| `level.rs` 142 · `sink.rs` 1566, 1783, 2167 | format arguments inside assertion messages | Evaluated only when the assertion **fails**. Covering them means shipping a failing test. |
+| `sink.rs` 1158–1161 | `panic!` inside a test helper | Same shape: it runs only when a fixture is already broken. |
+
+**Every one is a backstop or a diagnostic.** Making them execute would mean
+either deleting the backstop or committing a failing test, and both are worse
+than the number.
+
+### The decision this leaves
+
+`CLAUDE.md` §9's 100% and §3 rule 6's "name the limit" pull against each other
+here, and the gate has no way to express "unreachable and declared". Three
+options, none of which is mine to take:
+
+1. **Delete the unreachable arms** — loses real backstops for a percentage.
+2. **Give the gate an exclusion list**, declared one line at a time with a
+   reason, the way gate 1d already handles path-shaped literals. That is the
+   shape this repository already trusts.
+3. **Lower the threshold** to a measured floor and gate on regression instead.
+
+### Chosen: option 2, and it is now gate 20
+
+Option 2. Option 1 trades real backstops for a percentage, which is the
+percentage becoming the goal. Option 3 gates on regression, and a floor that
+moves down whenever somebody argues well enough is not a floor.
+
+Gate 20 in the `coverage` job holds the counts. It compares the measured
+zero-count lines under `crates/telemetry/src` against this declaration:
+
+| File | Uncovered | What they are |
+|---|---|---|
+| `clock.rs` | 1 | the pre-epoch branch of a monotonic clock |
+| `level.rs` | 1 | a rank past the last variant, which `of_rank` cannot be handed |
+| `lib.rs` | 6 | backstops behind the process-wide sink already being set |
+| `sink.rs` | 8 | I/O failure arms, and the `rotation_broken` latch's second visit |
+| `tail.rs` | 3 | reader arms for a file that changed under the read |
+
+**19 lines, and the gate fails in both directions.** More uncovered lines than
+declared is a new gap: cover it, or add it here with its reason and raise the
+count in the same commit. FEWER is a declaration that has become false — the
+line is reachable after all, so lower the count and delete the row that
+justified it. That second direction is the one that matters, and it is the same
+rule `crates/vocab/tests/workspace_is_rust.rs` applies to a native dependency
+that has left the tree: a stale declaration implies a limit that is gone, which
+is its own kind of lie.
+
+The counts are per file rather than per line number on purpose. A line number
+is invalidated by editing a comment above it, and a declaration that rots every
+time somebody reformats is one nobody will keep honest.
+
+**What this does not do.** It does not make the `coverage` job pass. That job
+also runs `--fail-under-lines 100` over the whole workspace, and the workspace
+is not at 100%. Gate 20 makes one crate's shortfall *declared and enforced*;
+every other crate's is still just a shortfall. Extending the same declaration
+to them is the path, and it is not taken here.

@@ -946,11 +946,13 @@ mod tests {
         // through `cpr_span`, so `bc > tc` cannot make it negative and collapse the
         // class to narrow.
         let inverted = levels(2_500_000, 2_490_000, 2_491_250);
+        // Read into locals rather than called inside the message: an argument computed
+        // only on failure is a region that only runs on failure, and the message reads
+        // exactly the same.
+        let (bc, tc) = (inverted.bc(), inverted.tc());
         assert!(
-            inverted.bc() > inverted.tc(),
-            "this fixture must be inverted or it tests nothing: bc={} tc={}",
-            inverted.bc(),
-            inverted.tc()
+            bc > tc,
+            "this fixture must be inverted or it tests nothing: bc={bc} tc={tc}"
         );
         assert_eq!(inverted.cpr_width(), 2_500, "a width is never signed");
         assert_eq!(inverted.cpr_class(cuts), Some(CprClass::Wide));
@@ -1097,12 +1099,15 @@ mod tests {
         assert_eq!(x.cpr_width(), 34, "50 - 16, the ordered span");
         let range = x.pdh() - x.pdl();
         assert_eq!(range, 100);
+        // The width is read into a local rather than called inside the message: an
+        // argument computed only on failure is a region that only runs on failure, and
+        // the interpolation reads the same.
+        let width = x.cpr_width();
         assert!(
-            x.cpr_width() * 1000 > range * 333,
+            width * 1000 > range * 333,
             "the documented 333-thousandth ceiling is exact arithmetic: the computed \
-             width is {} of {range}, and if that ever stops being true this test should \
-             be deleted, not relaxed",
-            x.cpr_width()
+             width is {width} of {range}, and if that ever stops being true this test \
+             should be deleted, not relaxed"
         );
         assert_eq!(
             x.cpr_class(CprWidth::CLASSICAL),
@@ -1163,19 +1168,34 @@ mod tests {
         // `Rel` is private and Copy, and `positions()` is the only reader of the
         // or-pattern below. A clone that dropped the position number would be a mask
         // that means something else entirely.
-        let first = plan(&x)
+        //
+        // EVERY entry is cloned, not just the first. Six alternatives share one arm, and
+        // a single entry exercises exactly one of them — the other five are then patterns
+        // no test enters, which `cargo llvm-cov` counts and nobody can be held to. The
+        // plan carries all six relations, so walking it walks the whole pattern.
+        let cloned: Vec<u16> = plan(&x)
             .into_iter()
-            .next()
-            .expect("the plan has 41 entries");
-        let index = match Clone::clone(&first.1) {
-            Rel::Near(i)
-            | Rel::Above(i)
-            | Rel::Below(i)
-            | Rel::AboveBare(i)
-            | Rel::BelowBare(i)
-            | Rel::InsideCpr(i) => i,
-        };
-        assert_eq!(index, 7, "the plan opens on near_pivot_r1, position 7");
+            .map(|(_, rel)| match Clone::clone(&rel) {
+                Rel::Near(i)
+                | Rel::Above(i)
+                | Rel::Below(i)
+                | Rel::AboveBare(i)
+                | Rel::BelowBare(i)
+                | Rel::InsideCpr(i) => i,
+            })
+            .collect();
+        assert_eq!(
+            cloned.first().copied(),
+            Some(7),
+            "the plan opens on near_pivot_r1, position 7"
+        );
+        // The same 41 numbers `positions()` reads through the same pattern, so a clone
+        // that lost a position number disagrees with the array the sweep is handed.
+        let from_positions: Vec<u16> = positions().into_iter().take(WIDTH_STATES_AT).collect();
+        assert_eq!(
+            cloned, from_positions,
+            "cloning a plan entry changed the position it names"
+        );
     }
 }
 
@@ -1210,11 +1230,12 @@ mod inverted_cpr {
         let levels = DailyLevels::from_previous_session(2_500_000, 2_400_000, 2_410_000)
             .expect("a sane session yields a ladder");
         let (low, high) = levels.cpr_span();
+        // Read into locals rather than called inside the message: an argument computed
+        // only on failure is a region that only runs on failure.
+        let (bc, tc) = (levels.bc(), levels.tc());
         assert!(
-            levels.bc() > levels.tc(),
-            "this fixture must be INVERTED or it tests nothing: bc={} tc={}",
-            levels.bc(),
-            levels.tc()
+            bc > tc,
+            "this fixture must be INVERTED or it tests nothing: bc={bc} tc={tc}"
         );
 
         // Walk the close across the whole CPR and past both edges.

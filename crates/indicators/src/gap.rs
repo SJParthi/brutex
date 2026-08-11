@@ -260,6 +260,27 @@ impl GapFib {
     }
 
     /// Fold one bar into the tail and, while it is forming, today's first candle.
+    ///
+    /// # The absent arm below cannot run, and removing it costs more than it saves
+    ///
+    /// `tail_next` is 0 in [`GapFib::new`] and in [`GapFib::close_the_session`], and
+    /// every fold re-derives it `% CANDLE_MINUTES`, so it is always a valid index into
+    /// the three-slot tail and `get_mut` is always `Some`. `cargo llvm-cov` therefore
+    /// records the `if let`'s absent arm as a region no passing test can execute — the
+    /// same objection the ladder in [`GapFib::bits`] answers by walking rather than
+    /// indexing.
+    ///
+    /// It is deliberately **not** answered the same way here. Dropping the cursor for a
+    /// total three-element shift — `let [_, b, c] = self.tail; self.tail = [b, c, new]`
+    /// — does remove the arm, and it carries exactly the same values, because
+    /// [`GapFib::close_the_session`] folds the slots with a max and a min and never
+    /// reads their order. It also shrinks this struct by 16 bytes, which moves
+    /// `size_of::<Evaluator>()` from 1664 to 1648 and makes the measurement recorded in
+    /// `docs/10-shared-core.md` — and quoted again in a row of `docs/05-decisions.md` —
+    /// a number nobody took. §3 rule 6 forbids reporting such a measurement and §3
+    /// rule 8 makes the ledger append-only, so the honest trade is one uncovered region
+    /// rather than one stale measurement. `only_the_last_three_bars_of_a_session_reach_
+    /// tomorrows_leg` pins the behaviour either way, so the choice stays open.
     fn fold(&mut self, bar: &Candle) {
         if let Some(slot) = self.tail.get_mut(self.tail_next) {
             *slot = Some((bar.high, bar.low));
@@ -356,6 +377,16 @@ impl GapFib {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes — a test that \
+              cannot panic cannot fail — and the same second reason `crate::tests` \
+              gives: `unreachable!` expands to a panic inside THIS crate, so llvm-cov \
+              counts a region that no passing run can execute and the coverage floor \
+              can never be reached on this file. `.expect` panics inside core, which \
+              is not instrumented: the same failure, with the refused value printed \
+              beside the message, and no dead region left behind."
+)]
 mod tests {
     use super::*;
 
@@ -375,10 +406,16 @@ mod tests {
     }
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib width is valid")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// Step a bar this fixture calls sane, and hand back the bits it emitted.
+    ///
+    /// A helper so the call sites below read as one line each, and so a fixture that
+    /// this file calls sane while `Candle::check` refuses it names itself once rather
+    /// than at every site.
+    fn ok(g: &mut GapFib, bar: &Candle) -> ConditionMask {
+        g.step(bar, tol()).expect("this fixture bar is sane")
     }
 
     /// The two sheets are one formula. Checked against both branches written out
@@ -404,9 +441,7 @@ mod tests {
                         i128::from(x2) + (i128::from(p) * (i128::from(x1) - i128::from(x2))) / 1000
                     }
                 };
-                let Some(got) = leg.level(p) else {
-                    unreachable!("levels for real prices fit i64")
-                };
+                let got = leg.level(p).expect("levels for real prices fit i64");
                 assert_eq!(i128::from(got), sheet, "{dir:?} rung {p}");
             }
         }
@@ -475,15 +510,11 @@ mod tests {
         let mut g = GapFib::new();
         // Day one: a plain session.
         for m in 0..6 {
-            let Ok(_) = g.step(&at(30_000, m, 2_501_000, 2_499_000, 2_500_000), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_000, m, 2_501_000, 2_499_000, 2_500_000));
         }
         // Day two opens inside yesterday's last candle — no gap either way.
         for m in 0..6 {
-            let Ok(mask) = g.step(&at(30_001, m, 2_500_500, 2_499_500, 2_500_000), tol()) else {
-                unreachable!("sane bar")
-            };
+            let mask = ok(&mut g, &at(30_001, m, 2_500_500, 2_499_500, 2_500_000));
             assert_eq!(mask, ConditionMask::ZERO, "no gap, no bits");
         }
         assert_eq!(g.leg(), None, "no leg was established");
@@ -495,19 +526,13 @@ mod tests {
         let mut g = GapFib::new();
         // Yesterday's last three bars top out at 2_500_000.
         for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
-            let Ok(_) = g.step(&at(30_100, m, h, h - 2_000, h - 500), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_100, m, h, h - 2_000, h - 500));
         }
         // Today's first three bars top out at 2_520_000 — clear of yesterday.
         for (m, h) in [(0_i64, 2_515_000_i64), (1, 2_518_000), (2, 2_520_000)] {
-            let Ok(_) = g.step(&at(30_101, m, h, h - 1_000, h - 200), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_101, m, h, h - 1_000, h - 200));
         }
-        let Some(leg) = g.leg() else {
-            unreachable!("a gap up was established")
-        };
+        let leg = g.leg().expect("a gap up was established");
         assert_eq!(leg.direction, Direction::Up);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 HIGH");
         assert_eq!(leg.x2, 2_520_000, "X2 is today's first-3 HIGH");
@@ -520,18 +545,12 @@ mod tests {
     fn a_gap_down_uses_the_lows() {
         let mut g = GapFib::new();
         for (m, l) in [(0_i64, 2_502_000_i64), (1, 2_501_000), (2, 2_500_000)] {
-            let Ok(_) = g.step(&at(30_200, m, l + 2_000, l, l + 500), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_200, m, l + 2_000, l, l + 500));
         }
         for (m, l) in [(0_i64, 2_485_000_i64), (1, 2_482_000), (2, 2_480_000)] {
-            let Ok(_) = g.step(&at(30_201, m, l + 1_000, l, l + 200), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_201, m, l + 1_000, l, l + 200));
         }
-        let Some(leg) = g.leg() else {
-            unreachable!("a gap down was established")
-        };
+        let leg = g.leg().expect("a gap down was established");
         assert_eq!(leg.direction, Direction::Down);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 LOW");
         assert_eq!(leg.x2, 2_480_000, "X2 is today's first-3 LOW");
@@ -547,17 +566,13 @@ mod tests {
     fn no_bits_until_the_opening_candle_is_complete() {
         let mut g = GapFib::new();
         for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
-            let Ok(_) = g.step(&at(30_300, m, h, h - 2_000, h - 500), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_300, m, h, h - 2_000, h - 500));
         }
         for m in 0..3_i64 {
             // The close was 2_510_000 with a low of 2_519_000 — BELOW its own low.
             // An invalid candle in my own fixture, which `Candle::check` now refuses.
             let bar = at(30_301, m, 2_520_000, 2_519_000, 2_519_500);
-            let Ok(mask) = g.step(&bar, tol()) else {
-                unreachable!("sane bar")
-            };
+            let mask = ok(&mut g, &bar);
             assert_eq!(
                 mask,
                 ConditionMask::ZERO,
@@ -575,19 +590,13 @@ mod tests {
     fn a_close_on_the_midpoint_sets_the_midpoint_rung() {
         let mut g = GapFib::new();
         for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
-            let Ok(_) = g.step(&at(30_400, m, h, h - 2_000, h - 500), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_400, m, h, h - 2_000, h - 500));
         }
         for (m, h) in [(0_i64, 2_515_000_i64), (1, 2_518_000), (2, 2_520_000)] {
-            let Ok(_) = g.step(&at(30_401, m, h, h - 1_000, h - 200), tol()) else {
-                unreachable!("sane bar")
-            };
+            let _ = ok(&mut g, &at(30_401, m, h, h - 1_000, h - 200));
         }
         // Leg is 2_500_000 .. 2_520_000; the midpoint is 2_510_000, rung 500 = index 135.
-        let Ok(mask) = g.step(&at(30_401, 3, 2_510_100, 2_509_900, 2_510_000), tol()) else {
-            unreachable!("sane bar")
-        };
+        let mask = ok(&mut g, &at(30_401, 3, 2_510_100, 2_509_900, 2_510_000));
         assert!(
             mask.get(135),
             "a close on the midpoint sets rung 0.5 (position 135)"
@@ -602,9 +611,7 @@ mod tests {
         for (i, index) in all.iter().enumerate() {
             let expect = GAP_FIRST.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
             assert_eq!(*index, expect, "positions are contiguous from GAP_FIRST");
-            let Some(def) = vocab::table::definition(*index) else {
-                unreachable!("position {index} is in the table")
-            };
+            let def = vocab::table::definition(*index).expect("132..=142 are allocated");
             assert_eq!(def.kind, vocab::Kind::Near, "position {index} needs a band");
             assert!(
                 def.name.starts_with("near_fib_gap_"),
@@ -630,5 +637,110 @@ mod tests {
         };
         assert_eq!(g.step(&inverted, tol()), Err(crate::Corrupt::HighBelowLow));
         assert_eq!(g.leg(), None);
+    }
+
+    /// `Default` must be `new`, or a caller writing `GapFib::default()` starts a run in
+    /// a state nothing in this file reasons about.
+    ///
+    /// `evaluator` builds its members by name, so nothing in the workspace had ever
+    /// called this impl — and the field that decides everything, `day`, holds §7's
+    /// `i64::MIN` null until the first bar. A `Default` that drifted to
+    /// `Self { day: 0, .. }` would make the epoch's own session look already open, and
+    /// the first real bar would then be folded into it instead of opening a session:
+    /// no rollover, so no `yesterday`, so no leg all day and eleven positions silently
+    /// absent.
+    #[test]
+    fn the_default_state_is_the_empty_one() {
+        assert_eq!(
+            GapFib::default(),
+            GapFib::new(),
+            "`Default` drifted from `new`"
+        );
+        assert_eq!(
+            GapFib::default().leg(),
+            None,
+            "a defaulted state named a leg before its first bar"
+        );
+    }
+
+    /// `X1` is the last 3-minute candle, **not** the session's own extreme.
+    ///
+    /// The tail is three slots and a real session is hundreds of bars, so the source's
+    /// "previous day's last 3-minute candle" is only what the tail still holds at the
+    /// bell. Nothing pinned which three bars those are: **every other test in this file
+    /// feeds a session exactly three bars**, and on a three-bar session "the last three"
+    /// and "the whole session" are the same candle, so a tail that never dropped a slot,
+    /// or kept only the newest bar, passed all of them. Either mistake anchors all
+    /// eleven rungs on a candle the source does not name, and [`GapFib::fold`]'s cursor
+    /// wraps `% CANDLE_MINUTES` to prevent exactly that.
+    ///
+    /// Both fixtures below are chosen so the three answers differ. Yesterday's last
+    /// three bars are m3, m4 and m5: their high, 2,500,000, comes from the **oldest**
+    /// of the three and their low, 2,450,000, from the **middle** one. The session's own
+    /// extremes, 2,600,000 and 2,400,000, are m0's — outside the tail. So keeping the
+    /// whole session, or only the newest bar, fails on the value, not merely on a sign.
+    #[test]
+    fn only_the_last_three_bars_of_a_session_reach_tomorrows_leg() {
+        // (minute, high, low, close). m0 spikes, and the cursor must have overwritten
+        // its slot before the bell.
+        let yesterday = [
+            (0_i64, 2_600_000_i64, 2_400_000_i64, 2_450_000_i64),
+            (1, 2_450_000, 2_440_000, 2_445_000),
+            (2, 2_455_000, 2_445_000, 2_450_000),
+            (3, 2_500_000, 2_470_000, 2_490_000),
+            (4, 2_460_000, 2_450_000, 2_455_000),
+            (5, 2_465_000, 2_455_000, 2_460_000),
+        ];
+
+        // Today clears 2,500,000 — yesterday's last-3 HIGH — so the gap is up and X1
+        // is that high. It does NOT clear the session high of 2,600,000.
+        let mut up = GapFib::new();
+        for (m, h, l, c) in yesterday {
+            let _ = ok(&mut up, &at(30_600, m, h, l, c));
+        }
+        for (m, h, l, c) in [
+            (0_i64, 2_515_000_i64, 2_512_000_i64, 2_514_000_i64),
+            (1, 2_518_000, 2_514_000, 2_516_000),
+            (2, 2_520_000, 2_517_000, 2_519_000),
+        ] {
+            let _ = ok(&mut up, &at(30_601, m, h, l, c));
+        }
+        let leg = up
+            .leg()
+            .expect("today's first-3 high cleared the last-3 high");
+        assert_eq!(leg.direction, Direction::Up);
+        assert_eq!(
+            leg.x1, 2_500_000,
+            "X1 must be the last-3 HIGH, which is m3's — not m5's 2,465,000 and not \
+             the session high of 2,600,000"
+        );
+        assert_eq!(leg.x2, 2_520_000, "X2 is today's first-3 HIGH");
+        assert_eq!(leg.length(), 20_000);
+
+        // Same yesterday, and today undercuts 2,450,000 — the last-3 LOW, which is
+        // m4's. It does not undercut the session low of 2,400,000, and its high stays
+        // under the last-3 high, so the up test cannot fire first.
+        let mut down = GapFib::new();
+        for (m, h, l, c) in yesterday {
+            let _ = ok(&mut down, &at(30_600, m, h, l, c));
+        }
+        for (m, h, l, c) in [
+            (0_i64, 2_437_000_i64, 2_435_000_i64, 2_436_000_i64),
+            (1, 2_434_000, 2_430_000, 2_432_000),
+            (2, 2_430_000, 2_425_000, 2_427_000),
+        ] {
+            let _ = ok(&mut down, &at(30_601, m, h, l, c));
+        }
+        let leg = down
+            .leg()
+            .expect("today's first-3 low undercut the last-3 low");
+        assert_eq!(leg.direction, Direction::Down);
+        assert_eq!(
+            leg.x1, 2_450_000,
+            "X1 must be the last-3 LOW, which is m4's — not m5's 2,455,000 and not \
+             the session low of 2,400,000"
+        );
+        assert_eq!(leg.x2, 2_425_000, "X2 is today's first-3 LOW");
+        assert_eq!(leg.length(), 25_000);
     }
 }

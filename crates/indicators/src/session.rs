@@ -399,9 +399,14 @@ impl SessionState {
             let Ok(gap) = i64::try_from(gap) else {
                 return mask;
             };
-            if let Ok(next) = vocab::table::set_near(mask, 68, tolerance, bar.close, mid, gap) {
-                mask = next;
-            }
+            // `unwrap_or`, the same way [`set`] below ignores a refusal, and not an
+            // `if let Ok(next)`: `set_near` refuses only when 68 is absent, retired or
+            // not a `Near` position, and `the_positions_agree_with_the_vocabulary`
+            // asserts it is all three. So the `if let`'s else was an arm no input can
+            // reach and no test can cover, while `unwrap_or` decides the same thing
+            // inside `core`. The two are the same expression: on a refusal the mask is
+            // returned unchanged either way.
+            mask = vocab::table::set_near(mask, 68, tolerance, bar.close, mid, gap).unwrap_or(mask);
         }
         mask
     }
@@ -426,14 +431,21 @@ pub const fn positions() -> [u16; 25] {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes — a test that \
+              cannot panic cannot fail — and here it buys a second thing. \
+              `unreachable!` expands to a panic inside THIS crate, so llvm-cov counts \
+              a region that can never run and the coverage gate can never reach 100 on \
+              this file. `.expect` panics inside core, which is not instrumented: the \
+              same failure, with the refused value printed beside the message, and no \
+              dead region left behind."
+)]
 mod tests {
     use super::*;
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the fib width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the fib width is pinned")
     }
 
     fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
@@ -450,10 +462,9 @@ mod tests {
     }
 
     fn ok(state: &mut SessionState, bar: &Candle, prev: Option<PreviousSession>) -> ConditionMask {
-        let Ok(m) = state.step(bar, prev, tol()) else {
-            unreachable!("this fixture bar is sane")
-        };
-        m
+        state
+            .step(bar, prev, tol())
+            .expect("this fixture bar is sane")
     }
 
     /// Every position is live and its kind matches how this module sets it.
@@ -462,9 +473,13 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for index in positions() {
             assert!(seen.insert(index), "position {index} appears twice");
-            let Some(def) = vocab::table::definition(index) else {
-                unreachable!("position {index} is not in the table")
-            };
+            // Built before the call, not interpolated on the failure path: `expect`
+            // takes a `&str`, and the position is what identifies a failing row. A
+            // message assembled only when the test fails is a region a green run
+            // cannot reach — the same reason `tests/extremes.rs` builds its labels
+            // up front.
+            let missing = format!("position {index} is not in the table");
+            let def = vocab::table::definition(index).expect(&missing);
             assert!(vocab::table::is_live(index), "position {index} is not live");
             let wants_near = index == 68;
             assert_eq!(
@@ -703,5 +718,219 @@ mod tests {
         assert!(w.early_ends < w.mid_ends);
         assert!(w.mid_ends < w.midday_ends);
         assert!(w.midday_ends < w.session_ends);
+    }
+
+    /// A state before its first bar answers nothing, and `bits` with yesterday in hand
+    /// still emits no day-type verdict.
+    ///
+    /// [`SessionState::day_open`] and [`SessionState::day_extremes`] each answer
+    /// `self.live` and nothing else, and the fields behind them hold **zero** until a
+    /// bar arrives. Without the guard at the head of the yesterday block, a caller
+    /// holding a completed previous session would get position 48 or 49 computed from
+    /// an open of zero — a gap the width of the entire price scale, off a session that
+    /// has not begun. `bits` is public and takes `&self`, so this is a state a consumer
+    /// can reach: `step` is not the only door.
+    ///
+    /// The shape and time-of-day bits, which need only the bar, are still emitted. This
+    /// is a guard on the families that need a session, not a blanket refusal.
+    #[test]
+    fn a_state_before_its_first_bar_emits_no_day_type() {
+        let state = SessionState::default();
+        assert_eq!(state.day_open(), None, "an unstarted session named an open");
+        assert_eq!(
+            state.day_extremes(),
+            None,
+            "an unstarted session named its extremes"
+        );
+        let prev = PreviousSession {
+            high: 120,
+            low: 80,
+            close: 100,
+        };
+        let mask = state.bits(&at(0, 100, 110, 95, 108), Some(prev), tol());
+        for index in [40, 41, 42, 43, 48, 49, 50, 51, 66, 67, 68] {
+            assert!(
+                !mask.get(index),
+                "position {index} was emitted before the session began"
+            );
+        }
+        assert!(
+            mask.get(30),
+            "a bullish bar is bullish whether or not a session is live"
+        );
+        assert!(mask.get(44), "the time of day needs no session state");
+    }
+
+    /// The shape positions are exactly the fractions [`ShapeLimits`] names.
+    ///
+    /// Hand-computed against a range of exactly 1000 paisa, so every bit is a statement
+    /// about a number this test can name: a 600-paisa body is 60% of the range and is
+    /// `bar_large_body`; a 50-paisa body is 5%, which is both a doji and a small body,
+    /// and leaves wicks of 450 and 500 paisa, both past the 40% limit; a 450-paisa body
+    /// with 275-paisa wicks is none of the five.
+    ///
+    /// `bar_large_body` was pinned by nothing at all. The only test that ever set it
+    /// asserts which positions this module **owns**, not which are right, so reading
+    /// the 600 limit as 6%, or `>=` as `>`, would have stayed green.
+    #[test]
+    fn the_shape_positions_are_the_fractions_the_limits_name() {
+        // (name, bar, [doji 32, large 33, small 34, long upper wick 35, long lower 36])
+        let cases: [(&str, Candle, [bool; 5]); 4] = [
+            (
+                "a 600-paisa body over a 1000-paisa range is large and not small",
+                at(0, 2_499_200, 2_500_000, 2_499_000, 2_499_800),
+                [false, true, false, false, false],
+            ),
+            (
+                "a 50-paisa body is a doji, a small body, and has both wicks long",
+                at(0, 2_499_500, 2_500_000, 2_499_000, 2_499_550),
+                [true, false, true, true, true],
+            ),
+            (
+                "a 450-paisa body with 275-paisa wicks is none of the five",
+                at(0, 2_499_275, 2_500_000, 2_499_000, 2_499_725),
+                [false, false, false, false, false],
+            ),
+            (
+                "a zero-range bar has no shape: every fraction of zero is undefined",
+                at(0, 2_500_000, 2_500_000, 2_500_000, 2_500_000),
+                [false, false, false, false, false],
+            ),
+        ];
+        for (name, bar, want) in cases {
+            let mut state = SessionState::default();
+            let mask = ok(&mut state, &bar, None);
+            for (offset, expected) in want.iter().enumerate() {
+                let index = 32 + u32::try_from(offset).expect("five fits in a u32");
+                assert_eq!(mask.get(index), *expected, "{name}: position {index}");
+            }
+        }
+    }
+
+    /// The thirds are measured from the day's **low**, their boundary is inclusive, and
+    /// a close in the middle third is in neither.
+    ///
+    /// Both positions are cross-multiplied against the day's range, so a transposed end
+    /// would put every close in the opposite third and still look plausible. Computed
+    /// against a 3000-paisa day, where the two boundaries sit exactly 1000 and 2000
+    /// paisa above the low and are named here rather than approached.
+    #[test]
+    fn the_day_thirds_are_measured_from_the_low_and_include_their_boundary() {
+        // (name, close, in the upper third, in the lower third)
+        let cases: [(&str, i64, bool, bool); 5] = [
+            ("the close at the day high", 2_502_000, true, false),
+            ("exactly two thirds up", 2_501_000, true, false),
+            ("the middle third", 2_500_500, false, false),
+            ("exactly one third up", 2_500_000, false, true),
+            ("the close at the day low", 2_499_000, false, true),
+        ];
+        for (name, close, upper, lower) in cases {
+            let mut state = SessionState::default();
+            let bar = at(0, 2_500_500, 2_502_000, 2_499_000, close);
+            let mask = ok(&mut state, &bar, None);
+            assert_eq!(mask.get(42), upper, "{name}: the upper third");
+            assert_eq!(mask.get(43), lower, "{name}: the lower third");
+        }
+    }
+
+    /// A pre-open print belongs to no time-of-day window.
+    ///
+    /// `crate::orb::minutes_since_open` is `None` before 09:15, and the `if let` that
+    /// consumes it is the only thing standing between an 08:00 print and
+    /// `early_morning` — without it the bar would be described as the first hour of a
+    /// session that had not started. Ingest is supposed to drop such a print, but this
+    /// module does not lean on a filter it cannot see; `crate::orb::fold` says the same
+    /// thing in the same words. `exactly_one_time_of_day_window_holds` covers the other
+    /// end, a bar past the close.
+    #[test]
+    fn a_pre_open_bar_belongs_to_no_time_of_day_window() {
+        let mut state = SessionState::default();
+        // Seventy-five minutes before the open is 08:00 IST.
+        let mask = ok(&mut state, &at(-75, 100, 110, 95, 108), None);
+        for index in 44..=47 {
+            assert!(!mask.get(index), "a pre-open bar matched window {index}");
+        }
+        assert!(
+            mask.get(30),
+            "the pre-open bar was not evaluated at all, so this proves nothing"
+        );
+    }
+
+    /// A close on the gap's midpoint sets the midpoint band; a close outside the band
+    /// does not.
+    ///
+    /// `the_opening_gap_needs_a_real_gap` covers the half where there is no gap to have
+    /// a midpoint. The other half had never been reached: 68 is the one `Near` position
+    /// this module owns, and `vocab::table::set_near` returns the mask unchanged
+    /// whether it sets a bit or declines — so a wrong index, a wrong kind or a wrong
+    /// base would have been silent. The band is the pinned fib width, 10/1000 of the
+    /// gap: 100 paisa across a gap of 10,000.
+    #[test]
+    fn a_close_on_the_gap_midpoint_sets_the_band_and_one_outside_it_does_not() {
+        let prev = PreviousSession {
+            high: 2_520_000,
+            low: 2_480_000,
+            close: 2_500_000,
+        };
+        // The gap runs 2_500_000..2_510_000, so its midpoint is 2_505_000 exactly.
+        let mut on = SessionState::default();
+        let mask = ok(
+            &mut on,
+            &at(0, 2_510_000, 2_512_000, 2_504_000, 2_505_000),
+            Some(prev),
+        );
+        assert!(
+            mask.get(68),
+            "a close exactly on the gap midpoint did not set the band"
+        );
+        assert!(
+            !mask.get(66) && !mask.get(67),
+            "a close ON the midpoint is neither above nor below it"
+        );
+        assert!(mask.get(48), "an open above yesterday's close is a gap up");
+
+        let mut off = SessionState::default();
+        let mask = ok(
+            &mut off,
+            &at(0, 2_510_000, 2_512_000, 2_504_000, 2_512_000),
+            Some(prev),
+        );
+        assert!(
+            !mask.get(68),
+            "a close 7,000 paisa from the midpoint, against a band of 100, set it anyway"
+        );
+        assert!(mask.get(66), "a close above the midpoint was not reported");
+    }
+
+    /// A gap wider than `i64` drops the band rather than wrapping.
+    ///
+    /// The gap is taken in `i128`, because `today_open - prev_close` for two `i64`
+    /// prices need not fit an `i64`, and `set_near` needs it back as an `i64` base.
+    /// Yesterday closing at the bottom of the type and today opening at the top is
+    /// exactly that state. The positions decided before the width check still stand and
+    /// the band is simply absent, which is the only honest answer: wrapping would hand
+    /// `vocab` a band computed from a negative width.
+    #[test]
+    fn a_gap_too_wide_for_the_type_drops_the_band_rather_than_wrapping() {
+        let prev = PreviousSession {
+            high: 0,
+            low: i64::MIN,
+            close: i64::MIN,
+        };
+        let mut state = SessionState::default();
+        let top = at(0, i64::MAX, i64::MAX, i64::MAX, i64::MAX);
+        let mask = ok(&mut state, &top, Some(prev));
+        assert!(
+            mask.get(48),
+            "an open above yesterday's close is a gap up at any width"
+        );
+        assert!(
+            mask.get(66),
+            "the close sits above the midpoint of that gap"
+        );
+        assert!(
+            !mask.get(68),
+            "a gap that does not fit i64 still produced a band"
+        );
     }
 }

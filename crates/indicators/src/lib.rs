@@ -726,11 +726,12 @@ mod tests {
                 base + ((k * 23) % 161) - 80,
             );
             let m = ok(&mut s, &b);
-            assert!(
-                m.popcount() <= 1,
-                "bar {k} lit {} rungs at once",
-                m.popcount()
-            );
+            // `popcount` once, into a name the message interpolates. As a second call
+            // in the message arguments it was a region evaluated ONLY on failure, and a
+            // region that cannot run while the test passes is one no coverage run can
+            // ever reach. The bound and the failure text are unchanged.
+            let lit = m.popcount();
+            assert!(lit <= 1, "bar {k} lit {lit} rungs at once");
         }
     }
 

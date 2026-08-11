@@ -1801,7 +1801,71 @@ is as old as the last finished round, and before the first one there is no
 survey at all. That is why `surveyed` is a field and IC-02 is a row: the
 staleness is reported, not removed. See `docs/06-limits.md`.
 
-A halt is cleared by a **restart** and by nothing else — no route can reach
-`FeedState::halted`, because the feed table is a local of `autopilot::fly`.
-IC-07 is that fact made checkable rather than a workaround for it. D-0093 says
-why a revive control was rejected rather than half-built.
+A halt is cleared by no **control** — no route can reach `FeedState::halted`,
+because the feed table is a local of `autopilot::fly`. IC-07 is that fact made
+checkable rather than a workaround for it, and D-0093 says why a revive control
+was rejected rather than half-built. **Since D-0108 two of the three halt classes
+are additionally cleared by EVIDENCE**, which is not a control and cannot be
+pressed: a census that loads again and a disk that accepts a write probe. The
+third — a dead broker credential — is cleared by neither, and is never re-checked
+at all, because `CLAUDE.md` §8 forbids minting a token and a retry against an
+unchanged dead value is §4's banned shape. See the `AU-` rows below.
+
+## The autopilot flies on Run, and a halt is probation only where it can be measured — D-0108
+
+The rows are prefixed `AU-` rather than continuing `IC-`: two sessions share this
+tree and a collided identifier is worse than a new prefix.
+
+Every row below is proved with no socket, no credential, no vendor and no bar.
+The two rows that touch a disk touch a scratch directory this suite owns.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| AU-01 | **The boot default FLIES and exactly one byte string holds it on the ground.** An absent `BRUTEX_AUTOPILOT` flies — that is the tracked Run configuration's own state, and the whole of the reported "press Run and nothing happens" defect. Only `pause` grounds it: `PAUSE`, `Pause`, `paused`, ` pause`, `pause `, `pause\n`, `stop`, `false`, `0`, `no`, `off` and the empty string all fly, and `run` is still accepted as a flying value so an existing alias does not silently change meaning. The environment reader and the pure decision are asserted to agree | `api::autopilot::tests::the_boot_default_flies_and_only_the_exact_word_pause_holds_it` | ✓ |
+| AU-02 | **A credential halt requires that NOT ONE instrument was reached.** A sweep that reached 772 of 773 and saw one `status 401` backs off and then stalls — bounded and visible — instead of making the feed terminal for the life of the process; the feed-wide case still takes its one §8 re-read and then halts naming §8. A run blocked before it attempted anything counts as feed-wide, because halting is the direction that costs nothing outside this machine | `api::autopilot::tests::a_credential_reason_from_a_sweep_that_reached_somebody_backs_off_instead_of_halting` | ✓ |
+| AU-03 | **A dead credential arms NO re-check of any kind** — no probe, no schedule, no timer. `CLAUDE.md` §8 forbids minting a token and §4 forbids a retry that hides a permanent fault, so this class is named and left named. Only `Halt::Store` arms anything, and each halt class carries its own distinct word | `api::autopilot::tests::every_halt_class_names_itself_and_only_the_store_class_arms_a_probe` · `api::autopilot::tests::a_credential_reason_from_a_sweep_that_reached_somebody_backs_off_instead_of_halting` | ✓ |
+| AU-04 | **A census halt clears on `Census::Held` and on nothing else.** A manifest an operator repaired puts the feed back on the ladder on the next pass, with no restart, and the page says why; `Census::Unreadable` keeps it terminal and — the narrow rule — `Census::Absent` does **not** revive it, because a census reporting nothing held is not evidence the fault is gone, and a feed revived on it would re-offer months whose bar files `BarFile::append` refuses wholesale | `api::autopilot::tests::a_repaired_manifest_clears_its_own_halt_and_an_absent_one_does_not` | ✓ |
+| AU-05 | **The store-halt probe is bounded at `STORE_PROBES` = 8 and gives up out loud.** The schedule doubles from 60 s and caps at 3600 s — seven gaps, 7,380 s, read back from `probe_secs` rather than trusted from a comment — and the ninth request answers `Due::Spent` however long is waited, saying the allowance is spent and that nothing further is written or read. An unarmed feed answers `Spent`, never `Now` | `api::autopilot::tests::the_store_probe_is_bounded_measures_the_disk_and_says_so_when_it_is_spent` | ✓ |
+| AU-06 | **The probe is a MEASUREMENT of a real disk and leaves nothing behind.** Three probes against a writable root leave the directory entry count where they found it (§3 rule 5), and a root that cannot be created reports the host's own refusal naming the path — never "the disk is fine" | `api::autopilot::tests::the_write_probe_measures_the_disk_and_leaves_nothing_behind` | ✓ |
+| AU-07 | **A store halt clears inside a real `round`, on evidence, with nothing asked of any vendor.** The store refusal halts the feed and arms a probe due immediately; one round probes the scratch store root, the write succeeds, the halt is cleared, and the published detail says both that it cleared and that no vendor was contacted to establish it | `api::autopilot::tests::a_store_halted_feed_probes_the_disk_inside_a_round_and_comes_back` | ✓ |
+| AU-08 | **A stalled month is reconsidered at most `STALL_RETRIES` = 2 times per process and then never again.** The first idle pass that sees a stall stamps it and does not retry it; one second short of `STALL_RECHECK_SECS` is still short of it; the allowance is exhausted one reconsideration at a time and afterwards `reconsider` answers `None` however long is waited — time does not renew it. The worst case `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = **9** attempts per stalled month per process is asserted as arithmetic, and `stall_note` says out loud which stalls are SPENT | `api::autopilot::tests::a_stalled_month_is_reconsidered_twice_at_the_earliest_and_then_never_again` | ✓ |
+| AU-09 | **Reconsideration takes the oldest month across feeds, one per pass, and never on a terminal feed.** The same rule the ladder itself climbs by, so a reconsideration cannot jump the queue; a halted feed owes none, because there is nothing to drive; and an empty stall list produces an empty note rather than a reassuring sentence about a fact nobody asserted | `api::autopilot::tests::reconsideration_takes_the_oldest_month_and_skips_a_terminal_feed` | ✓ |
+| AU-10 | **A reconsideration happens only from the idle branch of a real round, moves the frontier BACK to that month, and the page and the detail agree about which attempt it is.** The round returns `0` rather than `IDLE_POLL_SECS` because a reconsidered month is work; the JSON carries `retried` and `retries_max` beside the original reason verbatim; and a second round in the same interval does not ask again | `api::autopilot::tests::a_round_with_nothing_missing_reconsiders_a_stalled_month_and_says_which_attempt` | ✓ |
+| AU-11 | **An unusable clock is waited on a bounded number of times and then named.** Every wait says which check of `CLOCK_WAITS` = 20 it is and that nothing is being contacted meanwhile; past the bound `clock_wait` answers `None` and `fly` stops saying the allowance is spent. It used to `return` on the first reading, which made an NTP-shaped fault terminal for the life of the process and made every later resume refusable for ever | `api::autopilot::tests::the_clock_is_waited_on_a_bounded_number_of_times_and_then_named` | ✓ |
+
+**What is NOT invariant here, and is a limit rather than a bug.** `/health` still
+answers 200 while every feed is terminal — it reads the masters and nothing else
+— so a monitor cannot yet learn from a status code that the backfill is dead. A
+halt also still writes nothing durable to the event log; the only two emit sites
+in `autopilot.rs` are pause and resume. Both are changes to files another session
+holds (`server.rs`, `emitted.rs`), and A-40's source-derived emit-site count is
+the reason the second cannot be done unilaterally. D-0108 records both, and until
+the first exists the owner is still required to *look* in order to learn that a
+credential died.
+
+## The four NIFTY tiers are requestable and none of them is swept — D-0105
+
+`api::ingest::SpotTarget` went from three variants to seven so that a pull can
+name the NIFTY 50, 100, 200 and 500. The rows are prefixed `ST-` rather than
+continuing `IC-`: two sessions share this tree and a collided identifier is worse
+than a new prefix.
+
+Every row below is proved without a socket, a credential or a bar. The
+membership facts come from compile-time tables in `brutex_core::universe`.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| ST-01 | Each tier target resolves to its **published constituent list borrowed from `core`** — the same names in the same order, 500 / 200 / 100 / 50 of them — and every one of those names carries that tier's `Universe` bit, so the roster and the membership predicate are one set and not two lists that agree today | `api::ingest::tests::the_n500_target_resolves_to_the_five_hundred_published_constituents` · `api::ingest::tests::the_n200_target_resolves_to_the_two_hundred_published_constituents` · `api::ingest::tests::the_n100_target_resolves_to_the_one_hundred_published_constituents` · `api::ingest::tests::the_n50_target_resolves_to_the_fifty_published_constituents` | ✓ |
+| ST-02 | **A tier is STORED and never SWEPT** (`CLAUDE.md` §1). No constituent of any tier is `is_sweepable`, none is named by `SpotTarget::Swept`, neither swept index is named by any tier, and `InstrumentKey::SWEPT` still has exactly **two** entries — widening the engine surface breaks a test whose name says why | `api::ingest::tests::a_nifty_tier_target_stores_and_never_sweeps` | ✓ |
+| ST-03 | The slug a pull is requested WITH is the token `/instruments.json` counts a row BY — `n50`, `n100`, `n200`, `n500`, `server::UNIVERSE_TOKENS` verbatim — and it round-trips through `from_slug` to exactly one variant | `api::ingest::tests::the_n50_target_resolves_to_the_fifty_published_constituents` and its three siblings · `api::ingest::tests::a_spot_request_names_its_target_or_is_refused` | ✓ |
+| ST-04 | **An unknown slug is still refused BY NAME.** The new arms make no default: `nifty50`, `nifty-50`, `N50`, `n 50`, `n25`, `ntm`, `fno`, `*`, `mcx` and `bse` each refuse as `UnknownTarget`, the refusal quotes what arrived and lists every legal slug, and an empty field stays its own separate refusal | `api::ingest::tests::a_slug_that_is_not_a_target_is_refused_by_name_after_the_tiers_were_added` | ✓ |
+| ST-05 | `members()` answers **`None` rather than an invented list** for the two targets no published file defines — the engine surface and the vendor master's index series — and `Some` for every other target | `api::ingest::tests::the_two_targets_with_no_published_list_return_none_rather_than_an_invented_one` | ✓ |
+| ST-06 | Every target's counter is its **own** population: the count the form shows and the count the receipt echoes come from the slot that target occupies, for all seven, end to end over a real POST | `api::server::tests::each_spot_target_reports_its_own_population_and_not_a_neighbours` | ✓ |
+
+**What is NOT invariant here, and is a limit rather than a bug.** A tier being
+*requestable* is not a tier being *fetchable*. The broker path refuses every
+target that names a set — tiers included, exactly as `equities` always has been —
+because `pull::vendor::HttpSpec` carries no request-parameter map;
+`api::server::broker_target_tests::only_the_swept_target_names_a_single_instrument_this_path_can_reach`
+pins that to one target and is the reminder to widen the guard when the map
+lands. The archive path does not read the target at all. D-0105 records both.

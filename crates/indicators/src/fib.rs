@@ -170,9 +170,16 @@ fn emit(
         let Ok(level) = i64::try_from(level) else {
             continue;
         };
-        if let Ok(next) = vocab::table::set_near(mask, *index, tolerance, close, level, range) {
-            mask = next;
-        }
+        // `unwrap_or(mask)` and not `if let Ok(next)`: `set_near` refuses only a
+        // position that is absent, retired, void or `Kind::Plain`, and
+        // `the_positions_agree_with_the_vocabulary` proves that none of the 27 this
+        // module names is any of those. An `if let` would therefore write an else
+        // branch no test can take — `cargo llvm-cov` counts it as a region that never
+        // runs, and a region that cannot run is a region nobody can be held to. The
+        // behaviour is identical: a refusal leaves the bit clear, which is
+        // `docs/03-vocabulary.md` §4, and it is what `crate::daily` writes at its three
+        // set sites.
+        mask = vocab::table::set_near(mask, *index, tolerance, close, level, range).unwrap_or(mask);
     }
     mask
 }
@@ -260,10 +267,26 @@ impl Prev5 {
     /// The caller decides what a session is; this module only counts five of them.
     /// Passing today's partial extremes would make the ladder rolling rather than
     /// static, which is a different family.
+    ///
+    /// # DESTRUCTURED, not looked up
+    ///
+    /// `slots.get_mut(self.next)` cannot answer `None` while the cursor below is the
+    /// only writer of `next` and wraps at five — so its `None` arm was a branch
+    /// `cargo llvm-cov` counts and no passing test can enter. A match over the five
+    /// slots is TOTAL: every arm writes a real slot, nothing is dead, and the write is
+    /// still one move. `clippy::indexing_slicing` is denied in this workspace, so an
+    /// index was never the alternative; this is the idiom `vocab::tolerance` uses on
+    /// the rung ladder for the same reason.
     pub fn push_completed_session(&mut self, high: i64, low: i64) {
-        if let Some(slot) = self.slots.get_mut(self.next) {
-            *slot = (high, low);
-        }
+        let [s0, s1, s2, s3, s4] = &mut self.slots;
+        let slot = match self.next {
+            0 => s0,
+            1 => s1,
+            2 => s2,
+            3 => s3,
+            _ => s4,
+        };
+        *slot = (high, low);
         self.next = (self.next + 1) % self.slots.len();
         if self.filled < self.slots.len() {
             self.filled += 1;
@@ -328,44 +351,39 @@ const _: () = assert!(POSITION_COUNT == 27, "the ladders and positions() disagre
 #[must_use]
 pub fn positions() -> [u16; 27] {
     let mut out = [0u16; 27];
-    let mut i = 0;
-    for (_, index) in PREV_DAY_DOWN {
-        if let Some(slot) = out.get_mut(i) {
-            *slot = index;
-        }
-        i += 1;
-    }
-    for (_, index) in PREV_DAY_UP {
-        if let Some(slot) = out.get_mut(i) {
-            *slot = index;
-        }
-        i += 1;
-    }
-    for (_, index) in PREV5_UP {
-        if let Some(slot) = out.get_mut(i) {
-            *slot = index;
-        }
-        i += 1;
+    // ZIPPED against the array, not counted into it. `out.get_mut(i)` cannot answer
+    // `None` while `i` walks 27 slots of a 27-slot array, so its `None` arm was three
+    // branches `cargo llvm-cov` counts and no passing test can enter. A zip is total in
+    // that direction, and [`POSITION_COUNT`] keeps it total in the other: a ladder that
+    // grows a rung without widening the array is a compile error rather than a slot
+    // left at its initialiser. `crate::daily::positions` is written the same way, and
+    // `the_positions_are_the_three_ladders_concatenated_in_order` pins the result.
+    let ladders = PREV_DAY_DOWN.into_iter().chain(PREV_DAY_UP).chain(PREV5_UP);
+    for (slot, (_, index)) in out.iter_mut().zip(ladders) {
+        *slot = index;
     }
     out
 }
 
 #[cfg(test)]
+// `expect` in a fixture, and the reason is not taste. `let Ok(x) = f() else {
+// unreachable!() }` expands to a panic written IN THIS CRATE, so `cargo llvm-cov`
+// records a region that no test can ever execute while the code is correct — and a
+// region that cannot run is one nobody can be held to. `Result::expect` panics inside
+// the standard library, which is not instrumented, and refuses just as loudly. The
+// workspace denies `expect_used` for library code, where a panic is a real defect; the
+// same allow sits on the test module of `crate::daily`, `vocab::table` and a dozen
+// others.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the fib width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the fib width is pinned")
     }
 
     fn levels(h: i64, l: i64, c: i64) -> DailyLevels {
-        let Ok(x) = DailyLevels::from_previous_session(h, l, c) else {
-            unreachable!("this fixture session is sane")
-        };
-        x
+        DailyLevels::from_previous_session(h, l, c).expect("this fixture session is sane")
     }
 
     /// Every position is live, is `Kind::Near`, and appears exactly once.
@@ -374,9 +392,13 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for index in positions() {
             assert!(seen.insert(index), "position {index} appears twice");
-            let Some(def) = vocab::table::definition(index) else {
-                unreachable!("position {index} is not in the table")
-            };
+            // Asserted before it is unwrapped, so the failure still names the position
+            // that is missing: `expect` takes a string and cannot interpolate `index`,
+            // and a `let ... else { unreachable!() }` would put the refusal in a region
+            // this crate owns and no passing test can enter.
+            let found = vocab::table::definition(index);
+            assert!(found.is_some(), "position {index} is not in the table");
+            let def = found.expect("asserted to be Some on the line above");
             assert!(
                 vocab::table::is_live(index),
                 "position {index} (`{}`) is not live",
@@ -476,7 +498,11 @@ mod tests {
         let mut p5 = Prev5::new();
         for k in 0..4 {
             p5.push_completed_session(100 + k, 90 - k);
-            assert_eq!(p5.extremes(), None, "answered with {} sessions", k + 1);
+            // Counted into a local rather than added inside the message: an argument
+            // computed only on failure is a region that only runs on failure, and the
+            // message reads the same.
+            let pushed = k + 1;
+            assert_eq!(p5.extremes(), None, "answered with {pushed} sessions");
             assert!(p5.bits(95, tol()).is_empty());
         }
         p5.push_completed_session(104, 86);
@@ -493,9 +519,7 @@ mod tests {
         for k in 0..5 {
             p5.push_completed_session(100 + k, 90 - k);
         }
-        let Some((high, low)) = p5.extremes() else {
-            unreachable!("five sessions are present")
-        };
+        let (high, low) = p5.extremes().expect("five sessions are present");
         assert_eq!(
             high, 104,
             "the dropped session's high is still in the window"
@@ -535,5 +559,140 @@ mod tests {
             assert!(down <= 1, "{down} downward rungs fired at close {close}");
             assert!(up <= 1, "{up} upward rungs fired at close {close}");
         }
+    }
+
+    /// [`near`] refuses a non-positive range itself, and does not lean on [`emit`]
+    /// having checked first.
+    ///
+    /// Both functions guard the range, and `emit` is the only caller `near` has inside
+    /// the library — so its own guard is reached from this test and nowhere else. The
+    /// arithmetic is why the guard is not redundant all the same: `bound` is
+    /// `tolerance.milli() * range`, so on a zero range the band collapses to
+    /// `residual == 0` and rung 0 of a flat session would report itself as an exact hit
+    /// on the anchor; on a NEGATIVE range — a corrupt record — the bound is negative,
+    /// `-bound <= residual && residual <= bound` is unsatisfiable for every close, and
+    /// the ladder would answer "nothing is near" for a reason nobody wrote down. A
+    /// second caller added to this module would get the refusal, not the arithmetic.
+    #[test]
+    fn near_refuses_a_zero_or_negative_range_without_measuring_it() {
+        // Exactly on the anchor, where the collapsed band would otherwise say "near".
+        assert!(
+            !near(10_000, 10_000, 0, 0, Direction::Down, tol()),
+            "rung 0 of a zero-range ladder must be refused, not called an exact hit"
+        );
+        assert!(
+            !near(10_000, 10_000, 500, -1_000, Direction::Up, tol()),
+            "a negative range is a broken record and cannot decide a rung"
+        );
+        // The same rung on a real range DOES fire, so the two refusals above are the
+        // range guard and not a fixture that could never have hit anything.
+        assert!(
+            near(10_000, 10_000, 0, 1_000, Direction::Down, tol()),
+            "rung 0 measured down from the anchor IS the anchor"
+        );
+    }
+
+    /// A rung whose level leaves `i64` sets nothing, rather than being measured against
+    /// an invented one.
+    ///
+    /// Reachable only from a corrupt record, and that is exactly why it is worth a test:
+    /// the band is a fraction of the RANGE, so a range near the width of the type gives a
+    /// band near 1% of it, and rung 4.236 of such a range sits past `i64::MAX` while a
+    /// representable close is still inside that band. `near` therefore says yes about a
+    /// level that does not exist, and every alternative to the `try_from` invents one. A
+    /// saturating clamp — the policy `crate::daily` takes on the pivot ladder — pins the
+    /// level at `i64::MAX`, which is exactly where this close sits, so position 71 fires
+    /// against a price the ladder never reached; an `as` cast wraps it to the far end of
+    /// the type instead, where it is wrong for a different close. Skipping the rung is
+    /// the only answer that claims nothing.
+    #[test]
+    fn a_rung_whose_level_leaves_the_type_is_skipped_and_not_wrapped() {
+        // 4.236 * RANGE, exactly: the rung numerator times a thousandth of the range.
+        const RANGE: i64 = 2_000_000_000_000_000_000;
+        const STEP: i64 = 4236 * (RANGE / 1000);
+        // Anchored so that the rung's level is i64::MAX + 1 exactly, and the close one
+        // paisa under it — a residual of 1,000 against a bound of 10 * RANGE.
+        let pdl = i64::MAX - STEP + 1;
+        let x = levels(pdl + RANGE, pdl, pdl);
+        assert_eq!(
+            x.pdh() - x.pdl(),
+            RANGE,
+            "the fixture's range is the one meant"
+        );
+
+        let m = prev_day_bits(&x, i64::MAX, tol());
+        assert!(
+            !m.get(71),
+            "rung 4.236's level is i64::MAX + 1 on this range: position 71 must stay \
+             clear rather than be measured against a clamped or wrapped stand-in"
+        );
+        // And the rung below it, whose level DOES fit, fires from the same ladder — so
+        // the clear bit above is the type boundary and not a ladder that never emits.
+        let fits = pdl + 2618 * (RANGE / 1000);
+        let n = prev_day_bits(&x, fits, tol());
+        assert!(
+            n.get(109),
+            "rung 2.618's level fits the type and the close sits on it, so position 109 \
+             must fire or this fixture proves nothing about the rung above it"
+        );
+    }
+
+    /// The default ring is the empty one, and an empty ring answers nothing.
+    ///
+    /// `Default` is derived by hand here and nothing in the crate calls it, so without
+    /// this test a `Default` that filled the slots with zeros and set `filled` to five
+    /// would compile and ship: `extremes()` would answer `(0, 0)`, a range of zero, and
+    /// every five-session position would be decided against a session that never traded.
+    #[test]
+    fn the_default_ring_is_empty_and_answers_nothing() {
+        let empty = Prev5::default();
+        assert_eq!(
+            empty,
+            Prev5::new(),
+            "`Prev5::default()` is not the empty ring `Prev5::new()` builds"
+        );
+        assert_eq!(empty.filled(), 0, "a default ring has recorded no session");
+        assert_eq!(
+            empty.extremes(),
+            None,
+            "an empty ring must refuse, not answer with its zero initialiser"
+        );
+        assert!(
+            empty.bits(2_500_000, tol()).is_empty(),
+            "an empty ring set a five-session position"
+        );
+    }
+
+    /// [`positions`] is the three ladders concatenated, in ladder order.
+    ///
+    /// The array is filled by zipping the ladders against it, and the two ways that can
+    /// go wrong are both silent. A zip that ran short would leave a slot at its `0`
+    /// initialiser — and 0 is not one of the 27, so the mask would claim a position this
+    /// module never computes. A chain in the wrong order would still hold 27 correct
+    /// numbers, and `nothing_outside_the_twenty_six_positions_is_set` would still pass,
+    /// while the documented "down ladder, then up, then the five-session ladder" became
+    /// false.
+    #[test]
+    fn the_positions_are_the_three_ladders_concatenated_in_order() {
+        let expected: Vec<u16> = PREV_DAY_DOWN
+            .into_iter()
+            .chain(PREV_DAY_UP)
+            .chain(PREV5_UP)
+            .map(|(_, index)| index)
+            .collect();
+        assert_eq!(
+            expected.len(),
+            POSITION_COUNT,
+            "the ladders no longer hold POSITION_COUNT rungs between them"
+        );
+        assert_eq!(
+            positions().to_vec(),
+            expected,
+            "positions() is no longer the three ladders in ladder order"
+        );
+        assert!(
+            !positions().contains(&0),
+            "a slot was left at its zero initialiser, so the fill ran short of 27"
+        );
     }
 }

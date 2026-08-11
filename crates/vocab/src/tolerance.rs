@@ -55,7 +55,8 @@
 //!
 //! `R/100` is chosen over the neighbouring widths because its busiest rung
 //! fires on about 3% of bars: often enough to carry information, rarely enough
-//! to discriminate. See `docs/05-decisions.md` D-0076.
+//! to discriminate. See `docs/05-decisions.md` D-0076 (the `near_*` band) --
+//! disambiguated because that number was issued twice; D-0104 has the table.
 //!
 //! **Still unmeasured:** every figure above is from generated bars, not from
 //! the 2020-2026 history, which is not yet pulled. An ATR-relative or
@@ -82,7 +83,8 @@ pub const UNPINNED: i64 = i64::MIN;
 
 /// The Fibonacci band, in thousandths of the **session range**.
 ///
-/// **PINNED at 10 — one hundredth of the range — by D-0076.** The sweep behind
+/// **PINNED at 10 — one hundredth of the range — by D-0076 (the `near_*` band).**
+/// The other D-0076 is about Groww's interval words; see D-0104. The sweep behind
 /// it is in the module documentation.
 pub const TOL_FIB_MILLI: i64 = 10;
 
@@ -321,7 +323,8 @@ mod tests {
     fn the_tolerance_is_pinned_at_the_measured_width() {
         assert_eq!(
             TOL_FIB_MILLI, 10,
-            "D-0076 pinned the Fibonacci band at one hundredth of the session range"
+            "D-0076 (the `near_*` band) pinned the Fibonacci band at one hundredth \
+             of the session range"
         );
         assert_eq!(pinned_fib().map(Tolerance::milli), Ok(10));
         assert_eq!(pinned_pivot().map(Tolerance::milli), Ok(500));

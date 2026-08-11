@@ -9622,7 +9622,7 @@ file, take `max(existing) + 1`, and refuse rather than overwrite.**
 
 ---
 
-## D-0089 · 2026-08-11 · The one thing the emit-site count could never answer, now a gate
+## D-0107 · 2026-08-11 · The one thing the emit-site count could never answer, now a gate
 
 **Status: locked.**
 
@@ -9673,3 +9673,384 @@ future construct that is not a literal `failures.push(` is invisible to it, and
 an emit placed above a push that logs something unrelated would satisfy it. It
 converts the most common shape of this defect from discipline into a build
 failure; it does not make the class impossible.
+
+---
+
+## D-0105 · 2026-08-11 · Four NIFTY tiers join the REQUEST vocabulary, and the sweep surface is exactly where it was
+
+**Status: locked.**
+
+`api::ingest::SpotTarget` carried three variants — `swept`, `indices`, `equities`
+— and `/ingest` disabled its NIFTY 50, 100, 200 and 500 rows for one reason:
+there was no slug to put in the `target` field. The front end says so at
+`web/src/routes/ingest/+page.svelte`, where all four rows carry a literal
+`target: null` with the comment *"`target: null` is the whole refusal: it
+disables the row and it is why."* Posting `target=n50` returned
+`Refusal::UnknownTarget`.
+
+**The membership data was never the gap.** D-0089 appended `Universe::NIFTY_500`
+through `NIFTY_50` at bits 3..6 and transcribed the four constituent lists into
+`core::universe`; `/instruments.json` has emitted a `universes` array naming
+`n500`, `n200`, `n100` and `n50` in every row ever since, and an earlier agent
+measured it against the owner's running server: 50, 100, 200 and 500 names on
+both `dhan` and `groww`. The browser could COUNT each tier and could not ASK for
+one. That is a hole in the request vocabulary and in nothing else.
+
+`SpotTarget` now has seven variants. `ALL` is appended to, never reordered,
+because `server::Site::targets` is one counter per slot and `spot_answer` reads a
+slot by position — reordering relabels counts already on an operator's screen.
+
+### The slugs are the wire's own words, and that is the whole point
+
+`n50`, `n100`, `n200`, `n500` — character for character what
+`server::UNIVERSE_TOKENS` already emits. One vocabulary serves both directions:
+the token a row is filtered BY is the token a pull is requested WITH. Inventing
+`nifty50` here would have produced a set the page can count and cannot request
+under the name it counted it by, which is the defect this entry closes, arriving
+from the other end. `a_slug_that_is_not_a_target_is_refused_by_name_after_the_tiers_were_added`
+drives `nifty50`, `nifty-50`, `N50`, `n 50` and `n25` and refuses every one.
+
+### PULLABLE IS NOT SWEPT, and this entry does not widen `CLAUDE.md` §1
+
+A `n500` pull **stores** five hundred instruments and **sweeps none of them**.
+The engine surface is `NSE-NIFTY` and `NSE-BANKNIFTY`, it is
+`InstrumentKey::SWEPT` — two `(exchange, symbol)` pairs in `core` — and nothing
+in this change touched that table, `is_sweepable`, `require_sweepable`, or any
+caller of them. `SpotTarget::Swept` defers to `is_sweepable` rather than keeping
+a second copy of the pair, which is why a target cannot drift away from the
+surface even in principle.
+
+`a_nifty_tier_target_stores_and_never_sweeps` is that sentence as a test: 850
+constituent keys, none sweepable, none named by `SpotTarget::Swept`; and in the
+other direction, neither swept index is named by any tier — `NSE-NIFTY` is the
+series and the tier is the companies underneath it. `SWEPT.len() == 2` is
+asserted in the same test, so widening §1 breaks a test whose name says why.
+
+### The member lists are borrowed, never copied
+
+`SpotTarget::members` returns `core::universe`'s own consts. A second copy of
+"who is in the NIFTY 200" in `crates/api` would be a second answer, and the stale
+one would be whichever nobody rebalanced (`CLAUDE.md` §3 rule 1). The four tier
+tests assert the returned slice equals `core`'s const element by element, and
+then re-derive every name's membership through `core::universe::of_equity` — so
+the roster and the predicate are proved to be one set rather than two lists that
+happen to agree.
+
+`members` answers `None` for `Swept` and `Indices`, and that is a stated absence
+rather than a fallback (`CLAUDE.md` §4). `Swept` is the engine surface, not a
+published index membership; `Indices` is whatever the vendor master lists as an
+index series, and NSE publishes no file naming that set. A hardcoded list for
+either would be invention.
+
+### One catch-all removed, because the compiler could not have found it
+
+`Site::new` counted with `match target { Swept => key.is_sweepable(), _ =>
+entry.universe.contains(target.universe()) }`. The `_` arm is the one site in the
+crate that would have absorbed four new variants silently. It happened to be
+right for them — which is precisely the problem, because it decides for every
+variant that will ever exist, including ones whose membership is not a single bit
+test. It now calls `SpotTarget::names`, which is what `broker_run` filters the
+run by; counting with anything else is how a form comes to show a number no run
+will match, the exact defect `names` was added to remove. Every other `match` on
+`SpotTarget` is exhaustive and the compiler listed them.
+
+`Site::targets` is now `[usize; SpotTarget::ALL.len()]` rather than `[usize; 3]`
+— a hand-written length is a second place the target count lives, and the shorter
+of the two silently drops the tail.
+
+### The refusal counts nothing by hand
+
+`Refusal::UnknownTarget` rendered *"is not one of the three spot targets"*. There
+are seven. It now names the legal slugs, generated from `ALL`, so the one list an
+operator gets of what `target` accepts cannot be wrong one commit after somebody
+appends.
+
+### What this does NOT make work, stated rather than discovered
+
+* **The browser rows stay disabled.** `web/` is not touched by this entry: the
+  four rows still carry `target: null` and are enabled by mapping them to these
+  slugs. The server-side vocabulary is what was missing; the front end is a
+  separate change under the `web/` exception in `CLAUDE.md` §2.
+* **The broker path still refuses any target that names a set**, tiers included,
+  for the reason `equities` and `indices` have always been refused:
+  `pull::vendor::HttpSpec` carries no request-parameter map, so no instrument is
+  put on the wire and the vendor answers that a security id is required
+  (`server.rs`, first statements of `broker_window`). Refused by name ahead of
+  the credential read and the socket. A tier is exactly as servable as
+  `equities` is — no more, and no less.
+* **The archive path does not consult the target at all.** `run_local` takes
+  feed, folder, window, rung and store root; it ingests whatever CSV files the
+  named folder holds. So a `target=n50` archive receipt says "NIFTY 50 equities"
+  beside a run that filed the folder. That is a pre-existing conflation of what
+  a request NAMES with what a folder CONTAINS, it is identical for all seven
+  targets, and it is recorded here rather than fixed in the same change that
+  widened the vocabulary. Nothing in this entry made it worse or better.
+
+## D-0106 · 2026-08-11 · The logger's 19 uncovered lines are now declared one file at a time, and covering one of them is a build event
+
+`CLAUDE.md` §9 requires 100% line and branch coverage on every touched crate.
+`crates/telemetry` measures 99.24%, and the 19 lines short are not laziness:
+they are I/O failure arms, a latch's second visit, and backstops behind a
+condition the process cannot create. `docs/06-limits.md` §54 lists every one.
+
+`cargo llvm-cov` has no line-level exclusion — nothing finer than a whole file.
+So §9 and §3 rule 6 pulled against each other: the honest thing (a backstop for
+something unreachable) was indistinguishable from the dishonest thing (a line
+nobody tested). §54 left three options open and took none.
+
+**Taken: declare them, the way gate 1d declares path-shaped literals.**
+
+Gate 20 in the `coverage` job extracts zero-count lines under
+`crates/telemetry/src` from `cargo llvm-cov report --text` and compares the
+per-file counts against a declaration carried in the workflow beside the counts
+in §54. The alternatives were rejected on the record: deleting the unreachable
+arms trades real backstops for a percentage, which is the percentage becoming
+the goal; gating on regression from a measured floor is not a floor, because it
+moves down whenever somebody argues well enough.
+
+**The exact match is the point, not the ceiling.** A file with MORE uncovered
+lines than declared is a new gap. A file with FEWER is a declaration that has
+become false — the line turned out reachable, so the count drops and the row
+justifying it goes. Covering a line is therefore something the declaration has
+to record, not something it silently absorbs. This is the rule
+`crates/vocab/tests/workspace_is_rust.rs` already applies to a native dependency
+that has left the tree: *"a stale declaration implies a breach that is gone,
+which is its own kind of lie."*
+
+Counts are per file, never per line number. A line number is invalidated by
+editing a comment above it, and a declaration that rots on reformatting is one
+nobody keeps honest.
+
+**Proved to bite, four ways, before being believed.** Lowering a declared count
+fails; raising it fails; deleting a file's row fails. Those three only exercise
+the comparison. The fourth exercised the *measurement*: four uncovered lines
+were appended to `crates/telemetry/src/sink.rs`, the workspace coverage run was
+repeated, and the gate moved `sink.rs 8` to `sink.rs 12` and went red. The file
+was then restored and verified byte-identical by md5, the run repeated, and the
+gate returned green. A gate that only reacts to edits of its own declaration
+measures nothing, and this one was not trusted until that was ruled out.
+
+**What it does not do, said plainly.** It does not turn the `coverage` job
+green. That job also runs `--fail-under-lines 100` across the workspace, which
+measures 96.80% today. Gate 20 makes one crate's shortfall declared and
+enforced; every other crate's remains an undeclared shortfall. Extending the
+same declaration to them is the path and is not taken here.
+
+## D-0108 · 2026-08-11 · Pressing Run now flies, and a halt is probation for the two classes that can be measured — never for the one that cannot
+
+**Number taken as max+1 and asserted free before writing** (`D-0107` was the
+highest in the tree; two sessions share it). Supersedes the *reasoning* of
+D-0095's boot default without deleting it, and extends D-0093 rather than
+contradicting it.
+
+### The requirement, in the owner's words
+
+> "i will just click run api application alone only, but everything should be
+> entirely fully automated and integrated entirely with frontend and backend and
+> db. no manual intervention or human inputs or human monitoring should be
+> expected."
+
+Five things measurably blocked that. This entry settles three of them inside
+`crates/api/src/autopilot.rs`, records what the other two need, and — this is
+the part that matters — records the one thing that **cannot** be automated
+honestly, and why nothing here pretends to.
+
+---
+
+### 1 · The boot default is inverted: absence flies, the exact word `pause` does not
+
+`flies_on_startup` was `env("BRUTEX_AUTOPILOT") == "run"`. The tracked IntelliJ
+Run configuration sets no environment at all, so pressing Run reliably produced
+a process that came up paused and did nothing, for ever, while the banner told
+the operator to press a Resume they had not been told they would need.
+
+The rule is now: **absent flies. `run` flies. Anything else flies. Only the byte
+string `pause` holds it on the ground.** The comparison keeps the old exactness
+and merely points the other way — `PAUSE`, `paused`, ` pause`, `stop`, `false`,
+`0` and `off` all fly, and a test names every one of them.
+
+**What the old default was protecting, and what replaces it.** D-0095's
+reasoning was that this binary is started for many reasons and only one of them
+has a cost outside this machine — a rate budget spent, a token exercised, a
+vendor's logs written to. That is still true. What changed is who decides: the
+owner has decided that *pressing Run is the instruction to fly*. The consent the
+default used to give is now given by three pre-existing controls, none removed:
+
+* the **twenty-second grace window** (`GRACE_SECS`), counted down on the page,
+  which returns without contacting anything the moment the flag is set — this is
+  the mechanism that survives the flip and it is the real consent gate;
+* `POST /autopilot/pause` and `POST /autopilot/control action=stop`, which bite
+  within one instrument;
+* `BRUTEX_AUTOPILOT=pause` in the environment before start.
+
+**The asymmetry is deliberate and is the whole safety argument.** Under the old
+rule a typo left the machine on the ground doing nothing, which was *silent*.
+Under this rule a typo leaves it flying, which is a state the page announces,
+the terminal banner names, and the grace window gives twenty seconds to refuse.
+
+`autopilot::flies_on_startup` keeps its name and signature because
+`crates/api/src/server.rs` calls it and this session does not own that file. Both
+banner arms stay true under the new polarity: the flying arm prints the
+countdown, and the grounded arm still correctly says that setting the variable to
+`run` flies and that Resume works — a `pause`d process is paused, not halted, so
+Resume genuinely clears it. The environment read is split into
+`stays_paused_from(Option<&OsStr>)` — pure, and every arm testable — from the one
+line that fetches the variable, for the reason `server::masters_dir_from` is
+split from `default_masters_dir_from`: `set_var` is `unsafe` under edition 2024,
+this crate forbids `unsafe`, and an unsplit function has an arm no test can enter
+against §9's coverage floor.
+
+### 2 · A halt becomes probation for the two classes that can be MEASURED
+
+`FeedState::halted` is set at three sites and was cleared at none. A halt was
+terminal for the life of the process and a restart was the only cure. The three
+classes are not alike, and treating them alike was the defect:
+
+| class | can this process measure that the fault is gone? | what it now does |
+|---|---|---|
+| `Halt::Census` — the manifest exists and will not load | **yes, for free** — `round` re-reads every census once per pass already | cleared the moment that vendor's census is `Held` again |
+| `Halt::Store` — the same write refused twice | **yes, locally** — a few bytes written under the store root, `sync_all`-ed, removed | up to `STORE_PROBES` = 8 probes over 2 h 3 min; cleared only by a probe that succeeds |
+| `Halt::Credential` — the token is dead | **no. Nothing here can.** | **never re-checked at all** |
+
+**The credential row is the load-bearing one.** `CLAUDE.md` §8 forbids minting a
+token, and a timer-driven retry against an unchanged dead value is exactly the
+auto-retry §4 bans — a retry that hides a permanent fault. So this build arms
+*nothing* for that class: no schedule, no probe, no SSM re-read on a clock. The
+one automatic re-read §8 does grant already happens inside `broker_window`, which
+reads Parameter Store fresh for every instrument and caches nothing, so *the
+retry IS the re-read* — and after it, the feed halts and stays halted saying so.
+
+A design that noticed the parameter's *value had changed* (never that time had
+passed) would be permissible under §8 and is recorded here as **not built**: it
+requires calling `pull::ssm::get_parameter` from the backfill with a parameter
+path assembled in `crates/api/src/server.rs`, which this session does not own,
+and it is the highest-risk item on the list. Getting it wrong *is* §4's banned
+shape. It stays a human action: somebody rotates the token, and restarts.
+
+**Why this is not §4's banned shape for the two classes that are re-checked.**
+The phase stays `Halted` throughout. The original reason stays on the page
+verbatim. The probe count and the next probe time are published beside it. The
+clear is keyed on **new evidence** — a manifest that verifies, a write that
+reaches the device — and never on elapsed time. Nothing is hidden and nothing is
+claimed that was not measured.
+
+**And it is bounded, and it gives up out loud.** Eight probes, then `store_due`
+answers `Due::Spent` with a sentence saying the allowance is spent, nothing
+further is written or read for that feed, and it stays halted. A test exhausts
+the loop and asserts the refusal.
+
+`Census::Absent` deliberately does **not** revive a feed. Absent means the store
+reports it holds nothing; a feed revived on that reading would re-offer months
+whose bar files are still on disk, and `BarFile::append` refuses those wholesale
+because the overlap is not a suffix. Only `Census::Held` is evidence.
+
+**D-0093 is extended, not contradicted.** Its claim — *a resume cannot clear a
+halt* — is still exactly true: the feed table is a local of `fly` and no route
+reaches it. Probation is cleared by a measurement, and a measurement is not a
+control. `RESUME_CANNOT_CLEAR` gained a closing paragraph saying so, because a
+refusal that sent an operator to restart a server that was about to recover by
+itself would be a new small lie in place of the one D-0093 removed.
+
+### 3 · A stalled month is reconsidered at most twice, and only when nothing else is missing
+
+`MAX_MONTH_ATTEMPTS` = 3 failures pushed a month onto a permanent list and the
+frontier moved past it for the life of the process. A five-minute vendor outage
+in 2021-03 cost that month permanently, even while the process later sat idle
+with nothing else to do.
+
+Every stall this build can record is **transport-class by construction** — the
+credential class halts before the stall path is reached, and a repeated store
+refusal halts there too — which is exactly the class where a later attempt is
+justified. So `reconsider` puts the oldest eligible stalled month back on its
+feed's frontier, and:
+
+* **only from the idle branch of `round`** — the branch that already means
+  "nothing is missing that any feed can still be asked for", so it can never
+  delay forward progress;
+* **`STALL_RETRIES` = 2 per month per process**, at least `STALL_RECHECK_SECS` =
+  6 h apart. Worst case is `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = **9
+  attempts per stalled month per process, over at least twelve hours**. A test
+  asserts that arithmetic and exhausts the loop;
+* **never on a halted feed**, and never twice in one pass;
+* the stall stays on the list either way, and `stall_note` separates the months
+  still to be reconsidered from the ones whose allowance is **SPENT** — because
+  a list where those two look alike reads as though something is still pending.
+
+**Moving the frontier backward is safe, and this is the check that matters given
+the store cannot prepend.** The store is one file per month, so re-attempting
+month M writes `M.bin` and cannot reach M+1. Within M the window is re-derived
+from the manifest by `next_window`, which starts at the day after what is held,
+and `BarFile::append` verifies the overlap byte for byte and appends only the
+suffix. A re-attempt therefore costs vendor budget and **cannot corrupt** — §3
+rule 5, a recovery that re-runs does not double-write. `survey` re-derives the
+frontier upward on the next pass, so monotonicity is restored by the same scan
+that always establishes it.
+
+### 4 · Two smaller corrections found while doing the above
+
+* **One instrument's 401 no longer kills a whole feed.** `tick` builds its reason
+  from the first failure, so one symbol out of 773 answering `status 401` — an
+  entitlement gap on the account's contract, not a fact about the token — halted
+  the entire feed permanently. A genuinely dead token fails *every* instrument,
+  so the halt now requires `out.reached == 0`. Strictly more truthful, and the
+  partial case falls through to the bounded backoff that was always there.
+  `reached == 0` alone, not `reached == 0 && attempted > 0`: a run blocked before
+  it attempted anything reports zero attempts, and halting is the direction that
+  costs nothing outside this machine, so the ambiguous case takes it.
+* **An unusable clock is waited on rather than fatal.** `fly` returned outright
+  when `yesterday_ist` answered `None`, so a machine that booted before NTP
+  corrected its clock never started a backfill for the life of that process and
+  `admit_resume` then refused every resume for ever. It now re-derives every
+  `IDLE_POLL_SECS`, bounded by `CLOCK_WAITS` = 20 (twenty minutes), and then
+  stops and says the allowance is spent. `round` already handled the same failure
+  this way at its own site.
+
+### What this does NOT do, stated rather than discovered
+
+Five things were on the plan and are **not** in this change. Each is a fact about
+ownership or about honesty, not an oversight:
+
+1. **`/health` still answers 200 while every feed is terminal.** It reads
+   `site.read` — the masters — and nothing else. Making it answer 503 with the
+   reasons is the single cheapest way to turn "the owner must watch" into
+   "whatever already watches his machine tells him", and it is a change to
+   `crates/api/src/server.rs`, which another session holds. **Until it exists,
+   the owner is still required to look at `/autopilot.json` to learn that a
+   credential died.** That is the honest statement of what remains.
+2. **A halt still writes nothing durable to the log.** The two `telemetry::emit`
+   sites in this module are pause and resume; the most consequential event the
+   subsystem can produce writes nothing at all. Adding one is four lines — and
+   invariants A-38 and A-40 require a matching row and drive in
+   `crates/api/src/emitted.rs`, whose emit-site count is derived from source and
+   would fail the build without it. That file is another session's. The price is
+   correct and is not dodged here; it is deferred with its reason.
+3. **`Trouble::Credential` is not split into dead-vs-unreachable.** An SSM or
+   IMDS timeout is still filed as a dead credential. Splitting it needs marker
+   phrases taken from real AWS error text; inventing them is §3 rule 1's
+   prohibition, and no charter row records them.
+4. **The instrument masters are still operator-supplied files.** Automating the
+   refresh needs a `docs/00-charter.md` row for each vendor's CSV URL first (§3
+   rule 1), plus `crates/pull`, which this session does not own.
+5. **Nothing restarts the process if it dies, and this repository declines to.**
+   That is the operating system's job. A `launchd` `.plist` is XML and a
+   `systemd` unit is `.service`; §2's tracked-extension allowlist admits neither,
+   so the only place such a definition may live here is a fenced block inside a
+   `docs/*.md`, installed once by the operator. A self-supervising subcommand is
+   buildable in pure Rust and is **recommended against**: it does not survive its
+   own death, its own kill, a logout or a reboot, and it races port 8080 between
+   a dying child and its replacement. Note that a launchd-managed server and
+   pressing Run in the IDE are mutually exclusive — two servers race the store
+   and the port.
+
+### The honest summary of "no human monitoring"
+
+Achievable. **"No human ever" is not**, and this entry declines to pretend
+otherwise. Six faults still need a person: a dead broker token (§8 forbids the
+only automation that would remove it), a corrupt manifest (this build has no
+reconstructor and auto-rebuilding a census that already failed a checksum is the
+wrong instinct), a missing or malformed credential configuration (D-0013 gives it
+no default and no fallback, deliberately), both masters absent, a crash or
+reboot, and being *told* rather than having to look. For the first five the
+system now states its condition clearly and, where it can measure a repair,
+resumes on its own. For the sixth, item 1 above is the substitute and it is not
+built yet.

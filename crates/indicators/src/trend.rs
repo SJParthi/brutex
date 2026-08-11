@@ -437,8 +437,17 @@ impl SwingDetector {
     /// Fold one candle in and confirm a swing if the window now shows one.
     pub fn fold(&mut self, candle: &Candle) {
         self.seen = self.seen.saturating_add(1);
-        if let Some(slot) = self.ring.get_mut(self.next) {
-            *slot = Some((candle.high, candle.low));
+        // A scan across the fixed window, and NOT `ring.get_mut(self.next)`. `next` is
+        // `(next + 1) % RING`, so that `get_mut` could never answer `None` — and a
+        // branch no input can reach is a branch no test can hold anyone to, which is
+        // the same objection this module raised against a field nobody reads. Five
+        // comparisons over a five-slot array is the same constant cost, and both arms
+        // of the one below run on every candle.
+        let entry = Some((candle.high, candle.low));
+        for (i, slot) in self.ring.iter_mut().enumerate() {
+            if i == self.next {
+                *slot = entry;
+            }
         }
         self.next = self.next.saturating_add(1) % RING;
         if self.filled < RING {
@@ -454,14 +463,18 @@ impl SwingDetector {
     ///
     /// Chronological order is recovered by rotating the ring so the oldest entry is
     /// first: `next` points at the slot the *next* candle will overwrite, which is the
-    /// oldest one.
+    /// oldest one. The middle is [`FRACTAL`], the const derived from [`RING`], rather
+    /// than `RING.checked_div(2)` — the divisor is a literal, so that `checked_div`
+    /// could never answer `None` either.
+    ///
+    /// Both `else` arms below are defensive and **neither can run**: this is called
+    /// only when `filled == RING`, so every slot holds a candle. They are left as a
+    /// silent non-publication rather than turned into a panic, because publishing
+    /// nothing is the safe answer to a state that cannot occur.
     fn confirm(&mut self) {
         let mut window = self.ring;
         window.rotate_left(self.next);
-        let Some(middle_index) = RING.checked_div(2) else {
-            return;
-        };
-        let Some(Some((mid_high, mid_low))) = window.get(middle_index).copied() else {
+        let Some(Some((mid_high, mid_low))) = window.get(FRACTAL).copied() else {
             return;
         };
 
@@ -479,7 +492,7 @@ impl SwingDetector {
             if low < span_low {
                 span_low = low;
             }
-            if i == middle_index {
+            if i == FRACTAL {
                 continue;
             }
             // Strict on both sides: a plateau is not a swing. Two adjacent equal highs
@@ -1340,6 +1353,531 @@ mod thresholds_are_read {
         assert!(
             d.swing_high().is_some(),
             "the window completes at candle RING-1 and the swing is published then"
+        );
+    }
+}
+
+#[cfg(test)]
+mod defaults_and_degenerate_periods {
+    use super::*;
+
+    fn bar(ts: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: ts,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// `Default` is the classical set, and a state reports the set it computes with.
+    ///
+    /// Two `Default` impls reach these numbers — [`TrendThresholds::default`] and
+    /// [`TrendState::default`] — and each names the constant separately. If one drifted,
+    /// a caller recording [`TrendState::thresholds`] would file a run under numbers the
+    /// sweep did not use, which is §3 rule 3's identity broken quietly rather than
+    /// loudly.
+    #[test]
+    fn the_default_thresholds_are_the_classical_set() {
+        assert_eq!(
+            TrendThresholds::default(),
+            TrendThresholds::CLASSICAL,
+            "`Default` must BE `CLASSICAL`, not a second opinion about it"
+        );
+        assert_eq!(
+            TrendState::default().thresholds(),
+            TrendThresholds::CLASSICAL,
+            "a defaulted state must report the thresholds it actually computes with"
+        );
+    }
+
+    /// A defaulted detector is an empty one, not a half-filled window.
+    #[test]
+    fn a_defaulted_detector_has_confirmed_nothing() {
+        let d = SwingDetector::default();
+        assert_eq!(
+            d,
+            SwingDetector::new(),
+            "`Default` and `new` must be the same detector, or `fresh` means two things"
+        );
+        assert_eq!(
+            d.swing_high(),
+            None,
+            "an empty window has confirmed no high"
+        );
+        assert_eq!(d.swing_low(), None, "an empty window has confirmed no low");
+    }
+
+    /// A defaulted structure carries no direction, so its first break is a `BoS`.
+    ///
+    /// A `Default` that started at `Some(_)` would make the first break of every run a
+    /// `CHoCH` — an artefact of where the run started rather than a fact about price,
+    /// which is exactly what [`Structure::observe`]'s first-break rule exists to refuse.
+    #[test]
+    fn a_defaulted_structure_has_no_prior_direction() {
+        let mut s = Structure::default();
+        assert_eq!(
+            s,
+            Structure::new(),
+            "`Default` and `new` must be the same structure"
+        );
+        let high = Some(Swing {
+            price: 2_500_000,
+            window_span: 10_000,
+            confirmed_at: 3,
+        });
+        assert_eq!(
+            s.observe(2_501_000, high, None),
+            Some(Break::BosBullish),
+            "the first break out of a defaulted structure is a BoS, never a CHoCH"
+        );
+    }
+
+    /// A period that cannot divide holds the seed instead of dividing by zero.
+    ///
+    /// `ema_fast` and `ema_slow` are public `i128` fields with no floor, so
+    /// [`TrendState::new`] hands [`Ema::new`] whatever a caller writes. At `period == -1`
+    /// the denominator `n + 1` is exactly zero and the update divides by it: without the
+    /// guard this panics instead of reporting, and a panic in a sweep is 200,000 candles
+    /// of work thrown away for one bad threshold.
+    #[test]
+    fn an_average_whose_period_cannot_divide_holds_its_seed() {
+        let mut e = Ema::new(-1);
+        e.fold(2_500_000);
+        e.fold(9_000_000);
+        e.fold(1_000_000);
+        assert_eq!(
+            e.value(),
+            Some(2_500_000),
+            "a period that cannot divide must hold the seed: not panic, and not guess a step"
+        );
+    }
+
+    /// The same for the ATR, whose divisor is the period itself rather than `n + 1`.
+    #[test]
+    fn an_atr_whose_period_cannot_divide_holds_its_seed() {
+        let mut a = Atr::new(0);
+        // Seeds at the first candle's high-low span, 1,000 paisa.
+        a.fold(&bar(0, 2_501_000, 2_500_000, 2_500_500));
+        // A 200,000-wide candle would move a working ATR a very long way.
+        a.fold(&bar(60_000_000, 2_600_000, 2_400_000, 2_500_000));
+        assert_eq!(
+            a.value(),
+            Some(1_000),
+            "a zero period must divide nothing, and must smooth nothing either"
+        );
+    }
+
+    /// Nothing reports a range or a stop before the first candle.
+    ///
+    /// A zero would be worse than an absence here: a zero ATR is a zero `SuperTrend`
+    /// band, which puts the stop exactly on the midpoint and flips the trend on the
+    /// first candle that closes on the other side of it.
+    #[test]
+    fn an_unseeded_range_and_stop_report_nothing_rather_than_zero() {
+        assert_eq!(
+            Atr::new(10).value(),
+            None,
+            "an unfed ATR has no range to report, and zero is not `no range`"
+        );
+        let fresh = SuperTrend::new(TrendThresholds::CLASSICAL);
+        assert_eq!(
+            fresh.stop(),
+            None,
+            "there is no trailing stop before the first candle"
+        );
+        assert_eq!(
+            fresh.trend(),
+            Trend::Up,
+            "the latch starts on one side by construction; `stop() == None` is what keeps \
+             that arbitrary side out of positions 64 and 65"
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_stop_on_both_sides {
+    use super::*;
+
+    fn bar(ts: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: ts,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// The seed takes the side the first candle implies — and the other side proves it.
+    ///
+    /// Half of this had never run. Seeding always long would make the first 64/65 bit an
+    /// artefact of the starting trend rather than a fact about the candle, and a test
+    /// that only ever seeds long cannot tell the two apart.
+    #[test]
+    fn the_first_candle_decides_which_side_the_stop_seeds_on() {
+        // mid is 2_500_000 and the first ATR is the 20,000 high-low span, so the band is
+        // three times that: 60,000.
+        let mut short = SuperTrend::new(TrendThresholds::CLASSICAL);
+        short.fold(&bar(0, 2_510_000, 2_490_000, 2_491_000));
+        assert_eq!(
+            short.trend(),
+            Trend::Down,
+            "a close below the midpoint seeds short"
+        );
+        assert_eq!(
+            short.stop(),
+            Some(2_560_000),
+            "a short stop sits at mid + band, above price"
+        );
+
+        let mut long = SuperTrend::new(TrendThresholds::CLASSICAL);
+        long.fold(&bar(0, 2_510_000, 2_490_000, 2_509_000));
+        assert_eq!(
+            long.trend(),
+            Trend::Up,
+            "a close above the midpoint seeds long"
+        );
+        assert_eq!(
+            long.stop(),
+            Some(2_440_000),
+            "a long stop sits at mid - band, below price"
+        );
+    }
+
+    /// A short stop tightens downward, holds when the band widens, and flips on a close
+    /// through it.
+    ///
+    /// The mirror of `tests::the_stop_ratchets_and_does_not_retreat`, and not a copy of
+    /// it: that test seeds long and stays long, so the whole `Trend::Down` arm — the
+    /// tightening, the hold, and the flip back up — had never run. A stop that loosened
+    /// in a down trend would follow price back up and never be taken out, which is the
+    /// ratchet's whole purpose defeated.
+    #[test]
+    fn a_short_stop_tightens_holds_and_then_flips() {
+        let mut s = SuperTrend::new(TrendThresholds::CLASSICAL);
+        s.fold(&bar(0, 2_510_000, 2_490_000, 2_491_000));
+        let mut previous = s.stop();
+        let mut tightened = 0_u32;
+        for i in 1..20_i64 {
+            let p = 2_490_000 - i * 2_000;
+            s.fold(&bar(i * 60_000_000, p + 1_000, p - 1_000, p));
+            assert_eq!(
+                s.trend(),
+                Trend::Down,
+                "candle {i} closed far below the stop and must still be short"
+            );
+            let now = s.stop();
+            assert!(
+                matches!((previous, now), (Some(before), Some(after)) if after <= before),
+                "the short stop loosened or vanished at candle {i}: {previous:?} then {now:?}"
+            );
+            if matches!((previous, now), (Some(before), Some(after)) if after < before) {
+                tightened += 1;
+            }
+            previous = now;
+        }
+        assert!(
+            tightened > 0,
+            "a series falling 2,000 paisa a candle must tighten the short stop at least \
+             once, or the ratchet is not moving at all"
+        );
+
+        // A candle whose range explodes puts mid + band far ABOVE the stop. The ratchet
+        // must hold it, not follow the band out: the market has not taken it out.
+        let held = s.stop();
+        let p = 2_490_000 - 20 * 2_000;
+        s.fold(&bar(20 * 60_000_000, p + 200_000, p - 1_000, p - 500));
+        assert_eq!(
+            s.trend(),
+            Trend::Down,
+            "a wide candle that still closed below the stop is not a flip"
+        );
+        assert_eq!(
+            s.stop(),
+            held,
+            "a widening band must never loosen a stop price has not reached"
+        );
+
+        // And a close through it flips to long, with the stop on the other side of price.
+        let close = p + 300_000;
+        s.fold(&bar(21 * 60_000_000, p + 400_000, p, close));
+        assert_eq!(
+            s.trend(),
+            Trend::Up,
+            "a close above the short stop is the flip"
+        );
+        let flipped = s.stop();
+        assert!(
+            flipped.is_some_and(|stop| stop < close),
+            "after the flip the stop must sit below price at mid - band, not above it: {flipped:?}"
+        );
+    }
+
+    /// A stop that will not fit `i64` is refused, and the last good one stands.
+    ///
+    /// `supertrend_mult` is a public `i128` with no ceiling, so the band is only as
+    /// bounded as its caller. The multiplier below is not one any operator would set: it
+    /// is the coarse thing that puts `mid + band` past the top of `i64` while every price
+    /// stays ordinary paisa, which is the only way to reach the conversion's failing arm.
+    /// A wrapped stop would be a plausible wrong price, which §4 bans outright.
+    #[test]
+    fn a_stop_that_will_not_fit_i64_is_refused_and_the_last_good_one_stands() {
+        let mut s = SuperTrend::new(TrendThresholds {
+            supertrend_mult: 1_000_000_000_000_000_000_000,
+            ..TrendThresholds::CLASSICAL
+        });
+        // A limit-locked minute: zero range, so the first ATR is zero and the band with
+        // it. It is the only candle here whose stop can be represented at all.
+        s.fold(&bar(0, 2_500_000, 2_500_000, 2_500_000));
+        assert_eq!(
+            s.trend(),
+            Trend::Up,
+            "a close on the midpoint seeds long — `side` gives equality to neither bit, \
+             but the seed has to pick a side"
+        );
+        assert_eq!(
+            s.stop(),
+            Some(2_500_000),
+            "a zero band puts the seeded stop exactly on the midpoint"
+        );
+        // A 2,000-wide candle takes the ATR to 200, so the band is 2 x 10^20 — past the
+        // top of `i64` — and the close is under the stop, which is a flip to short.
+        s.fold(&bar(60_000_000, 2_501_000, 2_499_000, 2_499_500));
+        assert_eq!(s.trend(), Trend::Down, "the flip itself is still recorded");
+        assert_eq!(
+            s.stop(),
+            Some(2_500_000),
+            "an unrepresentable band must leave the last good stop in place, never wrap it"
+        );
+    }
+
+    /// A true range that will not fit `i64` establishes no stop at all.
+    ///
+    /// `high - low` is 2^63 here, one past the top of the type. [`Candle::check`] catches
+    /// it — this test asserts that it does — so [`TrendState::step`] never reaches the
+    /// guard. The guard exists because [`SuperTrend::fold`] is public and takes an
+    /// unchecked candle, and this crate is consumed by another repository.
+    #[test]
+    fn a_range_that_will_not_fit_i64_establishes_no_stop() {
+        let mut s = SuperTrend::new(TrendThresholds::CLASSICAL);
+        let corrupt = bar(0, i64::MAX, -1, 0);
+        assert_eq!(
+            corrupt.check(),
+            Err(crate::Corrupt::RangeOverflows),
+            "the record is corrupt and the type says so; `fold` sees it only from a \
+             caller that skipped the check"
+        );
+        s.fold(&corrupt);
+        assert_eq!(
+            s.stop(),
+            None,
+            "an ATR that does not fit `i64` must establish no stop rather than a wrapped one"
+        );
+        // Wilder's smoothing sheds a tenth of that corrupt seed per candle, so the band
+        // is still out of scale on the next candle and the stop is still absent — absent
+        // and loud beats present and wrong.
+        s.fold(&bar(60_000_000, 2_501_000, 2_499_000, 2_500_000));
+        assert_eq!(
+            s.stop(),
+            None,
+            "a stop that cannot be represented stays absent, and is not wrapped into range"
+        );
+    }
+}
+
+#[cfg(test)]
+mod the_window_and_the_wrap {
+    use super::*;
+
+    fn bar(ts: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: ts,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// A window that is not full confirms nothing, at every count on the way up.
+    ///
+    /// The five candles are a real peak — the same ones
+    /// `tests::a_swing_high_is_confirmed_two_bars_late` confirms — so a detector that
+    /// published from a partly-filled ring would publish this one early, and the
+    /// assertion names the count that did it.
+    #[test]
+    fn a_window_that_is_not_full_confirms_nothing() {
+        let highs = [2_500_000_i64, 2_501_000, 2_505_000, 2_502_000, 2_500_500];
+        for count in 1..RING {
+            let mut d = SwingDetector::new();
+            for (ts, high) in (0_i64..).zip(highs.iter().take(count)) {
+                d.fold(&bar(ts * 60_000_000, *high, high - 2_000, high - 1_000));
+            }
+            assert_eq!(
+                d.swing_high(),
+                None,
+                "{count} candles cannot fill a {RING}-candle window"
+            );
+            assert_eq!(
+                d.swing_low(),
+                None,
+                "{count} candles cannot fill a {RING}-candle window"
+            );
+        }
+    }
+
+    /// A peak whose window straddles the ring's wrap is confirmed at the right candle.
+    ///
+    /// Ten candles through a five-slot ring, with the only peak at index 6 — so the
+    /// window that confirms it spans the wrap. A detector that recovered chronological
+    /// order wrongly there would name a neighbour's high, or stamp it against the wrong
+    /// candle, and both are asserted exactly rather than as a property.
+    #[test]
+    fn a_peak_that_straddles_the_wrap_is_confirmed_at_the_right_candle() {
+        let highs = [
+            2_500_000_i64,
+            2_501_000,
+            2_502_000,
+            2_503_000,
+            2_504_000,
+            2_505_000,
+            2_520_000,
+            2_506_000,
+            2_505_500,
+            2_505_200,
+        ];
+        let mut d = SwingDetector::new();
+        for (i, high) in (0_i64..).zip(highs) {
+            d.fold(&bar(i * 60_000_000, high, high - 2_000, high - 1_000));
+            if i < 8 {
+                assert_eq!(
+                    d.swing_high(),
+                    None,
+                    "candle {i} cannot know the peak at index 6 yet"
+                );
+            }
+        }
+        assert_eq!(
+            d.swing_high(),
+            Some(Swing {
+                price: 2_520_000,
+                window_span: 18_000,
+                confirmed_at: 9,
+            }),
+            "the peak is index 6's high, in a window spanning 2_502_000 to 2_520_000, \
+             confirmed on the ninth candle folded"
+        );
+    }
+
+    /// One candle can be both the high and the low of its window, and both latches then
+    /// carry the same stamp.
+    ///
+    /// `confirm` publishes twice from one window here. A version that published the high
+    /// and returned would leave the swing low stale, and 73 would then measure price
+    /// against a level ten candles older than the one 72 uses.
+    #[test]
+    fn an_outside_candle_confirms_both_latches_on_the_same_candle() {
+        let window = [
+            (2_501_000_i64, 2_499_000_i64),
+            (2_502_000, 2_498_000),
+            (2_520_000, 2_480_000),
+            (2_503_000, 2_497_000),
+            (2_504_000, 2_496_000),
+        ];
+        let mut d = SwingDetector::new();
+        for (i, (high, low)) in (0_i64..).zip(window) {
+            d.fold(&bar(i * 60_000_000, high, low, high - 1_000));
+        }
+        assert_eq!(
+            d.swing_high(),
+            Some(Swing {
+                price: 2_520_000,
+                window_span: 40_000,
+                confirmed_at: 5,
+            }),
+            "the outside candle's high is the swing high"
+        );
+        assert_eq!(
+            d.swing_low(),
+            Some(Swing {
+                price: 2_480_000,
+                window_span: 40_000,
+                confirmed_at: 5,
+            }),
+            "and its low is the swing low, stamped on the same candle"
+        );
+        // Both prices come from ONE candle, so the low is below the high and no close can
+        // break both at once. `observe`'s `Equal` arm is therefore unreachable from a
+        // detector, and reachable only through a direct call with hand-built swings —
+        // `double_break::two_swings_confirmed_together_report_nothing` is that call.
+    }
+}
+
+#[cfg(test)]
+mod every_break_is_classified {
+    use super::*;
+
+    /// Every prior direction against every direction a close can break, once each.
+    ///
+    /// The four `Break` variants come out of a two-way match, and a scenario test walks
+    /// one path through it at a time. This walks all six: no prior direction, a prior
+    /// long, and a prior short, each against an up break and a down break. `(None,
+    /// Down)` is the row that matters most — reporting a `CHoCH` there, because there is
+    /// no prior direction to compare against, is the defect the first-break rule exists
+    /// to prevent.
+    #[test]
+    fn every_prior_direction_and_break_direction_pair_is_classified() {
+        let high = Swing {
+            price: 2_500_000,
+            window_span: 10_000,
+            confirmed_at: 10,
+        };
+        let low = Swing {
+            price: 2_400_000,
+            window_span: 10_000,
+            confirmed_at: 20,
+        };
+        let cases = [
+            (None, 2_501_000_i64, Trend::Up, Break::BosBullish),
+            (None, 2_399_000, Trend::Down, Break::BosBearish),
+            (Some(Trend::Up), 2_501_000, Trend::Up, Break::BosBullish),
+            (Some(Trend::Up), 2_399_000, Trend::Down, Break::ChochBearish),
+            (Some(Trend::Down), 2_501_000, Trend::Up, Break::ChochBullish),
+            (Some(Trend::Down), 2_399_000, Trend::Down, Break::BosBearish),
+        ];
+        for (last, close, direction, expected) in cases {
+            let mut s = Structure { last };
+            assert_eq!(
+                s.observe(close, Some(high), Some(low)),
+                Some(expected),
+                "a close at {close} with {last:?} behind it must be {expected:?}"
+            );
+            assert_eq!(
+                s.last,
+                Some(direction),
+                "the break must be remembered as {direction:?}, or the next one is \
+                 classified against a stale direction"
+            );
+        }
+
+        // A close that reaches neither level breaks nothing and remembers nothing.
+        let mut s = Structure::new();
+        assert_eq!(
+            s.observe(2_450_000, Some(high), Some(low)),
+            None,
+            "a close between the two levels is not a break"
+        );
+        assert_eq!(
+            s.last, None,
+            "a candle that broke nothing must not install a direction"
         );
     }
 }
