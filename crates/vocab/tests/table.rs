@@ -27,16 +27,20 @@ const VOCABULARY_DOC: &str = include_str!("../../../docs/03-vocabulary.md");
 /// The three retirements, and what each one duplicated.
 const TOMBSTONES: [(u16, u16); 3] = [(6, 62), (19, 17), (25, 18)];
 
-/// Parse the `| 6 | near_pivot_p |` rows out of §5 of the vocabulary document.
-fn shipped_names_from_the_document() -> Vec<(u16, String)> {
+/// Parse the `| 6 | near_pivot_p |` definition rows out of a document.
+///
+/// Takes the text rather than reading [`VOCABULARY_DOC`] directly so that
+/// [`the_row_parser_reads_definition_rows_and_skips_everything_else`] can hand it
+/// the rows a real document does not currently contain. A parser whose reject
+/// paths are never exercised is a parser that can start rejecting everything
+/// without anybody noticing.
+fn names_from(document: &str) -> Vec<(u16, String)> {
     // The WHOLE document, not just §5. The shipped table lives in §5 with three
     // columns; the appended positions live in §7 with four. Restricting the scan
     // to §5 is what let 200 positions sit undocumented while this test stayed
     // green.
-    let section = VOCABULARY_DOC;
-
     let mut rows = Vec::new();
-    for line in section.lines() {
+    for line in document.lines() {
         let cells: Vec<&str> = line.split('|').map(str::trim).collect();
         // `| 7 | `near_pivot_r1` |` splits to 4 cells; the §7 shape
         // `| 74 | `name` | — | live |` splits to 6. Accept any row whose second
@@ -56,6 +60,49 @@ fn shipped_names_from_the_document() -> Vec<(u16, String)> {
     rows
 }
 
+/// **The row parser takes definition rows and nothing else.**
+///
+/// Every other test in this file reads the parser's output and would report a
+/// transcription error if it were wrong. None of them can tell a parser that
+/// **rejects too much** from a document that is short: `doc.len() >= 74` is the
+/// only floor, and a parser that silently stopped accepting the §7 four-column
+/// shape, or started swallowing the §8 headroom rows as definitions, would fail
+/// somewhere far from the cause.
+///
+/// So the parser is fed the four shapes it must reject and the two it must take.
+/// The `not_backticked` row is the one that matters most: it is the reject path
+/// `docs/03-vocabulary.md` never exercises, because every one of its 276 numbered
+/// rows does carry a backticked name — so before this test that branch had never
+/// run, and a parser that treated a bare cell as a name would have been accepted.
+#[test]
+fn the_row_parser_reads_definition_rows_and_skips_everything_else() {
+    let document = concat!(
+        "| # | name | group |\n",
+        "|---|---|---|\n",
+        "| 0 | `above_vwap` | vwap |\n",
+        "| 1 | `below_vwap` | vwap | live |\n",
+        "| 2 | not_backticked | vwap |\n",
+        "| three | `spelled_out_index` | vwap |\n",
+        "| 4 | `no_closing_pipe`\n",
+        "a line of prose naming position 5 and holding no table at all\n",
+        "| positions allocated | 276 | the headroom table, not a definition |\n",
+    );
+    assert_eq!(
+        names_from(document),
+        vec![(0, "above_vwap".to_owned()), (1, "below_vwap".to_owned())],
+        "the parser must take the three-column §5 shape and the four-column §7 \
+         shape, and take nothing else: not a header, not a separator, not a row \
+         whose name is bare, not a row whose index is spelled out, not a row too \
+         short to be one, not prose, and not a headroom row that happens to hold \
+         a number",
+    );
+    assert!(
+        names_from("").is_empty(),
+        "an empty document must parse to no rows rather than to a row of empty \
+         cells",
+    );
+}
+
 /// **The shipped 74 are transcribed exactly, and nothing is undocumented.**
 ///
 /// Two directions, and they are not the same check.
@@ -70,7 +117,7 @@ fn shipped_names_from_the_document() -> Vec<(u16, String)> {
 ///   checking at all.
 #[test]
 fn the_shipped_74_are_the_document_character_for_character() {
-    let doc = shipped_names_from_the_document();
+    let doc = names_from(VOCABULARY_DOC);
     assert!(
         doc.len() >= 74,
         "the parser matched only {} rows; a silent zero or a short read here \
@@ -133,7 +180,7 @@ fn the_shipped_74_are_the_document_character_for_character() {
 /// unchanged and quietly renumbers everything after it.
 #[test]
 fn the_table_is_a_contiguous_run_of_indices() {
-    assert_eq!(COUNT, 274);
+    assert_eq!(COUNT, 276);
     let seen: BTreeSet<u16> = TABLE.iter().map(|d| d.index).collect();
     assert_eq!(seen.len(), COUNT, "an index is repeated");
     for (position, def) in TABLE.iter().enumerate() {
@@ -146,8 +193,8 @@ fn the_table_is_a_contiguous_run_of_indices() {
         );
     }
     assert_eq!(seen.first().copied(), Some(0));
-    assert_eq!(seen.last().copied(), Some(273));
-    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 274");
+    assert_eq!(seen.last().copied(), Some(275));
+    assert_eq!(usize::from(NEXT_FREE), COUNT, "the next append goes at 276");
 }
 
 /// **No two live positions share a name.** Two rows with one name is two
@@ -167,8 +214,8 @@ fn no_two_live_positions_share_a_name() {
     }
     assert_eq!(
         by_name.len(),
-        232,
-        "274 positions, less three tombstones and less 39 void forming-pivot rows"
+        234,
+        "276 positions, less three tombstones and less 39 void forming-pivot rows"
     );
 }
 
@@ -270,7 +317,7 @@ fn no_live_row_occupies_a_retired_position() {
         );
     }
     let last = TABLE.last().expect("the table is not empty");
-    assert_eq!(last.index, 273);
+    assert_eq!(last.index, 275);
     assert_eq!(
         usize::from(NEXT_FREE),
         COUNT,
@@ -298,12 +345,16 @@ fn every_near_name_is_a_near_kind_and_no_other_is() {
             near += 1;
         }
     }
-    assert_eq!(near, 97, "97 of the 274 positions need the tolerance");
+    assert_eq!(near, 97, "97 of the 276 positions need the tolerance");
     let live_near = TABLE
         .iter()
         .filter(|d| d.kind == Kind::Near && d.status == BitStatus::Live)
         .count();
-    assert_eq!(live_near, 81, "three of the 76 are tombstones");
+    assert_eq!(
+        live_near, 81,
+        "16 of the 97 are not live: the three tombstones (6, 19, 25) and the 13 void \
+         forming-pivot positions D-0080 excluded"
+    );
 }
 
 /// Names are `snake_case` ASCII. A stray capital or space is the sort of thing
@@ -327,11 +378,11 @@ fn every_name_is_snake_case_ascii() {
 
 /// The 200 appended positions are in the groups they were specified in, at the
 /// boundaries they were specified at. This is what catches a group that is one
-/// row short: the count still reaches 274 because the next group absorbed the
+/// row short: the count still reaches [`NEXT_FREE`] because the next group absorbed the
 /// difference, and every name after the seam means the wrong thing.
 #[test]
 fn the_appended_groups_start_and_end_where_they_are_specified() {
-    let groups: [(u16, u16, &str); 13] = [
+    let groups: [(u16, u16, &str); 14] = [
         (74, 85, "_band"),
         (86, 105, "orb"),
         (106, 109, "near_fib_bull_"),
@@ -345,6 +396,7 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
         (190, 197, "vwap_band"),
         (198, 234, "pat_"),
         (235, 273, "forming_pivot_"),
+        (274, 275, "cpr_day"),
     ];
     let mut covered = 0;
     for (first, last, marker) in groups {
@@ -369,8 +421,8 @@ fn the_appended_groups_start_and_end_where_they_are_specified() {
             );
         }
     }
-    assert_eq!(covered, 200, "the appended range is 74..=273");
-    assert_eq!(COUNT - 74, 200);
+    assert_eq!(covered, 202, "the appended range is 74..=275");
+    assert_eq!(COUNT - 74, 202);
 }
 
 /// The eleven-rung Fibonacci ladders are eleven rungs, in one order, three
@@ -414,4 +466,100 @@ fn the_retired_duplicates_were_not_re_added_under_new_names() {
              another position exactly",
         );
     }
+}
+
+/// Every number in the document's headroom table, checked against the table it
+/// describes.
+///
+/// # Why this test exists, and what it caught
+///
+/// §8 of the vocabulary document is a list of counts. Nothing read it, so when the
+/// table grew from 274 positions to 276 the document kept saying 274, 232 and 110 --
+/// three numbers that had each been correct when written. A count copied out of the
+/// code is a count that rots, and it rots **silently**, because a table of
+/// independent numbers cannot look wrong.
+///
+/// It also caught the opposite mistake. The row for the tolerance-bearing positions
+/// was labelled `near_*`, which reads as "the name starts with `near_`" -- 89
+/// positions, 73 of them live. The number in the document was 81, which is the count
+/// of positions **declaring `Kind::Near`**, and it was right. An ambiguous label is
+/// how a correct number gets "corrected" into a wrong one, so the label now names the
+/// predicate rather than a name shape.
+///
+/// The first five rows must also SUM to the allocated total. That is the part a
+/// per-row check cannot give: a table whose rows are required to add up announces its
+/// own staleness the moment one cell drifts.
+#[test]
+fn the_documented_headroom_is_the_table_it_describes() {
+    let retired = TABLE
+        .iter()
+        .filter(|d| matches!(d.status, BitStatus::Retired { .. }))
+        .count();
+    let void = TABLE
+        .iter()
+        .filter(|d| matches!(d.status, BitStatus::Void { .. }))
+        .count();
+    let near_all = TABLE.iter().filter(|d| d.kind == Kind::Near).count();
+    let near_live = TABLE
+        .iter()
+        .filter(|d| d.kind == Kind::Near && d.status == BitStatus::Live)
+        .count();
+    let live = usize::try_from(LIVE.popcount()).unwrap();
+    let allocated = usize::from(NEXT_FREE);
+    let width = usize::try_from(ConditionMask::BITS).unwrap();
+
+    // Label fragment -> the numbers the code says that row must open with.
+    let rows: [(&str, &[usize]); 7] = [
+        // "276 (0-275)" -- the total, then the inclusive range it spans.
+        ("positions allocated", &[allocated, 0, allocated - 1]),
+        ("| live |", &[live]),
+        ("retired", &[retired]),
+        ("void", &[void]),
+        ("Kind::Near", &[near_live, near_all]),
+        ("mask width", &[width]),
+        ("free positions", &[width - allocated]),
+    ];
+
+    let section = VOCABULARY_DOC
+        .split("## 8. Headroom, restated")
+        .nth(1)
+        .expect("§8 exists; if it was renamed this test must be updated with it");
+    let section = section.split("\n## ").next().unwrap_or(section);
+
+    for (label, expected) in rows {
+        let needle = label.trim_start_matches("| ").trim_end_matches(" |");
+        let row = section
+            .lines()
+            .find(|l| l.starts_with('|') && l.contains(needle))
+            .unwrap_or_else(|| panic!("§8 has no row containing `{needle}`"));
+        let found: Vec<usize> = row
+            .split('|')
+            .nth(2)
+            .unwrap_or("")
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|t| !t.is_empty())
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        for (i, want) in expected.iter().enumerate() {
+            assert_eq!(
+                found.get(i).copied(),
+                Some(*want),
+                "§8's `{needle}` row reads {found:?}; the table says number {i} is \
+                 {want}. The document is the stale copy -- `crates/vocab/src/table.rs` \
+                 is the truth. Row: {row}"
+            );
+        }
+    }
+
+    // The accounting must close, or a position is counted twice or not at all.
+    assert_eq!(
+        live + retired + void,
+        allocated,
+        "every allocated position is live, retired or void and nothing else: \
+         {live} + {retired} + {void} != {allocated}"
+    );
+    assert!(
+        allocated <= width,
+        "the table has outgrown the mask; widen `WORDS` in the same change"
+    );
 }

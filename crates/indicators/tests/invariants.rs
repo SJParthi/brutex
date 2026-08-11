@@ -8,25 +8,36 @@
 //! not need, because the input space that matters here is a real bar slice that can
 //! be walked in full.
 
+#![allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes — see \
+              tests/shared_core_doc.rs beside this file: a test that cannot panic \
+              cannot fail. `expect` and not the `let ... else { unreachable!() }` this \
+              file used to spell, because `unreachable!` expands to a panic inside the \
+              crate under test and is therefore a coverage region no green run can ever \
+              execute, while `expect` panics inside the standard library and leaves no \
+              such region behind."
+)]
+
+use indicators::Candle;
 use indicators::CurDayFib;
 use indicators::daily::DailyLevels;
 use indicators::pattern::{Patterns, Thresholds};
 use indicators::session::SessionState;
-use store::format::Bar;
 use vocab::{ConditionMask, Tolerance};
 
 /// One synthetic session, deterministic and shaped like a real one.
 ///
 /// Prices wander in a fixed pattern so bars differ from one another — a slice of
 /// identical bars would satisfy every property below without exercising anything.
-fn session(day: i64, n: i64) -> Vec<Bar> {
+fn session(day: i64, n: i64) -> Vec<Candle> {
     const IST_OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
     const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
     (0..n)
         .map(|m| {
             let drift = (m * 137) % 811 - 405;
             let mid = 2_500_000 + drift * 7;
-            Bar {
+            Candle {
                 ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * 60 * 1_000_000,
                 open: mid,
                 high: mid + 300 + (m % 11) * 20,
@@ -40,10 +51,7 @@ fn session(day: i64, n: i64) -> Vec<Bar> {
 }
 
 fn tol() -> Tolerance {
-    let Ok(t) = vocab::tolerance::pinned_fib() else {
-        unreachable!("the pinned fib tolerance is valid")
-    };
-    t
+    vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid")
 }
 
 /// Drive every module that takes a bar at a time and union what they emit.
@@ -52,7 +60,7 @@ fn tol() -> Tolerance {
 /// writing it here rather than in the library is deliberate: `crates/indicators`
 /// has no such function, the audit named that as the missing integration layer, and
 /// a test is not the place to introduce one.
-fn bits_over(bars: &[Bar]) -> Vec<ConditionMask> {
+fn bits_over(bars: &[Candle]) -> Vec<ConditionMask> {
     let mut fib = CurDayFib::new();
     let mut pat = Patterns::new(Thresholds::default());
     let mut sess = SessionState::default();
@@ -76,7 +84,7 @@ fn bits_over(bars: &[Bar]) -> Vec<ConditionMask> {
 /// the full run at its own last position.
 ///
 /// This is stronger than the accessor `CLAUDE.md` §3 rule 7 asks for. Every
-/// evaluator in this crate is a streaming fold — `step(&mut self, bar: &Bar, ..)` —
+/// evaluator in this crate is a streaming fold — `step(&mut self, bar: &Candle, ..)` —
 /// so it never *holds* a future bar and a look-ahead read is not expressible. The
 /// test pins that property against a future refactor that hands a module a slice.
 #[test]
@@ -84,19 +92,16 @@ fn no_lookahead() {
     let bars = session(20_000, 90);
     let full = bits_over(&bars);
     for cut in 1..=bars.len() {
-        let Some(prefix) = bars.get(..cut) else {
-            unreachable!("cut is within the slice")
-        };
+        let prefix = bars.get(..cut).expect("cut is within the slice");
         let got = bits_over(prefix);
-        let Some(expected) = full.get(..cut) else {
-            unreachable!("cut is within the slice")
-        };
+        let expected = full.get(..cut).expect("cut is within the slice");
+        // Named before the assertion, not computed inside its message: an argument that
+        // is only evaluated on failure is a region only a red run reaches.
+        let last = cut - 1;
         assert_eq!(
-            got,
-            expected,
+            got, expected,
             "prefix of length {cut} disagreed with the full run; some module read \
-             past bar {}",
-            cut - 1
+             past bar {last}"
         );
     }
 }
@@ -124,14 +129,14 @@ fn suffix_independence() {
             slot.volume = i64::MAX;
         }
         let got = bits_over(&mutated);
-        let Some((a, b)) = got.get(..cut).zip(baseline.get(..cut)) else {
-            unreachable!("cut is within both slices")
-        };
+        let (a, b) = got
+            .get(..cut)
+            .zip(baseline.get(..cut))
+            .expect("cut is within both slices");
+        let last = cut - 1;
         assert_eq!(
-            a,
-            b,
-            "mutating every bar from {cut} onward changed the bits at or before {}",
-            cut - 1
+            a, b,
+            "mutating every bar from {cut} onward changed the bits at or before {last}"
         );
     }
 }
@@ -150,9 +155,7 @@ fn daily_mask_clears() {
     let bars = session(20_200, 120);
     let mut v = Vwap::for_slice(Availability::Absent);
     for b in &bars {
-        let Ok(mask) = v.step(b, tol()) else {
-            unreachable!("a sane bar")
-        };
+        let mask = v.step(b, tol()).expect("a sane bar");
         for p in indicators::vwap::positions() {
             assert!(
                 !mask.get(u32::from(p)),
@@ -179,9 +182,12 @@ fn differential_vs_naive() {
         (1, 0, 0),
         (9_000_000, 100, 4_500_000),
     ] {
-        let Ok(fast) = DailyLevels::from_previous_session(h, l, c) else {
-            unreachable!("sane session ({h}, {l}, {c})")
-        };
+        // The session is named in a `String` built before the call, because `expect`
+        // takes a `&str` and the three prices are what identifies a failing row. A
+        // `format!` on the failure path only would be a region a green run cannot
+        // reach; built here it runs on every row.
+        let session = format!("sane session ({h}, {l}, {c})");
+        let fast = DailyLevels::from_previous_session(h, l, c).expect(&session);
 
         // The naive reference, straight from the document.
         let sum = i128::from(h) + i128::from(l) + i128::from(c);
@@ -203,17 +209,22 @@ fn differential_vs_naive() {
         assert_eq!(i128::from(fast.pivot()), pivot, "pivot ({h},{l},{c})");
         assert_eq!(i128::from(fast.bc()), bc, "bc ({h},{l},{c})");
         assert_eq!(i128::from(fast.tc()), tc, "tc ({h},{l},{c})");
+        // `Some(want)` rather than an unwrap and a compare: it asserts the level EXISTS
+        // in the same breath as its value, and it removes an `else` arm that a correct
+        // `DailyLevels` can never take.
         for (n, want) in [(1, r1), (2, r2), (3, r3), (4, r4), (5, r5)] {
-            let Some(got) = fast.resistance(n) else {
-                unreachable!("R{n} exists")
-            };
-            assert_eq!(i128::from(got), want, "R{n} ({h},{l},{c})");
+            assert_eq!(
+                fast.resistance(n).map(i128::from),
+                Some(want),
+                "R{n} ({h},{l},{c})"
+            );
         }
         for (n, want) in [(1, s1), (2, s2), (3, s3), (4, s4), (5, s5)] {
-            let Some(got) = fast.support(n) else {
-                unreachable!("S{n} exists")
-            };
-            assert_eq!(i128::from(got), want, "S{n} ({h},{l},{c})");
+            assert_eq!(
+                fast.support(n).map(i128::from),
+                Some(want),
+                "S{n} ({h},{l},{c})"
+            );
         }
         // The pivot is the exact midpoint of [bc, tc] because tc = 2*pivot - bc.
         // This identity is what retired position 6 and what makes the CPR's own

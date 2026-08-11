@@ -125,9 +125,16 @@ impl ConditionMask {
     /// An early-exit loop would return sooner on a candidate that fails in
     /// word 0, which makes the cost depend on the data; a constant-time
     /// guarantee that only holds on average is not the guarantee `CLAUDE.md`
-    /// §3 rule 4 asks for. This is always four ANDs, four XORs, three ORs and
-    /// one compare, for every input, with no loop and no early return.
-    /// Proven by `vocab::mask::hits_does_the_same_work_for_every_input` and
+    /// §3 rule 4 asks for. This is always [`WORDS`] ANDs, [`WORDS`] XORs,
+    /// `WORDS - 1` ORs and one compare -- six, six and five today -- for every
+    /// input, with no loop and no early return.
+    ///
+    /// The counts are stated against [`WORDS`] rather than as literals because
+    /// they were literals, they said "four", and the mask had been six words
+    /// wide since it outgrew 256 positions. A count copied from the code stops
+    /// being true the moment the code changes.
+    /// Proven by `vocab::mask::hits_does_the_same_work_for_every_input`, which
+    /// counts the operators in this body against `WORDS`, and by
     /// `vocab::mask::adding_a_required_bit_can_only_remove_hits`.
     ///
     /// The relation is **anti-monotone**: adding a required bit can only
@@ -206,7 +213,13 @@ mod tests {
 
     #[test]
     fn a_missing_bit_in_any_word_is_a_miss() {
-        for b in [0u32, 63, 64, 127, 128, 191, 192, 255] {
+        // Both edges of all six words, and 7 -- the bit the bar holds -- so the
+        // `held` branch below is a case this loop takes rather than an arm
+        // nobody enters. The list stopped at 255 while the mask was six words
+        // wide, which left words 4 and 5 out of the one test that walks a
+        // required-and-missing bit through every word, and left the `b == 7`
+        // branch dead: 7 was never in it.
+        for b in [0u32, 7, 63, 64, 127, 128, 191, 192, 255, 256, 319, 320, 383] {
             let bar = ConditionMask::ZERO.with_bit(7);
             let want = ConditionMask::ZERO.with_bit(7).with_bit(b);
             if b == 7 {
@@ -246,20 +259,62 @@ mod tests {
     /// `a_missing_bit_in_any_word_is_a_miss` above.
     #[test]
     fn hits_does_the_same_work_for_every_input() {
+        // The fold count, named once. It was written `WORDS - 1` inside the
+        // failure messages below, and an expression there is only ever
+        // evaluated when the assertion fails -- a region `cargo llvm-cov`
+        // counts and a passing run can never close. A `const` interpolates by
+        // name and says the same thing.
+        const FOLDS: usize = WORDS - 1;
+
         let src = include_str!("mask.rs");
         let body = src
             .split_once("pub const fn hits(")
-            .map(|(_, rest)| rest)
-            .and_then(|rest| rest.split_once("\n    }"))
+            .and_then(|(_, rest)| rest.split_once("\n    }"))
             .map(|(body, _)| body);
-        let Some(body) = body else {
-            unreachable!("`hits` is defined in this file and closes at one indent")
-        };
+        assert!(
+            body.is_some(),
+            "`hits` is no longer a `pub const fn hits(` in this file closing at \
+             one indent, so this test read nothing and proves nothing"
+        );
+        // Not `let Some(body) = .. else { unreachable!(..) }`: that `else` is a
+        // panic inside this crate that a correct build can never enter, so it
+        // is a coverage region no test can close. The assertion above is the
+        // check, and an empty body fails every count below rather than passing
+        // quietly -- `matches(..).count()` on "" is 0 and WORDS is 6.
+        let body = body.unwrap_or_default();
         for banned in ["for ", "while ", "loop ", "return", "if "] {
             assert!(
                 !body.contains(banned),
-                "`hits` contains `{banned}`, so its cost now depends on the \
-                 data. Four ANDs, four XORs, three ORs, one compare.",
+                "`hits` contains `{banned}`, so its cost now depends on the data. \
+                 It must be {WORDS} ANDs, {WORDS} XORs, {FOLDS} ORs and one compare."
+            );
+        }
+
+        // The shape, counted rather than described. This is what catches a word
+        // added to `WORDS` and not to the body: the function would still be
+        // branchless, still pass every behavioural test, and silently ignore the
+        // new word's bits -- so a combination requiring one of them would hit
+        // every bar. The doc comment above said "four ANDs" through two widenings
+        // because nothing counted.
+        assert_eq!(
+            body.matches(" & candidate.0[").count(),
+            WORDS,
+            "`hits` must AND every one of the {WORDS} words: {body}"
+        );
+        assert_eq!(
+            body.matches(") ^ candidate.0[").count(),
+            WORDS,
+            "`hits` must XOR every one of the {WORDS} words: {body}"
+        );
+        assert_eq!(
+            body.matches(" | d").count(),
+            FOLDS,
+            "{FOLDS} ORs fold {WORDS} differences into one: {body}"
+        );
+        for w in 0..WORDS {
+            assert!(
+                body.contains(&format!("self.0[{w}]")),
+                "`hits` never reads word {w}, so every bit in it is ignored"
             );
         }
     }
@@ -276,6 +331,75 @@ mod tests {
             ConditionMask::ZERO.with_bit(192).words(),
             [0, 0, 0, 1, 0, 0]
         );
+    }
+
+    /// Every position lands in the word the layout promises, is visible at its
+    /// own index, and is visible at no other.
+    ///
+    /// `with_bit` and `get` each pick a word with a six-arm match and the offset
+    /// with `b & 63`, so each has the same two mistakes available: touching the
+    /// wrong word, which answers for a position 64 away, and aliasing, where
+    /// bit 64 reports the bit set at 0. `bits_land_in_the_word_the_layout_promises`
+    /// above names four positions and `get` was only ever asked about three of
+    /// its six words -- words 2, 4 and 5 were never read by any unit test, so an
+    /// arm returning the wrong word's bit would have passed. This walks all
+    /// [`ConditionMask::BITS`] of them.
+    #[test]
+    fn every_position_lands_in_its_own_word_and_is_visible_nowhere_else() {
+        for b in 0..ConditionMask::BITS {
+            let word_of_b = b >> 6;
+            let offset = b & 63;
+            let m = ConditionMask::ZERO.with_bit(b);
+            assert!(m.get(b), "bit {b} was set and `get` denies it");
+            assert_eq!(m.popcount(), 1, "setting bit {b} set a second bit as well");
+            for (index, word) in m.words().into_iter().enumerate() {
+                let holds_it = u32::try_from(index).is_ok_and(|w| w == word_of_b);
+                let want = if holds_it { 1u64 << offset } else { 0 };
+                assert_eq!(
+                    word, want,
+                    "bit {b} belongs in word {word_of_b} at offset {offset}, and \
+                     word {index} reads {word:#018x}"
+                );
+            }
+            for other in 0..ConditionMask::BITS {
+                assert_eq!(
+                    m.get(other),
+                    other == b,
+                    "only bit {b} is set, and `get` disagrees about bit {other}"
+                );
+            }
+        }
+    }
+
+    /// Clearing reaches every word too, and clears exactly one position.
+    ///
+    /// Starting from all ones is what makes the negative half cheap: after one
+    /// removal exactly one position is gone, whichever word it was in, so a
+    /// `&= !bit` against the wrong word shows up as a `popcount` that is right
+    /// and a `get` that is wrong -- or the other way round.
+    /// `without_bit_removes_only_that_bit` above names eight positions; the mask
+    /// has [`ConditionMask::BITS`].
+    #[test]
+    fn without_bit_clears_one_position_in_every_word() {
+        let full = ConditionMask::from_words([u64::MAX; WORDS]);
+        for b in 0..ConditionMask::BITS {
+            let less = full.without_bit(b);
+            assert!(!less.get(b), "bit {b} survived removal from a full mask");
+            assert_eq!(
+                less.popcount(),
+                ConditionMask::BITS - 1,
+                "removing bit {b} took another position with it"
+            );
+            assert_eq!(
+                less.union(&ConditionMask::ZERO.with_bit(b)),
+                full,
+                "putting bit {b} back has to restore the full mask exactly"
+            );
+            assert!(
+                !less.hits(&ConditionMask::ZERO.with_bit(b)),
+                "a candidate requiring bit {b} must miss a bar that lost it"
+            );
+        }
     }
 
     #[test]

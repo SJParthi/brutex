@@ -27,3 +27,19 @@ description  = "The condition bit table and the 256-bit mask. Bit index is ident
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# THE BOUND IS RE-MEASURED, NOT ASSERTED. Gate 14 refuses a crate that claims a
+# constant cost and never measures it, and `ConditionMask::hits` is the sweep's
+# inner loop -- the one operation called more often than everything else in the
+# workspace combined. See `benches/ratio.rs` and D-0103.
+#
+# THIS IS NOT A DEPENDENCY AND GATE 9 IS UNAFFECTED. A [[bench]] target links
+# this crate's own lib and std, and nothing else -- the [dependencies] and
+# [dev-dependencies] tables stay empty, which is what the graph gates read. A
+# consumer taking this crate by git URL does not build benches.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

@@ -435,6 +435,40 @@ bar on those rungs. See D-0077 and `Timeframe::aligns_with_the_open`.
   script computes `R3 = R1 + (H - L)`. On the sheet's own BANKNIFTY numbers those
   differ by **8.67 points**. `S3` agrees on both. One of the two resistance
   ladders is wrong and this file does not decide which.
+* **The CPR's narrow / wide cut points, `80` and `250` permille, have no source.**
+  Positions 63, 274 and 275 — `narrow_cpr_day`, `wide_cpr_day`, `neutral_cpr_day` —
+  need two thresholds and **no document this repository has read publishes one**.
+  Every source in §1 gives the CPR's *construction* and none gives a width at which
+  it becomes worth naming narrow. So they are UNVERIFIED, they are marked as such at
+  their definition in `crates/indicators/src/daily.rs`, and they are a
+  caller-supplied `CprWidth` rather than a hardcoded constant — `bits_with` takes
+  the widths, so a result is never stamped with a threshold nobody can name.
+  D-0096.
+
+  **What IS verified is the ceiling they sit under, and it is derived rather than
+  read.** With `pivot = (h+l+c)/3`, `bc = (h+l)/2` and `tc = 2·pivot − bc` — the
+  construction §1 records — the width follows:
+
+  ```text
+  width = |tc − bc| = 2·|pivot − bc| = |2c − h − l| / 3
+  ```
+
+  `|2c − h − l|` is largest when the close sits exactly on the high or exactly on
+  the low, where it equals `h − l`. So **a CPR can never exceed one third of the
+  previous session's range**: 333 permille is the ceiling, not 1000.
+
+  That changes what the two numbers mean. They are fractions of the *reachable* 333,
+  not of 1000 — `80` is the bottom quarter and `250` the top quarter — and a "wide"
+  cut of, say, 500 would be **unreachable**, making position 274 a constant false.
+  That is the defect class D-0080 found in the 39 void forming-day positions, and it
+  is excluded here by a const assertion (`CprWidth::CLASSICAL.wide < 333`) that fails
+  the build rather than by care.
+
+  **What would settle it** is a source that states a width threshold, or a measured
+  distribution of `width / range` over real NIFTY and BANKNIFTY sessions with the
+  quartiles read off it. The second is the honest route and it needs bar data; there
+  is none on this machine, every pulled bar having been deleted deliberately. Until
+  one or the other exists the two numbers stay UNVERIFIED and stay caller-supplied.
 * **No `zone_mult` other than 1.0 has been considered.** The input allows
   0.1 upward in 0.1 steps. `CLAUDE.md` §6 is hostile to a tunable parameter for
   exactly the reason it gives about `k`, and nothing yet decides whether the

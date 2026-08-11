@@ -3,10 +3,14 @@
 //! # Why this is a test and not a bench
 //!
 //! `universe::of_equity` is public, takes an unguarded `&str`, and hashes it
-//! TWICE — once per table. `fnv1a` walks the whole argument with no bound of
-//! its own, so the cost of a membership probe used to be the CALLER's string
-//! length rather than the table's size. Measured against gate 8's 3.0x ceiling
-//! before the guard existed:
+//! once per table — TWICE when this was written, SIX times since D-0089 added
+//! the four published NIFTY tiers, which is a further reason the guard matters
+//! and not a reason to revisit the ceiling: a longer argument is refused
+//! before ANY of the six hashes, so the short side of the ratio grew three
+//! times over and the long side did not move. `fnv1a` walks the whole argument
+//! with no bound of its own, so the cost of a membership probe used to be the
+//! CALLER's string length rather than the table's size. Measured against gate
+//! 8's 3.0x ceiling before the guard existed:
 //!
 //! | input | per call | ratio |
 //! |---|---|---|

@@ -51,12 +51,29 @@
 //! already wrapped. `the_i64_extreme_is_refused_rather_than_wrapped_or_panicked`
 //! is the test; it would have gone red on release and panicked on debug.
 //!
+//! There are **four** `checked_` refusals on that path, and only two of them can be
+//! reached by handing [`Vwap::fold`] a legal bar: [`ACC_CEILING`] bounds the state
+//! every fold starts from, so the accumulate-into-`p2v`, `pv` and `v` steps cannot
+//! be made to overflow from a state `fold` itself produced. The tests build those
+//! states from the private fields instead. That is not a shortcut around the type —
+//! it is the only way to execute a guard whose precondition the surrounding code
+//! makes unreachable, and a guard no test can trip is an argument wearing a
+//! mechanism's clothes. The `v` case also pins the fold's atomicity: a refusal on
+//! the last accumulator leaves `pv` and `p2v` exactly as they were.
+//!
 //! # Integer square root, no floats
 //!
 //! Sigma needs a square root and §7 forbids floating point at any layer. This uses
-//! a Newton iteration on `i128` whose total step count is bounded by two
-//! compile-time constants, so the cost is O(1) for **every** `i128` — see
-//! [`isqrt_i128`], which records why an earlier 64-step cap was not.
+//! a Newton iteration on `i128` whose total step count is **bounded** by two
+//! compile-time constants — `ITERATION_CEILING` = 130 — for every `i128`. Measured
+//! by `C-I-03`, in `crates/indicators/benches/ratio.rs`, which folds the count at
+//! 1, `i64::MAX`, `10^30` and `i128::MAX`: 1, 37, 55 and 69 iterations.
+//!
+//! **Bounded, not flat.** This paragraph said "so the cost is O(1) for every
+//! `i128`", which reads as *the cost does not vary*. It varies by 217x, because the
+//! Newton loop exits on convergence. The honest limit is in `docs/06-limits.md` and
+//! the long version is on [`isqrt_i128`], which also records why an earlier 64-step
+//! cap was worse than this.
 //!
 //! # Sigma refuses on one observation
 //!
@@ -67,7 +84,7 @@
 //! the first bar of every session. [`Vwap::sigma`] returns `None` below
 //! `MIN_FOR_SIGMA` contributing bars instead.
 
-use store::format::Bar;
+use crate::Candle;
 use vocab::{ConditionMask, Tolerance};
 
 /// Whether this run's slice carries traded volume at all.
@@ -88,8 +105,6 @@ pub enum Availability {
 pub enum Refused {
     /// A record that is not a bar.
     Corrupt(crate::Corrupt),
-    /// `volume` is negative. Zero is a real zero (§7); negative is corruption.
-    NegativeVolume,
     /// The price-times-volume accumulator would leave the range this module can
     /// prove safe. Refused rather than wrapped.
     AccumulatorTooLarge,
@@ -125,12 +140,58 @@ const ACC_CEILING: i128 = 10_i128.pow(34);
 ///
 /// 128 steps covers the ~64 halvings plus the handful of quadratic steps for every
 /// `i128`, and the step-down is now bounded at [`STEP_DOWN_STEPS`]. Both are
-/// compile-time constants, so the cost is O(1) for every input in the type —
-/// including the ones no caller reaches today.
+/// compile-time constants, so the iteration count is **bounded** by
+/// [`ITERATION_CEILING`] for every input in the type — including the ones no
+/// caller reaches today.
+///
+/// # BOUNDED IS NOT FLAT, and this doc used to say it was
+///
+/// Proven by `C-I-03` — `indicators::bench::the_integer_square_root_is_bounded_and_flat_per_iteration`
+/// in `crates/indicators/benches/ratio.rs` — which asserts the iteration count
+/// against [`ITERATION_CEILING`] and prints the cost spread without comparing it to
+/// a ceiling, because there is no honest ceiling to compare it to.
+///
+/// The sentence above ended "so the cost is O(1) for every input in the type",
+/// and that reads as *the cost does not vary*. **It varies by a factor of 217.**
+/// Measured, `cargo bench -p indicators`: 4.3 ns at `v = 1` against 928 ns at
+/// `i128::MAX`. The Newton loop exits on convergence — `guess != previous` — so a
+/// small input finishes in one or two iterations and a 127-bit one needs about
+/// sixty-six, and each of those iterations is a 128-bit division whose own cost
+/// rises with the operands.
+///
+/// Both readings of "O(1)" are defensible in isolation and only one of them is
+/// what a reader of `CLAUDE.md` §3 rule 4 will take from it, so the claim is now
+/// stated as the bound it is. **The honest limit is recorded in
+/// `docs/06-limits.md`**, which §10 makes the authority on what is not
+/// constant-time, and the bench measures cost PER ITERATION rather than end to
+/// end — see [`isqrt_i128_counted`].
+///
+/// Making it genuinely flat is possible and was rejected: dropping the
+/// convergence exit would run all 128 iterations every time, paying the worst
+/// case on every call to buy a flatness no caller needs. VWAP abstains entirely
+/// on spot indices, which carry no volume, so this function does not execute at
+/// all on the data the engine actually sweeps.
 #[must_use]
 pub fn isqrt_i128(v: i128) -> i128 {
+    isqrt_i128_counted(v).0
+}
+
+/// [`isqrt_i128`], and how many iterations it took.
+///
+/// The count exists so the bound can be MEASURED rather than trusted to the
+/// constants. `crates/indicators/benches/ratio.rs` asserts it against
+/// [`ITERATION_CEILING`] at the extremes of the input range, and divides the
+/// measured cost by it to get cost per iteration — which is the quantity that
+/// has to be flat for a bounded count to bound anything at all.
+///
+/// This is `greeks::solver`'s pattern, for the same reason: a function whose
+/// iteration count varies cannot be timed end to end against a flat ceiling, and
+/// pretending otherwise produces either a false breach or a relaxed ceiling that
+/// no longer catches anything.
+#[must_use]
+pub fn isqrt_i128_counted(v: i128) -> (i128, u32) {
     if v <= 0 {
-        return 0;
+        return (0, 0);
     }
     let mut guess = v;
     let mut previous = 0;
@@ -149,15 +210,26 @@ pub fn isqrt_i128(v: i128) -> i128 {
         guess = guess.saturating_sub(1);
         down = down.saturating_add(1);
     }
-    guess
+    (guess, i.saturating_add(down))
 }
 
 /// Newton iterations. Enough for the full `i128` range — see [`isqrt_i128`].
-const NEWTON_STEPS: u32 = 128;
+pub const NEWTON_STEPS: u32 = 128;
 
 /// Bound on the corrective step-down. The residual after [`NEWTON_STEPS`] is at
-/// most 1; this leaves one step of margin and makes the total cost constant.
-const STEP_DOWN_STEPS: u32 = 2;
+/// most 1; this leaves one step of margin.
+pub const STEP_DOWN_STEPS: u32 = 2;
+
+/// The most iterations [`isqrt_i128`] can ever perform.
+///
+/// A compile-time constant, which is what bounds the function's cost. Measured by
+/// `C-I-03`, in `crates/indicators/benches/ratio.rs`, which asserts the real count
+/// against this ceiling at both ends of the input range rather than trusting the
+/// constants to be large enough — the previous ceiling was 64 and was not.
+///
+/// It bounds the cost and does **not** make it uniform; the spread is recorded in
+/// `docs/06-limits.md`.
+pub const ITERATION_CEILING: u32 = NEWTON_STEPS + STEP_DOWN_STEPS;
 
 /// The running VWAP accumulators for one session.
 ///
@@ -209,7 +281,7 @@ impl Vwap {
     /// with a single non-zero volume anywhere is [`Availability::Present`], because
     /// a run must not change its mind halfway.
     #[must_use]
-    pub fn availability_of(bars: &[Bar]) -> Availability {
+    pub fn availability_of(bars: &[Candle]) -> Availability {
         if bars.iter().any(|b| b.volume > 0) {
             Availability::Present
         } else {
@@ -272,19 +344,20 @@ impl Vwap {
     ///
     /// # Errors
     ///
-    /// [`Refused::Corrupt`] for a record that is not a bar, [`Refused::NegativeVolume`]
-    /// for a negative volume, and [`Refused::AccumulatorTooLarge`] when the running
-    /// sum would leave the range this module can prove safe.
-    pub fn fold(&mut self, bar: &Bar) -> Result<(), Refused> {
-        if bar.high < bar.low {
-            return Err(Refused::Corrupt(crate::Corrupt::HighBelowLow));
-        }
-        if bar.high.checked_sub(bar.low).is_none() {
-            return Err(Refused::Corrupt(crate::Corrupt::RangeOverflows));
-        }
-        if bar.volume < 0 {
-            return Err(Refused::NegativeVolume);
-        }
+    /// [`Refused::Corrupt`] for a record that is not a bar — which now includes a
+    /// negative volume, because this module is the ninth of nine and detecting it here
+    /// left the other eight already folded. See `Candle::check`.
+    ///
+    /// [`Refused::AccumulatorTooLarge`] when the running sum would leave the range this
+    /// module can prove safe. That one cannot move onto `Candle`: it is a property of the
+    /// accumulated state, not of the record, so it is the one refusal that can still
+    /// arrive after eight modules have folded. It is unreachable from any price a market
+    /// prints — it needs a per-field price near 10^10 — and that is the argument for
+    /// leaving it here rather than a proof that it cannot happen.
+    pub fn fold(&mut self, bar: &Candle) -> Result<(), Refused> {
+        // One definition, shared with the other eight modules — see `Candle::check`.
+        // Wrapped rather than re-derived, so a new refusal added there reaches here.
+        bar.check().map_err(Refused::Corrupt)?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day || !self.live {
             self.session_day = day;
@@ -354,7 +427,7 @@ impl Vwap {
     /// # Errors
     ///
     /// As [`Self::fold`].
-    pub fn step(&mut self, bar: &Bar, tolerance: Tolerance) -> Result<ConditionMask, Refused> {
+    pub fn step(&mut self, bar: &Candle, tolerance: Tolerance) -> Result<ConditionMask, Refused> {
         self.fold(bar)?;
         Ok(self.bits(bar.close, tolerance))
     }
@@ -392,15 +465,23 @@ impl Vwap {
         // scale — not a session range and not a CPR width.
         mask = near(mask, 145, tolerance, close, vwap, sigma);
 
-        for (band, multiple) in BAND_SIGMA.iter().enumerate() {
-            let Some(offset) = i64::try_from(multiple * i128::from(sigma)).ok() else {
+        // Zipped, not indexed. The multiple and the five positions it names are one
+        // row of one table, so a band cannot exist in one list and be missing from
+        // the other — which is what the `Option` this loop used to unwrap was
+        // guarding against, with an `else { continue }` no run could execute.
+        for (multiple, (above, below, near_up, near_down, inside)) in
+            BAND_SIGMA.iter().zip(BAND_POSITIONS)
+        {
+            // This one IS reachable, and `a_band_whose_offset_leaves_i64_emits_nothing`
+            // reaches it: sigma is an i64 and `3 * sigma` need not be. A band that
+            // cannot be expressed on the price scale emits **nothing** rather than a
+            // saturated level, because a saturated level is a comparison against a
+            // number the market never printed.
+            let Ok(offset) = i64::try_from(multiple * i128::from(sigma)) else {
                 continue;
             };
             let upper = vwap.saturating_add(offset);
             let lower = vwap.saturating_sub(offset);
-            let Some((above, below, near_up, near_down, inside)) = band_positions(band) else {
-                continue;
-            };
             if close > upper {
                 mask = set(mask, above);
             }
@@ -417,20 +498,30 @@ impl Vwap {
     }
 }
 
-/// `(above, below, near_upper, near_lower, inside)` for band 0, 1 or 2.
+/// `(above, below, near_upper, near_lower, inside)` for each entry of
+/// [`BAND_SIGMA`], in that order.
 ///
 /// Written out because the shipped table does **not** number them regularly: band
 /// 1's five positions are 146, 147, 150, 151, 152, band 2's are 148, 149, 190,
 /// 191, 192, and band 3's are 193, 194, 195, 196, 197. Deriving them by arithmetic
 /// from a base is one off-by-one away from a mask that means a different band.
-const fn band_positions(band: usize) -> Option<(u16, u16, u16, u16, u16)> {
-    match band {
-        0 => Some((146, 147, 150, 151, 152)),
-        1 => Some((148, 149, 190, 191, 192)),
-        2 => Some((193, 194, 195, 196, 197)),
-        _ => None,
-    }
-}
+///
+/// # Why a table and not the `band_positions(band: usize) -> Option<...>` it was
+///
+/// The function ended in `_ => None`, and that arm could not run: the only caller
+/// asked for 0, 1 and 2 because the index came from `BAND_SIGMA.iter().enumerate()`.
+/// So did the `else { continue }` that unwrapped its answer. Two branches that
+/// cannot execute while the code is correct are two branches no test can cover and
+/// no reader can trust — and llvm-cov counts both. Zipping the table against
+/// [`BAND_SIGMA`] cannot be asked for a fourth band at all, which is the same
+/// guarantee with nothing dead left behind. The length is written as
+/// `BAND_SIGMA.len()` so a fourth multiplier added without a fourth row is a
+/// compile error rather than a silently skipped band.
+const BAND_POSITIONS: [(u16, u16, u16, u16, u16); BAND_SIGMA.len()] = [
+    (146, 147, 150, 151, 152),
+    (148, 149, 190, 191, 192),
+    (193, 194, 195, 196, 197),
+];
 
 fn set(mask: ConditionMask, index: u16) -> ConditionMask {
     vocab::table::set_exact(mask, index).unwrap_or(mask)
@@ -460,19 +551,48 @@ pub const fn positions() -> [u16; 20] {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes — see \
+              crates/costs/src/money.rs and crates/indicators/src/orb.rs: a test that \
+              cannot panic cannot fail. `expect` and not the \
+              `let ... else { unreachable!() }` this module used to spell, because \
+              `unreachable!` expands to a panic inside THIS crate and is therefore a \
+              coverage region no green run can ever execute, while `expect` panics \
+              inside the standard library and leaves no such region behind."
+)]
 mod tests {
     use super::*;
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the fib width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the fib width is pinned")
     }
 
-    fn at(minute: i64, price: i64, volume: i64) -> Bar {
+    /// An accumulator whose fields are set directly, without a fold.
+    ///
+    /// Every state built with this is one [`Vwap::fold`] cannot produce, because
+    /// [`ACC_CEILING`] bounds what a fold leaves behind. That is the point: the four
+    /// `checked_` guards on the fold path and the two in [`Vwap::sigma`] are
+    /// documented as mechanisms rather than as arguments from that ceiling, and the
+    /// only way to execute a mechanism whose precondition the surrounding code makes
+    /// unreachable is to build the precondition. `session_day` is set from the
+    /// timestamp of the bar that will be folded, and `live` is true, so `fold` does
+    /// **not** reset the accumulators before reaching the guard under test.
+    fn primed(ts_micros: i64, pv: i128, v: i128, p2v: i128) -> Vwap {
+        Vwap {
+            availability: Availability::Present,
+            session_day: crate::ist_day(ts_micros),
+            live: true,
+            pv,
+            v,
+            p2v,
+            contributing: MIN_FOR_SIGMA,
+        }
+    }
+
+    fn at(minute: i64, price: i64, volume: i64) -> Candle {
         let ts = (50_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000;
-        Bar {
+        Candle {
             ts_micros: ts,
             open: price,
             high: price,
@@ -490,9 +610,11 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for index in positions() {
             assert!(seen.insert(index), "position {index} appears twice");
-            let Some(def) = vocab::table::definition(index) else {
-                unreachable!("position {index} is not in the table")
-            };
+            // Two steps rather than one `expect`, so the failure still names the
+            // position: `expect` takes a literal and the index is what a reader needs.
+            let entry = vocab::table::definition(index);
+            assert!(entry.is_some(), "position {index} is not in the table");
+            let def = entry.expect("`is_some` on the line above");
             assert!(vocab::table::is_live(index), "position {index} is not live");
             assert_eq!(
                 def.kind == vocab::Kind::Near,
@@ -509,13 +631,11 @@ mod tests {
     /// the decision is not revisited per bar.
     #[test]
     fn a_zero_volume_slice_disables_the_whole_family() {
-        let bars: Vec<Bar> = (0..20).map(|m| at(m, 2_500_000 + m * 100, 0)).collect();
+        let bars: Vec<Candle> = (0..20).map(|m| at(m, 2_500_000 + m * 100, 0)).collect();
         assert_eq!(Vwap::availability_of(&bars), Availability::Absent);
         let mut v = Vwap::for_slice(Availability::Absent);
         for bar in &bars {
-            let Ok(mask) = v.step(bar, tol()) else {
-                unreachable!("a zero-volume bar is legal")
-            };
+            let mask = v.step(bar, tol()).expect("a zero-volume bar is legal");
             assert!(mask.is_empty(), "an absent-volume run emitted a bit");
         }
         assert_eq!(v.value(), None);
@@ -527,7 +647,7 @@ mod tests {
     /// not change meaning halfway.
     #[test]
     fn a_slice_that_gains_volume_is_present_from_the_first_bar() {
-        let mut bars: Vec<Bar> = (0..5).map(|m| at(m, 2_500_000, 0)).collect();
+        let mut bars: Vec<Candle> = (0..5).map(|m| at(m, 2_500_000, 0)).collect();
         bars.extend((5..10).map(|m| at(m, 2_500_100, 1_000)));
         assert_eq!(
             Vwap::availability_of(&bars),
@@ -540,9 +660,7 @@ mod tests {
             assert_eq!(v.fold(bar), Ok(()));
         }
         assert_eq!(v.value(), None, "no volume yet, so nothing to divide by");
-        let Some(sixth) = bars.get(5) else {
-            unreachable!("the slice has ten bars")
-        };
+        let sixth = bars.get(5).expect("the slice has ten bars");
         assert_eq!(v.fold(sixth), Ok(()));
         assert_eq!(v.value(), Some(2_500_100));
     }
@@ -611,7 +729,7 @@ mod tests {
     #[test]
     fn the_i64_extreme_is_refused_rather_than_wrapped_or_panicked() {
         let mut v = Vwap::for_slice(Availability::Present);
-        let extreme = Bar {
+        let extreme = Candle {
             ts_micros: 0,
             open: 5_000_000_000_000_000_000,
             high: 5_000_000_000_000_000_000,
@@ -675,9 +793,7 @@ mod tests {
         let mut v = Vwap::for_slice(Availability::Present);
         assert_eq!(v.fold(&at(0, 1_000_000, 1)), Ok(()));
         assert_eq!(v.fold(&at(1, 1_000_300, 999)), Ok(()));
-        let Some(value) = v.value() else {
-            unreachable!("volume is present")
-        };
+        let value = v.value().expect("volume is present");
         // The exact weighted mean is 1,000,299.7 and the division floors, so
         // 1,000,299 is the correct answer — not 1,000,300. Asserting `> 1_000_299`
         // was off by one against my own arithmetic.
@@ -689,7 +805,14 @@ mod tests {
     #[test]
     fn a_negative_volume_is_refused() {
         let mut v = Vwap::for_slice(Availability::Present);
-        assert_eq!(v.fold(&at(0, 1_000_000, -1)), Err(Refused::NegativeVolume));
+        // The refusal now arrives through `Candle::check`, wrapped. The dedicated
+        // `Refused::NegativeVolume` variant was REMOVED rather than kept: `check` runs
+        // first, so nothing could ever construct it, and an error variant that cannot be
+        // reached is a door onto nothing.
+        assert_eq!(
+            v.fold(&at(0, 1_000_000, -1)),
+            Err(Refused::Corrupt(crate::Corrupt::NegativeVolume))
+        );
     }
 
     /// The accumulator refuses rather than wraps.
@@ -701,7 +824,7 @@ mod tests {
         // is 9 x 10^32 — INSIDE the 10^34 ceiling, so the test passed nothing.
         // 10^10 paisa (a hundred-million-point index) with 10^14 volume is
         // 9 x 10^34, past the ceiling and still 10^3 inside i128.
-        let huge = Bar {
+        let huge = Candle {
             ts_micros: 0,
             open: 10_000_000_000,
             high: 10_000_000_000,
@@ -753,16 +876,14 @@ mod tests {
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..60 {
             let price = 2_500_000 + (minute * 137) % 4_000;
-            let Ok(_) = v.step(&at(minute, price, 1_000 + minute), tol()) else {
-                unreachable!("sane")
-            };
+            assert!(
+                v.step(&at(minute, price, 1_000 + minute), tol()).is_ok(),
+                "minute {minute} at {price} was refused",
+            );
         }
         for close in [2_400_000_i64, 2_500_000, 2_502_000, 2_600_000] {
             let mask = v.bits(close, tol());
-            for band in 0..3 {
-                let Some((above, below, _, _, inside)) = band_positions(band) else {
-                    unreachable!("three bands")
-                };
+            for (band, (above, below, _, _, inside)) in BAND_POSITIONS.into_iter().enumerate() {
                 let n = u32::from(mask.get(u32::from(above)))
                     + u32::from(mask.get(u32::from(below)))
                     + u32::from(mask.get(u32::from(inside)));
@@ -777,9 +898,10 @@ mod tests {
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..90 {
             let price = 2_500_000 + (minute * 211) % 6_000;
-            let Ok(_) = v.step(&at(minute, price, 5_000), tol()) else {
-                unreachable!("sane")
-            };
+            assert!(
+                v.step(&at(minute, price, 5_000), tol()).is_ok(),
+                "minute {minute} at {price} was refused",
+            );
         }
         for step in -60..60 {
             let close = 2_500_000 + step * 137;
@@ -802,9 +924,9 @@ mod tests {
         let mut union = ConditionMask::ZERO;
         for minute in 0..375 {
             let price = 2_500_000 + (minute * 173) % 8_000;
-            let Ok(mask) = v.step(&at(minute, price, 1_000 + minute * 3), tol()) else {
-                unreachable!("sane")
-            };
+            let mask = v
+                .step(&at(minute, price, 1_000 + minute * 3), tol())
+                .expect("a sane bar");
             union = union.union(&mask);
         }
         for index in 0..ConditionMask::BITS {
@@ -823,16 +945,18 @@ mod tests {
     fn a_new_session_restarts_the_accumulators() {
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..10 {
-            let Ok(_) = v.step(&at(minute, 9_000_000, 1_000), tol()) else {
-                unreachable!("sane")
-            };
+            assert!(
+                v.step(&at(minute, 9_000_000, 1_000), tol()).is_ok(),
+                "minute {minute} was refused",
+            );
         }
         assert_eq!(v.value(), Some(9_000_000));
         let mut next = at(0, 1_000_000, 1_000);
         next.ts_micros += 1_440 * 60_000_000;
-        let Ok(_) = v.step(&next, tol()) else {
-            unreachable!("sane")
-        };
+        assert!(
+            v.step(&next, tol()).is_ok(),
+            "the first bar of the next session was refused",
+        );
         assert_eq!(v.value(), Some(1_000_000), "yesterday's volume survived");
     }
 
@@ -844,10 +968,9 @@ mod tests {
             (0..300)
                 .map(|minute| {
                     let price = 2_500_000 + (minute * 149) % 5_000;
-                    let Ok(mask) = v.step(&at(minute, price, 700 + minute), tol()) else {
-                        unreachable!("sane")
-                    };
-                    mask.words()
+                    v.step(&at(minute, price, 700 + minute), tol())
+                        .expect("a sane bar")
+                        .words()
                 })
                 .collect::<Vec<_>>()
         };
@@ -859,14 +982,263 @@ mod tests {
     fn the_shipped_and_appended_pairs_agree() {
         let mut v = Vwap::for_slice(Availability::Present);
         for minute in 0..30 {
-            let Ok(_) = v.step(&at(minute, 2_500_000 + minute * 50, 1_000), tol()) else {
-                unreachable!("sane")
-            };
+            assert!(
+                v.step(&at(minute, 2_500_000 + minute * 50, 1_000), tol())
+                    .is_ok(),
+                "minute {minute} was refused",
+            );
         }
         for close in [2_400_000_i64, 2_500_700, 2_600_000] {
             let mask = v.bits(close, tol());
             assert_eq!(mask.get(52), mask.get(143), "52 and 143 disagreed");
             assert_eq!(mask.get(53), mask.get(144), "53 and 144 disagreed");
         }
+    }
+
+    /// The verdict handed to [`Vwap::for_slice`] is what the accumulator reports,
+    /// and folding never revises it.
+    ///
+    /// Nothing else in this file reads [`Vwap::availability`], so without this the
+    /// accessor could return the wrong variant — or, worse, start answering
+    /// `Present` the moment a volume-bearing bar arrived — and every other test here
+    /// would still be green. The per-run decision in the module documentation is
+    /// only a decision if the accumulator keeps it, and this is the only test that
+    /// asks the accumulator what it thinks.
+    #[test]
+    fn the_availability_verdict_is_reported_and_never_revised() {
+        let mut present = Vwap::for_slice(Availability::Present);
+        assert_eq!(present.availability(), Availability::Present);
+        assert_eq!(present.fold(&at(0, 1_000_000, 0)), Ok(()));
+        assert_eq!(
+            present.availability(),
+            Availability::Present,
+            "a zero-volume bar must not downgrade a Present run",
+        );
+
+        let mut absent = Vwap::for_slice(Availability::Absent);
+        assert_eq!(absent.availability(), Availability::Absent);
+        assert_eq!(absent.fold(&at(0, 1_000_000, 5_000)), Ok(()));
+        assert_eq!(
+            absent.availability(),
+            Availability::Absent,
+            "a volume-bearing bar must not upgrade an Absent run halfway",
+        );
+        assert_eq!(
+            absent.value(),
+            None,
+            "and the volume it carried must not have been folded",
+        );
+    }
+
+    /// The **second** multiply on the fold path refuses, not just the first.
+    ///
+    /// `the_i64_extreme_is_refused_rather_than_wrapped_or_panicked` trips
+    /// `price * price`, which means `squared * volume` was never executed with a
+    /// product that leaves `i128` — so replacing that second `checked_mul` with a
+    /// bare `*` would have wrapped in release and panicked in debug with every test
+    /// still green. `4e18` per field is chosen so the first multiply survives and
+    /// only the second cannot, and the test asserts that split rather than assuming
+    /// it.
+    #[test]
+    fn the_second_multiply_refuses_when_the_first_survives() {
+        let field = 4_000_000_000_000_000_000_i64;
+        let price = i128::from(field) * 3;
+        assert!(
+            price.checked_mul(price).is_some(),
+            "price^2 must stay inside i128 or this test exercises the FIRST multiply",
+        );
+        assert!(
+            price
+                .checked_mul(price)
+                .and_then(|squared| squared.checked_mul(2))
+                .is_none(),
+            "price^2 * 2 must leave i128 or this test exercises no refusal at all",
+        );
+        let mut v = Vwap::for_slice(Availability::Present);
+        let bar = Candle {
+            ts_micros: 0,
+            open: field,
+            high: field,
+            low: field,
+            close: field,
+            volume: 2,
+            open_interest: i64::MIN,
+        };
+        assert_eq!(v.fold(&bar), Err(Refused::AccumulatorTooLarge));
+        assert_eq!(v.p2v, 0, "a refused bar contributed to p2v");
+        assert_eq!(v.value(), None, "a refused bar contributed nothing");
+    }
+
+    /// A full `p2v` accumulator refuses the next bar instead of wrapping.
+    ///
+    /// [`ACC_CEILING`] keeps `fold` from ever reaching this state, which is exactly
+    /// why the `checked_add` guarding it was never executed: the ceiling is an
+    /// argument and the `checked_add` is the mechanism, and only the mechanism runs.
+    /// A bare `self.p2v + weighted` here wraps to a plausible number in release and
+    /// panics in debug.
+    #[test]
+    fn a_full_squared_accumulator_refuses_the_next_bar() {
+        let bar = at(0, 1_000_000, 1);
+        let mut v = primed(bar.ts_micros, 0, 0, i128::MAX);
+        assert_eq!(v.fold(&bar), Err(Refused::AccumulatorTooLarge));
+        assert_eq!(v.p2v, i128::MAX, "the refused bar was added to p2v anyway");
+        assert_eq!(v.v, 0, "the refused bar was added to v anyway");
+    }
+
+    /// A full `pv` accumulator refuses the next bar instead of wrapping.
+    ///
+    /// The price-times-volume sum is checked *after* the ceiling test passes, so it
+    /// is the one guard on the fold path that a legal bar reaches with the ceiling
+    /// already satisfied. `pv` was unchecked once, under the unstated invariant
+    /// `|price| >= 1` that nothing enforced.
+    #[test]
+    fn a_full_price_volume_accumulator_refuses_the_next_bar() {
+        let bar = at(0, 1_000_000, 1);
+        let mut v = primed(bar.ts_micros, i128::MAX, 0, 0);
+        assert_eq!(v.fold(&bar), Err(Refused::AccumulatorTooLarge));
+        assert_eq!(v.pv, i128::MAX, "the refused bar was added to pv anyway");
+    }
+
+    /// A full `v` accumulator refuses — **and the fold is all-or-nothing**.
+    ///
+    /// The volume sum is the last of the four checks, and the three writes happen
+    /// after all four. So this is the case that proves the ordering: a bar refused
+    /// on the last guard must leave `pv` and `p2v` exactly where they were. Move the
+    /// assignments up beside the arithmetic that produced them — the obvious
+    /// "simplification" — and this test goes red while every other test in the file
+    /// stays green, because a torn accumulator only shows on the refusal path.
+    #[test]
+    fn a_full_volume_accumulator_refuses_and_commits_nothing() {
+        let bar = at(0, 1_000_000, 1);
+        let mut v = primed(bar.ts_micros, 0, i128::MAX, 0);
+        assert_eq!(v.fold(&bar), Err(Refused::AccumulatorTooLarge));
+        assert_eq!(v.v, i128::MAX, "the refused volume was added");
+        assert_eq!(v.pv, 0, "pv was committed before the volume check refused");
+        assert_eq!(
+            v.p2v, 0,
+            "p2v was committed before the volume check refused"
+        );
+    }
+
+    /// Sigma refuses when the mean square leaves `i128`, and says nothing rather
+    /// than something wrong.
+    ///
+    /// `mean * mean` was unchecked once. With `wrapping_mul` this state gives
+    /// `mean^2 = 5.97e37`, a variance of `-5.97e37`, a clamp to zero and a confident
+    /// `Some(0)` — a sigma of zero, which the module documentation spends a section
+    /// explaining is the single most damaging answer this function can give. The
+    /// VWAP itself is still answerable here, which is the point: the refusal is the
+    /// checked multiply and not a general unavailability.
+    #[test]
+    fn sigma_refuses_when_the_mean_square_leaves_i128() {
+        let v = primed(0, 20_000_000_000_000_000_000, 1, 0);
+        assert_eq!(
+            v.value(),
+            Some(6_666_666_666_666_666_666),
+            "VWAP itself is inside i64 and must still answer",
+        );
+        assert_eq!(
+            v.sigma(),
+            None,
+            "the mean square left i128, so sigma must refuse rather than wrap",
+        );
+    }
+
+    /// Sigma refuses when the variance subtraction leaves `i128`.
+    ///
+    /// A negative `p2v` is precisely what a wrapped accumulator looks like — the
+    /// module's own history is an unchecked `p2v` wrapping to a large negative value
+    /// and sailing under the ceiling — so this is the shape sigma has to survive
+    /// even after the fold path was fixed. With `wrapping_sub` the subtraction lands
+    /// on `+1.61e38`, whose root divides down to a perfectly plausible
+    /// `Some(4.23e18)` in paisa: a fabricated dispersion, from a state that has no
+    /// dispersion to report.
+    #[test]
+    fn sigma_refuses_when_the_variance_subtraction_leaves_i128() {
+        let v = primed(0, 3_000_000_000_000_000_000, 1, i128::MIN);
+        assert_eq!(
+            v.value(),
+            Some(1_000_000_000_000_000_000),
+            "VWAP itself is inside i64 and must still answer",
+        );
+        assert_eq!(
+            v.sigma(),
+            None,
+            "E[p^2] - E[p]^2 left i128, so sigma must refuse rather than wrap",
+        );
+    }
+
+    /// A band whose offset does not fit `i64` emits **nothing** for that band, and
+    /// does not disturb the bands that do fit.
+    ///
+    /// `sigma` is an `i64` and `3 * sigma` need not be, so the widest band is the
+    /// one that can fall off the price scale. This state gives
+    /// `sigma = 3_333_333_333_333_333_333`: bands 1 and 2 are representable, band 3
+    /// is `9_999_999_999_999_999_999` and is not. The alternative — saturating the
+    /// offset — would compare the close against `i64::MAX`, a number no market ever
+    /// printed, and set `close_below_vwap_band3_upper` on every bar forever.
+    #[test]
+    fn a_band_whose_offset_leaves_i64_emits_nothing() {
+        let v = primed(0, 3, 1, 10_i128.pow(38));
+        assert_eq!(v.value(), Some(1));
+        assert_eq!(
+            v.sigma(),
+            Some(3_333_333_333_333_333_333),
+            "the fixture no longer produces the sigma this test reasons about",
+        );
+        let mask = v.bits(0, tol());
+        assert!(mask.get(53), "the VWAP pair still answers");
+        assert!(
+            mask.get(152),
+            "band 1 fits i64 and the close sits inside it"
+        );
+        assert!(
+            mask.get(192),
+            "band 2 fits i64 and the close sits inside it"
+        );
+        for index in [193_u32, 194, 195, 196, 197] {
+            assert!(
+                !mask.get(index),
+                "band 3's offset leaves i64, so position {index} must stay unset",
+            );
+        }
+    }
+
+    /// The iteration count [`ITERATION_CEILING`] bounds is asserted by `cargo test`,
+    /// not only by a bench.
+    ///
+    /// [`isqrt_i128_counted`] exists so the bound can be measured, and the only
+    /// thing measuring it was `benches/ratio.rs` — which `cargo test` does not run,
+    /// which coverage does not run, and which lives behind its own CI gate. The four
+    /// counts below are the ones that bench prints and the module documentation
+    /// quotes; a quoted number rots and an asserted one does not. Lower
+    /// [`NEWTON_STEPS`] and the count at `i128::MAX` moves, which is the failure the
+    /// old 64-step cap hid behind an unbounded step-down.
+    #[test]
+    fn the_documented_iteration_counts_are_the_measured_ones() {
+        for (v, want) in [
+            (1_i128, 1_u32),
+            (i128::from(i64::MAX), 37),
+            (10_i128.pow(30), 55),
+            (i128::MAX, 69),
+        ] {
+            let (root, steps) = isqrt_i128_counted(v);
+            assert_eq!(root, v.isqrt(), "the root of {v} is not the exact one");
+            assert_eq!(steps, want, "the iteration count at {v} moved");
+            assert!(
+                steps <= ITERATION_CEILING,
+                "{v} took {steps} iterations, past the ceiling of {ITERATION_CEILING}",
+            );
+        }
+        assert_eq!(
+            isqrt_i128_counted(0),
+            (0, 0),
+            "zero has a root and needs no iteration to find it",
+        );
+        assert_eq!(
+            isqrt_i128_counted(-1),
+            (0, 0),
+            "a negative input has no root and must not be iterated on",
+        );
     }
 }

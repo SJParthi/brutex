@@ -212,12 +212,12 @@ fn the_dependency_set_has_not_moved_without_review() {
 
     assert_eq!(
         names.len(),
-        186,
+        187,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
     assert_eq!(
-        h, 0x53A9_30D0_795D_5D5E,
+        h, 0x3BDC_BF45_2CB6_25B7,
         "the dependency SET changed — a package was added, removed or renamed. \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \

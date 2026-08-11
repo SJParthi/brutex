@@ -339,6 +339,87 @@ Measured against the real masters on 2026-08-01 under D-0025: 750 of 750 Total
 Market members and 208 of 213 F&O underlyings resolve as a kept equity in
 **both** vendors. The remaining five F&O underlyings are indices — see §12.
 
+### 11a. Four tiers that DO have an exchange source, and one name that disagrees
+
+Added by D-0089. `NIFTY_50`, `NIFTY_100`, `NIFTY_200` and `NIFTY_500` are the
+first membership lists in this repository read from the exchange's own
+published files rather than derived from a vendor master —
+`nsearchives.nseindia.com`, fetched 2026-08-11, URLs and counts in
+`docs/00-charter.md` §4c. They are a **better** lane than the two rows above,
+and they are still snapshots of semi-annually rebalanced indices, still
+unchecked against a constituent circular, and still undetected on rebalance.
+
+| List | Size | Where it came from | Lane |
+|---|---:|---|---|
+| `NIFTY_500` | 500 | `ind_nifty500list.csv`, fetched from the exchange | published, **not** cross-checked against a vendor master |
+| `NIFTY_200` | 200 | `ind_nifty200list.csv`, fetched from the exchange | published, **not** cross-checked against a vendor master |
+| `NIFTY_100` | 100 | `ind_nifty100list.csv`, fetched from the exchange | published, **not** cross-checked against a vendor master |
+| `NIFTY_50` | 50 | `ind_nifty50list.csv`, fetched from the exchange | published, **not** cross-checked against a vendor master |
+
+What "not cross-checked" costs here: every one of the 500 resolves inside
+`NIFTY_TOTAL_MARKET`, which *was* measured 750/750 against both vendors, so
+every tier member inherits that measurement transitively. Nothing has run the
+D-0025 gate against these four lists directly, and nothing can without a pull.
+
+**And `NIFTY_TOTAL_MARKET` does not agree with the file NSE publishes.** The
+published Total Market file has 752 rows; two are placeholder scrips
+(`DUMMYINXGN`, `DUMMYTRVN`, carrying `DUM`-prefixed pseudo-ISINs that mirror
+`INOXGREEN` and `TRIVENI`, both separately present) and are dropped, leaving
+750 real names. **The counts match and the membership does not:** the exchange
+lists `GRINDWELL`, which the constant does not hold, and the constant holds
+`AGL`, which the exchange does not list. The constant's 750 is therefore **not
+a subset** of the exchange's 752.
+
+The array is left as it stands. Its 750/750 cross-vendor measurement is real
+and cannot be redone from a downloaded CSV, and swapping in a name that has
+never been through the D-0025 gate would trade a measured claim for an
+unmeasured one. **`AGL` is UNVERIFIED — this repository does not know what
+instrument it is.** Resolving it needs a vendor master, which needs a pull.
+
+The disagreement cannot reach the four tiers: the published Total Market file
+is exactly the union of the NIFTY 500 file and the NIFTY Microcap 250 file, and
+`GRINDWELL` sits in the Microcap 250 half, which this repository does not carry
+as a named tier. D-0089.
+
+**NSE publishes 139 indices; this repository carries five.** The exchange's own
+directory was fetched in the same pass. The other 134 — sectoral, thematic and
+strategy indices, NIFTY BANK and NIFTY IT and NIFTY MIDCAP 150 among them — are
+not carried, are not a universe, and nothing here may claim membership in one.
+That is a scope statement, not a gap to be closed by default:
+`docs/00-charter.md` §4c states it, and widening it needs a decision entry.
+
+**The probe bound was measured at one density and read as a guarantee at
+another.** `MemberIndex::build` asserts a table is at most half full. That is a
+TERMINATION guarantee — an empty slot always exists, so the probe loop ends —
+and it was being taken for a COST guarantee. Sizing the NIFTY 500 at 1024 slots
+satisfies `build` and probes **13** times, over the `<= 8` this section quotes
+above. The two existing tables sit at 36.6% and 20.8% fill, so nothing had ever
+exercised the gap. Every appended table is a quarter full or better; the six
+measured worst probes are NTM 6, FNO 7, NIFTY 500 5, NIFTY 200 6, NIFTY 100 5,
+NIFTY 50 3. `of_equity` probes all six, so a membership question costs at most
+32 steps rather than 13 — three times the work, still constant, and 30 KiB of
+extra pointer table to keep it that way.
+
+**Membership reaches the wire and stops there.** D-0090 added `universes` to
+`/instruments.json` — an array carrying all seven memberships per row — beside
+the frozen `universe` string, which still emits only `index|fno|ntm|other` and
+is documented as frozen rather than stale. What is still **not** wired:
+`api::catalog::Pill` admits three universes, so `/instruments?u=n50` selects
+`Pill::Every` and shows every row rather than fifty or an error;
+`api::render::universe_cell` renders three tags; the pill row shows three
+counts; and the four tier rows under `web/` are still disabled because nothing
+there reads the new field yet. Named here so the server-rendered pill is not
+mistaken for a working filter — the endpoint is one, the pill is not.
+
+**And the new field's cost is argued, not measured.** `universe_tokens` walks a
+seven-entry table whose length is a compile-time constant, so the per-row work
+does not grow with the instrument set — by construction. **No bench times it**:
+`crates/api/benches/ratio.rs` measures the instruments *page*, not
+`/instruments.json`, so the O(1) in that function's doc comment is the shape of
+a loop and not a number anybody took. It is written `UNVERIFIED` there for that
+reason. Closing it means a ratio bench over the JSON endpoint at two universe
+sizes, the way C-11 does for the page.
+
 ---
 
 ## 12. Index identity is not cross-checked at all
@@ -2565,3 +2646,587 @@ say "a corporate action may fall in this month", never "split on 2024-06-14".
   read and a whole-census walk, and this adds a constant factor to that linear
   term. What it removes is a route that would have been quadratic in practice —
   31,951 requests and ~17.5 GB to extract 492 KB.
+
+---
+
+## 41. The percentage columns: what is O(1), what is not, and what the store actually holds today
+
+D-0069 made `/store.json` serve `chg_bps` and `prev_chg_bps`. Five things about
+that are limits rather than features, and none of them is hidden behind the
+number on screen.
+
+### 41.1 Per row it is two probes; per request it is still a whole-census walk
+
+Pricing a row and its neighbour is **two hash probes into a table already
+resident, and zero syscalls** — crossing a month crosses a manifest *entry*, not
+a file. `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file` holds
+the falsifiable half of that: the fixture's manifest path does not exist on disk,
+so a change that reached for a bar file fails rather than passing slowly.
+
+**The request around it is `O(entries)` and was before this change.**
+`census_now` re-reads every manifest file and re-walks every committed entry, per
+request — §32's bargain, restated because a page that now shows prices invites
+the assumption that the prices were the expensive part. They are not. At the
+census D-0067 measured, the read is 5.56 MB and the walk is 43,422 entries, and
+the two probes per row are lost in it.
+
+### 41.2 Nothing renders a number on this machine's store, and that is correct
+
+Measured 2026-08-09 against `~/.brutex/store/manifest/groww.man`: **format
+version 1, 206 keys, 1,448,221 rows.** Version 1 had nowhere to put a close, so
+`/store.json` answers **205 `corporate_action_unverified` and 1 `not_recorded`,
+and 0 numbers.** The `not_recorded` rows fill in as their months are re-ingested
+(D-0067's migration); the `corporate_action_unverified` rows do not fill in at
+all, ever, until §41.3 is resolved. An operator can tell the two apart on the
+page, which is the whole point of five reason codes rather than one dash.
+
+### 41.3 No corporate-action threshold is sourced, so 99% of rows can never show a number
+
+`docs/00-charter.md` names no verified split-and-bonus feed and D-0018 names no
+number. Until an operator supplies one **with a source**, every `Segment::Cash`
+and `Segment::Fno` row is refused in both columns. On the census D-0067 measured
+that is 31,282 of 31,493 keys (99.33%); on this machine's it is 205 of 206
+(99.5%). The refusal is the honest answer and it is also a severe limitation of
+the feature, and both halves of that sentence are true at once.
+
+### 41.4 Even with a threshold, this field flags a month and cannot name a day
+
+D-0018 requires a suspected corporate action to be refused **with its date
+named**. A census row holds two closes and no timestamps between them, so the
+strongest statement it could ever support is "a corporate action may fall in this
+month". Naming the day is an O(bars) bar-to-bar pass over ~8,250 records, which
+is not what this layer is for and is not built. The page's prose says exactly
+this rather than implying more.
+
+### 41.5 The wire is `i64` and the browser is a double — unreachable, not guarded
+
+`chg_bps` is an `i64` on the Rust side and JSON has no integer type, so the
+browser parses it as a double and loses exactness past 2^53. **No guard is
+written, because no price can reach it:** the worst case is a base of one paisa,
+where `bps ≈ 10,000 × last`, so exactness holds while the last close is under
+`2^53 / 10^4 = 900,719,925,474` paisa — about ₹9.0 billion per share, five orders
+of magnitude past anything NSE lists. The `Overflow` refusal is about `i64`, not
+about this, and the two bounds are different numbers for different reasons.
+
+### What is NOT claimed
+
+* **That any percentage on this page has been checked against a broker.** None
+  has. The arithmetic is checked against hand-computed basis points at the
+  rounding boundary (A-31), and the closes are whatever the vendor sent.
+* **That `corporate_action_unverified` means a corporate action happened.** It
+  means the instrument is of a kind that can have one and nothing here can tell.
+  Most of those months had no corporate action at all.
+* **That an index is safe from every kind of re-basing.** The claim is D-0018's
+  and it is about splits and bonuses: "Indices never split; equities do." An
+  index reconstitution changes constituents, not the level's continuity.
+
+---
+
+## 42. The binary links C and hand-written assembly, and no gate said so until now
+
+**Measured, on this tree:** `nm target/release/api` returns **72 `ring_core`
+symbols**. `ring` 0.17.14 arrives `reqwest → rustls → ring`, vendors 17 `.c`, 28
+`.h`, 73 `.S` and 17 `.asm` files, and compiles them through its own `build.rs`
+calling `cc::Build::compile`. Five `target/*/build/ring-*/out/` directories hold
+the resulting `libring_core_0_17_14_.a`.
+
+### What was claimed instead
+
+`crates/pull/Cargo.toml` said the `rustls-tls` feature "keeps OpenSSL and its C
+toolchain out — `CLAUDE.md` §2 bans a vendored binding to another language, and
+CI gate 13 walks Cargo.lock for exactly that." Half of that is true: it keeps
+*OpenSSL* out. Gate 13 walked the lock for **interpreted-runtime names**, and
+`ring` is not one — so the sentence named a control that was not looking. Worse,
+`crates/lake/Cargo.toml` stated the fact **correctly** at the same time, so the
+tree carried two manifests contradicting each other and neither was checked.
+
+### What is claimed now
+
+* A **C compiler is required** to build this workspace. That was always true and
+  was written down nowhere.
+* Exactly **one** dependency compiles bundled native source: `ring`, through
+  `cc`. The other native-looking packages are declarations only —
+  `core-foundation-sys` (macOS), `windows-sys` (Windows), and `js-sys`/`web-sys`
+  which resolve solely because `deny.toml` lists `wasm32-unknown-unknown` as a
+  graph target and are in no native build.
+* D-0074 rules that this is permitted and **declared**. §2's four prohibitions
+  are about what *this repository* contains and runs; a third-party crate's own
+  build script is neither.
+
+### What is NOT claimed
+
+* **That the C is audited.** It is not. Nothing here has read `ring`'s sources,
+  and `cargo deny`'s advisory database is the only control on them.
+* **That a pure-Rust alternative was rejected on merit.** There is none in
+  reach: `rustls` takes `ring` or `aws-lc-rs`, and D-0051 measured the second as
+  worse — 87 extra crates, `aws-lc-sys` in the lock, and unswitchable because
+  cargo features are additive.
+* **That gate 13 layer 5 can see native code in a crate with an ordinary name.**
+  It walks `*-sys` and a named list of build-time compilers. A crate that
+  vendors C under a name matching neither is invisible to it, exactly as gate
+  13's own blind-spot list already says of the runtime layers. What layer 5
+  guarantees is narrower and still worth having: **the declared set cannot grow
+  while nobody is looking.**
+
+---
+
+## 43. The mutation gate scopes to the diff, and 15 mutants already survive
+
+**CI gate 18 exists as of D-0078 and it does NOT prove this workspace is free of
+surviving mutants.** It proves a *change* did not add one.
+
+`CLAUDE.md` §9 has required "no surviving mutant on touched modules" since
+before `.github/workflows/ci.yml` existed, and until today **nothing executed
+it**. `cargo-mutants` was installed on the operator's machine and a
+`mutants.out.old/` sat in the tree carrying **33 caught and 15 missed**.
+
+### Why the scope is the diff and not the workspace
+
+Mutation testing runs the suite once per mutant. Measured here: 19 mutants over
+one changed file took 35 s. The whole workspace is thousands, which is hours —
+and a gate that takes hours is a gate somebody disables. A disabled gate is
+worse than an honest absence, because it reads as protection. §9's own wording
+is "on touched modules", so `--in-diff` is both what the law asks for and what
+fits.
+
+### The 15 that survive today, and are NOT caught by this gate
+
+All in `crates/lake`, none touched by recent work, so `--in-diff` never sees
+them:
+
+| File | Count | Shape |
+|---|---|---|
+| `batch.rs` | 13 | `Batch::from_cash_columns` — one `\|\|` chain of `!=` comparisons; every operator in it survives, plus `is_empty` and the `-> Option<Self>` return |
+| `page.rs` | 2 | `decompress`'s `!=`, and `Iterator::next -> None` |
+
+Thirteen in one function is not thirteen problems: `from_cash_columns` validates
+a parquet schema with a chain nothing exercises at the boundary. One test that
+drives each column mismatch separately would kill most of them.
+
+`crates/lake` also measures **83.50% lines / 83.74% regions** against §9's 100%,
+`error.rs` at 24%. The two facts are the same fact.
+
+### What is NOT claimed
+
+* That the workspace is mutant-free. It is not, and the number is 15.
+* That `--in-diff` catches a mutant in code the change did not touch. It cannot.
+* That a caught mutant means the test is good. It means the test *noticed*.
+
+### One thing the gate proved on its first run
+
+Run against the day's telemetry changes it reported **4 missed**, in code
+written the same day. Three were removable rather than testable — two
+comparisons on `Level::rank`, which is injective, so both arms returned the same
+value and no test could ever kill them, and one redundant length guard the
+following line already implied. Those were **deleted**, not suppressed. The
+fourth was real: `with_target_level` accepts a repeated target and nothing
+decided which registration won. It now takes the last, and
+`telemetry::sink::a_repeated_target_takes_its_last_registration` pins it.
+
+---
+
+## 44. One cost figure describes a design that was rejected, so it can never be measured
+
+`crates/api/src/bars.rs`, the doc block on `note_unreadable_records`, contains
+this sentence:
+
+> a line per fault would cost up to `PAGE_BARS` events for one request — enough
+> to push the request's own earlier lines out of a 64 MiB sink
+
+**That number is arithmetic, not a measurement, and no measurement of it is
+possible.** It describes the cost of a per-fault logging design that was
+considered and *not built*. There is no code to run, so there is nothing to
+time. `PAGE_BARS` × one line is a multiplication, and the 64 MiB figure is
+`DEFAULT_KEEP_FILES` × `DEFAULT_MAX_FILE_BYTES` — both are constants read off
+the source, not a stopwatch.
+
+It is kept rather than deleted because it is the **reason** the shipped shape
+exists: one line carrying a count and the first reason, instead of one line per
+faulted record. A reader who deletes the justification will eventually re-propose
+the rejected design. Gate 12 flagged it as an unproven cost claim, which was
+correct — the resolution is the `UNVERIFIED` marker the gate provides, not a
+fabricated benchmark.
+
+**What is bounded, and is not unverified:** `note_unreadable_records` has exactly
+one call site — `read_page`, outside every loop — returns on its first line when
+`faults` is empty, and otherwise emits once. At most one event per request,
+whatever the file does. That is a structural property of the call graph, stated
+here so the `UNVERIFIED` above cannot be read as "the cost of this function is
+unknown". It is not. Only the cost of the alternative is, and that alternative
+does not exist.
+
+This is the same class as §43's equivalent mutants: a gate correctly refusing a
+claim, and the honest answer being to name the limit rather than to manufacture
+evidence for it. `CLAUDE.md` §3 rule 6.
+
+---
+
+## 45. Six mutants in `crates/telemetry` cannot be caught, because they stop the program rather than change its answer
+
+A full `cargo mutants` run over `crates/telemetry/src` (540 mutants, tool version
+26.2.0, the one CI pins) reports **6 timeouts**. They are not survivors and they
+are not caught; they are a third outcome, and it is worth naming what it means.
+
+| Mutant | What it removes |
+|---|---|
+| `clock.rs` `push_padded` `/=` → `%=` | the divide that shrinks the value each turn |
+| `clock.rs` `push_padded` `==` → `!=` | the loop's exit condition |
+| `json.rs` `Scan::bump` → `()` | the cursor advance |
+| `tail.rs` `READ_BLOCK` `*` → `/` | makes the block **zero**, so the walk never moves |
+| `tail.rs` `walk_back` `while pos > 0` → `>=` | always true on a `u64` |
+| `tail.rs` `walk_back` `while at > 0` → `>=` | the same, one loop down |
+
+Every one deletes the only thing that makes a loop terminate. A test cannot
+"catch" them in the sense the other 534 are caught — the process does not
+produce a wrong answer, it produces **no** answer, and the harness reports a
+timeout rather than a failure.
+
+**This is not a coverage gap and no test would close it.** Each of these lines
+is already exercised by the suite; what a mutation makes of them is an infinite
+loop, and the only detector for an infinite loop is a clock. `cargo mutants`
+already has one, and a 120-second timeout is what distinguishes them.
+
+Recorded rather than suppressed because gate 18 counts them separately from
+misses, and a reader comparing "9 missed" against a later "0 missed" should not
+have to wonder where six went. They are the same six every run.
+
+Measured 2026-08-10: **540 mutants — 472 caught, 9 missed, 53 unviable, 6
+timeouts.** The nine misses were then closed (T-15 through T-20, plus T-10's two
+guards and the deletion of an unfalsifiable length guard in `Query::wants`).
+
+---
+
+## 46. What one `emit` costs in the WORST case, which no number in this repository had ever stated
+
+Every figure describing `crates/telemetry` — in `docs/04-invariants.md`, in
+D-0075, in `sink.rs`'s own cost table — is a **ratio of means**. Gate 8 computes
+`min` over 20 trials of a mean, on sinks constructed with
+`NO_ROTATION = 1 << 40`. Both halves of that hide the thing `CLAUDE.md` §3 rule 4
+is about: `min` discards the trial containing a roll, and `NO_ROTATION`
+guarantees there is no roll to discard.
+
+Those rows are not wrong. They prove **flatness across file size**, which is a
+real property and the one they claim. They are simply not evidence of a
+worst-case bound, and nothing in the tree said so.
+
+`crates/telemetry/benches/ratio.rs` now also reports a DISTRIBUTION, with
+rotation inside the timed region and under contention.
+
+**THE MACHINE, because a measurement without its conditions is not one.** Every
+figure below was taken on:
+
+| | |
+|---|---|
+| Model | MacBook Pro `Mac16,7` |
+| Chip | Apple M4 Pro — **14 cores: 10 performance + 4 efficiency**, 20-core GPU |
+| Memory | 48 GB LPDDR5 |
+| Disk | Apple SSD `AP0512Z`, APFS, 111 GiB free of 460 GiB |
+| Power | **AC**, 140 W adapter, battery 100% |
+
+Two of those change how the numbers should be read, and neither was stated
+before:
+
+* **The machine has 14 cores, so a 16-thread run OVERSUBSCRIBES it.** An earlier
+  probe reported a p99 of 2.93 ms at 16 threads and read it as lock contention.
+  Part of that is the scheduler queueing threads that have no core, which is a
+  property of the fixture and not of the sink. The rows below stop at 8 for that
+  reason — 8 fits inside the 10 performance cores — and the 16-thread figure
+  should not be quoted as a contention measurement.
+* **It ran on AC at full charge, which is the FAVOURABLE case.** No power
+  throttling, and an NVMe SSD. Shared CI, a spinning disk, or a machine on
+  battery will all be worse, and the write syscall is the dominant term in the
+  tail. These are a floor, not a ceiling.
+
+Measured 2026-08-11, `cargo bench -p telemetry --bench ratio`:
+
+| Case | p50 | p99 | max | n |
+|---|---:|---:|---:|---:|
+| shipped config, no roll reached | 1,125 ns | 3,125 ns | **2,062,250 ns** | 20,000 |
+| 1 KiB × 8 — rolls every few events | 1,917 ns | **504,250 ns** | **5,466,667 ns** | 20,000 |
+| 1 thread, shipped config | 2,875 ns | 7,625 ns | 1,491,125 ns | 4,000 |
+| 4 threads, shipped config | 4,792 ns | 270,084 ns | 4,417,709 ns | 16,000 |
+| 8 threads, shipped config | 5,250 ns | **503,083 ns** | 3,332,416 ns | 32,000 |
+
+**The rolling maximum is 4,859× the median ordinary emit.** The rolling run
+really did roll — 2,499 rotations, 0 dropped — so this is the roll's cost and not
+an artefact of the fixture.
+
+### Three things these numbers say that the ratios could not
+
+1. **The tail is not only about rotation.** Even with no roll reached, the max is
+   2.06 ms against a 1.1 µs median. That is the operating system, not this crate:
+   a `write` syscall is not bounded by anything this code owns, and a page-cache
+   flush lands on whichever caller is unlucky.
+2. **Contention costs a hundredfold at p99, and every published number is
+   single-threaded.** p99 goes 3,125 ns at one thread with no roll to 503,083 ns
+   at eight — 161×. `crates/api` is a multi-threaded runtime. D-0075's "one
+   uncontended lock" is a single-thread statement and reads as a general one.
+3. **The claim §3 rule 4 makes is still true.** A roll is at most
+   `2 × keep_files` syscalls with `keep_files` a compile-time `u8`, and no term
+   is a function of events already logged, file size or file count. **A 5 ms
+   constant is a constant.** What was wrong was never the bound — it was that the
+   number attached to it everywhere was the wrong number.
+
+### The flatness claim is now gated at p99 as well as at the mean
+
+C-T-01b applies the **same** `CEILING_PERMILLE` to the **same** claim, measured
+with a statistic that can fail. It invents no threshold — that is the point, and
+it is what separates it from the rotation figures below, which stay a report.
+
+**Proven to bite, rather than assumed to.** A cost proportional to the file was
+injected into `Sink::emit` — the exact regression these rows exist to catch —
+and both flatness rows breached:
+
+```
+C-T-01  emit:     1,000 -> 100,000 events   ratio 31.592x  BREACH
+C-T-01b emit p99: 1,000 -> 100,000 events   ratio 39.196x  BREACH
+```
+
+The bench exits non-zero. The p99 row breached harder than the mean row, which
+is the asymmetry it was added for: a tail regression moves a percentile long
+before it moves an average.
+
+### Why the ROTATION figures are a report and not a gate
+
+There is no agreed ceiling for a worst-case emit, and inventing one here would
+be the same mistake in the other direction: a threshold with no evidence behind
+it, that later gets tuned until it passes. The measurement is printed on every
+`cargo bench` run so a regression is visible; choosing a ceiling is a separate
+decision that now has data to be made from.
+
+`benches/ratio.rs` is `harness = false` and `test = false`, so no coverage or
+mutation obligation attaches to this addition.
+
+---
+
+## 47. The reader's carry was quadratic AND unbounded, and both are fixed
+
+`tail::walk_back` reads fixed blocks backwards and keeps the bytes before a
+block's first newline as `carry`, to be joined to the next block. When a block
+holds **no** newline the whole block joins the carry — and the carry is copied on
+every iteration.
+
+So a file whose runs of bytes are long cost **O(bytes²) in time** and grew
+**without limit in space**. Measured on this machine over a file of one unbroken
+run:
+
+| Size | Before | After | Growth after |
+|---|---:|---:|---|
+| 1 MiB | 40 ms | 41 ms | — |
+| 2 MiB | — | 82 ms | 2.00× |
+| 4 MiB | — | 168 ms | 2.05× |
+| 8 MiB | **2,910 ms** | **330 ms** | 1.96× |
+
+4.0× per doubling became 2.0× — quadratic became linear — and 8 MiB is **8.8×
+faster**.
+
+### Why the space half mattered more than the time half
+
+The time was a nuisance. The space was a hazard, and it is the one that belongs
+in this document: **the reader is handed files it did not write.** A log folder
+given to somebody else to diagnose — which is the whole reason
+`docs/05-decisions.md` D-0088 reframes this crate as an evidence format — may be
+truncated, concatenated, hand-edited, or simply not ours. A reader that exhausts
+memory on such a file is no use at exactly the moment it is needed.
+
+`MAX_LINE_BYTES` is 64 KiB, far above any line this crate can write: the event
+ceilings bound one at roughly 2.2 KiB of content, and JSON escaping cannot
+inflate that past about 14 KiB even if every byte needs a `\u00XX`. A run longer
+than that is not a line of ours.
+
+The refusal is **counted, not silent** — `malformed` is what this reader already
+says about bytes it stepped over, so an oversized run gets the same number and
+the same meaning. A whole line after the garbage is still returned, so refusing
+a run does not blind the walk to everything past it. T-23.
+
+## 48. `/ingest/status.json` is as old as the last finished round, and cannot be made fresher without becoming O(entries)
+
+`GET /ingest/status.json` projects `api::autopilot::Status`, which the backfill
+publishes once per pass. Two consequences, both reported rather than removed:
+
+**It is stale by up to one round.** A round is a whole month for the tracked
+universe and takes minutes. Nothing this route says is wrong when it is said; it
+can be superseded before it is read. Making it fresh means `census::read_all`
+per request — O(entries) over ~248,000 manifest entries with a CRC check each,
+on a route a page polls every couple of seconds, which is the cost D-0039 exists
+to remove. The trade is D-0092's and the freshness is the side that was given
+up.
+
+**Before the first round there is nothing to report at all.** The payload says
+so — `surveyed: false`, with `blocked_by` distinguishing "no round has finished"
+from "the backfill task stopped before its first one" — because an empty
+`waiting_on` alone would read as "nothing is outstanding". `/store.json` is the
+route that reads the store and is the one to ask when the answer has to come
+from disk. IC-01 and IC-02.
+
+**What is NOT measured.** No number in this repository states how long a round
+takes on the operator's own store and network, so the staleness has no figure
+here, only a shape. Stating one from a test fixture would be the invention
+`CLAUDE.md` §3 rule 1 forbids.
+
+## 49. A halted feed cannot be revived without restarting the server, and no route can change that
+
+`api::autopilot::FeedState::halted` is set at three sites and the
+`Vec<FeedState>` holding it is a local of `autopilot::fly`. No HTTP handler
+holds a reference to it, so **no route can clear a halt** — `POST
+/autopilot/resume` and `POST /autopilot/control` both refuse a resume that would
+change nothing rather than publishing "resumed" over the reason (D-0093, IC-07).
+
+The operator's path out is a restart, which is safe by construction: `fly`
+rebuilds every feed at its floor and re-derives the frontier from the store.
+
+**The cost of that limit, stated.** A dead credential refreshed in Parameter
+Store cannot be picked up by the running process. On a two-feed build, one dead
+credential leaves the other feed backfilling — the resume is honoured and names
+the feed it did not bring back — but the halted one waits for a restart however
+long the process runs. Whether that should change is the policy question D-0093
+records and leaves to the owner; it is a decision about unattended vendor
+contact, not a missing handler.
+
+## 50. The floor pair is proved consistent by construction, and no committed test races it
+
+`Sink::set_min_level` used to write two atomics one after the other — the global
+floor, then the fast floor derived from it and every per-target override. Two
+callers racing interleaved those four stores and left the pair describing two
+*different* floors, permanently, until somebody set the level again. A
+barrier-synchronised probe on this tree (two setters, one observer, every read
+taken at an instant when nothing was writing) saw it at rounds **2023, 2597,
+5275 and 6269 of four million**, in both directions: `min_level()` reporting
+`error` while a `trace` event was still admitted, and `min_level()` reporting
+`trace` while `trace` was filtered.
+
+The pair is now one `AtomicU16` — global floor in the high byte, fast floor in
+the low byte — written by a single store. `telemetry::sink::the_two_floors_live_in_one_word_and_are_never_observed_crossed`
+(T-27) holds it.
+
+### What is NOT claimed
+
+**No committed test exercises a real interleaving.** The probe that found the
+defect is not in the tree, deliberately: its rounds-to-first-observation varied
+from 74 to 17,715 across runs, so committing it would commit a test whose result
+is the scheduler's. The invariant is asserted structurally instead — the pair has
+exactly one mutator, one store of one word, so every state a reader can observe
+is a word that mutator wrote, and T-27 asserts every such word is consistent.
+Splitting the pair back into two atomics fails to *compile* the test rather than
+failing it at runtime, which is the strongest signal available here but is not
+the same thing as a test that would have caught the original defect by running.
+
+There is no `loom` and there will not be one: it is a dependency, and
+`crates/telemetry` has none by design.
+
+**The `emit` cost is unchanged, and that is measured rather than asserted.** The
+filtered path's fast reject is one relaxed atomic load either way — `ldrh`
+instead of `ldrb` on aarch64, plus one `and w8, w8, #0xff` to take the low half.
+Gate 8's `C-T-02 filtered emit` measured **5,791 / 6,000 / 5,770 ps** across
+three runs with the packed word, against **6,021 / 5,770 ps** on a build kept
+deliberately at an 8-bit fast-floor read. The two are indistinguishable at this
+resolution: the spread *within* each shape is as large as the difference between
+them. No claim is made that the packed word is faster or slower — only that no
+slowdown is measurable, which is what C-T-02 requires.
+
+---
+
+## 51. `isqrt_i128` is BOUNDED, not flat: a 217× cost spread inside a constant step bound
+
+Measured 2026-08-11, `cargo bench -p indicators`, on the operator's machine.
+
+| `v` | Iterations | Total | Per iteration |
+|---|---|---|---|
+| 1 | 1 | 4.0 ns | 4.0 ns |
+| `i64::MAX` | 37 | 293 ns | 7.9 ns |
+| `10^30` | 55 | 712 ns | 13.0 ns |
+| `i128::MAX` | 69 | 916 ns | 13.3 ns |
+
+The iteration count is bounded by `ITERATION_CEILING` = `NEWTON_STEPS` +
+`STEP_DOWN_STEPS` = 130, a compile-time constant, and `C-I-03` asserts the real
+count against it at all four probes. **That bound is real and it is the thing
+worth having** — it is what prevents the regression this function already had,
+where an unbounded step-down needed 1,638,791,155,897,336,446 decrements at
+`i128::MAX` under a doc comment calling itself constant-cost.
+
+**What is not true is that the cost is flat.** Two effects compound:
+
+1. The Newton loop exits on convergence (`guess != previous`), so a small input
+   finishes in one iteration and a 127-bit one needs sixty-nine. **69×.**
+2. Each iteration performs a 128-bit division, which on this architecture is a
+   library call whose own cost rises with the magnitude of its operands. **3.3×
+   per iteration.**
+
+Together, **217×** end to end.
+
+### Why the bench reports this as context and not as a ratio
+
+The first version of `C-I-03` timed `isqrt_i128(1)` against
+`isqrt_i128(i128::MAX)` against a 3.0× ceiling and breached at 217×. The breach
+was correct and the *measurement* was wrong: the function never promised a flat
+cost, so there was nothing there to fail.
+
+The available fixes were both bad. Relaxing the ceiling past 217× produces a
+ceiling loose enough to miss any real regression. Choosing a baseline that happens
+to fit — `i64::MAX` instead of 1, which gives 1.68× — is picking the number that
+passes. So the row asserts the bound and the root, and prints the cost with
+`(context, NOT a ceiling)` beside it.
+
+### Why it is not made genuinely flat
+
+Dropping the convergence exit would run all 130 iterations every call, paying the
+worst case always to buy a uniformity no caller needs. And **VWAP abstains
+entirely on spot indices**, which carry no traded volume, so on the data this
+engine actually sweeps `isqrt_i128` does not execute at all. Spending 200× on the
+common case for a function that never runs would be the wrong trade made loudly.
+
+`crates/indicators/src/vwap.rs` states the bound at both the module header and the
+function, and both point here.
+
+---
+
+## 52. One candle's cost varies 1.87× with what the candle CONTAINS
+
+Measured 2026-08-11, `cargo bench -p indicators`, row `C-I-02`.
+
+| Candle | Cost | Against a wandering bar |
+|---|---|---|
+| wandering (ordinary) | 315 ns | 1.000× |
+| decisive trend, closes on its high | 298 ns | 0.947× |
+| motionless — one price, four times over | 169 ns | **0.535×** |
+
+A motionless bar costs a little over half an ordinary one. The reason is not a
+defect: every range-relative predicate refuses on a zero range — `is_doji` needs
+`range > 0`, `cpr_class` returns `None`, the shadow ratios have nothing to divide
+by — so the arithmetic those bits would have performed never runs.
+
+**It is still a content dependence, and it is recorded rather than described as
+constant.** It is under the 3.0× ceiling in **both** directions, which is how
+`C-I-02` checks it: a bar that costs half as much is as much a data-dependent cost
+as one that costs twice as much, and the one-sided comparison every other bench in
+this workspace uses would have reported it green without a word.
+
+The practical consequence is small and worth stating anyway: a sweep over a
+limit-locked or very quiet session runs faster per bar than one over an active
+session. A per-bar cost quoted from quiet data understates an active day by up to
+1.87×.
+
+---
+
+## 53. Two engine invariants are UNMEASURED and say so in the table
+
+`docs/04-invariants.md` carries both rows with `— ` and the word **UNMEASURED**
+rather than a test name. They are kept rather than deleted because the invariants
+are real; the gate's own instruction is that a row is never deleted to go green.
+
+**E-08 — peak memory under a declared budget.** There is no declared budget and no
+process-memory measurement anywhere in this workspace. Two things are missing, not
+one: a number to hold to, and a way to observe the number. The bar-bit column is
+computable — 1,222,791 bars × 48 bytes is **58.7 MB** — but the frontier's peak is
+a function of how many combinations survive at the widest level, which depends on
+the data and on `min_hits`, and no run has been performed to observe it. Writing a
+budget now would be inventing one, which §3 rule 1 forbids.
+
+**C-04 — result append cost flat from 1× to 100× results held.** The engine pushes
+to a `Vec`, whose amortised push is O(1) by construction. No bench varies the
+results-held count independently, so the claim rests on the standard library's
+documented behaviour rather than on a measurement taken here. That is a weaker
+position than every other `C-` row in the table and is labelled as such.
+
+Both are the honest form of §3 rule 6: the bound may hold, and it has not been
+measured, and neither of those sentences is allowed to be dropped.

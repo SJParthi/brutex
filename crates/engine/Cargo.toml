@@ -1,0 +1,28 @@
+[package]
+name         = "engine"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.97"
+publish      = false
+
+[dependencies]
+vocab = { path = "../vocab" }
+
+[lints]
+workspace = true
+
+# ---------------------------------------------------------------------------
+# THE BOUND IS RE-MEASURED, NOT ASSERTED. Gate 14 refuses a crate that claims a
+# constant cost and never measures it. This crate made four cost claims and
+# measured none until `benches/ratio.rs`. The per-bar factor is what the bench
+# pins: support counting is O(bars) by definition and the Apriori join is
+# O(|frontier|^2), and neither is a defect -- a per-bar constant that DRIFTS is.
+# See D-0103.
+#
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
+# one dependency and std. The [dependencies] table still names `vocab` alone.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

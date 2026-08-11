@@ -501,12 +501,100 @@ jobs:
           # workspace computes offsets in. D-0067.
           layout_field='magic version entry_stride entry_stride_len'
 
+          # ---- group 22: TELEMETRY FIELD KEYS AND OUTCOME WORDS. D-0075.
+          # `crates/pull` gained a telemetry dependency and 15 emit sites, and
+          # every `.with("key", ...)` puts a bare lower-case word in the source
+          # — which is exactly the shape this gate scans for. None of these is
+          # a path segment: they are the LEFT side of a log field, and the
+          # right side is the value. They are declared one by one rather than
+          # waved through with a pattern, because "it looks like a log field"
+          # is precisely the excuse a real credential segment would wear.
+          #
+          # WHAT IS DELIBERATELY NOT HERE. No org, no environment, no vendor
+          # and no field name from the Parameter Store shape. `value_len` is
+          # the closest this list comes to a credential and it is a LENGTH:
+          # `crates/pull/src/ssm.rs` logs how long the token is and never the
+          # token, and never the parameter name. Gate 1c still refuses the
+          # path itself in any tracked file, and this group does not touch it.
+          telemetry_field='
+          bars bars_out before_open before_window after_window at_or_after_close
+          bucket_secs bytes cap_days chunk chunks dropped entries epoch
+          first_chunk_to folded from_version generation ghosts header
+          instrument_id keys landed members outcome per_day per_minute
+          per_second reason refused region_bytes repairing representable
+          rows rows_in snapshots url value_len why absent degraded dir
+          field file kept loaded max rotated vendors
+          asked blank byte_len chars duplicate fault
+          about census rows_read slices
+          not-base32 too-long
+          '
+
+          # THE SECOND BATCH, and why each is not a path segment. The emit
+          # sites in `secret.rs`, `totp.rs`, `work.rs` and `config.rs` landed
+          # after this group was first written, so the gate correctly went red
+          # on all fifteen. Every one is the LEFT side of a `.with(...)`:
+          #
+          #   asked blank duplicate kept  — `work.rs` counts, one plan's
+          #     four outcomes. Integers on the right, never a name.
+          #   byte_len chars max          — LENGTHS. `secret.rs` logs how many
+          #     bytes the credential is and never the credential; `totp.rs`
+          #     logs how many characters were offered against `MAX_SECRET_LEN`.
+          #   fault not-base32 too-long   — `totp.rs` outcome words: a
+          #     `TotpError` rendered to a stable token so a page can group by
+          #     it. They name a FAILURE, not a location.
+          #   file loaded vendors         — `config.rs`, reporting that the
+          #     untracked local configuration was read and how many vendors it
+          #     named. The count, never the contents.
+          #   rotated                     — `secret.rs`, a bool: whether a
+          #     re-read returned a different value. CLAUDE.md §8's "a stale
+          #     token is re-read; if the re-read returns the same dead value,
+          #     the pull halts loudly".
+          #
+          # `field` IS THE ONE WORTH ARGUING ABOUT, so it is argued here. §8's
+          # shape is `/<org>/<env>/<vendor>/<field>`, and `secret.rs` logs
+          # `.with("field", <the field's name>)` — the fourth segment's VALUE,
+          # not just the key. That is deliberate and it is inside §8's own
+          # carve-out: "`crates/pull` holds the shape and the field names; it
+          # holds no `org`, `env`, or `vendor` literal." The field names are
+          # already tracked source. The two segments §8 keeps out of this
+          # repository — `org` and `env` — are read at run time from the
+          # untracked configuration and appear in NO event on any of these
+          # paths. A log handed to somebody still cannot be turned into a
+          # parameter path.
+
+          # THE THIRD BATCH — the four run-scoped failure events, D-0087.
+          # `refused_whole` and the two census arms returned `Err` and logged
+          # NOTHING, so a backfill that landed zero bars left a quiet log. All
+          # four are the LEFT side of a `.with(...)`:
+          #
+          #   about      — the folder or path a refused RUN was about. A local
+          #     archive directory the operator typed, or a store path this
+          #     repository rendered. Never a Parameter Store segment.
+          #   census     — the census file's own path on disk, same shape.
+          #   rows_read  — a COUNT. The rows a refused run did read, so the
+          #     receipt cannot blame a vendor that answered perfectly.
+          #   slices     — a COUNT of appended slices whose census went
+          #     unpublished.
+          #
+          # Two counts and two filesystem paths. No org, no env, no vendor, no
+          # field of a vendor's record.
+
+          # ---- group 23: A YEAR-MONTH IN AN ASSERTION. D-0070.
+          # `pull::unit::a_daily_bucket_is_an_ist_day_...` asserts the month a
+          # folded bar derives to, and that assertion is the whole proof of the
+          # fold fix: before it, a bar stamped 00:00 IST on 2026-01-01 derived
+          # to 2025-12. The literal is a `store::path::YearMonth` rendering,
+          # not a path segment — the store's own month component is written
+          # from a `YearMonth` and never from a caller's string.
+          year_month='2026-01'
+
           allowed="${seg_shape} ${vendor_wire} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
-          ${totp_vector} ${late_scaffold} ${layout_field}"
+          ${totp_vector} ${late_scaffold} ${layout_field}
+          ${telemetry_field} ${year_month}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
@@ -1288,9 +1376,159 @@ jobs:
           fi
           echo "OK — every crate root forbids unsafe and inherits the lint table."
 
+      - name: Gate 17 — nothing logs from inside the sweep
+        run: |
+          set -euo pipefail
+          # WHY THIS EXISTS, AND WHY O(1) IS NOT THE BAR HERE.
+          #
+          # `telemetry::emit` is O(1) and a FILTERED event is very nearly free:
+          # one relaxed atomic load and a comparison, no clock, no lock, no
+          # buffer. On a per-member path — thousands of calls — that is
+          # genuinely nothing, which is why crates/pull emits there.
+          #
+          # The sweep is not that path. It walks the combination ladder upward
+          # from k=1 and evaluates `(bits & mask) == mask` per (bar, mask). That
+          # is BILLIONS of evaluations, and a billion O(1) calls is a billion
+          # calls. Constant per-operation cost (CLAUDE.md section 3 rule 4) is
+          # satisfied by an emit and the operator still loses the run: the bar
+          # is not "each call is cheap", it is "the innermost loop does not call
+          # anything at all".
+          #
+          # SO THE RULE IS ZERO, NOT SMALL. No `telemetry::` reference of any
+          # kind may appear in the crates that hold the mask, the vocabulary and
+          # the sweep. What replaces it is the pattern `crate::session::
+          # DropCensus` already uses in crates/pull: plain integer counters,
+          # incremented in the loop with no atomic and no allocation, emitted
+          # ONCE at a structural boundary — per k-level, per instrument, per
+          # run. Every combination is still accounted for; none of them is
+          # logged individually. Full detail, zero marginal cost.
+          #
+          # WRITTEN BEFORE THE SUBJECT EXISTS, ON PURPOSE. crates/engine and
+          # crates/indicators are not workspace members yet and crates/vocab is
+          # not tracked yet, so this step passes vacuously today and says so.
+          # A rule that arrives after the hot loop is a rule that arrives after
+          # somebody has already put an emit in it.
+          #
+          # NO UNTRUSTED INPUT: `git ls-files` and the static list below.
+          swept='vocab engine indicators'
+          bad=0
+          scanned=0
+          for c in $swept; do
+            files=$( { git ls-files "crates/$c/src/*.rs" || true; } )
+            if [ -z "$files" ]; then
+              printf '  absent   crates/%s — not a tracked member yet\n' "$c"
+              continue
+            fi
+            for f in $files; do
+              scanned=$((scanned + 1))
+              hits=$( { grep -nE 'telemetry::|log::|println!|eprintln!' "$f" || true; } )
+              if [ -n "$hits" ]; then
+                printf 'LOGGING INSIDE THE SWEEP: %s\n%s\n' "$f" "$hits"
+                bad=1
+              fi
+            done
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "GATE 17 FAILED."
+            echo
+            echo "The sweep evaluates a mask per (bar, combination). A call that"
+            echo "is O(1) is still a call, and there are billions of them."
+            echo "Count in a plain integer and emit ONE aggregate at the k-level"
+            echo "boundary — the shape pull::session::DropCensus already uses."
+            exit 1
+          fi
+          echo "OK — ${scanned} swept source file(s) scanned, none logs per combination."
+
   # ==========================================================================
   # GATES 3-6 — the toolchain gates.
   # ==========================================================================
+      - name: Gate 19 — a failure an operator can see is a failure the log records
+        run: |
+          set -euo pipefail
+          # THE ONE THING THE EMIT-SITE COUNT CANNOT ANSWER.
+          #
+          # `api::emitted` counts every `telemetry::emit` under crates/api/src
+          # and proves each reaches a file. That is a strong guarantee about the
+          # sites that EXIST, and it says nothing whatever about a failure path
+          # that has none — which is the gap an operator actually falls into.
+          #
+          # Measured: four arms of `pull::ingest` pushed a `Failure` onto the
+          # receipt and emitted NOTHING, so a backfill that landed zero bars
+          # left a quiet log. They were found by reading every `Result`-
+          # returning function by hand, which is not a thing anyone will do
+          # again. This gate is that reading, mechanised.
+          #
+          # THE RULE. Every `failures.push(` and `failures: vec![` in production
+          # code under crates/{pull,api}/src must have a `telemetry::emit(` or a
+          # `note_*(` helper call within the WINDOW lines above it. Both forms
+          # count because this workspace extracts emits into `note_*` helpers as
+          # soon as a function reaches clippy's line limit — refusing the helper
+          # form would push authors to inline the emit and fail the OTHER gate.
+          #
+          # WHAT IT DELIBERATELY DOES NOT DO. It does not check that the event
+          # is at a useful level, or carries the right fields, or is reachable
+          # from a test — `api::emitted` and gate 12 cover those. It answers one
+          # question: did anybody write an event here at all.
+          #
+          # Test code is skipped from the first `#[cfg(test)]` onward. Every
+          # file in this workspace puts its test module last, and a test that
+          # constructs a `Failure` fixture is not a production failure path.
+          # ONE EMIT SATISFIES ONE FAILURE, AND ONLY THE NEAREST ONE ABOVE IT.
+          #
+          # The first version of this gate asked "is there an emit within twelve
+          # lines above". It passed a tree with a deliberately deleted emit,
+          # because the site below simply matched the site ABOVE's event. A gate
+          # that can be satisfied by somebody else's work is not a gate.
+          #
+          # So each event is claimed at most once, nearest-first. Five failures
+          # and four events is a failure, wherever the four happen to sit.
+          #
+          # A `fn note_*(` DEFINITION is not a call. Counting the helper's own
+          # signature would let a file satisfy itself by declaring helpers.
+          window=12
+          work="$(mktemp -d)"
+          found="$work/missing"; : > "$found"
+          counted="$work/counted"; : > "$counted"
+          for f in $(git ls-files 'crates/pull/src/*.rs' 'crates/api/src/*.rs'); do
+            cut=$( { grep -n '^#\[cfg(test)\]' "$f" || true; } | head -1 | cut -d: -f1 )
+            if [ -z "$cut" ]; then cut=$(awk 'END{print NR+1}' "$f"); fi
+            awk -v cut="$cut" -v window="$window" -v name="$f" '
+              NR >= cut { next }
+              /^[[:space:]]*fn[[:space:]]+note_[a-z_]+\(/ { next }
+              /telemetry::emit\(|note_[a-z_]+\(/ { e[++ne] = NR; next }
+              /failures\.push\(|failures: vec!\[/ { p[++np] = NR }
+              END {
+                for (i = 1; i <= np; i++) {
+                  print "counted" > "/dev/stderr"
+                  ok = 0
+                  for (j = ne; j >= 1; j--) {
+                    if (claimed[j]) continue
+                    if (e[j] >= p[i]) continue
+                    if (p[i] - e[j] > window) break
+                    claimed[j] = 1; ok = 1; break
+                  }
+                  if (!ok) print name ":" p[i]
+                }
+              }' "$f" >> "$found" 2>>"$counted"
+          done
+
+          echo "checked $(wc -l < "$counted" | tr -d ' ') production failure-recording site(s)"
+          if [ -s "$found" ]; then
+            echo
+            echo "A FAILURE IS RECORDED HERE AND NOTHING IS LOGGED:"
+            sed 's/^/  /' "$found"
+            echo
+            echo "The receipt will show it and the log will not, so an operator"
+            echo "reading /logs after a failed run sees a quiet file. Emit an"
+            echo "event beside it — Error or Warn, so it clears the default"
+            echo "floor — or extract a note_* helper as pull::ingest does."
+            echo "CLAUDE.md section 4: degrade loudly and name the reason."
+            exit 1
+          fi
+          echo "OK — every recorded failure has its own event beside it."
+
+
       - name: Gate 10 — every invariant names a test that exists
         run: |
           set -euo pipefail
@@ -1807,6 +2045,36 @@ jobs:
           '
 
           walked=0; kept=0; dropped=0; undelimited=0
+          # A WHOLE-FILE TEST MODULE IS NOT ON ANY PATH.
+          #
+          # The stripper below removes `#[cfg(test)] mod NAME { .. }` blocks
+          # written INSIDE a file. It cannot see the other shape: a module whose
+          # entire file is test code, gated by `#[cfg(test)]` on its `mod` line
+          # in the crate root. store/src/emits.rs, pull/src/emit_sites.rs and
+          # api/src/emitted.rs are that shape -- each proves that every
+          # `telemetry::emit` site in its crate reaches a file -- and they are
+          # compiled out of every non-test build, so their `expect`s are no more
+          # a panic on an O(1) path than the ones under `tests/` this gate has
+          # always skipped.
+          #
+          # Decided by reading the CRATE ROOT, never the file's own name and
+          # never its own contents: a file must not be able to exempt itself.
+          # `grep -A 1` means the attribute has to sit immediately above the
+          # declaration to count.
+          #
+          # A FUNCTION, and not an inline filter, because bash's process
+          # substitution parser fails on `#` comments inside `<( ... )` --
+          # "bad substitution: no closing `)'". The reasoning has to live
+          # somewhere it can be read, so it lives here.
+          whole_file_test_module() {
+            stem="${1##*/}"; stem="${stem%.rs}"
+            root="${1%/src/*}/src/lib.rs"
+            [ -f "$root" ] \
+              && grep -A 1 '^#\[cfg(test)\]$' "$root" \
+                 | grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$"
+          }
+
+
           while IFS= read -r f; do
             [ -n "$f" ] || continue
             walked=$((walked + 1))
@@ -1836,7 +2104,10 @@ jobs:
               undelimited=$((undelimited + 1))
             fi
           done < <(git ls-files 'crates/*.rs' \
-                   | grep '/src/' | grep -vE '/(tests|benches)/' || true)
+                   | grep '/src/' | grep -vE '/(tests|benches)/' \
+                   | while IFS= read -r cand; do
+                       whole_file_test_module "$cand" || printf %s\\n "$cand"
+                     done || true)
 
           # A gate must say what it walked. A glob that matches nothing is the
           # failure mode gate 8 shipped with for the whole life of the
@@ -2112,7 +2383,7 @@ jobs:
           fi
 
           trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace)s?'
+          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close)s?'
 
           refused="$work/refused"; : > "$refused"
           claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
@@ -2349,6 +2620,9 @@ jobs:
           lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03
           telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-02 C-T-03
           greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03
+          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04
+          indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04
+          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04
           '
 
           inv=docs/04-invariants.md
@@ -2386,7 +2660,7 @@ jobs:
                    | grep '/src/' | grep -vE '/(tests|benches)/' || true)
 
           trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace)s?'
+          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close)s?'
 
           claims="$work/claims"; : > "$claims"
           while IFS="$tab" read -r f ln text; do
@@ -2759,6 +3033,103 @@ jobs:
             --summary-only
 
   # ==========================================================================
+  # GATE 18 — no surviving mutant on what this change touched.
+  # ==========================================================================
+  mutants:
+    name: Gate 18 — no surviving mutant
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      # THE WHOLE HISTORY, because this gate's scope IS the diff. With the
+      # default shallow clone there is no merge base to diff against and the
+      # step would mutate nothing while reporting success — the exact silent
+      # pass CLAUDE.md §4 calls a fallback that hides a failure.
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: No surviving mutant
+        run: |
+          set -euo pipefail
+          # WHY THIS EXISTS. CLAUDE.md §9 has required "no surviving mutant on
+          # touched modules" since before this file did, and NOTHING enforced
+          # it. `cargo-mutants` was installed on the operator's machine and a
+          # `mutants.out.old/` sat in the tree carrying **33 caught and 15
+          # missed** — fifteen mutations that survived, thirteen of them in one
+          # function, with no gate to say so. A clause in the definition of
+          # done that no step executes is a clause that is true by nobody
+          # checking.
+          #
+          # WHY --in-diff AND NOT THE WHOLE WORKSPACE. §9 says "on touched
+          # modules", and it says that because it has to: mutation testing runs
+          # the test suite once per mutant, so a full-workspace pass over this
+          # tree is hours. A gate that takes hours is a gate somebody disables,
+          # and a disabled gate is worse than an honest absence — it reads as
+          # protection. `--in-diff` mutates only the lines this change actually
+          # touched, which is both what the law asks for and what fits in CI.
+          #
+          # WHAT THAT MEANS, STATED PLAINLY: this gate does NOT prove the
+          # workspace is free of surviving mutants. It proves THIS CHANGE did
+          # not add one. The 15 already in `crates/lake` are not caught by it
+          # and are recorded in docs/06-limits.md rather than hidden behind a
+          # green tick.
+          #
+          # THE TOOL IS PINNED, for the reason D-0034 gives about cargo-deny
+          # and cargo-llvm-cov: a verdict that can change with no commit is a
+          # verdict nobody can read.
+          cargo install cargo-mutants --version 26.2.0 --locked
+
+          base="${{ github.event.pull_request.base.sha }}"
+          if [ -z "$base" ]; then
+            base=$(git rev-parse HEAD~1 2>/dev/null || true)
+          fi
+          if [ -z "$base" ]; then
+            echo "::warning title=Gate 18 mutated nothing::\
+          No base commit to diff against — the first commit of a history has \
+          no predecessor. Nothing was mutated and nothing is claimed."
+            exit 0
+          fi
+          git diff "$base"...HEAD -- 'crates/*/src/*.rs' > /tmp/changed.diff
+          if [ ! -s /tmp/changed.diff ]; then
+            echo "OK — no crate source changed, so there is nothing to mutate."
+            exit 0
+          fi
+          echo "Mutating only the lines this change touched, against $base."
+
+          # `--test-tool=cargo` and the workspace's own suite. The timeout is
+          # generous per mutant because a mutant that hangs is a mutant the
+          # suite did NOT catch, and killing it early would score it as caught.
+          set +e
+          cargo mutants --in-diff /tmp/changed.diff \
+            --timeout 300 --no-shuffle --colors never
+          status=$?
+          set -e
+
+          # cargo-mutants exits 0 when every mutant was caught, and non-zero
+          # when any survived, was unviable in a way it could not classify, or
+          # timed out. The file is the authority either way, because it is what
+          # an operator reads.
+          missed=mutants.out/missed.txt
+          if [ -s "$missed" ]; then
+            echo
+            echo "GATE 18 FAILED — these mutations survived the test suite:"
+            cat "$missed"
+            echo
+            echo "Each line is a change to the source that NO test noticed."
+            echo "CLAUDE.md §4: a test that asserts nothing is banned, and a"
+            echo "surviving mutant is that test, found by experiment rather"
+            echo "than by review. Write the assertion that kills it."
+            exit 1
+          fi
+          if [ "$status" -ne 0 ]; then
+            echo "GATE 18 FAILED — cargo-mutants exited ${status} with no"
+            echo "missed list. Read the output above: a timeout or an unviable"
+            echo "mutant is not a pass, and this step will not call it one."
+            exit "$status"
+          fi
+          echo "OK — every mutation of the changed lines was caught by a test."
+
+  # ==========================================================================
   # GATE 8 — per-operation cost stays constant as input grows.
   # ==========================================================================
   complexity:
@@ -2816,7 +3187,7 @@ jobs:
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-24.04
-    needs: [language-purity, build, coverage, complexity]
+    needs: [language-purity, build, coverage, complexity, mutants]
     if: always()
     steps:
       - name: Verify every gate went green

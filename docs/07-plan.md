@@ -81,7 +81,7 @@ Restated here so the plan can be checked against it rather than against memory.
 | R-6 | **No vendor comparison anywhere.** One selected feed, always | Feed picker on `/store`; the counter cards and the row column both follow it |
 | R-7 | **N feeds** appear everywhere with no edit | True of routing, the picker, budgets and `/feeds.json`. **Not** true of the descriptor table — see §5 for the measured number |
 | R-8 | Rust only, **except the front end** | `CLAUDE.md` §2, D-0052, D-0053. Gate 1 by path; gate 1e proves the engine builds with `web/` absent |
-| R-9 | **O(1)** everywhere it is claimed | Gate 8 measures at 1×/10×/100× and exits non-zero on a breach |
+| R-9 | **O(1)** everywhere it is claimed | Gate 8 measures at 1×/10×/100× and exits non-zero on a breach. **All eleven crates covered as of D-0103** — `vocab`, `indicators` and `engine` claimed bounds with no bench until 2026-08-11, and gate 14 was red for it. Two of the claims were false; see §6 |
 | R-10 | Feeds not owned must not be offered | `/feeds.json` reports `ready`; the picker disables. **Advisory only** — see §4 |
 
 ---
@@ -225,26 +225,123 @@ ensured":
 
 Last run: **`rc=0`**, every ratio inside the ceiling at 100× input.
 
-**Where it does not yet reach.** `engine`, `vocab` and `indicators` have no
-implementation, so four of the five operations rule 4 names — condition lookup,
-mask evaluation, duplicate rejection, result append — have nothing to measure.
-Gate 14 goes red the day they land without benches. That is designed, not
-overlooked.
+### The prediction this section made came true, and is now closed
+
+This section used to end: *"`engine`, `vocab` and `indicators` have no
+implementation, so four of the five operations rule 4 names — condition lookup, mask
+evaluation, duplicate rejection, result append — have nothing to measure. Gate 14
+goes red the day they land without benches. That is designed, not overlooked."*
+
+**They landed without benches and gate 14 went red, exactly as written.** Seventeen
+cost claims across the three crates, none measured. Closed 2026-08-11 by D-0103:
+three `benches/ratio.rs`, twelve invariant rows `C-V-01…04`, `C-I-01…04`,
+`C-E-01…04`, and three rows in gate 14's own coverage table.
+
+Four of the five operations rule 4 names are now measured:
+
+| Rule 4 operation | Measured | Ratio |
+|---|---|---|
+| Condition lookup | `C-V-04` | 0.965× popcount, 1 bit → 234 bits |
+| Mask evaluation | `C-V-01`, `C-V-02`, `C-V-03` | 0.998× hit→miss, **0.996× word 0 → word 5**, 1.037× k=1 → k=234 |
+| Duplicate rejection | `C-E-04` | 0.842× per bar, 10,000 → 100,000 bars |
+| Result append | **UNMEASURED** — `C-04`, `docs/06-limits.md` §53 | a `Vec::push`, O(1) amortised by construction rather than by a measurement taken here |
+| Bar lookup | `C-01` | already measured in `store` |
+
+The 0.996× is the one that matters: an early-exit loop would return sooner on a
+candidate failing in word 0, so a flat ratio across the six words is what says the
+branchless implementation is the one that actually runs.
+
+**Two claims turned out to be false when measured**, which is the return on writing
+the benches at all. `isqrt_i128` was documented "O(1) for **every** `i128`" and its
+cost varies **217×**, because the Newton loop exits on convergence — bounded, not
+flat, now stated as the bound it is with the spread in `06-limits.md` §51. And a
+candle's cost varies **1.87×** with its content, recorded in §52.
+
+**Where it still does not reach.** Result append (`C-04`) and peak memory (`E-08`)
+have no measurement, and both say so in `docs/04-invariants.md` with the word
+UNMEASURED rather than a test name. `E-08` needs a declared budget before it needs a
+measurement, and inventing a budget is what §3 rule 1 forbids.
 
 ---
 
 ## 7. OPEN — real, measured, not started
 
+**This section was re-measured against the code on 2026-08-10 and four of its
+eight rows were wrong.** They are corrected below and what each used to say is
+kept in §7.4, because a row that was wrong once is the row a reader will
+re-derive wrongly again. D-0083.
+
+The rows are now **ordered by whether an operator can meet the defect today**,
+which is the distinction this section did not carry and the one a reader needs
+first:
+
+* **§7.2 is live.** Reachable now, on the path `api::server::run_local`
+  actually drives.
+* **§7.3 is latent.** A wrong value in a descriptor field that **nothing
+  outside a `#[cfg(test)]` module reads**. Correcting it changes no output
+  whatsoever until §7.1 is closed. Three rows here used to read as active bugs
+  and are not.
+
+### 7.1 The root cause, first, because it re-reads every row below
+
 | Item | Evidence |
 |---|---|
-| GDFL futures unreadable | `MemberPattern::SymbolAtRoot`, but they nest one level deeper. **All 642 files invisible** |
-| 596 decimal-strike contracts per day decode then vanish | `.` is not in the store's legal identifier byte set |
-| TrueData 2025 indices store nothing | 88,885 rows read, **0 stored** — `NIFTY 50` and `INDIA VIX` contain spaces |
+| The archive half of the descriptor table has **zero non-test consumers** | Every read of an `ArchiveSpec` field in `crates/pull/src/vendor.rs` is at a line inside the `#[cfg(test)]` module that opens at **2645** — `archive_spec` (3729), `member_suffix` (3754), `spec.layouts` (3794), `.layout(…)` (3919, 3928, 3933). `Descriptor::record` is the same: read at 4011–4014 and nowhere else. Outside that file **every** consumer matches `Transport::LocalArchive(_)` and discards the spec — `api/src/server.rs:838, 1710, 2330`, `api/src/render.rs:1566`, `pull/src/emit_sites.rs:761`. And the path that actually ingests an archive, `run_local` (`api/src/server.rs:3950`), never asks the descriptor anything: it hardcodes `Columns::Gdfl`, `TimestampEncoding::EpochSecondsUtc`, `PriceScale::Paisa`, `Exchange::Nse` and `Segment::Fno` at 3999–4005 |
+
+This row was already in the table and it was, if anything, **understated**. It
+is not one more defect beside the others; it is why the others divide the way
+they do.
+
+### 7.2 LIVE — reachable today, on the `run_local` path
+
+| Item | Evidence |
+|---|---|
+| GDFL futures are **unaddressable except by hand** | Measured on `GFDLNFO_TICK_01072025`: **642** futures CSVs, at `Futures/{-I,-II,-III}/{SYMBOL}-{series}.NFO.csv` — `Futures/-III/FINNIFTY-III.NFO.csv`. Options sit flat under `Options/` and resolve; futures nest a **continuation-series folder**, so the member path has **four** components where `MemberPattern::StemGroupSymbol` documents three — `{archive stem}/{group folder}/{symbol}{suffix}`, `vendor.rs:1700`. "Unreadable" was too strong: an operator who types the deepest folder into the Ingest page **does** get them, which is exactly how the 194 misfiled instrument-months in §3 happened — `ABB-III`, from `ABB-III.NFO.csv` |
+| **596** decimal-strike contracts per day are refused — **loudly** | Reproduced on 2025-07-01: **11,490** option members in `Options.zip`, of which **exactly 596** carry a decimal strike (`BANKBARODA31JUL25276.65CE.NFO.csv`). `.` is not in the store's legal identifier byte set — `core/src/symbol.rs:73–77` admits `A–Z 0–9 - _ &` and nothing else — so each is an `InstrumentError::Malformed`. **The coverage loss is real. The silence is not**; see below |
+| TrueData 2025 indices store nothing, and the **reason is thin** | 88,885 rows read, **0 stored** — `NIFTY 50` and `INDIA VIX` contain a space, refused by the same byte set. **That count is carried from the original row and was NOT re-measured in this pass**: no `NSE_IDX_TICK_*` archive is on this machine, and `CLAUDE.md` §3 rule 6 forbids restating it as though it were. What WAS re-measured is the refusal path, and it is loud by the same five mechanisms below. The genuine defect is the **wording** — `core/src/error.rs:91` renders every one of them as "malformed instrument identifier", naming neither the offending byte nor its offset. An operator reading "NIFTY 50 — malformed instrument identifier" is not told it was the space |
 | The only true 1-minute archive product is unreadable | 8 fields, and the time is `09:15` — the parser needs seconds |
-| No zip reader anywhere in the workspace | Every archive must be hand-extracted |
-| `PriceScale::Rupees` in both archive descriptors | The decoder already emits paisa. Dormant ×100 error, masked only by `run_local` hardcoding `Paisa` |
-| `RecordShape::Snapshot` unenforced | Its doc says a snapshot feed must refuse rather than be "stored as a bar with the price repeated four times — a lie written into the data itself". That is exactly what reaches disk |
-| The archive half of the descriptor table has **zero non-test consumers** | Wiring it as-is would activate the ×100 scale and the wrong member pattern. The rows must be corrected first |
+| No zip reader anywhere in the workspace | Every archive must be hand-extracted. Visible in the operator's own tree, where `GFDLNFO_TICK_01072025.zip` sits beside an already-extracted `GFDLNFO_TICK_01072025/` |
+
+**Why the two refusal rows are not `CLAUDE.md` §4 violations.** Each refused
+member raises **five** things, and every one of them was reproduced:
+
+1. a telemetry event at **`Error`** on `pull.member` — "did not land" — naming
+   the instrument and the reason (`pull/src/ingest.rs:442`, called at 576);
+2. an entry in `Ingested::failures`, named (`ingest.rs:577`);
+3. `Ingested::balances()` **false**, because it begins `self.failures.is_empty()`
+   (`ingest.rs:244–246`);
+4. a receipt line reading **"Members failed: 596"**, and the balance line
+   spelled `NO — …` (`api/src/server.rs:3717`, 3733);
+5. `audit::Outcome::Failed` on the journalled record, forced by
+   `!done.failures.is_empty()` (`api/src/audit.rs:588`).
+
+That is "degrade loudly and name the reason". It is **not** "a fallback that
+hides a failure", which is what the old wording — *decode then vanish*, *store
+nothing* — asserted, and that half is what decides how urgent these rows are.
+
+### 7.3 LATENT — wrong values in fields nothing outside a test reads
+
+Correcting any of these today changes no byte on disk and no line on a page.
+They are recorded because wiring §7.1 without correcting them first is what
+would make them fire.
+
+| Item | Evidence |
+|---|---|
+| `PriceScale::Rupees` in both archive descriptors | **`vendor.rs:2517`** — TrueData's `ArchiveSpec` — and **`vendor.rs:2573`** — GDFL's. Re-verified line by line; the numbers this row was previously given were the broker rows and are corrected in §7.4. The decoder already emits paisa, so wiring these as they stand is a ×100 error, masked today only by `run_local` hardcoding `PriceScale::Paisa` at `server.rs:4002` |
+| `MemberPattern` cannot express GDFL's futures depth | Three components against the four measured in §7.2. Nothing resolves a `MemberPattern` into a path outside `#[cfg(test)]`, so this is the descriptor half of the GDFL row and it is inert |
+| `RecordShape::Snapshot` unenforced | Its doc says a snapshot feed must refuse rather than be "stored as a bar with the price repeated four times — a lie written into the data itself". That is exactly what reaches disk — and `Descriptor::record` is read at `vendor.rs:4011–4014` **and nowhere else**, so nothing consults it before writing |
+
+### 7.4 What these rows used to say, and why it was wrong
+
+Kept rather than deleted: `CLAUDE.md` §3 rule 1 forbids an unsourced claim
+standing, and a corrected record is worth more here than a tidy one.
+
+| Row | Used to say | Why that was wrong |
+|---|---|---|
+| GDFL futures | "GDFL futures unreadable — `MemberPattern::SymbolAtRoot`, but they nest one level deeper. **All 642 files invisible**" | **The stated cause was never true.** `git log -S StemGroupSymbol -- crates/pull/src/vendor.rs` returns exactly two commits; the older, `dbaafd6`, is the one that created the descriptor table, and it introduced GDFL carrying `StemGroupSymbol { suffix: ".NFO.csv" }`. The newer, `10b11b2`, touches only test-side references and leaves the descriptor's value alone — so GDFL has carried it unchanged since the table was born. `SymbolAtRoot` is **TrueData's** value — §3's diagnosis, copied onto the wrong vendor. §3's row is correct and stands unchanged. The count 642 is right; "invisible" and "unreadable" are not, and the 194 misfiled months are the proof |
+| 596 decimal strikes | "596 decimal-strike contracts per day **decode then vanish**" | The count is exact and reproduces. "Vanish" does not: it names the one shape `CLAUDE.md` §4 bans, and the five mechanisms above are the opposite of it. Half the row decided the severity and that half was wrong |
+| TrueData 2025 indices | "TrueData 2025 indices **store nothing**" | Literally true of the bars, but read beside "vanish" it said *silently*. It is the same loud refusal. The real defect is the message text, which this row never mentioned |
+| `PriceScale::Rupees` | The claim behind the row named **lines 2159 and 2324** | Neither is a `PriceScale` line at all. Each sits inside a **broker's** `HttpSpec` literal, seven lines above that broker's own `prices: PriceScale::Rupees` — 2166 for Dhan, 2331 for Groww — where `Rupees` is **correct**, because both vendors send decimal rupee text. A remedy aimed at those lines would have broken the two feeds that work and left the two that do not. No tracked file carried the numbers, which is why the row went unchecked; the archive lines are 2517 and 2573 |
 
 ---
 

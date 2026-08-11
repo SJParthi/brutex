@@ -122,13 +122,12 @@ pub const TOL_PIVOT_MILLI: i64 = 500;
 /// source draws, in order.
 pub const LADDER_NUMERATORS: [i64; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 1618, 2000, 2618];
 
-/// The smallest gap between two adjacent numerators on [`LADDER_NUMERATORS`].
-///
-/// **Computed from the ladder, not written beside it.** It was a hand-kept `118`
-/// — correct for 382→500 and 500→618 — and nothing tied it to the rungs, so
-/// inflating it silently disarmed the only guard on [`TOL_FIB_MILLI`]. Now a rung
-/// change moves the bound with it.
 /// The lesser of two, so the gap fold below needs no indexing.
+///
+/// The six lines that used to precede this one were a second copy of
+/// [`SMALLEST_LADDER_GAP`]'s own documentation, describing that constant while
+/// sitting on this function. Deleted rather than reworded: the surviving copy is
+/// twelve lines below, on the item it is about.
 const fn lesser(a: i64, b: i64) -> i64 {
     if a < b { a } else { b }
 }
@@ -289,6 +288,33 @@ pub const fn pinned_pivot() -> Result<Tolerance, VocabError> {
 mod tests {
     use super::*;
 
+    /// Hand `body` the tolerance `pin` carries, and fail naming the pin if it
+    /// was refused.
+    ///
+    /// Every test below needs a [`Tolerance`] and [`Tolerance::from_milli`]
+    /// returns a `Result`, so each of them opened with
+    ///
+    /// ```text
+    /// let Ok(tol) = pinned_fib() else { unreachable!("a legal width") };
+    /// ```
+    ///
+    /// and that `else` arm costs something invisible: `unreachable!` expands to
+    /// a panic **inside this crate**, so `cargo llvm-cov` records a region that
+    /// a correct build can never enter and no test run can ever close. There
+    /// were seven of them in this module. Routing through `Result::map` states
+    /// the same thing as an assertion that can actually fail -- `Ok(())` is
+    /// produced only when the closure ran -- and leaves no arm behind.
+    ///
+    /// `Result<Tolerance, VocabError>` is `Copy`, so the failure message can
+    /// still name the pin that was refused.
+    fn with_pin(pin: Result<Tolerance, VocabError>, body: impl FnOnce(Tolerance)) {
+        assert_eq!(
+            pin.map(body),
+            Ok(()),
+            "a width this test needs was refused: {pin:?}"
+        );
+    }
+
     /// The number is pinned at the swept value, and the refusal path that
     /// guarded it while it was unknown still works.
     #[test]
@@ -312,72 +338,161 @@ mod tests {
             Tolerance::from_milli(-1),
             Err(VocabError::ToleranceNegative { milli: -1 })
         );
-        let exact = Tolerance::from_milli(0);
-        let Ok(exact) = exact else {
-            unreachable!("zero is a legal pin: it means exact equality")
-        };
-        assert_eq!(exact.milli(), 0);
-        assert!(exact.covers(100, 100, 10_000));
-        assert!(!exact.covers(101, 100, 10_000));
+        with_pin(Tolerance::from_milli(0), |exact| {
+            assert_eq!(exact.milli(), 0);
+            assert!(exact.covers(100, 100, 10_000));
+            assert!(!exact.covers(101, 100, 10_000));
+        });
+    }
+
+    /// Both refusals, at RUN time, over widths that arrive from a list.
+    ///
+    /// `from_milli` is a `const fn` and every other call to it in this crate
+    /// hands it a literal or one of this crate's own constants, which is a thing
+    /// a compiler is free to fold away. These arrive from a slice, and each one
+    /// is checked against the *whole* error it must produce -- the negative arm
+    /// has to carry the width it was handed, or an operator reading the message
+    /// learns only that something was negative.
+    ///
+    /// `i64::MIN + 1` is the case that separates the two arms: it is the
+    /// largest-magnitude negative width that is **not** the sentinel, so an
+    /// order that tested `milli < 0` first, or a sentinel test written
+    /// `milli <= UNPINNED`, would mis-file exactly one value and this is it.
+    #[test]
+    fn every_illegal_width_is_refused_and_the_error_names_the_width() {
+        assert_eq!(
+            Tolerance::from_milli(UNPINNED),
+            Err(VocabError::ToleranceUnpinned),
+            "the sentinel means no measurement has fixed the band, and it must \
+             not be reported as an ordinary negative width"
+        );
+        for milli in [-1i64, -10, -1_000, i64::MIN + 1] {
+            assert_eq!(
+                Tolerance::from_milli(milli),
+                Err(VocabError::ToleranceNegative { milli }),
+                "a band with a negative half-width is not a band, and the \
+                 refusal has to name the width it was offered"
+            );
+        }
+    }
+
+    /// [`lesser`] is reached only from a `const` initializer, so nothing ever
+    /// executed it and neither side of its comparison was covered.
+    ///
+    /// The compile-time assertion on [`SMALLEST_LADDER_GAP`] would catch an
+    /// inverted comparison **today**, because the ladder's smallest gap is 118
+    /// and its largest is 618 -- but only while that assertion names a number
+    /// that tells the two apart. This states the contract where the function is,
+    /// including the equal case, which no fold over the ladder reaches.
+    #[test]
+    fn lesser_returns_the_smaller_width_whichever_side_it_is_on() {
+        assert_eq!(lesser(118, 618), 118, "the smaller argument came first");
+        assert_eq!(lesser(618, 118), 118, "the smaller argument came second");
+        assert_eq!(lesser(7, 7), 7, "equal widths must not depend on the order");
+        assert_eq!(
+            lesser(-1, 0),
+            -1,
+            "the fold must not assume both sides are positive: a rung pair in \
+             descending order produces a negative difference, and the `gap > 0` \
+             assertion on SMALLEST_LADDER_GAP can only refuse it if that \
+             difference is what comes back"
+        );
     }
 
     #[test]
     fn the_band_is_relative_to_the_range_and_not_to_the_level() {
         // A 200.00-point session on NIFTY, in paisa. At the pinned width the
         // band is one hundredth of that span: 200 paisa, or 2.00 points.
-        let Ok(tol) = pinned_fib() else {
-            unreachable!("the pinned width is neither the sentinel nor negative")
-        };
-        let range = 20_000i64;
-        let level = 2_500_000i64;
-        assert!(tol.covers(level, level, range));
-        assert!(tol.covers(level + 200, level, range));
-        assert!(tol.covers(level - 200, level, range));
-        assert!(!tol.covers(level + 201, level, range));
-        assert!(!tol.covers(level - 201, level, range));
+        with_pin(pinned_fib(), |tol| {
+            let range = 20_000i64;
+            let level = 2_500_000i64;
+            assert!(tol.covers(level, level, range));
+            assert!(tol.covers(level + 200, level, range));
+            assert!(tol.covers(level - 200, level, range));
+            assert!(!tol.covers(level + 201, level, range));
+            assert!(!tol.covers(level - 201, level, range));
 
-        // The level's own magnitude must not move the band. Same range, a
-        // BANKNIFTY-scale level, identical edge.
-        let bank = 5_700_000i64;
-        assert!(tol.covers(bank + 200, bank, range));
-        assert!(!tol.covers(bank + 201, bank, range));
+            // The level's own magnitude must not move the band. Same range, a
+            // BANKNIFTY-scale level, identical edge.
+            let bank = 5_700_000i64;
+            assert!(tol.covers(bank + 200, bank, range));
+            assert!(!tol.covers(bank + 201, bank, range));
+        });
+    }
+
+    /// The pivot band is **half the CPR width**, which is the claim
+    /// [`TOL_PIVOT_MILLI`]'s documentation makes and the premise position 6 was
+    /// retired on.
+    ///
+    /// 500 thousandths of the range is the range halved, so with the CPR width
+    /// as the range the band edges land exactly on `bc` and `tc` and
+    /// `near_pivot_p` is `inside_cpr`. Nothing tested that the two constants
+    /// mean what the paragraph says: at any other width the retirement of
+    /// position 6 stops being true, and an index is never reissued, so it cannot
+    /// be undone.
+    #[test]
+    fn the_pivot_band_is_exactly_half_the_cpr_width() {
+        with_pin(pinned_pivot(), |tol| {
+            let cpr_width = 1_000i64;
+            let half = cpr_width / 2;
+            let pivot = 2_500_000i64;
+            assert!(tol.covers(pivot, pivot, cpr_width));
+            assert!(
+                tol.covers(pivot + half, pivot, cpr_width),
+                "tc sits on the band's edge and is inside it"
+            );
+            assert!(
+                tol.covers(pivot - half, pivot, cpr_width),
+                "bc sits on the band's edge and is inside it"
+            );
+            assert!(
+                !tol.covers(pivot + half + 1, pivot, cpr_width),
+                "one paisa past tc is outside the CPR and outside the band"
+            );
+            assert!(
+                !tol.covers(pivot - half - 1, pivot, cpr_width),
+                "one paisa past bc is outside the CPR and outside the band"
+            );
+        });
     }
 
     /// A circuit-frozen session has no range, so every `near_*` bit is false
     /// rather than "probably" -- `docs/03-vocabulary.md` §4.
     #[test]
     fn a_zero_or_negative_range_covers_nothing() {
-        let Ok(tol) = pinned_fib() else {
-            unreachable!("the pinned width is legal")
-        };
-        assert!(!tol.covers(100, 100, 0));
-        assert!(!tol.covers(100, 100, -1));
-        assert!(!tol.covers(100, 100, i64::MIN));
+        with_pin(pinned_fib(), |tol| {
+            assert!(!tol.covers(100, 100, 0));
+            assert!(!tol.covers(100, 100, -1));
+            assert!(!tol.covers(100, 100, i64::MIN));
+        });
     }
 
     #[test]
     fn a_level_at_the_edge_of_the_type_does_not_overflow() {
-        let Ok(tol) = Tolerance::from_milli(i64::MAX) else {
-            unreachable!("i64::MAX is neither the sentinel nor negative")
-        };
-        assert!(tol.covers(i64::MIN, i64::MAX, i64::MAX));
-        assert!(tol.covers(i64::MAX, i64::MIN, i64::MAX));
-        let Ok(tight) = Tolerance::from_milli(0) else {
-            unreachable!("zero is a legal pin")
-        };
-        assert!(!tight.covers(i64::MIN, i64::MAX, i64::MAX));
+        with_pin(Tolerance::from_milli(i64::MAX), |tol| {
+            assert!(tol.covers(i64::MIN, i64::MAX, i64::MAX));
+            assert!(tol.covers(i64::MAX, i64::MIN, i64::MAX));
+        });
+        with_pin(Tolerance::from_milli(0), |tight| {
+            assert!(!tight.covers(i64::MIN, i64::MAX, i64::MAX));
+        });
     }
 
     #[test]
     fn a_tolerance_carries_its_own_value() {
-        let Ok(a) = Tolerance::from_milli(7) else {
-            unreachable!("7 is a legal pin")
-        };
-        let Ok(b) = Tolerance::from_milli(7) else {
-            unreachable!("7 is a legal pin")
-        };
-        assert_eq!(a, b);
-        assert_eq!(a.milli(), 7);
-        assert!(format!("{a:?}").contains('7'));
+        with_pin(Tolerance::from_milli(7), |a| {
+            assert_eq!(
+                Tolerance::from_milli(7),
+                Ok(a),
+                "two pins of the same width are the same tolerance"
+            );
+            assert_ne!(
+                Tolerance::from_milli(8),
+                Ok(a),
+                "two pins of different widths are not"
+            );
+            assert_eq!(a.milli(), 7);
+            assert!(format!("{a:?}").contains('7'));
+        });
     }
 }

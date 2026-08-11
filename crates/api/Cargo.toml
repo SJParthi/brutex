@@ -47,6 +47,20 @@ pull = { path = "../pull", version = "0.1.0" }
 # year_month` exists to prevent.
 store = { path = "../store", version = "0.1.0" }
 
+# THE LOG. Taken now because until this line the crate was an ORPHAN: it
+# carried a rolling NDJSON sink, 72 tests and a passing ratio bench, and no
+# member of this workspace depended on it. Its own header states the problem it
+# solves in the present tense — "calls across this workspace write to a terminal
+# nobody is watching" — while that was exactly what still happened, because
+# nothing had taken the crate that fixed it.
+#
+# It declares NO dependencies of its own, so this arrow adds nothing to the
+# graph but the crate itself, and cannot cycle. Bounded by construction:
+# 8 MiB x 8 files, so the log can never grow past 64 MiB without an operator
+# choosing it. See D-ENTRY-PENDING in docs/05-decisions.md — `CLAUDE.md` §5
+# does not draw this arrow and must be amended.
+telemetry = { path = "../telemetry", version = "0.1.0" }
+
 axum   = { workspace = true }
 tokio  = { workspace = true }
 

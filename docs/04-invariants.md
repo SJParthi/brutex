@@ -83,34 +83,34 @@ the crate where the gap matters, and `docs/06-limits.md` §18 records the rest.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| V-01 | Condition bit indices are stable across releases | `vocab::table::the_table_is_a_contiguous_run_of_indices`, `vocab::table::a_tombstone_keeps_its_index_and_always_evaluates_false` | Was `vocab::golden::bit_table_frozen`, which existed in no file. Gate 10 skipped the row while `crates/vocab` was not a workspace member and went red the moment it became one — D-0080. |
+| V-01 | Condition bit indices are stable across releases | `vocab::table::the_table_is_a_contiguous_run_of_indices`, `vocab::table::a_tombstone_keeps_its_index_and_always_evaluates_false` | Previously named a golden `bit_table_frozen` test that existed in no file. Gate 10 skipped the row while `crates/vocab` was not a workspace member and went red the moment it became one — D-0080. The old name is deliberately not written in `crate::module::name` form here, because gate 10 reads that shape as a claim and cannot tell a citation from a history note. |
 | V-02 | At bar *i* the evaluator reads no bar `> i` | `indicators::barrier::no_lookahead` (index-guarded accessor) | — |
 | V-03 | Bits `0..=(i)` are identical whether bars `i+1..` are absent, mutated, or extreme | `indicators::proptest::suffix_independence` | — |
 | V-04 | Time-of-day and VWAP bits are cleared on a daily timeframe | `indicators::unit::daily_mask_clears` | — |
 | V-05 | The fast evaluator agrees with a naive reference on random input | `indicators::proptest::differential_vs_naive` | — |
-| V-06 | Bits are computed exactly once per slice | `indicators::bench::compute_call_count` (a counting spy) | — |
+| V-06 | Bits are computed exactly once per slice, never re-derived per candidate — proved **structurally** rather than by counting calls: `Ladder::walk` takes `&[ConditionMask]`, already computed, and `crates/engine` does not depend on `crates/indicators` at all, so no expression in the sweep can compute a condition bit. A counting spy would prove the current code does not recompute; this proves it CANNOT | `engine::tests::the_sweep_cannot_compute_a_condition_bit` | ✓ |
 
 ## Sweep
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| E-01 | `(bits & mask) == mask` is anti-monotone over mask supersets | `engine::proptest::antimonotone` | — |
-| E-02 | The Apriori kept-set equals the brute-force kept-set, exactly | `engine::proptest::apriori_equals_bruteforce` (exhaustive at small *n*) | — |
-| E-03 | Emission order matches the reference enumeration, so the ranked list is bit-identical, not merely set-equal | `engine::golden::emission_order` | — |
-| E-04 | **No depth parameter exists on any public sweep entry point** | `engine::unit::no_depth_field` (reflects over the request type) | — |
-| E-05 | The ladder terminates when a level produces no frequent candidate | `engine::unit::extinction_terminates` | — |
-| E-06 | A duplicate candidate is rejected without a full scan | `engine::bench::dedup_ratio` | — |
-| E-07 | A rerun with identical inputs produces byte-identical output | `engine::golden::rerun_byte_identical` | — |
-| E-08 | Peak memory stays under the declared budget at the declared candidate count | `engine::bench::peak_rss` | — |
+| E-01 | `(bits & mask) == mask` is anti-monotone over mask supersets | `engine::tests::support_never_increases_as_bits_are_added` | ✓ |
+| E-02 | The Apriori kept-set equals the brute-force kept-set, **exactly** — 12,288 sweeps over every assignment of six bars drawn from four bit patterns at three thresholds, compared as sets so a shortfall is a missed combination and a surplus is an invented one | `engine::tests::the_apriori_kept_set_equals_the_brute_force_kept_set` | ✓ |
+| E-03 | Emission order does not depend on hash iteration order, so the ranked list is bit-identical and not merely set-equal. **Narrowed:** this proves the order is DETERMINISTIC, not that it matches an external reference enumeration — there is no reference implementation to compare against, and inventing one would compare this code to itself | `engine::tests::the_order_of_the_output_does_not_depend_on_hash_iteration_order` | ✓ |
+| E-04 | **No depth parameter exists on any public sweep entry point** — `size_of::<Ladder>() == size_of::<u64>()`, so there is nowhere for a depth to hide | `engine::tests::the_type_carries_no_depth_field` | ✓ |
+| E-05 | The ladder terminates when a level produces no frequent candidate, and the empty level is recorded rather than hidden | `engine::tests::depth_is_reached_by_extinction_and_not_by_a_caller` | ✓ |
+| E-06 | A duplicate candidate is evaluated once however many pairs produce it, and the rejection is counted rather than silent | `engine::tests::one_k_set_is_evaluated_once_however_many_pairs_produce_it` | ✓ |
+| E-07 | A rerun with identical inputs produces byte-identical output — two independent walks rendered to text and compared as text, which is what §3 rule 5's "byte for byte" means for a result a file will hold | `engine::tests::a_rerun_with_identical_inputs_produces_an_identical_sweep` | ✓ |
+| E-08 | Peak memory stays under the declared budget at the declared candidate count | **UNMEASURED** — see `docs/06-limits.md`. No budget has been declared and no process-memory measurement exists, so there is nothing to prove yet; the row is kept rather than deleted because the invariant is real | — |
 
 ## Complexity — gate 8
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | C-01 | Reading the header costs the same at 1×, 10× and 100× the region offered | `store::bench::header_read_is_flat` | ✓ |
-| C-02 | Per-candidate evaluation cost is flat from 1× to 100× candidate count | `engine::bench::eval_ratio` | — |
-| C-03 | Duplicate-rejection cost is flat from 1× to 100× seen-set size | `engine::bench::dedup_ratio` | — |
-| C-04 | Result append cost is flat from 1× to 100× results held | `engine::bench::append_ratio` | — |
+| C-02 | Per-candidate evaluation cost does not grow with what the candidate requires — k=1 to k=8, measured at 1.117× | `engine::bench::support_costs_the_same_per_bar_at_every_depth` | ✓ |
+| C-03 | Duplicate-rejection cost does not drive the per-bar cost up as the column grows — folded into the whole-ladder measurement rather than isolated. **Narrowed:** the seen-set size is not varied independently, so this row proves dedup does not make a walk superlinear, and does NOT isolate a probe's own cost | `engine::bench::a_ladder_walk_costs_the_same_per_bar_at_every_column_length` | ✓ |
+| C-04 | Result append cost is flat from 1× to 100× results held | **UNMEASURED** — see `docs/06-limits.md`. The engine appends to a `Vec`, whose amortised push is O(1) by construction rather than by measurement here, and no bench varies the results-held count independently | — |
 | C-07 | Sealing one block costs the same at 1×, 10× and 100× the file's record count | `store::bench::block_seal_is_flat` | ✓ |
 | C-08 | The block checksum beats the bit-by-bit kernel it replaced by at least 3×, measured in the same process | `store::bench::checksum_beats_the_bit_loop` | ✓ |
 | C-09 | Decoding one vendor row costs the same whether a field is 28 bytes or 4 MiB | `core::bench::decode_is_flat_in_field_width` | ✓ |
@@ -488,6 +488,37 @@ while `CLAUDE.md` §9 was violated.
 | U-03 | The list lengths are the measured ones, and no exchange test instrument is ever a member | `core::universe::the_counts_are_the_measured_ones` | ✓ |
 | U-04 | No SME ticker is in either universe — the claim `Skip::SmeBoard` declines 1,117 real shares on | `core::universe::no_measured_sme_ticker_belongs_to_either_universe` | ✓ |
 | U-05 | An index is its own universe and a live derivative is in none | `core::universe::an_index_is_its_own_universe_and_a_live_derivative_is_in_none` | ✓ |
+| U-06 | The four published NIFTY tiers nest — every 50 name is in the 100, every 100 in the 200, every 200 in the 500, every 500 in the Total Market — and the converse does not hold, so the bits carry information | `core::universe::the_published_tiers_nest_one_inside_the_next` | ✓ |
+| U-07 | `INDEX`, `FNO` and `TOTAL_MARKET` are still bits 0, 1 and 2, and the four tiers appended at 3–6 are pinned as numbers (`CLAUDE.md` §3.8) | `core::universe::the_three_original_bits_never_moved` | ✓ |
+
+**U-06 is what lets `of_equity` set five bits for one symbol.** Added by
+D-0089. A NIFTY 50 name is also a NIFTY 100, 200, 500 and Total Market name, and
+the function sets every one of those bits — but it does not *derive* them. It
+probes all six tables and reads each bit from the file that publishes it, so
+that no bit is ever set on another file's authority. Nesting is then a property
+of the DATA, and this row is where the data is checked: symbol by symbol, in
+the direction that can fail, across all 750 members of the four tiers.
+
+The check runs both ways on purpose. If only containment were asserted, four
+copies of the same list would pass it. So the row also asserts that a Total
+Market name outside the NIFTY 500 exists and does **not** claim the NIFTY 500
+bit — without that, `of_equity` could return every bit for every member and
+still be green.
+
+The direction matters more than it looks. NSE rebalances these indices
+semi-annually and the constants are snapshots (`docs/00-charter.md` §4c). A
+rebalance that moved one name out of the 500 while leaving it in the 200 would
+break nesting for exactly one symbol, and this row fails naming that symbol
+rather than letting `of_equity` answer confidently and wrongly. That is the
+`CLAUDE.md` §4 "degrade loudly and name the reason" row, applied to data that
+arrives from outside.
+
+**U-07 is `CLAUDE.md` §3 rule 8 written as an assertion rather than a promise.**
+`Universe::bits()` is stamped onto merged rows and rendered on the page. Had
+D-0089 inserted a tier at bit 2 instead of appending at bit 3, every value
+already written would silently have meant something else, and nothing in the
+type system would have objected. All seven positions are pinned as literal
+numbers so the next insertion cannot renumber them either.
 
 ## The ingest and store pages
 
@@ -532,6 +563,30 @@ Added by D-0038. Every row here is proven by a test that runs today.
 | A-35 | An unknown percentage is `null` and one of five named reason codes on the wire — never `0`, never a missing key, and never a number and a reason together | `api::server::every_row_carries_a_number_or_a_named_reason_and_never_both` · `api::server::a_month_with_no_close_recorded_is_unknown_and_never_zero` | ✓ |
 | A-36 | An instrument's first held month renders its own change and `no_earlier_month` for the previous one; a census gap is **not** searched past — the row one month back is probed and that is all | `api::server::an_instruments_first_month_has_a_change_and_no_previous_change` · `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file` | ✓ |
 | A-37 | `/store.json` prices a row and its neighbour from the census alone: the fixture's manifest path does not exist on disk, so no bar file can have been opened | `api::server::a_row_and_its_neighbour_cost_two_probes_and_no_file` | ✓ |
+| A-41 | `/instruments.json` carries **every** universe a row is in as the `universes` array — the four NIFTY tiers included — while the shipped `universe` string stays frozen at `index`, `fno`, `ntm`, those joined by `+`, or `other`. A bit alone in the new range renders `other` in the frozen field and its own token in the array, and both fields are generated from one spelling table so they cannot disagree about a bit's name | `api::server::the_wire_carries_every_membership_and_the_frozen_field_never_widens` | ✓ |
+| A-42 | The catalogue's pill filter, its pill counts, its dashboard figures and its tracked scope are **inert** under the appended bits: a row carrying all seven selects, counts and pages exactly as the same row carrying three. The universe *column* is the deliberate exception — it orders by `universe.bits()`, so an appended membership visibly reorders it | `api::catalog::the_pill_filter_is_pinned_to_three_universes` · `api::catalog::the_universe_column_orders_by_every_bit_including_the_appended_ones` | ✓ |
+
+**A-41 and A-42 are one decision seen from both ends,** added by D-0090. D-0089
+landed NIFTY 50 / 100 / 200 / 500 as `Universe` bits 3–6 and wired none of it,
+so four rows on `/` and `/db` shipped disabled with "no endpoint carries this
+membership" written on them. A-41 is the wire finally saying what the data
+knows; A-42 is the promise that saying it moved nothing that was already
+working.
+
+The pair exists because "add a field" and "do not disturb the old one" are
+different claims and only one of them is obvious. A single widened `universe`
+string would have satisfied every browser that splits on `+` and broken every
+reader that compares or bookmarks the whole value — the failure would have been
+in somebody else's page, days later, with nothing in this repository red. So
+the frozen field is asserted at the one input that can tell pinning apart from
+coincidence: a bare `NIFTY_50`, a bit with no `ntm` beside it, which no real
+constituent ever is.
+
+A-42's exception is stated rather than repaired. D-0089 recorded that the four
+new bits "change no byte of any response"; that is true of every rendered cell
+and false of `?sort=universe`, because `Lead::Bits` sorts on the bitset itself.
+Masking it back to three bits would order the column by a membership the row no
+longer has — quiet and wrong, against visible and right.
 
 A-27 through A-29 added by the gate 12 sweep. All three are properties
 `crates/api/src/census.rs` already argued for at length in prose and none of
@@ -1378,6 +1433,19 @@ mutation-checked, and never wired to anything.
 | T-12 | A reopened sink resumes the byte count of the file it found, so the footprint bound survives a restart rather than allowing prior size **plus** the bound | `telemetry::sink::a_reopened_sink_resumes_the_byte_count_of_the_file_it_found` | ✓ |
 | T-13 | `Query::since` is inclusive: the record sitting exactly on the boundary is returned, not treated as the end of the walk | `telemetry::tail::since_returns_the_record_that_sits_exactly_on_the_boundary` | ✓ |
 | T-14 | The reader's two constants are pinned as **relations** — `READ_BLOCK` holds many events and is a fraction of a file; `DEFAULT_MAX_SCAN_BYTES` equals one file's bound and is less than the whole window — so a value change that breaks the design fails rather than moving the expectation with it | `telemetry::tail::the_readers_constants_hold_the_relations_they_were_chosen_for` | ✓ |
+| T-15 | The pre-year-0 era yields a real DATE, not merely a negative year: `civil_from_days(-800_000)` is `(-221, 9, 4)`, and every conversion returns a month in 1..=12 and a day in 1..=31 | `telemetry::clock::the_negative_era_yields_a_real_date_and_not_merely_a_negative_year` | ✓ |
+| T-16 | Year zero renders `0000`, not `-0000`; the year before it is signed | `telemetry::clock::year_zero_carries_no_sign` | ✓ |
+| T-17 | A target past `MAX_TARGET_BYTES` is truncated **and the line says `cut`**, so a reader never shows a shortened subsystem name as though it were whole; a target that fits raises no flag | `telemetry::encode::a_target_past_its_ceiling_is_truncated_and_the_line_admits_it` | ✓ |
+| T-18 | `Emitted::is_written` is true only for a write — false for filtered, dropped, and not-installed | `telemetry::sink::is_written_is_true_only_for_a_write` | ✓ |
+| T-19 | A restart resumes the sequence after a line of the **widest legal shape**, so a sequence cannot restart at zero and repeat every number | `telemetry::sink::a_restart_resumes_the_sequence_after_a_line_of_the_widest_legal_shape` | ✓ |
+| T-20 | A file that exists and cannot be stat-ed is a **named line in `Tail::errors`**, while an absent one stays silent — the sparse set is the ordinary state and must raise nothing | `telemetry::tail::a_file_that_exists_and_refuses_to_be_read_is_named_in_errors` | ✓ |
+| T-21 | A log can say whether it is WHOLE: an unfiltered walk reports the exact number of events the sink numbered and the file does not hold, and a filtered walk reports `None` rather than mistaking a skipped record for a lost one | `telemetry::tail::a_hole_in_the_sequence_is_counted_and_a_filter_is_not_mistaken_for_one` | ✓ |
+| T-22 | Every event carries the run it belongs to, so one file holding several interleaved backfills splits back into them; an event outside any run **omits** the key rather than writing a zero a reader must interpret, and a run filter reports `missing: None` rather than mistaking the other run's records for loss | `telemetry::tail::a_log_holding_several_runs_splits_back_into_them` | ✓ |
+| T-23 | The reader is bounded in SPACE as well as time: a run of bytes wider than any line this crate can write is refused and COUNTED as malformed rather than accumulated, so a truncated, concatenated or foreign file cannot exhaust memory — and a whole line after the garbage is still returned | `telemetry::tail::a_run_of_bytes_wider_than_any_line_is_refused_rather_than_accumulated` | ✓ |
+| T-24 | The run filter is reachable from a URL and from the form, and survives the 'as JSON' link — a filter nobody can ask for is not a feature | `api::logs::a_run_can_be_asked_for_by_url_and_survives_the_json_link` | ✓ |
+| T-25 | **No event is returned twice.** The walk keys on the file the operating system knows, not on the path it answered to, so a roll that renames a file onto the next path while the walk is between two of them is met and refused — before its bytes are read, not after its records are decoded | `telemetry::tail::a_roll_landing_mid_walk_never_returns_the_same_event_twice` | ✓ |
+| T-26 | And the refusal is not over-broad: a sequence that restarted at zero — which `resume_seq` documents and a wiped current file causes — puts the same NUMBER on distinct events, and every one of them is still returned. A repeat is a repeated FILE, never a repeated number | `telemetry::tail::a_restarted_sequence_is_not_mistaken_for_a_repeat` | ✓ |
+| T-27 | The global floor and the fast floor are **one atomic word**, so two callers racing `set_min_level` cannot leave them describing different floors: the pair is published in a single store, and every word that store can publish is `(global, min(global, every override))` — checked at construction and at all five levels, with an override below the global floor and one above it | `telemetry::sink::the_two_floors_live_in_one_word_and_are_never_observed_crossed` | ✓ |
 
 **Why T-02 is an invariant and not a feature note.** `Config::with_target_level`,
 `Sink::level_for` and `MAX_TARGET_LEVELS` existed with tests and no surviving
@@ -1403,6 +1471,27 @@ the number a page must show"*; no page showed it, and `Health::is_loud` had no
 caller anywhere in the workspace. `CLAUDE.md` §4 bans a fallback that hides a
 failure, and a sink that drops events behind a clean page is that fallback.
 
+**Why T-27 is deterministic, and what it therefore does not prove.** The defect
+was a race: `Sink::set_min_level` stored the global floor into one atomic and
+then computed and stored the fast floor into another, so two callers interleaved
+four stores and left the pair crossed — `min_level()` reporting `error` while a
+`trace` event was still admitted, and the reverse. A barrier-synchronised probe
+(two setters, one observer, reads taken only at the instant nothing was writing)
+saw it at rounds 2023, 2597, 5275 and 6269 of four million on this machine.
+
+That probe is **not** the committed test, because a test that fails at round
+2,023 one run and 17,715 the next reports the scheduler rather than the code. The
+committed test asserts the property that makes the race impossible instead of
+sampling for the race: the pair has exactly one mutator, one store of one word,
+so the only states any reader can observe are words `set_min_level` wrote, and
+every one of those words is consistent. It reads the packed field as a single
+load, so **splitting the pair back into two atomics does not make the test flaky
+— it stops the test compiling.**
+
+What it does not prove, stated: no committed test exercises a real concurrent
+interleaving of the level-setting path, and there is no `loom` in this workspace
+to enumerate one. `docs/06-limits.md` carries that limit.
+
 ### Complexity rows for the event stream
 
 Enforced by gate 8, `crates/telemetry/benches/ratio.rs`, against the same **3.0×
@@ -1413,8 +1502,18 @@ a file a hundred times bigger.
 | # | Must hold | Proven by | |
 |---|---|---|---|
 | C-T-01 | One `emit` costs the same with 1,000, 10,000 and 100,000 events already in the file — the level check, the clock, the lock, the render and the rotation check are none of them a function of what came before | `telemetry::bench::emit_cost_does_not_grow_with_the_file` | ✓ |
+| C-T-01b | The same claim **at p99 rather than at the mean**: the 99th percentile of the per-call distribution is flat across the same three file sizes, under the same 3.0× ceiling. A mean cannot see a tail — an emit that occasionally took a thousand times longer would move it by a fraction of a percent and C-T-01 would stay green | `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file_too` | ✓ |
 | C-T-02 | A filtered event returns at the level check having touched nothing else: its cost is flat in the file too, and it is **measurably** cheaper than a written one on the same sink rather than merely documented as such | `telemetry::bench::a_filtered_event_touches_nothing_and_stays_flat` | ✓ |
 | C-T-03 | Reading the last twenty events costs the same at 1,000, 10,000 and 100,000 events in the file, and reads the **same number of bytes** at every size — O(1) in the size of the file, which is the bound that matters because the file grows all day and N does not | `telemetry::bench::the_tail_is_flat_in_the_size_of_the_file` | ✓ |
+
+**These three rows are ratios of MEANS, and prove flatness across file size —
+not a worst-case bound.** Gate 8 takes `min` over 20 trials on sinks built with
+rotation disabled, so a roll is neither timed nor timeable here. The worst case
+is measured separately and reported in `docs/06-limits.md` §46: the emit that
+rolls costs up to **4,859×** the median ordinary one, and p99 rises 161× from one
+thread to eight. The bound in §3 rule 4 still holds — a roll is at most
+`2 × keep_files` syscalls and no term grows with events logged — but the number
+quoted for it was, until §46, the wrong number.
 
 Measured on the operator's machine, 2026-08-09, `cargo bench -p telemetry`,
 exit 0. C-T-01 measured **0.990×** and **0.968×**. C-T-02 measured **0.974×**
@@ -1446,21 +1545,37 @@ the emit — every row below drives the shipped call instead.
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| A-38 | **Twenty-two of this crate's twenty-five LIB emit sites reach a file**, each driven through the shipped call that owns it — `census::read_vendor`, `master::load`, `merge::merge`, `Catalog::build`, `Journal::{append, look, page}`, `bars::{open, page}`, `ingest::parse_spot`, `Assets::{new, respond}`, `Control::{pause, resume}`, the `/audit.json` handler, `broker_run`, `note_member_failure`, a served HTTP request through the `note_request` layer, and `run` itself — and each record is found by target, sentence and one field it could only have got from that drive, at a sequence number no earlier than the one the sink would have stamped before the call. The **level** is asserted on every row, because four sites choose theirs from a condition and a flipped ternary is invisible to every other kind of test | `api::emitted::every_reachable_emit_site_puts_a_record_in_the_file` · `api::server::the_run_events_and_the_request_event_reach_the_installed_sink` · `api::server::run_serves_until_the_signal_and_exits_zero` | ✓ |
+| A-38 | **All twenty-five of this crate's LIB emit sites reach a file**, each driven through the shipped call that owns it — `census::read_vendor`, `master::load`, `merge::merge`, `Catalog::build`, `Journal::{append, look, page}`, `bars::{open, page}`, `ingest::parse_spot`, `Assets::{new, respond}`, `Control::{pause, resume}`, the `/audit.json` handler, `broker_run` over an empty universe and over a universe of one, `note_member_failure`, `fetch_chunks` against a loopback vendor that refuses and one that answers, a served HTTP request through the `note_request` layer, and `run` itself — and each record is found by target, sentence and one field it could only have got from that drive, at a sequence number no earlier than the one the sink would have stamped before the call. The **level** is asserted on every row, because four sites choose theirs from a condition and a flipped ternary is invisible to every other kind of test | `api::emitted::every_reachable_emit_site_puts_a_record_in_the_file` · `api::server::the_run_events_and_the_request_event_reach_the_installed_sink` · `api::server::the_two_sites_past_the_socket_are_driven_over_a_real_one` · `api::server::the_refused_instrument_site_is_driven_over_a_real_universe` · `api::server::run_serves_until_the_signal_and_exits_zero` | ✓ |
 | A-39 | **The three sites whose doc comments promise silence are silent.** `Assets::note_missing` fires on a doubling, so the 1st and 2nd miss write a line and the 3rd writes nothing; `bars::note_unreadable_records` writes nothing for a page where every record read; `audit::note_looked` writes nothing for an absent journal and nothing for a whole one. Without this, every one of those guards could be deleted and A-38 would still pass — and a scanner walking a wordlist would roll the run's own beginning out of the 64 MiB window, which is the shape D-0072 forbids | `api::emitted::the_silent_arms_stay_silent` | ✓ |
-| A-40 | The three sites that are **not** proven are named with the reason rather than left for a coverage report, and the arithmetic is asserted: the sites proven here, plus the sites proven in `server::tests`, plus the sites named as unreachable, are exactly the twenty-five in the LIB target. A site added with no row fails the count | `api::emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten` | ✓ |
+| A-40 | The list of sites that are **not** proven is asserted rather than described, and it is now **empty**: the sites proven in `emitted`, plus the sites proven in `server::tests`, plus the sites named as unreachable, are exactly the twenty-five in the LIB target, counted from the source. A site added with no row fails the count, and an unreachable list that grows again has to name what it is waiting for | `api::emitted::the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten` | ✓ |
 
-### The three that are not proven, and why
+### The three that were not proven, and what was actually true
 
-All three sit past a socket, inside `broker_run`'s per-instrument loop:
+For a long time three sites were listed as out of reach, all inside
+`broker_run`'s per-instrument loop or past the socket it opens:
 `pull.spot instrument refused`, `pull.http vendor refused a window`, and
-`pull.chunk answered`. Reaching any of them needs a non-empty universe **and**
-a live vendor — `Site::broker` is `Live` only from `Site::serving`, and the
-reason each event exists to carry is the vendor's own words. A test that reached
-them would authenticate against Dhan, which is the failure `Site::broker`'s own
-doc comment records and which a previous version of this suite committed. They
-become reachable the day a recorded transport exists for `pull::fetch`; there is
-none, and inventing one would be a second definition of the vendor's wire.
+`pull.chunk answered`. Each entry said reaching it needed a live vendor, and
+each was wrong in its own way. **None of them needed one, and the recorded
+transport for `pull::fetch` they were all said to be waiting on was never
+written.**
+
+* `pull.http vendor refused a window` and `pull.chunk answered` needed a
+  **socket**, not a vendor. A `TcpListener` on `127.0.0.1:0` supplies one, which
+  is how `crates/pull`'s own socket tests already worked. The refusal is driven
+  against a 503 and the success against a 200 whose body is the shape the
+  shipped Dhan descriptor declares — parallel arrays, no envelope, rupee prices,
+  no `open_interest` array — so the decode under test is the production decode.
+* `pull.spot instrument refused` needed a **non-empty universe** and nothing
+  else. The loop emits for whatever `broker_window` refuses, and that function
+  refuses a rung the feed does not declare on its fourth statement, above the
+  credential file and above `AwsIdentity::discover`. Dhan declares `Day1` alone,
+  a form with no `granularity` field means `Minute1`, and `served` refuses by
+  name.
+
+No test here authenticates against a broker — the failure `Site::broker`'s own
+doc comment records, and which a previous version of this suite committed. The
+standing lesson is the one D-0072's neighbours keep re-learning: **an
+"unreachable" list is worth re-reading rather than trusting.**
 
 ### One sink, because `install` is a process singleton
 
@@ -1485,3 +1600,208 @@ walk at the first record older than it. One older-stamped line written by a
 concurrent test was enough to stop the walk before the record under assertion;
 measured, it failed about one run in three. `seq` is assigned inside the lock
 and is unbroken across a rotation, so it is the order the file is actually in.
+
+
+---
+
+## The condition mask — the sweep's inner loop, measured
+
+`ConditionMask::hits` is called once per candidate per bar. At 1.2 million bars
+and a frontier of any interesting size it runs more often than every other
+operation in this workspace combined, which is why `CLAUDE.md` §3 rule 4 names
+mask evaluation among the five that must be constant.
+
+Two things prove that jointly, and neither is sufficient alone. The **source**
+guarantee is `vocab::mask::hits_does_the_same_work_for_every_input`: it reads the
+function body, refuses `for`, `while`, `loop`, `return` and `if`, and counts the
+operators against `WORDS` — so a word added to the mask and not to the body fails
+the build rather than being silently ignored. The **cost** guarantee is the bench
+below: a source with no branch to take still has to be shown not to take one.
+
+The third row is the one §6 rests on. The Apriori ladder has no depth parameter
+and walks upward until the frontier empties, which is affordable only because
+evaluating a wide combination costs what a narrow one costs. If `hits` were
+per-bit, the ladder's total work would grow quadratically in depth and the
+missing parameter would be a performance defect rather than a design decision.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-V-01 | A hit and a miss cost the same, so the sweep's per-bar cost does not depend on how selective the frontier is | `vocab::bench::a_hit_and_a_miss_cost_the_same` | ✓ |
+| C-V-02 | A miss costs the same **in every word**, checked for all six — this is the measurement that catches an early-exit loop, which returns sooner on a candidate failing in word 0 and would make cost depend on which conditions a combination happens to require | `vocab::bench::a_miss_costs_the_same_in_every_word` | ✓ |
+| C-V-03 | The cost does not grow with what the candidate requires: a 1-bit candidate against all 234 live bits. §6's absent depth parameter depends on this row | `vocab::bench::the_cost_does_not_grow_with_what_the_candidate_requires` | ✓ |
+| C-V-04 | `popcount`, `union` and `intersect` do not grow with the bits set — `popcount` especially, because a shift-and-count implementation costs more when more are set and the frontier's reconciliation calls it on every mask | `vocab::bench::the_set_operations_do_not_grow_with_the_bits_set` | ✓ |
+
+Measured on the operator's machine, 2026-08-11, `cargo bench -p vocab`, exit 0.
+**Seven measurement sites producing eleven points** — the per-word loop is one
+site and emits one point per interior word, so it covers a seventh word
+automatically if `WORDS` ever grows rather than needing a line added beside it.
+Gate 14's floor is stated as 7 because that is what its own counter sees.
+`hits` costs **~0.82 ns** and every ratio landed between
+**0.961× and 1.044×** against a ceiling of 3.0×:
+
+| Point | Ratio |
+|---|---|
+| C-V-01 hit → miss | 0.998× |
+| C-V-02 miss in word 0 → word 5 | 0.996× |
+| C-V-02 miss in word 0 → words 1, 2, 3, 4 | 0.961×, 0.961×, 0.996×, 0.997× |
+| C-V-03 1-bit candidate → 234-bit candidate | 1.037× |
+| C-V-04 popcount, 1 bit → 234 bits | 0.965× |
+| C-V-04 union / intersect, empty → full | 1.044× / 0.973× |
+
+**What the numbers say and do not say.** 0.996× between a word-0 miss and a
+word-5 miss is the early-exit measurement, and it is flat — six words are read on
+every call whatever the answer. 1.037× between a 1-bit and a 234-bit candidate is
+the depth measurement, and it is flat for the same reason: the work is per WORD,
+not per BIT, so requiring 234 conditions costs what requiring one costs.
+
+What they do not say is that the compiler cannot introduce a branch. A ratio near
+1.0 is evidence and the source check is the guarantee; the honest claim is the
+conjunction, which is why both are listed and neither is described as sufficient.
+
+A zero baseline is reported as `UNMEASURABLE` and **fails**, rather than dividing
+by zero or passing. An operation the optimiser deleted has not been shown to be
+constant — it has been shown to be absent, and calling that a pass is the
+fallback §4 bans.
+
+
+---
+
+## The indicator fold — one candle in, and what it does not depend on
+
+Every module in `crates/indicators` is a streaming fold, `step(&mut self, bar:
+&Candle)`. `const _: () = assert!(size_of::<Evaluator>() <= 1792)` fails the build
+if the state grows, and that bounds the **space**. It says nothing about time, and
+the two come apart in one way that matters: a fold whose state is fixed-size can
+still do more work as it goes if it ever rescans that state.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-I-01 | One candle costs the same however many came before it — measured at 1,000, 50,000 and 200,000 candles folded, so drift appearing only at an intermediate depth is visible rather than hidden between two endpoints | `indicators::bench::a_candle_costs_the_same_however_many_came_before` | ✓ |
+| C-I-02 | One candle costs the same whatever it CONTAINS: a motionless bar, a wandering one and a decisive trend bar. Checked **in both directions** — a bar that costs half as much is as much a data-dependent cost as one that costs twice as much, and the one-sided check every other bench uses would report it green | `indicators::bench::a_candle_costs_the_same_whatever_it_contains` | ✓ |
+| C-I-03 | `isqrt_i128`'s iteration count stays under `ITERATION_CEILING` = 130 at 1, `i64::MAX`, `10^30` and `i128::MAX`, and the root satisfies `root² ≤ v < (root+1)²` at every one of them — a function that gave up early would be fast and useless | `indicators::bench::the_integer_square_root_is_bounded_and_flat_per_iteration` | ✓ |
+| C-I-04 | A session rollover costs what an ordinary mid-session candle costs. Rollover is the one place per-candle work could legitimately spike: it copies the running extremes into the previous-session slots and reseeds. That is a fixed number of field moves, and this row is what says it is not a rebuild from history | `indicators::bench::a_session_rollover_costs_what_an_ordinary_candle_costs` | ✓ |
+
+Measured on the operator's machine, 2026-08-11, `cargo bench -p indicators`,
+exit 0. The evaluator is **1,664 bytes** and emits **234 positions**.
+
+| Point | Ratio |
+|---|---|
+| C-I-01 1,000 → 50,000 candles in | 1.015× |
+| C-I-01 1,000 → 200,000 candles in | 1.009× |
+| C-I-02 wandering → motionless | 0.535× (1.87× inverted) |
+| C-I-02 wandering → decisive trend | 0.947× |
+| C-I-04 mid-session → session rollover | 0.772× |
+
+**C-I-01 is the row this crate exists to earn.** 1.009× at 200× the depth is the
+fold not accumulating — the claim the `size_of` assertion cannot make.
+
+**C-I-02 does not read as flat and is not reported as flat.** A motionless candle
+costs 0.535× a wandering one, because the range-relative predicates refuse on a
+zero range and never run their arithmetic. That is under the ceiling in both
+directions and it is a **1.87× content dependence**, recorded here as measured
+rather than described as constant. `docs/06-limits.md` carries it.
+
+**C-I-03 asserts a bound, not a flat cost, and the difference is the whole row.**
+An earlier version of this bench timed `isqrt_i128(1)` against
+`isqrt_i128(i128::MAX)` and breached at **217×**. The breach was correct and the
+measurement was wrong: the Newton loop exits on convergence, so the function never
+promised a flat cost. Iterations measured **1 → 37 → 55 → 69** against a ceiling
+of 130. The cost spread is printed as context and deliberately **not** compared to
+a ceiling — see `docs/06-limits.md` for why, and for the numbers.
+
+
+---
+
+## The sweep — what a per-bar cost is allowed to depend on
+
+Three costs in this crate are **not** constant and none of them is a defect.
+Support counting is O(bars) because it *is* the measurement. The Apriori level
+join is O(|frontier|²), which is that algorithm's shape. Building a candidate
+walks the full 384-bit width because `ConditionMask` exposes no bit iterator, and
+384 is a compile-time constant.
+
+What must not happen is a per-bar **constant that drifts**. That is how a linear
+pass becomes superlinear with nothing in the source resembling a nested loop, and
+it is what these rows measure. Every one divides by the bar count and compares the
+quotient, in **both directions** — a variant that is cheaper is as much a data
+dependence as one that is dearer.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-E-01 | The per-bar cost of support counting does not grow with the column: 10,000 against 100,000 against 1,000,000 bars | `engine::bench::support_costs_the_same_per_bar_at_every_column_length` | ✓ |
+| C-E-02 | The per-bar cost does not grow with what the combination REQUIRES: k=1 against k=4 against k=8. **§6's absent depth parameter depends on this row** — if a deep combination cost more per bar, the ladder's total work would be quadratic in depth and the missing parameter would be a performance defect rather than a design decision | `engine::bench::support_costs_the_same_per_bar_at_every_depth` | ✓ |
+| C-E-03 | The per-bar cost does not depend on the ANSWER: a column where every bar matches against one where none does, verified to be those two extremes before being timed. `support` folds a branchless `hits` with no early exit, so a short-circuiting version would be fast on selective candidates and the sweep's runtime would track the market rather than the bar count | `engine::bench::support_costs_the_same_whether_bars_match_or_not` | ✓ |
+| C-E-04 | A whole ladder walk — generate, subset-prune, reject duplicates, count support — costs the same per bar at 10,000 and 100,000 bars, with the live set held fixed so only the bar count varies and the O(&#124;frontier&#124;²) join is not what is being measured. Every frontier is checked to reconcile before its cost is reported: a walk that is not sound is not worth timing | `engine::bench::a_ladder_walk_costs_the_same_per_bar_at_every_column_length` | ✓ |
+
+Measured on the operator's machine, 2026-08-11, `cargo bench -p engine`, exit 0.
+`size_of::<Ladder>()` is **8 bytes** — one `u64`, with no room for a depth field.
+**Four measurement sites producing six points**: C-E-01 and C-E-02 each loop over
+their variants, so adding a column length or a depth adds a point without adding a
+line. Gate 14's floor is stated as 4 because that is what its own counter sees.
+
+| Point | Ratio |
+|---|---|
+| C-E-01 10,000 → 100,000 bars | 1.002× |
+| C-E-01 10,000 → 1,000,000 bars | 0.574× (cheaper) |
+| C-E-02 k=1 → k=4 | 1.118× |
+| C-E-02 k=1 → k=8 | 1.117× |
+| C-E-03 all match → none match | 0.998× |
+| C-E-04 walk, 10,000 → 100,000 bars | 0.842× |
+
+**C-E-02 is the row §6 rests on.** 1.117× from k=1 to k=8 is `hits` being `WORDS`
+word operations whatever the popcount: requiring eight conditions costs what
+requiring one costs. The ladder can therefore walk to extinction without a depth
+parameter being a cost decision.
+
+**C-E-03 at 0.998× is the no-early-exit measurement**, and the two columns are
+verified to be the extremes — 100,000 of 100,000 matches against 0 of 100,000 —
+before either is timed. A column that quietly failed to be an extreme would print
+a reassuring number and mean nothing.
+
+**C-E-01's 0.574× at a million bars is the sweep getting CHEAPER per bar, not
+dearer**, which is the branch predictor and the prefetcher warming over a longer
+run. It is reported as `(cheaper)` rather than silently passing a one-sided
+check. The honest reading is that the per-bar constant does not drift upward; the
+downward movement is the machine, not the algorithm.
+
+**C-E-04 walked to depth 8 and found 255 frequent sets** at `min_hits = 1` over
+eight live positions — every non-empty subset of the eight, which is the complete
+lattice. That is the extinction condition being reached rather than a cap: the
+ladder stopped because k=9 has no candidates, not because anything told it to.
+
+The 1,000,000-bar column is deliberately absent from C-E-04: a full walk over a
+million bars at eight live positions takes minutes and gate 8 runs on every push.
+The 10× step is enough to see a drifting constant. Stated rather than implied, per
+§3 rule 6.
+
+## The three routes that answer without running — D-0092, D-0093, D-0094
+
+`GET /ingest/status.json`, `POST /ingest/queue` and `POST /autopilot/control`.
+Each of them answers a question an operator had no machine-readable answer to,
+and none of them contacts a vendor. The rows are prefixed `IC-` rather than
+continuing `A-`: two agents were appending to this file at once and a collided
+identifier is worse than a new prefix.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| IC-01 | `/ingest/status.json` reads **no** file and probes **no** manifest: it projects `autopilot::Status`, which the backfill publishes once per pass. Cost is one uncontended lock and one pass over the feed reports | `api::ingest::route_tests::the_status_reports_the_month_the_window_and_what_is_behind` · read of `ingest::status_json`, which names no `census` call | ✓ |
+| IC-02 | Every state names what the next sweep is waiting on **in words** — the operator's pause, every feed halted (with the restart requirement), a task that stopped before its first round, and no round finished yet — and an empty `waiting_on` is never the whole answer | `api::ingest::route_tests::what_the_sweep_waits_on_is_named_in_every_state` | ✓ |
+| IC-03 | An unreadable status refuses with **503 and the reason**, never an empty list. A poisoned lock cannot say what is outstanding, and "nothing" is a different fact | `api::ingest::route_tests::the_status_route_answers_and_refuses_an_unreadable_one` | ✓ |
+| IC-04 | `POST /ingest/queue` **never** answers that anything was queued, and a legal selection is refused naming what does exist instead | `api::ingest::route_tests::a_legal_selection_is_refused_by_name_rather_than_accepted_and_dropped` | ✓ |
+| IC-05 | It writes nothing to the store root, journals nothing, and leaves the pull seat free — asserted against the directory and the seat, not against a comment | `api::ingest::route_tests::queueing_touches_neither_the_store_nor_a_vendor` | ✓ |
+| IC-06 | Every refusal names the control it is about, and the one refusal that is about the machine's clock names **`null`** rather than a guessed field | `api::ingest::route_tests::a_refused_selection_names_the_field_and_the_clock_names_none` | ✓ |
+| IC-07 | A resume that would change nothing is **refused with 409**, and the halt's own reason survives it — nothing is published over a halt | `api::autopilot::tests::a_resume_against_a_wholly_halted_backfill_is_refused_and_keeps_the_reason` · `api::autopilot::tests::a_resume_before_the_first_round_of_a_halted_task_is_refused` | ✓ |
+| IC-08 | A resume that WOULD change something is honoured, and when any feed stays terminal both the answer and the published detail name it | `api::autopilot::tests::a_partly_halted_backfill_resumes_and_names_what_stayed_dead` · `api::autopilot::tests::a_resume_before_the_first_round_of_a_live_task_is_admitted` | ✓ |
+| IC-09 | An unreadable status refuses to START and still permits a STOP, saying the reason could not be published rather than pretending it was | `api::autopilot::tests::a_control_over_a_poisoned_status_refuses_to_start_and_still_stops` | ✓ |
+| IC-10 | The control takes exactly `start`, `stop`, `resume`; every other word — including `pause`, the sibling route's own name — is refused **by name** and moves no flag | `api::autopilot::tests::the_control_takes_three_words_and_refuses_the_rest` | ✓ |
+| IC-11 | All three routes are registered, `GET /ingest/queue` is 405, and **`GET /autopilot` still reaches the front end** — the control is at `/autopilot/control` precisely because a `post`-only route at the bare path would 405 the operator's page | `api::ingest::route_tests::the_three_routes_answer_and_none_of_them_shadows_the_front_end` | ✓ |
+
+**What is NOT invariant here, and is a limit rather than a bug.** IC-01's answer
+is as old as the last finished round, and before the first one there is no
+survey at all. That is why `surveyed` is a field and IC-02 is a row: the
+staleness is reported, not removed. See `docs/06-limits.md`.
+
+A halt is cleared by a **restart** and by nothing else — no route can reach
+`FeedState::halted`, because the feed table is a local of `autopilot::fly`.
+IC-07 is that fact made checkable rather than a workaround for it. D-0093 says
+why a revive control was rejected rather than half-built.

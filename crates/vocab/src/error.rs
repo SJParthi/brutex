@@ -109,12 +109,26 @@ mod tests {
 
     /// Every arm, because an unreachable arm in a `Display` is a message
     /// nobody has ever read and it is usually wrong when they finally do.
+    ///
+    /// [`VocabError::Void`] **was** that arm: it was the one variant this list
+    /// left out, and it is the only arm that has to interpolate two bindings.
+    /// Its expectation below names both of them in order, which is what catches
+    /// an arm that prints `index` twice, or drops `reason` and leaves an
+    /// operator reading "carries no information" with no statement of why.
     #[test]
     fn every_refusal_says_what_happened() {
         let cases = [
             (
                 VocabError::NoSuchBit { index: 999 },
                 "999 is not a position",
+            ),
+            (
+                VocabError::Void {
+                    index: 235,
+                    reason: "the predicate is a constant",
+                },
+                "position 235 is void and carries no information: \
+                 the predicate is a constant",
             ),
             (
                 VocabError::Retired {

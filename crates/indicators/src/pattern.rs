@@ -36,7 +36,7 @@
 //! bars is the deepest any classical pattern reaches (rising three methods, mat
 //! hold, breakaway, ladder bottom), so the state is `5 × 56` bytes and never grows.
 
-use store::format::Bar;
+use crate::Candle;
 use vocab::ConditionMask;
 
 /// How deep the deepest pattern reaches. Five bars: rising three methods, mat
@@ -120,7 +120,7 @@ struct Shape {
 }
 
 impl Shape {
-    fn of(bar: &Bar) -> Self {
+    fn of(bar: &Candle) -> Self {
         let open = i128::from(bar.open);
         let high = i128::from(bar.high);
         let low = i128::from(bar.low);
@@ -212,7 +212,7 @@ impl Shape {
 /// of the constant-space argument for this family.
 #[derive(Clone, Copy, Debug)]
 pub struct Patterns {
-    ring: [Bar; LOOKBACK],
+    ring: [Candle; LOOKBACK],
     /// How many bars have been folded, saturating at [`LOOKBACK`].
     depth: usize,
     /// Where the next bar goes.
@@ -231,7 +231,7 @@ impl Default for Patterns {
     }
 }
 
-const EMPTY_BAR: Bar = Bar {
+const EMPTY_BAR: Candle = Candle {
     ts_micros: 0,
     open: 0,
     high: 0,
@@ -266,8 +266,8 @@ impl Patterns {
         self.depth
     }
 
-    /// Bar `n` back from the newest. `0` is the newest.
-    fn back(&self, n: usize) -> Option<&Bar> {
+    /// Candle `n` back from the newest. `0` is the newest.
+    fn back(&self, n: usize) -> Option<&Candle> {
         if n >= self.depth {
             return None;
         }
@@ -288,13 +288,8 @@ impl Patterns {
     ///
     /// [`crate::Corrupt`] for a record that is not a bar. It is neither folded nor
     /// emitted for.
-    pub fn step(&mut self, bar: &Bar) -> Result<ConditionMask, crate::Corrupt> {
-        if bar.high < bar.low {
-            return Err(crate::Corrupt::HighBelowLow);
-        }
-        if bar.high.checked_sub(bar.low).is_none() {
-            return Err(crate::Corrupt::RangeOverflows);
-        }
+    pub fn step(&mut self, bar: &Candle) -> Result<ConditionMask, crate::Corrupt> {
+        bar.check()?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day {
             // A pattern must not straddle an overnight gap: 15:29 Friday and 09:15
@@ -334,12 +329,19 @@ impl Patterns {
         };
         let bar0 = Shape::of(c0);
         if bar0.range <= 0 {
-            // A single-price bar. Only the four-price doji is defined on it, and
-            // that one is defined precisely by the zero range.
-            if bar0.open == bar0.close && bar0.high == bar0.low {
-                return set(mask, 225);
-            }
-            return mask;
+            // A single-price bar, and the four-price doji is not one of the shapes it
+            // can have — it is the ONLY one. Every bar that reaches here came through
+            // [`Self::step`], which ran `Candle::check`, which refuses a record unless
+            // `low <= open, close <= high`. A zero range therefore forces
+            // `open == close == high == low` and there is no second case to handle.
+            //
+            // This used to re-test that equality and fall through to `return mask` when
+            // it failed. The fall-through cannot execute while `check` is correct, so
+            // `cargo llvm-cov` reported it uncovered forever and a reader could not tell
+            // a dead branch from a case somebody forgot. The premise is pinned by
+            // `a_zero_range_bar_cannot_carry_an_open_or_close_off_the_price` instead,
+            // which is where it belongs: in a test, not in a branch nothing takes.
+            return set(mask, 225);
         }
 
         // ---- one-bar patterns -------------------------------------------------
@@ -641,8 +643,17 @@ impl Patterns {
         {
             mask = set(mask, 221);
         }
+        // A tri-star's direction comes from where the third doji closes relative to
+        // the first. When they close at the SAME price the pattern has no direction,
+        // and `else` handed that case to the bearish bit — the same degenerate-falls-
+        // into-one-branch defect that made position 227 fire on every zero-body bar.
+        // Three dojis at one price is not a bearish tri-star; it is not a tri-star.
         if bar2.is_doji(thr) && bar1.is_doji(thr) && bar0.is_doji(thr) {
-            mask = set(mask, if bar0.close > bar2.close { 233 } else { 234 });
+            if bar0.close > bar2.close {
+                mask = set(mask, 233);
+            } else if bar0.close < bar2.close {
+                mask = set(mask, 234);
+            }
         }
 
         // ---- four- and five-bar patterns -------------------------------------
@@ -788,8 +799,8 @@ pub fn positions() -> [u16; 62] {
 mod tests {
     use super::*;
 
-    fn mk(ts: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
-        Bar {
+    fn mk(ts: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
             ts_micros: ts,
             open,
             high,
@@ -801,12 +812,12 @@ mod tests {
     }
 
     /// Minute `m` of IST day 30,000.
-    fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
+    fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
         let ts = (30_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000;
         mk(ts, open, high, low, close)
     }
 
-    fn ok(p: &mut Patterns, bar: &Bar) -> ConditionMask {
+    fn ok(p: &mut Patterns, bar: &Candle) -> ConditionMask {
         let Ok(m) = p.step(bar) else {
             unreachable!("this fixture bar is sane")
         };
@@ -1076,10 +1087,10 @@ mod tests {
 #[cfg(test)]
 mod degenerate {
     use super::*;
-    use store::format::Bar;
+    use Candle;
 
-    fn bar(ts: i64, o: i64, h: i64, l: i64, c: i64) -> Bar {
-        Bar {
+    fn bar(ts: i64, o: i64, h: i64, l: i64, c: i64) -> Candle {
+        Candle {
             ts_micros: ts,
             open: o,
             high: h,
@@ -1155,5 +1166,82 @@ mod degenerate {
             mask.get(227),
             "a small body with long shadows both sides IS a high wave"
         );
+    }
+}
+
+#[cfg(test)]
+mod tri_star {
+    use super::*;
+
+    fn doji(ts: i64, price: i64, wick: i64) -> Candle {
+        Candle {
+            ts_micros: ts,
+            open: price,
+            high: price + wick,
+            low: price - wick,
+            close: price,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    /// Three dojis closing at the same price is not a directional tri-star.
+    ///
+    /// The branch was `if bar0.close > bar2.close { 233 } else { 234 }`, so equal
+    /// closes fell into the bearish bit — the identical defect shape as position 227
+    /// firing on every zero-body bar: a degenerate case handed to one arm because
+    /// `else` catches everything the condition does not.
+    #[test]
+    fn three_dojis_at_one_price_set_neither_direction() {
+        let mut p = Patterns::new(Thresholds::CLASSICAL);
+        for i in 0..3_i64 {
+            let Ok(mask) = p.step(&doji(i * 60_000_000, 2_500_000, 5_000)) else {
+                unreachable!("a doji is a sane bar")
+            };
+            if i == 2 {
+                assert!(!mask.get(233), "no bullish tri-star without a higher close");
+                assert!(!mask.get(234), "no bearish tri-star without a LOWER close");
+            }
+        }
+    }
+
+    /// A genuinely bearish tri-star still sets 234.
+    ///
+    /// Without this half, the fix above could be "never set 234" and stay green.
+    #[test]
+    fn a_descending_tri_star_is_bearish() {
+        let mut p = Patterns::new(Thresholds::CLASSICAL);
+        let prices = [2_500_000_i64, 2_499_000, 2_498_000];
+        let mut last = ConditionMask::ZERO;
+        for (i, price) in (0_i64..).zip(prices.iter()) {
+            let Ok(mask) = p.step(&doji(i * 60_000_000, *price, 5_000)) else {
+                unreachable!("a doji is a sane bar")
+            };
+            last = mask;
+        }
+        assert!(
+            last.get(234),
+            "the third doji closed lower: bearish tri-star"
+        );
+        assert!(!last.get(233));
+    }
+
+    /// And an ascending one still sets 233.
+    #[test]
+    fn an_ascending_tri_star_is_bullish() {
+        let mut p = Patterns::new(Thresholds::CLASSICAL);
+        let prices = [2_498_000_i64, 2_499_000, 2_500_000];
+        let mut last = ConditionMask::ZERO;
+        for (i, price) in (0_i64..).zip(prices.iter()) {
+            let Ok(mask) = p.step(&doji(i * 60_000_000, *price, 5_000)) else {
+                unreachable!("a doji is a sane bar")
+            };
+            last = mask;
+        }
+        assert!(
+            last.get(233),
+            "the third doji closed higher: bullish tri-star"
+        );
+        assert!(!last.get(234));
     }
 }

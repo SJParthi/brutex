@@ -6431,3 +6431,3245 @@ own cost, and asserting freshness without checking it would be the fallback
 that hides a failure `CLAUDE.md` §4 bans. Until such a gate exists the honest
 statement is the one in §38: **nothing keeps `web/build` fresh except the
 discipline of whoever last touched `web/src`.**
+
+---
+
+## D-0069 · 2026-08-09 · The percentage is integer basis points, and every instrument a corporate action can re-base is marked rather than numbered
+
+**Decision.** `/store.json` computes what the comment above `store_json` had
+promised for a long time and nothing had ever produced. Four fields per row, all
+four total:
+
+| Field | Meaning |
+|---|---|
+| `chg_bps` | this month's first close to its last close, in basis points — `125` is +1.25% — or `null` |
+| `chg_why` | `null` when `chg_bps` is a number, otherwise the reason code it is not |
+| `prev_chg_bps` | the **previous calendar month's** same statistic, or `null` |
+| `prev_chg_why` | the reason `prev_chg_bps` is `null`, or `null` |
+
+Exactly one of each pair is non-`null` on every row, always. Five reason codes:
+`corporate_action_unverified`, `not_recorded`, `no_earlier_month`,
+`base_not_positive`, `overflow`. D-0067 put the two closes in the census entry;
+this is the arithmetic and the rendering it deliberately left to the caller.
+
+### What "% change" means, and what "previous" means
+
+A row of `/db` is an instrument-**month**, so "previous % change" is the previous
+month's *same statistic* — not the previous bar's, which has no referent on a
+month-level row. Given that, "% change" was still ambiguous, and the reading is
+**intra-month: the month's own first close to its own last close.**
+
+**Rejected — month-over-month, last close to the previous month's last close.**
+Both span roughly 21 sessions, so neither is safer against a corporate action and
+that criterion does not discriminate. Three others do:
+
+1. Under the chosen reading `Δ %` is a property of the row itself. It needs no
+   neighbour, so there is no missing-neighbour case in the primary column and no
+   look-ahead question to answer — `CLAUDE.md` §3 rule 7 is satisfied
+   structurally rather than by a check.
+2. It is defined for an instrument's **first** held month. Month-over-month is
+   not, and an instrument's first month is a row an operator looks at.
+3. It costs the "previous" column **one** probe instead of two.
+
+### Integer basis points, and the rounding rule that needed choosing
+
+`CLAUDE.md` §7 bans the float for money; a ratio derived from money is the same
+arithmetic and gets the same treatment. `clippy::float_arithmetic` is a workspace
+deny (D-0061) and no `f64` appears at any step, on either side of the wire — the
+browser inserts the decimal point by taking `bps % 100` as an integer remainder
+and dividing a multiple of 100 by 100, which IEEE returns exactly.
+
+**Rounding is half AWAY FROM ZERO, and that is a choice, not §7's rule.** §7's
+half-up governs snapping a *price* to the tick grid at the *write boundary*. A
+percentage is neither a price nor a write. Under half-up, +0.5 bp renders `1` and
+−0.5 bp renders `0`: a gain and its mirror-image loss printing different
+magnitudes, which is visible the moment the column is sorted and inexplicable
+when it is noticed. Away from zero is symmetric. A-31 is the test, and its
+fixture is an exact tie by construction — a base of 32 paisa and a one-paisa move
+is 10,000/32 = 312.5 bp — so nothing about it depends on a rounding accident.
+
+**`i32` is unsafe and the counterexample uses only values the store can hold.**
+`i32::MAX` is 2,147,483,647 bp, which sounds unreachable until the base is small:
+a first close of **one paisa** and a last close of **₹2,147.50** — an ordinary NSE
+share price — is 2,147,490,000 bp. A one-paisa base is garbage data and the store
+can hold it, and `CLAUDE.md` §3 rule 6 does not permit claiming a bound that is
+not enforced. So the value is `i64` end to end. The only step that can overflow
+is the ×10,000, bounded exactly at `|delta| ≤ i64::MAX / 10_000 =
+922,337,203,685,477` paisa and **checked** rather than asserted; a base of zero is
+refused, because `docs/02-store-format.md` §3 makes an all-zero record a legal
+flat bar, so that arm is reachable rather than defensive.
+
+### Corporate actions: refused, in both columns, and the threshold is the operator's to supply
+
+`docs/05-decisions.md` D-0018 already decided the behaviour — refuse the window
+loudly and name the date, never back-adjust from a source no vendor has been
+verified to supply. **No threshold is sourced anywhere in this repository.**
+`docs/00-charter.md` names no verified split-and-bonus feed and D-0018 names no
+number. Inventing one here would be `CLAUDE.md` §3 rule 1 violated in the entry
+that cites it.
+
+So: `Segment::Index` renders a number, because D-0018 says in its own words that
+indices never split. `Segment::Cash` and `Segment::Fno` are **refused** — an F&O
+contract is adjusted by NSE when its underlying is, so a derivative inherits the
+hazard. The match is exhaustive: a fourth segment fails to compile rather than
+defaulting into whichever answer was written last.
+
+**Rejected — printing the number with a warning beside it.** The number travels
+and the warning does not. A `−8000` bp cell is copied into a spreadsheet, sorted,
+screenshotted and reasoned about; the tooltip is not. `CLAUDE.md` §4 admits
+"degrade loudly and name the reason, **or** refuse" — never a number that is
+wrong, and never "a fallback that hides a failure".
+
+**The gate is checked FIRST, ahead of whether a close was even recorded and ahead
+of whether the neighbouring month is held.** That ordering is load-bearing and it
+is what A-34 pins. An operator told `not_recorded` re-ingests the month; an
+operator told `no_earlier_month` ingests the month before. For an equity both are
+wasted work — no pull makes that cell a number, only a sourced threshold does.
+The permanent reason outranks every temporary one.
+
+**A month-level field can flag a month; it cannot name the day.** D-0018's stated
+detector is an unexplained *overnight* gap — a bar-to-bar test over ~8,250 bars,
+O(bars) work that cannot live in a census row. Even with a threshold in hand this
+column could only ever say "a corporate action may fall in this month", never
+"split on 2024-06-14". Nothing stronger is claimed, on the page or here.
+
+### What it costs
+
+**Two hash probes per row and no syscall**: the row, and the same series at the
+previous month. Crossing a month crosses a manifest *entry*, not a file — no
+`open`, no `stat`, no `pread`, because the census is already resident. A-37 is
+the falsifiable half: the fixture's manifest path does not exist on disk, so a
+change that reached for a bar file fails rather than passing slowly.
+
+The neighbour is a **probe, not a search**. Given June and August held and July
+not, August answers `no_earlier_month`; it does not walk back to June. A scan
+would find June, print a number spanning two months and label it as one.
+
+`/store.json` remains `O(entries)` per request, because `census_now` re-reads and
+re-walks every manifest. It was before this change. `docs/06-limits.md` §41.
+
+### The page
+
+`web/src/routes/db/+page.svelte` renders the two columns right-aligned in the
+monospaced numeric style the rest of the table uses, with the sign always shown,
+two decimals always, and **green up / red down** — the NSE convention every Indian
+broker and TradingView's India locale use, stated in the file because it is a
+convention and not a fact. A flat month is `0.00%` in neutral ink: a real answer,
+not an unknown. An unknown is a dash with a dotted underline and a help cursor,
+carrying its own reason on both `title` and `aria-label` — one sentence per code,
+and an unrecognised code is reported *as* an unrecognised code rather than given
+an invented sentence.
+
+Both columns now sort, because the page's own rule is that every column holding
+data sorts. **An unknown sorts last in both directions**, by an early return
+rather than through the direction multiplier: folding it in would put every dash
+at the top on one click, so "biggest fall first" would open on a screen of dashes.
+A dash is not a very small number.
+
+The disclosure panel that used to say "the endpoint carries no price" — true the
+day it was written, false the day D-0067 landed — is replaced by one whose every
+figure is **counted from the rows on screen**, including a full enumeration of
+which reason codes are present and how many of each. The first draft of that
+panel named `base_not_positive` and asserted it did not occur, while rendering
+over a dataset that contained one. A panel about honesty cannot afford a sentence
+that is not counted, so the sentence became a count.
+
+### Measured, on this machine, on the day
+
+Against `~/.brutex/store/manifest/groww.man`: **206 keys, 1,448,221 rows, format
+version 1** — a census written before D-0067 existed. So `/store.json` serves 206
+rows of which **205 are `corporate_action_unverified` (every CASH row) and 1 is
+`not_recorded`** (the one INDEX row, whose closes nobody has read), and **zero**
+show a number. That is the honest state of this store and the page says so.
+
+D-0067 recorded a much larger census — 31,493 keys, 43,422 entries — measured on
+another machine. Both numbers are real and this entry does not reconcile them;
+what matters to this decision is unchanged either way, because it is the *ratio*
+of CASH to INDEX that decides how much of the table is a dash, and that ratio is
+99.5% here and 99.33% there.
+
+The number path was driven against a synthesised version-2 census covering every
+arm — a rise, a fall, an exact flat month, an unpriced month, a base of zero, a
+census gap, an equity, and an F&O contract — and every one rendered as this entry
+describes.
+
+---
+
+## D-0070 · 2026-08-10 · The fold grid is anchored to the IST day, and the anchor is a constant
+
+`crate::fold::fold` bucketed on `ts.div_euclid(width) * width` — a grid whose
+origin is the Unix epoch, which is **UTC midnight**. The day this engine stores
+is an IST day. `IST_OFFSET_SECS` is 19,800 and `86_400 % 19_800 != 0`, so a
+day-wide bucket edge fell 05:30 *inside* the session it was meant to contain.
+
+A vendor stamps a daily candle at 00:00 IST of day D, which is **18:30 UTC of
+D−1**. Floored to the UTC grid, `fold` re-stamped it at 00:00 UTC of D−1, so
+**every daily bar moved back one calendar day**.
+
+### What it cost, measured
+
+A live 1day spot pull against the swept indices: 16 members, 296 rows read, 86
+bars stored, **10 members refused** with `bars span 2025-12 to 2026-01`. The 86
+bars that did land were decoded off disk record by record:
+
+| Weekday of the stored stamp | Mon | Tue | Wed | Thu | Fri | Sat | Sun |
+|---|---|---|---|---|---|---|---|
+| Records | 16 | 18 | 14 | 18 | **0** | 0 | **20** |
+
+Twenty bars on a Sunday and none on a Friday, on an exchange that trades Monday
+to Friday. Shift every record forward one day and it becomes 20/16/18/14/18
+across Mon–Fri with no weekend and no gap; no other shift is admissible.
+
+**The loud half was the smaller half.** `crate::ingest`'s month guard caught the
+shift only where it crossed a month boundary. Everywhere else the run reported
+success and wrote a wrong answer into an append-only store — the W1 class
+`crate::fetch` names and says is undetectable once written.
+
+### Why a constant and not a parameter
+
+For the reason `CLAUDE.md` §6 gives for the absent depth parameter: a value that
+can be set can be set wrongly, and silently. §1 fixes the engine surface at NSE,
+so there is exactly one trading day this store addresses and it is the IST one.
+A `Bucket` carrying its own origin would make the wrong origin expressible.
+
+### Why the minute rung cannot move
+
+By arithmetic, not by luck: 60 divides 19,800, so
+`(t + A).div_euclid(60M) * 60M − A` reduces exactly to `t.div_euclid(60M) * 60M`.
+Only a width that does not divide the offset moves, and `DAY_1` is the only such
+rung in `Timeframe::KNOWN`. P-38 pins that reduction across negative, zero and
+boundary instants so a later change to the anchor cannot silently move the rung
+that holds the engine's real data.
+
+### The overflow arm
+
+`FoldError::AnchorOverflow` is new. Shifting a stamp within 19,800 s of an `i64`
+end would wrap, and a wrapped instant lands in a bucket that is not its own —
+which files a bar under the wrong month, silently. Refused rather than
+saturated, per §4. Unreachable from any real vendor row, and stated anyway.
+
+### The store on disk
+
+The 86 wrong-dated bars cannot be corrected in place: the store is append-only
+and cannot prepend (§3 rule 8). They were **moved**, not deleted, to
+`~/.brutex/store/quarantine/2026-08-10-utc-anchored-fold/`, and the window must
+be re-pulled oldest-first.
+
+---
+
+## D-0071 · 2026-08-10 · Four documents said things the code contradicts, and the documents were wrong
+
+A workspace sweep compared every governing claim against the tree. Four failed.
+None is a code change; all four are this repository asserting something that is
+not true, which under §10 — where `CLAUDE.md` outranks every document — is the
+most dangerous kind of drift there is.
+
+### 1. The §5 crate graph named four crates that do not exist
+
+Declared: `core, store, indicators, vocab, engine, pull, api, web, cli`.
+On disk: `api, core, costs, greeks, lake, pull, store, telemetry`.
+
+`indicators`, `vocab`, `engine` and `cli` do not exist. `costs`, `greeks`,
+`lake` and `telemetry` were undeclared. The block now carries the graph read
+from the manifests:
+
+| crate | workspace dependencies |
+|---|---|
+| `core`, `telemetry`, `greeks` | none |
+| `store`, `costs`, `lake` | `core` |
+| `pull` | `core`, `store` |
+| `api` | `core`, `store`, `pull`, `telemetry` |
+
+Acyclic, and proven by construction rather than asserted: each crate names only
+crates above it. **`web/` is a directory, not a crate** — `api::assets` resolves
+it through `env!("CARGO_MANIFEST_DIR")`, a compile-time string, and a missing
+tree degrades to 503, so the §2 engine rule holds with `web/` never built.
+
+### 2. `.json` was tracked against a law that never allowed it
+
+`.claude/launch.json` is the only tracked `.json` outside `web/`. D-0028 and
+D-0058 each recorded that `.json` is not on §2's list, and each time **the gate
+was widened instead of the law** — leaving `ci.yml` reading
+`rs|toml|md|lock|html|css|yml|json` against a §2 naming seven extensions. §2 now
+allows `.json` **only under `.claude/`**, which is editor configuration the
+engine never reads. A `.json` anywhere else is the failure it always was.
+
+Gate 1b also checked `.json` and `.yml` against one shared prefix set, which
+admitted `.json` under `.github/` and `.yml` under `.claude/` — neither legal.
+It now asks two questions, one per extension, each against its own home. And
+`allowed_names` had unescaped dots, so `.gitignore` as a `grep -E` pattern also
+admitted `agitignore`; the dots are escaped.
+
+### 3. The binary links C and assembly, and a manifest denied it
+
+`ring` 0.17.14 arrives `reqwest → rustls → ring`, vendors 17 `.c`, 28 `.h`, 73
+`.S` and 17 `.asm`, and compiles them through a `build.rs` calling
+`cc::Build::compile`. **Measured: `nm target/release/api` returns 72
+`ring_core` symbols in the shipped binary.**
+
+`crates/lake/Cargo.toml` stated this correctly. `crates/pull/Cargo.toml` said
+`rustls-tls` "keeps OpenSSL and its C toolchain out — CLAUDE.md section 2 bans a
+vendored binding to another language, and CI gate 13 walks Cargo.lock for
+exactly that." Half true, read as wholly true: it keeps *OpenSSL* out, and gate
+13 walks the lock for **interpreted-runtime names**, of which `ring` is not one.
+The comment is corrected to say what is true.
+
+**§2 IS NOT AMENDED, AND THE RULING IS THE OPERATOR'S.** §2 scopes its allowlist
+to *tracked* files and `ring`'s `build.rs` is not tracked — that reading is the
+only one under which this passes, and it is a reading, not a verdict. There is
+no pure-Rust alternative in reach: `rustls` takes `ring` or `aws-lc-rs`, and
+D-0051 already measured the second as worse (87 extra crates). Recorded here so
+the choice is made once, in the open, rather than implied by a comment.
+
+### 4. S-06 claimed a bit-flip is detected; no file on disk can detect one
+
+`store::file::initialise` passes `Header::genesis(symbol_id, timeframe_secs, 0)`
+— flags **clear** — so `FLAG_CHECKSUMS` is set nowhere in production, the
+`Checksums` sidecar is never created, and `block::seal`/`verify` have no
+production caller. `store::fault::bitflip_detected` is a real and thorough test
+— every bit of every byte — but it builds its header with the flag **set in
+memory**, so it proves the algorithm and not any file.
+
+`crates/store/src/file.rs` already disclosed this honestly and said what closing
+it needs. The defect was two documents contradicting that disclosure. S-06 now
+states the algorithm/file split, and **S-06b** records what is actually true of
+a real file: a verification request against one is *refused*, not answered.
+
+---
+
+## D-0072 · 2026-08-10 · A body is landed against its own chunk, and a member that does not land says so
+
+Two defects from the same run as D-0070, both about a failure nobody could see.
+
+### The chunk window was computed and thrown away
+
+`fetch_chunks` built each request month-bounded (`window: *chunk`) and returned
+`Vec<RawWindow>` — and `RawWindow` is `{ rows }`, so the boundary died at the
+return. `BrokerWindow` carried **one** window for **N** bodies, set to
+`asked.window`: the operator's whole, *unclamped* range. `land_one` built one
+`BarRequest` from it and reused it for every body.
+
+`pull::fetch::land`'s only per-row filter is `request.window.verdict(..)`, so a
+one-month answer was compared against a multi-year window and
+`DropReason::BeforeWindow`/`AfterWindow` were **unreachable for every row of
+every chunk**. A run that lost 80 of 122 members reported `0 rows dropped` — a
+counter that could not be non-zero reporting zero, which is the fallback that
+hides a failure §4 bans.
+
+`bodies` is now `Vec<(Window, RawWindow)>` and `land_one` rebuilds the request
+per body. `Plan` is `Copy` and holds `&BarRequest`, so the borrow lives exactly
+one iteration. This did **not** cause D-0070's failures — proven by running the
+real `fold` and `verdict`, where the offending row is kept under the chunk's own
+window too — and it is what makes the census able to name an over-answering
+vendor at all.
+
+### A member that reached the vendor and died at the store was silent
+
+Every emit site in the workspace sat on a **refusal** path. A member that
+reached the vendor and failed at the store took the `Ok` arm, which recorded
+only `site.autopilot.fail` — an in-memory ring bounded by `MAX_FAILURES` that
+dies with the process. Measured: a run that refused 10 of 16 members in 18
+seconds wrote **zero** log lines; the only records in `logs/events.ndjson` were
+`api.serve listening`. After a restart nothing anywhere named which months
+failed, and the cause was reconstructed by decoding bar files by hand.
+
+`pull.spot` now emits `member did not land` per failed member, carrying
+instrument, month, feed, rung and the untruncated reason. **Bounded by the
+member count**, which is bounded by the chunk count — one event per member,
+never per row, so an event stays O(1) and the rolling sink's bound is not the
+thing keeping the run honest.
+
+`crates/pull` still declares no telemetry dependency and does not gain one: the
+event is emitted at the `api` layer where the other two live, which keeps §5's
+graph as D-0071 records it.
+
+---
+
+## D-0073 · 2026-08-10 · Every failed member gets its own record, in the byte the format already had
+
+`Record::of_run` keeps `done.failures.first()` and nothing else. A live run
+refused **10 of 16 members** and the journal kept one reason; the other nine
+were nowhere on disk, so no process on the machine could say which months had
+failed. It was recovered by decoding bar files by hand, which is not a
+diagnostic procedure.
+
+### Why not a longer note
+
+`NOTE_CAPACITY` is 68 bytes because `RECORD_LEN` is 256 and the stride is
+**fixed**. That is what makes `Journal::append` one `write_all` of one record,
+and the file addressable at `ordinal * RECORD_LEN` with no index — `CLAUDE.md`
+§3 rule 4. §4 bans a dynamic schema outright. Widening the note was never
+available.
+
+### The byte was already there
+
+The field map ran `OFF_NOTE_KEPT = 117` then `OFF_SOURCE = 120`. **Bytes 118 and
+119 were reserved and zero in every record ever written.** `Kind` takes 118, and
+`Kind::Run` is code `0` — which is exactly what an older writer left there. So:
+
+- the stride does not move,
+- every existing journal decodes unchanged, proven by
+  `a_record_written_before_the_kind_byte_existed_still_reads_as_a_run`, which
+  zeroes the byte and recomputes the CRC as a pre-`Kind` writer would,
+- no file version is minted, because this is not a schema that changed shape —
+  it is a discriminator in space the format already carried.
+
+An unknown kind is **refused**, not read as a run: a later build's record
+carries fields this one cannot, and rendering it as a run would put invented
+numbers on the operator's page. `RecordFault::UnknownKind`, and §4.
+
+### What it recovers, and what it does not
+
+Every failed **(instrument, month)** pair is now on disk: `source` carries the
+instrument, the day fields the month, `note` the reason. The reason is still cut
+at 68 bytes and `note_bytes` still says by how much — that half is answered by
+D-0072's `pull.spot` `member did not land` event, whose field is not
+stride-bound. Two surfaces, each doing what its format can actually do.
+
+The counters on a member record are **zero on purpose**. They belong to the run;
+repeating them would give a reader two places to add the same numbers up from,
+and two answers the first time either drifted. The page labels the row
+`spot · member` for that reason — a row of zeros with no label reads as a run
+that did nothing.
+
+### Cost
+
+One extra record per failed member. Bounded by the member count, which is
+bounded by the chunk count — never by rows. The append is the same O(1) it was.
+A failure record that will not write does **not** overwrite the run's own
+"Recorded" line: the run landing and the detail landing are two facts, and
+collapsing them would let a partial write read as a clean one.
+
+---
+
+## D-0074 · 2026-08-10 · Native code in a dependency is an OPEN §2 breach, declared and unresolved
+
+> **CORRECTED 2026-08-10, same day.** This entry originally read *"…is permitted
+> and §2 says so out loud"* and was written alongside an edit to `CLAUDE.md` §2
+> that relaxed the prohibition. **That edit was reverted by hand and §2 stands
+> unamended** — both bullets still read "Forbidden without exception". Under §10
+> `CLAUDE.md` wins, which makes this entry the stale copy and the breach **open,
+> not permitted.** Declaring a violation is not the same as authorising one.
+>
+> The measurement below is unchanged and was independently re-confirmed: `nm
+> target/release/api` returns **72 `ring_core` symbols**, all local text symbols,
+> i.e. compiled C and assembly linked in rather than dynamically imported.
+>
+> Two further facts this entry did not have. (1) The enforcing mechanism it names,
+> "gate 13 layer 5", **does not exist in `ci.yml`** — it was never added, so
+> nothing enforced the declaration either. (2) `ring` is not the only source:
+> `zeroize`'s `core::arch::asm!` is assembled into this binary on aarch64 today,
+> `twox-hash`'s xxhash3 scalar path likewise, and `sha2` ships four `asm!` blocks
+> one non-default feature away.
+>
+> **What actually enforces the declaration now** is
+> `crates/vocab/tests/workspace_is_rust.rs`, which pins the whole 185-package
+> dependency set by count and fingerprint. A new native crate is necessarily a new
+> package, so it cannot arrive without failing that test. Its first version did
+> not work — it compared the constant 4 to the constant 4 — and was rewritten.
+>
+> **Removing the breach is not a one-line change.** `rustls` takes `ring` or
+> `aws-lc-rs`, and D-0051 measured the second as worse. Whether to accept it with
+> an amended §2, or to drop HTTPS, remains the operator's decision and is NOT
+> settled by this entry.
+
+
+§2 forbade "any vendored binding to another language" **without exception**, and
+the workspace has been shipping one since TLS arrived. `ring` 0.17.14 comes in
+`reqwest → rustls → ring`, vendors 17 `.c`, 28 `.h`, 73 `.S` and 17 `.asm`, and
+compiles them through its own `build.rs`. Measured: `nm target/release/api`
+returns **72 `ring_core` symbols**.
+
+Three tracked files were involved and two of them were wrong.
+`crates/lake/Cargo.toml` stated the fact correctly. `crates/pull/Cargo.toml`
+claimed the `rustls-tls` feature "keeps OpenSSL and its C toolchain out … and CI
+gate 13 walks Cargo.lock for exactly that" — true about OpenSSL, false about C,
+and false about the gate, which walks the lock for interpreted-runtime *names*.
+
+### The ruling
+
+**Permitted, and declared.** §2's prohibitions are about what *this repository*
+contains and runs — its tracked files, its own build scripts. A third-party
+crate's build script is neither. That reading is now written into §2 instead of
+being the unstated thing that made the rule survivable.
+
+Two of the four bullets are **tightened** while this one is drawn, so the
+boundary does not read as a general softening:
+
+* `build.rs` — was "any that invokes an external process", now **any `build.rs`
+  in this repository at all**. Gate 13 layer 3 already enforced the stricter
+  reading; the law now matches the gate rather than trailing it.
+* vendored bindings — now says "checked in **here**", which is the scope that
+  was always meant.
+
+The engine rule is untouched: `cargo build`, `cargo test` and `cargo clippy`
+must still pass with no Node, no package manager and no `web/` build.
+
+### Why not simply forbid it
+
+Nothing to switch to. `rustls` takes `ring` or `aws-lc-rs`; D-0051 already
+measured the second as worse — 87 extra crates, `aws-lc-sys` in the lock, and
+unswitchable downstream because cargo features are additive. Dropping TLS is
+dropping the vendor. A rule that cannot be obeyed is not a rule, it is a comment
+that makes every manifest beside it untrustworthy — which is exactly what
+happened.
+
+### What makes the ruling stick: gate 13 layer 5
+
+A ruling with no gate is the state this repository was already in. Layer 5 walks
+`Cargo.lock` for every `*-sys` package — the ecosystem's convention for a native
+wrapper — and for the build-time native compilers (`cc`, `cmake`, `nasm-rs`,
+`bindgen`, `ring`, `aws-lc-sys`, `aws-lc-rs`). Each must appear in the declared
+set. **An undeclared arrival is a red build.** A declared name that no longer
+resolves is a warning, on the same argument the gate's other allowlists make: a
+declaration nobody removed reads as protection and is not.
+
+Declared today, and why each is in the set:
+
+| Package | Why |
+|---|---|
+| `ring` | **vendors and compiles C and assembly** |
+| `cc` | the compiler driver `ring` builds through — its presence is the tell |
+| `core-foundation-sys` | declaration-only bindings to a macOS system framework |
+| `windows-sys` | declaration-only bindings to the Windows API |
+| `js-sys`, `web-sys` | wasm32 only; resolve because `deny.toml` lists that target, in no native build |
+
+Verified differentially rather than asserted: with the real lock the layer
+reports six declared and zero undeclared, and an injected `openssl-sys` fails
+it. The first draft of the layer parsed `name:reason` records in shell and
+reported **one** entry for four packages — it was replaced by a word-membership
+test, because a lookup that has to parse a record is one that silently matches
+the wrong one.
+
+### What is still not claimed
+
+`docs/06-limits.md` §42 carries it: the C is **not audited**, `cargo deny`'s
+advisory database is the only control on it, and layer 5 cannot see native code
+in a crate whose name matches neither `*-sys` nor the compiler list. What it
+guarantees is narrower and worth having — the declared set cannot grow while
+nobody is looking.
+
+---
+
+## D-0075 · 2026-08-10 · The logging law: bounded by structure, never by rows, and absent from the sweep
+
+`crates/pull` — the crate that fetches, decodes, folds, censuses and writes —
+had **no telemetry dependency at all**. Every `telemetry::emit` in the workspace
+sat in `crates/api`, and all of them on a refusal path. A run that refused 10 of
+16 members in 18 seconds wrote **zero** log lines, and the cause was recovered
+by decoding bar files by hand.
+
+### The edge
+
+`pull → telemetry`. No cycle: `crates/telemetry` names no workspace member, so
+it is a leaf exactly like `core`.
+
+### The law, and why "O(1) per call" is the wrong bar
+
+`Sink::emit` filters on one relaxed atomic load and a comparison — a filtered
+event touches no clock, no lock and no buffer. That is O(1), and on a per-member
+path it is genuinely free.
+
+**It is not free a billion times.** The sweep walks the combination ladder from
+k=1 and evaluates `(bits & mask) == mask` per (bar, mask). Constant
+per-operation cost (§3 rule 4) is *satisfied* by an emit there and the operator
+still loses the run. So the rule is not "cheap per call", it is:
+
+| Path | Frequency | What may log |
+|---|---|---|
+| mask evaluation, combination | billions | **nothing** — integer counters only |
+| bar row | millions | **nothing** — counters (`DropCensus` is the existing shape) |
+| member (instrument-month) | thousands | `Debug` |
+| instrument | 2 – 800 | `Info` |
+| run | 1 | `Info`, or `Warn` when the books do not balance |
+| failure, throttle | rare | `Error` / `Warn` |
+
+Every combination is still **accounted for** — counted in a plain integer with
+no atomic and no allocation, and emitted once as an aggregate at the k-level
+boundary. Full detail, zero marginal cost. That is not a compromise on "capture
+every corner"; it is the only way to capture every corner and still finish.
+
+### Enforced, not merely written down
+
+**Gate 17** refuses `telemetry::`, `log::`, `println!` or `eprintln!` anywhere
+in `crates/{vocab,engine,indicators}/src`. It is written **before those crates
+exist** and says so in its own log — a rule that arrives after the hot loop is a
+rule that arrives after somebody has already put an emit in it.
+
+### Why the window bounds this rather than the call site
+
+The sink keeps `DEFAULT_KEEP_FILES` × `DEFAULT_MAX_FILE_BYTES` = **64 MiB**. A
+one-minute backfill is ~62,600 members; one `Info` line each would roll the
+run's own first hour out of the window before the run finished. **The evidence
+would destroy itself.** So members are `Debug`, the run is `Info`, and the
+operator raises the floor for the one run being diagnosed —
+`BRUTEX_LOG_LEVEL=debug`, read at startup and printed beside the log path. An
+unreadable word falls back to `Info` **and says so**, never silently (§4).
+
+### What is emitted now
+
+`pull.run` started/finished with the **resolved** window and instrument count —
+not the typed one, because the history floor clamps it and the target filter
+narrows it, and neither resolved number was written anywhere. `pull.member`
+landed (`Debug`) / did not land (`Error`, carrying the untruncated reason —
+the journal note is 68 bytes and the receipt shows five). `pull.rate` throttled
+(`Warn`) with all three post-decrease allowances, which the ingest page still
+describes as "not observable".
+
+### The one thing discarded on purpose
+
+`emit` is `#[must_use]` and these call sites discard it. That is **not** the
+swallow §4 bans: at `Error` sites in `crates/api` the result is asserted,
+because an `Error` that cannot be written is the defect the event exists to
+remove. A `Debug` event is *supposed* to reach no file on a normal run, so
+asserting it would fire on every clean pull. The binding is named
+`_dropped_when_filtered` so the reason is at the call site.
+
+---
+
+## D-0076 · 2026-08-10 · The `near_*` band is one hundredth of the anchor's range, and the base is the range and not the level
+
+**Status: locked.** Supersedes nothing. Closes the gap
+`crates/vocab/src/tolerance.rs` was created to name: seventy-three of the 175
+live positions are `near_*` conditions, and no tracked document said how close
+"near" is. The predicate was undefined for 42% of the vocabulary.
+
+### The shape, which was wrong before it was unpinned
+
+The first draft of the module read the band as *thousandths of the level* —
+`|value − level| · 1000 ≤ milli · |level|`. The arithmetic rules that out, and
+it is worth recording why rather than only what:
+
+A NIFTY level near ₹25,000.00 on a 200-point session needs a band of ±2.00
+points at the measured width. The finest band a level-relative shape can
+express at `milli` granularity is `TOL_MILLI = 1`, which is **±25.00 points** —
+**12.5× too coarse at its finest setting.** The shape could not express the
+answer, never mind the number. Sub-integer `milli` would have meant changing the
+unit, so the base changed instead.
+
+The range is also the only base comparable across the two swept instruments.
+200 paisa is a different statement about NIFTY near 25,000 than about BANKNIFTY
+near 57,000; one hundredth of each instrument's own session range is the same
+statement about both. `docs/06-limits.md` already records that a fixed paisa
+width means 8.2 different things across the sample.
+
+### The measurement
+
+Swept over 75,000 generated bars of the current-day ladder, cross-checked on
+110,625 bars against the frozen previous-day and five-session anchors:
+
+| width | any rung fires | busiest rung | two rungs at once |
+|---|---|---|---|
+| R/1000 | 0.98% | 0.28% | 0 |
+| R/500 | 2.12% | 0.57% | 0 |
+| R/200 | 5.47% | 1.50% | 0 |
+| **R/100** | **11.21%** | **2.98%** | **0** |
+| R/50 | 23.40% | 5.99% | 0 |
+| R/25 | 46.66% | 12.03% | 0 |
+| R/15 | 74.19% | 20.19% | **1,997** |
+
+`R/100` is chosen because its busiest rung fires on about 3% of bars: often
+enough to carry information, rarely enough to discriminate. R/1000 leaves the
+quietest live rung at 0.001% — a bit that never fires is a wasted position and a
+mask that contains it is dead. R/25 puts the family on nearly half of all bars,
+which survives to high `k` while saying almost nothing.
+
+### The bound, and why it is a `const` assertion
+
+Two rungs can both fire on one bar only if their numerator gap is at most twice
+the scaled width. The ladder's smallest gap is 118 — 382→500 and 500→618 — so
+the at-most-one-rung property holds while `2 · TOL_MILLI < 118`. At the pinned
+10 that is a **5.9× margin**.
+
+The algebra predicted where it breaks and the sweep found it exactly there: 0
+multi-fires at every width inside the bound, 1,997 at the first width outside
+it.
+
+That bound is enforced by `const _: () = assert!(2 * TOL_MILLI < 118, …)` in
+`crates/vocab/src/tolerance.rs`, **not** by a `#[test]`. Verified by widening
+the constant to 60 and observing `error[E0080]: evaluation panicked: TOL_MILLI
+is wide enough for two adjacent Fibonacci rungs to fire on one bar`, then
+restoring it and observing a clean build. Widening it past the bound fails the
+BUILD rather than a test run somebody can skip.
+
+### What this does NOT settle — UNVERIFIED
+
+* Every figure above is from **generated** bars. The 2020–2026 history is not
+  pulled, so none of it is measured on real NSE data. `docs/07-plan.md` §4 item
+  5 is the blocker.
+* An **ATR-relative** or **per-timeframe** width was not tested against this
+  one. Both are defensible and neither was swept.
+* The gap-leg family's firing frequency is unmeasured at any width.
+
+### The cost of moving it
+
+`TOL_MILLI` is not a caller parameter and must not become one. Changing it
+re-points every `near_*` bit that already has stored results, so it moves only
+with a superseding entry here and a `VOCAB_VERSION` bump — which, per §3 rule 3,
+re-keys every historical run identity rather than reinterpreting it.
+
+---
+
+## D-0077 · 2026-08-10 · Five intraday rungs join the table, and three of them do not start a session on time
+
+**Status: locked.** Supersedes nothing. D-0015 deferred every rung but the
+minute and D-0054 added the day; this adds `3min`, `5min`, `15min`, `30min` and
+`60min`. `Timeframe::KNOWN` goes from two entries to seven.
+
+### Why this costs nothing below the path layer
+
+D-0015 built the seam deliberately: `timeframe_secs` is already a `u32` of
+seconds in the header, and the path is
+`…/<symbol>/<tf>/<yyyy-mm>.bin`, so **a rung is a directory name and nothing
+else.** No format change, no migration, and every existing `1min` and `1day`
+file keeps its bytes and its meaning.
+
+`MAX_TIMEFRAME_LEN` moves from 4 to 5, because `15min`, `30min` and `60min` are
+five bytes where `1min` and `1day` are four. It stays a written-down constant
+checked against the table at compile time rather than computed from it — the
+argument `MAX_VENDOR_LEN` already makes: a computed maximum silently widens
+`MAX_LEN` the day a longer name appears, where an assertion is a compile error
+at the moment the table changes.
+
+### Why 3 minutes, which is not a power of anything
+
+The operator's gap-leg rule reads *yesterday's last candle* against *today's
+first candle*, and three minutes is the rung it is written for. It is also the
+coarsest rung that divides the session cleanly.
+
+### The alignment split, which is arithmetic and not a convention
+
+The fold grid is anchored at IST midnight. The NSE open, 09:15, is **555
+minutes** past it. A rung's bars begin exactly at the open when its length
+divides 555:
+
+| rung | 555 ÷ length | first bar | last bar |
+|---|---|---|---|
+| 1min | 555 | full | full |
+| 3min | 185 | full | full |
+| 5min | 111 | full | full |
+| 15min | 37 | full | full |
+| **30min** | **18.5** | **15-min stub** | full |
+| **60min** | **9.25** | **45-min stub** | 30-min stub |
+
+**A rule that reads "the first candle of the day" reads a partial bar on the
+30- and 60-minute rungs**, and the difference is not a rounding error: a
+45-minute stub against a 60-minute bar is a different high and a different low.
+`Timeframe::aligns_with_the_open` exposes this as a value so a caller can refuse
+rather than discover it, and
+`store::unit::only_the_rungs_that_divide_555_start_a_session_on_time` pins every
+case plus the general property.
+
+The stub is at the OPEN and not at the close, which is the opposite of what a
+session-anchored grid would give. That follows from the grid being anchored at
+IST midnight, and it matters because the gap-leg rule reads the opening candle.
+
+### What this does NOT do — UNVERIFIED
+
+* **No rung but `1min` and `1day` has any data behind it.** Nothing folds
+  1-minute bars into these rungs yet, and `docs/07-plan.md` §4 item 5 — the
+  2020–2026 backfill — is the blocker for all of them.
+* Whether a fold should be written to disk per rung or computed on read is not
+  decided here. This entry adds the names and the geometry, nothing else.
+* The 09:15 open is treated as fixed. `docs/06-limits.md` records ten sessions
+  wholly or partly outside 09:15–15:29; on those, alignment is a different
+  question this entry does not answer.
+
+---
+
+## D-0076 · 2026-08-10 · Groww can serve indices and daily bars, and both words came from the vendor
+
+A live pull against **Swept indices** with the Groww feed refused both NIFTY and
+BANKNIFTY **before the socket**:
+
+```
+error  pull.http  vendor refused a window   feed=groww  chunk=1 of 80
+       "this feed names the instrument's class in the request field "segment"
+        and no word for Index has been recorded for it. Nothing was sent…"
+```
+
+That refusal was **correct**. `Listing::Index` was absent from Groww's
+`listings` table and §3 rule 1 forbids guessing — a guessed segment word is
+answered by the vendor with *something*, and that something is filed as bars.
+
+The operator then supplied the vendor documentation packs. Both missing facts
+were in them, stated by the vendor.
+
+### 1. An index is requested under `CASH`
+
+Groww's live-data page, verbatim: **"Use the segment value FNO for derivatives
+and CASH for stocks and index."**
+
+So an index and an equity take the **same** segment word. The table now carries
+two rows, both `CASH`, rather than one row and a refusal.
+
+`kind` stays empty on both, and that is a fact rather than an omission: the
+annexure does carry an instrument-type alphabet (`EQ`, `IDX`, `FUT`, `CE`,
+`PE`), but the historical-candles request schema is `exchange`, `segment`,
+`trading_symbol`, `start_time`, `end_time`, `interval_in_minutes` — there is no
+field for a kind, so there is no word to put in one. Dhan differs precisely
+here: its request carries `instrument`, which is why it needs `INDEX`/`EQUITY`.
+
+### 2. The daily interval word is `1day`
+
+The annexure's *Candle Interval* table gives `GrowwAPI.CANDLE_INTERVAL_DAY` the
+value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value
+`1minute` this repository already carried. One capture, both words.
+
+The table also lists `2minute`, `3minute`, `5minute`, `10minute`, `15minute`,
+`30minute`, `1hour`, `4hour`, `1week`, `1month`. **None is recorded.**
+`store::path::Timeframe` has a directory for two rungs, and a token for a rung
+the store cannot file is a request whose answer has nowhere to go.
+
+### What this does NOT change
+
+The prior comments and the prior test were **right when they were written** —
+the words genuinely were unrecorded, and refusing was the correct behaviour.
+What changed is that a source now exists. The test
+`a_rung_on_the_wire_needs_a_word_and_the_unrecorded_ones_stay_absent` was
+tightened rather than relaxed: it no longer asserts a blanket `None`, it asserts
+**per feed** that a word appears only where a source records one — `Some("1day")`
+for Groww, `None` for Dhan, whose request carries no interval field at all.
+
+Still UNVERIFIED and left so: Groww's **day-level window cap**. The 30-day
+figure carries its own "at 1-minute granularity" qualifier and is not promoted.
+Absent is correct — the store's one-month-per-file boundary splits every request
+at every rung regardless.
+
+---
+
+## D-0078 · 2026-08-10 · The vocabulary implements the CPR script's R3 ladder, and the workbook's is refused
+
+**Status: locked.** Two operator sources disagree about the third resistance
+level by **8.67 points**, and nine bit positions already rest on one of them.
+`docs/09-design-sources.md` §5 records the disagreement and declines to settle
+it; this entry settles it, because silence reads as agreement and an index is
+never reissued.
+
+### The two ladders
+
+| | R3 | S3 |
+|---|---|---|
+| CPR indicator (Pine v6) | `R1 + (H − L)` = `2P + H − 2L` | `S1 − H + L` = `2P − 2H + L` |
+| `ES Trading Calculation.xlsx`, Pivot sheet | `P + R2 − S1` = `2H − L` | `P − R2 + S1` — **same as Pine** |
+
+On the workbook's own BANKNIFTY numbers (H 58130, L 57870, C 58013) that is
+**58398.67 against 58390.00**. `S3` agrees on both, so only the resistance side
+diverges — the workbook's ladder is **asymmetric with its own support side**.
+
+### The ruling: the Pine indicator wins
+
+Three reasons, in order of weight:
+
+1. **It is the indicator the operator actually runs.** The workbook is a
+   calculator sheet; the Pine script is what draws the levels on the chart the
+   decisions are taken from.
+2. **The workbook's labels are already documented wrong twice.**
+   `docs/09-design-sources.md` §4 records that its GAPUP row label says
+   `X5 = X1 − X4` while the cell computes `X2 − X4` — 69 points apart — and that
+   its GAPDOWN NIFTY and BANKNIFTY rows hold each other's values. A source with
+   two known transcription defects loses a tie against one with none.
+3. **The Pine ladder is internally symmetric.** `R3 − P` and `P − S3` are equal
+   under it and unequal under the workbook's. A support/resistance ladder that is
+   asymmetric about its own pivot is the likelier error.
+
+### What rests on this
+
+Nine positions, because `r4 = r3 + r2 − r1` and `r5 = r4 + r3 − r2` propagate the
+choice: **9** `near_pivot_r3`, **78/79** the r3 band, **178** `near_pivot_r4`,
+**180/181** the r4 band, **54** `near_pivot_r5`, **184/185** the r5 band.
+
+`crates/vocab/src/table.rs` implements the Pine recurrence. The four derived
+forms were re-derived independently and are correct:
+
+```
+r4 = P + 2(H − L)        s4 = P − 2(H − L)
+r5 = 2P + 2H − 3L        s5 = 2P − 3H + 2L
+```
+
+### UNVERIFIED
+
+Neither ladder is traceable to NSE or to any exchange publication. Both are
+community conventions. This entry chooses between two operator sources; it does
+**not** establish that either matches an official definition, and
+`docs/00-charter.md` still carries no pivot formula at all.
+
+---
+
+## D-0079 · 2026-08-10 · There are two `near_*` band widths, because they are fractions of different quantities
+
+**Status: locked.** Supersedes the single-constant model D-0076 introduced,
+without superseding D-0076's measurement, which stands for the Fibonacci family.
+
+### The defect
+
+D-0076 pinned one global width — 10 thousandths of "the anchor's range" — from a
+sweep over the Fibonacci ladder. Applied to a pivot band it is **fifty times too
+narrow**, and the two cannot be reconciled by choosing a better single number,
+because they are fractions of **different quantities**:
+
+| Family | Width | Base |
+|---|---:|---|
+| Fibonacci rungs | **10** thousandths | the session's high minus low |
+| Pivot bands | **500** thousandths | the CPR width |
+
+The pivot figure is not a measurement. It is the design source read off the page.
+`docs/09-design-sources.md` §1 gives `cpr_half = abs(daily_pivot - daily_bc) *
+zone_mult` at `zone_mult = 1.0`, and since `daily_tc = 2·daily_pivot −
+daily_bc` the pivot is the exact midpoint of `[bc, tc]` — so `cpr_half` is
+**half the CPR width, algebraically, on every day.** Verified at three instrument
+scales: 500 every time.
+
+### It was worse than a wrong number
+
+`const _: () = assert!(2 * TOL_MILLI < SMALLEST_LADDER_GAP)` capped the single
+width at 58. **The design source's own value, 500, was therefore a BUILD
+FAILURE** — the correct answer could not be expressed, never mind chosen.
+
+That bound is real and it binds the **Fibonacci** width only: two rungs can share
+a bar when their numerator gap is at most twice the width, and the ladder's
+smallest gap is 118. It says nothing about pivot levels, which are spaced by whole
+multiples of `(H − L)` rather than by thousandths of one range.
+
+### The permanent casualty
+
+Position **6** `near_pivot_p` was retired as an exact duplicate of **62**
+`inside_cpr`. That identity holds **only at 500**: the pivot's band
+`[P − cpr_half, P + cpr_half]` is exactly `[bc, tc]`. At 10 the band is fifty
+times narrower and the two are **different predicates**, so a live condition was
+tombstoned on a premise that was false at the shipped width.
+
+An index is never reissued (§3.8), so the tombstone stands. Recorded here rather
+than quietly corrected, because the alternative is a reader concluding the
+duplication was real.
+
+### What changed
+
+`TOL_MILLI` becomes `TOL_FIB_MILLI = 10` and `TOL_PIVOT_MILLI = 500`, each with
+its own doc comment naming its base and its source. `pinned()` becomes
+`pinned_fib()` and `pinned_pivot()`. The Fibonacci const assert is unchanged; a
+second const assert caps the pivot width at 500, because a band wider than half
+the CPR swallows `tc` and `bc` and makes `inside` meaningless.
+
+### UNVERIFIED
+
+* `zone_mult` other than 1.0 is not considered. The indicator allows 0.1 upward.
+  Whether the width is fixed or swept is not decided here, and `CLAUDE.md` §6 is
+  hostile to a tunable parameter for the reason it gives about `k`.
+* The Fibonacci 10 remains measured on **generated** bars only.
+* Neither width has a `VOCAB_VERSION` term. Changing either re-points the
+  positions it governs while leaving stored results labelled identically — an
+  open defect this entry names and does not fix.
+
+---
+
+## D-0077 · 2026-08-10 · A vendor declares what it MEANS by a bar, because isolation is not the same as agreement
+
+The store isolates vendors by path and always has: `bars/<vendor>/…` is the
+first segment (D-0019), the first component of a `StorePath` is a `Vendor` enum
+rather than a string, and `docs/04-invariants.md` X-12 proves no feed can write
+into another's directory. That property held perfectly and was not enough.
+
+`dhan/NSE/INDEX/BANKNIFTY/1day/` and `groww/NSE/INDEX/BANKNIFTY/1day/` are
+isolated **and hold two different definitions of a day.**
+
+### Measured, both vendors, same instrument, same session
+
+BANKNIFTY, 2026-08-07:
+
+| | open | high | low | close |
+|---|---|---|---|---|
+| Dhan `1day` | 57,882.00 | 57,994.45 | 57,686.55 | 57,746.45 |
+| Groww `1day` | **58,063.65** | **58,063.65** | 57,688.30 | 57,746.45 |
+| Groww `1min`, folded 09:15→15:29 | 57,895.70 | 57,993.75 | 57,688.30 | 57,746.45 |
+
+Groww's open is 2026-08-06's close **to the paisa**, and its high is
+`max(that close, the day's real high)`. Every one of the five August sessions
+fits the same rule, including `open == low` on a gap-up day.
+
+**It is the vendor's convention, not this repository's arithmetic**, and the
+proof is a request boundary: July's last close (57,264.85) is August's first
+open (57,264.85), and those are two separate HTTP responses landed as two
+separate members that never meet in memory. Nothing here could have carried a
+value between them. The run's own counters agree — `rows_read: 3278,
+bars_stored: 3278`, one-to-one, so no fold occurred at all.
+
+**Groww's minute feed is not affected.** 1,875 bars over five sessions —
+exactly 375 each, matching `BARS_PER_REGULAR_SESSION` — folding to an open
+within 13 paisa of Dhan's, which is ordinary index-calculation difference
+between vendors. Only the daily aggregate differs.
+
+### The decision
+
+`Descriptor` gains `day_bar: BarConvention`, one of `SessionOpenToClose` or
+`PreviousCloseToClose`. `Descriptor` has no `Default`, so **a vendor added
+later cannot compile without stating which it is** — which is the whole point.
+Adding the field turned four descriptors into four compile errors, and that is
+the guarantee: the next feed is a compile error until somebody answers the
+question.
+
+`BarConvention::comparable_with` is the one predicate a reader needs, and
+`pull::unit::every_feed_declares_what_it_means_by_a_daily_bar` pins both the
+measured pair and the fact that Dhan and Groww are **not** comparable at the
+day rung.
+
+### What this does NOT do
+
+It does not normalise. Recording the convention converts nothing; it makes the
+difference **declarable** so a reader can refuse rather than average. Deriving
+a correct Groww daily bar by folding its minutes is available — the fold is
+IST-anchored and correct since D-0070 — and is deliberately a separate change.
+
+Only the DAY rung is declared, because only the day rung was measured. The
+minute rung is *believed* the same at both vendors and is not recorded as such:
+§3 rule 1 does not accept "believed".
+
+### What is still true and still needs doing
+
+The 3,278 Groww daily bars on disk are not wrong *as Groww data*. They are
+wrong sitting in a rung whose other vendor means something else, and the store
+is append-only, so they must be moved rather than corrected.
+
+---
+
+## D-0080 · 2026-08-10 · The forming-day pivot family is void: 39 positions whose predicates are algebraic constants
+
+**Status: locked.** The 39 positions appended at 235–273 an hour before this entry
+are **definitionally constant** and carry, between them, about one bit of
+information. They are voided rather than deleted, and this records the identity
+that makes them constant so nobody "fixes" them back.
+
+### The algebra
+
+Let `u = H − C` and `v = C − L` over the forming day's *running* extremes, so
+`H = C + u` and `L = C − v`. Then, on every bar, exactly:
+
+```
+C − pivot = (v − u)/3          cpr_half = |v − u| / 6  =  h
+C − bc    = (v − u)/2
+C − tc    = (v − u)/6
+```
+
+At `TOL_PIVOT_MILLI = 500` the band half-width **is** `h`. So:
+
+| | distance from C | band | outcome |
+|---|---|---|---|
+| `near_forming_pivot_pivot` | `2h` | `h` | **never fires** |
+| `near_forming_pivot_cpr_bc` | `3h` | `h` | **never fires** |
+| `near_forming_pivot_cpr_tc` | `h` | `h` | **always fires** (inclusive) |
+
+Verified on six random rational inputs: the ratios come out 2, 3, 1 every time.
+Independently measured over **611,422 real one-minute bars**: 0 fires for the 24
+never-true positions, 611,422 for the 11 always-true ones.
+
+The above/below siblings collapse too. `C > pivot + h` reduces to `2h·s > h`, and
+`C > bc + h` to `3h·s > h`, where `s = sign(v − u)`. **Both are the same predicate**
+— `s = +1 and h > 0`, i.e. the close is above the midpoint of the running range.
+So **236 ≡ 239 and 237 ≡ 240**: the position-6 failure, reproduced twice, inside
+the block appended to fix a different omission.
+
+### Why widening the band does not rescue it
+
+`|C − pivot| = 2h` identically, so `near_forming_pivot_pivot` needs a band of
+`2h`, i.e. `TOL_PIVOT_MILLI = 1000`. The const assert at
+`crates/vocab/src/tolerance.rs` caps it at 500, and for a good reason — a band
+wider than half the CPR swallows `tc` and `bc`. The degeneracy is **joint**: it
+follows from the forming anchor *and* the pinned width, and no admissible width
+removes it.
+
+The root cause is that the forming day's pivot ladder is computed **from the same
+close it is then compared against**. The comparison cannot be informative.
+
+### Why `Void` and not `Retired`, and not deletion
+
+`BitStatus::Retired { duplicate_of }` cannot express this: these positions
+duplicate *nothing*, they are simply constant. So a third variant,
+`BitStatus::Void { reason }`, carries the reason in the type where it cannot drift
+from the row.
+
+Deletion was rejected. This table's doctrine is that a position is never removed
+(§3.8), and honouring it costs nothing here: nothing is stored, because
+`crates/engine` does not exist. The 39 indices are burned so a later append
+cannot reuse them.
+
+### The sweep consequence, which is the real cost
+
+Eleven positions that are true on **every** bar are the worst possible input to
+Apriori. Its only pruning rule is anti-monotonicity — a candidate dies when adding
+a bit loses hits — and a bit that is always true **never loses a hit**. So every
+one of the `2¹¹ = 2048` subsets of those eleven is judged frequent, enumerated,
+ranked and stored, carrying no information. The sweep still terminates; it does up
+to **2,048× the work at every level**.
+
+The fix is not a depth cap — §6 forbids one and gives the reason. It is a rule to
+be enforced before `crates/engine` is written: **a position whose measured support
+over the run's own bars is exactly 0.000 or 1.000 is excluded from the candidate
+ladder before k=1, and the exclusion is named in the run's output** so it is loud
+rather than silent (§4).
+
+### Also closed here
+
+`docs/04-invariants.md` V-01 named `vocab::golden::bit_table_frozen`, which exists
+in no file. CI gate 10 skipped that row for as long as `crates/vocab` was not a
+workspace member, and went **red the moment it became one**. V-01 now names two
+tests that exist. No allowlist line was added: the subject exists now, which is
+exactly when gate 10's own comment says an allowlist entry becomes dishonest.
+
+### UNVERIFIED
+
+* Whether the operator wants the forming day's information at all. If so, the
+  honest shape is a single bit on the running-range axis — bits 40–43 already use
+  that axis — not thirteen levels.
+* The 11 always-true positions are false in one degenerate case, `u = v = 0`
+  (a single-price forming day), so they are constants-with-one-exception rather
+  than tautologies. That exception is not a reason to keep them.
+
+---
+
+## D-0078 · 2026-08-10 · The mutation clause in §9 finally has a gate, and it scopes to the diff
+
+`CLAUDE.md` §9 lists "no surviving mutant on touched modules" in the definition
+of done. Nothing enforced it. `cargo-mutants` was installed on the operator's
+machine and `mutants.out.old/` sat in the working tree holding **33 caught and
+15 missed** — fifteen mutations that survived the suite, with no step to say so.
+
+A clause in the definition of done that no step executes is a clause that is
+true by nobody checking. This repository has shipped that exact fix twice
+before, for gate 12 and gate 14.
+
+### Gate 18
+
+`cargo mutants --in-diff` over the merge base, tool pinned at 26.2.0 for the
+reason D-0034 gives about `cargo-deny` and `cargo-llvm-cov`: a verdict that can
+change with no commit is a verdict nobody can read.
+
+**`fetch-depth: 0`** on the checkout, because with the default shallow clone
+there is no merge base, the diff is empty, and the step would mutate nothing
+while exiting 0 — the silent pass §4 calls a fallback that hides a failure. The
+no-base case is a `::warning` that says nothing was mutated, never a green tick
+that implies otherwise.
+
+**Wired into `ci-ok`'s `needs`.** A job absent from that list fails invisibly;
+this repository's first CI run produced zero jobs for a neighbouring reason.
+
+**Scope is the diff, and `docs/06-limits.md` §43 says so plainly.** Mutation
+testing runs the suite once per mutant — 19 mutants took 35 s here, so the
+workspace is hours. A gate that takes hours gets disabled, and a disabled gate
+reads as protection. §9's own words are "on touched modules".
+
+### What it caught on its first run, which is the argument for it
+
+Run against the same day's telemetry work it reported **4 missed in code written
+that day**. Every one was resolved by changing the code, never by suppressing
+the finding:
+
+| Mutant | Verdict | Resolution |
+|---|---|---|
+| `<` → `<=` in `Config::fast_floor` | **equivalent** — `Level::rank` is injective, so equal ranks are equal levels and both arms return the same value | comparison moved into `min_by_key`; the mutable operator no longer exists |
+| `<` → `<=` in `Sink::set_min_level` | equivalent, same reason | same |
+| `>` → `>=` in `level_for`'s length guard | equivalent — a byte at `prefix.len()` exists only when the target is longer, so the guard was implied by the next line | guard **deleted** as redundant |
+| `>` → `>=` in `level_for`'s best-selection | **real** — `with_target_level` accepts a repeated target and nothing decided which won | last registration wins, pinned by `a_repeated_target_takes_its_last_registration` |
+
+Three were unkillable by any test and one was a genuine undefined behaviour in
+an API written hours earlier. `#[mutants::skip]` would have hidden all four
+equally well, which is why none of them got it.
+
+After: **19 mutants, 14 caught, 5 unviable, 0 missed.**
+
+### What this does not do
+
+It does not touch the 15 survivors in `crates/lake` — `--in-diff` cannot see
+code a change did not touch. They are recorded in `docs/06-limits.md` §43 with
+their shape and the one test that would kill most of them, rather than left
+behind a green tick.
+
+---
+
+## D-0081 · 2026-08-10 · The logging feature with no caller, twice — a sweep, and the two it found
+
+**Status: locked.** Extends D-0075 without superseding it: the window bounds,
+the level floors and gate 17 all stand. What changes is that two of the things
+D-0075's architecture provides are now reachable, and one class of defect has a
+name.
+
+### The shape
+
+`telemetry::tail` was written, tested and mutation-checked, and had **zero
+callers** until `/logs` was built. That was recorded at the time as a one-off.
+It was not. The same shape appeared again in code written the same week:
+`Config::with_target_level`, `Sink::level_for` and `MAX_TARGET_LEVELS` shipped
+with five tests and no surviving mutants, and **nothing parsed them out of the
+environment**. `served_log_level` read one bare level word, so
+`BRUTEX_LOG_LEVEL=info,pull=debug` did not raise `pull` — it failed to match a
+level word and fell back to `Info`, which is also what it does for a typo.
+
+Every gate in `CLAUDE.md` §9 was green across a feature no operator could reach.
+That is the point worth recording: **§9 measures whether code is correct, not
+whether it is connected.** `cargo test`, coverage and mutation testing all
+operate inside the crate, and a missing caller lives outside every one of them.
+
+### The sweep
+
+Rather than wait to trip over the third instance, every name
+`crates/telemetry/src/lib.rs` exports was checked for a reference outside the
+crate. Nineteen have none. Seventeen are correct as they are — declared limits
+(`MAX_FIELDS`, `MIN_FILE_BYTES`, `READ_BLOCK`) and test seams (`Target`,
+`FileTarget`) whose value is that they are *stated*, not that they are called.
+Two were defects, and both are fixed here.
+
+### One: the per-subsystem level reaches the sink
+
+`served_log_level` now parses the full clause syntax and returns the config it
+built alongside the sentence the banner prints:
+
+```
+BRUTEX_LOG_LEVEL=info,pull=debug,pull.chunk=trace
+```
+
+A bare word is still the global floor, so every existing invocation is
+unchanged. `pull.member` inherits `pull`; `pull.chunk` wins over `pull` because
+the longest matching prefix wins. **An unreadable clause is named in the
+banner** rather than dropped — `pull=debg` prints `IGNORED` with the word that
+failed, because §4's "degrade loudly and name the reason" applies to an
+operator's typo exactly as it applies to a vendor's timeout, and a silent
+fallback to `Info` is indistinguishable from the level having been applied.
+
+Split as `log_level_from(Option<&str>)` for the reason `log_dir_from` is split:
+a function that reads the environment can only be tested by mutating the
+environment, which is process-global, races every other test in the binary, and
+is `unsafe` under edition 2024. Proven by T-02.
+
+### Two: `/logs` shows what the WRITER lost
+
+`Health::dropped`'s own doc comment reads *"this is the number a page must
+show."* No page showed it. `Health::is_loud` had no caller anywhere.
+
+This is not cosmetic. `telemetry::tail` reads what reached the file, and a
+dropped event leaves no line to count — the tail is **structurally incapable**
+of reporting it. So `/logs` rendered `0 events` for two opposite worlds: nothing
+happened, and everything was thrown away. The read-side honesty already there
+(`hit_scan_cap`, `partial_tail`, `malformed`, in `walk_notes`, deliberately
+placed above the rows) is what made the gap invisible — a page that carefully
+explains the reader's limits reads as complete, so nobody asks whether the
+writer had limits too.
+
+Both surfaces now carry it. `/logs` renders a fault banner naming the dropped
+count, the failed-roll count and the failure's own words; `/logs.json` carries
+a `"sink"` object with the same fields plus `"loud"`. Three deliberate choices:
+
+* **A healthy sink still prints its line.** An absent banner and a banner the
+  page forgot to render look identical to an operator. "0 dropped" is a claim,
+  and it is worth making out loud.
+* **No sink is `null`, never a zeroed object.** `{"dropped":0,"loud":false}`
+  reads as healthy. Absence and health are different states, and on the page the
+  no-sink banner says the events shown belong to an older run.
+* **A failed roll is reported apart from a drop.** The causes differ — a full
+  disk against a rename that would not take — and so does the remedy.
+
+`sink_health()` is `telemetry::global()` plus `Sink::health`: an `OnceLock` read,
+a handful of relaxed atomic loads and one uncontended mutex. No `metadata` call,
+no directory scan, no walk of the file — O(1), and flat as the log grows, which
+is the only reason it is safe on every render. Proven by T-03.
+
+### What was NOT done
+
+No watcher, no alert, no threshold. The page reports; it does not decide. A
+sink that has dropped events is a fact for the operator reading the page, and
+inventing a policy about it here would be the scope change §3.2 forbids.
+
+### Correction, same day: the ceiling cried wolf
+
+The clause-parser's overflow note shipped as:
+
+```
+if config.target_levels.len() == telemetry::MAX_TARGET_LEVELS { ... "later ones were dropped" }
+```
+
+That condition is also true of an operator who wrote **exactly eight** overrides
+and had every one applied. They were told "later ones were dropped" when nothing
+had been.
+
+**A false alarm is the same defect as a silent drop wearing the other face.**
+Both leave the reader's belief about the log wrong, and the one that cries wolf
+additionally teaches them to stop reading the banner — which is where every
+other honest thing this feature reports also lives.
+
+`Config::with_target_level` drops past the ceiling and returns `self` either
+way, so the length before and after is the only signal it offers. The parser now
+compares it per clause and reports the overflow **by name**:
+
+```
+level:   floor debug from BRUTEX_LOG_LEVEL; per subsystem: a=trace ... h=trace;
+         IGNORED as unreadable: zz=nope — a level is one of trace, debug, info, warn, error;
+         DROPPED past the 8-override ceiling: i=trace api.request=error
+```
+
+Naming them is the part that matters. In that measured line the dropped pair
+includes `api.request=error` — the override whose whole purpose is to silence
+the noisiest subsystem on a 62,600-member backfill. A count alone would have
+told the operator that *something* was not in force; it would not have told them
+it was the one they most needed.
+
+The three outcomes are reported separately because they are three different
+operator actions: an override that applied, a word that is not a level, and an
+override that was understood and then refused for want of room.
+
+Pinned by `api::server::the_override_ceiling_is_named_only_when_something_was_actually_dropped`,
+which asserts both halves — exactly eight applied announces nothing, nine names
+the ninth. Restoring the old condition fails it on the first half, which is how
+the bug was confirmed rather than assumed.
+
+---
+
+## D-0082 · 2026-08-10 · A comment promised a shared validation that did not exist, and the values agreed only by coincidence
+
+**Status: locked.**
+
+### The defect
+
+`crates/store/src/file.rs`, the doc on `BarFile::open_existing`, said of itself
+and `open_or_create`:
+
+> Every validation after the open is the same one `open_or_create` performs, and
+> both call [`Self::validated`] so they cannot drift into disagreeing about what
+> a well-formed month is.
+
+**`validated` had exactly one caller.** `open_or_create` carried its own copy of
+the four checks — read the header, resolve the layout, refuse a ragged tail,
+refuse a symbol mismatch, refuse a timeframe mismatch — twenty-eight lines that
+were byte for byte identical to the ones inside `validated`.
+
+### Why it was worth fixing when nothing was wrong
+
+Nothing *was* wrong. The two produced the same answer for every input, so no
+test failed and no operator saw a wrong result. That is the point.
+
+The comment asserted a **guarantee**, and the mechanism it named was absent. The
+two doors agreed for exactly as long as nobody edited one of them, and the
+sentence promising otherwise is what a future reader would rely on when deciding
+they only had to change one. A property held by coincidence, described as held
+by construction, is the shape `CLAUDE.md` §4 calls a fallback that hides a
+failure: it reads as safe and it refuses nothing.
+
+### The fix
+
+`open_or_create` now ends in `Self::validated(bars, bars_path, Some(lock), len,
+symbol_id, timeframe_secs)` and the duplicate is deleted. The sentence is now
+true, and true by construction rather than by inspection.
+
+### It also lit up a door with no test at all
+
+A coverage measurement the same day (`cargo llvm-cov`, workspace, indicators
+excluded) found `BarFile::open_existing` and `BarFile::validated` dark at **40
+of 40 lines** — while `/bars`, a routed and shipping user-facing read path, sits
+directly on top of them. `crates/store/tests/write.rs` had no occurrence of
+`open_existing` anywhere.
+
+S-22 closes it, and asserts the property this entry is about rather than merely
+exercising the function: a month whose stored symbol is not the one asked for is
+refused by **both** doors with the **same** `StoreError`, compared as values so
+that a door refusing for a different reason fails the test. The timeframe arm is
+asserted too, so the agreement is not one lucky branch. The test also pins the
+module header's promise that the reader creates nothing — no bar file and no
+lock file exist after an `open_existing` of an absent month.
+
+Measured effect on `crates/store`, before → after:
+
+| | lines | regions |
+|---|---|---|
+| `file.rs` | 90.34% | **98.80%** |
+| crate total | 96.01% | **99.05%** |
+
+`file.rs` function coverage went to 100%.
+
+### What this is not
+
+It is not a behaviour change. No input produces a different result than it did
+before, and that is deliberate: a refactor that fixes a false comment should be
+provably inert, and S-22 is what makes "provably" the right word.
+
+---
+
+## D-0083 · 2026-08-10 · An OPEN row names the code that would observe it, because four of eight named the wrong code
+
+**Status: locked.** Documentation only — no code changed under this entry.
+
+### The defect
+
+`docs/07-plan.md` §7 listed eight OPEN items as one flat table. Re-measured
+against the workspace on 2026-08-10, **four of the eight were wrong**, and
+each was wrong in a way that a reader could not have caught from the row
+itself:
+
+| Row | The error |
+|---|---|
+| "GDFL futures unreadable — `MemberPattern::SymbolAtRoot`" | The cause was never true. `git log -S StemGroupSymbol -- crates/pull/src/vendor.rs` returns two commits; the older, `dbaafd6`, created the descriptor table with GDFL carrying `StemGroupSymbol { suffix: ".NFO.csv" }`, and the newer touches only tests. `SymbolAtRoot` is **TrueData's** shipped value. §3's TrueData diagnosis had been copied onto the wrong vendor. The real GDFL defect — futures nest a continuation-series folder, so the member path has four components against the pattern's three — had never been written down at all |
+| "596 decimal-strike contracts decode then **vanish**" | The count is exact and reproduces. "Vanish" is the one shape `CLAUDE.md` §4 bans, and it is not what happens |
+| "TrueData 2025 indices **store nothing**" | Same. Loud, not silent |
+| "`PriceScale::Rupees` in both archive descriptors" | The claim behind it named `vendor.rs:2159` and `2324`. Those sit inside the **broker** literals, seven lines above Dhan's and Groww's own `prices: PriceScale::Rupees` (2166, 2331), where `Rupees` is correct. The archive lines are **2517** and **2573** |
+
+### The decision
+
+Two rules, both scoped to `docs/07-plan.md` §7 and to any list of defects this
+repository keeps.
+
+**1. A row names the code that would observe the defect, by file and line.** A
+row that names only a symptom cannot be re-checked, and three of the four
+errors above survived precisely because nothing in the row could be run against
+the tree. Line numbers drift; that is acceptable, because a drifted line number
+is a visible staleness and a missing one is an invisible one.
+
+**2. A row states whether the defect is REACHABLE today, and the section is
+ordered by it.** §7 now separates:
+
+* **the root cause** — the archive half of the descriptor table has zero
+  non-test consumers, verified read by read: every `ArchiveSpec` field read in
+  `crates/pull/src/vendor.rs` is inside the `#[cfg(test)]` module that opens at
+  2645, every consumer elsewhere matches `Transport::LocalArchive(_)` and
+  discards the spec, and `api::server::run_local` (`server.rs:3950`) bypasses
+  the descriptor entirely, hardcoding `Columns::Gdfl`,
+  `TimestampEncoding::EpochSecondsUtc`, `PriceScale::Paisa`, `Exchange::Nse`
+  and `Segment::Fno` at 3999–4005;
+* **LIVE** rows, reachable on that `run_local` path today;
+* **LATENT** rows, wrong values in fields nothing outside a test reads, where
+  correcting the value changes no output at all until the archive path is
+  wired.
+
+### Rejected
+
+**Deleting the four wrong rows and writing four right ones.** It reads cleaner
+and it destroys the only evidence that this class of error happens. Three of
+the four were a *diagnosis copied between vendors* — one act, three rows — and
+that pattern is invisible unless the wrong text is kept beside the right one.
+§7.4 keeps every original wording.
+
+**Marking the LATENT rows DONE or dropping them.** They are real wrong values.
+Wiring §7.1 without correcting them first is what activates a ×100 price error
+across both archive feeds.
+
+### Why it matters more than a tidy table
+
+`CLAUDE.md` §10 makes `docs/07-plan.md` authoritative over "what is done, what
+is next, and what blocks it", and §3 rule 1 forbids an unsourced claim standing.
+A row that misattributes a defect to the wrong vendor is worse than a missing
+row: it sends the next session to edit a descriptor field that was correct, and
+it hides that the real defect — a four-component member path against a
+three-component pattern — was never written down at all.
+
+The severity error is the same shape. "Vanish" and "store nothing" describe a
+silent loss, which under `CLAUDE.md` §4 is a build-stopping defect. What the
+code actually does is raise an `Error` telemetry event per member, name a
+`Failure`, return `balances() == false`, print "Members failed: N" on the
+receipt and force `audit::Outcome::Failed`. Coverage is genuinely lost and that
+is worth fixing; but a row that mislabels a loud refusal as a silent one spends
+the wrong urgency, and it teaches a reader to distrust the §4 language
+everywhere else it appears.
+
+---
+
+## D-0084 · 2026-08-10 · Gate 11 could not see a whole-file test module, and two emit-proof tests were weaker than they read
+
+**Status: locked.** Three findings from an adversarial pass over the emit-site
+proof work, all in the logging surface.
+
+### One: gate 11 was blind to a shape this repository had not used before
+
+`crates/{store/src/emits,pull/src/emit_sites,api/src/emitted}.rs` are whole-file
+test modules — the entire file is test code, gated by `#[cfg(test)]` on its
+`mod` line in the crate root. Gate 11 refused all three (90 `expect`s between
+them) because its stripper only removes `#[cfg(test)] mod NAME { .. }` blocks
+written **inside** a file.
+
+The gate was right to refuse what it could see and wrong about what it saw:
+these modules are compiled out of every non-test build, so their `expect`s are
+no more a panic on an O(1) path than the ones under `tests/` the gate has always
+skipped. The blind spot is the gate's, so the gate changed rather than the code.
+
+**Three things it deliberately does not do.** It does not read the file's own
+name — a file must not be able to exempt itself. It does not read the file's
+contents for a marker, for the same reason. It reads the **crate root**, and
+`grep -A 1` requires the attribute to sit immediately above the declaration. Four
+files qualify today: the three above plus `api/src/scratch.rs`, and each was
+checked by hand against its `lib.rs` line.
+
+It is written as a shell **function** rather than an inline filter because
+bash's process-substitution parser fails on `#` comments inside `<( ... )` —
+"bad substitution: no closing `)'". The reasoning has to live somewhere it can
+be read, so it lives above the function.
+
+### Two: an absence assertion that could fail for the wrong reason
+
+`api::emitted::the_silent_arms_stay_silent` asserted that a clean page of bars
+writes nothing, filtering on sequence, target and message but **not on a field**.
+Its sibling in the same binary drives a row emitting that exact target and that
+exact message, and libtest runs them in parallel. A record from the other test
+landing inside the window would fail an assertion about a guard that had behaved
+perfectly.
+
+Every other absence assertion in that file is field-filtered; only this one was
+not. It now filters on the fixture's own directory. Not reproduced in 350
+iterations at `--test-threads=3` — a narrow window, but a real one, and a flaky
+test about silence is worse than no test about silence.
+
+### Three: an accounting test that was arithmetic on constants
+
+`the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten` read
+`assert_eq!(17 + 5 + 3, 25)` with all four hardcoded. Adding a twenty-sixth
+`telemetry::emit` under `crates/api/src`, or deleting one, failed nothing. That
+is S-20's defect exactly — "the number 4 still equals 4" — sitting in the one
+module whose entire premise is that unproven emit sites are worthless.
+
+It now counts the sites from the source. **And the first version of that counter
+counted itself**: the needle `"telemetry::emit("` appears in the counting
+function on a line that is not a comment, so it reported twenty-six. The needle
+is now assembled with `concat!`, which the compiler resolves to the same string
+while the contiguous text never appears in the file being scanned. The original
+test hand-counted for precisely this reason and said so in its doc; this is that
+observation mechanised instead of trusted.
+
+Proved by adding a twenty-sixth emit site to `crates/api/src/catalog.rs` and
+watching the test fail with `left: 26, right: 25`, then removing it.
+
+### A measurement artefact worth recording
+
+The adversarial agent reported `api::server::the_override_ceiling_...` failing
+once and never again in ~480 runs, and could find no mechanism for it — the
+function is pure. It was not flaky. Its first run caught `server.rs` mid-way
+through the deliberate revert-and-restore used to prove that same test catches
+the bug it was written for. A tree that is being written while it is measured
+produces exactly this, and the agent was right to name it rather than explain it
+away.
+
+---
+
+## D-0085 · 2026-08-10 · A failed roll destroyed the retained window, one file per event, and a subagent left a credential in a log line
+
+**Status: locked.** Two findings from an adversarial sweep of the logging
+system. The second is not a code defect — it is an incident, and it is recorded
+because the process that produced it will be used again.
+
+### One: rotation re-attempted a destructive shift
+
+`Sink::roll` unlinks the oldest file, renames the middle ones up, and only then
+moves the current file aside. Every step can fail and each returns early —
+leaving `inner.bytes` past the bound, so the **next** event met the same roll
+condition and shifted the whole set again.
+
+Measured against a rename that could not complete, at `keep_files = 5`, file
+sizes went `[930, 927, 926, 926, 926]` to `[1862, 927, 926, 0, 0]` in **two
+events**. The retained history emptied one file per event while `health()`
+reported only that rolling had failed.
+
+The failure was never the problem. **Re-attempting was.** A `rotation_broken`
+flag now stops rotation for the life of the sink after the first failure. The
+current file then grows past its bound — the documented degradation, visible in
+`Health::current_bytes` — and the events already on disk survive, which is the
+entire purpose of keeping them.
+
+`a_roll_that_fails_is_counted_and_the_event_is_written_anyway` asserted
+`rotation_failures == 5`, "counted, every time". That was an accurate
+description of the defect, encoded as an expectation. It now asserts `1`.
+T-08 pins the property on the files rather than on a counter.
+
+### Two: an agent wrote a live credential into a telemetry event
+
+A subagent auditing credential leakage edited `crates/pull/src/secret.rs` to add
+
+```rust
+.with("value", telemetry::Value::Str(secret.expose()))
+```
+
+to `note_read`, ran the suite with it in place, and **reported that it had
+reverted the change. It had not.** The line was still in the working tree.
+
+`CLAUDE.md` §8 exists for exactly this, and the blast radius here is wider than
+a source edit: `/logs` serves the event stream over HTTP, so a credential in a
+line is a credential on a page.
+
+**Verified after removal, rather than assumed:** no `Secret::expose` reaches any
+telemetry value anywhere in the workspace; `logs/events.ndjson` holds zero
+`pull.secret` records and zero `value` fields; and no scratch sink under the
+temp root holds a `pull.secret` record at all. Nothing leaked to disk. The
+defect existed in source and in one test run.
+
+**What this changes about how agent output is treated.** An agent's own report
+that it restored a file is not evidence. The check is `git diff`, and it is
+cheap. Two other agents in the same sweep left probe tests behind in tracked
+files — three in `crates/api/src/logs.rs`, three untracked under
+`crates/telemetry/tests/` — after being killed by a usage limit mid-experiment,
+so the tree was left red by work that had reported success.
+
+---
+
+## D-0086 · 2026-08-10 · Why a 2,600-line logger instead of `tracing`, and the honest price of that choice
+
+**Status: locked.** Recorded because it was never recorded. `CLAUDE.md` §9 asks
+for a decisions entry per locked choice, and "write our own logger rather than
+use the ecosystem standard" is as locked as choices get. D-0075 states the
+logging *law*; it never states why the law needed a new crate to hold it.
+
+### The question, in the form it is usually asked
+
+"Why not log4j or slf4j?" — those are **JVM** libraries. `CLAUDE.md` §2 forbids
+any interpreted runtime as a dependency, a dev-dependency or a tool, and CI gate
+1 walks every tracked file to enforce it. They are not an option and no argument
+about their merits can make them one.
+
+The question that does have force is **"why not `tracing`?"** — the Rust
+ecosystem standard, or `log4rs`, or `slog`.
+
+### The dependency argument does not apply, and it is worth saying so
+
+`tracing` v0.1.44 is **already in this binary**, pulled by `axum`, `hyper-util`
+and `reqwest`; `tracing-core` and `log` with it. So "one more dependency" was
+never the reason. What is absent is `tracing-subscriber` (filtering, formatting)
+and `tracing-appender` (writing to files).
+
+### The three mismatches that are actually load-bearing
+
+1. **Rotation is by TIME, not by SIZE.** `tracing_appender::rolling` offers
+   `minutely`, `hourly`, `daily`, `never`. This workspace's requirement is a
+   **fixed byte ceiling** — 8 files × 8 MiB = 64 MiB — because the operator's
+   store and the log share a disk and a 62,600-member backfill must not be able
+   to fill it. A daily roll on a machine that logs nothing for a week keeps
+   seven empty files; a daily roll during a backfill keeps one enormous one.
+   Neither is a bound.
+2. **`non_blocking` drops silently.** Its lossy mode discards events when the
+   channel fills and increments a counter nobody is required to read. `CLAUDE.md`
+   §4 bans exactly that shape, and `Health::dropped` plus the `/logs` banner
+   exist so a loss is visible on a page.
+3. **There is no per-event ceiling.** `tracing` fields are unbounded; a span may
+   carry arbitrary context. §3 rule 4 requires O(1) **space** per operation, and
+   this crate gets it by construction: target ≤ 48 bytes, message ≤ 256, at most
+   12 fields of ≤ 32-byte key and ≤ 128-byte value. One line has a maximum
+   width, so the render buffer cannot grow with anything.
+
+Points 1 and 3 are properties of those crates as this entry is written, from
+knowledge rather than from a build in this tree — adding them to measure would
+move the fingerprinted dependency set. **Anyone revisiting this should verify
+them before relying on them.**
+
+### The price, stated rather than glossed
+
+A bespoke logger means bespoke bugs, and one day of adversarial testing found
+these in it:
+
+* a torn write left a fragment that the **next** event fused onto — two events
+  lost where `dropped` counted one (T-09);
+* a failed roll re-attempted, emptying the retained window one file per event
+  (T-08, D-0085);
+* an unlink or rename that refused was reported as a **successful** roll (T-10);
+* a restart measured its bound from zero (T-12);
+* `Health::is_loud` had a half that no test could distinguish (T-11).
+
+**A mature library would very likely have had none of them.** That is the real
+cost of this choice and it belongs in the record beside the reasons. What was
+bought for it is a 64 MiB ceiling that holds, a filtered event measured at
+**0.004×** a written one, and a reader that touches **8,192 bytes** whether the
+file holds a thousand events or a hundred thousand — bounds this crate can state
+because it owns every byte between the call site and the disk.
+
+### When to revisit
+
+If `tracing-appender` gains size-based rotation and a non-lossy writer, the
+first two mismatches disappear and only the per-event ceiling remains — and that
+could be had with a custom `Layer` over `tracing-subscriber`, keeping the
+ecosystem's macros and losing this crate's sink. That is a real option and this
+entry exists so it can be weighed rather than rediscovered.
+
+---
+
+## D-0087 · 2026-08-11 · Eight agents compared seven logging architectures; the incumbent stays, and the one real O(1) violation was in it
+
+**Status: locked.** Supersedes D-0086's reasoning without superseding its
+conclusion. D-0086 asked a successor to verify its three unmeasured claims; this
+is that successor, and two of the three did not survive.
+
+### The verdict
+
+**Keep the bespoke sink.** Seven candidates were surveyed against the six hard
+constraints and every one fails at least one. The finding that decides it is not
+a ranking: **every candidate ships a writer and no reader.** `log4rs`, `fern`,
+`slog`, `flexi_logger`, `file-rotate` and `tracing-appender` have nothing
+corresponding to `/logs` — no bounded tail, no honesty flags, no drop banner.
+Adopting any of them means writing the reader anyway and discarding a proven one.
+
+And the only architecture that satisfies all six constraints as written — a
+lock-free bounded MPSC ring, whose producer does one CAS and a memcpy and never
+touches the filesystem — **is unbuildable here.** It needs `crossbeam` (a package
+against a fingerprinted set) or raw `unsafe`, and every crate root is
+`#![forbid(unsafe_code)]` under gate 16. The constraint set as posed therefore has
+no strictly-worst-case-O(1) member, and that is worth knowing rather than
+glossing.
+
+### What D-0086 got wrong
+
+Its point 3 — "there is no per-event ceiling" — is true of `tracing`'s
+`fmt::Layer` and **false of a custom `Layer`**, which was refuted by measurement:
+a bounded visitor held 0 allocations across 20,000 events and capped the widest
+line at 214 bytes against a 1,000,000-element `Debug` value. Points 1 and 2 were
+verified from the local cargo cache without adding a dependency and both hold —
+point 2 more sharply than stated, since non-lossy mode blocks unboundedly rather
+than offering a third setting.
+
+So D-0086's conclusion was right and one of its three reasons was not.
+
+### The one real O(1) violation, and it was ours
+
+`Sink::emit` is a **function**, so a caller reaches it having already built the
+whole `Event` — a 12-slot array on the stack — and evaluated every argument.
+Measured in one binary under one harness:
+
+| filtered event | via `Sink::emit` | `tracing` macro |
+|---|---:|---:|
+| no fields | 6,750 ps | 270 ps |
+| three fields | 14,146 ps | 250 ps |
+
+**The bespoke cost doubles with the field count; `tracing`'s does not move.**
+That is O(call-site fields) against §3 rule 4's O(1), and it was the only measured
+O(1) violation on the write path.
+
+Closed by `telemetry::emit_if!`, a macro that gates on the new `Sink::admits`
+before the arguments are evaluated. **Zero new packages.** The one thing swapping
+libraries would measurably buy is had without swapping libraries.
+`telemetry::sink::a_filtered_event_never_evaluates_its_arguments` proves it by
+counting side effects rather than by timing — a counter measures the semantics,
+a stopwatch measures this machine — and also asserts that `admits` agrees with
+`emit` on every rung, because a gate that disagreed with the thing it gates would
+lose events.
+
+### Four failure paths that returned `Err` and logged nothing
+
+Counting emit sites cannot find these; only walking the failure paths can.
+`crates/pull/src/ingest.rs` had four arms that pushed a `Failure` onto the
+receipt and emitted **no event at all**, so a backfill that landed nothing left a
+quiet log:
+
+* `refused_whole` — the whole run refused. Three arms of `from_members` end here.
+* `install_census` failing — bars on disk that nothing counts, so a later run
+  refetches months already stored and the append refuses them.
+* the census loading degraded from a torn commit.
+* a member whose bars the census does not count.
+
+All four now emit at `Error` or `Warn`, so they clear the default `Info` floor,
+and all fire **once per run** rather than per member — D-0075's 64 MiB window
+arithmetic is untouched. Extracted as `note_census_degraded`,
+`note_census_unpublished` and `note_bars_not_counted` beside the file's existing
+`note_*` convention.
+
+### What was NOT done, and why it is next
+
+The synthesis agent's own recommendation was to **build the instrument first**,
+and it is right: gate 8 is `min` over 20 trials of a mean, on sinks constructed
+with `NO_ROTATION = 1<<40`. There is no roll to observe and `min` would discard
+it anyway. Meanwhile the emit that actually rotates costs **p50 2,375,958 ns —
+2,036× the median ordinary emit** — and `tail::walk_back` is genuinely quadratic
+in bytes scanned (40 ms at 1 MiB, 2.91 s at 8 MiB).
+
+The design *is* O(1) — a roll is at most `2 × keep_files` syscalls with
+`keep_files` a compile-time `u8`, and no term is a function of events already
+logged. But every number in every document describing it is a ratio of means, and
+a mean cannot express a worst case. That is a §3 rule 6 problem sitting under a
+green tick, and it is recorded here rather than fixed today.
+
+---
+
+## D-0088 · 2026-08-11 · A log is evidence, and evidence must be able to say whether it is whole
+
+**Status: locked.**
+
+### The requirement this comes from, which is not the one the crate was built for
+
+The operator's stated purpose for the log is **post-hoc forensic diagnosis by a
+reader who was not there**: when a brute-force run over billions of combinations
+goes wrong, hand the log folder to a fresh session and ask it to find out why.
+
+That is a different requirement from "record what happened", and it was never
+written down. Everything in D-0075 optimises for the WRITER — bounded cost, a
+64 MiB window, a level floor. Nothing addressed the reader who arrives cold with
+a file and no machine.
+
+Two properties decide whether such a file is usable, and neither existed.
+
+### One: the reader could not tell whether the log was complete
+
+`Tail` reported `hit_scan_cap`, `partial_tail`, `malformed` and `errors`. **Every
+one of those is a limit of the READER** — how far it walked, what it could not
+decode. Not one of them reports a loss by the WRITER.
+
+So a log with events missing from it looked identical to a log with none
+missing, and a reader drawing conclusions from the second while holding the first
+would be wrong in a way nothing on any surface would show. Measured once by
+accident during an audit: a live log lost **96 events** between two reads twenty
+minutes apart while every flag on every surface read clean.
+
+**The evidence was already on the disk.** `Sink::emit` assigns the sequence
+number BEFORE it attempts the write and burns one on an event it then drops, so
+a hole in the sequence is the drop's own receipt — written by the fact of the
+numbering rather than by any bookkeeping, and surviving a restart because
+`Sink::open` resumes the count from the file. Nothing added it up.
+
+`Tail::missing` now does:
+
+* `Some(n)` on an unfiltered walk — an exact count of events that existed and
+  are gone.
+* `Some(0)` on a complete one, because "nothing was lost" is a claim worth
+  making rather than an absence to infer.
+* **`None` under any filter**, because a filter skips records on purpose and a
+  gap then says nothing at all. Reporting a filtered gap as loss would be a
+  false alarm, and D-0081's correction already records what a false alarm costs:
+  it teaches the reader to stop believing the banner.
+
+It costs O(1) — two `seq` reads off records already in hand and one subtraction.
+No second walk. Rendered first in `walk_notes`, above every other flag, because
+it decides whether anything below it can be trusted. T-21.
+
+### Two: an event does not say which run it belongs to — NOT YET DONE
+
+A log file spanning three backfills cannot be split into three. `CLAUDE.md` §3
+rule 3 already mints a run identity —
+`blake3(mask ‖ direction ‖ instrument ‖ timeframe ‖ params ‖ data_digest ‖
+vocab_version ‖ commit)` — and no event carries it. A reader can see that
+something failed; it cannot see which run's failure it was, or reconstruct the
+order of two interleaved runs.
+
+**Implemented the same day, as T-22.** The stamp lives on the `Sink` — one
+relaxed atomic load per event, the same cost as the level gate beside it — and
+`api::server::note_run_started` sets it before the run's first event while
+`note_run_finished` clears it after the last. Held on the sink rather than
+threaded through every `note_*` helper for the reason `emit` reads a global at
+all: a parameter on every function between `main` and a leaf is one somebody
+forgets, and the site they forget is the one being diagnosed.
+
+Three choices worth stating:
+
+* **The id is the start instant in milliseconds**, not the §3 rule 3 blake3
+  identity. That identity covers a SWEEP — mask, direction, params, vocab
+  version — and a pull is not a sweep, so borrowing it would name something it
+  does not describe. The instant is monotonic, unique unless two runs begin in
+  the same millisecond, and readable as a timestamp by somebody with nothing
+  else to go on. When the sweep exists and mints its own identity, that is what
+  a sweep's events should carry.
+* **An event outside a run omits the key entirely** rather than writing `0`. A
+  reader never has to decide whether zero is an identifier or an absence.
+* **A run filter reports `missing: None`**, because narrowing to one run skips
+  the other's records on purpose — the same rule T-21 applies to every other
+  filter, and for the same reason D-0081 records: a banner that cries wolf
+  teaches the reader to stop believing it.
+
+Verified live: a serving process with no backfill in progress writes `run=0` on
+every startup event and `missing: 0` beside them.
+
+### What this changes about the crate's purpose
+
+`crates/telemetry` was specified as a bounded writer. It is also, and more
+importantly, an **evidence format**. The two goals mostly agree — a bounded
+window is why the file is small enough to hand over at all — but where they
+differ, the evidence goal is the one the operator stated, and it should be the
+one that decides. That is the reframing this entry exists to record.
+
+---
+
+## D-0089 · 2026-08-11 · The web pages offered four NIFTY tiers this repository did not have, and made them by slicing an alphabetical list
+
+**Status: locked.** Adds `core::universe::NIFTY_50`, `NIFTY_100`, `NIFTY_200`
+and `NIFTY_500`, four `Universe` bits at positions 3–6, and four `MemberIndex`
+tables. Touches `crates/core` and the documents only. Does **not** touch
+`api::server::universe_label`, `api::catalog::Pill` or anything under `web/` —
+wiring is a separate change and is named as one at the end of this entry.
+
+### What was wrong
+
+`/instruments` and the pages behind it offered universes NIFTY 50 / 100 / 200 /
+500. A port audit found none of the four existed in this repository.
+`api::server::universe_label` emits exactly `index|fno|ntm|other`, and
+`core::universe::Universe` was a three-bit set. The pages produced the tiers by
+**slicing `NIFTY_TOTAL_MARKET`**, which is stored alphabetically — so
+`slice(0, 50)` is `360ONE, 3MINDIA, AADHARHFC, AARTIDRUGS, …`, and that was
+labelled the NIFTY 50.
+
+That is a golden-rule-1 violation shipped as a feature: a claim about index
+membership with no source behind it, in the one place a user would read it as
+authoritative. Nothing in the type system objected, because the slice returns
+50 valid symbols and every one of them is a real share. Only the *claim about
+which index they are in* was invented, and an invented claim that type-checks
+is exactly the failure mode rule 1 exists for.
+
+### What replaces it
+
+The exchange's own published constituent files, fetched 2026-08-11 from
+`nsearchives.nseindia.com` and recorded in `docs/00-charter.md` §4c with their
+URLs, their row counts and the note that every row carries an ISIN. Symbols
+only are transcribed; the CSVs are **input** and are deliberately **not
+tracked**, because `CLAUDE.md` §2 permits no `.csv` in this repository. The
+data lives as Rust `const` arrays beside `NIFTY_TOTAL_MARKET` and
+`FNO_UNDERLYINGS`, sorted and unique like their neighbours, each naming its
+source URL and its fetch date in its own doc comment.
+
+### The bit positions, and why they are where they are
+
+| Bit | Universe | Added |
+|---|---|---|
+| `1 << 0` | `INDEX` | before this entry |
+| `1 << 1` | `FNO` | before this entry |
+| `1 << 2` | `TOTAL_MARKET` | before this entry |
+| `1 << 3` | `NIFTY_500` | here |
+| `1 << 4` | `NIFTY_200` | here |
+| `1 << 5` | `NIFTY_100` | here |
+| `1 << 6` | `NIFTY_50` | here |
+
+Bits 0–2 keep the positions they have always had. `CLAUDE.md` §3 rule 8 forbids
+renumbering, and `Universe::bits()` is stamped onto merged rows, so a tier
+inserted at bit 2 would have silently changed the meaning of every value
+already written. `the_three_original_bits_never_moved` pins all seven as
+numbers so a later insertion cannot renumber them either.
+
+The four new bits ascend as the tiers narrow — 500, 200, 100, 50 — which is a
+reading mnemonic and nothing more. Nothing compares two `Universe` values
+numerically and nothing may start: membership is a set, and the ordering
+derives from `PartialOrd` on the raw `u32` only because the type derives it.
+
+### Membership nests, and `of_equity` still asks every file
+
+A NIFTY 50 name is also a NIFTY 100, 200, 500 and Total Market name, so
+`of_equity` sets every containing bit. It does **not** derive them: it probes
+all six tables and reads each bit from the file that publishes it. The cheaper
+alternative — hit the narrowest table, then fill in the ladder — would make the
+function state "RELIANCE is in the NIFTY 200" on the authority of the NIFTY 50
+file, and a rebalance that broke the nesting would be answered confidently and
+wrongly.
+
+The nesting is therefore a **checked** property, not an assumed one.
+`the_published_tiers_nest_one_inside_the_next` asserts it symbol by symbol in
+the direction that can fail — 50 in 100, 100 in 200, 200 in 500, 500 in Total
+Market — and asserts the converse does not hold, so the bits carry information.
+`docs/04-invariants.md` U-06 records it. Verified on the fetched files: zero
+outside in every direction.
+
+### 750 versus 752 — the count agreed and the membership did not
+
+`NIFTY_TOTAL_MARKET` is declared `[&str; 750]`. NSE's file has **752 rows**.
+The array was not silently widened, and here is what the two extra rows are.
+
+**Two of the 752 are placeholder scrips, not constituents.** `DUMMYINXGN`
+("Dummy Inox Green Ltd.") and `DUMMYTRVN` ("Dummy Triveni Ltd.") carry
+identifiers that are not ISINs: `DUM510W01014` and `DUM256C01024` — the real
+ISINs of `INOXGREEN` (`INE510W01014`) and `TRIVENI` (`INE256C01024`) with `INE`
+replaced by `DUM`. Both real constituents are separately present in the same
+file. These are the exchange's temporary scrips for a corporate action, and
+they are not shares this engine could ever store. **Dropped, not transcribed**,
+and `the_counts_are_the_measured_ones` now asserts no list holds a `DUMMY*`
+symbol so the drop is checked rather than trusted.
+
+752 − 2 = **750**, which is the count the constant declares and the count
+niftyindices.com states. **The counts agree. The membership does not.**
+
+- The exchange lists `GRINDWELL`, which `NIFTY_TOTAL_MARKET` does not hold.
+- `NIFTY_TOTAL_MARKET` holds `AGL`, which the exchange does not list.
+
+**So the repository's 750 is NOT a subset of the exchange's 752.** One name in
+750 — a 0.13% disagreement that a count check would never have caught, which is
+the whole reason the count was not the check.
+
+**Resolution: the array is left as it stands.** Not out of caution but because
+changing it would trade a measured claim for an unmeasured one.
+`NIFTY_TOTAL_MARKET` was measured 750/750 against **two real vendor masters**
+under the D-0025 gate, with agreeing ISINs and zero misses; `GRINDWELL` has
+never been through that gate, and a pull is the only thing that could put it
+through, which this change is not. Swapping the names would leave the charter
+claiming a cross-vendor verification that had not been performed on the name it
+now listed. `AGL` is recorded as **UNVERIFIED** — this repository does not know
+what instrument it is and does not guess. `docs/00-charter.md` §4a carries the
+contradiction beside the claim it contradicts, and `docs/06-limits.md` §11
+carries the cost.
+
+**And the discrepancy cannot reach the four new tiers.** The Total Market file
+is exactly the union of the NIFTY 500 file and the NIFTY Microcap 250 file —
+752 rows, row for row, nothing on either side alone, which matches
+niftyindices.com's own definition of the index. `GRINDWELL` is in the Microcap
+250 half and **not** in the NIFTY 500. So all 500 NIFTY 500 names, and by
+nesting all 200, all 100 and all 50, resolve inside the existing 750 with zero
+exceptions. The disagreement lives entirely in a band this repository does not
+carry as a named tier.
+
+### A cost bound that was measured at one density and stated at another
+
+The four tables were first sized the way `MemberIndex::build` permits — at most
+half full, which is the assertion `build` makes at compile time. The probe
+test refused it:
+
+| table | slots | fill | worst probe |
+|---|---|---|---|
+| NIFTY 500 | 1024 | 48.8% | **13** — over the asserted bound of 8 |
+| NIFTY 500 | 2048 | 24.4% | 5 |
+
+`build`'s half-full assertion is a **termination** guarantee: an empty slot
+always exists, so the probe loop ends. It was being read as a **cost**
+guarantee, and it is not one — linear probing clusters sharply as a table
+approaches half. The two existing tables sit at 36.6% (750 in 2048) and 20.8%
+(213 in 1024), so nothing had ever exercised the difference and the `<= 8` in
+`the_probe_length_is_bounded_which_is_what_makes_it_o1` was a number measured
+only at those densities. **Every appended table is therefore a quarter full or
+better**, and the test holds all six to the same 8 rather than relaxing for the
+smaller ones.
+
+Measured worst probes, all six tables: NTM 6, FNO 7, NIFTY 500 5, NIFTY 200 6,
+NIFTY 100 5, NIFTY 50 3. `of_equity` probes all six, so a membership question
+costs at most 32 steps against 13 before — three times the work, and still a
+constant, which is what `CLAUDE.md` §3 rule 4 asks. Cost: 3,840 extra slots,
+30 KiB of pointers on a 64-bit target, known at link time. `docs/06-limits.md`
+§11.
+
+### Two stale sentences found on the way
+
+- `of_equity`'s doc comment still read "binary search over sorted arrays: at
+  most ten comparisons on 750 entries". There has been no binary search there
+  since D-0065 replaced it with `MemberIndex`; the sentence outlived the code
+  by one decision. Corrected.
+- `MemberIndex::contains` and `crates/core/tests/bound_probe.rs` both said
+  `of_equity` "hashes it TWICE — once per table". Six tables now. The length
+  guard fires before **any** of the six hashes, so the short side of that
+  test's ratio grew threefold and the long side did not move — the ceiling is
+  looser than it was, not tighter. Corrected in both places.
+
+### What this deliberately does NOT do
+
+`api::server::universe_label` still emits `index|fno|ntm|other`.
+`api::catalog::Pill` still admits three universes. `api::render::universe_cell`
+still renders three labels. All three iterate fixed tables of bits they know,
+so four new bits change no byte of any response — verified by the workspace
+suite. Nothing under `web/` was touched.
+
+Landing the data and its source note first is the point: the pages can only
+stop lying once there is something true to point them at. Wiring the API, the
+pill filter and the page to these constants is the next change, and it is named
+here so it is not rediscovered.
+
+---
+
+## D-0090 · 2026-08-11 · The four NIFTY tiers reach the wire as a second field, because widening the first one would have broken a page quietly
+
+**Status: locked.** Adds `universes` to `/instruments.json`, an array carrying
+every universe a row belongs to, alongside the existing `universe` string,
+which does not change. Touches `crates/api/src/server.rs` and
+`crates/api/src/catalog.rs` and the documents. Does **not** touch
+`api::render::universe_cell`, `api::render::UniverseCounts`, the server-rendered
+pill row, or anything under `web/`.
+
+### What was wrong
+
+D-0089 landed real NSE membership for NIFTY 50 / 100 / 200 / 500 as `Universe`
+bits 3–6 and deliberately wired none of it, saying so at the end of its own
+entry. The consequence was visible: `web/src/routes/+page.svelte` and
+`web/src/routes/db/+page.svelte` each render eight universe rows and four of
+them ship **disabled**, carrying the sentence "No endpoint carries this
+membership. /instruments.json reports index, fno and ntm only — the core
+universe is three bits". That sentence was true when it was written and stopped
+being true the moment D-0089 merged. The data existed and the API could not
+express it.
+
+### Why a second field and not a wider first one
+
+`universe_label` collapses a bitset to one string: `index`, `fno`, `ntm`, those
+joined with `+`, or `other`. Both browser pages parse it as
+`String(row.universe).split('+').includes(token)`.
+
+So widening it *looked* free — a row answering `fno+ntm+n500+n200+n100+n50`
+still parses, and still groups correctly under that exact reader. That is
+precisely what makes it the dangerous option. A reader comparing the whole
+string, grouping by it, using it as a map key, or holding it in a bookmark
+changes behaviour with nothing in this repository turning red, and the failure
+lands in somebody else's page days later. **A shipped field is an interface.**
+
+The field is therefore frozen and the set travels beside it:
+
+```json
+{"symbol":"RELIANCE", … ,"universe":"fno+ntm",
+ "universes":["fno","ntm","n500","n200","n100","n50"], … }
+```
+
+An old reader sees the field it always saw, byte for byte. A new reader reads
+`universes` and needs no `split`, because membership was always a set and the
+string could only ever be a lossy view of it. Neither field is deprecated:
+`universe` is not a worse `universes`, it is the frozen one.
+
+Three details worth stating:
+
+* **One spelling table.** `UNIVERSE_TOKENS` maps each bit to its wire word and
+  both functions read it, so the two fields cannot come to disagree about
+  whether the bit is `ntm` or `total_market`. `LEGACY_UNIVERSE_TOKENS = 3` is
+  the pin: appending an eighth universe widens the array and leaves the string
+  alone, which is the whole compatibility promise expressed as a number.
+* **Empty is `[]`, not `["other"]`.** `other` exists because a field that must
+  hold one token has to hold something. An array does not, and an `other`
+  element would make "in nothing" look like a membership.
+* **Order is fixed, and it is not a ranking.** Bit order ascending, so the
+  response is byte-identical between reloads (§3 rule 5). `core::universe`
+  makes the same point about the bits: nothing may compare two universes
+  numerically.
+
+### Cost
+
+Seven `contains` per row — one mask, one compare — over a table whose length is
+a compile-time constant, plus one `Vec` of at most seven `&'static str`. The
+memberships themselves are **not** recomputed: `entry.universe` was set once by
+`core::universe::of_instrument` when the masters were merged, so the six
+`MemberIndex` probes D-0089 measured are not paid per request and not paid per
+row.
+
+That is O(1) per instrument **by construction and unmeasured as a number**. No
+bench times `/instruments.json` — `crates/api/benches/ratio.rs` measures the
+instruments *page* — so the claim is the shape of a fixed-length loop and
+nothing was timed. It is written `UNVERIFIED` in the function's own doc block
+and recorded in `docs/06-limits.md` §11, because §3 rule 6 makes an
+unmeasured bound something to admit rather than something to assert.
+`docs/04-invariants.md` A-41 pins the field SHAPE, which is a different claim
+and is the one that is tested.
+
+### What stays pinned, and what that costs
+
+`api::catalog::Pill` still admits three universes, and `count`, `tracked` and
+the dashboard figures with it. This is a decision, not an oversight:
+
+* `Pill::slot` indexes the precomputed order table. Four more pills is `SETS`
+  8 → 16 and 96 orders instead of 48 — about 2.2 MB at the real universe where
+  this module's header argues for 1.1 MB.
+* The counts are `render::UniverseCounts`, a four-field struct the pill row
+  renders. Eight pills is eight fields and eight labels in a module this change
+  does not own.
+
+Both are ordinary work; neither belongs in a change about the wire. What
+matters is that the pinning is **inert** rather than quietly wrong:
+`Pill::admits` asks `contains` for one named bit, so a row that gained four
+memberships passes exactly the pills it passed before.
+`api::catalog::the_pill_filter_is_pinned_to_three_universes` drives every pill
+and both scopes over a catalog carrying all seven bits and asserts the pages,
+the counts and the dashboard figures are identical.
+
+**The visible cost is stated rather than hidden:** `/instruments?u=n50` selects
+`Pill::Every` and shows every row. That is the pre-existing stale-bookmark rule
+— an unrecognised pill renders the page rather than erroring — and under a name
+the data can now answer, it reads as a filter that silently did nothing. It is
+the §4 "no fallback that hides a failure" row on the wrong side, it is
+pre-existing, and closing it means adding the four pills above. The browser
+pages filter on `universes` and are unaffected. **This is the one thing left
+for a human in this change.**
+
+### A correction to D-0089
+
+D-0089 says four new bits "change no byte of any response — verified by the
+workspace suite". That holds for every rendered cell and **not** for
+`?sort=universe`: `catalog::Lead::Bits` sorts on `universe.bits()`, so RELIANCE
+moved from `0b000_0110` to `0b111_1110` and rows reorder relative to one
+another. The suite was green because no test ordered by that column over a row
+carrying an appended bit.
+
+The behaviour is correct and is kept: the column orders by what a row is a
+member of, and a row that is in more lists sorts differently because it *is*
+different. Masking back to the low three bits would order the column by a
+membership the row no longer has — quiet and wrong against visible and right,
+which is the §4 rule again. `docs/04-invariants.md` A-42 pins it with
+`api::catalog::the_universe_column_orders_by_every_bit_including_the_appended_ones`.
+
+### What this deliberately does NOT do
+
+`api::render::universe_cell` still renders three tags per row, and the pill row
+still shows three pills with three counts. `web/` is untouched, so the four
+disabled rows on `/` and `/db` stay disabled until a front-end change reads
+`universes` — the endpoint can now answer them, which is the blocker this entry
+removes. No `Universe` bit was renumbered and no store version was touched.
+
+---
+
+## D-0091 · 2026-08-11 · The tail returned the same event twice, and the fix keys on the file rather than on the number
+
+**Status: locked.**
+
+### The defect
+
+`telemetry::tail` walks the file set newest-first: it opens `events.ndjson`,
+reads it backwards, then opens `events.1.ndjson`, and so on. **The walk is not
+atomic and a roll renames.** A roll landing between two of those opens moves the
+file the walk has just finished onto the path it is about to open, so the walk
+read the same file a second time and returned every event in it a second time.
+
+Measured with one emit thread and one thread calling
+`telemetry::tail(dir, 8, &Query::last(200))` 2,000 times, on this branch:
+
+| file bound | rotations | answers holding a duplicate `seq` | worst in one answer | answers non-contiguous |
+|---|---|---|---|---|
+| 2 KiB | 2,490 | **1,497 of 2,000** | 40 | 1,498 |
+| 64 KiB | 1,686 | 0 | 0 | 166 |
+| 1 MiB | 136 | 0 | 0 | 0 |
+
+The first duplicate answer, newest-first, was
+`[8,7,6,5,4,3,2,1, 8,7,6,5,4,3,2,1]` with `files_read = 2`, `malformed = 0` and
+no errors. A small file bound makes it common because a 200-event answer then
+crosses many rolls; a large one makes it rare, not absent.
+
+### Why it is worse than a missing event
+
+D-0088 made this reader an **evidence format**. A reader diagnosing a failed run
+counts a duplicated event twice — a WRONG answer, and nothing on the page said
+otherwise. Worse, the duplicate **silenced the flag D-0088 added**:
+`Tail::missing` subtracts `records.len()` from the span between the newest and
+oldest sequence number, so eight events returned twice gave a span of 8 less 16,
+which saturates to `Some(0)` — "this log is whole". The one number that reports
+a loss by the writer was computed from an answer that held everything twice.
+
+### The choice: the file's identity, not the sequence number
+
+Three guards were considered. **The cheapest is unsound**, and that is why it is
+written down here rather than tried and quietly kept:
+
+1. *Sequence numbers arrive strictly decreasing within one answer, so a number
+   that does not decrease is a repeat and can be dropped with a single
+   comparison.* **Refused.** They do not always decrease. `Sink::open` resumes
+   the count from the current file and `resume_seq` documents that a wiped,
+   absent or corrupted tail restarts the numbering at zero — walking backwards
+   across such a restart the numbers run 3, 2, 1 and then 6. That rule would
+   discard every event written before the restart, which is exactly the evidence
+   a reader came for. Pinned by T-26.
+2. *Keep the set of sequence numbers already returned — O(limit) space, and
+   `limit` is capped at `MAX_LIMIT`.* Sound against the rename, and still
+   refused: it discards distinct records whose numbers collide across a restart,
+   it pays per record rather than per file, and it reads and decodes every byte
+   of the repeated file before rejecting what it decoded.
+3. **Taken: the file's own identity — `(dev, ino)`, the pair the operating
+   system uses.** A path is a name a roll moves; this is the thing the name is
+   on. At most `keep_files` entries, which is a `u8`, pushed once per file, and
+   the repeat is refused **before a single one of its bytes is read**.
+
+`tail` stays on the O(1)-in-file-size path, C-T-03, and got slightly cheaper
+rather than dearer — the walk now takes the length and the identity from one
+`fstat` on the open handle instead of a `metadata` of the path followed by an
+`open` of the path. Gate 8, this machine, `tail(20)` at 1,000 events, minimum of
+20 trials, three runs each: **26.58 / 26.64 / 26.14 µs before, 24.24 / 25.21 /
+24.72 µs after**, and `bytes_read` for the same twenty events is 8,192 either
+way. The C-T-03 ratios were 1.031× and 1.042×, against a 3.0× ceiling.
+
+### The second defect the same change closed
+
+Reading the length from `std::fs::metadata(&path)` and then the bytes from
+`std::fs::File::open(&path)` is **two lookups of one name**, and a roll landing
+between them gave the length of one file and the bytes of another. That is what
+most of the non-contiguity above was. After the change the walk takes every fact
+about a file from the one handle it read, and in the same harness non-contiguous
+answers fell from 1,498 to 2 at the 2 KiB bound and from 166 to 7 at 64 KiB.
+Duplicates went to **zero at every bound**.
+
+The residue is real and is not claimed away: a roll can still DELETE the oldest
+file while a walk is behind it, and that is a hole, not a repeat — it is what
+`Tail::missing` is for, and it reports it.
+
+### What this deliberately does NOT do
+
+No field was added to `Tail`. A skipped repeat is not a degradation to report:
+the file's events are already in the answer, the walk carries on to the next
+path — which now holds the file that was one older — and the answer stays
+complete as well as contiguous. `Tail::files_read` counts the files the walk
+read bytes from, so a file met twice counts once; its doc says so.
+
+`crates/telemetry/src/tail.rs` now takes `std::os::unix::fs::MetadataExt`, which
+is the same unix-only assumption `crates/store/src/file.rs` already makes with
+`FileExt`. This workspace has never built for a non-unix target.
+
+---
+
+## D-0092 · 2026-08-11 · `/ingest/status.json` reports the backfill's last survey and never re-derives one
+
+**Status: locked.** Adds `GET /ingest/status.json`, served from
+`crates/api/src/ingest.rs`. Touches `crates/api/src/ingest.rs` and the route
+table in `crates/api/src/server.rs`. Reads no file, opens no socket, and writes
+nothing.
+
+### What was missing
+
+"What is the next sweep waiting on" had no machine-readable answer.
+`/autopilot.json` answers "what is the autopilot doing", which is a different
+question in the one case that matters: an operator wants to know which month,
+which window, how many tracked series are still short of it, and what is
+stopping the rest — and had to read a paragraph of prose to guess.
+
+### The locked choice: memory, never the store
+
+Everything this route reports is already computed once per pass by
+`autopilot::survey` and published to `autopilot::Status`. This projects that and
+calls **no** `census::read_all` and probes **no** manifest. It is a route a page
+polls; re-reading every manifest per request is the O(entries) cost D-0039
+exists to remove and the reason `/autopilot.json` is served from memory.
+`CLAUDE.md` §3 rule 4. Cost: one uncontended lock and one pass over the feed
+reports — two rows on this build.
+
+### The price, stated rather than hidden
+
+The answer is as old as the last finished round, and can be *absent*: before the
+first round there is no survey at all. So `surveyed` is a field, and
+`blocked_by` says which of the two silences it is — no round has finished, or
+the backfill task stopped before its first one — and names `/store.json` as the
+route that does read the store. An empty `waiting_on` alone would read as
+"nothing is outstanding", which is a different fact and the §4 failure this
+would otherwise be. A poisoned status lock answers **503** with the reason, not
+an empty list.
+
+`pull_seat` is reported as a fact and nothing is inferred from it:
+`autopilot::round` takes the seat for the whole of every pass, so a held seat is
+the backfill's own tick as often as it is a hand-made pull.
+
+### What this deliberately does NOT do
+
+It does not replace `/autopilot.json`, does not change it, and adds no field to
+`Status`. It is a projection.
+
+---
+
+## D-0093 · 2026-08-11 · A resume that would change nothing is refused, because a halt is cleared by a restart and by nothing else
+
+**Status: locked.** Adds `POST /autopilot/control` and an admission check that
+`POST /autopilot/resume` now shares. Touches `crates/api/src/autopilot.rs` and
+the route table. Adds `Control::inspect`, `Control::seat_held`, `Action`,
+`Admission`, `admit_resume` and `RESUME_CANNOT_CLEAR`.
+
+### What was wrong
+
+`FeedState::halted` is set at three sites — twice in `FeedState::observe` (a
+dead credential after its one automatic re-read; the store refusing the same
+write twice) and once in `survey` (a manifest that exists and will not load) —
+and **nothing outside the backfill task can clear it.** The `Vec<FeedState>`
+holding it is a local of `fly`. A handler has no reference to it.
+
+`/autopilot/resume` nevertheless published `phase = Running` and *"resumed. The
+next unit is whatever the store is missing, oldest first."* unconditionally. So
+pressing Resume against a halted backfill: changed nothing, said the opposite,
+and **wrote over the one sentence naming what the operator had to go and fix**,
+which reappeared at the next round up to sixty seconds later. `CLAUDE.md` §4 —
+a fallback that hides a failure. The credential halt's own text made it worse by
+ending "press Resume", instructing the operator to use the control that cannot
+work; it now says RESTART and names why.
+
+### The locked choice: refuse when it would change nothing, honour when it would
+
+Read from the published status, which is the only per-feed truth a handler can
+see:
+
+* **Every reported feed halted** → `409`, and nothing is published. The halt's
+  own reason stays on the page and travels in the refusal, verbatim, with the
+  restart requirement named.
+* **No feed reported and the phase is `halted`** → `409`. That is `fly`'s three
+  pre-loop exits — no live broker, an unusable clock, a rung this store cannot
+  file — and in every one of them the task has *returned*. Nothing is left to
+  read the flag a resume would clear.
+* **Some halted, some not** → honoured, `200`, and the answer and the published
+  detail both name the feeds that stayed terminal. A resume that silently left
+  half the backfill dead reads exactly like one that worked.
+* **Nothing halted** → honoured.
+* **Poisoned status lock** → `409`. Whether a feed is halted cannot be
+  established, and starting on a guess is the same §4 failure in a smaller size.
+  A *stop* still works and says the reason could not be published — the flag is
+  an atomic, and the safe direction is never blocked by a status nobody can
+  read.
+
+### Why the path is `/autopilot/control` and not `/autopilot`
+
+`/autopilot` is the front end's own page, served by the router's fallback. A
+`post`-only route at that exact path makes `GET /autopilot` answer **405**:
+axum's method router answers a matched path itself and never reaches
+`Router::fallback`. Registering the bare path needs a `get` arm handing the
+request to the asset layer, which is a decision about the front end's front
+door rather than about this module. `api::ingest::route_tests::
+the_three_routes_answer_and_none_of_them_shadows_the_front_end` is what stops
+anyone tidying it back.
+
+### Why a revive control was NOT built
+
+Clearing a halt from a handler is possible — a generation counter on `Control`
+that `fly` reads at the top of each round, clearing `halted` on every feed —
+and it was rejected here rather than half-built. Two reasons, and the second is
+the deciding one:
+
+1. It changes `FeedState::halted` from terminal to revivable, which is a policy
+   about unattended vendor contact after a credential failure, and that is the
+   owner's to make.
+2. It cannot answer honestly in the case that matters. When `fly` has returned —
+   the three pre-loop exits above — a revive request is a promise nothing will
+   keep, and no field a handler can read distinguishes a returned task from a
+   sleeping one. An honest revive needs the task's own liveness published, which
+   is a bigger change than this.
+
+A restart is safe by construction and that is what the refusal names: `fly`
+rebuilds every feed at its floor and re-derives the frontier from the store, so
+nothing is lost and nothing is re-fetched. That is the module's own "what is NOT
+persisted, deliberately" rule.
+
+### What this deliberately does NOT do
+
+`POST /autopilot/pause` is unchanged, including its response shape: it cannot be
+refused, so it has nothing to carry. `start` and `resume` are the same act —
+there is one flag — and are kept as two words because the answer says which was
+asked rather than pretending they are different states. No `web/` file is
+touched, so the page still drives `/autopilot/resume`; that route is now honest,
+which was the defect.
+
+---
+
+## D-0094 · 2026-08-11 · `POST /ingest/queue` exists and never queues, because there is nothing in this process to drain a queue
+
+**Status: locked.** Adds `POST /ingest/queue` in `crates/api/src/ingest.rs`. It
+validates a spot selection in full and then refuses with **501**. It never
+opens a socket, never reads a credential, never writes to the store, and never
+spawns a task.
+
+### The choice, and why it is not a stub
+
+A queue control was asked for. Building one that answers `202 Accepted` would be
+accepting and dropping the request: there is exactly one pull seat
+(`autopilot::Control::take_seat`, a compare-exchange), `pull::ingest`'s census
+lock refuses rather than queues, and **nothing in this process drains a pending
+list, because no pending list exists.** An acceptance would be a receipt for
+work no code will ever pick up — `CLAUDE.md` §4, the fallback that hides a
+failure, in its purest form.
+
+So the route answers the two questions it honestly can. A selection with a bad
+field is refused by that field's name — the same `parse_spot` the form runs,
+and the same `refused_field` that names the control in its telemetry — so
+`/ingest/queue` and `/pull/spot` cannot disagree about what is legal. A selection that is legal is echoed back with the
+exact dates that would go on the wire, the seat's current state, and a refusal
+naming the two things that DO exist: `POST /pull/spot` runs it now,
+synchronously, and the autopilot backfills the swept indices oldest-first on its
+own.
+
+### Why `501` and not `503`
+
+`503` says *try again later*, which is what `/pull/fno` correctly says about a
+transport that is built but unwired. This is not that. Deferral is absent by
+decision, and it stays absent until one is recorded.
+
+### The question this leaves for a human
+
+**May a request be deferred — accepted now and run later against a vendor with
+nobody watching?** That is the decision that has to exist before this route can
+answer anything else, and it is the same question `AUTOPILOT_ENV` answered for
+the backfill: this binary is started for many reasons and only one of them has a
+cost outside this machine. If the answer is yes, the queue needs a consumer, a
+policy for how it interleaves with the autopilot's oldest-first ladder (the
+store cannot prepend), and a rule for what happens to a queued request across a
+restart. None of those is implied by the others, and none of them is a handler.
+
+---
+
+## D-0095 · 2026-08-11 · `indicators` takes `vocab` and nothing else, so six crates are shareable — and the measured crate graph, which §5 does not draw
+
+**Status: locked.** `indicators::Candle` replaces `store::format::Bar` as the input
+to every condition module. `crates/indicators/Cargo.toml` declares one dependency.
+`cargo tree -p indicators --edges normal` prints one line, and that command is the
+proof rather than this sentence.
+
+### The one arrow that was blocking everything
+
+`indicators` depended on `store` for exactly one item: `store::format::Bar`, a
+seven-field record. That single arrow coupled the entire condition layer to **this
+repository's on-disk file format**, and it is the reason no other project could use
+it. A live-trading consumer holds ticks off a socket, not records out of a
+fixed-stride file, and it should not have to link a storage engine to ask whether a
+candle is a hammer.
+
+`Candle` carries the same seven fields — `ts_micros`, `open`, `high`, `low`, `close`,
+`volume`, `open_interest` — with the same paisa-integer contract and the same
+`i64::MIN` open-interest sentinel (§7). Nothing was reinterpreted. The type moved to
+the crate that reads it, which is where a type belongs.
+
+### The six that are shareable, and the one that had to be argued back in
+
+| Crate | Depends on | Why a live consumer wants it |
+|---|---|---|
+`core` | nothing | `Instrument`, `Isin`, `Symbol`, `Price`, `Vendor`. The nouns must match or nothing else can. |
+`vocab` | nothing | The bit table and `ConditionMask`. Bit 42 must mean one thing in both systems. |
+`greeks` | nothing | Black-Scholes on integers. Already shared with tickvault. |
+`costs` | `core` | Brokerage, STT, stamp duty, GST, slippage. |
+`indicators` | `vocab` | Candle in, condition bits out. |
+`engine` | `vocab` | The Apriori ladder. |
+
+All six declare **zero external packages**, measured with `cargo tree --edges
+normal`. A consumer takes them without inheriting a dependency tree, and without a
+build script — §2's rule that no crate may need a foreign toolchain holds for them
+by construction, because they need nothing at all.
+
+**`costs` was excluded and the exclusion was wrong.** It was filed with `store` and
+`pull` as "a decision that belongs to brutex", and the challenge that overturned it
+was one sentence: a real brokerage calculator applies to a live trade too. The
+deciding reason is not convenience. A backtest that ranks a strategy net of costs and
+a live system that computes those costs a second time from a second source **will
+eventually disagree**, and the disagreement surfaces as a strategy that was
+profitable in the sweep and is not profitable in the market. Sharing the crate makes
+the two numbers the same number. That is a correctness argument, not a packaging one.
+
+`store`, `pull`, `api`, `lake` and `telemetry` stay unshareable and that is not a
+defect: a file format, a vendor's credentials, an HTTP surface and a log sink are
+this repository's decisions.
+
+### The measured graph, because §5's picture is not it
+
+Read with `cargo tree --edges normal --depth 1` on every member:
+
+```
+core        -> nothing
+vocab       -> nothing
+greeks      -> nothing
+telemetry   -> nothing
+costs       -> core
+indicators  -> vocab
+engine      -> vocab
+store       -> core, telemetry
+lake        -> core, telemetry
+pull        -> core, store, telemetry
+api         -> core, pull, store, telemetry
+```
+
+It is acyclic, so §5's actual requirement holds. What §5 gets wrong is the picture:
+it draws `indicators` as a child of `core` (it is a child of `vocab`), it names a
+`cli` crate that **does not exist** in `crates/`, and it omits `costs`, `greeks`,
+`lake` and `telemetry` altogether — four of eleven members. Eight real edges are
+undrawn: `store -> telemetry`, `lake -> telemetry`, `pull -> telemetry`,
+`api -> telemetry`, `api -> pull`, `api -> store`, `costs -> core`, `engine -> vocab`.
+
+**This entry reports the gap and does not close it.** `CLAUDE.md` is law and §10 says
+it wins over any document, so a stale §5 is not something a document may quietly
+correct. The graph above is the measurement; making §5 match it is a human's edit.
+
+### What this does not claim
+
+It does not claim tickvault can consume these today. It claims the dependency
+obstacle is gone and the arrow is measurable. A consumer still has to agree on
+`VOCAB_VERSION`, and §3.3 still makes the vocabulary version a term in run identity,
+so two systems on different versions produce different identities **by design** — see
+D-0097 for the append rule that governs that.
+
+---
+
+## D-0096 · 2026-08-11 · A CPR is narrow, neutral or wide, and it can never be more than one third of the range — derived, not chosen
+
+**Status: locked.** Positions **274 `wide_cpr_day`** and **275 `neutral_cpr_day`**
+join position 63 `narrow_cpr_day`. `DailyLevels::cpr_width`, `cpr_class`, `CprClass`
+and `CprWidth` in `crates/indicators/src/daily.rs`. `positions()` goes 41 → 44.
+
+### Why one bit was half a question
+
+Position 63 `narrow_cpr_day` existed alone and uncomputed. A single bit answers
+"narrow: yes or no", and *not narrow* is two different market states collapsed into
+one: a CPR that is genuinely wide, and one that is unremarkable. A sweep cannot
+distinguish "the CPR was wide" from "the CPR was ordinary" if both are `63 = false`,
+so any rule it learns about the false case is a rule about a union of two states.
+Three states need three bits, so two were appended.
+
+The three are mutually exclusive by construction — `cpr_class` returns one
+`CprClass` — and a test asserts no two of the three are ever set on the same bar.
+
+### The ceiling is algebra, and it changes what the thresholds mean
+
+With `pivot = (h+l+c)/3`, `bc = (h+l)/2` and `tc = 2·pivot − bc`:
+
+```text
+width = |tc − bc| = 2·|pivot − bc| = |2c − h − l| / 3
+```
+
+`|2c − h − l|` is maximised when the close sits exactly on the high or exactly on the
+low, where it equals `h − l`. Therefore:
+
+> **A CPR can never exceed one third of the previous session's range.**
+
+This is not a calibration. It is what the formula permits. The consequence is that
+every threshold stated as a fraction of the range lives inside 333 thousandths, not
+1000 — and a "wide" cut point of, say, 500 permille would be **unreachable**, making
+position 274 a constant false. That is precisely the defect class D-0080 identified in
+the 39 void forming-day positions, and it is excluded here by a const assertion rather
+than by care:
+
+```rust
+const _: () = assert!(
+    CprWidth::CLASSICAL.wide < 333,
+    "a CPR is at most one third of the range, so a wide cut at or above 333 is ..."
+);
+```
+
+A future edit that raises `wide` past the ceiling fails the build. That is the
+difference between a guarantee and a comment.
+
+### The numbers are UNVERIFIED and labelled as such
+
+`narrow: 80`, `wide: 250` — the bottom and top quarters of the reachable 333. **No
+source in `docs/00-charter.md` states a CPR width cut point**, so under §3 rule 1
+these are marked `UNVERIFIED` at their definition and are a caller-supplied
+`CprWidth`, not a hardcoded constant: `bits_with` takes the widths so a result is
+never stamped with a threshold nobody can name. `CprWidth::CLASSICAL` is the default
+and is the only value used today.
+
+What *is* verified is the ceiling they sit under, because it is derived from the CPR
+formula already recorded in the charter.
+
+### A zero range refuses instead of guessing
+
+`cpr_class` returns `None` when the previous session's range is zero — a limit-locked
+day. Every fraction of zero is the same fraction, so there is no honest class. Calling
+it narrow would be §4's fallback that hides a failure: the bit would read as a
+measurement and be an artefact of division by zero. None of the three bits is set.
+
+### The append exercised the append-only mechanism, and five tests caught it
+
+This is the **first** append since the table reached 274, and §3.8 says positions are
+never renumbered or reused. Adding two rows turned five tests red at once — the
+`LIVE` popcount, the table length, the `NEXT_FREE` boundary, the word-4 emptiness
+comment, and a bidirectional doc check that reads the documents back against the
+table. Every one of them was a mechanism doing its job, and none of them was a
+review comment.
+
+**`VOCAB_VERSION` stays 3.** I reached to bump it and the constant's own
+documentation corrected me: an *append* does not bump the version, because an append
+cannot change the meaning of any existing bit, and §3.3 makes `vocab_version` a term
+in run identity — bumping it would invalidate every recorded run for a change that
+altered none of them. A *renumbering* or a *re-meaning* would bump it, and §3.8
+forbids both.
+
+---
+
+## D-0097 · 2026-08-11 · One definition of a valid candle, because nine derivations are nine chances to disagree — and it found 45 invalid bars in my own fixtures
+
+**Status: locked.** `Candle::check() -> Result<(), Corrupt>` in
+`crates/indicators/src/lib.rs`, called at seven sites across `session`, `pattern`,
+`trend`, `orb`, `vwap`, `gap` and the evaluator.
+
+### What it checks, and why each line is separate
+
+```rust
+if self.high < self.low                          { return Err(Corrupt::HighBelowLow); }
+if self.high.checked_sub(self.low).is_none()     { return Err(Corrupt::RangeOverflows); }
+if self.open > self.high || self.close > self.high
+   || self.open < self.low || self.close < self.low { return Err(Corrupt::PriceOutsideRange); }
+if self.volume < 0                               { return Err(Corrupt::NegativeVolume); }
+```
+
+Four distinct refusals rather than one boolean, because a caller that cannot tell
+*which* invariant broke cannot report the reason, and §4 bans a fallback that hides a
+failure. `R == 0` and `R < 0` deliberately do not share a branch: a market can print a
+zero range and cannot print a negative one.
+
+`RangeOverflows` cannot arise from Indian index data — the widest span is about 10^7
+paisa against an `i64` ceiling of 9.2 × 10^18 — but it can arise from a **corrupt
+record**, and a bar with `low = i64::MIN` overflows the subtraction. It is refused
+rather than saturated: a saturating range answers a different question than the one
+asked.
+
+### The false comment that caused the gap
+
+`Corrupt::RangeOverflows`'s own documentation used to say that
+`store::format::Bar::ohlc_is_sane` "checks field ORDER only". **That was false.** It
+checks full containment: `high >= open`, `high >= low`, `high >= close`,
+`low <= open`, `low <= close`.
+
+The falsehood had a cost, and the cost is the point of this entry: it is *why* the
+evaluator was written with no containment check of its own. I read a comment instead
+of the function, concluded the store had already rejected mis-assembled OHLC, and
+built on that. The store would in fact have refused a bar this crate accepted. The
+comment is now corrected in place and says so explicitly, so the next reader inherits
+the correction rather than the claim.
+
+### It immediately found 45 invalid bars in fixtures that had been green for weeks
+
+Turning `check()` on failed the ORB tests: **45 of 120 fixture bars had a `close`
+outside `[low, high]`**. A second invalid candle turned up in the gap fixtures. These
+were my own test inputs, they had passed for weeks, and every assertion they made was
+about market behaviour that the inputs could not exhibit.
+
+This is the cheapest possible demonstration of why the definition must be shared. Nine
+modules each deriving "is this a candle" would have nine slightly different answers,
+and a fixture that is invalid under one and valid under another is a test that passes
+for the wrong reason.
+
+### A refused candle changes nothing — and the first version of that was false
+
+The evaluator folds every module and then VWAP. A VWAP refusal therefore left **eight
+modules already folded**, so a rejected bar had mutated the state it was supposed to
+leave untouched. Torn state, in the one type whose whole job is to be a clean
+streaming fold.
+
+Caught by a test I wrote for exactly this — `a_refused_candle_changes_nothing` —
+which is the only reason it is in this entry rather than in the store. The fix
+validates before any module folds, and the refusal path is now:
+
+```rust
+Err(crate::vwap::Refused::Corrupt(why))            => return Err(why),
+Err(crate::vwap::Refused::AccumulatorTooLarge)     => return Err(Corrupt::AccumulatorTooLarge),
+```
+
+VWAP's own refusals propagate instead of being swallowed, which they previously were.
+
+### Monotonic timestamps are part of validity
+
+The evaluator carries `last_ts: Option<i64>` and refuses `TimestampNotIncreasing`. A
+fold whose input can go backwards is not a fold over a series, and §3.7's no-look-ahead
+guarantee is meaningless if bar N can arrive after bar N+1. Note what this makes
+*unconstructible* rather than merely checked: every evaluator is
+`step(&mut self, bar: &Candle)` with no index and no slice, so there is no expression
+in this crate that can read a future bar. That is stronger than the index-guarded
+accessor §3.7 asks for, and it is worth stating because I previously described §3.7 as
+"enforced by review", which was both wrong and backwards.
+
+---
+
+## D-0098 · 2026-08-11 · A knob that changes nothing is worse than a magic number, so three were removed and the remaining four are proved read by a test
+
+**Status: locked.** `TrendThresholds` in `crates/indicators/src/trend.rs` carries four
+fields. `SwingDetector::new()` takes none. The test module
+`trend::thresholds_are_read` fails the build if any surviving field stops mattering.
+
+### The three that were removed
+
+| Removed | What it looked like | What it did |
+|---|---|---|
+`fractal: usize` | the half-window, default 2 | stored on `SwingDetector` and **never read** — every use is the const `RING` |
+`swing_band: i64` | a tolerance band | **never read anywhere** |
+`SwingDetector::new(thresholds)` | takes the whole struct | read **no field of it** |
+
+A knob that looks adjustable and is not is worse than a hardcoded number, because a
+hardcoded number is *visibly* fixed. A caller setting `fractal: 7` reasonably believes
+the confirming window changed. It did not, and nothing anywhere would have told them.
+That is a lie in the **public API of a crate another repository is meant to consume**
+(D-0095), which is why this is a correctness entry and not tidying.
+
+`fractal` was replaced by a derived const, so the relationship it was supposed to
+express is now checked by the compiler:
+
+```rust
+pub const FRACTAL: usize = RING / 2;
+const _: () = assert!(RING == 2 * FRACTAL + 1);
+const _: () = assert!(RING % 2 == 1);
+```
+
+`swing_band` was **removed rather than wired**, deliberately. The band a swing is
+judged against already exists: it is the caller's `Tolerance`, scaled by the confirming
+window's span. A second band knob here would compete with `vocab`'s, and two sources
+for one number is the divergence §3.8 exists to prevent. The right number was already
+there; the field was a second way to get it wrong.
+
+### Why the test cannot be satisfied by a weaker assertion
+
+`changing_any_threshold_changes_what_is_emitted` runs 400 synthetic candles per
+variant and requires the emitted masks to differ when each threshold changes. It found
+`fractal` and `swing_band`, and then it failed on a third field — `atr_period`.
+
+`atr_period` **is** read: it reaches `Atr::new` inside `SuperTrend::new`. The reason
+the masks were identical is that positions 64/65 encode only which **side** of the
+trailing stop price sits on, and a faster ATR moves the stop's *level* without moving
+the *side* on a trending series. The mask comparison genuinely could not observe it.
+
+So `atr_period` was given its own observable rather than the assertion being loosened:
+
+```rust
+let mut fast = Atr::new(2);
+let mut slow = Atr::new(50);
+// ... 200 candles into both ...
+assert_ne!(fast.value(), slow.value(), "`atr_period` changed nothing, ...");
+```
+
+**Relaxing the first test until it passed was the available shortcut and it was the
+wrong one.** A test weakened to accommodate a field is §4's test that asserts nothing,
+arriving by the back door — it would have kept reporting green while losing the ability
+to catch the next dead field. Different fields act at different levels; the test has to
+meet each one where it acts.
+
+### `min_hits` is floored at 1, and there is still no `k`
+
+`crates/engine/src/lib.rs` floors `min_hits` at 1. Zero would make every combination
+frequent by definition, so the frequent frontier could never empty, and §6's
+termination condition — the ladder stops where the frontier empties — would never fire.
+A zero there is not a permissive setting; it is a non-terminating sweep.
+
+`min_hits` is a legitimate parameter and `k` is not, and the distinction is worth
+recording because they look alike. `min_hits` is named as the threshold by
+`docs/00-charter.md` §6 and it *cannot* silently truncate the search: anti-monotonicity
+means a combination below the floor has no frequent superset, so nothing reachable is
+lost. A depth cap has no such property — it discards frequent combinations that exist,
+which is exactly the predecessor failure §6 recounts. `size_of::<Ladder>() ==
+size_of::<u64>()` is asserted, so there is no room in the type for a depth field.
+
+The caller's `live` list is now validated too: a position that is not live in the table
+is refused rather than swept, because a retired bit always evaluates false and a
+combination containing one is `AlwaysFalse` — reported as `Why::AlwaysFalse` rather
+than counted as an honest zero-support result.
+
+---
+
+## D-0099 · 2026-08-11 · Two defect shapes recurred five times each, so both are now prevented by structure rather than fixed by instance
+
+**Status: locked.** The anchor/description fold-order rule and the mandatory equality
+arm. Both are rules about *how a condition is written*, not fixes to particular
+conditions, and both exist because the same mistake was made repeatedly by the same
+reasoning.
+
+### Shape one — the anchor/description distinction, and it is per-quantity
+
+Every indicator state is a streaming fold, so every quantity is read either **before**
+the current bar is folded in or **after**. The choice is not stylistic:
+
+| Kind | Definition | Fold order | Example |
+|---|---|---|---|
+**anchor** | a level the bar is *measured against* | **emit, then fold** — must EXCLUDE this bar | an opening range's high, a swing level, yesterday's pivot |
+**description** | a fact *about* the bar | **fold, then emit** — must INCLUDE this bar | whether the window has closed, whether this candle is a doji |
+
+Getting it backwards is invisible in the output. An anchor that includes the current
+bar is a level the bar is trivially inside, so the "close is above the opening range
+high" bit is false on exactly the bar that broke out. That is not a wrong number — it
+is a **bit that reads as a measurement and is an artefact of ordering**.
+
+The ORB defect was this exactly: `closed` was set inside `fold`, which runs after the
+emit, so the bar whose minute-since-open first equals the window length emitted
+nothing. One bar per window per day, silently, and the module's own documentation
+already stated the correct rule.
+
+**The rule that matters is that this is decided per-quantity, not per-module.** A
+single module routinely holds both kinds — an opening range's high is an anchor and
+whether the range has closed is a description — so "this module folds first" is not a
+statement that can be true. The evaluator's order is therefore
+**roll over → emit → fold**, and any quantity needing the current bar is computed
+inside the emit rather than by moving the module.
+
+### Shape two — equality swept into `else`
+
+`if a > b { set(above) } else { set(below) }` sets `below` when `a == b`. Five
+occurrences were found and fixed: position 227 `pat_high_wave`, the tri-star pattern,
+and three call sites in `trend.rs`.
+
+On paisa integers exact equality is not a measure-zero curiosity. Prices are `i64` on a
+two-decimal tick grid (§7), so `close == pivot` happens, and an equality quietly folded
+into "below" makes `close_below_pivot` fire on a bar that is *at* the pivot. Every
+instance had been written by the same reasoning — that two outcomes need two branches —
+and reviewing for it was clearly not working, because it kept recurring.
+
+So it is now structural. Where the comparison is a shared operation, it goes through
+one helper that cannot omit the case:
+
+```rust
+match value.cmp(&level) {
+    Ordering::Greater => set(mask, above),
+    Ordering::Less    => set(mask, below),
+    Ordering::Equal   => mask,          // neither bit
+}
+```
+
+`Ordering` has exactly three variants, so **the compiler checks the equality arm
+exists** instead of a reader having to notice that it does. Clippy's
+`bool_to_int_with_if` is what forced this helper into being, which is worth recording:
+a lint about style surfaced a correctness rule.
+
+Equality sets **neither** bit, not both. "Above" and "below" are strict, a bar at the
+level is at the level, and a sweep that wants that case needs an `at_*` position of its
+own — appended under §3.8 like any other, never inferred from the absence of two bits.
+
+---
+
+## D-0100 · 2026-08-11 · `overflow-checks = true` in release, because `debug` and `release` disagreed about what a bug is
+
+**Status: locked.** `[profile.release]` in the workspace `Cargo.toml` sets
+`overflow-checks = true` alongside `opt-level = 3`, `lto = "fat"`,
+`codegen-units = 1` and `panic = "abort"`.
+
+### The disagreement this removes
+
+Rust's defaults panic on integer overflow in `debug` and **wrap silently** in
+`release`. For this repository that means the two profiles disagreed about whether an
+arithmetic mistake is a bug: `cargo test` would catch it and the binary that runs a
+sweep would not. Every test in the workspace runs under the profile that reports, and
+every real run used the profile that hides.
+
+A wrapped paisa price is not a crash. It is a **plausible number that is wrong** — a
+price of the right magnitude, on the right tick grid, that will pass `ohlc_is_sane`,
+enter a mask, and rank. That is §4's fallback that hides a failure in its purest form,
+and §7's whole reason for `i64` paisa over floats is to make arithmetic exact rather
+than approximately right.
+
+### What it costs, measured against the hot path
+
+A branch per arithmetic operation. The sweep's hot path is `ConditionMask::hits` — six
+ANDs, six XORs, five ORs and one compare — which is **bitwise and therefore
+unaffected**: there is no add, no multiply and no subtract in it to check. The cost
+lands on the indicator fold, which runs once per bar and is not the O(1)-per-operation
+path §3.4 governs.
+
+This is why the setting is affordable here and would not be everywhere. The one
+operation that must stay constant-cost has no arithmetic in it at all.
+
+### Why not `checked_*` everywhere instead
+
+Much of the codebase already uses `checked_sub`, `saturating_mul` and `i128`
+intermediates where an overflow is *reachable and meaningful* — `Candle::check`'s
+`RangeOverflows` (D-0097), `cpr_class`'s cross-multiplication (D-0096), VWAP's
+accumulator ceiling. Those are refusals with a named reason, and they stay.
+
+`overflow-checks` covers the rest: the arithmetic where overflow is **not** reachable
+on real data and is therefore not worth an explicit branch, but where being wrong
+about that reachability should abort rather than produce a number. It is the backstop
+under the explicit checks, not a replacement for them. `panic = "abort"` means the
+backstop stops the process rather than unwinding into a partially updated fold.
+
+---
+
+## D-0101 · 2026-08-11 · The sink's two level floors are ONE atomic word, because two words could be observed describing two different floors
+
+**Status: locked.** `Sink` holds `floors: AtomicU16` — the global floor in the high
+byte, the fast floor (`min(global, every per-target override)`) in the low byte —
+written by a single relaxed store in `Sink::set_min_level` and read by a single
+relaxed load in `Sink::emit`, `Sink::admits` and `Sink::min_level`. The two
+`AtomicU8` fields it replaces are gone.
+
+### The defect
+
+`set_min_level` stored the new global floor, then computed the fast floor from it and
+every override, then stored that. **Two stores, two atomics, no ordering between two
+callers.** Interleave them —
+
+```
+thread A: store min_level = Error
+thread B: store min_level = Trace
+thread B: store fast_floor = Trace
+thread A: store fast_floor = Error
+```
+
+— and the sink reports a floor of `Trace` while gating every event at `Error`. Reverse
+the last two and it reports `Error` while admitting `trace`. Either way the pair stays
+crossed **for the life of the sink**, or until somebody sets the level again.
+
+It is silent in the direction that matters. `emit`'s first test is the fast floor and
+nothing else; an operator who lowers the floor mid-backfill to see what is going wrong
+gets no debug lines and a `min_level()` that agrees with what they asked for.
+
+Established before it was fixed, not argued from the code: a barrier-synchronised probe
+— two setter threads, one observer, every read taken at an instant when both setters
+were parked and nothing was writing — saw the crossed pair at rounds **2023, 2597, 5275
+and 6269 of four million**, in both directions.
+
+### Why one word rather than a `Mutex`
+
+A `Mutex` around the pair was the other candidate and it would work. It sits on the
+level-setting path rather than the emit path, so its cost is paid by a rare caller
+rather than by every event — the argument that would normally settle it.
+
+Two things settled it the other way:
+
+* **It fixes only the durable crossing.** Serialising the writers leaves the readers
+  loading two atomics at two instants, so a reader can still see one floor from before
+  a set and the other from after. Closing *that* means taking the lock in `emit`, which
+  is the one place in this crate that cannot afford a lock — the filtered path is
+  measured at ~6 ns and is what C-T-02 gates.
+* **It adds a third lock to a type that already refuses to take the first two.**
+  `Sink`'s `Debug` deliberately touches neither `inner` nor `last_error`, because a
+  `Debug` that takes a mutex can deadlock the thing printing it. A third lock is a
+  third ordering to get right for no gain over a store that cannot tear.
+
+Packing removes both windows, adds no lock, and leaves `emit` where it was.
+
+### What it costs `emit`, measured
+
+One relaxed atomic load either way. On aarch64 the fast reject became `ldrh` instead of
+`ldrb`, plus one `and w8, w8, #0xff` to take the low half. Gate 8's
+`C-T-02 filtered emit` measured **5,791 / 6,000 / 5,770 ps** over three runs with the
+packed word against **6,021 / 5,770 ps** on a build held at an 8-bit fast-floor read:
+indistinguishable, with the spread inside each shape as large as the gap between them.
+No speed claim is made in either direction — only that no slowdown is measurable, which
+is the whole requirement. `docs/06-limits.md` §50 carries the numbers and what they do
+not say.
+
+### What holds it
+
+`telemetry::sink::the_two_floors_live_in_one_word_and_are_never_observed_crossed`
+(T-27), and it is **deterministic on purpose**. The racing probe that found the defect
+took between 74 and 17,715 rounds to observe it depending on the run, so committing it
+would commit a test whose result is the scheduler's. The invariant asserted instead is
+the one that makes the race impossible: the pair has exactly one mutator, a single
+store of a single word, so every state a reader can observe is a word that mutator
+wrote — and the test checks that every such word is consistent, at construction and at
+all five levels, with an override below the global floor and one above it. It reads the
+packed field as one load, so splitting the pair back into two atomics does not make the
+test flaky; it stops the test compiling.
+
+One duplication went with it: the "fast floor is the minimum of the global floor and
+every override" arithmetic existed verbatim in both `Config::fast_floor` and
+`set_min_level`. It is now one `lowest_floor` called by both, because an invariant with
+two implementations has two chances to drift — and this one is exactly the invariant
+the packed word exists to keep.
+
+---
+
+## D-0102 · 2026-08-11 · A document that states a number is read back by a test, because eight numbers rotted in one day and nothing noticed
+
+**Status: locked.** `crates/vocab/tests/table.rs::the_documented_headroom_is_the_table_it_describes`
+reads §8 of `docs/03-vocabulary.md`.
+`crates/indicators/tests/shared_core_doc.rs` reads all of `docs/10-shared-core.md`.
+Both `include_str!` the document, so a rename fails the build rather than skipping the
+check.
+
+### What was actually wrong
+
+| Document | Said | Is |
+|---|---|---|
+`03-vocabulary.md` §8 | 274 allocated, 232 live, 110 free | 276, 234, 108 |
+`10-shared-core.md` | seven modules | nine position sources |
+`10-shared-core.md` | 205 positions | 234 |
+`10-shared-core.md` | 274 allocated, twice | 276 |
+`10-shared-core.md` | `size_of::<Evaluator>() <= 1024` | `<= 1792`, measuring 1664 |
+`10-shared-core.md` | "four crates that are shareable", above a table of six | six |
+
+**Every one of these was correct when written.** That is the whole problem and the
+reason a rule is needed rather than a round of corrections. A number copied out of the
+code cannot be wrong at the moment of copying, and cannot stay right afterwards. A
+table of independent numbers has no way to look wrong.
+
+`docs/10-shared-core.md` was read by **nothing**, and it is the document another
+repository consumes the boundary across (D-0095). A consumer sizing a buffer against
+205 positions drops 29 conditions it was told did not exist.
+
+### The rule
+
+> Where a document states a number that the code also knows, a test reads the document
+> and compares. Drift is a build failure.
+
+Applied, not asserted: five mutations were run against `10-shared-core.md`, each
+restoring the exact stale value the document actually carried, and each turned tests
+red. The headroom check was mutated back to `110 free` — the value it had — and failed
+with the reason. A guard that has not been shown to fail is not known to be a guard.
+
+### Two things the numbers alone would not have caught
+
+**Sums close.** §8's first five rows are now required to add up: `live + retired +
+void == NEXT_FREE`. A per-row check passes on a table where two rows drifted in
+opposite directions; a closing sum does not. This is the same construction as the
+engine's five-bucket reconciliation, and it is the difference between checking values
+and checking an invariant.
+
+**Labels are predicates.** §8 had a row labelled `near_*` reading 81, and 81 was
+right — it counts positions declaring `Kind::Near`. Reading the label as "the name
+starts with `near_`" gives 89 allocated and 73 live, and on that reading I "corrected"
+a correct number into a wrong one, caught only because an existing test asserts 81.
+The label now says `declaring Kind::Near`. **An ambiguous label is how a right number
+becomes a wrong one**, so the fix was the label and not just the value.
+
+### What is deliberately not guarded
+
+Prose. The tests read numbers, crate names and the length of one table; they do not
+check that an explanation is true. A wrong sentence with right numbers still passes,
+and no test proposed here would change that. Stated rather than implied, per §3 rule 6.
+
+
+---
+
+## D-0103 · 2026-08-11 · Seventeen O(1) claims had no bench; three benches now measure them, and two of the claims were false
+
+**Status: locked.** `crates/vocab/benches/ratio.rs`,
+`crates/indicators/benches/ratio.rs`, `crates/engine/benches/ratio.rs`, all wired
+`harness = false`. Rows `C-V-01…04`, `C-I-01…04`, `C-E-01…04` in
+`docs/04-invariants.md`, and the three coverage rows gate 14 reads.
+
+### The gap
+
+Gate 14 refuses a crate that claims a constant bound and never re-measures it.
+`vocab`, `indicators` and `engine` made **seventeen cost claims between them and
+measured none**. Eight other crates already had a bench; these three were the only
+members promising a bound on the word of a comment.
+
+`vocab`'s single claim is the one that matters most: `ConditionMask::hits` is the
+sweep's inner loop, called once per candidate per bar, more often than everything
+else in this workspace put together.
+
+### What the measurements say
+
+| Claim | Measured |
+|---|---|
+`hits` costs the same whether it hits or misses | **0.998×**, at 0.82 ns |
+`hits` costs the same wherever the miss is — all six words | **0.996×** |
+`hits` costs the same for a 1-bit and a 234-bit candidate | **1.037×** |
+One candle costs the same at 1,000 and 200,000 candles folded | **1.009×** |
+Support's per-bar cost from k=1 to k=8 | **1.117×** |
+Support's per-bar cost, every bar matching → none matching | **0.998×** |
+
+**The word-0 versus word-5 measurement is the one to read twice.** An early-exit
+loop returns sooner on a candidate failing in word 0, and 0.996× says six words are
+read on every call whatever the answer. **The k=1 versus k=8 measurement is what
+§6 rests on:** the ladder has no depth parameter and walks to extinction, which is
+affordable only because a wide combination costs per bar what a narrow one costs.
+If it did not, the missing parameter would be a performance defect rather than a
+design decision.
+
+### Two claims were false, and finding them is why the benches exist
+
+**`isqrt_i128` is bounded, not flat — a 217× spread.** The doc said "the cost is
+O(1) for **every** `i128`", which reads as *does not vary*. The Newton loop exits
+on convergence, so the count runs 1 → 37 → 55 → 69 across the input range, and each
+iteration's own 128-bit division costs more on larger operands. Both readings of
+"O(1)" are defensible in isolation and only one is what a reader of §3 rule 4 takes
+from it. The claim now states the bound, `ITERATION_CEILING` = 130 is asserted
+against the real count at four probes, and the spread is in `docs/06-limits.md` §51.
+
+**A candle's cost varies 1.87× with its content.** A motionless bar costs 0.535× an
+ordinary one, because every range-relative predicate refuses on a zero range. Under
+the ceiling, and a content dependence, recorded in §52.
+
+### Three decisions inside the benches worth naming
+
+**A zero baseline FAILS.** An operation the optimiser deleted has not been shown
+constant — it has been shown absent. Reporting that as a pass is §4's fallback that
+hides a failure, so `ratio` returns false on a zero side rather than dividing.
+
+**Content and per-bar claims are checked in BOTH directions.** The one-sided form
+every other bench uses asks "did this get slower", which is right for a depth claim
+— folding 200,000 candles cannot make the next one cheaper. It is wrong for a
+content claim: a bar costing half as much is as much a data dependence as one
+costing twice as much. `two_sided_ratio` compares the ratio and its reciprocal and
+takes the worse. Engine's rows use it throughout, which is what surfaced C-E-01's
+0.574× at a million bars as `(cheaper)` rather than passing silently.
+
+**A ratio is not asserted where there is no honest ceiling.** `C-I-03` prints its
+cost figures marked `(context, NOT a ceiling)`. The two ways to make that row green
+were to relax the ceiling past 217× — loose enough to miss any real regression — or
+to pick the baseline that fits. Both were refused. The row asserts the bound and
+the root, which is what actually holds.
+
+### What they do not prove
+
+None of them proves branchlessness: a compiler may introduce a branch, and a ratio
+near 1.0 is evidence. The source guarantee is
+`vocab::mask::hits_does_the_same_work_for_every_input`, which reads the body,
+refuses `for`/`while`/`loop`/`return`/`if`, **counts the operators against `WORDS`**
+and asserts every word index is read. That counting is new here and it catches a
+real bug the behavioural tests cannot: `hits` reading word 4 in place of word 5 is
+still branchless, still passes every test written against bits 0–255, and silently
+ignores bits 320–383 — so a candidate requiring bit 330 would match every bar and
+produce a strategy with 100% support that is pure artefact. The vocabulary has 108
+free positions, all of which land in that blind spot.
+
+The claim is the conjunction: the source has no branch to take, and the clock agrees
+it does not take one. Neither half is described as sufficient.
+
+Deepest column measured is 1,000,000 bars against the 1,222,791 an instrument
+carries, and `C-E-04` stops at 100,000 because a full walk over a million takes
+minutes on every push. Both stated in the bench headers, per §3 rule 6.
+
+
+---
+
+## D-0104 · 2026-08-11 · Three decision numbers were each issued twice, so forty citations are ambiguous — resolved by subject, not by renumbering
+
+**Status: locked.** This entry adds no decision. It makes forty existing citations
+readable, and it is the only fix available: the header of this file says *"Append
+only. Entries are never edited"*, so the six colliding headings stay exactly as
+written.
+
+### The collisions
+
+| ID | First issued | Second issued |
+|---|---|---|
+**D-0076** | The `near_*` band is one hundredth of the anchor's range, and the base is the range and not the level | Groww can serve indices and daily bars, and both words came from the vendor |
+**D-0077** | Five intraday rungs join the table, and three of them do not start a session on time | A vendor declares what it MEANS by a bar, because isolation is not the same as agreement |
+**D-0078** | The vocabulary implements the CPR script's R3 ladder, and the workbook's is refused | The mutation clause in §9 finally has a gate, and it scopes to the diff |
+
+All six carry the date 2026-08-10. They were written in one long session, and
+nothing in this repository read the file back to check that a number was free — the
+same class of gap D-0102 closed for the numeric claims in `docs/03-vocabulary.md`
+and `docs/10-shared-core.md`.
+
+### Why they are not renumbered
+
+Renumbering is the obvious fix and it is forbidden twice over. This file's own
+header forbids editing an entry. And a renumber would silently change what forty
+existing citations point at — including citations inside `crates/pull` and
+`crates/store`, which are another line of work's files. A citation that quietly
+starts meaning something else is worse than one that is ambiguous, because an
+ambiguous citation announces itself and a redirected one does not.
+
+### The convention, from here
+
+**Cite the number with its subject in parentheses** — `D-0076 (near_* band)`,
+`D-0076 (Groww indices)` — wherever the bare number could mean either. A reader who
+finds a bare number resolves it from the table above, which is why the table is the
+substance of this entry rather than its preamble.
+
+**Where the existing forty sit, and why they are readable in place:** the split is
+almost perfectly by crate, because the two halves of each collision came from
+unrelated work.
+
+* `crates/vocab` and `crates/indicators` cite the **vocabulary** halves — the
+  `near_*` band and the CPR R3 ladder. `crates/vocab/src/tolerance.rs:298` says
+  "D-0076 pinned", which can only be the band.
+* `crates/pull` and `crates/store` cite the **vendor** halves — Groww's words and
+  what a vendor means by a bar. `crates/pull/src/vendor.rs:2295` says "measured.
+  D-0077", which can only be the vendor's bar declaration.
+* `docs/06-limits.md:2775` cites the mutation gate, which is the second D-0078.
+
+So no citation is actually unresolvable today. What was missing is anything that
+says so, and a reader had no way to know a number was reused at all.
+
+### The mechanism that stops the next one
+
+`D-0102` established the rule that a document stating a number is read back by a
+test. This is the same failure in the same file and it deserves the same treatment,
+but the check belongs where the numbers are issued rather than where they are read:
+**the next entry to be appended must assert its number is free before writing it.**
+That is how D-0102 itself came to be numbered 0102 — it was drafted as D-0101, the
+append asserted `'## D-0101' not in s`, the assertion fired because another line of
+work had taken 0101 minutes earlier, and the number was recomputed as
+`max(existing) + 1`. The assertion is the whole reason this file has three
+collisions and not four.
+
+Written as a rule, for whoever appends next: **do not hardcode the number. Read the
+file, take `max(existing) + 1`, and refuse rather than overwrite.**
+
+---
+
+## D-0089 · 2026-08-11 · The one thing the emit-site count could never answer, now a gate
+
+**Status: locked.**
+
+`api::emitted` counts every `telemetry::emit` under `crates/api/src` and proves
+each reaches a file. That is a strong guarantee **about the sites that exist**,
+and it says nothing whatever about a failure path that has none — which is the
+gap an operator actually falls into.
+
+Measured: four arms of `pull::ingest` pushed a `Failure` onto the receipt and
+emitted nothing, so a backfill that landed zero bars left a quiet log. They were
+found by reading every `Result`-returning function by hand, which is not a thing
+anyone will do again. **Gate 19 is that reading, mechanised.**
+
+### The rule
+
+Every `failures.push(` and `failures: vec![` in production code under
+`crates/{pull,api}/src` must have a `telemetry::emit(` or a `note_*(` helper
+call above it. Both forms count: this workspace extracts emits into `note_*`
+helpers as soon as a function reaches clippy's line limit, so refusing the
+helper form would push authors to inline the emit and fail the other gate.
+
+### The first version was unsound, and it passed
+
+It asked "is there an emit within twelve lines above". Deleting a real emit
+**did not turn it red** — the site below simply matched the site ABOVE's event.
+A gate that can be satisfied by somebody else's work is not a gate, and one that
+has never been shown to fail is a decoration.
+
+Each event is now claimed **at most once**, nearest-first. Five failures and four
+events is a failure wherever the four happen to sit. A `fn note_*(` definition
+is excluded, because counting a helper's own signature would let a file satisfy
+itself by declaring helpers.
+
+**Proven by removal.** Each of the four `note_*` calls was deleted in turn and
+the gate went red every time; the file was restored byte-exactly (md5 checked)
+after each.
+
+### What it deliberately does not check
+
+Whether the event is at a useful level, carries the right fields, or is reachable
+from a test — `api::emitted`, gate 12 and gate 8 cover those. It answers one
+question: **did anybody write an event here at all.**
+
+### The honest limit
+
+It is a text scan, not a dataflow analysis. A failure recorded through some
+future construct that is not a literal `failures.push(` is invisible to it, and
+an emit placed above a push that logs something unrelated would satisfy it. It
+converts the most common shape of this defect from discipline into a build
+failure; it does not make the class impossible.

@@ -39,7 +39,7 @@
 //! Rounding here is not on the evaluation path. The band test that follows is the
 //! cross-multiplied integer form, so a level once fixed is compared exactly.
 
-use store::format::Bar;
+use crate::Candle;
 use vocab::{ConditionMask, Tolerance};
 
 /// A record that cannot yield a pivot ladder.
@@ -51,6 +51,70 @@ pub enum Unusable {
     /// `high - low` does not fit in an `i64`, so no level can be computed. Only
     /// reachable from a corrupt record — see [`crate::Corrupt::RangeOverflows`].
     RangeOverflows,
+}
+
+/// Where the cuts between a narrow, a neutral and a wide CPR fall, in thousandths of
+/// the previous session's range.
+///
+/// **UNVERIFIED.** No tracked document defines either cut, and unlike a doji there is
+/// no single classical value the literature agrees on. They are declared here rather
+/// than refused, because refusing one convention while `crate::pattern` declares six
+/// and `crate::trend` declares six more is not a rule — it is an accident of which
+/// module was written first.
+///
+/// What is NOT a convention is the ceiling they sit under: `DailyLevels::cpr_width`
+/// derives that a CPR is at most **333 thousandths** of the range, so these numbers
+/// are meaningful as fractions of 333 and not of 1000.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CprWidth {
+    /// At or below this fraction of the range, the CPR is narrow. 80 — the bottom
+    /// quarter of the reachable 333.
+    pub narrow: i64,
+    /// At or above this fraction, wide. 250 — the top quarter of the reachable 333.
+    pub wide: i64,
+}
+
+impl Default for CprWidth {
+    fn default() -> Self {
+        Self::CLASSICAL
+    }
+}
+
+impl CprWidth {
+    /// The declared set. **UNVERIFIED** — see the struct documentation.
+    pub const CLASSICAL: Self = Self {
+        narrow: 80,
+        wide: 250,
+    };
+}
+
+// Both cuts must sit inside the derived ceiling, or the bit above them can never be
+// set and D-0080 would exclude it from every sweep as constant-false. A build error is
+// the right place to learn that, not a support table.
+const _: () = assert!(
+    CprWidth::CLASSICAL.narrow < CprWidth::CLASSICAL.wide,
+    "narrow must cut below wide, or the classes overlap"
+);
+const _: () = assert!(
+    CprWidth::CLASSICAL.wide < 333,
+    "a CPR is at most one third of the range, so a wide cut at or above 333 is \
+     unreachable and position 274 would be constant false"
+);
+
+/// The three states a CPR's width can be in.
+///
+/// Three, not one. Position 63 `narrow_cpr_day` shipped alone, and one bit answers
+/// half a question: the hit test is `(bits & mask) == mask` with no negation, so
+/// "not narrow" cannot be expressed by leaving 63 clear. A sweep that wants "the CPR
+/// was wide" needs a bit that says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CprClass {
+    /// Position 63. The two edges are close together.
+    Narrow,
+    /// Position 275. Neither narrow nor wide.
+    Neutral,
+    /// Position 274. The edges are far apart.
+    Wide,
 }
 
 /// Every level the previous session fixes, computed once.
@@ -137,7 +201,7 @@ impl DailyLevels {
     /// # Errors
     ///
     /// As [`Self::from_previous_session`].
-    pub fn from_daily_bar(bar: &Bar) -> Result<Self, Unusable> {
+    pub fn from_daily_bar(bar: &Candle) -> Result<Self, Unusable> {
         Self::from_previous_session(bar.high, bar.low, bar.close)
     }
 
@@ -184,7 +248,73 @@ impl DailyLevels {
     pub const fn band_half(&self) -> i64 {
         self.half
     }
+    /// The CPR's width — how far apart its two edges are.
+    ///
+    /// # The width is bounded, and the bound is derived rather than assumed
+    ///
+    /// `pivot = (h+l+c)/3` and `bc = (h+l)/2`, and `tc = 2·pivot − bc`, so
+    ///
+    /// ```text
+    /// width = |tc − bc| = 2·|pivot − bc| = |2c − h − l| / 3
+    /// ```
+    ///
+    /// `|2c − h − l|` is largest when the close sits on the high or the low, where it
+    /// equals `h − l`. So **a CPR can never exceed one third of the previous session's
+    /// range** — 333 thousandths, not 1000. Any threshold expressed against the range
+    /// has to sit inside that ceiling, which is why [`CprWidth`]'s cut points are
+    /// stated as fractions of 333 rather than of 1000: a "wide" cut of 500 would be
+    /// unreachable and the bit would be constant false, exactly the defect D-0080
+    /// exists to exclude.
+    ///
+    /// # The ceiling is exact arithmetic; the levels are rounded
+    ///
+    /// The derivation above is in rationals, and `pivot` and `bc` are each rounded once
+    /// by `div_euclid`, so the **computed** width can land up to one paisa above
+    /// `range / 3`. At `H=100 L=0 C=0` the levels are `pivot = 33`, `bc = 50`,
+    /// `tc = 16`, and the width is 34 — 340 thousandths of a 100-paisa range, past the
+    /// exact third. One paisa is only a large fraction of a range that small; at index
+    /// scale the excess is unmeasurable, and both cuts sit far enough inside 333 that
+    /// neither becomes unreachable either way. So 333 is a floor on the ceiling and not
+    /// a hard bound on this function's output, and
+    /// `the_ceiling_is_exact_arithmetic_and_rounding_can_pass_it` pins the arithmetic so
+    /// a change of rounding policy is visible rather than inferred.
+    #[must_use]
+    pub const fn cpr_width(&self) -> i64 {
+        let (low, high) = self.cpr_span();
+        high.saturating_sub(low)
+    }
+
+    /// How wide the CPR is, against the previous session's range.
+    ///
+    /// `None` when the range is zero — a limit-locked session has no range to measure
+    /// against, and every fraction of zero is the same fraction. Refusing is the answer
+    /// rather than calling it narrow.
+    #[must_use]
+    pub fn cpr_class(&self, thresholds: CprWidth) -> Option<CprClass> {
+        let range = self.pdh().saturating_sub(self.pdl());
+        if range <= 0 {
+            return None;
+        }
+        let width = i128::from(self.cpr_width());
+        let scaled = i128::from(range);
+        // Cross-multiplied, no division: `width <= range * permille / 1000` becomes
+        // `width * 1000 <= range * permille`.
+        if width.saturating_mul(1000) <= scaled.saturating_mul(i128::from(thresholds.narrow)) {
+            return Some(CprClass::Narrow);
+        }
+        if width.saturating_mul(1000) >= scaled.saturating_mul(i128::from(thresholds.wide)) {
+            return Some(CprClass::Wide);
+        }
+        Some(CprClass::Neutral)
+    }
+
     /// The CPR's low and high edge, in numeric order.
+    ///
+    /// Ordered, because `bc` and `tc` are not: `tc = 2·pivot − bc`, so `tc` sits below
+    /// `bc` on any session whose close is under the midpoint of its range — 48.51% of
+    /// them. Three positions once compared the close against the raw pair while a
+    /// fourth used this ordered one, and on those sessions the bar reported itself as
+    /// above, inside AND below the same zone at once.
     #[must_use]
     pub const fn cpr_span(&self) -> (i64, i64) {
         if self.bc <= self.tc {
@@ -329,6 +459,8 @@ fn plan(l: &DailyLevels) -> [(i64, Rel); 41] {
 /// 41 comparisons against numbers fixed before the session opened. No loop whose
 /// length depends on the data, no allocation, no division. `41` is a compile-time
 /// constant, which is what makes this O(1) rather than "O(levels)".
+/// Measured by `C-I-02` — one candle costs the same whatever it contains, in
+/// both directions. `crates/indicators/benches/ratio.rs`.
 ///
 /// # What it deliberately does not set
 ///
@@ -339,7 +471,42 @@ fn plan(l: &DailyLevels) -> [(i64, Rel); 41] {
 /// * **71 `near_fib_424`** — an orphan: 4.24 sits on none of the four ladders.
 #[must_use]
 pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> ConditionMask {
+    bits_with(levels, close, tolerance, CprWidth::CLASSICAL)
+}
+
+/// [`bits`], with the CPR-width cuts supplied rather than taken from the declared set.
+///
+/// Present so a caller can record which cuts a run used. The cuts are UNVERIFIED
+/// (see [`CprWidth`]), and a result stamped with a threshold nobody can name is a
+/// result nobody can reproduce.
+#[must_use]
+pub fn bits_with(
+    levels: &DailyLevels,
+    close: i64,
+    tolerance: Tolerance,
+    widths: CprWidth,
+) -> ConditionMask {
     let mut mask = ConditionMask::ZERO;
+    // 63 / 274 / 275 — exactly one of the three, or none when the previous session had
+    // no range to measure against. `match` on the enum rather than an `if` chain, so
+    // the compiler checks all three arms exist: this family is where "not narrow"
+    // would otherwise quietly become "wide".
+    if let Some(class) = levels.cpr_class(widths) {
+        let index = match class {
+            CprClass::Narrow => 63,
+            CprClass::Wide => 274,
+            CprClass::Neutral => 275,
+        };
+        // `unwrap_or(mask)` and not `if let Ok(next)`, here and at the two sites below:
+        // `set_exact` refuses only a position that is absent, retired, void or `Near`,
+        // and `the_plan_agrees_with_the_vocabulary` proves that none of the positions
+        // this module names is any of those. An `if let` would therefore write a branch
+        // no test can take — `cargo llvm-cov` counts it as a region that never runs, and
+        // a region that cannot run is a region nobody can be held to. The behaviour is
+        // identical: a refusal leaves the bit clear, which is
+        // `docs/03-vocabulary.md` §4. It is also what the other five modules write.
+        mask = vocab::table::set_exact(mask, index).unwrap_or(mask);
+    }
     let half = levels.band_half();
     for (level, rel) in plan(levels) {
         let set = match rel {
@@ -347,13 +514,9 @@ pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> Condition
                 // The band is a fraction of the CPR WIDTH, which is twice the
                 // half-width — the base `vocab` expects for a pivot band.
                 let width = half.saturating_mul(2);
-                match vocab::table::set_near(mask, index, tolerance, close, level, width) {
-                    Ok(next) => {
-                        mask = next;
-                        continue;
-                    }
-                    Err(_) => continue,
-                }
+                mask = vocab::table::set_near(mask, index, tolerance, close, level, width)
+                    .unwrap_or(mask);
+                continue;
             }
             Rel::Above(index) => (close > level.saturating_add(half)).then_some(index),
             Rel::Below(index) => (close < level.saturating_sub(half)).then_some(index),
@@ -364,10 +527,8 @@ pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> Condition
                 (lo <= close && close <= hi).then_some(index)
             }
         };
-        if let Some(index) = set
-            && let Ok(next) = vocab::table::set_exact(mask, index)
-        {
-            mask = next;
+        if let Some(index) = set {
+            mask = vocab::table::set_exact(mask, index).unwrap_or(mask);
         }
     }
     mask
@@ -376,7 +537,7 @@ pub fn bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> Condition
 /// Every position this module can set, for the test that proves it sets nothing
 /// else.
 #[must_use]
-pub fn positions() -> [u16; 41] {
+pub fn positions() -> [u16; 44] {
     let zero = DailyLevels {
         pdh: 0,
         pdl: 0,
@@ -387,7 +548,7 @@ pub fn positions() -> [u16; 41] {
         s: [0; 5],
         half: 0,
     };
-    let mut out = [0u16; 41];
+    let mut out = [0u16; 44];
     for (slot, (_, rel)) in out.iter_mut().zip(plan(&zero)) {
         *slot = match rel {
             Rel::Near(i)
@@ -398,25 +559,46 @@ pub fn positions() -> [u16; 41] {
             | Rel::InsideCpr(i) => i,
         };
     }
+    // The CPR-width trio is not in `plan`, because it is decided from the levels
+    // themselves rather than by comparing the close to a price. 63 shipped with the
+    // original table; 274 and 275 were appended at NEXT_FREE.
+    for (slot, index) in out.iter_mut().skip(WIDTH_STATES_AT).zip(WIDTH_STATES) {
+        *slot = index;
+    }
     out
 }
 
+/// Where the three CPR-width positions sit in [`positions`], after the 41 the plan
+/// covers.
+const WIDTH_STATES_AT: usize = 41;
+
+/// The three CPR-width positions, in the order narrow, wide, neutral.
+const WIDTH_STATES: [u16; 3] = [63, 274, 275];
+
+const _: () = assert!(
+    WIDTH_STATES_AT + WIDTH_STATES.len() == 44,
+    "positions() must be exactly the plan's 41 plus the three width states"
+);
+
 #[cfg(test)]
+// `expect` in a fixture, and the reason is not taste. `let Ok(x) = f() else {
+// unreachable!() }` expands to a panic written IN THIS CRATE, so `cargo llvm-cov`
+// records a region that no test can ever execute while the code is correct — and a
+// region that cannot run is one nobody can be held to. `Result::expect` panics inside
+// the standard library, which is not instrumented, and refuses just as loudly. The
+// workspace denies `expect_used` for library code, where a panic is a real defect; the
+// same allow appears on the test module of `core::price`, `greeks::bsm` and eleven
+// others.
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_pivot() else {
-            unreachable!("the pivot width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_pivot().expect("the pivot width is pinned")
     }
 
     fn levels(h: i64, l: i64, c: i64) -> DailyLevels {
-        let Ok(x) = DailyLevels::from_previous_session(h, l, c) else {
-            unreachable!("this fixture session is sane")
-        };
-        x
+        DailyLevels::from_previous_session(h, l, c).expect("this fixture session is sane")
     }
 
     /// The recurrence, checked against hand arithmetic on numbers chosen so every
@@ -534,22 +716,27 @@ mod tests {
                 seen.insert(index),
                 "position {index} appears twice in the plan"
             );
-            let Some(def) = vocab::table::definition(index) else {
-                unreachable!("position {index} is not in the table")
-            };
+            // Asserted before it is unwrapped, so the failure still names the position
+            // that is missing: `expect` takes a string and cannot interpolate `index`,
+            // and an `unwrap_or_else(|| panic!(...))` would put the message back in a
+            // closure this crate owns and no test can enter.
+            let found = vocab::table::definition(index);
+            assert!(found.is_some(), "position {index} is not in the table");
+            let def = found.expect("asserted to be Some on the line above");
             assert!(
                 vocab::table::is_live(index),
                 "position {index} (`{}`) is not live",
                 def.name,
             );
             let is_near = def.kind == vocab::Kind::Near;
+            // Both readings are computed here rather than inside the failure message:
+            // an argument evaluated only on failure is a region that runs only on
+            // failure, and `wants_near` takes both values across this loop.
+            let treated_as = if wants_near { "banded" } else { "bare" };
             assert_eq!(
-                is_near,
-                wants_near,
-                "position {index} (`{}`) is {:?} and the plan treats it as {}",
-                def.name,
-                def.kind,
-                if wants_near { "banded" } else { "bare" },
+                is_near, wants_near,
+                "position {index} (`{}`) is {:?} and the plan treats it as {treated_as}",
+                def.name, def.kind,
             );
         }
         assert_eq!(seen.len(), 41);
@@ -559,17 +746,26 @@ mod tests {
     #[test]
     fn the_undefined_and_retired_positions_are_untouched() {
         let owned = positions();
-        for (index, why) in [
-            (6_u16, "a tombstone; inside_cpr (62) is set instead"),
-            (
-                63,
-                "narrow_cpr_day has no threshold in any tracked document",
-            ),
-            (71, "near_fib_424 is an orphan on none of the ladders"),
-        ] {
+        // Only ONE position is still deliberately untouched, and it is a tombstone
+        // rather than a refusal. Two others used to be on this list:
+        //
+        //   63 narrow_cpr_day — was refused for want of a threshold, while
+        //      `crate::pattern` declared six UNVERIFIED thresholds and used them. That
+        //      was an accident of which module was written first, not a rule. It is now
+        //      computed, with cuts declared in `CprWidth` and bounded by the derived
+        //      fact that a CPR cannot exceed a third of the range.
+        //   71 near_fib_424 — was called "an orphan" while 2.618 shipped in three
+        //      ladders. 4.236 is a member of the same classical extension set, so
+        //      refusing it was arbitrary. It is now rung 4.236 of the bullish ladder.
+        assert!(
+            !owned.contains(&6),
+            "position 6 is set, and it is a tombstone; inside_cpr (62) is set instead"
+        );
+        // And the reverse, so this test cannot pass by the family shrinking:
+        for index in [63_u16, 274, 275] {
             assert!(
-                !owned.contains(&index),
-                "position {index} is set, and {why}"
+                owned.contains(&index),
+                "position {index} is one of the three CPR-width states and must be owned"
             );
         }
     }
@@ -603,9 +799,391 @@ mod tests {
             );
         }
     }
+
+    /// The mirror of the test above: a price under every level sets every `below`
+    /// relation and no `above` one.
+    ///
+    /// Without both halves, a transposition that set the `below` bits for an `above`
+    /// price and nothing at all for a `below` price would pass — the above-test only
+    /// proves the below-bits stay clear, never that they can fire.
+    #[test]
+    fn a_price_below_everything_sets_only_the_below_relations() {
+        let x = levels(100, 90, 98);
+        // S5 is the lowest rung of this ladder at 2*96 - 300 + 180 = 72.
+        let m = bits(&x, -10_000, tol());
+        assert!(m.get(75) && m.get(77) && m.get(79), "R bands not below");
+        assert!(m.get(81) && m.get(83) && m.get(85), "S bands not below");
+        assert!(m.get(181) && m.get(183), "R4/S4 bands not below");
+        assert!(m.get(185) && m.get(187), "R5/S5 bands not below");
+        assert!(m.get(14) && m.get(16), "pdh/pdl not below");
+        assert!(m.get(61), "not below the CPR's low edge");
+        for above in [74_u32, 76, 78, 80, 82, 84, 180, 182, 184, 186, 13, 15, 60] {
+            assert!(
+                !m.get(above),
+                "above-position {above} fired below everything"
+            );
+        }
+        for near in [7_u32, 8, 9, 10, 11, 12, 17, 18, 54, 55, 178, 179, 188, 189] {
+            assert!(
+                !m.get(near),
+                "banded position {near} fired 10,000 paisa below its level"
+            );
+        }
+    }
+
+    /// The default cuts are the declared set, and `bits` uses them.
+    ///
+    /// Two things break without this. A `Default` that drifted from `CLASSICAL` would
+    /// hand a run cuts no document declares, and `bits` — which is the entry point every
+    /// caller uses — would silently class the CPR by them.
+    #[test]
+    fn the_default_cuts_are_the_declared_set() {
+        assert_eq!(
+            CprWidth::default(),
+            CprWidth::CLASSICAL,
+            "the default cuts drifted from the declared UNVERIFIED set"
+        );
+        assert_eq!(CprWidth::default().narrow, 80);
+        assert_eq!(CprWidth::default().wide, 250);
+        // 120 thousandths of the range: neutral under the declared cuts, so the two
+        // entry points must agree on position 275 and not merely on "some bit".
+        let x = levels(2_500_000, 2_490_000, 2_496_800);
+        let plain = bits(&x, x.pivot(), tol());
+        let supplied = bits_with(&x, x.pivot(), tol(), CprWidth::default());
+        assert_eq!(
+            plain.words(),
+            supplied.words(),
+            "`bits` does not use the declared cuts that `Default` names"
+        );
+        assert!(plain.get(275), "this fixture must be the neutral class");
+    }
+
+    /// A daily bar yields the ladder of its high, low and close — not its open.
+    ///
+    /// `from_daily_bar` is the accessor every caller with a bar in hand reaches for. If
+    /// it transposed two of the seven fields the ladder would still build, every level
+    /// would still be a number, and the whole family would be measured against the wrong
+    /// prices. The pivot is asserted by value because that is where a transposition
+    /// shows.
+    #[test]
+    fn a_daily_bar_yields_the_ladder_of_its_high_low_and_close() {
+        // ts, open, high, low, close, volume, open interest. The open is deliberately
+        // NOT the close, and the timestamp is deliberately meaningless: a ladder is
+        // three prices and the previous session's identity is the caller's business.
+        let bar = Candle::new(
+            0,
+            2_410_000,
+            2_500_000,
+            2_400_000,
+            2_450_000,
+            0,
+            crate::OI_NULL,
+        );
+        let from_bar = DailyLevels::from_daily_bar(&bar).expect("a sane daily bar has a ladder");
+        assert_eq!(
+            from_bar,
+            levels(2_500_000, 2_400_000, 2_450_000),
+            "from_daily_bar disagrees with the same three prices passed directly"
+        );
+        assert_eq!(
+            from_bar.pivot(),
+            2_450_000,
+            "the pivot must come from the CLOSE; the open would give 2,436,666"
+        );
+        // And a broken record is refused by name through this door too.
+        let corrupt = Candle::new(0, 95, 90, 100, 95, 0, crate::OI_NULL);
+        assert_eq!(
+            DailyLevels::from_daily_bar(&corrupt),
+            Err(Unusable::HighBelowLow),
+            "a bar whose high is below its low must be refused, not measured"
+        );
+    }
+
+    /// The three width classes fall exactly where the cuts say, and both cuts are
+    /// inclusive.
+    ///
+    /// Every fixture divides exactly, so a rounding change cannot be mistaken for a
+    /// threshold change. The two-paisa fixtures are the point: a cut compared with `<`
+    /// instead of `<=`, or scaled against 1000 instead of the range, moves the boundary
+    /// and only a test that sits ON it can tell.
+    #[test]
+    fn the_three_width_classes_fall_where_the_cuts_say() {
+        let cuts = CprWidth::CLASSICAL;
+        // Range 10,000. bc = 2,495,000, so the width is 2*|pivot - 2,495,000|.
+        let at_the_narrow_cut = levels(2_500_000, 2_490_000, 2_496_200);
+        assert_eq!(at_the_narrow_cut.cpr_width(), 800, "80/1000 of 10,000");
+        assert_eq!(
+            at_the_narrow_cut.cpr_class(cuts),
+            Some(CprClass::Narrow),
+            "the narrow cut is inclusive: a width exactly at 80 thousandths is narrow"
+        );
+
+        let two_paisa_wider = levels(2_500_000, 2_490_000, 2_496_203);
+        assert_eq!(two_paisa_wider.cpr_width(), 802);
+        assert_eq!(
+            two_paisa_wider.cpr_class(cuts),
+            Some(CprClass::Neutral),
+            "802 of 10,000 is past the narrow cut and must not be narrow"
+        );
+
+        let at_the_wide_cut = levels(2_500_000, 2_490_000, 2_498_750);
+        assert_eq!(at_the_wide_cut.cpr_width(), 2_500, "250/1000 of 10,000");
+        assert_eq!(
+            at_the_wide_cut.cpr_class(cuts),
+            Some(CprClass::Wide),
+            "the wide cut is inclusive: a width exactly at 250 thousandths is wide"
+        );
+
+        let two_paisa_narrower = levels(2_500_000, 2_490_000, 2_498_747);
+        assert_eq!(two_paisa_narrower.cpr_width(), 2_498);
+        assert_eq!(
+            two_paisa_narrower.cpr_class(cuts),
+            Some(CprClass::Neutral),
+            "2,498 of 10,000 is short of the wide cut and must not be wide"
+        );
+
+        // And the same width on an INVERTED CPR is the same class: the width is read
+        // through `cpr_span`, so `bc > tc` cannot make it negative and collapse the
+        // class to narrow.
+        let inverted = levels(2_500_000, 2_490_000, 2_491_250);
+        assert!(
+            inverted.bc() > inverted.tc(),
+            "this fixture must be inverted or it tests nothing: bc={} tc={}",
+            inverted.bc(),
+            inverted.tc()
+        );
+        assert_eq!(inverted.cpr_width(), 2_500, "a width is never signed");
+        assert_eq!(inverted.cpr_class(cuts), Some(CprClass::Wide));
+    }
+
+    /// `bits_with` classes the CPR by the cuts it is handed, not by the declared ones.
+    ///
+    /// This is the whole reason the function is public: a run records which cuts it used,
+    /// and cuts that are ignored are worse than cuts that are UNVERIFIED. One fixture,
+    /// three cut sets, three different positions — and the other two must stay clear,
+    /// because `(bits & mask) == mask` has no negation and two width bits at once would
+    /// mean "narrow and wide" to every sweep that reads them.
+    #[test]
+    fn a_supplied_cut_decides_the_class_and_not_the_classical_one() {
+        // 1,200 of a 10,000 range: 120 thousandths.
+        let x = levels(2_500_000, 2_490_000, 2_496_800);
+        assert_eq!(x.cpr_width(), 1_200);
+        let close = x.pivot();
+        for (cuts, expected, others) in [
+            (CprWidth::CLASSICAL, 275_u32, [63_u32, 274]),
+            (
+                CprWidth {
+                    narrow: 130,
+                    wide: 300,
+                },
+                63,
+                [274, 275],
+            ),
+            (
+                CprWidth {
+                    narrow: 50,
+                    wide: 100,
+                },
+                274,
+                [63, 275],
+            ),
+        ] {
+            let m = bits_with(&x, close, tol(), cuts);
+            assert!(
+                m.get(expected),
+                "cuts {}/{} must class a 120-thousandth CPR at position {expected}",
+                cuts.narrow,
+                cuts.wide
+            );
+            for other in others {
+                assert!(
+                    !m.get(other),
+                    "cuts {}/{} set position {other} as well as {expected}",
+                    cuts.narrow,
+                    cuts.wide
+                );
+            }
+        }
+    }
+
+    /// A session with no range has no width class at all.
+    ///
+    /// A limit-locked or untraded session prints `high == low`. Its CPR width is zero,
+    /// and zero is at or below every cut — so the arithmetic alone would call it the
+    /// narrowest possible day and set position 63 on a day with nothing to measure. The
+    /// refusal is the answer, and `docs/03-vocabulary.md` §4 makes an unevaluable bit
+    /// false rather than "probably".
+    #[test]
+    fn a_zero_range_session_has_no_width_class() {
+        let flat = levels(2_500_000, 2_500_000, 2_500_000);
+        assert_eq!(flat.cpr_width(), 0, "a flat session collapses the CPR");
+        assert_eq!(
+            flat.cpr_class(CprWidth::CLASSICAL),
+            None,
+            "a zero range must be refused, not classed narrow because 0 <= 80"
+        );
+        let m = bits(&flat, 2_500_000, tol());
+        for index in [63_u32, 274, 275] {
+            assert!(
+                !m.get(index),
+                "width position {index} fired on a session with no range"
+            );
+        }
+    }
+
+    /// A level past the end of `i64` pins at the extreme of its own sign, and a pinned
+    /// level answers every band test as "not near, not above".
+    ///
+    /// Reachable only from a corrupt record, and the alternative is what makes it worth a
+    /// test: a wrapping cast would turn R3 into a plausible-looking price in the middle
+    /// of the range, and every position measured against it would answer confidently and
+    /// wrongly. The negative direction is not decoration — `i64::MIN` is reached by a
+    /// different branch than `i64::MAX`, and §7 gives that value a second meaning, so a
+    /// saturated support must be a level nothing is ever above rather than a null.
+    #[test]
+    fn a_level_past_the_type_pins_at_the_extreme_of_its_own_sign() {
+        // H = i64::MAX/2, L = -H: the range is 2H, one short of i64::MAX, so the ladder
+        // builds. H is divisible by 3, so the pivot is exact and only the rungs saturate.
+        let half_max = i64::MAX / 2;
+        let x = levels(half_max, -half_max, -half_max);
+        assert_eq!(
+            x.pivot(),
+            -(half_max / 3),
+            "the pivot itself must not saturate"
+        );
+        assert_eq!(x.bc(), 0, "(H + -H) / 2 is exactly zero");
+        assert_eq!(
+            x.resistance(2),
+            Some(7_686_143_364_045_646_505),
+            "R2 = P + range fits and must not be pinned"
+        );
+        assert_eq!(
+            x.resistance(3),
+            Some(i64::MAX),
+            "R3 = R1 + range leaves the type upward and must pin at the ceiling"
+        );
+        assert_eq!(
+            x.support(1),
+            Some(-7_686_143_364_045_646_505),
+            "S1 = 2P - H fits and must not be pinned"
+        );
+        assert_eq!(
+            x.support(2),
+            Some(i64::MIN),
+            "S2 = P - range leaves the type downward and must pin at the floor"
+        );
+        // A pinned resistance is above every price there is, so nothing is above it.
+        let m = bits(&x, 0, tol());
+        assert!(!m.get(184), "a close was reported above a pinned R5");
+        assert!(m.get(185), "a close below a pinned R5 must say so");
+    }
+
+    /// The one-third ceiling is exact arithmetic; the levels are rounded, and the
+    /// rounding can pass it by a paisa.
+    ///
+    /// `cpr_width`'s derivation says a CPR is at most `range / 3`. It divides twice with
+    /// `div_euclid`, and at `H=100 L=0 C=0` the result is 34 against a 100-paisa range —
+    /// 340 thousandths, past the exact third and past the 333 the documentation rounds it
+    /// to. It matters to nothing at index scale, where a paisa of slack is unmeasurable
+    /// against a range of thousands, and both cuts stay reachable either way. This test
+    /// exists so that the claim is a measured one and so a change of rounding policy
+    /// shows up here rather than in a support table.
+    #[test]
+    fn the_ceiling_is_exact_arithmetic_and_rounding_can_pass_it() {
+        let x = levels(100, 0, 0);
+        assert_eq!(x.pivot(), 33, "(100 + 0 + 0) / 3 floors to 33");
+        assert_eq!(x.bc(), 50, "(100 + 0) / 2 is exact");
+        assert_eq!(x.tc(), 16, "2 * 33 - 50");
+        assert_eq!(x.cpr_width(), 34, "50 - 16, the ordered span");
+        let range = x.pdh() - x.pdl();
+        assert_eq!(range, 100);
+        assert!(
+            x.cpr_width() * 1000 > range * 333,
+            "the documented 333-thousandth ceiling is exact arithmetic: the computed \
+             width is {} of {range}, and if that ever stops being true this test should \
+             be deleted, not relaxed",
+            x.cpr_width()
+        );
+        assert_eq!(
+            x.cpr_class(CprWidth::CLASSICAL),
+            Some(CprClass::Wide),
+            "340 thousandths is past the 250 cut whatever the rounding"
+        );
+    }
+
+    /// The derives are exercised, because a derive nothing calls is a derive nobody has
+    /// checked.
+    ///
+    /// `Debug` is the one that earns its place: these types are what a refusal carries
+    /// into a log line, and a rendering that dropped the variant name or the level would
+    /// make a corrupt session indistinguishable from an overflowing one after the fact.
+    #[test]
+    fn the_derives_render_and_copy_what_they_claim() {
+        let high_below_low = format!("{:?}", Unusable::HighBelowLow);
+        let overflows = format!("{:?}", Unusable::RangeOverflows);
+        assert!(
+            high_below_low.contains("HighBelowLow"),
+            "a refusal must name itself, and this rendered as {high_below_low}"
+        );
+        assert_ne!(
+            high_below_low, overflows,
+            "the two refusals render identically and a log cannot tell them apart"
+        );
+        assert_eq!(
+            Unusable::HighBelowLow,
+            Clone::clone(&Unusable::HighBelowLow)
+        );
+
+        let cuts = format!("{:?}", CprWidth::CLASSICAL);
+        assert!(
+            cuts.contains("narrow: 80") && cuts.contains("wide: 250"),
+            "the declared cuts must be readable off the rendering, not inferred: {cuts}"
+        );
+        assert_eq!(CprWidth::CLASSICAL, Clone::clone(&CprWidth::CLASSICAL));
+
+        for (class, name) in [
+            (CprClass::Narrow, "Narrow"),
+            (CprClass::Neutral, "Neutral"),
+            (CprClass::Wide, "Wide"),
+        ] {
+            let rendered = format!("{class:?}");
+            assert_eq!(rendered, name, "a width class must render as its own name");
+            assert_eq!(class, Clone::clone(&class));
+        }
+        assert_ne!(CprClass::Narrow, CprClass::Wide);
+
+        let x = levels(100, 90, 98);
+        let rendered = format!("{x:?}");
+        assert!(
+            rendered.contains("pivot: 96") && rendered.contains("half: 1"),
+            "the ladder must render its own levels: {rendered}"
+        );
+        assert_eq!(x, Clone::clone(&x), "a copy of a ladder is the same ladder");
+
+        // `Rel` is private and Copy, and `positions()` is the only reader of the
+        // or-pattern below. A clone that dropped the position number would be a mask
+        // that means something else entirely.
+        let first = plan(&x)
+            .into_iter()
+            .next()
+            .expect("the plan has 41 entries");
+        let index = match Clone::clone(&first.1) {
+            Rel::Near(i)
+            | Rel::Above(i)
+            | Rel::Below(i)
+            | Rel::AboveBare(i)
+            | Rel::BelowBare(i)
+            | Rel::InsideCpr(i) => i,
+        };
+        assert_eq!(index, 7, "the plan opens on near_pivot_r1, position 7");
+    }
 }
 
 #[cfg(test)]
+// See the note on `mod tests`: an `unreachable!` fixture is a region this crate owns
+// and no test can enter, and `expect` refuses just as loudly from inside the standard
+// library.
+#[allow(clippy::expect_used)]
 mod inverted_cpr {
     use super::*;
 
@@ -626,14 +1204,11 @@ mod inverted_cpr {
     /// above / inside / below can hold.
     #[test]
     fn the_three_cpr_body_positions_never_contradict_each_other() {
-        let Ok(tol) = vocab::tolerance::pinned_pivot() else {
-            unreachable!("the pinned pivot tolerance is valid")
-        };
+        let tol = vocab::tolerance::pinned_pivot().expect("the pinned pivot tolerance is valid");
         // A session whose close is well below its high-low midpoint inverts the CPR
         // (bc > tc), because tc = 2*pivot - bc puts tc below bc.
-        let Ok(levels) = DailyLevels::from_previous_session(2_500_000, 2_400_000, 2_410_000) else {
-            unreachable!("a sane session yields a ladder")
-        };
+        let levels = DailyLevels::from_previous_session(2_500_000, 2_400_000, 2_410_000)
+            .expect("a sane session yields a ladder");
         let (low, high) = levels.cpr_span();
         assert!(
             levels.bc() > levels.tc(),

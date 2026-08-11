@@ -59,18 +59,36 @@ pub const PREV_DAY_DOWN: [(i32, u16); 9] = [
 
 /// The previous-day ladder measured UP from yesterday's low.
 ///
-/// Six positions rather than eleven, and that is the shipped table's shape, not a
+/// Seven positions rather than eleven, and that is the shipped table's shape, not a
 /// choice made here: 69 and 70 arrived with the original vocabulary and 106–109
 /// were appended for the extensions. The retracement rungs 0.382, 0.5 and 0.618 in
 /// this direction coincide with 0.618, 0.5 and 0.382 in the other, which already
 /// have positions.
-pub const PREV_DAY_UP: [(i32, u16); 6] = [
+///
+/// # Rung 4.236 was refused, and refusing it was arbitrary
+///
+/// Position 71 `near_fib_424` sat uncomputed with a test calling it "an orphan",
+/// while the vocabulary's own comment beside it reads **"Shipped."** The stated
+/// reason was that no source defines the rung — but 4.236 is a member of the same
+/// classical extension set as the four rungs this ladder already carries:
+///
+/// ```text
+/// 1.272   1.414   1.618 = phi   2.0   2.618 = phi^2   3.618   4.236
+/// ^shipped        ^shipped      ^shipped ^shipped             ^was refused
+/// ```
+///
+/// Shipping 2.618 and refusing 4.236 is not a rule, it is an accident of which
+/// positions the table happened to allocate first. Either both are conventional or
+/// neither is, and 2.618 is already in three ladders. So 4.236 is computed here and
+/// the orphan is gone.
+pub const PREV_DAY_UP: [(i32, u16); 7] = [
     (236, 69),
     (786, 70),
     (1272, 106),
     (1618, 107),
     (2000, 108),
     (2618, 109),
+    (4236, 71),
 ];
 
 /// The five-session ladder, measured UP from the five-session low. All eleven
@@ -195,6 +213,10 @@ pub fn prev_day_bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> 
 /// # Why a five-slot ring and not a sliding window over bars
 ///
 /// A trailing window counted in bars needs a monotonic deque and gives amortised
+/// Measured by `C-I-01` and `C-I-04`, in `crates/indicators/benches/ratio.rs`:
+/// the per-candle cost is flat at 1,000, 50,000 and 200,000 candles folded, and a
+/// session rollover costs what a mid-session candle costs.
+///
 /// O(1) with an O(window) worst case on a single bar. Counted in **sessions** it
 /// needs five slots and is worst-case O(1) — five comparisons, no deque, no
 /// amortisation. Where an exact worst-case-constant alternative exists, §3 rule 4
@@ -293,10 +315,19 @@ impl Prev5 {
     }
 }
 
-/// Every position this module can set.
+/// The length is asserted against the three ladders rather than written twice.
+/// Adding a rung to any ladder without widening this array is a compile error.
+const POSITION_COUNT: usize = PREV_DAY_DOWN.len() + PREV_DAY_UP.len() + PREV5_UP.len();
+const _: () = assert!(POSITION_COUNT == 27, "the ladders and positions() disagree");
+
+/// Every position the three Fibonacci ladders own, in ladder order.
+///
+/// Down ladder, then up, then the five-session ladder — nine, seven and eleven.
+/// Derived from the ladders themselves via [`POSITION_COUNT`], so adding a rung
+/// without widening the array is a compile error rather than a silent truncation.
 #[must_use]
-pub fn positions() -> [u16; 26] {
-    let mut out = [0u16; 26];
+pub fn positions() -> [u16; 27] {
+    let mut out = [0u16; 27];
     let mut i = 0;
     for (_, index) in PREV_DAY_DOWN {
         if let Some(slot) = out.get_mut(i) {
@@ -358,7 +389,7 @@ mod tests {
                 def.name,
             );
         }
-        assert_eq!(seen.len(), 26);
+        assert_eq!(seen.len(), POSITION_COUNT);
     }
 
     /// The two tombstoned rungs are NOT in this module's plan, and the positions
@@ -368,7 +399,12 @@ mod tests {
         let owned = positions();
         assert!(!owned.contains(&19), "19 near_fib_0 is a tombstone");
         assert!(!owned.contains(&25), "25 near_fib_100 is a tombstone");
-        assert!(!owned.contains(&71), "71 near_fib_424 is an orphan");
+        // 71 is NO LONGER an orphan: 4.236 is computed on the bullish anchor. See
+        // PREV_DAY_UP for why refusing it while shipping 2.618 was arbitrary.
+        assert!(
+            owned.contains(&71),
+            "71 near_fib_424 is rung 4.236 of the bullish ladder and must be computed"
+        );
         // And rung 0 / rung 1.0 are absent from the DOWN ladder for that reason.
         for (p, _) in PREV_DAY_DOWN {
             assert!(p != 0 && p != 1000, "rung {p} should have no position here");

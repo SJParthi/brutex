@@ -540,6 +540,8 @@ indicators and the gap-leg spreadsheet the design comes from.
 | 271 | `near_forming_pivot_s5` | — | **void** |
 | 272 | `close_above_forming_pivot_s5_band` | — | **void** |
 | 273 | `close_below_forming_pivot_s5_band` | — | **void** |
+| 274 | `wide_cpr_day` | — | live |
+| 275 | `neutral_cpr_day` | — | live |
 
 
 ---
@@ -548,14 +550,18 @@ indicators and the gap-leg spreadsheet the design comes from.
 
 | | |
 |---|---|
-| positions allocated | 274 (0–273) |
-| live | 232 |
+| positions allocated | 276 (0–275) |
+| live | 234 |
 | retired (duplicated a live position) | 3 — bits 6, 19, 25 |
 | **void** (definitionally constant) | **39** — bits 235–273, D-0080 |
-| `near_*`, needing a tolerance | 81 live |
+| declaring `Kind::Near`, needing a tolerance | 81 live, of 97 allocated |
 | mask type | `ConditionMask`, `[u64; 6]` |
 | mask width | 384 bits |
-| free positions | 110 |
+| free positions | 108 |
+
+The first five rows account for every allocated position exactly once:
+234 + 3 + 39 = 276. If a future append breaks that sum, this table is the stale
+copy and the table in `crates/vocab/src/table.rs` is the truth.
 
 **§6 above is superseded and kept for the record.** It said 74 live bits in a
 `u128` with 54 free, and that was true until this table widened. The `u128` claim

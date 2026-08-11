@@ -33,7 +33,7 @@
 //! is the caller's, because only the caller knows the rung; this module reports
 //! [`Orb::window_closed`] so the caller can abstain per run rather than per bar.
 
-use store::format::Bar;
+use crate::Candle;
 use vocab::{ConditionMask, Tolerance};
 
 /// Minutes from IST midnight to the NSE open, 09:15.
@@ -51,6 +51,20 @@ pub const ORB_FIRST: u16 = 86;
 /// Relations per window, in position order. Five of them, so window `w` owns
 /// `ORB_FIRST + 5*w ..= ORB_FIRST + 5*w + 4`.
 const RELATIONS_PER_WINDOW: u16 = 5;
+
+/// The number of windows, counted in the `u16` the position arithmetic needs.
+///
+/// [`Orb::bits`] used to walk `0..WINDOWS.len()` and derive this per window with
+/// `u16::try_from(w)`, skipping the window on a refusal. The refusal cannot happen —
+/// the loop bound is four — and an arm no input can take is worse than dead weight:
+/// it reads as a case that was thought about, and it is a region no passing test can
+/// execute. Counting in `u16` from the start removes the arm rather than hiding it.
+const WINDOW_COUNT: u16 = 4;
+
+/// `WINDOW_COUNT` and [`WINDOWS`] describe the same four windows. A fifth length added
+/// to one and not the other is a build failure here, not a window that is silently
+/// never swept.
+const _: () = assert!(WINDOWS.len() == 4 && WINDOW_COUNT == 4);
 
 /// Minutes since the session open, or `None` before it.
 ///
@@ -148,15 +162,10 @@ impl Orb {
     /// [`crate::Corrupt`] for a record that is not a bar.
     pub fn step(
         &mut self,
-        bar: &Bar,
+        bar: &Candle,
         tolerance: Tolerance,
     ) -> Result<ConditionMask, crate::Corrupt> {
-        if bar.high < bar.low {
-            return Err(crate::Corrupt::HighBelowLow);
-        }
-        if bar.high.checked_sub(bar.low).is_none() {
-            return Err(crate::Corrupt::RangeOverflows);
-        }
+        bar.check()?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day || !self.live {
             *self = Self {
@@ -187,21 +196,23 @@ impl Orb {
     ///
     /// Separate from [`Self::fold`] because it runs on the other side of the emit:
     /// see [`Self::step`]. `closed` has exactly one owner, and this is it.
-    fn mark_closed(&mut self, bar: &Bar) {
+    fn mark_closed(&mut self, bar: &Candle) {
         let Some(since) = minutes_since_open(bar.ts_micros) else {
             return;
         };
-        for (w, length) in WINDOWS.iter().enumerate() {
-            if since >= *length
-                && let Some(slot) = self.windows.get_mut(w)
-            {
+        // Zipped, not indexed. `self.windows.get_mut(w)` for `w` drawn from
+        // `WINDOWS.iter().enumerate()` cannot be `None` — both are four wide, and
+        // `WINDOW_COUNT` asserts that at compile time — so the `Some` arm this used to
+        // spell was a condition with no false case. See `WINDOW_COUNT`.
+        for (slot, length) in self.windows.iter_mut().zip(WINDOWS) {
+            if since >= length {
                 slot.closed = true;
             }
         }
     }
 
     /// Fold one bar into whichever windows are still open.
-    fn fold(&mut self, bar: &Bar) {
+    fn fold(&mut self, bar: &Candle) {
         let Some(since) = minutes_since_open(bar.ts_micros) else {
             // Before the open. A pre-open print is not part of any opening range,
             // and ingest is supposed to have dropped it — but this module does not
@@ -209,11 +220,11 @@ impl Orb {
             // trust.
             return;
         };
-        for (w, length) in WINDOWS.iter().enumerate() {
-            let Some(slot) = self.windows.get_mut(w) else {
-                continue;
-            };
-            if since < *length {
+        // Zipped for the reason `Self::mark_closed` is: the `continue` that used to
+        // handle a missing slot handled nothing, because `[Window; 4]` and a four-long
+        // `WINDOWS` cannot disagree about an index.
+        for (slot, length) in self.windows.iter_mut().zip(WINDOWS) {
+            if since < length {
                 if slot.seeded {
                     if bar.high > slot.high {
                         slot.high = bar.high;
@@ -238,17 +249,15 @@ impl Orb {
     ///
     /// Four windows times five relations — a compile-time constant, which is what
     /// makes this O(1) rather than "O(windows)". No allocation, no division.
+    /// Measured by `C-I-02`, in `crates/indicators/benches/ratio.rs`.
     #[must_use]
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mut mask = ConditionMask::ZERO;
-        for w in 0..WINDOWS.len() {
-            let Some((high, low)) = self.extremes(w) else {
+        for offset in 0..WINDOW_COUNT {
+            let Some((high, low)) = self.extremes(usize::from(offset)) else {
                 // Still forming, or never seeded. Every position for this window
                 // stays false: a level that can still move is not a level, and
                 // `docs/03-vocabulary.md` §4 wants false rather than "probably".
-                continue;
-            };
-            let Ok(offset) = u16::try_from(w) else {
                 continue;
             };
             let base = ORB_FIRST + offset * RELATIONS_PER_WINDOW;
@@ -303,21 +312,28 @@ pub fn positions() -> [u16; 20] {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes — see \
+              crates/costs/src/money.rs and crates/indicators/tests/shared_core_doc.rs: \
+              a test that cannot panic cannot fail. `expect` and not the \
+              `let ... else { unreachable!() }` this module used to spell, because \
+              `unreachable!` expands to a panic inside THIS crate and is therefore a \
+              coverage region no green run can ever execute, while `expect` panics \
+              inside the standard library and leaves no such region behind."
+)]
 mod tests {
     use super::*;
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the fib width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the fib width is pinned")
     }
 
     /// A bar `m` minutes after the open on IST day 20,000.
-    fn at(m: i64, h: i64, l: i64, c: i64) -> Bar {
+    fn at(m: i64, h: i64, l: i64, c: i64) -> Candle {
         let ts =
             (20_000 * MINUTES_PER_DAY + OPEN_MINUTE + m) * MICROS_PER_MINUTE - IST_OFFSET_MICROS;
-        Bar {
+        Candle {
             ts_micros: ts,
             open: c,
             high: h,
@@ -328,11 +344,8 @@ mod tests {
         }
     }
 
-    fn ok(o: &mut Orb, b: &Bar) -> ConditionMask {
-        let Ok(m) = o.step(b, tol()) else {
-            unreachable!("this fixture bar is sane")
-        };
-        m
+    fn ok(o: &mut Orb, b: &Candle) -> ConditionMask {
+        o.step(b, tol()).expect("this fixture bar is sane")
     }
 
     /// The minute arithmetic, at the boundaries that matter.
@@ -393,9 +406,7 @@ mod tests {
         }
         let mut previous: Option<(i64, i64)> = None;
         for w in 0..WINDOWS.len() {
-            let Some((high, low)) = o.extremes(w) else {
-                unreachable!("every window has closed by minute 70")
-            };
+            let (high, low) = o.extremes(w).expect("every window has closed by minute 70");
             if let Some((ph, pl)) = previous {
                 assert!(high >= ph, "window {w}'s high is below a narrower one's");
                 assert!(low <= pl, "window {w}'s low is above a narrower one's");
@@ -413,17 +424,14 @@ mod tests {
         }
         for close in [50_i64, 89, 90, 100, 110, 111, 500] {
             let mask = o.bits(close, tol());
-            for w in 0..WINDOWS.len() {
-                let Ok(offset) = u16::try_from(w) else {
-                    unreachable!("four fits")
-                };
+            for offset in 0..WINDOW_COUNT {
                 let base = u32::from(ORB_FIRST + offset * RELATIONS_PER_WINDOW);
                 let n = u32::from(mask.get(base))
                     + u32::from(mask.get(base + 1))
                     + u32::from(mask.get(base + 2));
                 assert_eq!(
                     n, 1,
-                    "window {w} at close {close} had {n} of the three relations",
+                    "window {offset} at close {close} had {n} of the three relations",
                 );
             }
         }
@@ -475,7 +483,12 @@ mod tests {
         for m in 0..120 {
             let h = 2_500_000 + (m * 31) % 400;
             let l = 2_500_000 - (m * 17) % 400;
-            union = union.union(&ok(&mut o, &at(m, h, l, 2_500_000 + (m * 13) % 300)));
+            // The close is derived from the span so it is always INSIDE it. The old
+            // fixture used an independent `2_500_000 + (m*13)%300`, which lands above
+            // the high on 39 of these 120 bars — an invalid candle that the old
+            // two-check preamble accepted and `Candle::check` now refuses.
+            let c = l + (m * 13) % (h - l + 1);
+            union = union.union(&ok(&mut o, &at(m, h, l, c)));
         }
         for index in 0..ConditionMask::BITS {
             if union.get(index) {
@@ -492,27 +505,24 @@ mod tests {
     #[test]
     fn the_positions_agree_with_the_vocabulary() {
         for (i, index) in positions().iter().enumerate() {
-            let Some(def) = vocab::table::definition(*index) else {
-                unreachable!("86..=105 are allocated")
-            };
+            let def = vocab::table::definition(*index).expect("86..=105 are allocated");
             assert!(
                 vocab::table::is_live(*index),
                 "position {index} is not live"
             );
             let wants_near = i % 5 >= 3;
             let is_near = def.kind == vocab::Kind::Near;
+            // Chosen BEFORE the assertion rather than inside its message. An `if` in a
+            // failure message is a branch that runs only when the test fails, so both
+            // of its arms are regions a green run cannot reach; here both run on every
+            // pass — twelve bare positions and eight banded ones.
+            let sets_it_as = if wants_near { "banded" } else { "bare" };
             assert_eq!(
-                is_near,
-                wants_near,
-                "position {index} (`{}`) is {:?} and this module sets it as {}",
-                def.name,
-                def.kind,
-                if wants_near { "banded" } else { "bare" },
+                is_near, wants_near,
+                "position {index} (`{}`) is {:?} and this module sets it as {sets_it_as}",
+                def.name, def.kind,
             );
-            let Ok(offset) = u16::try_from(i / 5) else {
-                unreachable!("four fits")
-            };
-            let expected_window = WINDOWS.get(usize::from(offset)).copied().unwrap_or(0);
+            let expected_window = WINDOWS.get(i / 5).copied().unwrap_or(0);
             assert!(
                 def.name.starts_with(&format!("orb{expected_window}_")),
                 "position {index} is `{}` and belongs to the {expected_window}-minute window",
@@ -530,7 +540,8 @@ mod tests {
                 .map(|m| {
                     let h = 2_500_000 + (m * 31) % 400;
                     let l = 2_500_000 - (m * 17) % 400;
-                    ok(&mut o, &at(m, h, l, 2_500_000 + (m * 13) % 300)).words()
+                    let c = l + (m * 13) % (h - l + 1);
+                    ok(&mut o, &at(m, h, l, c)).words()
                 })
                 .collect::<Vec<_>>()
         };
@@ -550,16 +561,76 @@ mod tests {
             Err(crate::Corrupt::RangeOverflows),
         );
     }
+
+    /// `Orb::default()` is [`Orb::new`], and in particular it is not a zeroed struct.
+    ///
+    /// Nothing called `default()`, which is exactly how a hand-written `Default` gets
+    /// replaced by `#[derive(Default)]` in a later cleanup without anything going red.
+    /// A derived one would carry `session_day: 0` and `live: false`; day 0 is a real
+    /// IST day, 1970-01-01, so the first bar of that session would find
+    /// `day == self.session_day` and — because `live` is false — still reset, which
+    /// looks harmless until the second field is the one that changes. `Orb::new` picks
+    /// `i64::MIN` deliberately: no bar this crate accepts can carry that IST day, so a
+    /// fresh state cannot be mistaken for a session in progress on the strength of the
+    /// day alone. This asserts the sentinel, not just the equality, because two derived
+    /// zeroes would satisfy an equality between two derived values.
+    #[test]
+    fn default_is_the_empty_state_and_not_a_zeroed_one() {
+        let fresh = Orb::default();
+        assert_eq!(fresh, Orb::new(), "Orb::default() drifted from Orb::new()");
+        assert_eq!(
+            fresh.session_day,
+            i64::MIN,
+            "a fresh Orb claims a real IST day, so a bar on that day would not reset it"
+        );
+        assert!(
+            !fresh.live,
+            "a fresh Orb claims a session is already running"
+        );
+        for w in 0..WINDOWS.len() {
+            assert!(
+                !fresh.window_closed(w),
+                "window {w} is closed before any bar has arrived"
+            );
+            assert_eq!(
+                fresh.extremes(w),
+                None,
+                "window {w} has a level before any bar has arrived"
+            );
+        }
+        // And it folds a session exactly as `new` does, which equality of the empty
+        // state alone does not prove.
+        let mut from_default = Orb::default();
+        let mut from_new = Orb::new();
+        for m in 0..6 {
+            let bar = at(m, 110, 90, 100);
+            assert_eq!(
+                ok(&mut from_default, &bar).words(),
+                ok(&mut from_new, &bar).words(),
+                "minute {m} emitted differently from a defaulted Orb"
+            );
+        }
+        assert_eq!(
+            from_default, from_new,
+            "the two states diverged over a session"
+        );
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "as `mod tests` above, and for the same coverage reason: `unreachable!` \
+              expands to a panic inside this crate, so the arm a passing test never \
+              takes is a region a passing test can never cover."
+)]
 mod boundary_bar {
     use super::*;
 
-    fn at(minute: i64, o: i64, h: i64, l: i64, c: i64) -> Bar {
+    fn at(minute: i64, o: i64, h: i64, l: i64, c: i64) -> Candle {
         // Minute 0 is 09:15 IST = 555 minutes past IST midnight, in UTC micros.
         const OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
-        Bar {
+        Candle {
             ts_micros: OPEN_UTC_MICROS + minute * 60 * 1_000_000,
             open: o,
             high: h,
@@ -579,26 +650,24 @@ mod boundary_bar {
     /// after the emit. One lost bar per window per day, silently.
     #[test]
     fn the_bar_at_the_window_boundary_is_already_measured_against_it() {
-        let Ok(tolerance) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib tolerance is valid")
-        };
+        let tolerance = vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid");
         let mut o = Orb::new();
         // Minutes 0..4: range 2_500_000 .. 2_501_000.
         for m in 0..5 {
-            let Ok(_) = o.step(
-                &at(m, 2_500_500, 2_501_000, 2_500_000, 2_500_500),
-                tolerance,
-            ) else {
-                unreachable!("a sane bar")
-            };
+            let _ = o
+                .step(
+                    &at(m, 2_500_500, 2_501_000, 2_500_000, 2_500_500),
+                    tolerance,
+                )
+                .expect("a sane bar");
         }
         // Minute 5: outside the 5-minute window, closing well above its high.
-        let Ok(bits) = o.step(
-            &at(5, 2_502_000, 2_502_000, 2_502_000, 2_502_000),
-            tolerance,
-        ) else {
-            unreachable!("a sane bar")
-        };
+        let bits = o
+            .step(
+                &at(5, 2_502_000, 2_502_000, 2_502_000, 2_502_000),
+                tolerance,
+            )
+            .expect("a sane bar");
         assert!(
             o.window_closed(0),
             "the 5-minute window must be closed at minute 5"
@@ -617,17 +686,15 @@ mod boundary_bar {
     /// too eagerly, and the test above would still pass.
     #[test]
     fn the_window_is_not_closed_before_its_length_is_reached() {
-        let Ok(tolerance) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib tolerance is valid")
-        };
+        let tolerance = vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid");
         let mut o = Orb::new();
         for m in 0..5 {
-            let Ok(_) = o.step(
-                &at(m, 2_500_500, 2_501_000, 2_500_000, 2_500_500),
-                tolerance,
-            ) else {
-                unreachable!("a sane bar")
-            };
+            let _ = o
+                .step(
+                    &at(m, 2_500_500, 2_501_000, 2_500_000, 2_500_500),
+                    tolerance,
+                )
+                .expect("a sane bar");
             assert!(
                 !o.window_closed(0),
                 "minute {m} is inside the 5-minute window; it must still be forming"

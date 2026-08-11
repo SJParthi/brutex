@@ -74,27 +74,6 @@ impl Vendor {
     /// Every vendor this engine reads, in path order.
     pub const ALL: [Self; 4] = [Self::Groww, Self::Dhan, Self::TrueData, Self::Gdfl];
 
-    /// What this vendor's instrument master is called on disk.
-    ///
-    /// # Why the file name is a property of the vendor
-    ///
-    /// It was a hand-written list in `api::server::master_paths`:
-    ///
-    /// ```text
-    /// vec![(Vendor::Groww, dir.join("groww_instruments.csv")),
-    ///      (Vendor::Dhan,  dir.join("dhan_scrip.csv"))]
-    /// ```
-    ///
-    /// So adding a feed meant editing that function — and forgetting to meant a
-    /// vendor the engine knows about whose master is silently never read, which
-    /// reports as "this vendor lists nothing" rather than as the wiring bug it
-    /// is. A `match` on `Self` cannot be forgotten: a new variant is a compile
-    /// error until it names its file.
-    ///
-    /// Everything downstream already iterates [`Self::ALL`] — the census grid,
-    /// the merge, the ingest form, the coverage table. This was the one place
-    /// that did not, and it was the entry point.
-    #[must_use]
     /// Whether this vendor publishes an instrument master at all.
     ///
     /// Brokers do; archives do not — a folder of CSVs IS its own listing, and
@@ -106,6 +85,7 @@ impl Vendor {
     /// instrument became non-agreeing and the whole universe degraded — the
     /// same shape as `pull::config` demanding a credential from a feed that has
     /// none. A predicate, so the right set is named rather than assumed.
+    #[must_use]
     pub const fn publishes_master(self) -> bool {
         match self {
             Self::Groww | Self::Dhan => true,
@@ -116,8 +96,6 @@ impl Vendor {
     /// Every vendor that publishes an instrument master.
     pub const MASTERED: [Self; 2] = [Self::Groww, Self::Dhan];
 
-    /// Secondary broker.
-    /// Every vendor this engine reads, in path order.
     /// What this vendor's instrument master is called on disk.
     ///
     /// # Why the file name is a property of the vendor
@@ -857,7 +835,7 @@ enum EquityVerdict {
 /// they are ordinary listed companies.
 ///
 /// Sorted, and no longer for a search. `board_of` probes
-/// [`EQUITY_BOARD_INDEX`], so order carries no correctness weight at all now;
+/// `EQUITY_BOARD_INDEX`, so order carries no correctness weight at all now;
 /// it is kept because a sorted list is the one a human can append to without
 /// re-reading it, and because sortedness is how
 /// `the_measured_series_tables_are_sorted_disjoint_and_complete` catches a
@@ -889,7 +867,7 @@ pub const SME_BOARD_SERIES: [&str; 2] = ["SM", "ST"];
 /// NSE debt series is a one-line append and nothing else moves.
 ///
 /// Sorted for the same reason [`EQUITY_BOARD_SERIES`] is: a human appends to
-/// it, and `board_of` probes [`NON_EQUITY_INDEX`] rather than searching here.
+/// it, and `board_of` probes `NON_EQUITY_INDEX` rather than searching here.
 pub const NON_EQUITY_SERIES: [&str; 120] = [
     "AK", "AL", "AM", "AN", "AZ", "BA", "BC", "BR", "BS", "BU", "BV", "BW", "BX", "D1", "GB", "GS",
     "IV", "MF", "N0", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "NA", "NB", "NC", "ND",

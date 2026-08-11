@@ -1,0 +1,634 @@
+//! Fibonacci over the overnight gap leg.
+//!
+//! **11 vocabulary positions**, 132–142.
+//!
+//! # The source, and why it had to be read off the cell formulas
+//!
+//! `docs/09-design-sources.md` §4 records this one. It is not a Pine script — it
+//! arrived as a spreadsheet with `GAPUP` and `GAPDOWN` sheets, and the rule was read
+//! out of the **cell formulas rather than the row labels, because the two disagree**.
+//!
+//! | | Gap up | Gap down |
+//! |---|---|---|
+//! | `X1` | previous day's **last 3-minute candle HIGH** | previous day's **last 3-minute candle LOW** |
+//! | `X2` | today's **first 3-minute candle HIGH** | today's **first 3-minute candle LOW** |
+//! | `X3` | `X2 - X1` | `X1 - X2` |
+//! | `X4` | `X3 / 2` | `X3 / 2` |
+//! | `X5` | `X2 - X4` | `X2 + X4` |
+//!
+//! # The two sheets are one formula
+//!
+//! Written out, both branches reduce to the same expression, and this was checked
+//! before any of it was implemented rather than assumed:
+//!
+//! ```text
+//! up:      X2 - p·(X2 - X1)/1000
+//! down:    X2 + p·(X1 - X2)/1000
+//! both:    X2 + p·(X1 - X2)/1000      <- the up form is this with the sign folded in
+//! ```
+//!
+//! So [`GapLeg::level`] has one body for both directions. Rung 0 sits on `X2`
+//! (today's opening extreme) and rung 1000 on `X1` (yesterday's closing extreme);
+//! the extension rungs run past `X1`. At `p = 500` the level is `(X1 + X2)/2`
+//! exactly, which is the sheet's own `X5` — and §4 records that `X5 == (X1+X2)/2`
+//! held exactly across all six worked examples in the file. The eleven-rung ladder
+//! contains the sheet's single midpoint as a strict superset.
+//!
+//! # Three-minute candles, from one-minute bars
+//!
+//! The source specifies **3-minute** candles at both ends, and the engine's own rung
+//! is one minute. Rather than require a folded feed, this module folds three
+//! one-minute bars itself: a three-slot tail of the current session gives yesterday's
+//! last 3-minute candle at the day boundary, and the first three bars of the new
+//! session give today's first. Both are fixed-size, so the cost is O(1) per bar.
+//! Measured by `C-I-01`, in `crates/indicators/benches/ratio.rs`.
+//!
+//! On a rung already 3 minutes or longer a single bar *is* the candle, and the fold
+//! degenerates correctly — the first bar seeds it and the next two, if the session
+//! has them, only widen the extremes.
+//!
+//! # What it refuses, and why refusing is the answer
+//!
+//! `X3` is a **length** and the sheet's arithmetic requires it positive. So a session
+//! that did not gap has no leg: the eleven rungs would collapse onto one price and
+//! setting eleven bits at once for a single price is not a ladder, it is noise. The
+//! table's own comment at position 132 says exactly this. [`GapFib`] holds `None`
+//! until a real gap is established and emits nothing until then.
+//!
+//! The direction test is the sheet's own requirement that `X3 > 0`, so it is derived
+//! rather than invented: a gap **up** needs today's first-3 high above yesterday's
+//! last-3 high, and a gap **down** needs yesterday's last-3 low above today's
+//! first-3 low. A session satisfying neither is not a gap.
+
+use crate::Candle;
+use vocab::{ConditionMask, Tolerance};
+
+/// The first vocabulary position of the gap-Fibonacci group.
+pub const GAP_FIRST: u16 = 132;
+
+/// The rungs, in thousandths, in the order positions 132–142 carry them.
+///
+/// Identical to the current-day ladder: the same seven retracements and four
+/// extensions. A different ladder here would mean two "0.618"s in one vocabulary
+/// that were not the same fraction.
+pub const GAP_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 1618, 2000, 2618];
+
+/// The last position, derived so it cannot disagree with the ladder's length.
+///
+/// `saturating_sub` on the count rather than an `as` cast: `clippy::cast_possible_
+/// truncation` is denied in this workspace and the lint is right — a cast here
+/// would be correct only because the ladder happens to be short, which is
+/// proof-by-adjacency and stops holding after an edit.
+pub const GAP_LAST: u16 = {
+    let count = GAP_RUNGS.len();
+    assert!(count <= u16::MAX as usize, "the ladder outgrew a u16 index");
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the assertion above is a const assertion: this cannot truncate"
+    )]
+    let last = GAP_FIRST + (count as u16) - 1;
+    last
+};
+
+const _: () = assert!(GAP_LAST == 142, "the gap group is positions 132..=142");
+
+/// How many one-minute bars make the source's 3-minute candle.
+const CANDLE_MINUTES: usize = 3;
+
+/// Which way the market gapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Today opened above yesterday's close region. The sheet's `GAPUP`.
+    Up,
+    /// Today opened below it. The sheet's `GAPDOWN`.
+    Down,
+}
+
+/// The two ends of a real overnight gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GapLeg {
+    /// `X1` — yesterday's last 3-minute candle, high for an up gap, low for a down.
+    pub x1: i64,
+    /// `X2` — today's first 3-minute candle, same field as `x1`.
+    pub x2: i64,
+    /// Which sheet applies.
+    pub direction: Direction,
+}
+
+impl GapLeg {
+    /// The gap's length, `X3`. Always positive: a leg is only built when it is.
+    #[must_use]
+    pub const fn length(&self) -> i64 {
+        match self.direction {
+            Direction::Up => self.x2.saturating_sub(self.x1),
+            Direction::Down => self.x1.saturating_sub(self.x2),
+        }
+    }
+
+    /// Rung `p`'s price, in paisa. `None` if it leaves `i64`.
+    ///
+    /// One body for both directions — see the module documentation for the algebra.
+    /// `div_euclid` and not `/`: truncation toward zero would round a level on the
+    /// wrong side of the anchor for a negative product, and the two sheets differ
+    /// exactly in that sign.
+    ///
+    /// `None` rather than a clamp: §7 reserves `i64::MIN` for the open-interest null,
+    /// and pinning an out-of-range level onto it would put a sentinel where a price
+    /// goes.
+    #[must_use]
+    pub fn level(&self, p: i32) -> Option<i64> {
+        let x1 = i128::from(self.x1);
+        let x2 = i128::from(self.x2);
+        let step = (i128::from(p) * (x1 - x2)).div_euclid(1000);
+        i64::try_from(x2 + step).ok()
+    }
+
+    /// The sheet's `X5`, the gap midpoint — rung 500 of this ladder.
+    ///
+    /// Present because it is the one value the source states directly and the only
+    /// one its six worked examples pin. If the ladder is right, this equals
+    /// `(X1 + X2)/2`, and a test asserts it.
+    #[must_use]
+    pub fn midpoint(&self) -> Option<i64> {
+        self.level(500)
+    }
+}
+
+/// The gap ladder for one session, and the bookkeeping that establishes it.
+///
+/// Fixed size: a three-slot tail, a three-bar accumulator, and the leg. Nothing
+/// grows with the number of bars fed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GapFib {
+    /// The IST day currently being folded. `i64::MIN` before the first bar.
+    day: i64,
+    /// The current session's rolling last-three extremes, newest folded last.
+    tail: [Option<(i64, i64)>; CANDLE_MINUTES],
+    /// Where the next tail entry goes.
+    tail_next: usize,
+    /// Yesterday's last 3-minute candle, `(high, low)`.
+    yesterday: Option<(i64, i64)>,
+    /// Today's first 3-minute candle while it is still forming.
+    today_high: i64,
+    today_low: i64,
+    /// Bars folded into today's first candle, saturating at [`CANDLE_MINUTES`].
+    today_bars: usize,
+    /// The established leg. `None` until three bars of the new session have arrived
+    /// and a real gap was found.
+    leg: Option<GapLeg>,
+}
+
+const _: () = assert!(core::mem::size_of::<GapFib>() <= 160);
+
+impl Default for GapFib {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GapFib {
+    /// An empty state, before any session.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            day: i64::MIN,
+            tail: [None; CANDLE_MINUTES],
+            tail_next: 0,
+            yesterday: None,
+            today_high: 0,
+            today_low: 0,
+            today_bars: 0,
+            leg: None,
+        }
+    }
+
+    /// The established leg, or `None` while the session has not gapped or has not
+    /// yet produced three bars.
+    #[must_use]
+    pub const fn leg(&self) -> Option<GapLeg> {
+        self.leg
+    }
+
+    /// The full per-bar step: roll over, emit, then fold.
+    ///
+    /// The leg is an **anchor** — a reference the current bar is measured against —
+    /// so it is fixed once early in the session and never moves. Once established it
+    /// cannot depend on the current bar, which is why the emit reads a leg built from
+    /// bars strictly before it.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Corrupt`] for a record that is not a bar.
+    pub fn step(
+        &mut self,
+        bar: &Candle,
+        tolerance: Tolerance,
+    ) -> Result<ConditionMask, crate::Corrupt> {
+        bar.check()?;
+
+        let today = crate::ist_day(bar.ts_micros);
+        if today != self.day {
+            self.close_the_session();
+            self.day = today;
+        }
+
+        let bits = self.bits(bar.close, tolerance);
+        self.fold(bar);
+        Ok(bits)
+    }
+
+    /// Hand the finished session's last 3-minute candle forward and reset.
+    fn close_the_session(&mut self) {
+        // Fold whatever the tail holds. Fewer than three entries is a short session,
+        // and the source's "last 3-minute candle" is then whatever traded — refusing
+        // a half-day outright would drop a real gap.
+        let folded = self
+            .tail
+            .iter()
+            .flatten()
+            .copied()
+            .reduce(|(ah, al), (bh, bl)| {
+                (if bh > ah { bh } else { ah }, if bl < al { bl } else { al })
+            });
+        if folded.is_some() {
+            self.yesterday = folded;
+        }
+        self.tail = [None; CANDLE_MINUTES];
+        self.tail_next = 0;
+        self.today_bars = 0;
+        self.leg = None;
+    }
+
+    /// Fold one bar into the tail and, while it is forming, today's first candle.
+    fn fold(&mut self, bar: &Candle) {
+        if let Some(slot) = self.tail.get_mut(self.tail_next) {
+            *slot = Some((bar.high, bar.low));
+        }
+        self.tail_next = self.tail_next.saturating_add(1) % CANDLE_MINUTES;
+
+        if self.today_bars < CANDLE_MINUTES {
+            if self.today_bars == 0 {
+                self.today_high = bar.high;
+                self.today_low = bar.low;
+            } else {
+                if bar.high > self.today_high {
+                    self.today_high = bar.high;
+                }
+                if bar.low < self.today_low {
+                    self.today_low = bar.low;
+                }
+            }
+            self.today_bars = self.today_bars.saturating_add(1);
+            if self.today_bars == CANDLE_MINUTES {
+                self.leg = self.establish();
+            }
+        }
+    }
+
+    /// Build the leg, or refuse.
+    ///
+    /// The direction test is the sheet's own requirement that `X3` be positive, so it
+    /// is derived from the source rather than chosen: an up gap needs today's first-3
+    /// high above yesterday's last-3 high, a down gap needs yesterday's last-3 low
+    /// above today's first-3 low. Neither holding means the session did not gap.
+    fn establish(&self) -> Option<GapLeg> {
+        let (y_high, y_low) = self.yesterday?;
+        if self.today_high > y_high {
+            return Some(GapLeg {
+                x1: y_high,
+                x2: self.today_high,
+                direction: Direction::Up,
+            });
+        }
+        if y_low > self.today_low {
+            return Some(GapLeg {
+                x1: y_low,
+                x2: self.today_low,
+                direction: Direction::Down,
+            });
+        }
+        None
+    }
+
+    /// The eleven positions for one closing price.
+    ///
+    /// # Cost
+    ///
+    /// Eleven rungs, each one cross-multiplied band test. A compile-time constant,
+    /// which is what makes this O(1) rather than "O(rungs)".
+    /// Measured by `C-I-02`, in `crates/indicators/benches/ratio.rs`.
+    #[must_use]
+    pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
+        let mut mask = ConditionMask::ZERO;
+        let Some(leg) = self.leg else {
+            return mask;
+        };
+        let range = leg.length();
+        // THE LADDER IS WALKED, NOT INDEXED. This was `while i < GAP_RUNGS.len()`
+        // around a `let Some(p) = GAP_RUNGS.get(i) else { break }`, which is an arm
+        // that cannot run while the loop condition holds — `cargo llvm-cov` records
+        // it as a region no passing test can ever execute, and a region that cannot
+        // run is one nobody can be held to. Walking the array removes the arm
+        // instead of hiding it. The ladder is still a fixed eleven, so the cost
+        // claim above is the same claim.
+        for (i, p) in GAP_RUNGS.into_iter().enumerate() {
+            let index = GAP_FIRST.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+            // ONE level, ONE test: `set_near` re-tests with exactly the `covers` used
+            // on the line above, so the two cannot disagree. This is the shape the
+            // current-day family was corrected to after its own level and its own
+            // test were computed separately and drifted apart at the band edge.
+            if let Some(level) = leg.level(p)
+                && tolerance.covers(close, level, range)
+                && let Ok(next) =
+                    vocab::table::set_near(mask, index, tolerance, close, level, range)
+            {
+                mask = next;
+            }
+        }
+        mask
+    }
+
+    /// Every position this module can set.
+    #[must_use]
+    pub const fn positions() -> [u16; 11] {
+        [132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const IST_OPEN_UTC_MICROS: i64 = (555 - 330) * 60 * 1_000_000;
+    const DAY_MICROS: i64 = 24 * 60 * 60 * 1_000_000;
+
+    fn at(day: i64, minute: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + minute * 60 * 1_000_000,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn tol() -> Tolerance {
+        let Ok(t) = vocab::tolerance::pinned_fib() else {
+            unreachable!("the pinned fib width is valid")
+        };
+        t
+    }
+
+    /// The two sheets are one formula. Checked against both branches written out
+    /// separately, exactly as the spreadsheet has them.
+    #[test]
+    fn both_sheet_branches_reduce_to_one_expression() {
+        for (x1, x2, dir) in [
+            (2_400_000_i64, 2_450_000_i64, Direction::Up),
+            (2_450_000, 2_400_000, Direction::Down),
+        ] {
+            let leg = GapLeg {
+                x1,
+                x2,
+                direction: dir,
+            };
+            for p in GAP_RUNGS {
+                // The sheet's own arithmetic, per direction, kept apart on purpose.
+                let sheet = match dir {
+                    Direction::Up => {
+                        i128::from(x2) - (i128::from(p) * (i128::from(x2) - i128::from(x1))) / 1000
+                    }
+                    Direction::Down => {
+                        i128::from(x2) + (i128::from(p) * (i128::from(x1) - i128::from(x2))) / 1000
+                    }
+                };
+                let Some(got) = leg.level(p) else {
+                    unreachable!("levels for real prices fit i64")
+                };
+                assert_eq!(i128::from(got), sheet, "{dir:?} rung {p}");
+            }
+        }
+    }
+
+    /// `X5 == (X1 + X2) / 2` in both directions — the one value the source states
+    /// directly, and the only one its six worked examples pin.
+    #[test]
+    fn the_midpoint_is_the_sheets_x5() {
+        for (x1, x2, dir) in [
+            (2_400_000_i64, 2_450_000_i64, Direction::Up),
+            (2_450_000, 2_400_000, Direction::Down),
+        ] {
+            let leg = GapLeg {
+                x1,
+                x2,
+                direction: dir,
+            };
+            assert_eq!(leg.midpoint(), Some(x1.midpoint(x2)), "{dir:?}");
+        }
+    }
+
+    /// Rung 0 is today's extreme and rung 1000 is yesterday's, both directions.
+    #[test]
+    fn the_ladder_runs_from_today_to_yesterday() {
+        for dir in [Direction::Up, Direction::Down] {
+            let leg = GapLeg {
+                x1: 2_400_000,
+                x2: 2_450_000,
+                direction: dir,
+            };
+            assert_eq!(leg.level(0), Some(2_450_000), "{dir:?} rung 0 is X2");
+            assert_eq!(leg.level(1000), Some(2_400_000), "{dir:?} rung 1000 is X1");
+        }
+    }
+
+    /// The length is positive in both directions — the sheet's `X3` is a length.
+    #[test]
+    fn the_leg_length_is_positive_in_both_directions() {
+        assert_eq!(
+            GapLeg {
+                x1: 100,
+                x2: 140,
+                direction: Direction::Up
+            }
+            .length(),
+            40
+        );
+        assert_eq!(
+            GapLeg {
+                x1: 140,
+                x2: 100,
+                direction: Direction::Down
+            }
+            .length(),
+            40
+        );
+    }
+
+    /// A session that did not gap establishes no leg and sets nothing.
+    ///
+    /// Eleven bits at one price is not a ladder. The table's own comment at position
+    /// 132 says the evaluator's job is to abstain.
+    #[test]
+    fn a_session_that_did_not_gap_sets_nothing() {
+        let mut g = GapFib::new();
+        // Day one: a plain session.
+        for m in 0..6 {
+            let Ok(_) = g.step(&at(30_000, m, 2_501_000, 2_499_000, 2_500_000), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        // Day two opens inside yesterday's last candle — no gap either way.
+        for m in 0..6 {
+            let Ok(mask) = g.step(&at(30_001, m, 2_500_500, 2_499_500, 2_500_000), tol()) else {
+                unreachable!("sane bar")
+            };
+            assert_eq!(mask, ConditionMask::ZERO, "no gap, no bits");
+        }
+        assert_eq!(g.leg(), None, "no leg was established");
+    }
+
+    /// A real gap up establishes the leg the sheet describes.
+    #[test]
+    fn a_gap_up_establishes_the_sheets_leg() {
+        let mut g = GapFib::new();
+        // Yesterday's last three bars top out at 2_500_000.
+        for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
+            let Ok(_) = g.step(&at(30_100, m, h, h - 2_000, h - 500), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        // Today's first three bars top out at 2_520_000 — clear of yesterday.
+        for (m, h) in [(0_i64, 2_515_000_i64), (1, 2_518_000), (2, 2_520_000)] {
+            let Ok(_) = g.step(&at(30_101, m, h, h - 1_000, h - 200), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        let Some(leg) = g.leg() else {
+            unreachable!("a gap up was established")
+        };
+        assert_eq!(leg.direction, Direction::Up);
+        assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 HIGH");
+        assert_eq!(leg.x2, 2_520_000, "X2 is today's first-3 HIGH");
+        assert_eq!(leg.length(), 20_000);
+        assert_eq!(leg.midpoint(), Some(2_510_000));
+    }
+
+    /// A real gap down uses the LOWS, as the `GAPDOWN` sheet does.
+    #[test]
+    fn a_gap_down_uses_the_lows() {
+        let mut g = GapFib::new();
+        for (m, l) in [(0_i64, 2_502_000_i64), (1, 2_501_000), (2, 2_500_000)] {
+            let Ok(_) = g.step(&at(30_200, m, l + 2_000, l, l + 500), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        for (m, l) in [(0_i64, 2_485_000_i64), (1, 2_482_000), (2, 2_480_000)] {
+            let Ok(_) = g.step(&at(30_201, m, l + 1_000, l, l + 200), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        let Some(leg) = g.leg() else {
+            unreachable!("a gap down was established")
+        };
+        assert_eq!(leg.direction, Direction::Down);
+        assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 LOW");
+        assert_eq!(leg.x2, 2_480_000, "X2 is today's first-3 LOW");
+        assert_eq!(leg.length(), 20_000);
+        assert_eq!(leg.midpoint(), Some(2_490_000));
+    }
+
+    /// Nothing is emitted before three bars of the new session have arrived.
+    ///
+    /// The leg is an anchor: it cannot exist until the candle defining it is complete,
+    /// and a partial candle would make the level move under the bits.
+    #[test]
+    fn no_bits_until_the_opening_candle_is_complete() {
+        let mut g = GapFib::new();
+        for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
+            let Ok(_) = g.step(&at(30_300, m, h, h - 2_000, h - 500), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        for m in 0..3_i64 {
+            // The close was 2_510_000 with a low of 2_519_000 — BELOW its own low.
+            // An invalid candle in my own fixture, which `Candle::check` now refuses.
+            let bar = at(30_301, m, 2_520_000, 2_519_000, 2_519_500);
+            let Ok(mask) = g.step(&bar, tol()) else {
+                unreachable!("sane bar")
+            };
+            assert_eq!(
+                mask,
+                ConditionMask::ZERO,
+                "bar {m} is inside the opening candle"
+            );
+            if m < 2 {
+                assert_eq!(g.leg(), None, "the leg cannot exist yet");
+            }
+        }
+        assert!(g.leg().is_some(), "the third bar completes the candle");
+    }
+
+    /// A close sitting exactly on a rung sets that rung.
+    #[test]
+    fn a_close_on_the_midpoint_sets_the_midpoint_rung() {
+        let mut g = GapFib::new();
+        for (m, h) in [(0_i64, 2_498_000_i64), (1, 2_499_000), (2, 2_500_000)] {
+            let Ok(_) = g.step(&at(30_400, m, h, h - 2_000, h - 500), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        for (m, h) in [(0_i64, 2_515_000_i64), (1, 2_518_000), (2, 2_520_000)] {
+            let Ok(_) = g.step(&at(30_401, m, h, h - 1_000, h - 200), tol()) else {
+                unreachable!("sane bar")
+            };
+        }
+        // Leg is 2_500_000 .. 2_520_000; the midpoint is 2_510_000, rung 500 = index 135.
+        let Ok(mask) = g.step(&at(30_401, 3, 2_510_100, 2_509_900, 2_510_000), tol()) else {
+            unreachable!("sane bar")
+        };
+        assert!(
+            mask.get(135),
+            "a close on the midpoint sets rung 0.5 (position 135)"
+        );
+    }
+
+    /// Every position is live, `Kind::Near`, and inside the declared block.
+    #[test]
+    fn the_positions_match_the_vocabulary() {
+        let all = GapFib::positions();
+        assert_eq!(all.len(), GAP_RUNGS.len(), "one position per rung");
+        for (i, index) in all.iter().enumerate() {
+            let expect = GAP_FIRST.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+            assert_eq!(*index, expect, "positions are contiguous from GAP_FIRST");
+            let Some(def) = vocab::table::definition(*index) else {
+                unreachable!("position {index} is in the table")
+            };
+            assert_eq!(def.kind, vocab::Kind::Near, "position {index} needs a band");
+            assert!(
+                def.name.starts_with("near_fib_gap_"),
+                "position {index} is named {} and should be a gap rung",
+                def.name
+            );
+        }
+        assert_eq!(*all.last().unwrap_or(&0), GAP_LAST);
+    }
+
+    /// A corrupt record is refused and changes no state.
+    #[test]
+    fn a_corrupt_record_is_refused() {
+        let mut g = GapFib::new();
+        let inverted = Candle {
+            ts_micros: 0,
+            open: 100,
+            high: 90,
+            low: 110,
+            close: 100,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        assert_eq!(g.step(&inverted, tol()), Err(crate::Corrupt::HighBelowLow));
+        assert_eq!(g.leg(), None);
+    }
+}

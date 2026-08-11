@@ -43,6 +43,20 @@ description  = "Reads the Parquet lake into paisa integers and full-precision gr
 # and a path dependency with no version IS a wildcard.
 brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 
+# THE EVENT SINK. This crate reads the operator's 40 GB parquet lake and said
+# nothing about any of it: a file opened, a row group decoded, a schema
+# refused were all invisible, so "the lake is empty" and "the lake would not
+# open" reached a page as the same silence.
+#
+# NO CYCLE. `crates/telemetry` names no workspace member — a leaf, like
+# `core` — so `lake -> telemetry` keeps CLAUDE.md section 5's graph acyclic.
+#
+# EVERY EVENT HERE IS PER FILE OR PER ROW GROUP, never per row. A parquet row
+# group holds tens of thousands of rows and the lake holds millions; a per-row
+# event would roll the run out of a 64 MiB window long before it finished.
+# D-0075.
+telemetry = { path = "../telemetry", version = "0.1.0" }
+
 # Footer/metadata parsing and column VALUE decoding (RLE definition levels,
 # PLAIN, RLE_DICTIONARY). `default-features = false` drops all eight defaults;
 # the two that matter are `zstd` (C, above) and `arrow`, which we do not want

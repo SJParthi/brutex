@@ -1,4 +1,4 @@
-//! The bit table. 274 positions, and the index **is** the identity.
+//! The bit table. 276 positions, and the index **is** the identity.
 //!
 //! # The rule that outranks every other rule in this file
 //!
@@ -41,7 +41,8 @@
 //!
 //! A tombstone **keeps its index forever** and always evaluates false.
 //! Retiring frees nothing: position 6 is still position 6, and the next
-//! condition appends at 274. That is modelled in the type -- [`BitStatus`] --
+//! condition appends at [`NEXT_FREE`], which is 276 today and only ever grows.
+//! That is modelled in the type -- [`BitStatus`] --
 //! rather than in a comment, and [`set_exact`] refuses a retired index instead
 //! of setting it.
 //!
@@ -157,7 +158,7 @@ const fn retired(index: u16, name: &'static str, kind: Kind, duplicate_of: u16) 
 }
 
 /// The table. Row `i` is position `i`, for every `i`, forever.
-pub const TABLE: [BitDef; 274] = [
+pub const TABLE: [BitDef; 276] = [
     // ---- 0–5. Moving averages. Shipped. ---------------------------------
     plain(0, "close_above_ema20"),
     plain(1, "close_below_ema20"),
@@ -807,6 +808,20 @@ pub const TABLE: [BitDef; 274] = [
         Kind::Plain,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
+    // ---- 274–275. The CPR's width, appended. ------------------------------
+    // Position 63 `narrow_cpr_day` shipped alone, which asks only half a
+    // question: a reader learns that a day was not narrow and nothing about
+    // whether it was wide or ordinary. Three states need three bits, because the
+    // hit test is `(bits & mask) == mask` with no negation — "not narrow" is not
+    // expressible by leaving 63 clear.
+    //
+    // Appended at NEXT_FREE rather than squeezed beside 63, which is what §3
+    // rule 8 requires: 63 keeps its index and its meaning, every mask recorded
+    // before today still means what it meant, and the two new bits are simply
+    // available. This is the first use of the append mechanism since the table
+    // was written, and it cost two rows and one edit to `LIVE`.
+    plain(274, "wide_cpr_day"),
+    plain(275, "neutral_cpr_day"),
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
@@ -816,7 +831,7 @@ pub const COUNT: usize = TABLE.len();
 
 /// The highest position that will ever be a hole: none. The next condition
 /// appends here, whatever has been retired below it.
-pub const NEXT_FREE: u16 = 274;
+pub const NEXT_FREE: u16 = 276;
 
 // THE TABLE CANNOT OUTGROW THE MASK, enforced at COMPILE time.
 //
@@ -849,7 +864,12 @@ pub const LIVE: ConditionMask =
     ConditionMask::from_words([u64::MAX, u64::MAX, u64::MAX, (1u64 << 43) - 1, 0, 0])
         .without_bit(6)
         .without_bit(19)
-        .without_bit(25);
+        .without_bit(25)
+        // 274 and 275 sit in word 4, which the comment above says is empty because
+        // 235–273 are all void. They are the first live positions above 234, so the
+        // sentence is now "word 4 carries exactly these two".
+        .with_bit(274)
+        .with_bit(275);
 
 /// The row at `index`, or `None` when the index is past the table.
 #[must_use]
@@ -956,6 +976,15 @@ pub fn set_near(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail. `expect` and not `let ... else \
+              { unreachable!() }` on purpose -- an `unreachable!` expands to a \
+              panic inside THIS crate, which is a region no passing test can \
+              ever execute, while `expect` panics inside the standard library \
+              and leaves nothing dead behind."
+)]
 mod tests {
     use super::*;
 
@@ -966,10 +995,8 @@ mod tests {
     /// The width the repository actually ships, not a convenient stand-in --
     /// so these tests exercise the configuration a run will use.
     fn test_tolerance() -> Tolerance {
-        let Ok(t) = crate::tolerance::pinned_fib() else {
-            unreachable!("the pinned width is neither the sentinel nor negative")
-        };
-        t
+        crate::tolerance::pinned_fib()
+            .expect("the pinned width is neither the sentinel nor negative")
     }
 
     #[test]
@@ -981,8 +1008,8 @@ mod tests {
         assert_eq!(LIVE, folded, "the LIVE literal drifted from the table");
         assert_eq!(
             LIVE.popcount(),
-            232,
-            "274 positions, less three tombstones and less the 39 void forming-pivot rows"
+            234,
+            "276 positions, less three tombstones and less the 39 void forming-pivot rows"
         );
     }
 
@@ -1028,6 +1055,39 @@ mod tests {
         );
     }
 
+    /// **A void position is refused AS VOID, not as needing a tolerance.**
+    ///
+    /// [`set_exact`] tests the void arm before it tests [`Kind::Near`], and the
+    /// order is the assertion. Reverse them and 238 -- void *and* near --
+    /// answers [`VocabError::NeedsTolerance`], which tells the caller to go to
+    /// [`set_near`] instead; [`set_near`] refuses it too, so the caller is sent
+    /// after a call that cannot exist. A void row has no correct call, and the
+    /// refusal has to say so and carry the reason D-0080 recorded.
+    #[test]
+    fn set_exact_refuses_a_void_position_as_void_and_not_as_needing_a_tolerance() {
+        // 238 is `near_forming_pivot_cpr_bc`: void AND near, so it is the row
+        // that can be refused for two different reasons and only one is right.
+        assert_eq!(
+            set_exact(ConditionMask::ZERO, 238),
+            Err(VocabError::Void {
+                index: 238,
+                reason: "constant false: |C - level| is a fixed multiple of the band on every bar",
+            }),
+            "a void near row is void first; NeedsTolerance would send the caller \
+             to a call that refuses it as well"
+        );
+        // 237 is `close_below_forming_pivot_pivot_band`: void AND plain, so the
+        // only other answer available is `Ok` with the bit set.
+        assert_eq!(
+            set_exact(ConditionMask::ZERO, 237),
+            Err(VocabError::Void {
+                index: 237,
+                reason: "carries only sign(v - u), the running-range axis bits 40-43 already hold",
+            }),
+            "a void plain row must refuse rather than set a bit that carries nothing"
+        );
+    }
+
     #[test]
     fn set_exact_refuses_a_near_bit_and_an_index_past_the_table() {
         assert_eq!(
@@ -1038,9 +1098,7 @@ mod tests {
             set_exact(ConditionMask::ZERO, NEXT_FREE),
             Err(VocabError::NoSuchBit { index: NEXT_FREE })
         );
-        let Ok(m) = set_exact(ConditionMask::ZERO, 0) else {
-            unreachable!("bit 0 is live and plain")
-        };
+        let m = set_exact(ConditionMask::ZERO, 0).expect("bit 0 is live and plain");
         assert!(m.get(0) && m.popcount() == 1);
     }
 
@@ -1048,14 +1106,11 @@ mod tests {
     fn set_near_needs_the_band_to_actually_cover() {
         let tol = test_tolerance();
         let level = 2_500_000i64;
-        let Ok(hit) = set_near(ConditionMask::ZERO, 17, tol, level + 200, level, 20_000) else {
-            unreachable!("17 is live and near")
-        };
+        let hit = set_near(ConditionMask::ZERO, 17, tol, level + 200, level, 20_000)
+            .expect("17 is live and near");
         assert!(hit.get(17));
-        let Ok(miss) = set_near(ConditionMask::ZERO, 17, tol, level + 200_000, level, 20_000)
-        else {
-            unreachable!("17 is live and near")
-        };
+        let miss = set_near(ConditionMask::ZERO, 17, tol, level + 200_000, level, 20_000)
+            .expect("17 is live and near");
         assert!(miss.is_empty(), "outside the band sets nothing");
     }
 
@@ -1087,9 +1142,7 @@ mod tests {
         assert_eq!(name(NEXT_FREE), None);
         assert!(!is_live(NEXT_FREE));
         assert_eq!(definition(NEXT_FREE), None);
-        let Some(d) = definition(6) else {
-            unreachable!("position 6 exists; it is retired, which is not absent")
-        };
+        let d = definition(6).expect("position 6 exists; it is retired, which is not absent");
         assert_eq!(d.kind, Kind::Near);
         assert_eq!(d.status, BitStatus::Retired { duplicate_of: 62 });
         assert!(format!("{d:?}").contains("near_pivot_p"));
@@ -1097,7 +1150,128 @@ mod tests {
 
     #[test]
     fn count_and_next_free_agree_with_the_table() {
-        assert_eq!(COUNT, 274);
+        assert_eq!(COUNT, 276);
         assert_eq!(usize::from(NEXT_FREE), COUNT);
+    }
+
+    /// **A row constructor carries the `kind` and the `reason` it is handed, and
+    /// does not substitute the answer today's rows happen to want.**
+    ///
+    /// [`TABLE`] is a `const`, so until this test existed the four constructors
+    /// were only ever evaluated by the compiler and no test ever called one.
+    /// That hid two mistakes that no table-wide check can see:
+    ///
+    /// * All three tombstones are [`Kind::Near`] today, so a [`retired`] that
+    ///   ignored its `kind` argument and wrote `Kind::Near` would pass every
+    ///   test in this crate -- until the first plain position is retired, at
+    ///   which point a position that decides on its own starts demanding a
+    ///   tolerance.
+    /// * `crates/vocab/tests/table.rs` asserts only that a void row's reason is
+    ///   non-empty, so a [`void`] that ignored its `reason` argument and wrote
+    ///   one fixed sentence for all 39 rows would pass that too -- and every
+    ///   void row would then explain itself with another row's identity, which
+    ///   is the reason travelling in [`VocabError::Void`] to whoever asked.
+    ///
+    /// The indices are [`NEXT_FREE`] on purpose: this is the constructors' own
+    /// contract and not a claim about any shipped row.
+    #[test]
+    fn the_row_constructors_carry_the_kind_and_the_reason_they_are_handed() {
+        let synthetic = NEXT_FREE;
+
+        assert_eq!(
+            plain(synthetic, "a_plain_row"),
+            BitDef {
+                index: synthetic,
+                name: "a_plain_row",
+                kind: Kind::Plain,
+                status: BitStatus::Live,
+            },
+            "`plain` builds a live row that decides on its own"
+        );
+        assert_eq!(
+            near(synthetic, "a_near_row"),
+            BitDef {
+                index: synthetic,
+                name: "a_near_row",
+                kind: Kind::Near,
+                status: BitStatus::Live,
+            },
+            "`near` differs from `plain` in exactly one field, and it is `kind`"
+        );
+        assert_eq!(
+            retired(synthetic, "a_retired_row", Kind::Plain, 62),
+            BitDef {
+                index: synthetic,
+                name: "a_retired_row",
+                kind: Kind::Plain,
+                status: BitStatus::Retired { duplicate_of: 62 },
+            },
+            "`retired` must pass `kind` through; no shipped tombstone is plain, \
+             so hardcoding `Kind::Near` here would go unnoticed"
+        );
+        assert_eq!(
+            void(synthetic, "a_void_row", Kind::Near, "this exact sentence"),
+            BitDef {
+                index: synthetic,
+                name: "a_void_row",
+                kind: Kind::Near,
+                status: BitStatus::Void {
+                    reason: "this exact sentence"
+                },
+            },
+            "`void` must carry the reason verbatim, not a fixed stand-in"
+        );
+    }
+
+    /// **A void position is refused even where the band would have covered it.**
+    ///
+    /// The ORDER of the checks in [`set_near`] is the whole content of this
+    /// test. Both calls pass `value_paisa == level_paisa` against a positive
+    /// range, which [`Tolerance::covers`] answers true for: delete the
+    /// [`BitStatus::Void`] arm and 238 falls straight through to the band test
+    /// and the bit is SET. A position D-0080 proved is a constant would then be
+    /// reported as a condition that held on this bar.
+    ///
+    /// `crates/vocab/tests/table.rs` walks 235..=273 through [`set_exact`] only.
+    /// Thirteen of those 39 rows are [`Kind::Near`], and [`set_exact`] refuses
+    /// them for the wrong reason -- it would answer
+    /// [`VocabError::NeedsTolerance`] if the void arm were gone, so it cannot
+    /// see this. [`set_near`] is the only entry point that can.
+    #[test]
+    fn set_near_refuses_a_void_position_even_where_the_band_would_cover() {
+        let tol = test_tolerance();
+        let level = 2_500_000i64;
+
+        // 238 is `near_forming_pivot_cpr_bc`: void AND near, so `set_near` is
+        // the only door it has.
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 238, tol, level, level, 20_000),
+            Err(VocabError::Void {
+                index: 238,
+                reason: "constant false: |C - level| is a fixed multiple of the band on every bar",
+            }),
+            "an exact hit on a void level must still refuse, and must say why"
+        );
+
+        // 237 is `close_below_forming_pivot_pivot_band`: void AND plain. Void
+        // outranks `NotNear`, because `NotNear` advertises `set_exact` and
+        // `set_exact` refuses 237 as well -- there is no correct call to name.
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 237, tol, level, level, 20_000),
+            Err(VocabError::Void {
+                index: 237,
+                reason: "carries only sign(v - u), the running-range axis bits 40-43 already hold",
+            }),
+            "a void row is refused as void, not redirected to a call that refuses it too"
+        );
+
+        // The control: 17 is live, near, and the very same arguments set it. So
+        // the two refusals above are the void arm and not a band that missed.
+        let live = set_near(ConditionMask::ZERO, 17, tol, level, level, 20_000)
+            .expect("17 is live and near");
+        assert!(
+            live.get(17),
+            "these arguments do cover, so the refusals above are the void arm"
+        );
     }
 }

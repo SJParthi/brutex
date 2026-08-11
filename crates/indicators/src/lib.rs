@@ -39,20 +39,22 @@
 //! Per bar: one session comparison, eleven cross-multiplied rung tests, two
 //! extreme updates. No loop whose length depends on the data, no allocation, and
 //! a fixed state whose size is asserted at compile time. Measured on the proof
-//! harness at 24.4 → 22.4 nanoseconds per bar across a 100× larger input — flat,
+//! harness at 24.4 → 22.4 nanoseconds per bar across a 100× larger input — level,
 //! which is the evidence for §3 rule 4 rather than a claim about it.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod daily;
+pub mod evaluator;
 pub mod fib;
+pub mod gap;
 pub mod orb;
 pub mod pattern;
 pub mod session;
+pub mod trend;
 pub mod vwap;
 
-use store::format::Bar;
 use vocab::{ConditionMask, Tolerance};
 
 /// The first vocabulary position of the current-day Fibonacci ladder.
@@ -94,25 +96,25 @@ pub fn ist_day(ts_micros: i64) -> i64 {
 /// all, so a look-ahead read cannot be written, let alone run.
 #[derive(Clone, Copy, Debug)]
 pub struct PastPrefix<'a> {
-    seen: &'a [Bar],
+    seen: &'a [Candle],
 }
 
 impl<'a> PastPrefix<'a> {
     /// Borrow `bars[0..=n]`, or `None` when `n` is past the end.
     #[must_use]
-    pub fn upto(bars: &'a [Bar], n: usize) -> Option<Self> {
+    pub fn upto(bars: &'a [Candle], n: usize) -> Option<Self> {
         bars.get(..=n).map(|seen| Self { seen })
     }
 
     /// The bar at index `n` — the latest one this prefix can see.
     #[must_use]
-    pub fn current(&self) -> Option<&'a Bar> {
+    pub fn current(&self) -> Option<&'a Candle> {
         self.seen.last()
     }
 
     /// Every bar this prefix can see. There is no accessor that returns more.
     #[must_use]
-    pub const fn as_slice(&self) -> &'a [Bar] {
+    pub const fn as_slice(&self) -> &'a [Candle] {
         self.seen
     }
 
@@ -153,14 +155,69 @@ pub enum Corrupt {
     ///
     /// It cannot happen on real market data — the widest Indian index span is
     /// about 10^7 paisa against an `i64` ceiling of 9.2 x 10^18. It CAN happen
-    /// from a corrupt record, because the store's own `ohlc_is_sane` checks field
-    /// ORDER only: a bar with `low = i64::MIN` is "sane" by that test and the
-    /// subtraction overflows.
+    /// from a corrupt record: a bar with `low = i64::MIN` and `open = close =
+    /// i64::MIN` satisfies `store::format::Bar::ohlc_is_sane` and the subtraction
+    /// still overflows.
+    ///
+    /// **This paragraph previously said `ohlc_is_sane` "checks field ORDER only".
+    /// That was false**, and the falsehood had a cost: it is why [`Evaluator`] was
+    /// written without a containment check of its own. `ohlc_is_sane` checks full
+    /// containment — `high >= open`, `high >= low`, `high >= close`, `low <= open`,
+    /// `low <= close` — so the store would have refused the mis-assembled OHLC that
+    /// this crate accepted. See [`Corrupt::PriceOutsideRange`].
     ///
     /// Refused loudly rather than saturated. A saturating range would silently
     /// answer a different question than the one asked, which is the fallback
     /// `CLAUDE.md` §4 bans.
     RangeOverflows,
+    /// `open` or `close` lies outside `[low, high]`.
+    ///
+    /// # Why this needs its own refusal rather than tolerance
+    ///
+    /// A bar is a summary of ticks, and `open` and `close` are two of those ticks, so
+    /// both must lie within the extremes. When they do not, the record was assembled
+    /// wrongly — the classic cause is an aggregator dropping or reordering a tick —
+    /// and every shape predicate built on it becomes meaningless in a way that reads
+    /// as meaningful.
+    ///
+    /// Concretely, with `open = 2_600_000, high = 2_500_000, low = 2_400_000,
+    /// close = 2_300_000`: body is 300,000 against a range of 100,000, and both wicks
+    /// come out at **minus** 100,000. Every `_at_most` predicate is a `<=` against a
+    /// positive bound, which a negative satisfies, so the bar was labelled a **long
+    /// bearish marubozu — "no wicks" — precisely because its wicks were impossible**,
+    /// and `session` called it a large body on a bar whose body is three times its own
+    /// range.
+    ///
+    /// Refused rather than clamped. Flooring the wicks at zero would fabricate a shape
+    /// the ticks never made, which is the fallback `CLAUDE.md` §4 bans — the same
+    /// reason [`Corrupt::RangeOverflows`] refuses instead of saturating.
+    PriceOutsideRange,
+    /// This bar's timestamp is not strictly after the last accepted one.
+    ///
+    /// Refused because the session rollover keys on the IST day *changing*, not
+    /// increasing. A receding timestamp therefore closes the books on a **later**
+    /// session and installs it as "yesterday", so the CPR, the S1–S5 / R1–R5 ladder,
+    /// the fifteen previous-day rungs and the five-session rungs are all computed
+    /// from a session that has not happened yet. That is look-ahead, and §3 rule 7
+    /// requires a mechanism rather than an assumption.
+    ///
+    /// The store guarantees monotonic append, but `crates/indicators` no longer
+    /// depends on the store — and a live consumer holding a replayed or reordered
+    /// feed does not control its ordering. So the guarantee has to live here.
+    TimestampNotIncreasing,
+    /// `volume` is negative. Zero is a real zero (§7); negative is corruption.
+    ///
+    /// Reached through the aggregate evaluator, which previously discarded it. Only the
+    /// VWAP family can detect it — the other eight modules never read `volume` — and
+    /// discarding it made a bar VWAP called corruption come back as a successful
+    /// evaluation with twenty positions silently absent.
+    NegativeVolume,
+    /// The volume-weighted accumulator would leave the range this crate can prove safe.
+    ///
+    /// Unreachable on any price a market prints; reachable from a corrupt record. Same
+    /// reason as [`Corrupt::NegativeVolume`] for why it now surfaces rather than being
+    /// swallowed.
+    AccumulatorTooLarge,
 }
 
 /// The current-session Fibonacci anchors, and the eleven bits they decide.
@@ -252,13 +309,8 @@ impl CurDayFib {
     ///
     /// [`Corrupt::HighBelowLow`] for a record whose high is below its low. The
     /// bar is neither emitted for nor folded in.
-    pub fn step(&mut self, bar: &Bar, tolerance: Tolerance) -> Result<ConditionMask, Corrupt> {
-        if bar.high < bar.low {
-            return Err(Corrupt::HighBelowLow);
-        }
-        if bar.high.checked_sub(bar.low).is_none() {
-            return Err(Corrupt::RangeOverflows);
-        }
+    pub fn step(&mut self, bar: &Candle, tolerance: Tolerance) -> Result<ConditionMask, Corrupt> {
+        bar.check()?;
         let day = ist_day(bar.ts_micros);
         if day != self.session_day {
             *self = Self {
@@ -273,11 +325,11 @@ impl CurDayFib {
 
     /// Fold one bar into the anchors. Strict `>` and `<` are load-bearing.
     ///
-    /// Under `>=`, a flat market merely *re-touching* the session high would move
+    /// Under `>=`, a market at one price merely *re-touching* the session high would move
     /// the later extreme and flip the leg — remapping all eleven rungs with no
     /// change to the range at all. Under `>`, the leg changes if and only if the
     /// range changes.
-    fn fold(&mut self, bar: &Bar) {
+    fn fold(&mut self, bar: &Candle) {
         if !self.live {
             self.hi = bar.high;
             self.lo = bar.low;
@@ -333,9 +385,16 @@ impl CurDayFib {
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mut mask = ConditionMask::ZERO;
         let r = self.range();
-        if !self.live || r <= 0 || self.leg == Leg::Undetermined {
+        if !self.live || r <= 0 {
             return mask;
         }
+        // ONE test for an undetermined leg, and it is this match. The guard above
+        // used to carry `self.leg == Leg::Undetermined` as well, which made the
+        // third arm below unreachable while the guard was correct — a region no
+        // input could execute, and therefore one no test could cover. Deleting the
+        // duplicate rather than the arm keeps every leg named explicitly at the
+        // one place the anchor is decided; the returned mask is empty either way,
+        // so nothing a caller can observe changed.
         let anchor = match self.leg {
             Leg::Up => self.hi,
             Leg::Down => self.lo,
@@ -407,11 +466,21 @@ impl CurDayFib {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes — a test that \
+              cannot panic cannot fail — and here it buys a second thing. \
+              `unreachable!` expands to a panic inside THIS crate, so llvm-cov \
+              counts a region that can never run and the coverage gate can never \
+              reach 100 on this file. `.expect` panics inside core, which is not \
+              instrumented: the same failure, with the refused value printed \
+              beside the message, and no dead region left behind."
+)]
 mod tests {
     use super::*;
 
-    fn bar(ts: i64, o: i64, h: i64, l: i64, c: i64) -> Bar {
-        Bar {
+    fn bar(ts: i64, o: i64, h: i64, l: i64, c: i64) -> Candle {
+        Candle {
             ts_micros: ts,
             open: o,
             high: h,
@@ -423,20 +492,14 @@ mod tests {
     }
 
     fn tol() -> Tolerance {
-        let Ok(t) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the fib width is pinned")
-        };
-        t
+        vocab::tolerance::pinned_fib().expect("the fib width is pinned")
     }
 
-    /// Step a bar that must be legal. A helper rather than `.expect()`, because
-    /// this workspace denies `clippy::expect_used` — a panic message in shipped
-    /// code is a decision nobody reviewed.
-    fn ok(s: &mut CurDayFib, b: &Bar) -> ConditionMask {
-        let Ok(m) = s.step(b, tol()) else {
-            unreachable!("this fixture bar is sane")
-        };
-        m
+    /// Step a bar that must be legal. A helper so that the twenty call sites below
+    /// read as one line each, and so that a fixture this crate calls sane failing
+    /// the sanity check names itself once rather than twenty times.
+    fn ok(s: &mut CurDayFib, b: &Candle) -> ConditionMask {
+        s.step(b, tol()).expect("this fixture bar is sane")
     }
 
     /// The rung order here MUST be the table's order, or every emitted bit means
@@ -461,13 +524,9 @@ mod tests {
             (2618, "near_fib_curday_2618"),
         ];
         for (i, (p, want)) in EXPECTED.iter().enumerate() {
-            let Ok(offset) = u16::try_from(i) else {
-                unreachable!("eleven fits in a u16")
-            };
+            let offset = u16::try_from(i).expect("eleven fits in a u16");
             let index = CURDAY_FIRST + offset;
-            let Some(def) = vocab::table::definition(index) else {
-                unreachable!("121..=131 are allocated")
-            };
+            let def = vocab::table::definition(index).expect("121..=131 are allocated");
             assert_eq!(
                 CURDAY_RUNGS.get(i).copied(),
                 Some(*p),
@@ -504,9 +563,9 @@ mod tests {
     #[test]
     fn the_first_bar_of_a_session_emits_nothing() {
         let mut s = CurDayFib::new();
-        let Ok(m) = s.step(&bar(0, 100, 110, 90, 105), tol()) else {
-            unreachable!("a sane bar")
-        };
+        let m = s
+            .step(&bar(0, 100, 110, 90, 105), tol())
+            .expect("a sane bar");
         assert!(
             m.is_empty(),
             "the first bar had no anchor and still emitted"
@@ -590,13 +649,9 @@ mod tests {
     fn a_new_ist_day_discards_the_previous_session() {
         let mut s = CurDayFib::new();
         let _ = ok(&mut s, &bar(0, 100, 500, 50, 200));
-        let Some(day_one) = s.session_day() else {
-            unreachable!("live")
-        };
+        let day_one = s.session_day().expect("a folded bar leaves the state live");
         let _ = ok(&mut s, &bar(MICROS_PER_DAY, 100, 110, 90, 105));
-        let Some(day_two) = s.session_day() else {
-            unreachable!("live")
-        };
+        let day_two = s.session_day().expect("a folded bar leaves the state live");
         assert_ne!(day_two, day_one);
         assert_eq!(s.bars_folded(), 1, "the new session kept old bars");
         assert_eq!(s.range(), 20, "the new session kept the old range");
@@ -605,7 +660,7 @@ mod tests {
     /// Same bars twice, byte-identical bit streams. §3 rule 5.
     #[test]
     fn the_same_session_twice_gives_the_same_bits() {
-        let bars: Vec<Bar> = (0..200)
+        let bars: Vec<Candle> = (0..200)
             .map(|k| {
                 let base = 2_500_000 + (k * 37) % 900;
                 bar(
@@ -683,14 +738,10 @@ mod tests {
     /// rather than clamping.
     #[test]
     fn the_prefix_cannot_see_past_its_own_end() {
-        let bars: Vec<Bar> = (0..5).map(|k| bar(k, 1, 2, 0, 1)).collect();
-        let Some(p) = PastPrefix::upto(&bars, 2) else {
-            unreachable!("2 is in range")
-        };
+        let bars: Vec<Candle> = (0..5).map(|k| bar(k, 1, 2, 0, 1)).collect();
+        let p = PastPrefix::upto(&bars, 2).expect("2 is in range");
         assert_eq!(p.len(), 3);
-        let Some(cur) = p.current() else {
-            unreachable!("the prefix is non-empty")
-        };
+        let cur = p.current().expect("the prefix is non-empty");
         assert_eq!(cur.ts_micros, 2);
         assert_eq!(p.as_slice().len(), 3, "the slice reached past n");
         assert!(
@@ -723,15 +774,272 @@ mod tests {
         let _ = t.bits(i64::MAX, tol());
         let _ = t.bits(i64::MIN, tol());
     }
+
+    /// Before its first bar the state names no session, no range and no ladder.
+    ///
+    /// `session_day` is an `Option` for exactly this reason: the field holds
+    /// `i64::MIN` until a bar arrives, so returning `Some(i64::MIN)` would hand a
+    /// caller §7's null sentinel dressed as a day number. Nothing had ever called
+    /// the accessor before the first bar, so nothing had ever checked which of the
+    /// two it returns.
+    #[test]
+    fn a_state_before_its_first_bar_has_no_session_and_no_ladder() {
+        let s = CurDayFib::new();
+        assert_eq!(s.session_day(), None, "an empty state named a session day");
+        assert_eq!(s.range(), 0, "an empty state reported a range");
+        assert_eq!(s.bars_folded(), 0, "an empty state had folded a bar");
+        assert_eq!(s.leg(), Leg::Undetermined, "an empty state picked a leg");
+        assert_eq!(s.level(0), None, "an empty state materialised a level");
+        assert!(
+            s.bits(2_500_000, tol()).is_empty(),
+            "an empty state emitted a rung"
+        );
+    }
+
+    /// `Default` must be `new`, or a caller writing `CurDayFib::default()` starts a
+    /// run in a state nothing in this file reasons about.
+    #[test]
+    fn the_default_state_is_the_empty_one() {
+        assert_eq!(
+            CurDayFib::default(),
+            CurDayFib::new(),
+            "`Default` drifted from `new`"
+        );
+    }
+
+    /// A span wider than `i64` reports "no range" rather than panicking.
+    ///
+    /// `step` refuses such a record — `extreme_prices_neither_panic_nor_overflow`
+    /// proves that — so this state is reachable only from inside the crate, which is
+    /// exactly the reader `range`'s `checked_sub` is there for. Written as `hi - lo`
+    /// it is a panic in **every** profile, because this workspace leaves overflow
+    /// checks on in release too.
+    #[test]
+    fn a_span_wider_than_the_type_reports_no_range_rather_than_panicking() {
+        let s = CurDayFib {
+            hi: i64::MAX,
+            lo: i64::MIN,
+            leg: Leg::Up,
+            live: true,
+            ..CurDayFib::new()
+        };
+        assert_eq!(s.range(), 0, "hi - lo overflowed and was not caught");
+        assert_eq!(
+            s.level(618),
+            None,
+            "a state with no range still materialised a level"
+        );
+        assert!(
+            s.bits(0, tol()).is_empty(),
+            "a state with no range emitted a rung"
+        );
+    }
+
+    /// The displayed level is the level the bit is tested against, on both legs.
+    ///
+    /// `level` is the display path and `rung_level` is the evaluation path, and two
+    /// bugs already lived in that pair — see `rung_level`'s documentation: a
+    /// truncation that disagreed at the band edge, and a sign that put every
+    /// Down-leg rung on the wrong side of the anchor. `level` had no caller at all,
+    /// in this crate or any other. The hand-computed numbers come first so this is
+    /// not two implementations agreeing with each other and nothing else: over a
+    /// 100,000-paisa session, rung 618 sits exactly 61,800 paisa from the anchor.
+    #[test]
+    fn the_displayed_level_is_the_level_the_rung_is_tested_against() {
+        // Bar two takes the high alone, so the high is the later extreme.
+        let mut up = CurDayFib::new();
+        let _ = ok(&mut up, &bar(0, 2_450_000, 2_490_000, 2_400_000, 2_450_000));
+        let _ = ok(
+            &mut up,
+            &bar(60_000_000, 2_450_000, 2_500_000, 2_410_000, 2_460_000),
+        );
+        assert_eq!(up.leg(), Leg::Up, "a new high alone is an Up leg");
+        assert_eq!(
+            up.range(),
+            100_000,
+            "the session spans 2,400,000..2,500,000"
+        );
+        assert_eq!(up.level(0), Some(2_500_000), "rung 0 is the anchor itself");
+        assert_eq!(
+            up.level(618),
+            Some(2_438_200),
+            "an Up-leg rung retraces DOWN from the high"
+        );
+        assert_eq!(
+            up.level(1000),
+            Some(2_400_000),
+            "rung 1000 is the far extreme"
+        );
+
+        // Bar two takes the low alone, so the low is the later extreme.
+        let mut down = CurDayFib::new();
+        let _ = ok(
+            &mut down,
+            &bar(0, 2_450_000, 2_500_000, 2_410_000, 2_450_000),
+        );
+        let _ = ok(
+            &mut down,
+            &bar(60_000_000, 2_450_000, 2_490_000, 2_400_000, 2_420_000),
+        );
+        assert_eq!(down.leg(), Leg::Down, "a new low alone is a Down leg");
+        assert_eq!(
+            down.range(),
+            100_000,
+            "the session spans 2,400,000..2,500,000"
+        );
+        assert_eq!(
+            down.level(0),
+            Some(2_400_000),
+            "rung 0 is the anchor itself"
+        );
+        assert_eq!(
+            down.level(618),
+            Some(2_461_800),
+            "a Down-leg rung retraces UP from the low"
+        );
+        assert_eq!(
+            down.level(1000),
+            Some(2_500_000),
+            "rung 1000 is the far extreme"
+        );
+
+        // And every rung of the ladder displays what it is tested against. This is
+        // the disagreement that silently dropped every Down-leg bit.
+        for (state, anchor, name) in [(up, 2_500_000_i64, "Up"), (down, 2_400_000_i64, "Down")] {
+            for p in CURDAY_RUNGS {
+                assert_eq!(
+                    state.level(p),
+                    state.rung_level(anchor, p, 100_000),
+                    "{name} leg: rung {p} displays one level and is tested against another"
+                );
+            }
+        }
+    }
+
+    /// An undetermined leg has a range but no ladder, and emits nothing.
+    ///
+    /// A bar that engulfs the running range moves both extremes, so they share one
+    /// bar and no temporal order exists. `bits` decides that in the single match
+    /// that picks the anchor, and this is the input that reaches it: live, with a
+    /// real range, and with no later extreme. Without such an input that arm is a
+    /// region no test executes.
+    #[test]
+    fn an_undetermined_leg_has_a_range_but_no_level() {
+        let mut s = CurDayFib::new();
+        let _ = ok(&mut s, &bar(0, 2_450_000, 2_490_000, 2_400_000, 2_450_000));
+        let _ = ok(
+            &mut s,
+            &bar(60_000_000, 2_450_000, 2_600_000, 2_300_000, 2_450_000),
+        );
+        assert_eq!(
+            s.leg(),
+            Leg::Undetermined,
+            "an engulfing bar left a temporal order behind"
+        );
+        assert_eq!(
+            s.range(),
+            300_000,
+            "the engulfing bar's own span is the session range"
+        );
+        assert_eq!(
+            s.level(618),
+            None,
+            "an undetermined leg materialised a level"
+        );
+        assert!(
+            s.bits(2_450_000, tol()).is_empty(),
+            "an undetermined leg emitted a rung"
+        );
+    }
+
+    /// A level outside `i64` is refused by the display path too, not clamped.
+    ///
+    /// `an_out_of_range_level_is_refused_not_clamped` proves it for the evaluation
+    /// path, and both must refuse for the same reason: clamping would put §7's
+    /// open-interest null sentinel where a price goes. Rung 0 of the same state is
+    /// still representable, which is what makes this the refusal of one rung rather
+    /// than of the whole ladder.
+    #[test]
+    fn a_displayed_level_outside_the_type_is_refused_not_clamped() {
+        let s = CurDayFib {
+            hi: i64::MAX,
+            lo: i64::MAX / 2,
+            leg: Leg::Down,
+            live: true,
+            ..CurDayFib::new()
+        };
+        assert_eq!(
+            s.level(0),
+            Some(i64::MAX / 2),
+            "rung 0 is the anchor and fits"
+        );
+        assert_eq!(
+            s.level(2618),
+            None,
+            "a level 2.618 half-i64 ranges above the anchor was returned anyway"
+        );
+    }
+
+    /// `is_empty` is the accessor clippy demands beside `len`, and nothing called it.
+    ///
+    /// The answer it must give is not obvious from the type: an empty prefix is not
+    /// constructible at all, because `upto` on an empty history is `None` rather
+    /// than a prefix of nothing. Both halves are asserted, because a prefix that
+    /// reported itself empty would make a caller skip the bar it does hold.
+    #[test]
+    fn a_prefix_always_holds_at_least_the_bar_it_names() {
+        let bars: Vec<Candle> = (0..3).map(|k| bar(k, 1, 2, 0, 1)).collect();
+        let p = PastPrefix::upto(&bars, 0).expect("bar 0 is in range");
+        assert_eq!(p.len(), 1, "the prefix at bar 0 saw more than bar 0");
+        assert!(
+            !p.is_empty(),
+            "a prefix holding bar 0 reported itself empty"
+        );
+        let nothing: [Candle; 0] = [];
+        assert!(
+            PastPrefix::upto(&nothing, 0).is_none(),
+            "bar 0 of an empty history is not a bar and must not be a prefix"
+        );
+    }
+
+    /// The three legs are three distinct keys, and the default leg emits nothing.
+    ///
+    /// `Leg` is `Hash` so a caller can key results by leg, and a hash that
+    /// disagreed with `Eq` would give it two entries for one leg. `Default` matters
+    /// for the reason `CurDayFib::new` starts undetermined: a leg that defaulted to
+    /// `Up` would emit a ladder off an anchor no bar established.
+    #[test]
+    fn the_three_legs_are_three_distinct_keys() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        assert!(seen.insert(Leg::Up), "an empty set already held Up");
+        assert!(!seen.insert(Leg::Up), "one leg produced two entries");
+        assert!(seen.insert(Leg::Down), "Down collided with Up");
+        assert!(
+            seen.insert(Leg::Undetermined),
+            "Undetermined collided with a determined leg"
+        );
+        assert_eq!(seen.len(), 3, "the three legs did not stay three keys");
+        assert_eq!(
+            Leg::default(),
+            Leg::Undetermined,
+            "the default leg must be the one with no anchor"
+        );
+    }
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "same exception, and the same second reason, as `mod tests` above: \
+              `unreachable!` would leave a region in this crate that no input can \
+              reach, and `.expect` leaves none."
+)]
 mod zero_range {
     use super::*;
-    use store::format::Bar;
 
-    fn flat(ts: i64, price: i64) -> Bar {
-        Bar {
+    fn flat(ts: i64, price: i64) -> Candle {
+        Candle {
             ts_micros: ts,
             open: price,
             high: price,
@@ -755,9 +1063,7 @@ mod zero_range {
     /// from a run while reporting nothing.
     #[test]
     fn a_zero_range_bar_is_accepted_by_curday_fib() {
-        let Ok(tolerance) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib tolerance is valid")
-        };
+        let tolerance = vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid");
         let mut f = CurDayFib::new();
         assert!(
             f.step(&flat(0, 2_500_000), tolerance).is_ok(),
@@ -770,11 +1076,9 @@ mod zero_range {
     /// Without this half, the test above could be satisfied by deleting the guard.
     #[test]
     fn an_inverted_bar_is_still_refused_by_curday_fib() {
-        let Ok(tolerance) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib tolerance is valid")
-        };
+        let tolerance = vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid");
         let mut f = CurDayFib::new();
-        let inverted = Bar {
+        let inverted = Candle {
             ts_micros: 0,
             open: 2_500_000,
             high: 2_499_000,
@@ -788,6 +1092,12 @@ mod zero_range {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "same exception, and the same second reason, as `mod tests` above: \
+              `unreachable!` would leave a region in this crate that no input can \
+              reach, and `.expect` leaves none."
+)]
 mod down_leg {
     use super::*;
 
@@ -803,9 +1113,7 @@ mod down_leg {
     /// were simply flipped the other way.
     #[test]
     fn both_legs_can_set_a_rung() {
-        let Ok(tolerance) = vocab::tolerance::pinned_fib() else {
-            unreachable!("the pinned fib tolerance is valid")
-        };
+        let tolerance = vocab::tolerance::pinned_fib().expect("the pinned fib tolerance is valid");
         let (anchor, range, p) = (2_500_000_i64, 100_000_i64, 618_i32);
         let step = i64::from(p) * range / 1000;
 
@@ -848,5 +1156,233 @@ mod down_leg {
             None,
             "clamping to i64::MIN would put §7's null sentinel where a price goes"
         );
+    }
+}
+
+/// One period of price, and the only input the indicator layer needs.
+///
+/// # Why this exists instead of `Candle`
+///
+/// `crates/indicators` used to take `Candle`, which coupled the whole
+/// condition layer to **brutex's on-disk file format** for the sake of a seven-field
+/// struct. That coupling is what stopped any other project using it: a live-trading
+/// consumer holds ticks from a socket, not records from a fixed-stride file, and it
+/// should not have to link a storage engine to ask "is this candle a hammer".
+///
+/// So the indicator layer declares the shape it needs and depends on `vocab` alone.
+/// `crates/vocab`, `crates/indicators` and `crates/engine` now form a closure that
+/// takes **no brutex-specific dependency at all** — see the crate documentation.
+/// A caller holding a `Candle`, a socket tick, or a row from someone
+/// else's database converts it at its own boundary, which is where the knowledge of
+/// that format already lives.
+///
+/// The fields are deliberately identical to a stored bar, so the conversion is a
+/// struct literal and not a decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Candle {
+    /// Microseconds since the Unix epoch, UTC — the **open** (left edge) of the
+    /// period. `docs/00-charter.md` verified this against 1,706,290 lake bars.
+    pub ts_micros: i64,
+    /// Open, in paisa. §7: never a float.
+    pub open: i64,
+    /// High, in paisa.
+    pub high: i64,
+    /// Low, in paisa.
+    pub low: i64,
+    /// Close, in paisa.
+    pub close: i64,
+    /// Contracts or shares. `0` is a real zero, not an absence.
+    pub volume: i64,
+    /// Open interest, or [`OI_NULL`] when absent. §7 reserves `i64::MIN` for the
+    /// null; zero means zero.
+    pub open_interest: i64,
+}
+
+/// The open-interest null sentinel. §7 reserves `i64::MIN`; zero means zero.
+pub const OI_NULL: i64 = i64::MIN;
+
+impl Candle {
+    /// A candle from its seven fields.
+    #[must_use]
+    pub const fn new(
+        ts_micros: i64,
+        open: i64,
+        high: i64,
+        low: i64,
+        close: i64,
+        volume: i64,
+        open_interest: i64,
+    ) -> Self {
+        Self {
+            ts_micros,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            open_interest,
+        }
+    }
+
+    /// Is this a candle at all?
+    ///
+    /// # Why this lives on the type and not in nine modules
+    ///
+    /// Nine modules each need to know whether a record is a bar, and each used to
+    /// re-derive it. Nine derivations is nine chances to disagree, and a disagreement
+    /// means a **partially evaluated** bar: some families emit, others refuse, and the
+    /// mask is a mixture of two answers with nothing recording which.
+    ///
+    /// A design review found exactly that. The aggregate evaluator was given a
+    /// containment check and the nine modules were not, so a mis-assembled OHLC was
+    /// refused by the whole and accepted by every part — and a consumer calling
+    /// `Patterns::step` directly still got a bar labelled "no wicks" because its wicks
+    /// were negative. One definition, nine call sites, is the fix.
+    ///
+    /// # Errors
+    ///
+    /// [`Corrupt::HighBelowLow`] when the extremes are inverted, which a market cannot
+    /// print — it can print a zero range, never a negative one.
+    /// [`Corrupt::RangeOverflows`] when `high - low` leaves `i64`.
+    /// [`Corrupt::PriceOutsideRange`] when `open` or `close` sits outside the extremes,
+    /// which makes every wick length negative and every shape predicate meaningless.
+    pub const fn check(&self) -> Result<(), Corrupt> {
+        if self.high < self.low {
+            return Err(Corrupt::HighBelowLow);
+        }
+        if self.high.checked_sub(self.low).is_none() {
+            return Err(Corrupt::RangeOverflows);
+        }
+        if self.open > self.high
+            || self.close > self.high
+            || self.open < self.low
+            || self.close < self.low
+        {
+            return Err(Corrupt::PriceOutsideRange);
+        }
+        // Volume is checked HERE, not inside the one module that reads it, and the
+        // reason is torn state rather than tidiness.
+        //
+        // The aggregate evaluator drives nine modules in sequence. VWAP is the only one
+        // that reads `volume`, and it ran LAST — so a negative volume was detected after
+        // the other eight had already folded the bar into their own accumulators. The
+        // evaluator then returned an error, and `a_refused_candle_changes_nothing` went
+        // red: the refusal was real but eight modules had already moved. A refusal that
+        // leaves state behind is worse than none, because the next bar is evaluated
+        // against a session that absorbed a record nobody accepted.
+        //
+        // Anything checkable from the record alone belongs before the first module runs.
+        if self.volume < 0 {
+            return Err(Corrupt::NegativeVolume);
+        }
+        Ok(())
+    }
+
+    /// `high - low`, or `None` when the subtraction leaves `i64`.
+    ///
+    /// A market can print a zero range; it cannot print a negative one, so
+    /// `high < low` is a broken record rather than a state to tolerate.
+    #[must_use]
+    pub const fn range(&self) -> Option<i64> {
+        if self.high < self.low {
+            return None;
+        }
+        self.high.checked_sub(self.low)
+    }
+}
+
+#[cfg(test)]
+mod candle {
+    use super::*;
+
+    /// The constructor fills the fields in the documented order.
+    ///
+    /// Seven `i64` arguments in a row is exactly the shape a transposition hides in,
+    /// and `Candle::new` had no caller anywhere in the workspace: the bench and every
+    /// test build the struct with a literal, where the field names catch a swap. A
+    /// caller that does use the constructor would get its high and low exchanged with
+    /// nothing to notice it — every wick negative, every `_at_most` predicate
+    /// satisfied by a negative, which is the failure `Corrupt::PriceOutsideRange`
+    /// documents. The seven values are distinct so no swap can pass.
+    #[test]
+    fn the_constructor_fills_the_fields_in_the_documented_order() {
+        let c = Candle::new(11, 2_450_000, 2_500_000, 2_400_000, 2_460_000, 7, OI_NULL);
+        assert_eq!(c.ts_micros, 11, "argument 1 is the timestamp");
+        assert_eq!(c.open, 2_450_000, "argument 2 is the open");
+        assert_eq!(c.high, 2_500_000, "argument 3 is the high");
+        assert_eq!(c.low, 2_400_000, "argument 4 is the low");
+        assert_eq!(c.close, 2_460_000, "argument 5 is the close");
+        assert_eq!(c.volume, 7, "argument 6 is the volume");
+        assert_eq!(
+            c.open_interest, OI_NULL,
+            "argument 7 is the open interest, and the null sentinel was not carried"
+        );
+        assert_eq!(c.check(), Ok(()), "a sane candle was refused");
+        assert_eq!(
+            c.range(),
+            Some(100_000),
+            "2,500,000 - 2,400,000 is 100,000 paisa"
+        );
+    }
+
+    /// A range is refused when it would be negative and when it would not fit, and
+    /// zero is neither of those.
+    ///
+    /// A limit-locked or untraded minute prints `high == low`, and answering `None`
+    /// for it would drop a real bar from a run while reporting nothing. Nothing in
+    /// the workspace called `Candle::range` at all, so none of its three answers had
+    /// ever been checked.
+    #[test]
+    fn a_candle_range_refuses_a_negative_or_unrepresentable_span_and_keeps_zero() {
+        let inverted = Candle::new(0, 2_450_000, 2_400_000, 2_500_000, 2_450_000, 0, OI_NULL);
+        assert_eq!(
+            inverted.range(),
+            None,
+            "a negative span was reported as a range"
+        );
+        let straddling = Candle::new(0, 0, i64::MAX, i64::MIN, 0, 0, OI_NULL);
+        assert_eq!(
+            straddling.range(),
+            None,
+            "i64::MAX - i64::MIN wrapped instead of refusing"
+        );
+        let flat = Candle::new(0, 2_500_000, 2_500_000, 2_500_000, 2_500_000, 0, OI_NULL);
+        assert_eq!(flat.range(), Some(0), "a zero-range minute is a real bar");
+        let wide = Candle::new(0, 2_400_000, 2_500_000, 2_400_000, 2_500_000, 0, OI_NULL);
+        assert_eq!(
+            wide.range(),
+            Some(100_000),
+            "the span of a 2,400,000..2,500,000 bar is 100,000 paisa"
+        );
+    }
+
+    /// A defaulted candle carries a **real** zero open interest, not the null.
+    ///
+    /// `Candle` derives `Default`, and §7 reserves `i64::MIN` for "absent" while zero
+    /// means zero — so `Candle::default()` states that the instrument has no open
+    /// contracts, not that its open interest is unknown. Nothing in the workspace
+    /// calls it, so nothing had ever said which of the two it means.
+    ///
+    /// This records the behaviour rather than endorsing it: if the derive is ever
+    /// replaced by a hand-written `Default` that uses [`OI_NULL`], this test goes red
+    /// and the choice gets made deliberately instead of by a derive.
+    #[test]
+    fn a_defaulted_candle_is_all_zero_and_its_open_interest_is_a_real_zero() {
+        let d = Candle::default();
+        assert_eq!(
+            d,
+            Candle::new(0, 0, 0, 0, 0, 0, 0),
+            "the derived default is not all-zero"
+        );
+        assert_ne!(
+            d.open_interest, OI_NULL,
+            "a defaulted candle claimed an ABSENT open interest"
+        );
+        assert_eq!(
+            d.check(),
+            Ok(()),
+            "an all-zero candle is sane: zero range, zero volume, prices contained"
+        );
+        assert_eq!(d.range(), Some(0), "an all-zero candle has a zero range");
     }
 }

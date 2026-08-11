@@ -18,7 +18,27 @@
 //!
 //! Lookup is one hash, one mask and a bounded probe of [`MemberIndex`] — a
 //! table this file builds at compile time. The worst probe is asserted at
-//! `<= 8` and measured at 6 on 750 members and 7 on 213.
+//! `<= 8` by `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`,
+//! which walks each table the way `contains` does and counts the steps, and
+//! measured, on the six tables this file now builds, at:
+//!
+//! | table | members | slots | worst probe |
+//! |---|---|---|---|
+//! | `NTM_INDEX` | 750 | 2048 | 6 |
+//! | `FNO_INDEX` | 213 | 1024 | 7 |
+//! | `NIFTY_500_INDEX` | 500 | 2048 | 5 |
+//! | `NIFTY_200_INDEX` | 200 | 1024 | 6 |
+//! | `NIFTY_100_INDEX` | 100 | 512 | 5 |
+//! | `NIFTY_50_INDEX` | 50 | 256 | 3 |
+//!
+//! [`of_equity`] probes all six, so a membership question costs at most 32
+//! probe steps rather than 13. That is three times what it was and it is still
+//! a CONSTANT — none of those numbers moves when a list grows within its
+//! table, which is the property `CLAUDE.md` §3 rule 4 asks for. The four
+//! appended tables came in at D-0089; sizing them the way [`MemberIndex`]
+//! merely *permits* rather than the way its bound was *measured* put the NIFTY
+//! 500 at 13 steps, and [`NIFTY_500_INDEX`] records why they are a quarter
+//! full instead of half.
 //!
 //! **This paragraph said "a binary search over a sorted array — O(log n) on 750
 //! entries, so at most 10 comparisons ... a perfect hash would make it O(1) and
@@ -39,6 +59,19 @@
 //! the ground that neither list contains an SME listing, and a claim that
 //! load-bearing is checked here rather than asserted in a comment — see
 //! [`of_equity`] and `no_measured_sme_ticker_belongs_to_either_universe`.
+//!
+//! # What the four NIFTY tiers replace
+//!
+//! Nothing, in this crate — they had never existed here. The web pages offered
+//! NIFTY 50 / 100 / 200 / 500 and produced them by SLICING
+//! [`NIFTY_TOTAL_MARKET`], which is stored alphabetically, so the first fifty
+//! rows were `360ONE, 3MINDIA, AADHARHFC, …` presented as the NIFTY 50. That
+//! is a `CLAUDE.md` §3 rule 1 violation shipped as a feature: a claim about
+//! index membership with no source behind it. D-0089 replaces the slice with
+//! the exchange's own published constituent files. Wiring the API and the page
+//! to these constants is deliberately NOT part of that change — the data and
+//! the source note land first, and `api::server::universe_label` still emits
+//! only `index|fno|ntm|other` until a later one.
 
 use crate::instrument::{InstrumentKey, Kind};
 
@@ -1040,6 +1073,932 @@ pub const FNO_UNDERLYINGS: [&str; 213] = [
     "ZYDUSLIFE",
 ];
 
+/// The 50 NIFTY 50 constituents.
+///
+/// Transcribed from
+/// <https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv>,
+/// fetched 2026-08-11, and recorded in `docs/00-charter.md` §4c as golden
+/// rule 1 requires of any claim about an instrument. The file is authored by
+/// the exchange that computes the index, so this is a PUBLISHED membership
+/// rather than a derived one — which is the whole difference between this
+/// constant and the four ways the web pages used to fake it.
+///
+/// Symbols only. Every row of the source also carries a company name, an
+/// industry, a series and an ISIN; the ISIN is what makes the row checkable
+/// against a vendor master, and it is recorded in the charter rather than
+/// duplicated here because nothing in this crate reads it.
+///
+/// UNVERIFIED against an NSE constituent circular: this is a SNAPSHOT and the
+/// index is rebalanced semi-annually. See `docs/06-limits.md` §11.
+pub const NIFTY_50: [&str; 50] = [
+    "ADANIENT",
+    "ADANIPORTS",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJAJFINSV",
+    "BAJFINANCE",
+    "BEL",
+    "BHARTIARTL",
+    "CIPLA",
+    "COALINDIA",
+    "DRREDDY",
+    "EICHERMOT",
+    "ETERNAL",
+    "GRASIM",
+    "HCLTECH",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HINDALCO",
+    "HINDUNILVR",
+    "ICICIBANK",
+    "INDIGO",
+    "INFY",
+    "ITC",
+    "JIOFIN",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LT",
+    "M&M",
+    "MARUTI",
+    "MAXHEALTH",
+    "NESTLEIND",
+    "NTPC",
+    "ONGC",
+    "POWERGRID",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SHRIRAMFIN",
+    "SUNPHARMA",
+    "TATACONSUM",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TITAN",
+    "TMPV",
+    "TRENT",
+    "ULTRACEMCO",
+    "WIPRO",
+];
+
+/// The 100 NIFTY 100 constituents.
+///
+/// Transcribed from
+/// <https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv>,
+/// fetched 2026-08-11, and recorded in `docs/00-charter.md` §4c.
+///
+/// Contains [`NIFTY_50`] entire — 50 of 50, zero outside — which is not
+/// assumed from the names but asserted for every symbol by
+/// `core::universe::the_published_tiers_nest_one_inside_the_next`.
+///
+/// UNVERIFIED against an NSE constituent circular: this is a SNAPSHOT and the
+/// index is rebalanced semi-annually. See `docs/06-limits.md` §11.
+pub const NIFTY_100: [&str; 100] = [
+    "ABB",
+    "ADANIENSOL",
+    "ADANIENT",
+    "ADANIGREEN",
+    "ADANIPORTS",
+    "ADANIPOWER",
+    "AMBUJACEM",
+    "APOLLOHOSP",
+    "ASIANPAINT",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJAJFINSV",
+    "BAJAJHLDNG",
+    "BAJFINANCE",
+    "BANKBARODA",
+    "BEL",
+    "BHARTIARTL",
+    "BOSCHLTD",
+    "BPCL",
+    "BRITANNIA",
+    "CANBK",
+    "CGPOWER",
+    "CHOLAFIN",
+    "CIPLA",
+    "COALINDIA",
+    "CUMMINSIND",
+    "DIVISLAB",
+    "DLF",
+    "DMART",
+    "DRREDDY",
+    "EICHERMOT",
+    "ENRIN",
+    "ETERNAL",
+    "GAIL",
+    "GODREJCP",
+    "GRASIM",
+    "HAL",
+    "HCLTECH",
+    "HDFCAMC",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HINDALCO",
+    "HINDUNILVR",
+    "HINDZINC",
+    "HYUNDAI",
+    "ICICIBANK",
+    "INDHOTEL",
+    "INDIGO",
+    "INFY",
+    "IOC",
+    "IRFC",
+    "ITC",
+    "JINDALSTEL",
+    "JIOFIN",
+    "JSWSTEEL",
+    "KOTAKBANK",
+    "LODHA",
+    "LT",
+    "LTM",
+    "M&M",
+    "MARUTI",
+    "MAXHEALTH",
+    "MAZDOCK",
+    "MOTHERSON",
+    "MUTHOOTFIN",
+    "NESTLEIND",
+    "NTPC",
+    "ONGC",
+    "PFC",
+    "PIDILITIND",
+    "PNB",
+    "POWERGRID",
+    "RECLTD",
+    "RELIANCE",
+    "SBILIFE",
+    "SBIN",
+    "SHREECEM",
+    "SHRIRAMFIN",
+    "SIEMENS",
+    "SOLARINDS",
+    "SUNPHARMA",
+    "TATACAP",
+    "TATACONSUM",
+    "TATAPOWER",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TITAN",
+    "TMCV",
+    "TMPV",
+    "TORNTPHARM",
+    "TRENT",
+    "TVSMOTOR",
+    "ULTRACEMCO",
+    "UNIONBANK",
+    "UNITDSPR",
+    "VBL",
+    "VEDL",
+    "WIPRO",
+    "ZYDUSLIFE",
+];
+
+/// The 200 NIFTY 200 constituents.
+///
+/// Transcribed from
+/// <https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv>,
+/// fetched 2026-08-11, and recorded in `docs/00-charter.md` §4c.
+///
+/// Contains [`NIFTY_100`] entire — 100 of 100, zero outside — asserted by
+/// `core::universe::the_published_tiers_nest_one_inside_the_next`.
+///
+/// UNVERIFIED against an NSE constituent circular: this is a SNAPSHOT and the
+/// index is rebalanced semi-annually. See `docs/06-limits.md` §11.
+pub const NIFTY_200: [&str; 200] = [
+    "360ONE",
+    "ABB",
+    "ABCAPITAL",
+    "ADANIENSOL",
+    "ADANIENT",
+    "ADANIGREEN",
+    "ADANIPORTS",
+    "ADANIPOWER",
+    "ALKEM",
+    "AMBUJACEM",
+    "APLAPOLLO",
+    "APOLLOHOSP",
+    "ASHOKLEY",
+    "ASIANPAINT",
+    "ASTRAL",
+    "ATGL",
+    "AUBANK",
+    "AUROPHARMA",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJAJFINSV",
+    "BAJAJHLDNG",
+    "BAJFINANCE",
+    "BANKBARODA",
+    "BANKINDIA",
+    "BDL",
+    "BEL",
+    "BHARATFORG",
+    "BHARTIARTL",
+    "BHEL",
+    "BIOCON",
+    "BLUESTARCO",
+    "BOSCHLTD",
+    "BPCL",
+    "BRITANNIA",
+    "BSE",
+    "CANBK",
+    "CGPOWER",
+    "CHOLAFIN",
+    "CIPLA",
+    "COALINDIA",
+    "COCHINSHIP",
+    "COFORGE",
+    "COLPAL",
+    "CONCOR",
+    "COROMANDEL",
+    "CUMMINSIND",
+    "DABUR",
+    "DIVISLAB",
+    "DIXON",
+    "DLF",
+    "DMART",
+    "DRREDDY",
+    "EICHERMOT",
+    "ENRIN",
+    "ETERNAL",
+    "EXIDEIND",
+    "FEDERALBNK",
+    "FORTIS",
+    "GAIL",
+    "GLENMARK",
+    "GMRAIRPORT",
+    "GODFRYPHLP",
+    "GODREJCP",
+    "GODREJPROP",
+    "GRASIM",
+    "GROWW",
+    "GVT&D",
+    "HAL",
+    "HAVELLS",
+    "HCLTECH",
+    "HDFCAMC",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HEROMOTOCO",
+    "HINDALCO",
+    "HINDPETRO",
+    "HINDUNILVR",
+    "HINDZINC",
+    "HUDCO",
+    "HYUNDAI",
+    "ICICIAMC",
+    "ICICIBANK",
+    "ICICIGI",
+    "IDEA",
+    "IDFCFIRSTB",
+    "INDHOTEL",
+    "INDIANB",
+    "INDIGO",
+    "INDUSINDBK",
+    "INDUSTOWER",
+    "INFY",
+    "IOC",
+    "IRCTC",
+    "IREDA",
+    "IRFC",
+    "ITC",
+    "JINDALSTEL",
+    "JIOFIN",
+    "JSWENERGY",
+    "JSWSTEEL",
+    "JUBLFOOD",
+    "KALYANKJIL",
+    "KEI",
+    "KOTAKBANK",
+    "KPITTECH",
+    "LAURUSLABS",
+    "LENSKART",
+    "LGEINDIA",
+    "LICHSGFIN",
+    "LODHA",
+    "LT",
+    "LTF",
+    "LTM",
+    "LUPIN",
+    "M&M",
+    "M&MFIN",
+    "MANKIND",
+    "MARICO",
+    "MARUTI",
+    "MAXHEALTH",
+    "MAZDOCK",
+    "MCX",
+    "MFSL",
+    "MOTHERSON",
+    "MOTILALOFS",
+    "MPHASIS",
+    "MRF",
+    "MUTHOOTFIN",
+    "NATIONALUM",
+    "NAUKRI",
+    "NESTLEIND",
+    "NHPC",
+    "NMDC",
+    "NTPC",
+    "NYKAA",
+    "OBEROIRLTY",
+    "OFSS",
+    "OIL",
+    "ONGC",
+    "PAGEIND",
+    "PATANJALI",
+    "PAYTM",
+    "PERSISTENT",
+    "PFC",
+    "PHOENIXLTD",
+    "PIDILITIND",
+    "PIIND",
+    "PNB",
+    "POLICYBZR",
+    "POLYCAB",
+    "POWERGRID",
+    "POWERINDIA",
+    "PREMIERENE",
+    "PRESTIGE",
+    "RADICO",
+    "RECLTD",
+    "RELIANCE",
+    "RVNL",
+    "SAIL",
+    "SBICARD",
+    "SBILIFE",
+    "SBIN",
+    "SHREECEM",
+    "SHRIRAMFIN",
+    "SIEMENS",
+    "SOLARINDS",
+    "SRF",
+    "SUNPHARMA",
+    "SUPREMEIND",
+    "SUZLON",
+    "SWIGGY",
+    "TATACAP",
+    "TATACOMM",
+    "TATACONSUM",
+    "TATAELXSI",
+    "TATAINVEST",
+    "TATAPOWER",
+    "TATASTEEL",
+    "TCS",
+    "TECHM",
+    "TIINDIA",
+    "TITAN",
+    "TMCV",
+    "TMPV",
+    "TORNTPHARM",
+    "TRENT",
+    "TVSMOTOR",
+    "ULTRACEMCO",
+    "UNIONBANK",
+    "UNITDSPR",
+    "UPL",
+    "VBL",
+    "VEDL",
+    "VMM",
+    "VOLTAS",
+    "WAAREEENER",
+    "WIPRO",
+    "YESBANK",
+    "ZYDUSLIFE",
+];
+
+/// The 500 NIFTY 500 constituents.
+///
+/// Transcribed from
+/// <https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv>,
+/// fetched 2026-08-11, and recorded in `docs/00-charter.md` §4c.
+///
+/// Contains [`NIFTY_200`] entire — 200 of 200, zero outside — and is itself
+/// contained entire by [`NIFTY_TOTAL_MARKET`]: all 500 resolve in the 750, with
+/// zero outside. Both are asserted for every symbol by
+/// `core::universe::the_published_tiers_nest_one_inside_the_next`, which lets
+/// [`of_equity`] set the containing bits without inventing a membership no
+/// source states.
+///
+/// That second containment is the load-bearing one. niftyindices.com defines
+/// the Total Market as "all stocks that are part of Nifty 500 and Nifty
+/// Microcap 250", and the published files agree with the definition exactly:
+/// the union of the NIFTY 500 file and the NIFTY Microcap 250 file is the
+/// NIFTY Total Market file, row for row, with nothing on either side alone.
+/// The 750-versus-752 discrepancy D-0089 records lives entirely in the
+/// Microcap 250 half, which this repository does not carry as a named tier —
+/// so it cannot reach any of the four tiers here. See `docs/06-limits.md` §11.
+///
+/// UNVERIFIED against an NSE constituent circular: this is a SNAPSHOT and the
+/// index is rebalanced semi-annually. See `docs/06-limits.md` §11.
+pub const NIFTY_500: [&str; 500] = [
+    "360ONE",
+    "3MINDIA",
+    "AADHARHFC",
+    "AARTIIND",
+    "AAVAS",
+    "ABB",
+    "ABBOTINDIA",
+    "ABCAPITAL",
+    "ABDL",
+    "ABFRL",
+    "ABLBL",
+    "ABREL",
+    "ABSLAMC",
+    "ACC",
+    "ACE",
+    "ACMESOLAR",
+    "ACUTAAS",
+    "ADANIENSOL",
+    "ADANIENT",
+    "ADANIGREEN",
+    "ADANIPORTS",
+    "ADANIPOWER",
+    "AEGISLOG",
+    "AEGISVOPAK",
+    "AFCONS",
+    "AFFLE",
+    "AIAENG",
+    "AIIL",
+    "AJANTPHARM",
+    "ALKEM",
+    "AMBER",
+    "AMBUJACEM",
+    "ANANDRATHI",
+    "ANANTRAJ",
+    "ANGELONE",
+    "ANTHEM",
+    "ANURAS",
+    "APARINDS",
+    "APLAPOLLO",
+    "APOLLOHOSP",
+    "APOLLOTYRE",
+    "APTUS",
+    "ARE&M",
+    "ASAHIINDIA",
+    "ASHOKLEY",
+    "ASIANPAINT",
+    "ASTERDM",
+    "ASTRAL",
+    "ATGL",
+    "ATHERENERG",
+    "ATUL",
+    "AUBANK",
+    "AUROPHARMA",
+    "AWL",
+    "AXISBANK",
+    "BAJAJ-AUTO",
+    "BAJAJFINSV",
+    "BAJAJHFL",
+    "BAJAJHLDNG",
+    "BAJFINANCE",
+    "BALKRISIND",
+    "BALRAMCHIN",
+    "BANDHANBNK",
+    "BANKBARODA",
+    "BANKINDIA",
+    "BATAINDIA",
+    "BAYERCROP",
+    "BBTC",
+    "BDL",
+    "BEL",
+    "BELRISE",
+    "BEML",
+    "BERGEPAINT",
+    "BHARATFORG",
+    "BHARTIARTL",
+    "BHARTIHEXA",
+    "BHEL",
+    "BIKAJI",
+    "BIOCON",
+    "BLS",
+    "BLUEDART",
+    "BLUEJET",
+    "BLUESTARCO",
+    "BOSCHLTD",
+    "BPCL",
+    "BRIGADE",
+    "BRITANNIA",
+    "BSE",
+    "BSOFT",
+    "CAMS",
+    "CANBK",
+    "CANFINHOME",
+    "CANHLIFE",
+    "CAPLIPOINT",
+    "CARBORUNIV",
+    "CARTRADE",
+    "CASTROLIND",
+    "CCL",
+    "CDSL",
+    "CEATLTD",
+    "CEMPRO",
+    "CENTRALBK",
+    "CESC",
+    "CGCL",
+    "CGPOWER",
+    "CHALET",
+    "CHAMBLFERT",
+    "CHENNPETRO",
+    "CHOICEIN",
+    "CHOLAFIN",
+    "CHOLAHLDNG",
+    "CIEINDIA",
+    "CIPLA",
+    "CLEAN",
+    "COALINDIA",
+    "COCHINSHIP",
+    "COFORGE",
+    "COHANCE",
+    "COLPAL",
+    "CONCOR",
+    "CONCORDBIO",
+    "COROMANDEL",
+    "CPPLUS",
+    "CRAFTSMAN",
+    "CREDITACC",
+    "CRISIL",
+    "CROMPTON",
+    "CUB",
+    "CUMMINSIND",
+    "CYIENT",
+    "DABUR",
+    "DALBHARAT",
+    "DATAPATTNS",
+    "DCMSHRIRAM",
+    "DEEPAKFERT",
+    "DEEPAKNTR",
+    "DELHIVERY",
+    "DEVYANI",
+    "DIVISLAB",
+    "DIXON",
+    "DLF",
+    "DMART",
+    "DOMS",
+    "DRREDDY",
+    "ECLERX",
+    "EICHERMOT",
+    "EIDPARRY",
+    "EIHOTEL",
+    "ELECON",
+    "ELGIEQUIP",
+    "EMAMILTD",
+    "EMCURE",
+    "EMMVEE",
+    "ENDURANCE",
+    "ENGINERSIN",
+    "ENRIN",
+    "ERIS",
+    "ESCORTS",
+    "ETERNAL",
+    "EXIDEIND",
+    "FACT",
+    "FEDERALBNK",
+    "FINCABLES",
+    "FIRSTCRY",
+    "FIVESTAR",
+    "FLUOROCHEM",
+    "FORCEMOT",
+    "FORTIS",
+    "FSL",
+    "GABRIEL",
+    "GAIL",
+    "GALLANTT",
+    "GESHIP",
+    "GICRE",
+    "GILLETTE",
+    "GLAND",
+    "GLAXO",
+    "GLENMARK",
+    "GMDCLTD",
+    "GMRAIRPORT",
+    "GODFRYPHLP",
+    "GODIGIT",
+    "GODREJCP",
+    "GODREJIND",
+    "GODREJPROP",
+    "GPIL",
+    "GRANULES",
+    "GRAPHITE",
+    "GRASIM",
+    "GRAVITA",
+    "GROWW",
+    "GRSE",
+    "GVT&D",
+    "HAL",
+    "HAVELLS",
+    "HBLENGINE",
+    "HCLTECH",
+    "HDBFS",
+    "HDFCAMC",
+    "HDFCBANK",
+    "HDFCLIFE",
+    "HEG",
+    "HEROMOTOCO",
+    "HEXT",
+    "HFCL",
+    "HINDALCO",
+    "HINDCOPPER",
+    "HINDPETRO",
+    "HINDUNILVR",
+    "HINDZINC",
+    "HOMEFIRST",
+    "HONASA",
+    "HONAUT",
+    "HSCL",
+    "HUDCO",
+    "HYUNDAI",
+    "ICICIAMC",
+    "ICICIBANK",
+    "ICICIGI",
+    "ICICIPRULI",
+    "IDBI",
+    "IDEA",
+    "IDFCFIRSTB",
+    "IEX",
+    "IFCI",
+    "IGIL",
+    "IGL",
+    "IIFL",
+    "IKS",
+    "INDGN",
+    "INDHOTEL",
+    "INDIACEM",
+    "INDIAMART",
+    "INDIANB",
+    "INDIGO",
+    "INDUSINDBK",
+    "INDUSTOWER",
+    "INFY",
+    "INOXWIND",
+    "INTELLECT",
+    "IOB",
+    "IOC",
+    "IPCALAB",
+    "IRB",
+    "IRCON",
+    "IRCTC",
+    "IREDA",
+    "IRFC",
+    "ITC",
+    "ITCHOTELS",
+    "ITI",
+    "J&KBANK",
+    "JAINREC",
+    "JBMA",
+    "JINDALSAW",
+    "JINDALSTEL",
+    "JIOFIN",
+    "JKCEMENT",
+    "JKTYRE",
+    "JMFINANCIL",
+    "JPPOWER",
+    "JSL",
+    "JSWCEMENT",
+    "JSWDULUX",
+    "JSWENERGY",
+    "JSWINFRA",
+    "JSWSTEEL",
+    "JUBLFOOD",
+    "JUBLINGREA",
+    "JUBLPHARMA",
+    "JWL",
+    "JYOTICNC",
+    "KAJARIACER",
+    "KALYANKJIL",
+    "KARURVYSYA",
+    "KAYNES",
+    "KEC",
+    "KEI",
+    "KFINTECH",
+    "KIMS",
+    "KIRLOSENG",
+    "KOTAKBANK",
+    "KPIL",
+    "KPITTECH",
+    "KPRMILL",
+    "LALPATHLAB",
+    "LATENTVIEW",
+    "LAURUSLABS",
+    "LEMONTREE",
+    "LENSKART",
+    "LGEINDIA",
+    "LICHSGFIN",
+    "LICI",
+    "LINDEINDIA",
+    "LLOYDSME",
+    "LODHA",
+    "LT",
+    "LTF",
+    "LTFOODS",
+    "LTM",
+    "LTTS",
+    "LUPIN",
+    "M&M",
+    "M&MFIN",
+    "MAHABANK",
+    "MANAPPURAM",
+    "MANKIND",
+    "MAPMYINDIA",
+    "MARICO",
+    "MARUTI",
+    "MAXHEALTH",
+    "MAZDOCK",
+    "MCX",
+    "MEDANTA",
+    "MEESHO",
+    "MFSL",
+    "MGL",
+    "MINDACORP",
+    "MMTC",
+    "MOTHERSON",
+    "MOTILALOFS",
+    "MPHASIS",
+    "MRF",
+    "MRPL",
+    "MSUMI",
+    "MUTHOOTFIN",
+    "NAM-INDIA",
+    "NATCOPHARM",
+    "NATIONALUM",
+    "NAUKRI",
+    "NAVA",
+    "NAVINFLUOR",
+    "NBCC",
+    "NCC",
+    "NESTLEIND",
+    "NETWEB",
+    "NEULANDLAB",
+    "NEWGEN",
+    "NH",
+    "NHPC",
+    "NIACL",
+    "NIVABUPA",
+    "NLCINDIA",
+    "NMDC",
+    "NSLNISP",
+    "NTPC",
+    "NTPCGREEN",
+    "NUVAMA",
+    "NUVOCO",
+    "NYKAA",
+    "OBEROIRLTY",
+    "OFSS",
+    "OIL",
+    "OLAELEC",
+    "OLECTRA",
+    "ONESOURCE",
+    "ONGC",
+    "PAGEIND",
+    "PARADEEP",
+    "PATANJALI",
+    "PAYTM",
+    "PCBL",
+    "PERSISTENT",
+    "PETRONET",
+    "PFC",
+    "PFIZER",
+    "PFOCUS",
+    "PGEL",
+    "PHOENIXLTD",
+    "PIDILITIND",
+    "PIIND",
+    "PINELABS",
+    "PIRAMALFIN",
+    "PNB",
+    "PNBHOUSING",
+    "POLICYBZR",
+    "POLYCAB",
+    "POLYMED",
+    "POONAWALLA",
+    "POWERGRID",
+    "POWERINDIA",
+    "PPLPHARMA",
+    "PREMIERENE",
+    "PRESTIGE",
+    "PTCIL",
+    "PVRINOX",
+    "PWL",
+    "RADICO",
+    "RAILTEL",
+    "RAINBOW",
+    "RAMCOCEM",
+    "RBLBANK",
+    "RECLTD",
+    "REDINGTON",
+    "RELIANCE",
+    "RHIM",
+    "RITES",
+    "RKFORGE",
+    "RPOWER",
+    "RRKABEL",
+    "RVNL",
+    "SAGILITY",
+    "SAIL",
+    "SAILIFE",
+    "SAMMAANCAP",
+    "SAPPHIRE",
+    "SARDAEN",
+    "SAREGAMA",
+    "SBFC",
+    "SBICARD",
+    "SBILIFE",
+    "SBIN",
+    "SCHAEFFLER",
+    "SCHNEIDER",
+    "SCI",
+    "SHREECEM",
+    "SHRIRAMFIN",
+    "SHYAMMETL",
+    "SIEMENS",
+    "SIGNATURE",
+    "SJVN",
+    "SOBHA",
+    "SOLARINDS",
+    "SONACOMS",
+    "SONATSOFTW",
+    "SPLPETRO",
+    "SRF",
+    "STARHEALTH",
+    "SUMICHEM",
+    "SUNDARMFIN",
+    "SUNPHARMA",
+    "SUNTV",
+    "SUPREMEIND",
+    "SUZLON",
+    "SWANCORP",
+    "SWIGGY",
+    "SYNGENE",
+    "SYRMA",
+    "TARIL",
+    "TATACAP",
+    "TATACHEM",
+    "TATACOMM",
+    "TATACONSUM",
+    "TATAELXSI",
+    "TATAINVEST",
+    "TATAPOWER",
+    "TATASTEEL",
+    "TATATECH",
+    "TBOTEK",
+    "TCS",
+    "TECHM",
+    "TECHNOE",
+    "TEGA",
+    "TEJASNET",
+    "TENNIND",
+    "THELEELA",
+    "THERMAX",
+    "TIINDIA",
+    "TIMKEN",
+    "TITAGARH",
+    "TITAN",
+    "TMCV",
+    "TMPV",
+    "TORNTPHARM",
+    "TORNTPOWER",
+    "TRAVELFOOD",
+    "TRENT",
+    "TRIDENT",
+    "TRITURBINE",
+    "TTML",
+    "TVSMOTOR",
+    "UBL",
+    "UCOBANK",
+    "ULTRACEMCO",
+    "UNIONBANK",
+    "UNITDSPR",
+    "UNOMINDA",
+    "UPL",
+    "URBANCO",
+    "USHAMART",
+    "UTIAMC",
+    "VBL",
+    "VEDL",
+    "VIJAYA",
+    "VMM",
+    "VOLTAS",
+    "VTL",
+    "WAAREEENER",
+    "WELCORP",
+    "WELSPUNLIV",
+    "WHIRLPOOL",
+    "WIPRO",
+    "WOCKPHARMA",
+    "YESBANK",
+    "ZEEL",
+    "ZENSARTECH",
+    "ZENTEC",
+    "ZFCVINDIA",
+    "ZYDUSLIFE",
+    "ZYDUSWELL",
+];
+
 /// Which universes an instrument belongs to.
 ///
 /// A bitset rather than an enum: an instrument belongs to **many** universes
@@ -1058,6 +2017,24 @@ impl Universe {
     pub const FNO: Self = Self(1 << 1);
     /// A NIFTY Total Market constituent.
     pub const TOTAL_MARKET: Self = Self(1 << 2);
+    /// A NIFTY 500 constituent.
+    ///
+    /// Bits 3 through 6 were appended by D-0089 and are ordered so that a
+    /// HIGHER bit is a NARROWER tier: 500, 200, 100, 50. That is the reading
+    /// order of the containment ladder, and it is only a mnemonic — nothing
+    /// compares two universe values numerically, and nothing may start,
+    /// because bit order is a convenience and membership is a set.
+    ///
+    /// Bits 0, 1 and 2 keep the positions they have always had. `CLAUDE.md`
+    /// §3 rule 8 forbids renumbering, and a stored `bits()` from before this
+    /// change still decodes to the same three universes it always did.
+    pub const NIFTY_500: Self = Self(1 << 3);
+    /// A NIFTY 200 constituent.
+    pub const NIFTY_200: Self = Self(1 << 4);
+    /// A NIFTY 100 constituent.
+    pub const NIFTY_100: Self = Self(1 << 5);
+    /// A NIFTY 50 constituent.
+    pub const NIFTY_50: Self = Self(1 << 6);
 
     /// Whether this set contains every bit of `other`.
     #[must_use]
@@ -1086,7 +2063,30 @@ impl Universe {
 
 /// The universes a cash-segment symbol belongs to.
 ///
-/// Binary search over sorted arrays: at most ten comparisons on 750 entries.
+/// **This line said "binary search over sorted arrays: at most ten comparisons
+/// on 750 entries".** There has been no binary search here since D-0065
+/// replaced it with [`MemberIndex`]; the sentence outlived the code by one
+/// decision and is corrected by D-0089. Six hashed probes now, each bounded by
+/// the table's fill factor and none of them growing with the list — the cost
+/// [`MemberIndex`] documents, paid six times instead of twice.
+///
+/// # Why six probes and not one probe plus arithmetic
+///
+/// The tiers nest — every NIFTY 50 name is in the 100, the 100 in the 200, the
+/// 200 in the 500, the 500 in the Total Market — so a narrowest-hit-wins
+/// lookup could set the containing bits from the ladder alone and stop after
+/// one hit. It does not, because that would make this function state a
+/// membership no file states: it would DERIVE "RELIANCE is in the NIFTY 200"
+/// from "RELIANCE is in the NIFTY 50" rather than from
+/// `ind_nifty200list.csv`, and a rebalance that broke the nesting would be
+/// answered confidently and wrongly.
+///
+/// Each bit is therefore read from its own published file, and the nesting is
+/// a CHECKED property rather than an assumed one —
+/// `core::universe::the_published_tiers_nest_one_inside_the_next` asserts it
+/// symbol by symbol across all 750. If a snapshot stops nesting it fails and
+/// says so; this function keeps answering what the files say either way.
+/// `CLAUDE.md` §3 rule 1 and §4's "degrade loudly" row, in that order.
 #[must_use]
 pub fn of_equity(symbol: &str) -> Universe {
     let mut u = Universe::NONE;
@@ -1095,6 +2095,18 @@ pub fn of_equity(symbol: &str) -> Universe {
     }
     if NTM_INDEX.contains(symbol) {
         u = u.union(Universe::TOTAL_MARKET);
+    }
+    if NIFTY_500_INDEX.contains(symbol) {
+        u = u.union(Universe::NIFTY_500);
+    }
+    if NIFTY_200_INDEX.contains(symbol) {
+        u = u.union(Universe::NIFTY_200);
+    }
+    if NIFTY_100_INDEX.contains(symbol) {
+        u = u.union(Universe::NIFTY_100);
+    }
+    if NIFTY_50_INDEX.contains(symbol) {
+        u = u.union(Universe::NIFTY_50);
     }
     u
 }
@@ -1191,8 +2203,10 @@ impl<const N: usize> MemberIndex<N> {
         //
         // `fnv1a` walks the whole argument with no bound of its own, and
         // `of_equity` is public, takes an unguarded `&str`, and calls this
-        // TWICE — once per table. So the cost of a membership probe was the
-        // caller's string length, not the table's size.
+        // once per table — TWICE when this guard was written, SIX times since
+        // D-0089 added the four published NIFTY tiers. So the cost of a
+        // membership probe was the caller's string length, not the table's
+        // size, and it was about to become three times that.
         //
         // Measured before this line existed, against gate 8's 3.0x ceiling:
         //      8 B          8,256 ps    baseline
@@ -1293,6 +2307,43 @@ pub static FNO_INDEX: MemberIndex<1024> = MemberIndex::build(&FNO_UNDERLYINGS);
 /// The NIFTY Total Market constituents, indexed. 750 members in 2048 slots.
 pub static NTM_INDEX: MemberIndex<2048> = MemberIndex::build(&NIFTY_TOTAL_MARKET);
 
+/// The NIFTY 500 constituents, indexed. 500 members in 2048 slots.
+///
+/// # Why a QUARTER full and not the half [`MemberIndex::build`] allows
+///
+/// `build` asserts `members * 2 <= N`, and 500 members in 1024 slots satisfies
+/// it. It was written that way first, and the probe test refused it:
+///
+/// | table | slots | fill | worst probe |
+/// |---|---|---|---|
+/// | NIFTY 500 | 1024 | 48.8% | **13** — over the bound of 8 |
+/// | NIFTY 500 | 2048 | 24.4% | 5 |
+///
+/// The `build` assertion is a TERMINATION guarantee — at most half full means
+/// an empty slot always exists, so the probe loop ends. It is not a COST
+/// guarantee, and the two were never the same bound. Linear probing degrades
+/// sharply near half: the clusters merge. The existing two tables happen to
+/// sit at 36.6% and 20.8%, so nothing had ever exercised the difference, and
+/// the `<= 8` in
+/// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1` was
+/// a measurement taken only at those densities.
+///
+/// So every tier below is sized to keep the fill at or under a quarter, which
+/// is the density the measured bound actually came from. 3,840 slots, 30 KiB
+/// of pointers on a 64-bit target — constant, known at link time, and the
+/// price of the probe bound `CLAUDE.md` §3 rule 4 asks for. Recorded in
+/// `docs/06-limits.md` §11 and D-0089.
+pub static NIFTY_500_INDEX: MemberIndex<2048> = MemberIndex::build(&NIFTY_500);
+
+/// The NIFTY 200 constituents, indexed. 200 members in 1024 slots.
+pub static NIFTY_200_INDEX: MemberIndex<1024> = MemberIndex::build(&NIFTY_200);
+
+/// The NIFTY 100 constituents, indexed. 100 members in 512 slots.
+pub static NIFTY_100_INDEX: MemberIndex<512> = MemberIndex::build(&NIFTY_100);
+
+/// The NIFTY 50 constituents, indexed. 50 members in 256 slots.
+pub static NIFTY_50_INDEX: MemberIndex<256> = MemberIndex::build(&NIFTY_50);
+
 /// The universes a merged instrument belongs to.
 ///
 /// The entry point every caller outside this module uses, so that "which list
@@ -1381,7 +2432,7 @@ mod tests {
 
     #[test]
     fn the_index_holds_every_member_and_nothing_else() {
-        // Exhaustive: every one of the 963 members must be found, and the
+        // Exhaustive: every one of the 1,813 members must be found, and the
         // tables must hold exactly as many as the lists do -- a collision that
         // silently dropped a member would leave an instrument permanently
         // outside its own universe.
@@ -1391,13 +2442,35 @@ mod tests {
         for m in FNO_UNDERLYINGS {
             assert!(FNO_INDEX.contains(m), "{m} is an F&O underlying");
         }
+        for m in NIFTY_500 {
+            assert!(NIFTY_500_INDEX.contains(m), "{m} is a NIFTY 500 member");
+        }
+        for m in NIFTY_200 {
+            assert!(NIFTY_200_INDEX.contains(m), "{m} is a NIFTY 200 member");
+        }
+        for m in NIFTY_100 {
+            assert!(NIFTY_100_INDEX.contains(m), "{m} is a NIFTY 100 member");
+        }
+        for m in NIFTY_50 {
+            assert!(NIFTY_50_INDEX.contains(m), "{m} is a NIFTY 50 member");
+        }
         assert_eq!(NTM_INDEX.len(), NIFTY_TOTAL_MARKET.len());
         assert_eq!(FNO_INDEX.len(), FNO_UNDERLYINGS.len());
+        assert_eq!(NIFTY_500_INDEX.len(), NIFTY_500.len());
+        assert_eq!(NIFTY_200_INDEX.len(), NIFTY_200.len());
+        assert_eq!(NIFTY_100_INDEX.len(), NIFTY_100.len());
+        assert_eq!(NIFTY_50_INDEX.len(), NIFTY_50.len());
         assert!(!NTM_INDEX.is_empty() && !FNO_INDEX.is_empty());
+        assert!(!NIFTY_500_INDEX.is_empty() && !NIFTY_50_INDEX.is_empty());
+        assert!(!NIFTY_200_INDEX.is_empty() && !NIFTY_100_INDEX.is_empty());
 
         for absent in ["", "ZZZZNOTREAL", "NIFT", "RELIANCEX", "  ", "nifty"] {
             assert!(!NTM_INDEX.contains(absent), "{absent:?} is not a member");
             assert!(!FNO_INDEX.contains(absent), "{absent:?} is not a member");
+            assert!(!NIFTY_500_INDEX.contains(absent), "{absent:?} is not one");
+            assert!(!NIFTY_200_INDEX.contains(absent), "{absent:?} is not one");
+            assert!(!NIFTY_100_INDEX.contains(absent), "{absent:?} is not one");
+            assert!(!NIFTY_50_INDEX.contains(absent), "{absent:?} is not one");
         }
     }
 
@@ -1437,7 +2510,33 @@ mod tests {
             fno <= 8,
             "213 in 1024 slots must probe at most 8 times, got {fno}"
         );
-        println!("worst probe: NTM {ntm}, FNO {fno}");
+
+        // The four published tiers, held to the SAME number rather than to a
+        // looser one for being smaller. `of_equity` probes all six tables on
+        // every call, so the cost of a membership question is now the SUM of
+        // these, and a tier that quietly needed twelve steps would raise that
+        // sum without changing any answer -- which is exactly the kind of
+        // drift a bound stated as a number catches and a bound stated as
+        // "small" does not.
+        let n500 = worst_probe(&NIFTY_500_INDEX, &NIFTY_500);
+        let n200 = worst_probe(&NIFTY_200_INDEX, &NIFTY_200);
+        let n100 = worst_probe(&NIFTY_100_INDEX, &NIFTY_100);
+        let n50 = worst_probe(&NIFTY_50_INDEX, &NIFTY_50);
+        for (name, slots, worst) in [
+            ("NIFTY 500", 2048, n500),
+            ("NIFTY 200", 1024, n200),
+            ("NIFTY 100", 512, n100),
+            ("NIFTY 50", 256, n50),
+        ] {
+            assert!(
+                worst <= 8,
+                "{name} in {slots} slots must probe at most 8 times, got {worst}"
+            );
+        }
+        println!(
+            "worst probe: NTM {ntm}, FNO {fno}, 500 {n500}, 200 {n200}, \
+             100 {n100}, 50 {n50}"
+        );
     }
 
     #[test]
@@ -1455,11 +2554,21 @@ mod tests {
         // is used rather than only where it is enforced.
         assert!(NIFTY_TOTAL_MARKET.len() * 2 <= 2048);
         assert!(FNO_UNDERLYINGS.len() * 4 <= 1024);
+        // The four appended tiers are held to a QUARTER rather than the half
+        // `build` asserts. Half is what makes the probe TERMINATE; a quarter
+        // is what the measured bound of 8 was taken at, and the NIFTY 500 at
+        // 1024 slots probed 13 times to prove the two are different bounds.
+        assert!(NIFTY_500.len() * 4 <= 2048);
+        assert!(NIFTY_200.len() * 4 <= 1024);
+        assert!(NIFTY_100.len() * 4 <= 512);
+        assert!(NIFTY_50.len() * 4 <= 256);
 
         // mask never exceeds the table.
         for h in [0, 1, u64::MAX, 0xcbf2_9ce4_8422_2325] {
             assert!(mask(h, 2048) < 2048);
             assert!(mask(h, 1024) < 1024);
+            assert!(mask(h, 512) < 512);
+            assert!(mask(h, 256) < 256);
         }
     }
 
@@ -1469,6 +2578,10 @@ mod tests {
         for (name, list) in [
             ("NIFTY_TOTAL_MARKET", NIFTY_TOTAL_MARKET.as_slice()),
             ("FNO_UNDERLYINGS", FNO_UNDERLYINGS.as_slice()),
+            ("NIFTY_500", NIFTY_500.as_slice()),
+            ("NIFTY_200", NIFTY_200.as_slice()),
+            ("NIFTY_100", NIFTY_100.as_slice()),
+            ("NIFTY_50", NIFTY_50.as_slice()),
         ] {
             for w in list.windows(2) {
                 assert!(w[0] < w[1], "{name} is not sorted or not unique at {w:?}");
@@ -1480,14 +2593,156 @@ mod tests {
     fn the_counts_are_the_measured_ones() {
         assert_eq!(NIFTY_TOTAL_MARKET.len(), 750, "niftyindices.com states 750");
         assert_eq!(FNO_UNDERLYINGS.len(), 213, "both masters name 213, exactly");
+        // A tier whose count does not match its name is the whole reason this
+        // change exists: the pages sliced an alphabetical list and called the
+        // first fifty rows the NIFTY 50. The count is the cheapest check that
+        // the list came from the file it claims.
+        assert_eq!(NIFTY_500.len(), 500, "NSE publishes 500 rows");
+        assert_eq!(NIFTY_200.len(), 200, "NSE publishes 200 rows");
+        assert_eq!(NIFTY_100.len(), 100, "NSE publishes 100 rows");
+        assert_eq!(NIFTY_50.len(), 50, "NSE publishes 50 rows");
+        for (name, list) in [
+            ("FNO_UNDERLYINGS", FNO_UNDERLYINGS.as_slice()),
+            ("NIFTY_TOTAL_MARKET", NIFTY_TOTAL_MARKET.as_slice()),
+            ("NIFTY_500", NIFTY_500.as_slice()),
+            ("NIFTY_200", NIFTY_200.as_slice()),
+            ("NIFTY_100", NIFTY_100.as_slice()),
+            ("NIFTY_50", NIFTY_50.as_slice()),
+        ] {
+            assert!(
+                list.iter().all(|s| !s.contains("NSETEST")),
+                "{name}: exchange test instruments must never be a universe member"
+            );
+            // NSE's own files carry placeholder scrips during a corporate
+            // action -- `DUMMYINXGN` and `DUMMYTRVN` sit in the published
+            // Total Market and Microcap 250 files today, wearing pseudo-ISINs
+            // that begin `DUM` instead of `INE`. They are not constituents,
+            // and D-0089 records why they were dropped rather than
+            // transcribed. This asserts the drop instead of trusting it.
+            assert!(
+                list.iter().all(|s| !s.starts_with("DUMMY")),
+                "{name}: an NSE placeholder scrip is not a constituent"
+            );
+        }
+    }
+
+    #[test]
+    fn the_published_tiers_nest_one_inside_the_next() {
+        // THE INVARIANT `of_equity` RESTS ON, and the reason it is allowed to
+        // set several bits for one symbol without any of them being invented.
+        //
+        // Asserted symbol by symbol rather than by counting: 50 <= 100 <= 200
+        // <= 500 <= 750 holds for four disjoint lists too, and a count proves
+        // nothing about membership. Every containment is checked in the
+        // direction that can fail -- narrow inside wide -- and the failure
+        // message names the symbol, because a rebalance breaks nesting for one
+        // name at a time.
+        for (inner_name, inner, outer_name, outer) in [
+            (
+                "NIFTY 50",
+                NIFTY_50.as_slice(),
+                "NIFTY 100",
+                &NIFTY_100_INDEX as &dyn Probe,
+            ),
+            (
+                "NIFTY 100",
+                NIFTY_100.as_slice(),
+                "NIFTY 200",
+                &NIFTY_200_INDEX as &dyn Probe,
+            ),
+            (
+                "NIFTY 200",
+                NIFTY_200.as_slice(),
+                "NIFTY 500",
+                &NIFTY_500_INDEX as &dyn Probe,
+            ),
+            (
+                "NIFTY 500",
+                NIFTY_500.as_slice(),
+                "Total Market",
+                &NTM_INDEX as &dyn Probe,
+            ),
+        ] {
+            for m in inner {
+                assert!(
+                    outer.holds(m),
+                    "{m} is in the {inner_name} and not in the {outer_name} — \
+                     the tiers no longer nest, so `of_equity` would be setting \
+                     a bit no published file states"
+                );
+            }
+        }
+
+        // And the same fact stated through the public surface, because that is
+        // where a caller reads it: the bits a NIFTY 50 name carries must be a
+        // superset of the bits every wider tier carries.
+        for m in NIFTY_50 {
+            let u = of_equity(m);
+            assert!(
+                u.contains(Universe::NIFTY_50)
+                    && u.contains(Universe::NIFTY_100)
+                    && u.contains(Universe::NIFTY_200)
+                    && u.contains(Universe::NIFTY_500)
+                    && u.contains(Universe::TOTAL_MARKET),
+                "{m} is a NIFTY 50 name and must carry every containing bit, got {:#b}",
+                u.bits()
+            );
+        }
+        for m in NIFTY_500 {
+            let u = of_equity(m);
+            assert!(
+                u.contains(Universe::NIFTY_500) && u.contains(Universe::TOTAL_MARKET),
+                "{m} is a NIFTY 500 name and must also be a Total Market one"
+            );
+        }
+
+        // The converse must NOT hold, or the bits carry no information: a
+        // Total Market name outside the 500 exists, and it must say so.
+        let outside = NIFTY_TOTAL_MARKET
+            .iter()
+            .find(|s| !NIFTY_500_INDEX.contains(s))
+            .expect("the Total Market is wider than the NIFTY 500");
+        let u = of_equity(outside);
+        assert!(u.contains(Universe::TOTAL_MARKET));
         assert!(
-            FNO_UNDERLYINGS.iter().all(|s| !s.contains("NSETEST")),
-            "exchange test instruments must never be a universe member"
+            !u.contains(Universe::NIFTY_500),
+            "{outside} is outside the NIFTY 500 and must not claim the bit"
         );
-        assert!(
-            NIFTY_TOTAL_MARKET.iter().all(|s| !s.contains("NSETEST")),
-            "exchange test instruments must never be a universe member"
-        );
+    }
+
+    /// One method, so the nesting table above can hold tables of four
+    /// different sizes in one array.
+    ///
+    /// `MemberIndex<N>` is generic over the slot count, so `MemberIndex<256>`
+    /// and `MemberIndex<2048>` are different types and cannot sit in the same
+    /// slice without one. The alternative is four copies of the same loop,
+    /// which is four places for a future tier to be forgotten.
+    trait Probe {
+        fn holds(&self, symbol: &str) -> bool;
+    }
+
+    impl<const N: usize> Probe for MemberIndex<N> {
+        fn holds(&self, symbol: &str) -> bool {
+            self.contains(symbol)
+        }
+    }
+
+    #[test]
+    fn the_three_original_bits_never_moved() {
+        // `CLAUDE.md` §3 rule 8 as an assertion rather than a promise. These
+        // three values are stamped onto merged rows and rendered on the page;
+        // if D-0089 had inserted a tier at bit 2 instead of appending at bit
+        // 3, every one of those would silently mean something else.
+        assert_eq!(Universe::INDEX.bits(), 1);
+        assert_eq!(Universe::FNO.bits(), 2);
+        assert_eq!(Universe::TOTAL_MARKET.bits(), 4);
+        // And the appended four, pinned so a later insertion cannot renumber
+        // them either.
+        assert_eq!(Universe::NIFTY_500.bits(), 8);
+        assert_eq!(Universe::NIFTY_200.bits(), 16);
+        assert_eq!(Universe::NIFTY_100.bits(), 32);
+        assert_eq!(Universe::NIFTY_50.bits(), 64);
+        assert_eq!(Universe::NONE.bits(), 0);
     }
 
     #[test]
@@ -1607,7 +2862,15 @@ mod tests {
     #[test]
     fn bits_are_distinct_powers_of_two() {
         // An append-only bitset is only safe if no two universes share a bit.
-        let all = [Universe::INDEX, Universe::FNO, Universe::TOTAL_MARKET];
+        let all = [
+            Universe::INDEX,
+            Universe::FNO,
+            Universe::TOTAL_MARKET,
+            Universe::NIFTY_500,
+            Universe::NIFTY_200,
+            Universe::NIFTY_100,
+            Universe::NIFTY_50,
+        ];
         for (i, a) in all.iter().enumerate() {
             assert_eq!(a.bits().count_ones(), 1, "universe {i} is not a single bit");
             for (j, b) in all.iter().enumerate() {

@@ -1,4 +1,4 @@
-//! Bar shape, prior-bar sequence, position within the day, time of day, day type
+//! Candle shape, prior-bar sequence, position within the day, time of day, day type
 //! and the opening gap.
 //!
 //! **25 vocabulary positions**: 30–51 and 66–68.
@@ -28,7 +28,7 @@
 //! extremes and yesterday's close. Fixed state, no allocation, no division on the
 //! deciding path.
 
-use store::format::Bar;
+use crate::Candle;
 use vocab::{ConditionMask, Tolerance};
 
 /// Where the four time-of-day windows end, in minutes after the 09:15 open.
@@ -187,16 +187,11 @@ impl SessionState {
     /// emitted for.
     pub fn step(
         &mut self,
-        bar: &Bar,
+        bar: &Candle,
         previous: Option<PreviousSession>,
         tolerance: Tolerance,
     ) -> Result<ConditionMask, crate::Corrupt> {
-        if bar.high < bar.low {
-            return Err(crate::Corrupt::HighBelowLow);
-        }
-        if bar.high.checked_sub(bar.low).is_none() {
-            return Err(crate::Corrupt::RangeOverflows);
-        }
+        bar.check()?;
         let day = crate::ist_day(bar.ts_micros);
         if day != self.session_day || !self.live {
             self.session_day = day;
@@ -221,9 +216,14 @@ impl SessionState {
         // `clippy::indexing_slicing` are both denied, and both are right that an
         // index into a fixed array is a panic the compiler cannot rule out.
         self.prior.rotate_right(1);
-        if let Some(newest) = self.prior.first_mut() {
-            *newest = Some(bar.close > bar.open);
-        }
+        // `let [newest, ..]` and not `first_mut()`: `prior` is an ARRAY of known
+        // length, so a fixed-length pattern is irrefutable and compiles to no branch
+        // at all. `first_mut()` handed back an `Option` whose `None` arm a
+        // three-element array makes impossible — an arm no input can reach, and
+        // therefore one no test can cover. A `PRIOR_N` of zero would be a compile
+        // error here rather than a silent no-op, which is the stronger guard.
+        let [newest, ..] = &mut self.prior;
+        *newest = Some(bar.close > bar.open);
         Ok(bits)
     }
 
@@ -236,7 +236,7 @@ impl SessionState {
     )]
     pub fn bits(
         &self,
-        bar: &Bar,
+        bar: &Candle,
         previous: Option<PreviousSession>,
         tolerance: Tolerance,
     ) -> ConditionMask {
@@ -351,7 +351,14 @@ impl SessionState {
         let Some(prev) = previous else {
             return mask;
         };
-        let Some(day_open) = self.day_open() else {
+        // Both halves of "has a session begun" in ONE test, because they are one
+        // question: [`Self::day_open`] and [`Self::day_extremes`] each answer
+        // `self.live` and nothing else. Asked separately — as they were, the extremes
+        // in an `if let` of their own below — the second `None` arm could only be
+        // taken on a state where the first had already returned, so it was an arm no
+        // input can reach and no test can cover.
+        let (Some(day_open), Some((day_high, day_low))) = (self.day_open(), self.day_extremes())
+        else {
             return mask;
         };
         let prev_close = i128::from(prev.close);
@@ -362,26 +369,26 @@ impl SessionState {
         if today_open < prev_close {
             mask = set(mask, 49);
         }
-        if let Some((day_high, day_low)) = self.day_extremes() {
-            let ph = i128::from(prev.high);
-            let pl = i128::from(prev.low);
-            let dh = i128::from(day_high);
-            let dl = i128::from(day_low);
-            if dh <= ph && dl >= pl {
-                mask = set(mask, 50);
-            }
-            if dh > ph && dl < pl {
-                mask = set(mask, 51);
-            }
+        let ph = i128::from(prev.high);
+        let pl = i128::from(prev.low);
+        let dh = i128::from(day_high);
+        let dl = i128::from(day_low);
+        if dh <= ph && dl >= pl {
+            mask = set(mask, 50);
+        }
+        if dh > ph && dl < pl {
+            mask = set(mask, 51);
         }
 
         // The gap's midpoint, between yesterday's close and today's open. Only a
         // real gap has a midpoint; a flat open has nothing to be above or below.
         if today_open != prev_close {
-            let mid = prev_close.midpoint(today_open);
-            let Ok(mid) = i64::try_from(mid) else {
-                return mask;
-            };
+            // The midpoint is taken in `i64`, not in `i128` and then narrowed. Both
+            // widths are signed and both round towards zero, so the value is the same
+            // one; but the midpoint of two `i64` always fits an `i64`, so the
+            // narrowing could only refuse on a state that cannot exist — a region no
+            // input can reach and no test can cover.
+            let mid = prev.close.midpoint(day_open);
             if close > i128::from(mid) {
                 mask = set(mask, 66);
             }
@@ -429,9 +436,9 @@ mod tests {
         t
     }
 
-    fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Bar {
+    fn at(minute: i64, open: i64, high: i64, low: i64, close: i64) -> Candle {
         let ts = (40_000 * 1_440 + 555 + minute) * 60_000_000 - 19_800 * 1_000_000;
-        Bar {
+        Candle {
             ts_micros: ts,
             open,
             high,
@@ -442,7 +449,7 @@ mod tests {
         }
     }
 
-    fn ok(state: &mut SessionState, bar: &Bar, prev: Option<PreviousSession>) -> ConditionMask {
+    fn ok(state: &mut SessionState, bar: &Candle, prev: Option<PreviousSession>) -> ConditionMask {
         let Ok(m) = state.step(bar, prev, tol()) else {
             unreachable!("this fixture bar is sane")
         };
@@ -570,7 +577,7 @@ mod tests {
         );
     }
 
-    /// Gap up and gap down are exclusive, and a flat open is neither. The gap
+    /// Gap up and gap down are exclusive, and an unchanged open is neither. The gap
     /// midpoint positions need a real gap.
     #[test]
     fn the_opening_gap_needs_a_real_gap() {

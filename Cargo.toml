@@ -31,6 +31,7 @@ members = [
     "crates/telemetry",
     "crates/vocab",
     "crates/indicators",
+    "crates/engine",
 ]
 
 [workspace.package]

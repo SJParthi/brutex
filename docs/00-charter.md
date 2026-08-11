@@ -127,7 +127,9 @@ Evidence lane is recorded per row and is never promoted while copying.
 | History depth | from 2020 | documented |
 | Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
 | Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
-| Daily interval word | **UNVERIFIED.** The request names its bar length in `candle_interval`, and `1minute` is the only spelling read first-hand. `1day`, `1d` and `day` are all plausible and only one is a request, so none is written. A daily pull against this feed **refuses by name** until the word is read live — `pull::fetch::FetchError::RungNotSpellable`. | unverified |
+| Daily interval word | **`1day`.** The vendor's own annexure, *Candle Interval*, gives `GrowwAPI.CANDLE_INTERVAL_DAY` the value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this repository already used. The full table also carries `2minute`…`4hour`, `1week` and `1month`; none is recorded here, because `store::path::Timeframe` has a directory for two rungs and a token for a rung the store cannot file is a request whose answer has nowhere to go. Was UNVERIFIED until the docs were read; D-0076. | verified from vendor annexure |
+| Index segment word | **`CASH`** — the same word an equity takes. The vendor's live-data page states it: *"Use the segment value FNO for derivatives and CASH for stocks and index."* Before this was read, `Listing::Index` was absent from the descriptor and a live index pull refused by name with `FetchError::ListingNotSpellable`. D-0076. | verified from vendor docs |
+| Instrument-type word | **Not applicable to this request.** The annexure carries an instrument-type alphabet (`EQ`, `IDX`, `FUT`, `CE`, `PE`), but the historical-candles request schema is `exchange`, `segment`, `trading_symbol`, `start_time`, `end_time`, `interval_in_minutes` and nothing else — there is no field for a kind, so no word is written into one. Contrast Dhan, whose request carries `instrument`. | verified from vendor docs |
 | Response shape | row arrays: `[ts, o, h, l, c, v, oi]`, `oi` null off-derivatives | verified |
 | Timestamp | native IST string, or epoch seconds defensively | verified |
 | Price unit | rupees as float on the wire; converted to paisa at the boundary | verified |
@@ -169,6 +171,19 @@ Both index lists are **snapshots** of rebalanced indices, and none of the three
 has been checked against an exchange publication. `docs/06-limits.md` §11
 carries what that costs. D-0025 and D-0029.
 
+**The Total Market row above is now partly contradicted, and the contradiction
+is recorded rather than repaired.** On 2026-08-11 the exchange's own file was
+fetched for the first time (§4c). Excluding two placeholder scrips it holds 750
+real names, the same count — but not the same names. The exchange lists
+`GRINDWELL`, which `NIFTY_TOTAL_MARKET` does not hold; `NIFTY_TOTAL_MARKET`
+holds `AGL`, which the exchange does not list. One name in 750, and the
+constant's 750 is therefore **not a subset** of the exchange's 752. The array
+is deliberately left as it stands: it was measured 750/750 against two real
+vendor masters under the D-0025 gate, and that measurement cannot be redone
+from a downloaded CSV. `AGL` is **UNVERIFIED** — this repository does not know
+what instrument it is, and will not guess. D-0089 states the resolution and
+`docs/06-limits.md` §11 carries the cost.
+
 ### 4b. Option-greek facts, measured from a live chain
 
 Golden rule 1 again. `crates/greeks` makes claims about what a vendor's option
@@ -206,6 +221,74 @@ maturity or rate. The best possible *single* contract is off by **884× the
 vendor's own display precision** — measured. Everything above is fitted with
 **two** mutually inconsistent contracts, one per side, which is a diagnostic
 and not an agreement. D-0046, and `docs/06-limits.md` §18.
+
+### 4c. NSE index constituents, read from the exchange's own files
+
+Golden rule 1 again, and this time the rule caught something that had already
+shipped. The web pages offered NIFTY 50 / 100 / 200 / 500 and produced them by
+slicing `core::universe::NIFTY_TOTAL_MARKET`, which is stored alphabetically —
+so `slice(0, 50)` yielded `360ONE, 3MINDIA, AADHARHFC, …` and the page called
+that the NIFTY 50. No source said any of it. The four tiers did not exist in
+this repository at all. D-0089 replaces the slice with the exchange's own
+published constituent files, which are the route recorded here.
+
+**Fetched 2026-08-11**, over HTTPS, from `nsearchives.nseindia.com` — the
+archive host of the exchange that computes the indices. Each file is a CSV with
+the header `Company Name, Industry, Symbol, Series, ISIN Code`; **every row
+carries an ISIN**, which is what makes a row checkable against a vendor master
+rather than merely readable.
+
+| Index | URL | Rows | Where it lives |
+|---|---|---|---|
+| NIFTY 50 | `https://nsearchives.nseindia.com/content/indices/ind_nifty50list.csv` | 50 | `core::universe::NIFTY_50` |
+| NIFTY 100 | `https://nsearchives.nseindia.com/content/indices/ind_nifty100list.csv` | 100 | `core::universe::NIFTY_100` |
+| NIFTY 200 | `https://nsearchives.nseindia.com/content/indices/ind_nifty200list.csv` | 200 | `core::universe::NIFTY_200` |
+| NIFTY 500 | `https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv` | 500 | `core::universe::NIFTY_500` |
+| NIFTY Total Market | `https://nsearchives.nseindia.com/content/indices/ind_niftytotalmarket_list.csv` | **752** | `core::universe::NIFTY_TOTAL_MARKET` holds **750** — see below |
+
+**Symbols only are transcribed.** `CLAUDE.md` §2 allows no `.csv` in the
+tracked tree, so the files are input and the data becomes Rust. The company
+name, industry, series and ISIN are read, used for the checks in this section,
+and not carried: nothing in `crates/core` reads them, and a field carried
+without a reader is a field that goes stale unnoticed.
+
+**Verified on the fetched files, not asserted:**
+
+- The tiers **nest**: all 50 NIFTY 50 symbols are in the 100, all 100 in the
+  200, all 200 in the 500, and all 500 in `NIFTY_TOTAL_MARKET` — zero outside
+  in every direction. Proved for every symbol by
+  `core::universe::the_published_tiers_nest_one_inside_the_next`, which is why
+  `of_equity` may set several bits for one name.
+- The Total Market file is exactly the union of the NIFTY 500 file and the
+  NIFTY Microcap 250 file — 752 rows, row for row, nothing on either side
+  alone. That matches niftyindices.com's own definition, "all stocks that are
+  part of Nifty 500 and Nifty Microcap 250".
+
+**The 752 that is 750.** Two of the 752 rows are NSE placeholder scrips, not
+constituents: `DUMMYINXGN` ("Dummy Inox Green Ltd.") and `DUMMYTRVN` ("Dummy
+Triveni Ltd."). Their identifiers are not ISINs — they read `DUM510W01014` and
+`DUM256C01024`, the real ISINs of `INOXGREEN` and `TRIVENI` with `INE` replaced
+by `DUM` — and both of those real constituents are separately present in the
+same file. Dropping the two placeholders leaves **750 real names**, which is
+the count niftyindices.com states and the count `NIFTY_TOTAL_MARKET` declares.
+The agreement of the counts is a coincidence of arithmetic, not of membership:
+see §4a's row, `docs/06-limits.md` §11, and D-0089, which records that the
+repository's 750 and the exchange's 750 differ by one name.
+
+**What NSE publishes and this repository does NOT carry.** The exchange's own
+index directory (`https://www.nseindia.com/api/allIndices`, same fetch) lists
+**139 indices**. This repository carries **five** of them — the four tiers above
+plus NIFTY Total Market — alongside the derived F&O underlying list of §4a. The
+other 134, sectoral and thematic and strategy indices among them — NIFTY BANK,
+NIFTY IT, NIFTY MIDCAP 150, NIFTY MICROCAP 250 and the rest — are **not
+carried**, are not a universe, and no part of this repository may claim
+membership in one. Two of them appear in this section only as evidence:
+Microcap 250 was read to check the Total Market's composition, and it was not
+transcribed.
+
+These are **snapshots.** NSE rebalances these indices semi-annually and none of
+the five has been checked against a constituent circular. `docs/06-limits.md`
+§11 carries what that costs.
 
 ---
 

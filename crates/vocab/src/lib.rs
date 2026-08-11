@@ -88,8 +88,14 @@ mod tests {
 
     #[test]
     fn the_version_is_the_widened_table() {
+        // Still 3, and that is the rule rather than an oversight. 274 and 275 were
+        // APPENDED at NEXT_FREE, and this constant's own documentation says an append
+        // does not bump it: every mask recorded before today still means exactly what
+        // it meant, so two vocabularies differing only by an append are not
+        // "genuinely different" in the sense the version exists to separate.
+        // Retiring, renaming, renumbering or widening the mask would bump it.
         assert_eq!(VOCAB_VERSION, 3);
-        assert_eq!(table::COUNT, 274);
+        assert_eq!(table::COUNT, 276);
         assert_eq!(ConditionMask::BITS, 384);
     }
 
@@ -101,10 +107,23 @@ mod tests {
             BitStatus::Retired { duplicate_of: 62 },
             table::BitStatus::Retired { duplicate_of: 62 }
         );
-        let Some(d): Option<&BitDef> = table::definition(0) else {
-            unreachable!("position 0 exists")
-        };
-        assert_eq!(d.name, "close_above_ema20");
+        // The annotation is the assertion: `Option<&BitDef>` names the
+        // re-export, `table::definition` returns the module's own type, and the
+        // two have to be one type or this line does not compile.
+        //
+        // Read through `Option::map` rather than through `let Some(d) = .. else
+        // { unreachable!("position 0 exists") }`. That `else` arm was a panic
+        // inside this crate on a path a correct table can never take, so
+        // `cargo llvm-cov` counted a region no test run could ever close. The
+        // comparison below makes the same claim as an assertion that can fail:
+        // an absent position 0 renders as `None` and fails here.
+        let zero: Option<&BitDef> = table::definition(0);
+        assert_eq!(
+            zero.map(|d| d.name),
+            Some("close_above_ema20"),
+            "position 0 is the first row of the table and it is what the \
+             re-exported `BitDef` has to describe"
+        );
         assert_eq!(
             VocabError::NoSuchBit { index: 1 },
             error::VocabError::NoSuchBit { index: 1 }
