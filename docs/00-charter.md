@@ -124,8 +124,10 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Transport | official SDK, injected client | verified |
 | History endpoint | one method for spot and derivatives | verified |
 | Granularity fetched | `1minute` only. Every other timeframe is derived — **at the write boundary**, by `pull::fold`, into the rung the bars are filed under. See D-0055. | decided |
-| History depth | from 2020 | documented |
+| History depth, daily | **2020-01-01, and the vendor claims more.** This row read "from 2020 / documented" and the lane was wrong: no vendor page says 2020. The operator stated it on **11 Aug 2026**, and the vendor's own interval table gives its `1 day` row **"Full history"** (`Groww Docs / 08-historical-data.md`). Two sources, disagreeing. The operator's is the LATER day, so it binds and the vendor's is carried beside it — `pull::vendor::Descriptor::history`, D-0113. | operator-stated 11 Aug 2026, contested by vendor docs |
+| History depth, 1-minute | **A rolling 3 months — NOT 2020.** Same page, same table, `1 min` row: **"Last 3 months"**. It is stated against the rung, the operator's 2020 was stated against the vendor, and three months is six years later, so this is what binds at this rung. A single per-vendor floor was necessarily wrong for one of these two rows, which is why the field is keyed on the rung. D-0113. | documented |
 | Window cap, 1-minute | 30 days per request at 1-minute granularity | documented |
+| Window cap, 1-minute — the vendor's own table says 7 | **UNRESOLVED, and both figures are written down.** The 30 above is what this repository has carried and is what `pull::vendor::HttpSpec::window_caps` encodes. `Groww Docs / 08-historical-data.md`'s interval table gives the `1 min` row a **"Max Duration per Request" of 7 days**, and its `1 day` row 1,080. Nothing was changed on the strength of this reading: the 30 is operator-facing history and a narrower cap only costs requests, while a wrong one loses bars. Named here so it is not discovered a third time. | conflicting sources |
 | Window cap, daily | **UNVERIFIED.** No day-level figure is published in any source this repository has read; the 30 above carries its own "at 1-minute granularity" qualifier and is not promoted. Encoded as **absent** in `pull::vendor::HttpSpec::window_caps`, which means "the vendor bounds nothing here" — the store's one-month-per-file boundary still splits every request. | unverified |
 | Daily interval word | **`1day`.** The vendor's own annexure, *Candle Interval*, gives `GrowwAPI.CANDLE_INTERVAL_DAY` the value **`1day`** — the same table that gives `CANDLE_INTERVAL_MIN_1` the value `1minute` this repository already used. The full table also carries `2minute`…`4hour`, `1week` and `1month`; none is recorded here, because `store::path::Timeframe` has a directory for two rungs and a token for a rung the store cannot file is a request whose answer has nowhere to go. Was UNVERIFIED until the docs were read; D-0076. | verified from vendor annexure |
 | Index segment word | **`CASH`** — the same word an equity takes. The vendor's live-data page states it: *"Use the segment value FNO for derivatives and CASH for stocks and index."* Before this was read, `Listing::Index` was absent from the descriptor and a live index pull refused by name with `FetchError::ListingNotSpellable`. D-0076. | verified from vendor docs |
@@ -148,12 +150,29 @@ Evidence lane is recorded per row and is never promoted while copying.
 | Window cap, 1-minute | 90 days per request. Documented against the **intraday charts** endpoint named one row above, so it is recorded at the one-minute rung and not promoted past it. | documented |
 | Window cap, daily | **UNVERIFIED.** Whether the 90 above applies to a day-level request is not stated anywhere read; nor is whether `/v2/charts/historical` serves daily at all — the endpoint row calls it "intraday charts" and the descriptor's path string does not say. Encoded as **absent**, which the store's month boundary already bounds: every chunk is ≤ 31 days and therefore inside the 90 regardless. | unverified |
 | Daily interval word | **Not applicable — and that is itself the fact.** This vendor's request carries no interval parameter at all (five fields: `securityId`, `exchangeSegment`, `instrument`, `fromDate`, `toDate`), so this build cannot vary the rung on its wire. Bars are folded into whatever rung they are filed under, which is correct for any vendor cadence no coarser than the target. | verified from SDK |
-| History depth | rolling ~5 years. **Not a fixed floor** — it moves every day. | documented |
+| History depth, daily | **A rolling ~5 years, and the vendor claims more.** Operator, **11 Aug 2026**: a rolling last 5 years — **not a fixed floor**, it moves every day. `Dhan Docs / 12-historical-data.md`, *Get Daily Historical Data*: *"The data for any scrip is available back upto the date of its inception."* Two sources, disagreeing; the operator's is the later day, so it binds and the vendor's is carried beside it. A stated absence of a floor cannot widen a stated one. D-0113. | operator-stated 11 Aug 2026, contested by vendor docs |
+| History depth, 1-minute | **A rolling 5 years, and here the two sources AGREE.** Same page, *Get Intraday Historical Data*: *"…for last 5 years."* Recorded although this build does not serve the rung — the row is a vendor fact, and `/feeds.json` emits it marked `served: false`. D-0113. | documented |
+| `toDate` inclusivity | **NON-INCLUSIVE on the daily endpoint, and NOT STATED on the intraday one.** `Dhan Docs / 12-historical-data.md`: the daily request table describes `toDate` as *"End date (YYYY-MM-DD, non-inclusive)"*; the intraday table one section below describes the same field as *"End date (YYYY-MM-DD)"*, with no qualifier. The expired-options endpoint (`14-expired-options-data.md`) repeats *non-inclusive*. `pull::vendor::HttpSpec::range_end` is per **vendor**, and the served path is the daily one, so the encoded `Exclusive` is right for what is sent today — and it is **UNVERIFIED** for the intraday path, which cannot be enabled without settling it. D-0113. | documented (daily) · unverified (intraday) |
 | Rate limit | 5/s, 100,000/day, no per-minute governor | documented |
 | Subscription | paid data plan; enforcement surfaces as a specific error code | documented |
 | Credentials | `/<org>/<env>/<vendor>/<field>` — read-only. Fields: `client-id`, `access-token`. Real segments resolved at runtime; see D-0013. | verified |
 | Security ids | NIFTY = 13 (verified from the SDK's own example). BANKNIFTY 25, SENSEX 51, INDIA VIX 21 — **community sources only, unverified.** | mixed |
 | India VIX candle availability | **UNVERIFIED.** No documentation states it. Treat as a hard gate before relying on it. | unverified |
+
+### 4z. Zerodha — recorded, and carried nowhere
+
+The operator stated on **11 Aug 2026** that Zerodha serves **a rolling 10 years**
+of history. It is written here because §3 rule 1 wants a stated fact traceable,
+and it is carried in **no** descriptor: `pull::vendor::Feed` has four rows and
+none of them is this vendor. There is no transport, no credential field and no
+wire name for it in this repository, so there is nothing for a floor to hang
+off. If a row is ever added, this line is the source it starts from — and it is
+one source, operator-stated, with no vendor page read against it.
+
+| Fact | Value | Lane |
+|---|---|---|
+| History depth | rolling 10 years | operator-stated 11 Aug 2026, no vendor page read |
+| Descriptor | **none exists.** Not a feed this build can name. | verified from source |
 
 ### 4a. Instrument facts transcribed into source
 

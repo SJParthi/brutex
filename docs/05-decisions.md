@@ -10406,3 +10406,214 @@ mechanism doing its job, and one of them —
 appears in no row of docs/03-vocabulary.md — an undocumented condition is one nobody can
 audit"*, which is the check that forced §7's two new subsections to exist before the code
 could ship.
+
+## D-0113 · 2026-08-12 · The history floor is a property of the RUNG, both sources are carried, and the non-inclusive `toDate` is a per-vendor fact that was already right
+
+**Status: locked.** `pull::vendor::Descriptor` gains `history: &'static [FloorRow]`.
+`HistoryFloor` gains two arms — `RollingMonths` and `Unbounded` — so the four shapes
+that occur are four values. `/feeds.json` emits one entry per rung with the resolved
+day, both claims and the reason one binds. `pull::session::Day::months_before` is the
+calendar walk a months-shaped floor resolves through.
+
+### Why the field could not stay per vendor
+
+One vendor, one documentation page, one table, two rows that disagree:
+`Groww Docs / 08-historical-data.md` gives its `1 day` row **"Full history"** and its
+`1 min` row **"Last 3 months"**. A floor keyed on the vendor alone is therefore
+*necessarily* wrong for one of that vendor's own two rungs — and wrong in the
+expensive direction, because asking below a floor is not an error a vendor reports
+usefully. It answers EMPTY, and an empty answer is indistinguishable from a market
+holiday. A 2020-to-today one-minute backfill against a three-month window spends
+about six years of requests per instrument on days that do not exist and reports
+success.
+
+### Four kinds, because there are four different facts
+
+| Kind | Means | Example |
+|---|---|---|
+| `rolling` | N years or months back from TODAY. It moves every day, so it is **computed** and can never be stored | Dhan, 5 years · Groww 1-minute, 3 months |
+| `fixed` | A calendar date that does not move | Groww daily, 2020-01-01 |
+| `none` | The vendor **states** there is no floor | "available back upto the date of its inception" |
+| `unknown` | Nobody has stated anything | both local archives, every rung |
+
+`none` and `unknown` were one value before this, and collapsing them is the fallback
+`CLAUDE.md` §4 bans: one is a claim a vendor made, the other is a claim nobody made,
+and they read identically once they are both a null date. The API says which by name.
+An archive claims **nothing** — the operator's folder holds whatever they bought, and
+walking it would be O(days) and would still only describe today.
+
+`RollingMonths` is a separate arm rather than a fraction of `Rolling` because three
+months is 89, 90, 91 or 92 days depending on where in the year it is measured from.
+Writing a quarter of a year, or 90 days, would be a number this repository invented.
+
+### Provenance, and what happens where the two sources disagree
+
+Two sources speak. The **operator**, on 11 Aug 2026: Dhan a rolling 5 years, Groww
+from January 2020, Zerodha a rolling 10 years. The **vendor documentation**, in the
+owner's own folders, cited line by line in `docs/00-charter.md` §4.
+
+They disagree on three of the four recorded rows. **The stricter claim binds — the
+later day, the one that refuses first — and the displaced claim is carried beside it
+with the reason.** Not averaged, not "the newer", not "the official one": each of
+those produces a number no source supports. Obeying the stricter claim can only cost
+requests the looser one would have answered empty; obeying the looser one loses days
+the store cannot prepend later.
+
+| Feed · rung | Binds | Displaced | Why |
+|---|---|---|---|
+| Dhan · `1day` | operator, rolling 5y | vendor doc, `none` (inception) | a stated absence of a floor cannot widen a stated one |
+| Dhan · `1min` | both, rolling 5y | — | the two agree; the source names both |
+| Groww · `1min` | vendor doc, rolling 3 months | operator, fixed 2020-01-01 | rung-specific, and six years later |
+| Groww · `1day` | operator, fixed 2020-01-01 | vendor doc, `none` ("Full history") | the later day refuses first |
+
+**Zerodha is recorded and carried nowhere.** `pull::vendor::Feed` has four rows and
+none is that vendor, so there is no transport for a floor to hang off. The claim is
+written into `docs/00-charter.md` §4z so that adding a row later starts from a source
+rather than from a memory.
+
+**Dhan's `1min` row is recorded although this build does not serve the rung.**
+`granularities` withdrew it — the descriptor's single `bars_path` is the daily
+endpoint — and the floor is a vendor fact either way. `/feeds.json` emits it with
+`served: false`, which is neither hiding it nor advertising a capability.
+
+### The rolling day is resolved through the clamp, in one place
+
+`api::server::floor_oldest` hands `clamp_to_floor` a window that runs from the epoch
+to today; the clamped window *starts* at the floor. So the day `/feeds.json` shows an
+operator is, by construction, the day their pull will be clamped to. A second
+implementation of "five years back" would be a second answer, and the page's own copy
+of that arithmetic is what this decision exists to delete.
+
+### What this did NOT change, and it is the one thing left
+
+`api::server::fetch_chunks` still reads the **per-vendor** `HttpSpec::history_floor`:
+
+```rust
+let asked_window = clamp_to_floor(asked.window, spec.history_floor)?;
+```
+
+`asked.granularity` is in scope on that line, so the fix is
+`asked.feed.descriptor().history_floor(asked.granularity)`. It is not taken here for
+two reasons. It changes what a live pull does — a Groww one-minute backfill would
+start refusing every month before the rolling three, loudly, and `autopilot::floor_day`
+plans the ladder from the per-vendor floor, so the planner and the fetcher would then
+disagree by six years and every planned month would refuse by name. And this session's
+remit was the descriptor and the emit. Until it is taken, the emitted floor is a fact
+an operator can read and not yet a bound the pull obeys per rung, and
+`pull::vendor::HttpSpec::history_floor` says so in its own documentation.
+
+The one direction that would be dangerous **is** asserted:
+`pull::vendor::tests::the_vendor_wide_floor_is_never_later_than_a_rungs_own`. The
+vendor-wide value may be earlier than a rung's own — that only spends empty requests —
+and may never be later, which would refuse days the vendor holds.
+
+### The non-inclusive `toDate` — checked per vendor, and already correct
+
+`Dhan Docs / 12-historical-data.md`, daily request table:
+`toDate | string | No | End date (YYYY-MM-DD, non-inclusive)`. Forwarding an
+operator's inclusive last day verbatim loses that day's session, one per request,
+and a short window is indistinguishable from a holiday.
+
+It was **already** encoded: `HttpSpec::range_end` is `Exclusive` for Dhan and
+`Inclusive` for Groww, and `HttpSource::wire_end` — the function `window_async` calls
+to build the `To` parameter — takes the successor only for an exclusive vendor. Groww
+takes the day unchanged and pushes the clock to `23:59:59`, because its `end_time` is
+an instant and midnight would collapse a one-day window to a point (measured: `GA001
+Start time should be less than end time`). **A blanket `+1` would be wrong there** —
+it names a day outside the window the operator asked for, and this vendor stamps a
+daily bar at midnight.
+
+What this session added is the proof, stated once over both feeds in terms neither
+vendor's convention appears in: the wire end must fall strictly **after** the last
+print of the session named and strictly **before** the first print of the next one.
+Both wire formats are ISO-ordered, so byte order is instant order and one comparison
+serves both conventions. No socket is opened.
+
+Three findings around it, none of them fixed here:
+
+1. **`pull::fetch::wire_end` is a second conversion site** and both it and
+   `HttpSource::wire_end` document themselves as "one conversion site". Only the HTTP
+   one is on the wire path; the `fetch` one has no caller outside tests, and it
+   returns a `Day`, so an inclusive datetime vendor routed through it would collapse
+   to midnight — the bug the `23:59:59` branch exists to prevent.
+2. **`Window::wire_to` is a blanket `+1`** with no vendor in its signature, documented
+   as what makes the non-inclusive `toDate` invisible. It has no caller outside tests
+   either. Against an inclusive vendor it would ask for a session the operator did not
+   name.
+3. **Dhan's INTRADAY table does not repeat "non-inclusive"** — it reads
+   `End date (YYYY-MM-DD)` — while the expired-options endpoint does repeat it.
+   `range_end` is per vendor, not per endpoint, so restoring Dhan's minute rung means
+   settling that first. Recorded in `docs/00-charter.md` §4 as UNVERIFIED for the
+   intraday path.
+
+## D-0114 · 2026-08-11 · Two defects the logger had against itself: a clock read outside its own lock, and a notice printed inside it
+
+**Number taken as max+1 and asserted free before writing** (`D-0113` was the
+highest in the tree; two sessions share it). Both found by an adversarial audit
+of the logging surface — 27 findings, 9 verified by skeptics told to default to
+*refuted*, 6 surviving — and both are the same shape: the logger breaking a rule
+it exists to enforce on everyone else.
+
+### The clock was read before the lock, so `ms` order was not file order
+
+`Sink::emit` called `now_millis()` **before** taking its mutex and assigned
+`seq` **after**. So `seq` followed lock-acquisition order while `ms` followed
+pre-lock order, and one thread preempted between the two lines appended a line
+whose `ms` was lower than the line before it.
+
+That mattered because `tail` **ends its entire walk** at the first record older
+than a `since` floor, on the stated grounds that "events are in time order".
+One inversion therefore returned **nothing** — and nothing said so:
+`missing_between` returns `None` whenever a `since` filter is present, and
+`reached_oldest == false` is also set on the ordinary full-page path, so it
+cannot distinguish "your page is full" from "I gave up". A silent wrong answer,
+which is the failure mode `CLAUDE.md` §4 names first.
+
+Fixed by making the writer PRODUCE the order the reader assumes: the stamp is
+taken inside the critical section and clamped to `Inner::last_at`, so `ms` is
+non-decreasing in file order by construction. Clamping rather than merely moving
+the call also absorbs a clock stepped backwards by NTP, which moving it alone
+would not. Cost: one comparison and one store, in a critical section that
+already formats and appends a line.
+
+The clamp is split into `Inner::stamp` because `now_millis` reads the host
+clock and **a test cannot move the host clock** — the only way to prove a
+backward clock is handled is to hand the reading in directly.
+`a_backward_clock_cannot_move_ms_backwards` does that and is deterministic;
+`ms_never_goes_backwards_in_the_file` races eight threads at it as a regression
+net and, being a race, is recorded as a net rather than as a proof. Removing the
+clamp fails the deterministic one.
+
+### The failure notice was printed while the emit mutex was held
+
+`report` writes to stderr. **stderr blocks** — piped to a reader that has
+stopped reading, the write parks until the pipe drains. One of the three
+`report` call sites ran with the emit mutex held, so a stalled stderr would
+freeze every thread that logs: a failed rename turned into a process-wide
+freeze, on the one path whose job is to explain the failure. The other two call
+sites already dropped the guard first; this was the one that did not.
+
+Fixed by carrying the reason out in an `Option<String>` and reporting after
+`drop(guard)` in both arms. The counters stay inside — they are relaxed atomics
+and cannot block. Only the notice moves. When a roll AND an append both fail the
+roll is reported first, because `report` prints once per sink and the roll is
+the earlier and more explanatory of the two.
+
+**Proved by parking, since no portable test can block stderr.** `report`'s
+first act is to take `last_error`; holding that lock parks any thread inside
+`report` at a known point — the same park a full pipe causes, reached through a
+door a test can close. `a_failed_roll_reports_with_the_emit_lock_released` then
+asserts another thread can take the emit mutex. Putting the call back under the
+lock fails it with "the emit mutex was still held while `report` was parked".
+
+### What the audit found that is NOT fixed here
+
+Recorded with its size rather than left implied. Three verified findings remain:
+the `/logs` health banner reports the current process's counters beside a
+durable seq-hole count, so the page contradicts itself after a restart;
+`census.rs` emits at `Info` on a per-request path while its own comment claims
+four lines per process; and `emit_if!` is still unadopted at 15 allocating emit
+sites (see the correction appended to the `emit_if!` entry). All three live in
+`crates/api/src`, where a second session is active, which is why they are
+recorded rather than half-done. A further 18 findings fell past the
+verification cap and are **unverified, not absent**.

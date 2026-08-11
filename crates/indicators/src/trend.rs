@@ -781,19 +781,17 @@ impl TrendState {
         tolerance: Tolerance,
     ) -> Result<ConditionMask, crate::Corrupt> {
         candle.check()?;
-        let bits = self.bits(candle.close, tolerance);
-        // The latch advance: exactly once per candle, and OUTSIDE the emit. `bits` is
-        // `&self` and idempotent; this is the only line that moves the structure on. It
-        // reads the swings as they stood BEFORE this candle is folded — the same reading
-        // `bits` just used, which is why the classification is not re-derived from a
-        // different state.
-        if let Some((_, direction)) = self.structure.classify(
-            candle.close,
-            self.swings.swing_high(),
-            self.swings.swing_low(),
-        ) {
+        // ONE classification, used for both the mask and the latch — not two calls that
+        // happen to agree. A sweep proved that shape unguarded by folding the candle before
+        // the advance, and by advancing on `candle.open` while the emit used `candle.close`.
+        // Neither was caught by anything. Sharing the value makes both unconstructible.
+        let (bits, broke) = self.emit(candle.close, tolerance);
+        if let Some((_, direction)) = broke {
             self.structure.advance(direction);
         }
+        // The fold comes LAST. The structure is read against the swings as they stood BEFORE
+        // this candle — an anchor excludes the bar it is measured against — and moving this
+        // line above the advance was the other uncaught mutation.
         self.fold(candle);
         Ok(bits)
     }
@@ -841,6 +839,29 @@ impl TrendState {
     /// classification. No loop over data, no allocation.
     #[must_use]
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
+        self.emit(close, tolerance).0
+    }
+
+    /// The mask, **and the classification it was built from**.
+    ///
+    /// # Why this exists rather than two `classify` calls
+    ///
+    /// `step` needs the break for the mask and the direction for the latch. It used to call
+    /// `classify` twice — once inside `bits`, once for the advance — with arguments that
+    /// merely happened to match. A verification sweep proved that unguarded two ways:
+    ///
+    /// * folding the candle before the advance, so the latch classified POST-fold swings
+    ///   while the emit had used pre-fold ones;
+    /// * advancing on `candle.open` while the emit classified `candle.close`.
+    ///
+    /// **Neither was caught by anything**, and both make the regime disagree with the bits
+    /// that reported it — a bit that reads as a measurement and is an artefact of which of
+    /// two readings won.
+    ///
+    /// One call, handed to both consumers, makes that disagreement UNCONSTRUCTIBLE rather
+    /// than merely tested. Same reasoning as `bits(&self)`: prefer the shape in which the
+    /// mistake cannot be written.
+    fn emit(&self, close: i64, tolerance: Tolerance) -> (ConditionMask, Option<(Break, Trend)>) {
         let mut mask = ConditionMask::ZERO;
 
         // 0–3: close against each average. A position stays false while its average is
@@ -911,7 +932,7 @@ impl TrendState {
             };
             mask = set(mask, index);
         }
-        mask
+        (mask, broke)
     }
 
     /// The thresholds in force, for a caller that needs to record them.

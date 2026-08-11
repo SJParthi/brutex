@@ -1859,6 +1859,125 @@ mod tests {
         );
     }
 
+    /// EVERY FEED'S WIRE END REACHES THE LAST SESSION AND NO FURTHER — AND THE
+    /// TWO FEEDS GET THERE BY OPPOSITE ROUTES.
+    ///
+    /// The operator names an INCLUSIVE window: the last day they typed is a day
+    /// they want. What each vendor takes for that is its own business, and the
+    /// two shipped rows disagree:
+    ///
+    ///   * Dhan — `toDate` is documented `End date (YYYY-MM-DD, non-inclusive)`
+    ///     on its daily endpoint, so the wire value is the day AFTER. Forward
+    ///     the operator's day verbatim and the last session is missing, one day
+    ///     per request, and a short window is indistinguishable from a holiday.
+    ///   * Groww — `end_time` is an instant and is taken inclusively, so the
+    ///     day is unchanged and the clock is pushed to the end of it. Adding a
+    ///     day HERE would be the blanket `+1` this test exists to refuse: it
+    ///     would pull a session outside the window the operator asked for.
+    ///
+    /// So the property is stated once, over both, in terms neither vendor's
+    /// convention appears in: the wire end must fall strictly after the last
+    /// print of the session named, and strictly before the first print of the
+    /// next one. Both wire formats are ISO-ordered — `YYYY-MM-DD` and
+    /// `YYYY-MM-DD HH:MM:SS` — so byte order IS instant order, and one
+    /// comparison serves both.
+    ///
+    /// No socket: this is the value the request builder puts in the `To`
+    /// parameter, taken from the same function `window_async` calls.
+    #[test]
+    fn every_feeds_wire_end_covers_the_last_session_and_not_the_next() {
+        // A Friday that traded. `docs/00-charter.md` §3: the regular session
+        // runs 09:15 to 15:30 IST and the last one-minute bar OPENS at 15:29,
+        // so these two strings are the last instant that must be inside the
+        // request and the first that must be outside it.
+        let last = crate::session::Day::new(2026, 8, 7).expect("a real date");
+        let last_print = "2026-08-07 15:29:00";
+        let next_open = "2026-08-08 09:15:00";
+
+        let mut checked = 0;
+        for feed in crate::vendor::Feed::ALL {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let wire = HttpSource::wire_end(last, spec.range_end, spec.date_format)
+                .expect("2026 has a successor");
+            assert!(
+                wire.as_str() > last_print,
+                "{feed} asks to {wire}, which stops before the last bar of the \
+                 session the operator named — the window comes back one session \
+                 short and nothing downstream can tell that from a holiday"
+            );
+            assert!(
+                wire.as_str() < next_open,
+                "{feed} asks to {wire}, which reaches into the next session — a \
+                 blanket +1 against a vendor whose bound is already inclusive"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "both HTTP feeds were checked, not one twice");
+    }
+
+    /// WHICH VENDOR IS WHICH, AND THE OFF-BY-ONE IS LOAD-BEARING.
+    ///
+    /// The test above passes for both feeds without saying that they differ.
+    /// This one says it: swap either row's `RangeEnd` and the request breaks in
+    /// the direction that row's convention makes silent.
+    #[test]
+    fn the_range_end_is_a_per_vendor_fact_and_the_wrong_one_loses_a_session() {
+        let last = crate::session::Day::new(2026, 8, 7).expect("a real date");
+        let last_print = "2026-08-07 15:29:00";
+
+        // Dhan: documented NON-INCLUSIVE. Forwarding the operator's day
+        // verbatim stops at midnight ON that day, before the session opened.
+        let dhan = match crate::vendor::Feed::Dhan.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is a broker"),
+        };
+        assert_eq!(
+            dhan.range_end,
+            RangeEnd::Exclusive,
+            "Dhan Docs / 12-historical-data.md, Get Daily Historical Data: \
+             toDate is End date (YYYY-MM-DD, non-inclusive)"
+        );
+        assert!(
+            HttpSource::wire_end(last, RangeEnd::Inclusive, dhan.date_format)
+                .expect("unchanged")
+                .as_str()
+                < last_print,
+            "if this row were inclusive the request would end before the \
+             session it names, which is the silent loss the field prevents"
+        );
+
+        // Groww: an instant, taken inclusively. The successor a blanket +1
+        // would send lands INSIDE the next session.
+        let groww = match crate::vendor::Feed::Groww.descriptor().transport {
+            crate::vendor::Transport::Http(spec) => spec,
+            crate::vendor::Transport::LocalArchive(_) => panic!("this feed is a broker"),
+        };
+        assert_eq!(
+            groww.range_end,
+            RangeEnd::Inclusive,
+            "Groww Docs / 08-historical-data.md: the window is a pair of \
+             instants, start_time and end_time, not a pair of dates"
+        );
+        let correct = HttpSource::wire_end(last, groww.range_end, groww.date_format)
+            .expect("an inclusive vendor needs no successor");
+        let blanket = HttpSource::wire_end(last, RangeEnd::Exclusive, groww.date_format)
+            .expect("the day after");
+        assert!(
+            correct.starts_with("2026-08-07"),
+            "the operator's own last day, with the clock pushed to the end of \
+             it: {correct}"
+        );
+        assert!(
+            blanket.starts_with("2026-08-08"),
+            "a blanket +1 names a DAY OUTSIDE the window the operator asked \
+             for: {blanket}. Harmless-looking at the minute rung, where the \
+             extra span holds no bars, and not harmless at the day rung, where \
+             this vendor stamps a daily bar at midnight."
+        );
+    }
+
     /// The two bounds this module states as numbers, asserted as numbers.
     ///
     /// `64 * 1024 * 1024` is a product, and `64 + 1024 + 1024` is 2,112 — a

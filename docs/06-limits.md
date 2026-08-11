@@ -3586,3 +3586,39 @@ thought of.
 One of the sweep's five was also mis-targeted and I nearly recorded a false negative: the
 severity downgrade hit the legend table at the top of the document rather than a finding row,
 so the digest was right not to move. Verified by targeting the row itself, where it fails.
+
+
+---
+
+## 61. `advance` twice per candle is uncaught, and provably harmless
+
+A verification sweep applied it and nothing failed. That is correct and is recorded here so
+the next reader does not write a test for it.
+
+`Structure::advance(d)` is `self.last = Some(d)`. Calling it twice with the same direction
+leaves the same state as calling it once — it is idempotent by construction, not by luck. A
+test asserting "advanced exactly once" would therefore have to observe a call COUNT rather
+than a state, which means a counter that exists only for the test. §4 bans a test that asserts
+nothing, and a test asserting a fact about instrumentation it introduced is close to it.
+
+`the_structure_latch_advances_exactly_once_per_candle` is named for the property that DOES
+matter and does not test this one: that `classify` alone does not advance, and `advance` does.
+The distinction is worth stating because the test's name reads as though it covers the double
+call, and it does not.
+
+### The two mutations from the same sweep that WERE real, and are now unwritable
+
+Both made the latch disagree with the mask that reported it — folding the candle before the
+advance, so the latch classified post-fold swings; and advancing on `candle.open` while the
+emit classified `candle.close`. Neither was caught.
+
+They are fixed by structure rather than by tests. `TrendState::emit` returns the mask **and
+the classification it was built from**, and `step` hands that one value to both consumers.
+There is now exactly one `classify` call on the library path, so there is no second call site
+whose arguments could drift. Re-applying the fold-order mutation now fails six tests, and the
+`candle.open` mutation cannot be written at all.
+
+This is the third time today the answer was "remove the second copy" rather than "test that
+the two copies agree": `hits`'s operator count against `WORDS`, `Calendar::charter`'s const
+assertion against `CHARTER_NON_REGULAR_IST_DAYS`, and this. Two things that must agree are a
+defect waiting for the moment nobody checks.

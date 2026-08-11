@@ -483,7 +483,10 @@ impl Day {
     /// move a history floor *later* than the vendor's, which silently refuses
     /// days the vendor would have answered.
     ///
-    /// Constant work: two divisions and a comparison, whatever `months` is.
+    /// There is no loop here and nothing is looked up: two divisions, a
+    /// comparison and two subtractions, whatever `months` is. That is a
+    /// statement about the code below rather than a measurement, and it is not
+    /// written as a bound because nothing has timed it.
     ///
     /// # Errors
     ///
@@ -1384,5 +1387,106 @@ mod month_boundary {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "the same exception every test module in this workspace takes: a \
+              test that cannot panic cannot fail."
+)]
+mod rolling_months {
+    use super::{Day, MIN_YEAR, SessionError};
+
+    fn day(y: u16, m: u8, d: u8) -> Day {
+        Day::new(y, m, d).expect("a real calendar date")
+    }
+
+    /// A rolling floor stated in months lands on the same day of an earlier
+    /// month, and crosses the year boundary by borrowing rather than by
+    /// arithmetic on a day count.
+    ///
+    /// This is the shape `HistoryFloor::RollingMonths` resolves through, and
+    /// the reason it is not a day count: the three-month floor Groww publishes
+    /// is 89, 90, 91 or 92 days wide depending on where it is measured from,
+    /// and every one of the cases below would be off by one to three days if
+    /// the span were fixed at 90.
+    #[test]
+    fn a_month_walk_keeps_the_day_and_borrows_across_january() {
+        for (from, months, want) in [
+            // The vendor's own figure, from four different starting months.
+            (day(2026, 8, 12), 3, day(2026, 5, 12)),
+            (day(2026, 3, 15), 3, day(2025, 12, 15)),
+            (day(2026, 1, 1), 1, day(2025, 12, 1)),
+            (day(2026, 1, 31), 12, day(2025, 1, 31)),
+            // Zero months is this day. A floor of "none of the past" is not a
+            // shape any vendor states, and the identity still has to hold.
+            (day(2026, 8, 12), 0, day(2026, 8, 12)),
+            // More than a year, so both the whole-year division and the
+            // remainder borrow at once.
+            (day(2026, 2, 10), 14, day(2024, 12, 10)),
+            (day(2026, 12, 31), 24, day(2024, 12, 31)),
+        ] {
+            assert_eq!(
+                from.months_before(months).expect("inside the calendar"),
+                want,
+                "{from} less {months} months"
+            );
+        }
+    }
+
+    /// THE DAY IS CLAMPED DOWN, NEVER ROLLED FORWARD.
+    ///
+    /// 31 May less three months is the last day February has. Rolling forward
+    /// into March — which is what a naive date library does — would move the
+    /// floor LATER than the vendor's own, and a floor that is too late refuses
+    /// days the vendor would have answered. Silently: the operator sees a
+    /// shorter window, not a refusal.
+    #[test]
+    fn a_short_month_clamps_the_day_rather_than_spilling_into_the_next() {
+        assert_eq!(
+            day(2026, 5, 31).months_before(3).expect("February exists"),
+            day(2026, 2, 28),
+            "2026 is not a leap year"
+        );
+        assert_eq!(
+            day(2024, 3, 31).months_before(1).expect("February exists"),
+            day(2024, 2, 29),
+            "2024 is, and the clamp reads the same month_len `new` validates with"
+        );
+        assert_eq!(
+            day(2026, 7, 31).months_before(1).expect("June exists"),
+            day(2026, 6, 30),
+            "a 30-day month takes the 30th, not the 1st of July"
+        );
+        // AND AN ORDINARY DAY IS UNTOUCHED, which is the branch the three
+        // above would pass without if the clamp fired unconditionally.
+        assert_eq!(
+            day(2026, 5, 15).months_before(3).expect("May"),
+            day(2026, 2, 15)
+        );
+    }
+
+    /// A walk that lands before 1970 is refused by name, with the bound in the
+    /// message — the same refusal `Day::new` gives, because it IS `Day::new`'s.
+    #[test]
+    fn a_walk_below_the_first_year_this_build_can_name_is_refused() {
+        let first = day(u16::try_from(MIN_YEAR).expect("1970 fits"), 1, 1);
+        let Err(why) = first.months_before(1) else {
+            panic!("there is no December 1969 in this calendar")
+        };
+        assert!(
+            matches!(why, SessionError::YearOutOfRange { year: 1969 }),
+            "the year it landed on is named: {why}"
+        );
+        // The whole-years path lands below the floor too, and saturates rather
+        // than wrapping to a year in the far future.
+        assert!(
+            first.months_before(u8::MAX).is_err(),
+            "twenty-one years before 1970 is not a date either"
+        );
     }
 }

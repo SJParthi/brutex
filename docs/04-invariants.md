@@ -1812,6 +1812,8 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 
 | I-21 | `Calendar::default()` is the charter's six, **not** an empty calendar. `impl Default` was the only uncovered FUNCTION in these three crates, and its body was mutated to `all_regular()` uncaught — the same hole twice: a `Default` nobody exercises is one whose value nobody has checked, and an empty one silently restores the defect D-0110 fixed for every consumer that writes `Calendar::default()` | `indicators::evaluator::the_default_calendar_is_the_charters_six_and_not_an_empty_one` | ✓ |
 
+| I-22 | The market-structure latch advances from the **same** classification the mask was built from. `TrendState::emit` returns both and `step` shares one value, so there is exactly one `classify` on the library path — folding before the advance, or advancing on a different price, were each uncaught mutations and the second is now unwritable | `indicators::trend::bits_is_idempotent_across_a_break_and_a_change_of_character`, `indicators::trend::a_change_of_character_reaches_the_mask` | ✓ |
+
 **I-18, I-19 and I-20 exist because a verification sweep applied mutations that nothing
 caught.** All three fixes were green, tested, and documented; three specific breaks passed
 undetected — a swapped direction mapping, a shifted calendar date, and a deleted conjunct.
@@ -1940,3 +1942,37 @@ because `pull::vendor::HttpSpec` carries no request-parameter map;
 `api::server::broker_target_tests::only_the_swept_target_names_a_single_instrument_this_path_can_reach`
 pins that to one target and is the reminder to widen the guard when the map
 lands. The archive path does not read the target at all. D-0105 records both.
+
+## The history floor is a fact about a RUNG, and the wire end is a fact about a VENDOR — D-0113
+
+The rows are prefixed `HF-` rather than continuing an existing block: two sessions
+share this tree and a collided identifier is worse than a new prefix.
+
+Every row below is proved with no socket, no credential, no vendor and no bar. The
+one row that resolves a rolling floor does it against a **fixed** day written into
+the test, because a test that reads the clock asserts something different every day
+it runs.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| HF-01 | **A feed's history floor is keyed on the RUNG, and one vendor's two rungs carry two different floors.** Groww's own interval table gives its `1 day` row "Full history" and its `1 min` row "Last 3 months", so a per-vendor floor is necessarily wrong for one of them; the descriptor answers `RollingMonths { months: 3 }` at `1min` and `Fixed 2020-01-01` at `1day`, and the two are asserted to differ. Every recorded row names a rung the store can actually file | `pull::vendor::one_vendors_two_rungs_carry_two_different_floors` | ✓ |
+| HF-02 | **A rung nothing states a floor for claims NOTHING** — not zero, not the epoch, not "no limit". Both archive feeds record an empty table and every rung of both answers `HistoryFloor::Unstated`; a broker rung no source speaks about (`1hr`) answers the same rather than inheriting the rung beside it | `pull::vendor::a_rung_with_no_recorded_floor_claims_nothing` | ✓ |
+| HF-03 | **`none` and `unknown` are two different facts and never collapse.** A vendor stating it serves back to inception is `HistoryFloor::Unbounded`; nobody having stated anything is `Unstated`. Both resolve to no day — that is asserted — and `/feeds.json` still reports them as two different words, so a reader can tell a claim from the absence of one | `api::server::the_two_floors_that_name_no_day_resolve_to_none` · `api::server::feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it` | ✓ |
+| HF-04 | **Where the operator and the vendor documentation disagree, BOTH are carried and the stricter binds.** Three of the four recorded rows are contested; every contested row names the displaced claim, its source and why it lost, every uncontested row carries an empty reason, and no claim that agrees is recorded as a contest. The binding floor is asserted to be the LATER day of the two — the one that refuses first | `pull::vendor::a_contested_floor_keeps_the_claim_it_displaced` · `pull::vendor::the_binding_floor_is_never_the_looser_of_the_two` | ✓ |
+| HF-05 | **The per-vendor floor the clamp reads is never LATER than a rung's own.** Two fields answer "how far back", and only one direction of drift is survivable: earlier spends requests a vendor answers empty, later refuses days it holds — and a refused day cannot be prepended into an append-only store | `pull::vendor::the_vendor_wide_floor_is_never_later_than_a_rungs_own` | ✓ |
+| HF-06 | **A months-shaped rolling floor is a calendar walk, and the day of the month is clamped DOWN.** 31 May less three months is the last day February has, in a leap year and a common one alike, and 31 July less one month is 30 June — never a spill forward into the next month, which would move a floor later than the vendor's. An ordinary day is untouched, a walk below 1970 is refused by name, and three months is asserted to be a calendar span rather than 90 days | `pull::session::a_short_month_clamps_the_day_rather_than_spilling_into_the_next` · `pull::session::a_month_walk_keeps_the_day_and_borrows_across_january` · `pull::session::a_walk_below_the_first_year_this_build_can_name_is_refused` | ✓ |
+| HF-07 | **A rolling floor is COMPUTED and never stored**, and the day the API shows is the day the pull will be clamped to: `/feeds.json` resolves it through `clamp_to_floor` itself, so there is one arithmetic site rather than two answers. The emitted day is asserted to be a rendered date rather than a literal anybody wrote down | `api::server::feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it` | ✓ |
+| HF-08 | **The wire end covers the last session the operator named, and not the next one** — for BOTH feeds, whose conventions are opposite. Dhan's `toDate` is documented non-inclusive so the wire value is the day after; Groww's `end_time` is an instant taken inclusively, so the day is unchanged and the clock is pushed to the end of it. The property is asserted in terms of neither: the wire end falls strictly after the session's last print (09:15–15:29, `docs/00-charter.md` §3) and strictly before the next session's first | `pull::http::every_feeds_wire_end_covers_the_last_session_and_not_the_next` | ✓ |
+| HF-09 | **The range end is a PER-VENDOR fact and the wrong one is a silent loss.** With Dhan's row read as inclusive the request would end before the session it names — one session lost per request, indistinguishable from a holiday. With a blanket `+1` applied to Groww the request names a day outside the window the operator asked for. Both wrong directions are asserted, so neither row can be "simplified" into the other | `pull::http::the_range_end_is_a_per_vendor_fact_and_the_wrong_one_loses_a_session` | ✓ |
+
+**What is NOT invariant here, and is a limit rather than a bug.** `fetch_chunks`
+still clamps with the **per-vendor** `HttpSpec::history_floor`, so Groww's
+one-minute rung is bounded at 2020 by the pull while the API correctly reports its
+three-month floor. HF-05 is what keeps that safe rather than wrong — the pull
+over-asks and the vendor answers empty; it never under-asks. Closing it is a
+one-line change at the call site and it changes what a live pull does, so D-0113
+records it rather than taking it in passing. Separately, `pull::fetch::wire_end` and
+`Window::wire_to` are two further "wire end" implementations with no caller outside
+tests, and the second carries a blanket `+1` with no vendor in its signature; HF-08
+and HF-09 hold for the path that actually reaches a socket and say nothing about
+those two.

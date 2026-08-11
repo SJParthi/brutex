@@ -834,16 +834,138 @@ async fn instruments_json(
     )
 }
 
+/// The day a history floor resolves to as of `today`, or `None` when it names
+/// no day at all.
+///
+/// # One arithmetic site, so the page and the pull cannot disagree
+///
+/// A rolling floor moves every day, so what it *is* has to be computed. It is
+/// computed HERE by handing `clamp_to_floor` a window that starts at the epoch
+/// and ends today: the clamped window begins exactly at the floor. That is not
+/// a trick for its own sake — it means the day `/feeds.json` shows an operator
+/// is, by construction, the day their pull will be clamped to. A second
+/// implementation of "five years back" would be a second answer.
+///
+/// `None` for the two floors that name no day: `HistoryFloor::Unbounded`,
+/// where the vendor says it holds everything, and `HistoryFloor::Unstated`,
+/// where nobody has said anything. The emitted `kind` is what tells those two
+/// apart — this function must not, because they resolve identically.
+fn floor_oldest(
+    floor: pull::vendor::HistoryFloor,
+    today: pull::session::Day,
+) -> Option<pull::session::Day> {
+    use pull::vendor::HistoryFloor;
+    match floor {
+        HistoryFloor::Unbounded | HistoryFloor::Unstated => None,
+        HistoryFloor::Fixed { .. }
+        | HistoryFloor::Rolling { .. }
+        | HistoryFloor::RollingMonths { .. } => {
+            let epoch = pull::session::Day::from_days(0).ok()?;
+            let whole = pull::session::Window::new(epoch, today).ok()?;
+            clamp_to_floor(whole, floor)
+                .ok()
+                .map(pull::session::Window::from)
+        }
+    }
+}
+
+/// One history claim as JSON object FIELDS — no braces, so the binding claim
+/// can be flattened into its row and a contested one nested under a key.
+///
+/// # Four kinds, four different words
+///
+/// `rolling`, `fixed`, `none` and `unknown`. The last two are the pair a
+/// caller must never collapse: `none` is the vendor stating it holds
+/// everything, `unknown` is nobody having stated anything. Emitting `null` for
+/// both and letting the reader guess is exactly the fallback `CLAUDE.md` §4
+/// bans — so the day is `null` in both cases and the WORD carries the fact.
+///
+/// `oldest` is the resolved day and is `null` whenever there is none to
+/// resolve, including when the clock could not be read: a `rolling` kind with
+/// a null day says "it moves and this answer could not place it", which is
+/// still not "no floor".
+fn claim_fields(
+    claim: Option<pull::vendor::FloorClaim>,
+    today: Option<pull::session::Day>,
+) -> String {
+    use pull::vendor::HistoryFloor;
+
+    // NO CLAIM IS A CLAIM OF NOTHING, not a claim of everything. An unrecorded
+    // rung answers `unknown` with a null source.
+    let (floor, source) = match claim {
+        Some(made) => (made.floor, Some(made.source)),
+        None => (HistoryFloor::Unstated, None),
+    };
+    let (kind, unit, count) = match floor {
+        HistoryFloor::Fixed { .. } => ("fixed", None, None),
+        HistoryFloor::Rolling { years } => ("rolling", Some("y"), Some(u64::from(years))),
+        HistoryFloor::RollingMonths { months } => ("rolling", Some("m"), Some(u64::from(months))),
+        HistoryFloor::Unbounded => ("none", None, None),
+        HistoryFloor::Unstated => ("unknown", None, None),
+    };
+    // The stated date of a fixed floor, rendered from the three numbers the
+    // descriptor holds rather than through a calendar — `oldest` below is the
+    // one that goes through the clamp, and it is the one a caller compares.
+    let from = match floor {
+        HistoryFloor::Fixed { year, month, day } => {
+            render::json_string(&format!("{year:04}-{month:02}-{day:02}"))
+        }
+        _ => "null".to_owned(),
+    };
+    let oldest = match today.and_then(|day| floor_oldest(floor, day)) {
+        Some(day) => render::json_string(&day.to_string()),
+        None => "null".to_owned(),
+    };
+    let unit = match unit {
+        Some(word) => render::json_string(word),
+        None => "null".to_owned(),
+    };
+    let count = match count {
+        Some(n) => n.to_string(),
+        None => "null".to_owned(),
+    };
+    let source = match source {
+        Some(text) => render::json_string(text),
+        None => "null".to_owned(),
+    };
+    format!(
+        r#""kind":{},"unit":{unit},"n":{count},"from":{from},"oldest":{oldest},"source":{source}"#,
+        render::json_string(kind),
+    )
+}
+
 /// Every feed this build can read, for the browser's feed selector.
 ///
 /// Built from `DESCRIPTORS`, so a fifth feed appears in the UI the day its row
 /// exists and nothing in the front end names a vendor. `transport` is included
 /// because it is what decides which of the other controls mean anything — an
 /// archive feed has no token, no rate budget and no window rules.
+///
+/// # `history` — how far back each rung answers, and who says so
+///
+/// The floor is a property of the feed AND of the rung: Groww's own interval
+/// table gives its day row "Full history" and its one-minute row "Last 3
+/// months". Until `pull::vendor::Descriptor::history` existed there was no
+/// field to read, so the /ingest page held that table itself — a vendor fact
+/// living in a browser, versioned separately from the vendor row it describes,
+/// which is the copy that goes stale. It is emitted here so the page can stop
+/// carrying literals.
+///
+/// One entry per rung the feed serves, PLUS any rung it records a floor for
+/// without serving it — `served` says which, and a floor recorded for a
+/// withdrawn rung is a fact worth keeping rather than a capability being
+/// advertised.
 async fn feeds_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let mut out = String::from("[");
+    // ONE CLOCK READ FOR THE WHOLE ANSWER, so two feeds' rolling floors are
+    // resolved against the same day. Reading it per row could straddle
+    // midnight and emit two answers that disagree by a day for no reason a
+    // reader could see. `None` when the clock is unusable, which every rolling
+    // floor below then reports as a null day beside a `rolling` kind — never
+    // as an absent floor.
+    let today = ingest::ist_day(std::time::SystemTime::now()).ok();
     for (n, feed) in pull::vendor::Feed::ALL.into_iter().enumerate() {
         if n > 0 {
             out.push(',');
@@ -852,6 +974,39 @@ async fn feeds_json(
             pull::vendor::Transport::Http(_) => "broker",
             pull::vendor::Transport::LocalArchive(_) => "archive",
         };
+
+        // THE HISTORY FLOORS, ONE ROW PER RUNG.
+        //
+        // Walked over the whole ladder rather than over the descriptor's
+        // table, so a rung a feed SERVES with no recorded floor still appears
+        // — as `unknown`, which is the honest answer and the one the page
+        // renders as "claims nothing". A rung that is neither served nor
+        // recorded is not emitted at all: there is nothing to say about it.
+        let mut history = String::from("[");
+        let mut rungs = 0usize;
+        for rung in pull::vendor::Granularity::ALL {
+            let row = feed.descriptor().history_row(rung);
+            let served = feed.serves(rung);
+            if !served && row.is_none() {
+                continue;
+            }
+            if rungs > 0 {
+                history.push(',');
+            }
+            rungs += 1;
+            let contested = match row.and_then(|r| r.contested) {
+                Some(other) => format!("{{{}}}", claim_fields(Some(other), today)),
+                None => "null".to_owned(),
+            };
+            let _ = write!(
+                history,
+                r#"{{"rung":{},"served":{served},{},"binds_because":{},"contested":{contested}}}"#,
+                render::json_string(rung.dir()),
+                claim_fields(row.map(|r| r.binding), today),
+                render::json_string(row.map_or("", |r| r.binds_because)),
+            );
+        }
+        history.push(']');
 
         // CAN THIS FEED ACTUALLY SERVE?
         //
@@ -909,7 +1064,7 @@ async fn feeds_json(
 
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"transport":{},"ready":{ready},"why":{}}}"#,
+            r#"{{"wire":{},"display":{},"transport":{},"ready":{ready},"why":{},"history":{history}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
             render::json_string(transport),
@@ -3162,9 +3317,26 @@ pub(crate) fn clamp_to_floor(
     use pull::vendor::HistoryFloor;
 
     let oldest = match floor {
-        // Nothing published. Ask for what was asked — inventing a floor would
-        // be the vendor fact `CLAUDE.md` §3 rule 1 forbids.
-        HistoryFloor::Unstated => return Ok(window),
+        // TWO DIFFERENT FACTS, ONE ARM, AND THE ARM IS NOT WHERE THEY DIFFER.
+        //
+        // `Unstated` is nobody having published a floor — inventing one would
+        // be the vendor fact `CLAUDE.md` §3 rule 1 forbids. `Unbounded` is the
+        // vendor stating it serves back to the instrument's own inception.
+        // Neither narrows a window, so clamping cannot tell them apart and
+        // must not pretend to; `/feeds.json` reports them as `unknown` and
+        // `none`, which is where the difference is visible to an operator.
+        HistoryFloor::Unstated | HistoryFloor::Unbounded => return Ok(window),
+        // A ROLLING FLOOR STATED IN MONTHS, resolved the same way the years
+        // arm is: from today's clock, never from a stored date. The calendar
+        // walk lives on `Day` because a month is not a fixed number of days
+        // and dividing one into 30 would be a figure no vendor published.
+        HistoryFloor::RollingMonths { months } => {
+            let today = ingest::ist_day(std::time::SystemTime::now())
+                .map_err(|why| format!("the clock is unusable: {why}"))?;
+            today
+                .months_before(months)
+                .map_err(|why| format!("the rolling floor lands before the epoch: {why}"))?
+        }
         HistoryFloor::Fixed { year, month, day } => pull::session::Day::new(year, month, day)
             .map_err(|why| format!("the feed's history floor is not a real day: {why}"))?,
         HistoryFloor::Rolling { years } => {
@@ -9998,6 +10170,150 @@ mod tests {
             !sink.health().is_loud(),
             "nothing was dropped while proving these sites: {:?}",
             sink.health()
+        );
+    }
+
+    /// THE HISTORY FLOORS LEAVE THIS PROCESS, PER RUNG, WITH THEIR SOURCES.
+    ///
+    /// The /ingest page held this table in the browser because there was no
+    /// field to read. Every claim below is now emitted, so a stale copy in a
+    /// front end is a copy that can be deleted rather than a copy that has to
+    /// be kept in step with `crates/pull` by hand.
+    #[tokio::test]
+    async fn feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it() {
+        let dir = masters("feeds-floors", None, None);
+        let site = Loaded::new(Site::load(&dir, &store_root("feeds-floors")));
+        let (_, body) = feeds_json(axum::extract::State(site)).await;
+
+        // ONE VENDOR, TWO RUNGS, TWO DIFFERENT FLOORS — the whole reason the
+        // field is keyed on the rung.
+        assert!(
+            body.contains(r#"{"rung":"1min","served":true,"kind":"rolling","unit":"m","n":3"#),
+            "Groww's one-minute rung rolls three months: {body}"
+        );
+        assert!(
+            body.contains(
+                r#"{"rung":"1day","served":true,"kind":"fixed","unit":null,"n":null,"from":"2020-01-01""#
+            ),
+            "and its day rung is a fixed date: {body}"
+        );
+
+        // A ROLLING FLOOR IS RESOLVED, NOT STORED. The day is computed from
+        // today's clock through the same clamp a pull uses, so it is a
+        // different string tomorrow — which is why the assertion is on its
+        // shape and on the two facts around it rather than on a literal.
+        let oldest = body
+            .split(r#""kind":"rolling","unit":"y","n":5,"from":null,"oldest":""#)
+            .nth(1)
+            .expect("the five-year floor resolved to a day")
+            .get(..10)
+            .expect("a rendered day is ten characters")
+            .to_owned();
+        assert!(
+            oldest.starts_with("20") && oldest.contains('-'),
+            "a resolved day, not a stored one: {oldest}"
+        );
+        assert!(
+            !body.contains(r#""oldest":"2021-08-11""#) || oldest != "2021-08-11",
+            "nothing here pins a rolling floor to a literal"
+        );
+
+        // THE FOUR KINDS ARE FOUR WORDS, and the two that name no day are not
+        // the same word. An archive claims NOTHING; a vendor that states it
+        // holds everything says so.
+        assert!(
+            body.contains(r#"{"rung":"1s","served":true,"kind":"unknown","unit":null,"n":null,"from":null,"oldest":null,"source":null"#),
+            "an archive's reach is unknown, not unlimited: {body}"
+        );
+        assert!(
+            body.contains(r#""contested":{"kind":"none""#),
+            "the vendor claim that lost is carried, by name: {body}"
+        );
+
+        // A RUNG THIS BUILD DOES NOT SERVE IS MARKED, NOT HIDDEN AND NOT
+        // ADVERTISED. Dhan's minute rung is withdrawn until the intraday path
+        // exists, and the floor read from its documentation is still a fact.
+        assert!(
+            body.contains(r#"{"rung":"1min","served":false,"kind":"rolling","unit":"y","n":5"#),
+            "the withdrawn rung carries its floor and says it is not served: {body}"
+        );
+
+        // Every entry carries every key, so a reader never has to tell an
+        // absent field from a null one.
+        for key in [
+            r#""kind":"#,
+            r#""unit":"#,
+            r#""n":"#,
+            r#""from":"#,
+            r#""oldest":"#,
+            r#""source":"#,
+            r#""binds_because":"#,
+            r#""contested":"#,
+        ] {
+            assert!(body.contains(key), "every entry carries {key}: {body}");
+        }
+        // And the array is still the array it was: the five fields the page
+        // already reads are untouched.
+        assert!(body.starts_with(
+            r#"[{"wire":"dhan","display":"Dhan","transport":"broker","ready":true,"why":""#
+        ));
+    }
+
+    /// A FLOOR THAT NAMES NO DAY RESOLVES TO NO DAY — both of them, and for
+    /// two different reasons that the resolver is deliberately blind to.
+    #[test]
+    fn the_two_floors_that_name_no_day_resolve_to_none() {
+        let today = Day::new(2026, 8, 12).expect("a real date");
+        assert_eq!(
+            floor_oldest(pull::vendor::HistoryFloor::Unbounded, today),
+            None,
+            "the vendor says it holds everything, so there is no oldest day"
+        );
+        assert_eq!(
+            floor_oldest(pull::vendor::HistoryFloor::Unstated, today),
+            None,
+            "and nobody has said anything, which is not the same fact"
+        );
+        // A fixed floor resolves to itself, and a rolling one to a day before
+        // today — through the clamp, so this is the day a pull would be given.
+        assert_eq!(
+            floor_oldest(
+                pull::vendor::HistoryFloor::Fixed {
+                    year: 2020,
+                    month: 1,
+                    day: 1
+                },
+                today
+            ),
+            Some(Day::new(2020, 1, 1).expect("a real date"))
+        );
+        assert_eq!(
+            floor_oldest(
+                pull::vendor::HistoryFloor::RollingMonths { months: 3 },
+                today
+            ),
+            Some(Day::new(2026, 5, 12).expect("a real date")),
+            "three calendar months, not ninety days"
+        );
+        // A CLAIM NOBODY MADE IS `unknown`, WITH A NULL SOURCE. This is the
+        // arm a rung with no row takes, and it must not read as "no limit".
+        let fields = claim_fields(None, Some(today));
+        assert!(
+            fields.contains(r#""kind":"unknown""#) && fields.contains(r#""source":null"#),
+            "{fields}"
+        );
+        // And a floor whose date is not a date resolves to nothing rather than
+        // to a day it invented. 30 February is the case.
+        assert_eq!(
+            floor_oldest(
+                pull::vendor::HistoryFloor::Fixed {
+                    year: 2020,
+                    month: 2,
+                    day: 30
+                },
+                today
+            ),
+            None
         );
     }
 }

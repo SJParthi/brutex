@@ -1548,8 +1548,8 @@ pub struct FloorClaim {
 /// The operator stated one set of floors on 11 Aug 2026 and the vendors'
 /// documentation states another, and for three of the four rows below they do
 /// not agree. Averaging them, or taking the newer, or taking the vendor's
-/// because it is "official", would each produce a number no source supports.
-/// So the **stricter** one binds — the later day is the one that refuses first,
+/// because it is the *official* one, would each produce a number no source
+/// supports. So the **stricter** one binds — the later day refuses first,
 /// and obeying it can only cost requests that would have come back empty — and
 /// the one it displaced stays here, named, beside the reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1605,11 +1605,12 @@ pub struct HttpSpec {
     pub prices: PriceScale,
     /// The published budget.
     pub budget: Budget,
-    /// The oldest day this feed will answer for.
+    /// The oldest day this feed will answer for, **whatever rung is asked
+    /// for** — the loosest of its floors, and the one the clamp reads.
     ///
     /// # Why a feed needs one, and why the two differ in KIND
     ///
-    /// `docs/00-charter.md` §4 records Groww's history as "from 2020" and
+    /// `docs/00-charter.md` §4 records Groww's daily history as 2020-01-01 and
     /// Dhan's as "rolling ~5 years. **Not a fixed floor** — it moves every
     /// day." That is a difference of SHAPE, not of number, and one date could
     /// not express both.
@@ -1623,6 +1624,30 @@ pub struct HttpSpec {
     /// For Dhan it is worse than waste: a rolling floor makes COMPLETE a claim
     /// with an expiry date. The oldest month held falls further outside the
     /// vendor's window every month, and nothing notices.
+    ///
+    /// # TWO FIELDS NOW SAY "HOW FAR BACK", AND THIS ONE IS THE LOOSER
+    ///
+    /// [`Descriptor::history`] states the floor **per rung**, because the
+    /// vendors do: Groww's own interval table gives its day row "Full history"
+    /// and its one-minute row "Last 3 months". This field is per **vendor**
+    /// and cannot express that, and it is what `api::server::clamp_to_floor`
+    /// is handed today.
+    ///
+    /// The two are not free to disagree in the dangerous direction. This one
+    /// must be **no later** than every rung's own floor — an over-clamp would
+    /// refuse days a vendor holds, which loses data, while an under-clamp only
+    /// spends requests that come back empty. `pull::vendor::tests::the_vendor_
+    /// wide_floor_is_never_later_than_a_rungs_own` asserts exactly that, so a
+    /// rung floor edited to be stricter cannot silently leave this field
+    /// behind.
+    ///
+    /// **What is still true and is a limit, not an invariant:** Groww's
+    /// one-minute rung is narrowed to three months by its own documentation
+    /// and this field says 2020, so a one-minute backfill to 2020 is clamped
+    /// to 2020 and spends six years of requests the vendor answers empty. The
+    /// fix is one line at the clamp's call site — `asked.granularity` is in
+    /// scope there — and it changes what a live pull does, so it is recorded
+    /// in D-0113 rather than taken in passing.
     pub history_floor: HistoryFloor,
     /// How many days one request may name, **per rung**.
     ///
@@ -2188,13 +2213,169 @@ pub struct Descriptor {
     pub transport: Transport,
     /// Which granularities it serves.
     pub granularities: GranularitySet,
+    /// How far back it answers, **per rung**. See [`FloorRow`].
+    ///
+    /// # On the descriptor, not on [`HttpSpec`]
+    ///
+    /// Beside `granularities`, because "which rungs" and "how far back at each
+    /// rung" are one question asked twice, and because a **local archive has a
+    /// reach too**: an archive descriptor has no `HttpSpec` to hang a field
+    /// off, and the answer for both of them — nothing states anything — is a
+    /// fact worth being able to say. Before this field the page could not ask
+    /// the API and held the table itself, which is the one place a vendor fact
+    /// must not live: it is versioned with the vendor row, and a second copy
+    /// in a front end is the copy that goes stale.
+    ///
+    /// An absent rung is [`HistoryFloor::Unstated`] — see
+    /// [`Descriptor::history_floor`]. It is never zero and never "no limit".
+    pub history: &'static [FloorRow],
     /// Which segments it serves.
     pub segments: SegmentSet,
     /// Which exchange its rows belong to.
     pub exchange: Exchange,
 }
 
+impl Descriptor {
+    /// This feed's whole history claim for `rung`, or `None` when it records
+    /// none.
+    ///
+    /// `None` is the honest answer for a rung nothing has been read about, and
+    /// a caller must render it as a claim NOT MADE rather than as an absent
+    /// bound. The two read the same in a JSON field and mean opposite things.
+    ///
+    /// A walk of a table with at most one row per rung of a closed ladder —
+    /// the same shape and the same bound as [`HttpSpec::window_cap_days`].
+    /// There is no `N` here an input can grow.
+    #[must_use]
+    pub fn history_row(&self, rung: Granularity) -> Option<&'static FloorRow> {
+        let rows: &'static [FloorRow] = self.history;
+        rows.iter().find(|row| row.granularity as u8 == rung as u8)
+    }
+
+    /// The floor that **binds** at `rung`, or [`HistoryFloor::Unstated`] when
+    /// this feed records nothing for it.
+    ///
+    /// The convenience over [`Self::history_row`] for a caller that clamps
+    /// rather than displays: `Unstated` already means "nothing published", and
+    /// `clamp_to_floor` already reads it as "ask for what was asked". So an
+    /// unrecorded rung narrows nothing, and it does so through the arm that
+    /// says why rather than through a `None` a caller had to interpret.
+    #[must_use]
+    pub fn history_floor(&self, rung: Granularity) -> HistoryFloor {
+        match self.history_row(rung) {
+            Some(row) => row.binding.floor,
+            None => HistoryFloor::Unstated,
+        }
+    }
+}
+
 // --- the rows --------------------------------------------------------------
+
+/// How far back Dhan answers, per rung, with the disagreement intact.
+///
+/// The operator stated a rolling five years for this vendor on 11 Aug 2026.
+/// The vendor's own historical-data page says two different things about its
+/// two endpoints, and this table keeps them apart because they ARE apart:
+/// the daily endpoint claims inception, the intraday one claims five years.
+const DHAN_HISTORY: &[FloorRow] = &[
+    FloorRow {
+        granularity: Granularity::Day1,
+        // THE OPERATOR'S, AND IT IS THE NARROWER OF THE TWO. The vendor claims
+        // more history than the operator does; taking the vendor's word would
+        // widen a bound the person paying for the entitlement says is five
+        // years, and the cost of being wrong that way is a backfill that walks
+        // decades of empty answers and calls them holidays.
+        binding: FloorClaim {
+            floor: HistoryFloor::Rolling { years: 5 },
+            source: "the operator, 11 Aug 2026: a rolling last 5 years",
+        },
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::Unbounded,
+            source: "Dhan Docs / 12-historical-data.md, Get Daily Historical \
+                     Data: available back upto the date of its inception",
+        }),
+        binds_because: "a stated absence of a floor cannot widen a stated one: \
+                        five years back is the later day, so it is the one \
+                        that refuses first, and obeying it can only cost \
+                        requests the wider claim would have answered empty.",
+    },
+    // THE RUNG THIS BUILD DOES NOT SERVE, AND THE ROW IS STILL HERE.
+    //
+    // `granularities` withdraws `Minute1` from this feed — the descriptor's
+    // single `bars_path` is the DAILY endpoint, so a minute request would have
+    // fetched daily bars and filed them under `1min/`. The FLOOR is a fact
+    // about the vendor either way, it was read from the same page as the row
+    // above, and recording it here is what makes restoring the rung a question
+    // about `bars_path` rather than a second reading of the documentation.
+    // `/feeds.json` emits it marked as not served.
+    FloorRow {
+        granularity: Granularity::Minute1,
+        // BOTH SOURCES SAY FIVE YEARS, so there is nothing to contest and the
+        // source names them both rather than picking one to credit.
+        binding: FloorClaim {
+            floor: HistoryFloor::Rolling { years: 5 },
+            source: "the operator, 11 Aug 2026, and Dhan Docs / \
+                     12-historical-data.md, Get Intraday Historical Data \
+                     (for last 5 years): the two agree",
+        },
+        contested: None,
+        binds_because: "",
+    },
+];
+
+/// How far back Groww answers, per rung, with the disagreement intact.
+///
+/// **This is the table that proves the field had to be per rung.** One vendor,
+/// one documentation page, one interval table — and its two rows say different
+/// things: `1 day` is "Full history", `1 min` is "Last 3 months". A single
+/// per-vendor floor is necessarily wrong for one of them.
+const GROWW_HISTORY: &[FloorRow] = &[
+    FloorRow {
+        granularity: Granularity::Minute1,
+        // THE VENDOR'S, AND IT IS RUNG-SPECIFIC. The operator's January 2020
+        // was stated for the vendor rather than for this rung, and the vendor's
+        // own table narrows this rung to a rolling quarter. Three months is the
+        // later day by six years, so it binds.
+        binding: FloorClaim {
+            floor: HistoryFloor::RollingMonths { months: 3 },
+            source: "Groww Docs / 08-historical-data.md, interval table, \
+                     1 min row: Last 3 months",
+        },
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::Fixed {
+                year: 2020,
+                month: 1,
+                day: 1,
+            },
+            source: "the operator, 11 Aug 2026: from January 2020",
+        }),
+        binds_because: "three months back is the later day by six years, and \
+                        it is the only one of the two stated against this rung \
+                        rather than against the vendor as a whole.",
+    },
+    FloorRow {
+        granularity: Granularity::Day1,
+        // THE OPERATOR'S, for the same reason Dhan's day row takes his: the
+        // vendor claims everything and he claims 2020, and 2020 is the later
+        // day.
+        binding: FloorClaim {
+            floor: HistoryFloor::Fixed {
+                year: 2020,
+                month: 1,
+                day: 1,
+            },
+            source: "the operator, 11 Aug 2026: from January 2020",
+        },
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::Unbounded,
+            source: "Groww Docs / 08-historical-data.md, interval table, \
+                     1 day row: Full history",
+        }),
+        binds_because: "a stated absence of a floor cannot widen a stated one: \
+                        2020-01-01 is the later day, so it is the one that \
+                        refuses first.",
+    },
+];
 
 const DHAN: Descriptor = Descriptor {
     // MEASURED against Groww on the same instrument and the same five sessions:
@@ -2257,8 +2438,13 @@ const DHAN: Descriptor = Descriptor {
             per_minute: None,
             per_day: Some(crate::rate::DHAN_PER_DAY),
         },
-        // docs/00-charter.md §4: "History depth | rolling ~5 years. Not a
-        // fixed floor — it moves every day | documented".
+        // docs/00-charter.md §4, "History depth, daily": a rolling ~5 years,
+        // not a fixed floor — it moves every day. Operator-stated 11 Aug 2026,
+        // and the vendor's own daily page claims MORE (inception), which is
+        // carried beside it in `DHAN_HISTORY` rather than here: this field is
+        // per vendor and has room for one claim. Both of this feed's recorded
+        // rungs carry the same five years, so the vendor-wide value below is
+        // exactly the per-rung one and not a widening of it.
         history_floor: HistoryFloor::Rolling { years: 5 },
         // docs/00-charter.md §4: "Window cap | 90 days per request |
         // documented" — and that row sits directly under this vendor's
@@ -2358,6 +2544,7 @@ const DHAN: Descriptor = Descriptor {
     // per-rung table and an `interval` parameter whose word comes from
     // `granularity_tokens`. UNVERIFIED until both exist.
     granularities: GranularitySet::EMPTY.with(Granularity::Day1),
+    history: DHAN_HISTORY,
     segments: SegmentSet::EMPTY
         .with(Segment::Index)
         .with(Segment::Cash)
@@ -2424,7 +2611,13 @@ const GROWW: Descriptor = Descriptor {
             per_day: None,
         },
         // Groww pools per endpoint group; the other broker does not.
-        // docs/00-charter.md §4: "History depth | from 2020 | documented".
+        //
+        // docs/00-charter.md §4, "History depth, daily": 2020-01-01,
+        // operator-stated 11 Aug 2026. THE LOOSEST OF THIS FEED'S FLOORS AND
+        // NOT ALL OF THEM — its one-minute rung is a rolling three months by
+        // the vendor's own interval table, six years later than this. See
+        // `GROWW_HISTORY`, and this field's own documentation for why the
+        // looser value is the safe one to leave here and what it still costs.
         history_floor: HistoryFloor::Fixed {
             year: 2020,
             month: 1,
@@ -2541,6 +2734,7 @@ const GROWW: Descriptor = Descriptor {
     granularities: GranularitySet::EMPTY
         .with(Granularity::Minute1)
         .with(Granularity::Day1),
+    history: GROWW_HISTORY,
     segments: SegmentSet::EMPTY
         .with(Segment::Index)
         .with(Segment::Cash)
@@ -2604,6 +2798,13 @@ const TRUE_DATA: Descriptor = Descriptor {
     granularities: GranularitySet::EMPTY
         .with(Granularity::Second1)
         .with(Granularity::Minute1),
+    // EMPTY, AND THAT IS THE FACT. An archive's reach is whatever the operator
+    // bought and put in the folder; no vendor page states a floor for a
+    // directory on this machine, and this repository will not derive one by
+    // walking it — a walk is O(days) and would still only report what is there
+    // today. Every rung therefore answers `HistoryFloor::Unstated`, which
+    // `/feeds.json` renders as a claim NOT MADE rather than as "no limit".
+    history: &[],
     segments: SegmentSet::EMPTY.with(Segment::Index),
     exchange: Exchange::Nse,
 };
@@ -2658,6 +2859,8 @@ const GDFL: Descriptor = Descriptor {
         prices: PriceScale::Rupees,
     }),
     granularities: GranularitySet::EMPTY.with(Granularity::Second1),
+    // Empty for the reason the archive above is empty.
+    history: &[],
     segments: SegmentSet::EMPTY.with(Segment::Fno),
     exchange: Exchange::Nse,
 };
@@ -2745,6 +2948,29 @@ mod tests {
     /// A real date, or the test fails on its own literal.
     fn day(year: u16, month: u8, of_month: u8) -> Day {
         Day::new(year, month, of_month).expect("the test's own date literal is real")
+    }
+
+    /// A history floor as the day it names, resolved against a FIXED day.
+    ///
+    /// `None` for the two floors that name no day. The rolling arm uses 365
+    /// rather than the clamp's 365.25 on purpose: nothing here compares
+    /// against a literal, only floors against each other, and a test that
+    /// re-derives the production constant proves the constant rather than the
+    /// ordering.
+    fn resolve_floor(floor: HistoryFloor, today: Day) -> Option<Day> {
+        match floor {
+            HistoryFloor::Fixed { year, month, day } => {
+                Some(Day::new(year, month, day).expect("a real floor date"))
+            }
+            HistoryFloor::Rolling { years } => Day::from_days(
+                today
+                    .days_from_epoch()
+                    .saturating_sub(years.saturating_mul(365)),
+            )
+            .ok(),
+            HistoryFloor::RollingMonths { months } => today.months_before(months).ok(),
+            HistoryFloor::Unbounded | HistoryFloor::Unstated => None,
+        }
     }
 
     // -- the const helpers ---------------------------------------------------
@@ -4159,7 +4385,11 @@ mod tests {
         };
 
         let printed = format!(
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+            HistoryFloor::Unbounded,
+            HistoryFloor::RollingMonths { months: 3 },
+            DHAN_HISTORY[0],
+            DHAN_HISTORY[0].binding,
             Granularity::Minute1,
             Granularity::Minute1.grid(),
             GranularitySet::EMPTY,
@@ -4227,5 +4457,224 @@ mod tests {
         );
         let cloned = *Feed::Dhan.descriptor();
         assert_eq!(cloned, *Feed::Dhan.descriptor(), "a row is Copy and equal");
+    }
+
+    // -- the history floors --------------------------------------------------
+
+    /// THE FLOOR IS PER RUNG, AND ONE VENDOR'S TWO RUNGS DISAGREE.
+    ///
+    /// This is the assertion that would have been impossible before the field
+    /// existed: Groww's own interval table gives its day row "Full history" and
+    /// its one-minute row "Last 3 months", so a floor keyed on the vendor alone
+    /// is necessarily wrong for one of the two. A minute backfill clamped to the
+    /// day rung's 2020 spends six years of requests on days the vendor answers
+    /// EMPTY, and an empty answer reads exactly like a market holiday.
+    #[test]
+    fn one_vendors_two_rungs_carry_two_different_floors() {
+        let groww = Feed::Groww.descriptor();
+        assert_eq!(
+            groww.history_floor(Granularity::Minute1),
+            HistoryFloor::RollingMonths { months: 3 },
+            "the vendor's own interval table, 1 min row"
+        );
+        assert_eq!(
+            groww.history_floor(Granularity::Day1),
+            HistoryFloor::Fixed {
+                year: 2020,
+                month: 1,
+                day: 1
+            },
+            "the operator, 11 Aug 2026"
+        );
+        assert_ne!(
+            groww.history_floor(Granularity::Minute1),
+            groww.history_floor(Granularity::Day1),
+            "if these were ever equal the field would not have needed a rung"
+        );
+        // Every rung a feed SERVES is either recorded or honestly unknown, and
+        // every recorded rung is one this build could file bars for.
+        for feed in Feed::ALL {
+            for row in feed.descriptor().history {
+                assert!(
+                    row.granularity.store_timeframe().is_some(),
+                    "{feed} records a floor for a rung the store cannot file"
+                );
+            }
+        }
+    }
+
+    /// A RUNG NOTHING STATES A FLOOR FOR CLAIMS NOTHING.
+    ///
+    /// Not zero, not the epoch, and not "no limit" — those are three different
+    /// wrong answers and all three read as a fact. Both archive feeds are the
+    /// live case: an operator's folder holds whatever they bought, and no page
+    /// anywhere states how far back that goes.
+    #[test]
+    fn a_rung_with_no_recorded_floor_claims_nothing() {
+        for feed in [Feed::TrueData, Feed::Gdfl] {
+            assert!(
+                feed.descriptor().history.is_empty(),
+                "{feed} is a folder on this machine and no vendor states its reach"
+            );
+            for rung in Granularity::ALL {
+                assert_eq!(
+                    feed.descriptor().history_floor(rung),
+                    HistoryFloor::Unstated,
+                    "{feed} at {rung}"
+                );
+                assert!(feed.descriptor().history_row(rung).is_none(), "{feed}");
+            }
+        }
+        // And a rung a broker serves nothing about is unknown too, rather than
+        // inheriting the rung next to it.
+        assert_eq!(
+            Feed::Groww.descriptor().history_floor(Granularity::Hour1),
+            HistoryFloor::Unstated,
+            "no source states an hourly floor, so none is claimed"
+        );
+    }
+
+    /// WHERE THE TWO SOURCES DISAGREE, BOTH ARE CARRIED AND ONE IS MARKED.
+    ///
+    /// `CLAUDE.md` §3 rule 1 wants every vendor claim traceable to a source.
+    /// Three of the four rows recorded here have two sources that do not agree,
+    /// and the displaced one is kept beside the reason it was displaced —
+    /// deleting it would leave a number no reader could argue with.
+    #[test]
+    fn a_contested_floor_keeps_the_claim_it_displaced() {
+        let dhan_day = Feed::Dhan
+            .descriptor()
+            .history_row(Granularity::Day1)
+            .expect("the one rung this feed serves");
+        assert_eq!(dhan_day.binding.floor, HistoryFloor::Rolling { years: 5 });
+        assert_eq!(
+            dhan_day
+                .contested
+                .expect("the vendor claims inception")
+                .floor,
+            HistoryFloor::Unbounded,
+            "the vendor claims more than the operator does, and it is kept"
+        );
+
+        let groww_minute = Feed::Groww
+            .descriptor()
+            .history_row(Granularity::Minute1)
+            .expect("the rung the vendor narrows");
+        assert_eq!(
+            groww_minute
+                .contested
+                .expect("the operator's claim for this vendor")
+                .floor,
+            HistoryFloor::Fixed {
+                year: 2020,
+                month: 1,
+                day: 1
+            },
+            "the operator's 2020 lost this rung to the vendor's own table, and \
+             is still readable"
+        );
+
+        // Every row that displaced a claim says why, and every row that
+        // displaced nothing says nothing. An empty reason beside a contest
+        // would be a verdict with no argument behind it.
+        let mut contested = 0;
+        for feed in Feed::ALL {
+            for row in feed.descriptor().history {
+                assert_eq!(
+                    row.contested.is_some(),
+                    !row.binds_because.is_empty(),
+                    "{feed} at {}: a contest and its reason travel together",
+                    row.granularity
+                );
+                assert!(
+                    !row.binding.source.is_empty(),
+                    "{feed} at {}: a floor with no source is one somebody typed",
+                    row.granularity
+                );
+                if let Some(other) = row.contested {
+                    assert!(!other.source.is_empty(), "{feed}");
+                    assert_ne!(
+                        other.floor, row.binding.floor,
+                        "{feed} at {}: a claim that agrees is not a contest",
+                        row.granularity
+                    );
+                    contested += 1;
+                }
+            }
+        }
+        assert_eq!(contested, 3, "three of the four rows are contested");
+    }
+
+    /// THE PER-VENDOR FIELD AND THE PER-RUNG TABLE CANNOT DRIFT APART IN THE
+    /// DIRECTION THAT LOSES DATA.
+    ///
+    /// `HttpSpec::history_floor` is what `api::server::clamp_to_floor` reads,
+    /// and it is per VENDOR. `Descriptor::history` is per RUNG. Two fields
+    /// answering "how far back" is a drift risk, and the asymmetry is what
+    /// makes it survivable: a vendor-wide floor that is EARLIER than a rung's
+    /// own only spends requests the vendor answers empty, while one that is
+    /// LATER refuses days the vendor holds — and a refused day in an
+    /// append-only store cannot be prepended later.
+    ///
+    /// So the one direction is asserted. Edit a rung to be stricter and this
+    /// stays green; edit the vendor-wide field to be stricter than a rung and
+    /// this goes red before the pull does.
+    #[test]
+    fn the_vendor_wide_floor_is_never_later_than_a_rungs_own() {
+        let today = day(2026, 8, 12);
+        for feed in Feed::ALL {
+            let Transport::Http(spec) = feed.descriptor().transport else {
+                continue;
+            };
+            let Some(vendor_wide) = resolve_floor(spec.history_floor, today) else {
+                continue;
+            };
+            for row in feed.descriptor().history {
+                let Some(per_rung) = resolve_floor(row.binding.floor, today) else {
+                    continue;
+                };
+                assert!(
+                    vendor_wide <= per_rung,
+                    "{feed} at {}: the clamp would refuse {per_rung} back to \
+                     {vendor_wide}, which is later than the rung's own floor",
+                    row.granularity
+                );
+            }
+        }
+    }
+
+    /// THE STRICTER CLAIM IS THE ONE THAT BINDS, MEASURED AS A DAY.
+    ///
+    /// "Stricter" is not a word in the type — it is a comparison, and this is
+    /// where it is checked rather than asserted in prose. A floor that binds
+    /// must refuse at least as much as the one it displaced, or the row has
+    /// promoted the looser claim and the pull will spend requests on days no
+    /// source says exist.
+    #[test]
+    fn the_binding_floor_is_never_the_looser_of_the_two() {
+        // A day the rolling floors are resolved against. Fixed here rather than
+        // read from a clock: a test that reads the clock asserts a different
+        // thing every day it runs.
+        let today = day(2026, 8, 12);
+        for feed in Feed::ALL {
+            for row in feed.descriptor().history {
+                let Some(other) = row.contested else {
+                    continue;
+                };
+                let bound =
+                    resolve_floor(row.binding.floor, today).expect("a binding floor names a day");
+                // A displaced claim that names NO day cannot narrow anything,
+                // so any real day beats it and there is nothing to compare.
+                // One that does name a day must be the earlier of the two: the
+                // later day refuses first, and that is what `stricter` means.
+                if let Some(loser) = resolve_floor(other.floor, today) {
+                    assert!(
+                        bound >= loser,
+                        "{feed} at {}: the looser claim was promoted",
+                        row.granularity
+                    );
+                }
+            }
+        }
     }
 }

@@ -411,7 +411,7 @@ Step 1 is where honesty is required, and it is the part with no code yet.
 | Which instruments? | The tracked universe, ~800 | ✅ `catalog::tracked` |
 | Which days? | Trading days between the instrument's floor and yesterday | ❌ **no trading calendar in this build** |
 | How many bars in a day? | 375 at one-minute, 09:15–15:29 inclusive (CAS, from 2026-08-03) | ⚠️ constant exists; holidays do not |
-| When does an instrument's history start? | Per feed AND per instrument. Groww from 2020; Dhan is a **rolling** ~5 years that moves daily | ❌ no floor recorded |
+| When does an instrument's history start? | Per feed, per RUNG, and per instrument. Groww's day rung from 2020 and its one-minute rung a rolling 3 months; Dhan a **rolling** ~5 years that moves daily | ⚠️ per-feed and per-rung floors are recorded and emitted — `pull::vendor::Descriptor::history`, `/feeds.json`, D-0113. **Per INSTRUMENT is still nowhere**: a scrip listed in 2024 has no bars in 2021 and nothing here knows that |
 
 **Without a trading calendar, "expected" cannot be computed exactly.** A weekend
 and an exchange holiday are indistinguishable from a missing pull, and treating

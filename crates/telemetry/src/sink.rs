@@ -950,6 +950,20 @@ impl Sink {
             event,
         );
         let span = u64::try_from(inner.buf.len()).unwrap_or(u64::MAX);
+        // CARRIED OUT OF THE CRITICAL SECTION, NOT REPORTED INSIDE IT.
+        //
+        // `report` writes to stderr, and stderr BLOCKS: piped to a reader that
+        // has stopped reading, it fills the pipe buffer and the write parks
+        // indefinitely. Doing that while this mutex is held would stall every
+        // other thread that logs — turning a failed rename into a process-wide
+        // freeze on the one path that is supposed to explain the failure.
+        // `CLAUDE.md` §4 forbids a fallback that hides a failure; a fallback
+        // that HANGS on one is worse.
+        //
+        // The counters stay inside: they are relaxed atomics and cannot block.
+        // Only the notice moves. The other two `report` call sites already
+        // dropped the guard first; this was the one that did not.
+        let mut roll_failure: Option<String> = None;
         if !self.rotation_broken.load(Ordering::Relaxed)
             && inner.bytes > 0
             && inner.bytes.saturating_add(span) > self.max_file_bytes
@@ -962,13 +976,16 @@ impl Sink {
             // would be the worse of the two, and a bound that has been
             // exceeded is visible in `health()`.
             self.rotation_failures.fetch_add(1, Ordering::Relaxed);
-            self.report(&why);
+            roll_failure = Some(why);
         }
         let landed = inner.target.append(&inner.buf);
         match landed {
             Ok(()) => {
                 inner.bytes = inner.bytes.saturating_add(span);
                 drop(guard);
+                if let Some(why) = roll_failure {
+                    self.report(&why);
+                }
                 self.written.fetch_add(1, Ordering::Relaxed);
                 Emitted::Written
             }
@@ -995,6 +1012,13 @@ impl Sink {
                 // already unwritable and the next append will say so.
                 let _terminated = inner.target.append(b"\n");
                 drop(guard);
+                // A ROLL THAT ALSO FAILED IS REPORTED FIRST, so the notice
+                // names the failure that came first. `report` prints once per
+                // sink, so with both failing this is the one an operator sees —
+                // and the roll is the earlier and more explanatory of the two.
+                if let Some(why) = roll_failure {
+                    self.report(&why);
+                }
                 let why = format!(
                     "{}: cannot append the event — {e}",
                     current_path(&self.dir).display()
@@ -1322,6 +1346,106 @@ mod tests {
         fn reopen(&mut self, _path: &Path) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// **`report` runs with the emit mutex RELEASED, proved by parking it.**
+    ///
+    /// The hazard is that `report` writes to stderr, and stderr blocks: piped
+    /// to a reader that has stopped reading, the write parks until the pipe
+    /// drains. Doing that under the emit mutex freezes every thread that logs.
+    ///
+    /// No portable test can block stderr. But `report`'s FIRST act is to take
+    /// `last_error`, so holding that lock parks any thread inside `report` at a
+    /// known point — the same park a full pipe would cause, reached by a door
+    /// a test can actually close.
+    ///
+    /// With the notice still inside the critical section the emitting thread
+    /// would hold `inner` while parked, and `try_lock` below would never
+    /// succeed. That is exactly the freeze this checks for.
+    #[test]
+    fn a_failed_roll_reports_with_the_emit_lock_released() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::sync::PoisonError;
+
+        let dir = scratch("report-off-lock");
+        let sink = Arc::new(
+            Sink::open(
+                &Config::new(&dir)
+                    .with_max_file_bytes(MIN_FILE_BYTES)
+                    .with_keep_files(3),
+            )
+            .expect("opens"),
+        );
+
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let wide = "y".repeat(MAX_STR_VALUE_BYTES);
+        let emit_fat = move |sink: &Sink| {
+            sink.emit(
+                &Event::info("t", &fat)
+                    .with("pad_a", wide.as_str())
+                    .with("pad_b", wide.as_str()),
+            )
+        };
+
+        // One natural roll first, so the failing one is the SECOND.
+        for _ in 0..2 {
+            assert!(emit_fat(&sink).is_written());
+        }
+        assert_eq!(sink.health().rotation_failures, 0, "nothing failed yet");
+
+        // A read-only directory makes the rename refuse, which is a failed roll.
+        let mut ro = std::fs::metadata(&dir).expect("the dir").permissions();
+        ro.set_mode(0o555);
+        std::fs::set_permissions(&dir, ro).expect("read-only");
+
+        // PARK anything that reaches `report`.
+        let held = sink
+            .last_error
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+
+        let writer = {
+            let mine = Arc::clone(&sink);
+            std::thread::spawn(move || emit_fat(&mine))
+        };
+
+        // The counter is bumped INSIDE the critical section, immediately before
+        // the notice that now sits outside it — so once it moves, the writer is
+        // either finishing its append or already parked in `report`.
+        let mut spun = 0;
+        while sink.rotation_failures.load(Ordering::Relaxed) == 0 && spun < 5_000 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            spun += 1;
+        }
+        assert!(
+            sink.rotation_failures.load(Ordering::Relaxed) > 0,
+            "the premise: the roll had to fail for `report` to be reached"
+        );
+
+        // THE ASSERTION. Another thread must be able to take the emit mutex
+        // while the writer is parked in `report`.
+        let mut free = false;
+        for _ in 0..5_000 {
+            if sink.inner.try_lock().is_ok() {
+                free = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+
+        // Release the park and let the writer finish before asserting, so a
+        // failure reports rather than leaving a thread wedged.
+        drop(held);
+        let _outcome = writer.join().expect("the writer did not panic");
+        let mut rw = std::fs::metadata(&dir).expect("the dir").permissions();
+        rw.set_mode(0o755);
+        std::fs::set_permissions(&dir, rw).expect("restore");
+
+        assert!(
+            free,
+            "the emit mutex was still held while `report` was parked: a stderr \
+             that blocks would freeze every thread that logs"
+        );
     }
 
     /// **The clamp, against a clock that runs backwards.**
