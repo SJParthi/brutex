@@ -670,8 +670,9 @@ mod tests {
 
     /// A flat bar inside a run breaks the alternation as well as the two runs.
     ///
-    /// Up, flat, up is not an alternation, and it is the case that catches a ring
-    /// which encodes "unchanged" as "down": under that encoding the three directions
+    /// Up, then an unchanged bar, then up is not an alternation, and it is the case that
+    /// catches a ring which encodes "unchanged" as "down": under that encoding the three
+    /// directions
     /// read as true, false, true — every adjacent pair different — and 39 fired on a
     /// sequence containing no down bar at all.
     #[test]

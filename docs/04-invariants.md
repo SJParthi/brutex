@@ -1806,6 +1806,23 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 | I-16 | 276/277 compare the close to the **session's** open, and a flat close sets **neither** — nor does the session's first bar, which has no session open to compare against yet | `indicators::evaluator::the_close_against_the_session_open_sets_at_most_one_bit` | ✓ |
 | I-17 | 278/279 report the structure **in force between** breaks, not only on the bars where 56–59 fire. Without that distinction they are a duplicate of the break events and every other test still passes | `indicators::evaluator::the_structure_in_force_is_reported_between_breaks_and_not_before_the_first` | ✓ |
 
+| I-18 | The six non-regular days ARE the charter's six, derived by an arithmetic sharing no code with the constant. A sweep shifted 2023-11-12 by one day in **both** spellings — so the const assertion still passed — and nothing caught it. An off-by-one is worse than the defect the calendar fixed: a regular session's anchor is discarded while the real Muhurat goes on poisoning the next day's | `indicators::evaluator::the_six_non_regular_days_are_the_charter_dates` | ✓ |
+| I-19 | 278 means UP and 279 means DOWN. I-17 passes with the mapping **swapped**, so the regime could have been reported permanently inverted — a sweep asking for "structure up" would get every bar where it was down, which is a false combination rather than a missing one | `indicators::evaluator::the_structure_direction_bits_are_not_swapped` | ✓ |
+| I-20 | `warmed_up` requires the pivot ladder, not only the session count. The four conditions look coupled and are not: `close_the_books` fills `prev5` unconditionally and installs `yesterday` only `if let Ok(levels)`, so five unusable sessions give a full window with no ladder | `indicators::evaluator::warmed_up_is_false_when_the_pivot_ladder_is_absent_despite_five_sessions` | ✓ |
+
+**I-18, I-19 and I-20 exist because a verification sweep applied mutations that nothing
+caught.** All three fixes were green, tested, and documented; three specific breaks passed
+undetected — a swapped direction mapping, a shifted calendar date, and a deleted conjunct.
+Each is now guarded and each was confirmed by re-applying the mutation.
+
+**I-20 was written twice.** The first version fed five unusable sessions of two bars each and
+asserted `!warmed_up()`. It passed with the `yesterday` conjunct deleted, because ten candles
+leaves the 200-period EMA unwarmed — so the `false` came from the trend and the assertion said
+nothing about the pivot ladder. Forty ordinary bars per session were added so everything else
+is warm and a false answer can only come from `yesterday`. **This is the third time in one day
+that a test of mine passed for the wrong reason**, and all three were found by mutating rather
+than by reading.
+
 **I-10 and I-11 both fail on the obvious slip**, which is why the verdict is taken on
 `self.day` and not `today`: asking about the session that is *starting* rather than the one
 that just *ended* inverts the fix, so the Muhurat session would poison the anchor and the

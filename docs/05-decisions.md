@@ -8138,7 +8138,41 @@ a stopwatch measures this machine — and also asserts that `admits` agrees with
 `emit` on every rung, because a gate that disagreed with the thing it gates would
 lose events.
 
-### Four failure paths that returned `Err` and logged nothing
+> **This paragraph is wrong and is corrected below — see *"The macro was built
+> and never adopted"*. The macro exists and works; the word "closed" does not
+> survive, because nothing calls it.**
+
+### The macro was built and never adopted, so the violation above is still open
+
+*Correction, same ledger, appended rather than rewritten — the entry above stays
+as it was written so the mistake is legible.*
+
+"Closed by `telemetry::emit_if!`" is false. The macro is real, its test is real,
+and the semantics it proves are real. **What was never done is using it.**
+Counted across `crates/api/src` and `crates/pull/src`: `emit_if!` has **zero**
+production call sites. The four occurrences in the tree are one doc example
+(`lib.rs`), one integration test (`tests/global_absent.rs`) and two mentions in
+prose. Every real emit site still calls `telemetry::emit(&Event::new(..).with(..))`,
+which is exactly the shape the measurement above indicted.
+
+So the ledger recorded a violation as closed on the strength of the *mechanism*
+being available, not the *call sites* being changed. That is the same error §3
+rule 6 exists to prevent, made in the document whose job is to prevent it.
+
+**How much of it is real cost.** Being fair to the original entry: the field
+count is bounded by `MAX_FIELDS` = 12, so "O(call-site fields)" is a constant
+factor of at most twelve, not unbounded growth. The part that is not merely a
+constant is the **arguments**, and 15 sites evaluate an allocating expression
+before `emit` can decide to drop it — `.display().to_string()` in `census.rs`,
+`audit.rs` (four sites), `master.rs` and `server.rs` among them. Those pay a
+heap allocation per filtered event. That is the cost worth removing, and it is
+smaller and more specific than "the write path violates O(1)".
+
+**Not fixed here, and deliberately not.** Converting call sites touches
+`crates/api/src/audit.rs`, `master.rs`, `census.rs` and `server.rs`, and a second
+session is live in this tree. Recorded as open with its exact size — 15
+allocating sites, ~62 total — rather than half-done or overstated. The honest
+status is: the instrument exists, the adoption does not.
 
 Counting emit sites cannot find these; only walking the failure paths can.
 `crates/pull/src/ingest.rs` had four arms that pushed a `Failure` onto the

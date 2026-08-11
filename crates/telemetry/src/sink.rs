@@ -930,7 +930,11 @@ impl Sink {
         // line whose `ms` was lower than the line before it. `tail`'s `since`
         // filter ends the walk at the first record older than the floor because
         // it trusts time order, so one inversion silently truncated the answer.
-        // See `Inner::last_at`. Proved by `ms_never_goes_backwards_in_the_file`.
+        // See `Inner::last_at`. Proved deterministically by
+        // `a_backward_clock_cannot_move_ms_backwards`, which feeds the clamp a
+        // reading no real clock would give; `ms_never_goes_backwards_in_the_file`
+        // races eight threads at it as a regression net, and being a race it
+        // cannot prove an absence — recorded that way rather than as a proof.
         let at = inner.stamp(now_millis());
         inner.seq = inner.seq.saturating_add(1);
         inner.buf.clear();
@@ -1170,8 +1174,8 @@ fn resume_seq(path: &Path) -> u64 {
 )]
 mod tests {
     use super::{
-        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, Health, MIN_FILE_BYTES, Sink,
-        Target, current_path, dir_beneath_store, paths_newest_first, rotated_path,
+        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, Health, Inner, MIN_FILE_BYTES,
+        Sink, Target, current_path, dir_beneath_store, paths_newest_first, rotated_path,
     };
     use crate::event::{Event, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES};
     use crate::level::{LEVELS, Level};
@@ -1292,6 +1296,28 @@ mod tests {
             Path::new("/root/telemetry"),
             "beside audit/, not inside it"
         );
+    }
+
+    /// A destination that accepts everything and keeps nothing.
+    ///
+    /// [`Inner::stamp`] touches no destination, so the tests that exercise the
+    /// clamp need an `Inner` without needing a file. Distinct from `Brittle`,
+    /// which exists to REFUSE.
+    #[derive(Debug)]
+    struct NullTarget;
+
+    impl Target for NullTarget {
+        fn append(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn sync(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn reopen(&mut self, _path: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// **The clamp, against a clock that runs backwards.**

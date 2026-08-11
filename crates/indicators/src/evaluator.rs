@@ -167,9 +167,18 @@ pub const CHARTER_NON_REGULAR_IST_DAYS: [i64; 6] = [
 
 /// Which IST days are not regular sessions.
 ///
-/// A fixed-size set, checked once per session rollover rather than once per bar. The scan
-/// is bounded by a compile-time length, so it is O(1) under §3 rule 4 — and it is not on
-/// the per-bar path at all.
+/// A fixed-size set, checked once per session rollover rather than once per bar. The scan is
+/// bounded by a compile-time length, so it is O(1) under §3 rule 4 — and it is not on the
+/// per-bar path at all.
+///
+/// Measured by `C-I-01` in `crates/indicators/benches/ratio.rs`. That row times
+/// `Evaluator::step` at 1,000 candles folded against 200,000, and the rollover — including
+/// this scan — is inside what it times: if the check grew with anything, the per-candle cost
+/// would drift and the row would breach. Measured 1.009x.
+///
+/// Named rather than asserted because gate 12 refuses a cost claim with no proof beside it,
+/// and this block was the gate's first refusal after it was written. The claim was true and
+/// unaccompanied, which is exactly what that gate exists to catch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Calendar {
     days: [i64; 8],
@@ -617,6 +626,20 @@ impl Evaluator {
     /// Use `every_family_can_answer` to interpret a single bar: it is what says an
     /// `orb60_*` position is false because the window has not closed rather than because the
     /// price is elsewhere.
+    /// # `previous.is_some()` is redundant today, and stays
+    ///
+    /// A verification sweep deleted it and nothing caught it — correctly, because nothing
+    /// CAN: `close_the_books` assigns `self.previous` unconditionally, so it is `Some` after
+    /// any completed session and `prev5.filled() >= 5` already implies five of those.
+    ///
+    /// It is not removed, and the distinction matters. The other three conditions are
+    /// independent and each is guarded by a test that fails without it — `yesterday` in
+    /// particular is NOT implied by the session count, because `close_the_books` installs it
+    /// only `if let Ok(levels)` and an unusable session fills the window while leaving the
+    /// pivot ladder absent. This line states the same requirement for the previous-session
+    /// edge, and it stops being redundant the moment that assignment becomes conditional too.
+    /// A redundant conjunct that documents a requirement is cheaper than rediscovering the
+    /// requirement after the assignment changes.
     #[must_use]
     pub fn warmed_up(&self) -> bool {
         self.prev5.filled() >= 5
@@ -1741,6 +1764,209 @@ mod tests {
             !saw_event_without_regime,
             "a break event fired on a bar where no direction was in force, so the latch is \
              advancing after the emit rather than before"
+        );
+    }
+
+    /// The six non-regular dates are the charter's six, derived rather than trusted.
+    ///
+    /// # Why this test exists
+    ///
+    /// `CHARTER_NON_REGULAR_IST_DAYS` is six hand-transcribed integers. A verification sweep
+    /// changed 2023-11-12 from `19_673` to `19_674` in **both** spellings — so the const
+    /// assertion that holds the two in agreement still passed — and **nothing caught it.**
+    ///
+    /// An off-by-one there is worse than the defect the calendar fixed: the engine would
+    /// treat a REGULAR session as non-regular and discard a real anchor, while the actual
+    /// Muhurat session went on poisoning the next day's. Two wrongs, in opposite directions,
+    /// from one digit.
+    ///
+    /// So the days are computed from the calendar dates here, by an arithmetic that shares no
+    /// code with the constant. `crates/indicators` declares one dependency and it is `vocab`,
+    /// so there is no date library to reach for — which is why this is written out. The
+    /// charter's §3 table is the source for the dates themselves.
+    #[test]
+    fn the_six_non_regular_days_are_the_charter_dates() {
+        /// Days from 1970-01-01 to the given date, by Howard Hinnant's civil-from-days
+        /// inverse. Shares nothing with the constant under test.
+        const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+            let y = if m <= 2 { y - 1 } else { y };
+            let era = if y >= 0 { y } else { y - 399 } / 400;
+            let yoe = y - era * 400;
+            let mp = (m + 9) % 12;
+            let doy = (153 * mp + 2) / 5 + d - 1;
+            let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            era * 146_097 + doe - 719_468
+        }
+
+        // Sanity: the arithmetic itself. If these are wrong the comparison below is worthless.
+        assert_eq!(days_from_civil(1970, 1, 1), 0, "the epoch is day zero");
+        assert_eq!(days_from_civil(1970, 1, 2), 1);
+        assert_eq!(
+            days_from_civil(2000, 1, 1),
+            10_957,
+            "a date with a known answer"
+        );
+
+        // docs/00-charter.md §3, "Muhurat (Diwali) session ... Verified dates".
+        let charter: [(i64, i64, i64); 6] = [
+            (2020, 11, 14),
+            (2021, 11, 4),
+            (2022, 10, 24),
+            (2023, 11, 12),
+            (2024, 11, 1),
+            (2025, 10, 21),
+        ];
+        for (i, (y, m, d)) in charter.iter().enumerate() {
+            let want = days_from_civil(*y, *m, *d);
+            let got = CHARTER_NON_REGULAR_IST_DAYS
+                .get(i)
+                .copied()
+                .expect("six dates, six entries");
+            assert_eq!(
+                got, want,
+                "entry {i} is {got} and {y}-{m:02}-{d:02} is day {want}. A transcription \
+                 off-by-one makes the engine discard a REGULAR session's anchor while the \
+                 real Muhurat session goes on poisoning the next day's."
+            );
+            // And the constant is actually consulted for that day.
+            assert!(
+                Calendar::charter().is_non_regular(want),
+                "{y}-{m:02}-{d:02} is in the charter's six and the calendar does not know it"
+            );
+            // The day before and after are regular, which is what stops a fix that marks a
+            // whole week non-regular from passing.
+            assert!(!Calendar::charter().is_non_regular(want - 1));
+            assert!(!Calendar::charter().is_non_regular(want + 1));
+        }
+    }
+
+    /// 278 means UP and 279 means DOWN, and swapping them is caught.
+    ///
+    /// `the_structure_in_force_is_reported_between_breaks_..` asserts the two are never both
+    /// set and that they fire between events — and it passes with the mapping SWAPPED, so the
+    /// regime could have been reported permanently inverted. Found by a verification sweep
+    /// applying that exact mutation.
+    ///
+    /// A sweep asking for "structure up" would have received every bar where the structure
+    /// was down: not a missing combination but a false one, which is the worse of the two.
+    #[test]
+    fn the_structure_direction_bits_are_not_swapped() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let mut last_break_up: Option<bool> = None;
+        let mut compared = 0_u32;
+
+        for m in 0..90_i64 {
+            let within = m % 22;
+            let close = match m / 22 {
+                0 => 2_400_000 + within * 9_000,
+                1 => 2_600_000 - within * 10_000,
+                2 => 2_380_000 + within * 11_000,
+                _ => 2_620_000 - within * 12_000,
+            };
+            let bar = Candle {
+                ts_micros: 26_000 * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                open: close,
+                high: close + 800,
+                low: close - 800,
+                close,
+                volume: 0,
+                open_interest: i64::MIN,
+            };
+            let mask = e.step(&bar).expect("a sane candle");
+
+            // 56 bos_up and 58 choch_up are upward breaks; 57 and 59 are downward.
+            if mask.get(56) || mask.get(58) {
+                last_break_up = Some(true);
+            } else if mask.get(57) || mask.get(59) {
+                last_break_up = Some(false);
+            }
+
+            // The regime must AGREE with the direction of the most recent break.
+            if let Some(up) = last_break_up {
+                compared += 1;
+                assert_eq!(
+                    mask.get(278),
+                    up,
+                    "bar {m}: the last break was {} and 278 `structure_up_in_force` is {}",
+                    if up { "UPWARD" } else { "downward" },
+                    mask.get(278)
+                );
+                assert_eq!(
+                    mask.get(279),
+                    !up,
+                    "bar {m}: 279 `structure_down_in_force` disagrees with the last break"
+                );
+            }
+        }
+        assert!(
+            compared > 20,
+            "only {compared} bars were compared against a known break direction, which is \
+             too few for this to mean anything"
+        );
+    }
+
+    /// `warmed_up` needs the previous day, not only the five sessions.
+    ///
+    /// Deleting `self.yesterday.is_some()` from `warmed_up` was not caught by anything. The
+    /// four conditions look coupled — `close_the_books` pushes `prev5` and installs
+    /// `yesterday` in the same call — but they are NOT: `yesterday` is installed only
+    /// `if let Ok(levels)`, so a session whose levels are unusable fills the rolling window
+    /// and leaves the pivot ladder absent.
+    ///
+    /// Five such sessions give `prev5.filled() == 5` with `has_yesterday() == false`, and a
+    /// `warmed_up` that checked only the count would report a run ready to sweep while the
+    /// whole 44-position pivot family was structurally silent.
+    #[test]
+    fn warmed_up_is_false_when_the_pivot_ladder_is_absent_despite_five_sessions() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        // A session whose own span leaves i64: two zero-range bars at opposite ends. Each bar
+        // is legal — `Candle::check` bounds `high - low` WITHIN a bar — but the session's
+        // extremes come from two different bars, so `DailyLevels` refuses it.
+        // 2 extreme bars to make the session unusable, then 40 ordinary ones so the 200-period
+        // EMA warms. Both halves are load-bearing: WITHOUT the ordinary bars this test passed
+        // for the wrong reason — 10 candles leaves the trend unwarmed, so `warmed_up` returned
+        // false from the EMA and the assertion said nothing about `yesterday`. Found by
+        // deleting `yesterday.is_some()` and watching it stay green.
+        for day in 27_000..=27_005 {
+            for m in 0..42_i64 {
+                let price = match m {
+                    0 => i64::MIN / 2,
+                    1 => i64::MAX / 2,
+                    _ => 2_500_000 + (m % 17) * 400,
+                };
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: price,
+                    high: price,
+                    low: price,
+                    close: price,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("each bar is individually legal");
+            }
+        }
+        assert_eq!(
+            e.sessions_completed(),
+            5,
+            "the rolling window did not fill, so this proves nothing about the decoupling"
+        );
+        assert!(
+            !e.has_yesterday(),
+            "the unusable sessions installed a pivot ladder, so the premise is wrong"
+        );
+        // The premise the earlier version of this test lacked: everything ELSE is warm, so a
+        // false answer can only be coming from `yesterday`.
+        assert!(
+            e.sessions_until_every_family_can_answer() == 0,
+            "the session count is not satisfied, so the assertion below is ambiguous"
+        );
+        assert!(
+            !e.warmed_up(),
+            "five completed sessions with a warm trend and NO pivot ladder is reported as \
+             warm, so `warmed_up` is the session count wearing a conjunction's name — the \
+             44-position pivot family is structurally silent and every support it touches is \
+             depressed"
         );
     }
 }
