@@ -116,12 +116,23 @@ pub struct GapLeg {
 }
 
 impl GapLeg {
-    /// The gap's length, `X3`. Always positive: a leg is only built when it is.
+    /// The gap's length, `X3`, or `None` when it does not fit `i64`. Positive whenever
+    /// it exists: [`GapFib::establish`] builds a leg only when it is.
+    ///
+    /// `checked_sub` and an `Option`, exactly as [`Self::level`] answers one. `X1` and
+    /// `X2` come from two DIFFERENT sessions, and `Candle::check` reads one record — a
+    /// flat bar at either end of the type has a zero range and is accepted — so the leg
+    /// can span 1.84e19 where neither bar does. `saturating_sub` pinned that at
+    /// `i64::MAX`, and every rung is a fraction of this length: rung 0 is `X2` at any
+    /// length, so position 132 still fired on today's opening extreme while the ten rungs
+    /// above it stood at prices of a gap half the real one. A saturated length is a
+    /// plausible number for a gap the market never made, which §4 bans, and it is the
+    /// same objection [`Self::level`] answers with `None` rather than a clamp.
     #[must_use]
-    pub const fn length(&self) -> i64 {
+    pub const fn length(&self) -> Option<i64> {
         match self.direction {
-            Direction::Up => self.x2.saturating_sub(self.x1),
-            Direction::Down => self.x1.saturating_sub(self.x2),
+            Direction::Up => self.x2.checked_sub(self.x1),
+            Direction::Down => self.x1.checked_sub(self.x2),
         }
     }
 
@@ -344,7 +355,12 @@ impl GapFib {
         let Some(leg) = self.leg else {
             return mask;
         };
-        let range = leg.length();
+        // A leg whose length leaves `i64` decides nothing — see [`GapLeg::length`]. The
+        // whole ladder abstains rather than the individual rungs: the length is the base
+        // of every one of them, so there is no rung it is right for.
+        let Some(range) = leg.length() else {
+            return mask;
+        };
         // THE LADDER IS WALKED, NOT INDEXED. This was `while i < GAP_RUNGS.len()`
         // around a `let Some(p) = GAP_RUNGS.get(i) else { break }`, which is an arm
         // that cannot run while the loop condition holds — `cargo llvm-cov` records
@@ -488,7 +504,7 @@ mod tests {
                 direction: Direction::Up
             }
             .length(),
-            40
+            Some(40)
         );
         assert_eq!(
             GapLeg {
@@ -497,7 +513,7 @@ mod tests {
                 direction: Direction::Down
             }
             .length(),
-            40
+            Some(40)
         );
     }
 
@@ -536,7 +552,7 @@ mod tests {
         assert_eq!(leg.direction, Direction::Up);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 HIGH");
         assert_eq!(leg.x2, 2_520_000, "X2 is today's first-3 HIGH");
-        assert_eq!(leg.length(), 20_000);
+        assert_eq!(leg.length(), Some(20_000));
         assert_eq!(leg.midpoint(), Some(2_510_000));
     }
 
@@ -554,7 +570,7 @@ mod tests {
         assert_eq!(leg.direction, Direction::Down);
         assert_eq!(leg.x1, 2_500_000, "X1 is yesterday's last-3 LOW");
         assert_eq!(leg.x2, 2_480_000, "X2 is today's first-3 LOW");
-        assert_eq!(leg.length(), 20_000);
+        assert_eq!(leg.length(), Some(20_000));
         assert_eq!(leg.midpoint(), Some(2_490_000));
     }
 
@@ -663,6 +679,70 @@ mod tests {
         );
     }
 
+    /// A leg whose length does not fit `i64` sets NOTHING, rather than laying eleven
+    /// rungs over a saturated one.
+    ///
+    /// `X1` and `X2` come from different sessions, and each bar below is legal on its own
+    /// — `Candle::check` reads one record, and a flat bar at either end of the type has a
+    /// zero range — so the LEG spans 1.84e19 where no record does. Under `saturating_sub`
+    /// that became `i64::MAX`, and every rung is a fraction of it: rung 0 is `X2` whatever
+    /// the length, so position 132 still fired at today's opening extreme while the ten
+    /// rungs above it sat at prices of a gap half the real one. Nothing refused.
+    #[test]
+    fn a_leg_whose_length_leaves_the_type_sets_nothing() {
+        const HI: i64 = 9_200_000_000_000_000_000;
+        const LO: i64 = -9_200_000_000_000_000_000;
+
+        let mut g = GapFib::new();
+        for m in 0..3 {
+            let _ = ok(&mut g, &at(30_700, m, LO, LO, LO));
+        }
+        for m in 0..3 {
+            let _ = ok(&mut g, &at(30_701, m, HI, HI, HI));
+        }
+        let leg = g
+            .leg()
+            .expect("today's first-3 high cleared yesterday's last-3 high");
+        assert_eq!(leg.direction, Direction::Up);
+        assert_eq!(leg.x1, LO, "X1 is yesterday's last-3 high");
+        assert_eq!(leg.x2, HI, "X2 is today's first-3 high");
+        assert_eq!(
+            leg.length(),
+            None,
+            "a leg spanning 1.84e19 reported a length that fits i64, so ten rungs were \
+             laid out over a gap the market never made"
+        );
+        // A close on `X2` is rung 0 of this ladder at any length, which is why it is the
+        // close that shows a saturated length firing a bit.
+        let mask = ok(&mut g, &at(30_701, 3, HI, HI, HI));
+        assert_eq!(
+            mask,
+            ConditionMask::ZERO,
+            "a leg whose length leaves i64 decided a rung on today's opening extreme"
+        );
+
+        // And a gap spanning half as much — 9.2e18, which DOES fit — fires rung 0 on the
+        // same close from the same code, so the empty mask above is the length leaving
+        // the type and not a ladder that never emits at this magnitude.
+        let mut fits = GapFib::new();
+        for m in 0..3 {
+            let _ = ok(&mut fits, &at(30_800, m, LO / 2, LO / 2, LO / 2));
+        }
+        for m in 0..3 {
+            let _ = ok(&mut fits, &at(30_801, m, HI / 2, HI / 2, HI / 2));
+        }
+        assert_eq!(
+            fits.leg().map(|leg| leg.length()),
+            Some(Some(HI / 2 - LO / 2)),
+            "a representable 9.2e18 gap did not report its own length"
+        );
+        let mask = ok(&mut fits, &at(30_801, 3, HI / 2, HI / 2, HI / 2));
+        assert!(
+            mask.get(u32::from(GAP_FIRST)),
+            "a representable gap did not fire rung 0 on a close sitting exactly on X2"
+        );
+    }
+
     /// `X1` is the last 3-minute candle, **not** the session's own extreme.
     ///
     /// The tail is three slots and a real session is hundreds of bars, so the source's
@@ -715,7 +795,7 @@ mod tests {
              the session high of 2,600,000"
         );
         assert_eq!(leg.x2, 2_520_000, "X2 is today's first-3 HIGH");
-        assert_eq!(leg.length(), 20_000);
+        assert_eq!(leg.length(), Some(20_000));
 
         // Same yesterday, and today undercuts 2,450,000 — the last-3 LOW, which is
         // m4's. It does not undercut the session low of 2,400,000, and its high stays
@@ -741,6 +821,6 @@ mod tests {
              the session low of 2,400,000"
         );
         assert_eq!(leg.x2, 2_425_000, "X2 is today's first-3 LOW");
-        assert_eq!(leg.length(), 25_000);
+        assert_eq!(leg.length(), Some(25_000));
     }
 }

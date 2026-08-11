@@ -51,6 +51,18 @@ pub enum Unusable {
     /// `high - low` does not fit in an `i64`, so no level can be computed. Only
     /// reachable from a corrupt record — see [`crate::Corrupt::RangeOverflows`].
     RangeOverflows,
+    /// A rung of the ladder does not fit an `i64`. The span fits and the record is
+    /// ordered, so neither refusal above fires, but `r4 = r3 + r2 - r1` reaches past
+    /// the type.
+    ///
+    /// Refused and not saturated, and the reason is not the sentinel: a saturated rung
+    /// is a plausible price that is WRONG, and two of them are one predicate wearing two
+    /// position numbers. At `H = i64::MAX / 2, L = 0, C = 0` R4 and R5 both pinned onto
+    /// `i64::MAX`, which made positions 180/184 and 181/185 identical and set four band
+    /// bits against prices the session never printed. `crate::CurDayFib::rung_level`
+    /// already refuses the same overflow; this is that policy, applied once per crate
+    /// instead of twice in opposite directions.
+    LevelOverflows,
 }
 
 /// Where the cuts between a narrow, a neutral and a wide CPR fall, in thousandths of
@@ -141,8 +153,11 @@ impl DailyLevels {
     ///
     /// # Errors
     ///
-    /// [`Unusable::HighBelowLow`] for a session whose high is below its low, and
-    /// [`Unusable::RangeOverflows`] when the span does not fit an `i64`.
+    /// [`Unusable::HighBelowLow`] for a session whose high is below its low,
+    /// [`Unusable::RangeOverflows`] when the span does not fit an `i64`, and
+    /// [`Unusable::LevelOverflows`] when the span fits but a rung computed from it does
+    /// not. The three are separate because the first two can be seen in the input and
+    /// the third cannot: `H = i64::MAX / 2, L = 0, C = 0` passes both earlier gates.
     pub fn from_previous_session(high: i64, low: i64, close: i64) -> Result<Self, Unusable> {
         if high < low {
             return Err(Unusable::HighBelowLow);
@@ -155,11 +170,11 @@ impl DailyLevels {
         // i64 at index levels nowhere near i64::MAX, and `i128::from(a + b)` would
         // have already lost the value.
         let sum = i128::from(high) + i128::from(low) + i128::from(close);
-        let pivot = clamp_i64(sum.div_euclid(3));
-        let bc = clamp_i64((i128::from(high) + i128::from(low)).div_euclid(2));
-        let tc = clamp_i64(2 * i128::from(pivot) - i128::from(bc));
-
-        let p = i128::from(pivot);
+        // The whole ladder in `i128`, narrowed once at the end. Every rung is derived
+        // from `p` and never from a narrowed intermediate, so no rounding or clamping can
+        // enter partway down the ladder.
+        let p = sum.div_euclid(3);
+        let b = (i128::from(high) + i128::from(low)).div_euclid(2);
         let rr = i128::from(range);
         let r1 = 2 * p - i128::from(low);
         let r2 = p + rr;
@@ -172,27 +187,41 @@ impl DailyLevels {
         let s4 = s3 + s2 - s1;
         let s5 = s4 + s3 - s2;
 
+        // Narrowed at ONE site and destructured by pattern, rather than a `?` per level.
+        // The clamp this replaced had a single body that all fourteen calls shared, so
+        // whichever level left the type first exercised its overflow arm. Fourteen `?`s
+        // would instead put thirteen branches here that no input can take: `p` and `b`
+        // cannot leave `i64` at all — `|h+l+c|/3` and `|h+l|/2` are inside it by
+        // construction for any `i64` inputs — and reaching the one on `s5` on its own
+        // already needs a fixture built backwards from the recurrence. A branch nothing
+        // can take is a branch nobody can be held to, which is why this crate refuses
+        // `unreachable!` for the same reason.
+        let [pivot, bc, tc, r1, r2, r3, r4, r5, s1, s2, s3, s4, s5, half] = fit([
+            p,
+            b,
+            2 * p - b,
+            r1,
+            r2,
+            r3,
+            r4,
+            r5,
+            s1,
+            s2,
+            s3,
+            s4,
+            s5,
+            (p - b).abs(),
+        ])?;
+
         Ok(Self {
             pdh: high,
             pdl: low,
             pivot,
             bc,
             tc,
-            r: [
-                clamp_i64(r1),
-                clamp_i64(r2),
-                clamp_i64(r3),
-                clamp_i64(r4),
-                clamp_i64(r5),
-            ],
-            s: [
-                clamp_i64(s1),
-                clamp_i64(s2),
-                clamp_i64(s3),
-                clamp_i64(s4),
-                clamp_i64(s5),
-            ],
-            half: clamp_i64((i128::from(pivot) - i128::from(bc)).abs()),
+            r: [r1, r2, r3, r4, r5],
+            s: [s1, s2, s3, s4, s5],
+            half,
         })
     }
 
@@ -325,32 +354,45 @@ impl DailyLevels {
     }
 }
 
-/// `i128` back to `i64`, saturating.
+/// Every level of one ladder from `i128` back to `i64`, or the refusal that names why
+/// one of them will not fit.
+///
+/// All of them or none of them, which is the point: a ladder with one rung missing is
+/// not a partial answer, it is fourteen positions measured against thirteen prices.
+///
+/// # It used to saturate, and saturating was the defect
+///
+/// The clamp it replaces pinned an out-of-range rung onto `i64::MAX` or `i64::MIN`
+/// under a comment claiming "a level pinned at the extreme fails every band test".
+/// That was true of `Rel::Near` alone, because `Tolerance::covers` refuses a
+/// non-positive range, and false of all six plain `Above`/`Below` relations — which is
+/// the majority of what this family decides. At `H = i64::MAX / 2, L = 0, C = 0` both
+/// R4 and R5 pinned onto `i64::MAX`, so 180 and 184 became one predicate and 181 and
+/// 185 another, and positions 181, 185, 182 and 186 fired against prices no session
+/// printed. A sweep reading that mask sees a k=2 pair whose support equals both of its
+/// k=1 supports and calls it a discovery.
+///
+/// So the whole ladder is refused instead. `crate::CurDayFib::rung_level` already
+/// refuses this exact overflow with `ok()`; a crate that answered the same question two
+/// opposite ways was the defect underneath the arithmetic, and `close_the_books` already
+/// keeps yesterday's levels on a refusal rather than half-updating them.
 ///
 /// Not `const`: `TryFrom` is not yet a const trait, and the alternative was an
-/// `as` cast whose correctness rested on the two branches beside it — the kind of
+/// `as` cast whose correctness rested on the branches beside it — the kind of
 /// proof-by-adjacency that stops holding after an edit. Nothing calls this from a
 /// const context, so the const-ness bought nothing.
-///
-/// Saturating and not wrapping: a level beyond `i64` is unreachable from real
-/// prices, and if a corrupt record produces one, a level pinned at the extreme
-/// fails every band test rather than wrapping to a plausible-looking price in the
-/// middle of the range.
-fn clamp_i64(v: i128) -> i64 {
-    // `match` on the fallible conversion rather than `as`: `clippy::cast_possible_
-    // truncation` is denied in this workspace, and the lint is right — an `as`
-    // here would be correct only because of the two branches above it, which is
-    // exactly the kind of proof-by-adjacency that stops being true after an edit.
-    match i64::try_from(v) {
-        Ok(x) => x,
-        Err(_) => {
-            if v > 0 {
-                i64::MAX
-            } else {
-                i64::MIN
-            }
-        }
+fn fit<const N: usize>(wide: [i128; N]) -> Result<[i64; N], Unusable> {
+    let mut out = [0_i64; N];
+    // `zip` and not an index, because `clippy::indexing_slicing` is denied and it is
+    // right: the two arrays share one const length here, and the next edit to this
+    // function is where that would stop being true.
+    for (slot, v) in out.iter_mut().zip(wide) {
+        // One arm, not a sign test. The clamp needed `if v > 0` to choose which extreme
+        // to pin at, and that branch is what made `i64::MIN` — which §7 gives a second
+        // meaning — reachable as an ordinary price. A refusal has nothing to choose.
+        *slot = i64::try_from(v).map_err(|_| Unusable::LevelOverflows)?;
     }
+    Ok(out)
 }
 
 /// Every position this family decides, paired with the level it is measured
@@ -662,6 +704,88 @@ mod tests {
         // exactly on. That is a real answer, not an unevaluated one.
         assert!(m.get(62), "a close exactly on a collapsed CPR is inside it");
         assert!(!m.get(60) && !m.get(61), "it is neither above nor below");
+    }
+
+    /// A session whose intermediate SUM needs `i128` still yields fourteen distinct rungs.
+    ///
+    /// # Why this test had to be written, and what its absence cost
+    ///
+    /// The fix that replaced clamping with `Unusable::LevelOverflows` also deleted
+    /// `a_level_past_the_type_pins_at_the_extreme_of_its_own_sign`, and that test had a
+    /// second job nobody noticed: it pinned the POSITIVE half of the near-edge arithmetic,
+    /// where `R2` and `S1` came back exact rather than saturated. Its assertions could not
+    /// be kept — the session it used now correctly refuses, because `R3 = R1 + range`
+    /// leaves the type — and **nothing replaced them.**
+    ///
+    /// So after that fix the only near-edge sessions the suite still built were zero-range
+    /// ones, where every rung collapses onto the high by design. Which means the comment
+    /// three hundred lines up — *"Widened before the sum, never after"* — had no guard at
+    /// all. `high + low + close` overflows an `i64` long before any of the three reaches
+    /// `i64::MAX`, and if the widening were dropped the pivot would be computed from a
+    /// wrapped sum: fourteen plausible levels, all wrong, and the refusal would not fire
+    /// because each individual rung still fits.
+    ///
+    /// The fixture is chosen so the sum genuinely needs the widening and the ladder
+    /// genuinely fits: `4e18 + 3e18 + 3.5e18` is `1.05e19`, past `i64::MAX` at `9.22e18`,
+    /// while `r5` lands at `6e18` and `s5` at `1e18`, both inside.
+    #[test]
+    fn a_session_whose_sum_needs_the_widening_still_yields_distinct_rungs() {
+        let high = 4_000_000_000_000_000_000_i64;
+        let low = 3_000_000_000_000_000_000_i64;
+        let close = 3_500_000_000_000_000_000_i64;
+
+        // The premise: the sum really does need i128.
+        assert!(
+            high.checked_add(low)
+                .and_then(|s| s.checked_add(close))
+                .is_none(),
+            "the fixture no longer overflows an i64 sum, so it does not test the widening"
+        );
+
+        let levels = DailyLevels::from_previous_session(high, low, close)
+            .expect("the span fits and every rung fits, so the ladder is usable");
+
+        // The pivot is the exact third of a sum that does not fit an i64.
+        assert_eq!(
+            levels.pivot(),
+            3_500_000_000_000_000_000,
+            "the pivot is not (h+l+c)/3, so the sum was narrowed before it was divided"
+        );
+
+        // Fourteen rungs, and no two of them share a price. A collapse is the defect the
+        // refusal replaced: two vocabulary positions becoming one predicate, which the
+        // sweep then reports as a k=2 pair whose support equals both k=1 supports.
+        // The TEN LADDER RUNGS, and only those. `pdh`/`pdl`/`pivot` are deliberately not
+        // in this set: `R1 = 2·pivot − low` is `4e18` on this fixture and `pdh` is also
+        // `4e18`, which is arithmetic rather than a collapse — R1 coinciding with the
+        // previous high is an ordinary thing for a pivot ladder to do. The defect the
+        // refusal replaced was two RUNGS landing on one price because both saturated, so
+        // the rungs are what must be pairwise distinct.
+        let mut rungs: Vec<i64> = Vec::new();
+        for n in 1..=5 {
+            // `expect` and not `unwrap_or_else(|| panic!(..))`: the closure is a panic
+            // this crate owns, which llvm-cov counts as a region no green run can close,
+            // and the workspace denies `panic` outright. The rung number is in the
+            // distinctness message below, so nothing is lost by dropping it here.
+            rungs.push(levels.resistance(n).expect("R exists on a usable ladder"));
+            rungs.push(levels.support(n).expect("S exists on a usable ladder"));
+        }
+        for (i, a) in rungs.iter().enumerate() {
+            for (j, b) in rungs.iter().enumerate() {
+                if i < j {
+                    assert_ne!(
+                        a, b,
+                        "rungs {i} and {j} are both {a}, so two positions are one predicate"
+                    );
+                }
+            }
+            assert_ne!(
+                *a,
+                i64::MIN,
+                "rung {i} is the §7 open-interest null sentinel sitting in a price field"
+            );
+            assert_ne!(*a, i64::MAX, "rung {i} is saturated, not computed");
+        }
     }
 
     /// A corrupt session yields no ladder at all, by name.
@@ -1033,51 +1157,75 @@ mod tests {
         }
     }
 
-    /// A level past the end of `i64` pins at the extreme of its own sign, and a pinned
-    /// level answers every band test as "not near, not above".
+    /// A ladder with a rung past the end of `i64` is refused whole, and never handed
+    /// out with two rungs pinned onto one price.
     ///
-    /// Reachable only from a corrupt record, and the alternative is what makes it worth a
-    /// test: a wrapping cast would turn R3 into a plausible-looking price in the middle
-    /// of the range, and every position measured against it would answer confidently and
-    /// wrongly. The negative direction is not decoration — `i64::MIN` is reached by a
-    /// different branch than `i64::MAX`, and §7 gives that value a second meaning, so a
-    /// saturated support must be a level nothing is ever above rather than a null.
+    /// Reachable only from a corrupt previous session, because no market prints a price
+    /// within a factor of a billion of `i64`. The measurement is what makes it worth a
+    /// refusal rather than a clamp. At `H = i64::MAX / 2, L = 0, C = 0` the span fits
+    /// and neither older refusal fires, so the ladder was built with R4 and R5 both
+    /// saturated onto `i64::MAX`: positions 180/184 and 181/185 became the SAME
+    /// predicate, and 181, 185, 182 and 186 all fired against prices the session never
+    /// printed. The sweep cannot see that from the mask — a saturated level is a number
+    /// like any other, and a k=2 pair whose support equals both of its k=1 supports is
+    /// the invented discovery `vwap.rs` refuses by name.
+    ///
+    /// `crate::CurDayFib::rung_level` already refuses this exact overflow with `ok()`.
+    /// One crate held two opposite policies for it, which is the defect underneath the
+    /// arithmetic.
     #[test]
-    fn a_level_past_the_type_pins_at_the_extreme_of_its_own_sign() {
-        // H = i64::MAX/2, L = -H: the range is 2H, one short of i64::MAX, so the ladder
-        // builds. H is divisible by 3, so the pivot is exact and only the rungs saturate.
-        let half_max = i64::MAX / 2;
-        let x = levels(half_max, -half_max, -half_max);
+    fn a_rung_past_the_type_refuses_the_whole_ladder() {
+        for (h, l, c, rung) in [
+            // The measured session: R4 and R5 both pinned onto `i64::MAX`.
+            (i64::MAX / 2, 0, 0, "R4 and R5 both leave the type upward"),
+            // Symmetric about zero, so R4 and S4 leave the type in opposite directions
+            // on the same session. R4 is evaluated first, which is why the row below
+            // exists as well.
+            (
+                2_500_000_000_000_000_000,
+                -2_500_000_000_000_000_000,
+                0,
+                "R4 and S4 both leave the type",
+            ),
+            // The first rung computed is already out, so nothing downstream is reached.
+            (
+                i64::MAX,
+                0,
+                i64::MAX,
+                "R1 leaves the type before any other rung",
+            ),
+            // The DOWNWARD direction on its own, and it is not decoration: with
+            // R = 3e18 and P = -2e18 every resistance rung, the pivot, `bc`, `tc` and
+            // the band half all fit, and `s5 = 2P - H - 2R` is -1e19. A refusal that
+            // covered only the upward direction — the shape the old clamp's `if v > 0`
+            // branch invited — passes every row above this one and fails here.
+            (
+                0,
+                -3_000_000_000_000_000_000,
+                -3_000_000_000_000_000_000,
+                "S5 alone leaves the type, downward",
+            ),
+        ] {
+            assert_eq!(
+                DailyLevels::from_previous_session(h, l, c),
+                Err(Unusable::LevelOverflows),
+                "({h}, {l}, {c}): {rung}, and a saturated rung is a plausible price \
+                 that is wrong"
+            );
+        }
+        // The refusal is not blanket, or this test would pass on a
+        // `from_previous_session` that refused every session at the edges of the type.
+        // Every rung of this one IS `i64::MAX`, computed and not saturated: the range is
+        // zero, so each rung reduces to the high. Refusing it would be the mirror defect.
+        let ceiling = DailyLevels::from_previous_session(i64::MAX, i64::MAX, i64::MAX)
+            .expect("a zero-range session at the ceiling has a ladder: every rung is H");
         assert_eq!(
-            x.pivot(),
-            -(half_max / 3),
-            "the pivot itself must not saturate"
-        );
-        assert_eq!(x.bc(), 0, "(H + -H) / 2 is exactly zero");
-        assert_eq!(
-            x.resistance(2),
-            Some(7_686_143_364_045_646_505),
-            "R2 = P + range fits and must not be pinned"
-        );
-        assert_eq!(
-            x.resistance(3),
+            ceiling.resistance(5),
             Some(i64::MAX),
-            "R3 = R1 + range leaves the type upward and must pin at the ceiling"
+            "R5 = H at zero range"
         );
-        assert_eq!(
-            x.support(1),
-            Some(-7_686_143_364_045_646_505),
-            "S1 = 2P - H fits and must not be pinned"
-        );
-        assert_eq!(
-            x.support(2),
-            Some(i64::MIN),
-            "S2 = P - range leaves the type downward and must pin at the floor"
-        );
-        // A pinned resistance is above every price there is, so nothing is above it.
-        let m = bits(&x, 0, tol());
-        assert!(!m.get(184), "a close was reported above a pinned R5");
-        assert!(m.get(185), "a close below a pinned R5 must say so");
+        assert_eq!(ceiling.support(5), Some(i64::MAX), "S5 = H at zero range");
+        assert_eq!(ceiling.band_half(), 0, "a zero range collapses the band");
     }
 
     /// The one-third ceiling is exact arithmetic; the levels are rounded, and the
@@ -1124,19 +1272,38 @@ mod tests {
     /// make a corrupt session indistinguishable from an overflowing one after the fact.
     #[test]
     fn the_derives_render_and_copy_what_they_claim() {
+        // All THREE refusals, rendered and compared pairwise. A log line is the only
+        // place a corrupt session is ever seen, and `LevelOverflows` differs from
+        // `RangeOverflows` by one word: an operator who cannot tell them apart cannot
+        // tell "the span was impossible" from "the span was fine and a rung was not".
         let high_below_low = format!("{:?}", Unusable::HighBelowLow);
-        let overflows = format!("{:?}", Unusable::RangeOverflows);
-        assert!(
-            high_below_low.contains("HighBelowLow"),
-            "a refusal must name itself, and this rendered as {high_below_low}"
+        let bad_span = format!("{:?}", Unusable::RangeOverflows);
+        let bad_rung = format!("{:?}", Unusable::LevelOverflows);
+        for (text, name) in [
+            (&high_below_low, "HighBelowLow"),
+            (&bad_span, "RangeOverflows"),
+            (&bad_rung, "LevelOverflows"),
+        ] {
+            assert!(
+                text.contains(name),
+                "a refusal must name itself, and this rendered as {text}"
+            );
+        }
+        assert_ne!(
+            high_below_low, bad_span,
+            "two refusals render identically and a log cannot tell them apart"
         );
         assert_ne!(
-            high_below_low, overflows,
-            "the two refusals render identically and a log cannot tell them apart"
+            bad_span, bad_rung,
+            "an overflowing span and an overflowing rung render identically"
         );
         assert_eq!(
             Unusable::HighBelowLow,
             Clone::clone(&Unusable::HighBelowLow)
+        );
+        assert_eq!(
+            Unusable::LevelOverflows,
+            Clone::clone(&Unusable::LevelOverflows)
         );
 
         let cuts = format!("{:?}", CprWidth::CLASSICAL);

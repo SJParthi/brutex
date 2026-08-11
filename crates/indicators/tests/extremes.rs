@@ -543,7 +543,13 @@ fn an_empty_run_answers_without_panicking() {
 fn daily_levels_at_the_edges_of_the_type() {
     let cases: [(i64, i64, i64, bool); 7] = [
         (i64::MAX, i64::MIN, 0, false),
-        (i64::MAX, 0, i64::MAX, true),
+        // The span fits here — MAX - 0 is exactly i64::MAX — so this row used to say
+        // `true`, and it was pinning a defect. `R1 = 2P - L` is 12,297,829,382,473,034,408,
+        // three quintillion past the ceiling, and so are R2 through R5: the clamp this row
+        // was written against put ALL FIVE resistance rungs on i64::MAX, collapsing ten
+        // vocabulary positions onto two predicates. A rung that does not fit is now
+        // `Unusable::LevelOverflows` and the ladder is refused whole.
+        (i64::MAX, 0, i64::MAX, false),
         // h=0 with l=i64::MIN: the range does not fit i64, so this must NOT build.
         // The row said `true` and that was my error, not the code's.
         (0, i64::MIN, i64::MIN, false),

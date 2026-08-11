@@ -3416,3 +3416,63 @@ an argument about why it cannot execute, not a gap in the tests.** A reader who 
 gate green has two options and both are worse than the current state: delete a defensive
 check, or write a test that asserts nothing. `CLAUDE.md` §4 bans the second and the
 public API forbids the first.
+
+
+---
+
+## 57. `DailyLevels::cpr_width` CAN saturate, and the agent that said it cannot was wrong
+
+Recorded because a fix's own report carried a false derivation, and inheriting it would
+have put a wrong argument into this document under the appearance of a measurement.
+
+The A5 fix replaced `clamp_i64` with `Unusable::LevelOverflows`, correctly. Its report
+then argued that `cpr_width`'s remaining `saturating_sub` is unreachable, deriving
+`half = |2c − h − l| / 6 ≤ i64::MAX / 2`, therefore `2 · half` stays inside `i64`.
+
+**That derivation is false and the skeptic measured it false.** `|2c − h − l|` reaches
+about `3.69 × 10^19`, so `half` reaches about `6.15 × 10^18`, which is larger than
+`i64::MAX / 2 = 4.61 × 10^18`. Measured through the public surface at
+`high = i64::MIN + 1000`, `low = i64::MIN`, `close = i64::MAX` — a session the **new**
+code accepts:
+
+| | |
+|---|---|
+`band_half` | 6,148,914,691,236,517,038 |
+`cpr_span` | (−9,223,372,036,854,775,308, 3,074,457,345,618,258,768) |
+true width | 12,297,829,382,473,034,076 |
+`cpr_width()` returns | 9,223,372,036,854,775,807 — **saturated** |
+
+### The conclusion survives, by a different argument
+
+No bit is fabricated, but not for the reason given. A saturated width always satisfies
+`width · 1000 ≥ range · 250` — `9.22 × 10^21` against at most `2.31 × 10^21` — so
+position 274 `wide_cpr_day` classifies as Wide; and the true width is wider still, so the
+saturation cannot flip the class. **The answer is right and the stated reason is not**,
+which is exactly the shape §3 rule 6 exists to catch, and the reason this section names
+the derivation rather than quietly using the conclusion.
+
+---
+
+## 58. Three things the A-phase fixes did not close, named rather than left implied
+
+**`i64::MIN` is still reachable as an ordinary price, by computation.**
+`from_previous_session(i64::MIN, i64::MIN, i64::MIN)` returns `Ok` with the pivot, `bc`,
+`tc` and all ten rungs equal to `i64::MIN` — measured — and `tests/extremes.rs` asserts
+that session builds. The A5 fix closed the *saturation* route to the §7 open-interest
+sentinel sitting in a price field; it did not close the *arithmetic* route, and the
+comment on `fit` reads as though it closed both. Pre-existing, outside the finding that
+was fixed, and stated here so the next reader is not misled by that comment.
+
+**The new refusal is loud only at the `DailyLevels` boundary.**
+`Evaluator::close_the_books` still discards it with `if let Ok(levels)`, so through the
+evaluator an overflowing session now silently keeps the PREVIOUS day's ladder where it
+used to install a fabricated one. That is the better of the two outcomes and it is
+pre-existing documented policy with its own test — but `LevelOverflows` widens the set of
+inputs that reach it, and a session silently measured against the wrong day's pivots is
+worth knowing about.
+
+**`prior_alternating` (39) had a surviving mutant, and now does not.**
+Replacing `differing` with `true` — so 39 fires on three consecutive up bars — passed all
+22 session tests. Neither run test asserted `!mask.get(39)`. Both do now, and the mutant
+was confirmed killed by re-applying it. The same class as the defect A3 fixed: a bit that
+reads as a measurement of one shape while the run is the opposite shape.

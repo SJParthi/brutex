@@ -29,6 +29,7 @@
 //! deciding path.
 
 use crate::Candle;
+use core::cmp::Ordering;
 use vocab::{ConditionMask, Tolerance};
 
 /// Where the four time-of-day windows end, in minutes after the 09:15 open.
@@ -132,7 +133,14 @@ pub struct SessionState {
     /// Today's opening price, fixed by the first bar.
     day_open: i64,
     /// The last [`PRIOR_N`] bar directions, newest first. `None` where absent.
-    prior: [Option<bool>; PRIOR_N],
+    ///
+    /// An [`Ordering`] and not a `bool`, because `close` against `open` has three
+    /// answers and a `bool` has two. The ring stored `close > open`, which filed a
+    /// flat bar under `false` alongside every genuine down bar: 38 then reported a
+    /// bearish run over bars on which 31 had never fired, and the run 38 names was
+    /// expressible by no live position. Positions 30 and 31 have always asked the
+    /// three-valued question of the current bar; this asks it of the prior ones.
+    prior: [Option<Ordering>; PRIOR_N],
     windows: DayWindows,
     limits: ShapeLimits,
 }
@@ -223,7 +231,10 @@ impl SessionState {
         // therefore one no test can cover. A `PRIOR_N` of zero would be a compile
         // error here rather than a silent no-op, which is the stronger guard.
         let [newest, ..] = &mut self.prior;
-        *newest = Some(bar.close > bar.open);
+        // `cmp` and not `close > open`: a flat bar is a legal bar — `check` refuses
+        // only `high < low` and a range that overflows — and a boolean direction has
+        // nowhere to put it but the down side.
+        *newest = Some(bar.close.cmp(&bar.open));
         Ok(bits)
     }
 
@@ -278,29 +289,37 @@ impl SessionState {
         }
 
         // ---- 37–39: prior-bar sequence ---------------------------------------
-        // Zipped rather than indexed: `clippy::needless_range_loop` and
+        // Iterated rather than indexed: `clippy::needless_range_loop` and
         // `clippy::indexing_slicing` are both denied, and iterating the array is
         // also the form that cannot go out of step with PRIOR_N.
-        let all_known = self.prior.iter().all(Option::is_some);
-        if all_known {
-            let dirs: [bool; PRIOR_N] = {
-                let mut out = [false; PRIOR_N];
-                for (slot, dir) in out.iter_mut().zip(self.prior.iter()) {
-                    *slot = dir.unwrap_or(false);
-                }
-                out
-            };
-            if dirs.iter().all(|d| *d) {
-                mask = set(mask, 37);
-            }
-            if dirs.iter().all(|d| !*d) {
-                mask = set(mask, 38);
-            }
-            // Strictly alternating: every adjacent pair differs.
-            let alternating = dirs.windows(2).all(|pair| pair.first() != pair.last());
-            if alternating {
-                mask = set(mask, 39);
-            }
+        //
+        // Each slot is compared against `Some(direction)` rather than unwrapped
+        // behind a "the ring is full" guard. That guard needed a placeholder for the
+        // absent slots it had already ruled out, and the placeholder it chose —
+        // `false` — was the same value a down bar carried, so the arm no input could
+        // reach decided the answer if it ever were reached. An absent slot is unequal
+        // to every direction, so an incomplete ring cannot read as a run at all.
+        let up = Some(Ordering::Greater);
+        let down = Some(Ordering::Less);
+        if self.prior.iter().all(|d| *d == up) {
+            mask = set(mask, 37);
+        }
+        if self.prior.iter().all(|d| *d == down) {
+            mask = set(mask, 38);
+        }
+        // Strictly alternating: every adjacent pair is one up bar and one down bar.
+        // A flat bar breaks the alternation instead of counting as "different from its
+        // neighbour" — the same rule that keeps it out of 37 and 38, and the reason
+        // the first half of this is not redundant. Without it `Some(Equal)` beside
+        // `Some(Greater)` differs, so up-flat-up reported an alternation over a run
+        // containing no down bar.
+        let directional = self.prior.iter().all(|d| *d == up || *d == down);
+        let differing = self
+            .prior
+            .windows(2)
+            .all(|pair| pair.first() != pair.last());
+        if directional && differing {
+            mask = set(mask, 39);
         }
 
         // ---- 40–43: position within the day ----------------------------------
@@ -556,6 +575,16 @@ mod tests {
             "three prior up bars did not set prior_n_bullish"
         );
         assert!(!mask.get(38));
+        // 39 MUST stay clear, and nothing pinned that until an audit replaced the
+        // alternation test's `differing` with `true` and watched all 22 session tests
+        // stay green. `prior_alternating` on a monotone run is the same class of defect
+        // as 38 firing on flat bars: a bit that reads as a measurement of one shape while
+        // the run is the opposite shape.
+        assert!(
+            !mask.get(39),
+            "three consecutive UP bars set prior_alternating, which is the opposite of \
+             what the position names"
+        );
     }
 
     /// Alternating means strictly alternating over the three priors.
@@ -568,6 +597,98 @@ mod tests {
         let _ = ok(&mut state, &at(2, 100, 110, 95, 108), None);
         let mask = ok(&mut state, &at(3, 108, 112, 100, 110), None);
         assert!(mask.get(39), "an alternating run was not detected");
+        assert!(!mask.get(37) && !mask.get(38));
+    }
+
+    /// A run of flat bars is a run of neither direction.
+    ///
+    /// The ring stored `close > open` — a two-valued answer to the three-valued
+    /// question positions 30 and 31 have always asked of the current bar — so every
+    /// flat bar was filed as "not up" and therefore as down. Three flat bars then set
+    /// 38 on the fourth while 31 had not fired on one of them: a bit that reads as a
+    /// measurement and is an artefact of the encoding. Over-reporting is only half of
+    /// it. With `false` meaning both "closed down" and "closed unchanged", the
+    /// predicate "all three prior bars closed down" was expressible by no live
+    /// position at all, so every mask that wanted the real run got this one instead.
+    #[test]
+    fn a_run_of_flat_bars_is_neither_a_bullish_nor_a_bearish_run() {
+        let flat = |minute| at(minute, 2_500_000, 2_500_300, 2_499_700, 2_500_000);
+        let mut state = SessionState::default();
+        for minute in 0..3 {
+            let mask = ok(&mut state, &flat(minute), None);
+            assert!(
+                !mask.get(30) && !mask.get(31),
+                "minute {minute}: a flat bar claimed a direction, so the run below \
+                 proves nothing"
+            );
+            assert!(mask.get(32), "minute {minute}: a flat bar is a doji");
+        }
+        let mask = ok(&mut state, &flat(3), None);
+        assert!(
+            !mask.get(38),
+            "prior_n_bearish fired over three bars on which bar_bearish never did"
+        );
+        assert!(!mask.get(37), "prior_n_bullish fired over three flat bars");
+        assert!(!mask.get(39), "three flat bars alternated");
+    }
+
+    /// The bearish run has a positive case, so "38 never fires" is not a way to pass
+    /// `a_run_of_flat_bars_is_neither_a_bullish_nor_a_bearish_run`.
+    #[test]
+    fn a_run_of_three_down_bars_sets_prior_n_bearish_on_the_fourth() {
+        let mut state = SessionState::default();
+        let mut px = 2_500_000i64;
+        for minute in 0..3 {
+            let open = px;
+            px -= 400;
+            let mask = ok(
+                &mut state,
+                &at(minute, open, open + 100, px - 100, px),
+                None,
+            );
+            assert!(
+                mask.get(31),
+                "minute {minute}: a down bar was not reported as one"
+            );
+            assert!(
+                !mask.get(38),
+                "prior_n_bearish fired at minute {minute}, before three priors existed"
+            );
+        }
+        let mask = ok(&mut state, &at(3, px, px + 100, px - 500, px - 400), None);
+        assert!(
+            mask.get(38),
+            "three prior down bars did not set prior_n_bearish"
+        );
+        assert!(!mask.get(37));
+        assert!(
+            !mask.get(39),
+            "three consecutive DOWN bars set prior_alternating, which is the opposite of \
+             what the position names"
+        );
+    }
+
+    /// A flat bar inside a run breaks the alternation as well as the two runs.
+    ///
+    /// Up, flat, up is not an alternation, and it is the case that catches a ring
+    /// which encodes "unchanged" as "down": under that encoding the three directions
+    /// read as true, false, true — every adjacent pair different — and 39 fired on a
+    /// sequence containing no down bar at all.
+    #[test]
+    fn a_flat_bar_between_two_up_bars_is_not_an_alternation() {
+        let mut state = SessionState::default();
+        let _ = ok(&mut state, &at(0, 100, 110, 95, 108), None);
+        let flat = ok(&mut state, &at(1, 108, 112, 104, 108), None);
+        assert!(
+            !flat.get(30) && !flat.get(31),
+            "the middle bar was not flat, so this proves nothing"
+        );
+        let _ = ok(&mut state, &at(2, 108, 118, 104, 116), None);
+        let mask = ok(&mut state, &at(3, 116, 120, 110, 118), None);
+        assert!(
+            !mask.get(39),
+            "an unchanged bar counted as the opposite of its neighbours"
+        );
         assert!(!mask.get(37) && !mask.get(38));
     }
 

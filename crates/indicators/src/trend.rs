@@ -36,6 +36,29 @@
 //!
 //! ATR uses Wilder's smoothing, `atr += (tr − atr)/n`, in the same scaled form.
 //!
+//! # A period is FOLDED before it is named
+//!
+//! Every average here is seeded with its first value, which means it holds a number from
+//! the first candle onward — and for the next `period − 1` candles that number is a fact
+//! about where the run started, not a `period`-candle measurement. Emitting off it was a
+//! real defect: `TrendState::new(CLASSICAL)` fed a close of 10,000 paisa and then 20,000
+//! set positions 0, 2 and 64 on the **second** candle, so `close_above_ema200` meant
+//! "close above the previous close" and `close_above_supertrend` meant "close above a
+//! stop seeded from one candle's high-low span". Three positions the vocabulary names as
+//! a 20-period, a 200-period and a 10-period-ATR measurement, and nothing downstream
+//! could tell them from converged ones.
+//!
+//! So [`Ema`] and [`Atr`] count the candles folded into them and answer `warm`, and
+//! [`TrendState::bits`] emits 0–5 and 64–65 only once the accumulator behind each has
+//! folded its own period. `docs/03-vocabulary.md` §4: a bit that cannot be evaluated
+//! evaluates **false**, and never "probably".
+//!
+//! The gate is on the **emission**, deliberately not on [`Ema::value`] or [`Atr::value`].
+//! Those are the accumulator's honest state and other code needs it — [`SuperTrend`]
+//! seeds its stop off the ATR's first value, and withholding it would leave the stop
+//! unestablished for ten candles rather than merely unemitted, which is a different and
+//! worse change than the one this defect asked for.
+//!
 //! # A swing is confirmed LATE, and that is not look-ahead
 //!
 //! A swing high is a bar whose high exceeds the `fractal` bars on **each** side. So
@@ -146,6 +169,9 @@ const _: () = assert!(RING % 2 == 1, "a fractal window needs a middle");
 pub struct Ema {
     period: i128,
     scaled: i128,
+    /// Candles folded, saturating. Read only by [`Ema::warm`], which is what keeps a
+    /// two-candle seed from being emitted as a 200-period measurement.
+    folded: u64,
     seeded: bool,
 }
 
@@ -156,6 +182,7 @@ impl Ema {
         Self {
             period,
             scaled: 0,
+            folded: 0,
             seeded: false,
         }
     }
@@ -166,8 +193,14 @@ impl Ema {
     /// That is a convention and it is stated: seeding with an SMA needs `period`
     /// candles of buffer, which would make the state grow with the period and cost the
     /// constant-space property for no gain in a long run. The two agree to within the
-    /// smoothing constant after a few periods.
+    /// smoothing constant after a few periods — which is why [`Ema::warm`] exists and
+    /// why no vocabulary position is emitted before it is true.
     pub fn fold(&mut self, price: i64) {
+        // Counted before either early return below, because both of them absorb the
+        // candle: the seeding branch and the degenerate-period branch each `return`, and
+        // a count taken at the end of the function would miss every candle folded into a
+        // seed — which is exactly the run of candles this counter has to measure.
+        self.folded = self.folded.saturating_add(1);
         let target = i128::from(price).saturating_mul(SCALE);
         if !self.seeded {
             self.scaled = target;
@@ -194,6 +227,24 @@ impl Ema {
         }
         i64::try_from(self.scaled.div_euclid(SCALE)).ok()
     }
+
+    /// True once `period` candles have been folded.
+    ///
+    /// The seed is the first price, so until then the average is that price plus a
+    /// handful of steps — a fact about where the run started rather than about the
+    /// market. Measured: a state fed 10,000 paisa and then 20,000 set
+    /// `close_above_ema200`, where the "200-period average" was the previous close.
+    ///
+    /// **Separate from [`Ema::value`] on purpose, and this is the part a fix gets
+    /// wrong.** The average is a real number from the first candle and every caller
+    /// that wants it must keep getting it — [`SuperTrend::fold`] seeds its stop off the
+    /// ATR's first value, and returning `None` there would leave the stop unestablished
+    /// for ten candles instead of unemitted. What is gated is the **emission** of a
+    /// vocabulary position, in [`TrendState::bits`], and nothing else.
+    #[must_use]
+    pub fn warm(&self) -> bool {
+        i128::from(self.folded) >= self.period
+    }
 }
 
 /// Average true range, Wilder-smoothed, held scaled.
@@ -202,6 +253,8 @@ pub struct Atr {
     period: i128,
     scaled: i128,
     previous_close: Option<i64>,
+    /// Candles folded, saturating. Read only by [`Atr::warm`].
+    folded: u64,
     seeded: bool,
 }
 
@@ -213,6 +266,7 @@ impl Atr {
             period,
             scaled: 0,
             previous_close: None,
+            folded: 0,
             seeded: false,
         }
     }
@@ -242,7 +296,14 @@ impl Atr {
     }
 
     /// Fold one candle in.
+    ///
+    /// The first candle seeds the range at its own high-low span — there is no previous
+    /// close to gap from — so the seed is a one-candle range wearing a `period`-candle
+    /// label until [`Atr::warm`] is true.
     pub fn fold(&mut self, candle: &Candle) {
+        // Counted first, for the same reason as in `Ema::fold`: the seeding branch below
+        // absorbs a candle without reaching the smoothing step.
+        self.folded = self.folded.saturating_add(1);
         let tr = self.true_range(candle).saturating_mul(SCALE);
         if self.seeded {
             let denominator = self.period;
@@ -264,6 +325,13 @@ impl Atr {
             return None;
         }
         i64::try_from(self.scaled.div_euclid(SCALE)).ok()
+    }
+
+    /// True once `period` candles have been folded. See [`Ema::warm`] for why this is
+    /// beside [`Atr::value`] rather than inside it.
+    #[must_use]
+    pub fn warm(&self) -> bool {
+        i128::from(self.folded) >= self.period
     }
 }
 
@@ -311,6 +379,18 @@ impl SuperTrend {
     #[must_use]
     pub const fn trend(&self) -> Trend {
         self.trend
+    }
+
+    /// True once the ATR under the band has folded its own period.
+    ///
+    /// The stop itself exists from the first candle and [`SuperTrend::stop`] keeps
+    /// reporting it, because the ratchet needs a level to move from and the seed is the
+    /// only level there is. This answers the different question positions 64 and 65
+    /// actually ask: whether that level is yet a `period`-candle range rather than the
+    /// first candle's own high-low span.
+    #[must_use]
+    pub fn warm(&self) -> bool {
+        self.atr.warm()
     }
 
     /// Fold one candle in, moving or flipping the stop.
@@ -725,20 +805,43 @@ impl TrendState {
         let mut mask = ConditionMask::ZERO;
 
         // 0–3: close against each average. A position stays false while its average is
-        // unseeded rather than guessing — docs/03-vocabulary.md §4.
-        if let Some(fast) = self.fast.value() {
+        // unseeded — and while that average has folded fewer candles than the period its
+        // NAME claims — rather than guessing. docs/03-vocabulary.md §4.
+        //
+        // `warm` beside `value` and not inside it. Without the counter these bits fired
+        // on the second candle of every run: fed 10,000 paisa and then 20,000, position 2
+        // `close_above_ema200` compared the close against the PREVIOUS CLOSE and set,
+        // and nothing downstream could tell that bit from one backed by two hundred
+        // candles. Folding the gate into `value` instead would have starved
+        // `SuperTrend::fold` of its seed — see `Ema::warm`.
+        if self.fast.warm()
+            && let Some(fast) = self.fast.value()
+        {
             mask = side(mask, close, fast, 0, 1);
         }
-        if let Some(slow) = self.slow.value() {
+        if self.slow.warm()
+            && let Some(slow) = self.slow.value()
+        {
             mask = side(mask, close, slow, 2, 3);
         }
-        // 4–5: the averages against each other.
-        if let (Some(fast), Some(slow)) = (self.fast.value(), self.slow.value()) {
+        // 4–5: the averages against each other. BOTH must have folded their own period,
+        // so the slow one governs and this pair is the last of the six to speak. Gating
+        // on the fast average alone would compare a converged 20 against a seeded 200,
+        // which is a statement about the seed and not about the market.
+        if self.fast.warm()
+            && self.slow.warm()
+            && let (Some(fast), Some(slow)) = (self.fast.value(), self.slow.value())
+        {
             mask = side(mask, fast, slow, 4, 5);
         }
 
-        // 64–65: close against the trailing stop.
-        if let Some(stop) = self.supertrend.stop() {
+        // 64–65: close against the trailing stop, once the range under the band is an
+        // `atr_period`-candle measurement. The seeded stop comes off ONE candle's
+        // high-low span, so before this the side price sits on is a fact about the first
+        // candle of the run.
+        if self.supertrend.warm()
+            && let Some(stop) = self.supertrend.stop()
+        {
             mask = side(mask, close, stop, 64, 65);
         }
 
@@ -2096,5 +2199,122 @@ mod every_break_is_classified {
             s.last, None,
             "a candle that broke nothing must not install a direction"
         );
+    }
+}
+
+#[cfg(test)]
+// A sibling module, so it carries the allow in its own right; see `mod tests` for why
+// `expect` and not `unreachable!`.
+#[allow(clippy::expect_used)]
+mod a_period_is_folded_before_it_is_named {
+    use super::*;
+
+    fn bar(ts: i64, high: i64, low: i64, close: i64) -> Candle {
+        Candle {
+            ts_micros: ts,
+            open: close,
+            high,
+            low,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        }
+    }
+
+    fn tol() -> Tolerance {
+        vocab::tolerance::pinned_fib().expect("the pinned fib width is valid")
+    }
+
+    /// The measured defect: three positions spoke on the SECOND candle of a run.
+    ///
+    /// All eight of the two families are asserted, not just the three that fired: the
+    /// other five are the opposite sides of the same comparisons, and a fix that moved
+    /// the defect from `above` to `below` would otherwise pass.
+    ///
+    /// `TrendState::new(CLASSICAL)`, close 10,000 paisa then 20,000, emitted `[]` and
+    /// then `[0, 2, 64]` — `close_above_ema20`, `close_above_ema200` and
+    /// `close_above_supertrend`. The "ema200" was the previous close, one candle old;
+    /// the trailing stop was seeded from a one-candle true range. Three positions the
+    /// vocabulary names as a 20-period, a 200-period and a 10-period-ATR measurement
+    /// were artefacts of the fold's first candle, and nothing downstream could tell
+    /// them from converged ones.
+    ///
+    /// `docs/03-vocabulary.md` §4: a bit that cannot be evaluated evaluates **false**,
+    /// and never "probably".
+    #[test]
+    fn the_second_candle_of_a_run_names_no_period_at_all() {
+        let tolerance = tol();
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        let first = t
+            .step(&bar(0, 10_000, 10_000, 10_000), tolerance)
+            .expect("a sane candle");
+        let second = t
+            .step(&bar(60_000_000, 20_000, 20_000, 20_000), tolerance)
+            .expect("a sane candle");
+        for index in [0_u32, 1, 2, 3, 4, 5, 64, 65] {
+            assert!(
+                !first.get(index),
+                "position {index} spoke on the first candle, before anything was folded"
+            );
+            assert!(
+                !second.get(index),
+                "position {index} spoke on the second candle of the run, where the average \
+                 behind it is the previous close and the stop is a one-candle range"
+            );
+        }
+    }
+
+    /// And each position speaks on exactly the candle its own period completes.
+    ///
+    /// The other half of the guard, and it is the half that stops the fix from being a
+    /// silent mute. Gating the emission on a counter that never satisfies — or on the
+    /// wrong period — would leave positions 0–5 and 64–65 permanently false, which
+    /// §4 bans as loudly as a wrong value: a position that can never fire is a
+    /// condition the sweep can never rank.
+    ///
+    /// The emit precedes the fold, so at candle *n* the accumulators hold *n − 1*
+    /// candles. A 20-period average is therefore first named at candle 21, a
+    /// 200-period at 201, and the 10-period ATR under the stop at 11. The series rises
+    /// 1,000 paisa a candle, so once each position is entitled to speak it has
+    /// something to say: close is above both averages and above the ratcheting stop,
+    /// and the fast average is above the slow one.
+    #[test]
+    fn each_position_speaks_on_the_candle_its_own_period_completes() {
+        let tolerance = tol();
+        let mut t = TrendState::new(TrendThresholds::CLASSICAL);
+        let watched = [(0_u32, 21_i64), (2, 201), (4, 201), (64, 11)];
+        let mut first: [Option<i64>; 4] = [None; 4];
+        for n in 1..=260_i64 {
+            let price = 2_000_000 + n * 1_000;
+            let mask = t
+                .step(
+                    &bar(n * 60_000_000, price + 500, price - 500, price),
+                    tolerance,
+                )
+                .expect("a sane candle");
+            for (seen, (index, _)) in first.iter_mut().zip(watched) {
+                if seen.is_none() && mask.get(index) {
+                    *seen = Some(n);
+                }
+            }
+            // The falling side of every pair must stay silent on a series that only
+            // rises: a gate that let the counter select the wrong arm would show up
+            // here and nowhere else.
+            for index in [1_u32, 3, 5, 65] {
+                assert!(
+                    !mask.get(index),
+                    "position {index} claimed a fall at candle {n} of a rising series"
+                );
+            }
+        }
+        for (seen, (index, expected)) in first.iter().zip(watched) {
+            assert_eq!(
+                *seen,
+                Some(expected),
+                "position {index} first spoke at {seen:?}; its period completes at candle \
+                 {expected}, so anything earlier names a measurement it has not taken and \
+                 anything later — or never — is a live condition the sweep cannot reach"
+            );
+        }
     }
 }

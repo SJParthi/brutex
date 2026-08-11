@@ -333,7 +333,19 @@ impl Prev5 {
         let Some((high, low)) = self.extremes() else {
             return mask;
         };
-        let range = high.saturating_sub(low);
+        // `checked_sub`, not `saturating_sub`. The window's high and low come from two
+        // DIFFERENT sessions, so nothing that accepted either one has checked their span:
+        // `DailyLevels::from_previous_session` refuses `Unusable::RangeOverflows` for one
+        // session's own range, which is why the previous-day ladder above can subtract
+        // without a guard, and there is no such gate on a pair. Saturating pinned a
+        // 1.84e19 span at `i64::MAX` and every rung is a fraction of the span, so the
+        // whole ladder was laid out over half the range it names — rung 0.236 sat 2.17e18
+        // paisa from the price position 111 claims. Refusing the ladder is the answer that
+        // claims nothing; `emit` treats a non-positive range the same way, for the same
+        // reason.
+        let Some(range) = high.checked_sub(low) else {
+            return mask;
+        };
         emit(mask, &PREV5_UP, low, range, Direction::Up, close, tolerance)
     }
 }
@@ -634,6 +646,54 @@ mod tests {
             n.get(109),
             "rung 2.618's level fits the type and the close sits on it, so position 109 \
              must fire or this fixture proves nothing about the rung above it"
+        );
+    }
+
+    /// A five-session span that does not fit `i64` sets NOTHING, rather than anchoring
+    /// eleven rungs on a saturated one.
+    ///
+    /// The ring is fed one session at either end of the type. Each is a legal session —
+    /// `DailyLevels` is not involved here, and nothing refuses a flat session at
+    /// `-9.2e18` — but the WINDOW's span is 1.84e19, which `saturating_sub` pinned at
+    /// `i64::MAX`. Every rung is a fraction of that span, so the ladder was laid out over
+    /// half the range it claims: rung 0 still landed on the five-session low and fired
+    /// position 110, and the saturated rung 0.236 sat at -7.02e18 while the true one is
+    /// -4.86e18 — 2.17e18 paisa, or 21.7 billion rupees, from the price the bit names.
+    #[test]
+    fn a_five_session_span_that_leaves_the_type_sets_nothing() {
+        const HI: i64 = 9_200_000_000_000_000_000;
+        const LO: i64 = -9_200_000_000_000_000_000;
+
+        let mut p5 = Prev5::new();
+        p5.push_completed_session(HI, HI);
+        for _ in 0..4 {
+            p5.push_completed_session(LO, LO);
+        }
+        assert_eq!(
+            p5.extremes(),
+            Some((HI, LO)),
+            "the fixture did not give the ring the straddling span this test is about"
+        );
+        // Rung 0 of an upward ladder IS the anchor, and the second close is the price the
+        // saturated ladder called rung 0.236.
+        for close in [LO, LO + 236 * (i64::MAX / 1000)] {
+            assert!(
+                p5.bits(close, tol()).is_empty(),
+                "a five-session span that leaves i64 decided a rung at close {close}"
+            );
+        }
+
+        // And a window spanning half as much — 9.2e18, which DOES fit — still fires rung
+        // 0 on its own low, so the empty masks above are the span leaving the type and
+        // not a ladder that never emits at this magnitude.
+        let mut fits = Prev5::new();
+        fits.push_completed_session(HI / 2, HI / 2);
+        for _ in 0..4 {
+            fits.push_completed_session(LO / 2, LO / 2);
+        }
+        assert!(
+            fits.bits(LO / 2, tol()).get(110),
+            "a representable 9.2e18 five-session span did not fire rung 0 on its own low"
         );
     }
 

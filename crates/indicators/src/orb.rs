@@ -260,8 +260,21 @@ impl Orb {
                 // `docs/03-vocabulary.md` §4 wants false rather than "probably".
                 continue;
             };
+            // `checked_sub`, not `saturating_sub`. A window takes its high from one bar
+            // and its low from another, and `Candle::check` reads ONE record — a flat bar
+            // at either end of the type has a zero range and is accepted — so the SPAN
+            // leaves `i64` where no single record does. Saturating pinned it at
+            // `i64::MAX`, and the band is a hundredth of the span: on a true span of
+            // 1.84e19 the band came out 9.2e16 against a real 1.84e17, so a close 1.3e17
+            // under the window high set `orb5_close_inside` and NOT `orb5_near_high`,
+            // and nothing said why. A band half the window's own width is the plausible
+            // wrong number §4 bans. Abstaining is what the still-forming arm above
+            // already means — every position for this window false — and it is the only
+            // answer that claims nothing about a span this type cannot hold.
+            let Some(range) = high.checked_sub(low) else {
+                continue;
+            };
             let base = ORB_FIRST + offset * RELATIONS_PER_WINDOW;
-            let range = high.saturating_sub(low);
 
             if close > high {
                 mask = set(mask, base);
@@ -546,6 +559,71 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(run(), run());
+    }
+
+    /// A window whose span does not fit `i64` sets NOTHING, rather than being measured
+    /// against a band half its own width.
+    ///
+    /// The two seeding bars below are each legal on their own — `Candle::check` reads one
+    /// record, and a flat bar at either end of the type has a zero range — but a window
+    /// takes its high from one bar and its low from another, so the SPAN leaves `i64`
+    /// where neither record does. Under `saturating_sub` that span was pinned at
+    /// `i64::MAX`, and the band is a hundredth of it: 9.2e16 where the true band is
+    /// 1.84e17. Measured at a close 1.3e17 below the window high, the mask was `[88]` —
+    /// `orb5_close_inside` alone, with 89 `orb5_near_high` absent — and at 0.8e17 below
+    /// it was `[88, 89]`. Every close in the missing half of the band set no `near` bit
+    /// and nothing refused.
+    #[test]
+    fn a_window_whose_span_leaves_the_type_sets_nothing() {
+        const HI: i64 = 9_200_000_000_000_000_000;
+        const LO: i64 = -9_200_000_000_000_000_000;
+        // 1.3e17 below the high: inside the true band, outside the saturated one.
+        const OUTSIDE_THE_SATURATED_BAND: i64 = HI - 130_000_000_000_000_000;
+        // 0.8e17 below it: inside both, so this close proves the near bit is reachable
+        // at this magnitude and the empty mask is not a fixture that never fires.
+        const INSIDE_BOTH_BANDS: i64 = HI - 80_000_000_000_000_000;
+
+        let mut o = Orb::new();
+        assert!(ok(&mut o, &at(0, HI, HI, HI)).is_empty());
+        assert!(ok(&mut o, &at(1, LO, LO, LO)).is_empty());
+        let mask = ok(
+            &mut o,
+            &at(
+                5,
+                OUTSIDE_THE_SATURATED_BAND,
+                OUTSIDE_THE_SATURATED_BAND,
+                OUTSIDE_THE_SATURATED_BAND,
+            ),
+        );
+        assert_eq!(
+            o.extremes(0),
+            Some((HI, LO)),
+            "the fixture did not give window 0 the straddling span this test is about"
+        );
+        for (close, emitted) in [
+            (OUTSIDE_THE_SATURATED_BAND, mask),
+            (INSIDE_BOTH_BANDS, o.bits(INSIDE_BOTH_BANDS, tol())),
+        ] {
+            assert!(
+                emitted.is_empty(),
+                "a window whose span leaves i64 decided a position at close {close}, so \
+                 the band it was measured against was not the window's own"
+            );
+        }
+
+        // And a window spanning half as much — 9.2e18, which DOES fit — bands from the
+        // same code at the same magnitude, so the empty masks above are the span leaving
+        // the type and not a scale this family cannot measure at.
+        let mut fits = Orb::new();
+        let (hi, lo) = (HI / 2, LO / 2);
+        let near_high = hi - 80_000_000_000_000_000;
+        assert!(ok(&mut fits, &at(0, hi, hi, hi)).is_empty());
+        assert!(ok(&mut fits, &at(1, lo, lo, lo)).is_empty());
+        let mask = ok(&mut fits, &at(5, near_high, near_high, near_high));
+        assert!(
+            mask.get(u32::from(ORB_FIRST + 3)),
+            "a representable 9.2e18 window did not band a close 0.8e17 under its high"
+        );
     }
 
     /// A corrupt record is refused and folded into nothing.
