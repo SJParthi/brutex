@@ -243,6 +243,18 @@ impl Orb {
         }
     }
 
+    /// Have all four opening ranges closed?
+    ///
+    /// A window that is still forming has no level, so its five positions are false for a
+    /// reason that is not a measurement — `Orb::bits` skips it deliberately. A caller
+    /// starting a sweep needs to know when that stops being true; see
+    /// `Evaluator::every_family_can_answer`, which folds this into the answer for all
+    /// families.
+    #[must_use]
+    pub fn every_window_closed(&self) -> bool {
+        (0..WINDOWS.len()).all(|w| self.extremes(w).is_some())
+    }
+
     /// The twenty positions, for one closing price.
     ///
     /// # Cost

@@ -808,6 +808,21 @@ impl TrendState {
         // why `observe` runs inside the emit and not here.
     }
 
+    /// Can every one of the fourteen positions answer yet?
+    ///
+    /// Distinct from [`Self::warm`], which answers the narrower question positions 64 and 65
+    /// ask — whether the ATR is a `period`-candle range. This is the conjunction: the two
+    /// EMAs as well, so positions 0–5 are included. At `CLASSICAL` the binding constraint is
+    /// the 200-candle average.
+    ///
+    /// Folded into `Evaluator::every_family_can_answer`, which a caller needs so that a
+    /// sweep does not start on bars where whole families are structurally silent and depress
+    /// every support they touch.
+    #[must_use]
+    pub fn every_position_can_answer(&self) -> bool {
+        self.fast.warm() && self.slow.warm() && self.supertrend.warm()
+    }
+
     /// The fourteen positions for one closing price.
     ///
     /// # Cost

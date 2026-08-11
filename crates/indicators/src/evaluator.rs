@@ -507,6 +507,100 @@ impl Evaluator {
         self.yesterday.is_some()
     }
 
+    /// Can **every** family answer yet?
+    ///
+    /// # Why a caller needs this, and what happens without it
+    ///
+    /// `min_hits` filters on measured support, and measured support is depressed by warm-up
+    /// in a way that is invisible in the result. `Prev5::extremes` is `None` until five
+    /// sessions have been pushed, so positions 110–120 are **false** on every bar before
+    /// that — for a reason that is not a measurement. Over six 375-bar sessions that is
+    /// 1,875 of 2,250 bars, and a condition genuinely present on three bars of every
+    /// session has a true support of 18 and a **measured support of 3**.
+    ///
+    /// At `min_hits = 10` that condition is dropped at k=1, and by anti-monotonicity every
+    /// combination containing it dies with it. **This is a completeness loss that the
+    /// Apriori proof cannot see**: the ladder correctly keeps every frequent set, and the
+    /// set was made infrequent before the ladder ever saw it.
+    ///
+    /// The engine cannot fix this. `Ladder::walk` receives `&[ConditionMask]` and nothing
+    /// else — a false bit and an unanswerable bit are the same bit to it, and that is the
+    /// right shape for it to have. So the decision belongs to whoever feeds it, and this is
+    /// the signal they need: **start the sweep at the first bar where this is true**, or
+    /// accept a diluted support and know that you have.
+    ///
+    /// # What "every family" means, and why it is the longest of them
+    ///
+    /// The families warm at wildly different rates, and the answer is the slowest:
+    ///
+    /// | Family | Warm when |
+    /// |---|---|
+    /// | previous-day pivots, previous-day Fibonacci | one completed session |
+    /// | the five-session Fibonacci ladder | **five** completed sessions |
+    /// | the gap family | one completed session, for the previous close |
+    /// | `SuperTrend`, positions 64–65 | `atr_period` candles folded |
+    /// | the EMAs, positions 0–5 | **200** candles folded, at `CLASSICAL` |
+    /// | the opening ranges | their own window has closed — 60 minutes for the longest |
+    ///
+    /// Five sessions dominates: 1,875 one-minute bars against 200 for the slowest average.
+    /// The answer is deliberately the conjunction rather than a per-family report, because a
+    /// caller that starts a sweep needs one boundary and a partial one is the defect.
+    ///
+    /// # This is a signal, not a filter
+    ///
+    /// `step` keeps emitting before this is true, and those bits are correct — a position
+    /// that cannot be evaluated evaluates false, which is `docs/03-vocabulary.md` §4 and not
+    /// a compromise. Nothing here silently drops a bar. `docs/06-limits.md` records the
+    /// consequence for `min_hits`, because a signal a caller may ignore is not a guarantee.
+    #[must_use]
+    pub fn every_family_can_answer(&self) -> bool {
+        self.warmed_up() && self.orb.every_window_closed()
+    }
+
+    /// Has the RUN warmed up? Monotone, and one boundary for the whole sweep.
+    ///
+    /// # Why this is separate from [`Self::every_family_can_answer`], and why that matters
+    ///
+    /// The first version of this was one function, and it was wrong in a way a test caught:
+    /// **the opening ranges re-open every session.** At minute 0 of every trading day the
+    /// 60-minute window has no level again, so a signal that includes them goes FALSE at
+    /// every session start and is not a warm-up signal at all — it is a per-bar
+    /// can-everything-answer signal, which is a different question.
+    ///
+    /// Both are worth having and they answer different things:
+    ///
+    /// | | Monotone? | False when |
+    /// |---|---|---|
+    /// | `warmed_up` | **yes**, once true it stays true | the run has not seen five sessions, one previous day, or 200 candles |
+    /// | `every_family_can_answer` | no | additionally, during the first 60 minutes of any session |
+    ///
+    /// **Use `warmed_up` to choose where a sweep starts.** Using the other would discard the
+    /// first hour of every session — a quarter of the bars, and the most active quarter —
+    /// which trades one distortion for a larger one.
+    ///
+    /// Use `every_family_can_answer` to interpret a single bar: it is what says an
+    /// `orb60_*` position is false because the window has not closed rather than because the
+    /// price is elsewhere.
+    #[must_use]
+    pub fn warmed_up(&self) -> bool {
+        self.prev5.filled() >= 5
+            && self.yesterday.is_some()
+            && self.previous.is_some()
+            && self.trend.every_position_can_answer()
+    }
+
+    /// How many completed sessions the slowest family still needs.
+    ///
+    /// Zero once [`Self::every_family_can_answer`] is true. Reported in sessions rather than
+    /// bars because the binding constraint is the five-session ladder, and a bar count would
+    /// be a guess about how many bars a session holds — 375 on a regular day and 60 on the
+    /// 2025 Muhurat.
+    #[must_use]
+    pub const fn sessions_until_every_family_can_answer(&self) -> usize {
+        let filled = self.prev5.filled();
+        5_usize.saturating_sub(filled)
+    }
+
     /// Every position this evaluator can ever set.
     ///
     /// The union of nine sources' own `positions()` — eight modules and the current-day
@@ -1277,6 +1371,211 @@ mod tests {
             any,
             "a non-regular session emitted nothing at all, so the fix silenced a real hour \
              of trading instead of merely keeping it out of the anchors"
+        );
+    }
+
+    /// Whole families are silent until they warm, and the evaluator says when that stops.
+    ///
+    /// # The completeness loss this measures
+    ///
+    /// `min_hits` filters on measured support, and warm-up depresses measured support
+    /// invisibly. `Prev5::extremes` is `None` until five sessions have been pushed, so
+    /// positions 110–120 are false on 1,875 of 2,250 bars across six sessions — for a reason
+    /// that is not a measurement. A condition genuinely present on three bars of every
+    /// session then has a true support of 18 and a **measured support of 3**, is dropped at
+    /// `min_hits = 10`, and by anti-monotonicity every combination containing it dies.
+    ///
+    /// The Apriori completeness proof cannot see this. The ladder correctly keeps every
+    /// frequent set; the set was made infrequent before the ladder saw it.
+    ///
+    /// This test pins the two halves a caller depends on: the signal is FALSE while any
+    /// family is silent, and TRUE once none is — with the five-session ladder as the binding
+    /// constraint.
+    #[test]
+    fn the_evaluator_reports_when_every_family_can_finally_answer() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        let feed = |e: &mut Evaluator, day: i64, bars: i64| {
+            for m in 0..bars {
+                let p = 2_500_000 + (m % 61) * 300 + day * 17;
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: p,
+                    high: p + 500,
+                    low: p - 500,
+                    close: p + 200,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("a sane candle");
+            }
+        };
+
+        assert!(
+            !e.every_family_can_answer(),
+            "a fresh evaluator claims every family can answer, so the signal is useless"
+        );
+        assert_eq!(
+            e.sessions_until_every_family_can_answer(),
+            5,
+            "a fresh evaluator needs five completed sessions for the Prev5 ladder"
+        );
+
+        // A session completes when a bar on the NEXT day rolls its books, so five full days
+        // fed in order leaves FOUR completed. 375 bars a session is already well past the
+        // 200-candle EMA and the 60-minute opening range, so Prev5 is the only family still
+        // silent — which is the point: it is the slowest by a wide margin.
+        for day in 21_000..=21_004 {
+            feed(&mut e, day, 375);
+        }
+        assert_eq!(e.sessions_completed(), 4);
+        assert!(
+            !e.every_family_can_answer(),
+            "four completed sessions is reported as fully warm, but the five-session \
+             Fibonacci ladder cannot answer — positions 110-120 are still structurally \
+             false and every support they touch is depressed"
+        );
+        assert_eq!(e.sessions_until_every_family_can_answer(), 1);
+
+        // The sixth day's first bar rolls the fifth session's books, and that completes it.
+        // 61 bars, not 60: the longest opening range is 60 minutes and closes at minute 60.
+        feed(&mut e, 21_005, 61);
+        assert_eq!(e.sessions_completed(), 5);
+        assert_eq!(e.sessions_until_every_family_can_answer(), 0);
+        assert!(
+            e.warmed_up(),
+            "five completed sessions and 1,875 bars folded, and the run still reports \
+             itself unwarmed — a caller waiting on this signal would never start"
+        );
+        assert!(
+            e.every_family_can_answer(),
+            "the run is warm and the 60-minute window has closed, so every family can answer"
+        );
+    }
+
+    /// The opening ranges re-open every session, so only ONE of the two signals is monotone.
+    ///
+    /// This is the distinction the first version of these signals collapsed, and a test
+    /// caught it: at minute 0 of every trading day the 60-minute window has no level again.
+    /// A signal that includes the opening ranges therefore goes false at every session start,
+    /// which makes it a per-bar question rather than a warm-up boundary.
+    ///
+    /// Conflating them has a real cost either way round. Start a sweep on
+    /// `every_family_can_answer` and it discards the first hour of every session — a quarter
+    /// of the bars, and the most active quarter. Interpret a single bar with `warmed_up` and
+    /// an `orb60_*` false reads as "price is elsewhere" when it means "the window has not
+    /// closed".
+    #[test]
+    fn only_the_run_level_signal_is_monotone() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        // Takes a start minute as well as a count: a session must be fed in one monotone
+        // sweep, and restarting a day at minute 0 is refused by the timestamp guard — which
+        // is `Evaluator` doing its job and cost two attempts at this test to remember.
+        let feed = |e: &mut Evaluator, day: i64, from: i64, bars: i64| {
+            for m in from..from + bars {
+                let p = 2_500_000 + (m % 61) * 300 + day * 17;
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: p,
+                    high: p + 500,
+                    low: p - 500,
+                    close: p + 200,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("a sane candle");
+            }
+        };
+        for day in 23_000..=23_005 {
+            feed(&mut e, day, 0, 375);
+        }
+        assert!(e.warmed_up(), "six sessions in, the run is warm");
+        assert!(
+            e.every_family_can_answer(),
+            "and at the end of a full session every window has closed"
+        );
+
+        // The next session's FIRST bar. The run is still warm — that is what monotone means —
+        // and the 60-minute window is not.
+        feed(&mut e, 23_006, 0, 1);
+        assert!(
+            e.warmed_up(),
+            "`warmed_up` went false at a session boundary, so it is not monotone and cannot \
+             be used to choose where a sweep starts"
+        );
+        assert!(
+            !e.every_family_can_answer(),
+            "the 60-minute opening range reports itself closed on the first bar of a \
+             session, so `every_window_closed` is not asking about this session"
+        );
+
+        // And it comes back once the longest window has closed.
+        feed(&mut e, 23_006, 1, 60);
+        assert!(
+            e.every_family_can_answer(),
+            "sixty-one bars into a session and the 60-minute window still reports itself open"
+        );
+    }
+
+    /// The signal is a conjunction, so the slowest family decides.
+    ///
+    /// Without this, `every_family_can_answer` could be `prev5.filled() >= 5` alone and pass
+    /// the test above: five sessions of 375 bars warms everything else on the way. This
+    /// drives five very SHORT sessions instead — 60 bars each, the 2025 Muhurat's length — so
+    /// `Prev5` fills while the 200-candle EMA has seen only 300 candles… which is enough.
+    /// So it uses shorter sessions still: five 30-bar sessions is 150 candles, under 200.
+    #[test]
+    fn the_slowest_family_decides_and_it_is_not_always_prev5() {
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        for day in 22_000..22_005 {
+            for m in 0..30_i64 {
+                let p = 2_500_000 + (m % 17) * 200 + day * 11;
+                let bar = Candle {
+                    ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                    open: p,
+                    high: p + 400,
+                    low: p - 400,
+                    close: p + 100,
+                    volume: 0,
+                    open_interest: i64::MIN,
+                };
+                e.step(&bar).expect("a sane candle");
+            }
+        }
+        // A bar on a sixth day, to roll the fifth session's books.
+        for m in 0..1_i64 {
+            let bar = Candle {
+                ts_micros: 22_005 * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+                open: 2_500_000,
+                high: 2_500_400,
+                low: 2_499_600,
+                close: 2_500_100,
+                volume: 0,
+                open_interest: i64::MIN,
+            };
+            e.step(&bar).expect("a sane candle");
+        }
+
+        assert_eq!(e.sessions_completed(), 5, "five sessions were completed");
+        assert_eq!(
+            e.sessions_until_every_family_can_answer(),
+            0,
+            "the session count is satisfied"
+        );
+        // `warmed_up`, NOT `every_family_can_answer`. This test passed for the wrong reason
+        // until a mutation proved it: with 30-bar sessions the 60-minute opening range never
+        // closes, so `every_family_can_answer` returns false from the ORB regardless of what
+        // the EMA does — and reducing `warmed_up` to `prev5.filled() >= 5` left every test
+        // green. Asserting the run-level signal directly is what makes this about the EMA.
+        assert!(
+            !e.warmed_up(),
+            "five sessions of 30 bars is 150 candles and the 200-period EMA cannot answer \
+             yet, so `warmed_up` is only checking the session count and the conjunction it \
+             claims to be is not one"
+        );
+        // And the per-bar signal is false too, for its own separate reason.
+        assert!(
+            !e.every_family_can_answer(),
+            "a 30-bar session cannot have closed a 60-minute window"
         );
     }
 }

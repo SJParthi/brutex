@@ -3476,3 +3476,61 @@ Replacing `differing` with `true` — so 39 fires on three consecutive up bars �
 22 session tests. Neither run test asserted `!mask.get(39)`. Both do now, and the mutant
 was confirmed killed by re-applying it. The same class as the defect A3 fixed: a bit that
 reads as a measurement of one shape while the run is the opposite shape.
+
+
+---
+
+## 59. Warm-up depresses measured support, and the Apriori completeness proof cannot see it
+
+`min_hits` filters on **measured** support, and whole families are structurally silent
+until they warm. `Prev5::extremes` is `None` until five sessions have been pushed, so
+positions 110–120 are false on **1,875 of 2,250 bars** across six 375-bar sessions — for a
+reason that is not a measurement.
+
+A condition genuinely present on three bars of every session therefore has a true support
+of **18** and a measured support of **3**. At `min_hits = 10` it is dropped at k=1, and by
+anti-monotonicity **every combination containing it dies with it.**
+
+### Why the completeness proof does not cover this
+
+`the_apriori_kept_set_equals_the_brute_force_kept_set` compares the ladder to direct
+enumeration over 12,288 sweeps, and it is sound. It proves the ladder keeps every
+**frequent** set. This loss happens *before* the ladder: the set was made infrequent by the
+warm-up, and both the ladder and brute force then agree to discard it. **Two correct
+components composing into a wrong answer**, which is the shape a per-component proof cannot
+catch.
+
+### The engine cannot fix it, and should not try
+
+`Ladder::walk` receives `&[ConditionMask]` and nothing else. A false bit and an
+unanswerable bit are the same bit to it, and that is the right shape for it to have — an
+engine that had to know why a bit was false would need the whole indicator layer.
+
+So the decision belongs to whoever feeds it, and `crates/indicators` now publishes what
+they need:
+
+| | Monotone? | False when |
+|---|---|---|
+`Evaluator::warmed_up` | **yes** | fewer than five completed sessions, no previous day, or under 200 candles folded |
+`Evaluator::every_family_can_answer` | no | additionally, during the first 60 minutes of any session |
+`Evaluator::sessions_until_every_family_can_answer` | — | counts down to zero |
+
+**Start a sweep at `warmed_up`.** Using the other signal would discard the first hour of
+every session — a quarter of the bars, and the most active quarter — trading one distortion
+for a larger one.
+
+### The two signals were one function, and that was a defect
+
+The first version folded the opening ranges into the warm-up answer, and a test caught it:
+**the opening ranges re-open every session.** At minute 0 of every trading day the
+60-minute window has no level again, so the combined signal went false at every session
+boundary and was not a warm-up signal at all.
+
+### What is still not fixed, said plainly
+
+**No production caller of `walk` exists**, so nothing consumes these signals yet. Until one
+does, this section records a capability rather than a fix: the information is available and
+the loss is still there for anyone who ignores it. `min_hits` remains an absolute count
+against a support that warm-up depresses, and no per-position eligibility count is carried
+in the result — a reader of a `Sweep` cannot tell a condition that was rare from one that
+was unanswerable.

@@ -1799,6 +1799,10 @@ fail there — a guard nobody has watched fail is not known to be a guard.
 | I-11 | A non-regular session does not advance the five-session rolling window. The second of the charter's three prohibitions: `Prev5` is what positions 110–120 are measured against, and a one-hour OHLC entering it contaminates them for five more sessions | `indicators::evaluator::a_non_regular_session_does_not_advance_the_rolling_window` | ✓ |
 | I-12 | A non-regular session **still emits its own bars**. The charter forbids that hour becoming an anchor, not that it be silenced — it is real trading, and every intraday position on it is a genuine measurement | `indicators::evaluator::a_non_regular_session_still_emits_its_own_bars` | ✓ |
 
+| I-13 | `Evaluator::warmed_up` is **monotone** and `every_family_can_answer` is not, because the opening ranges re-open every session. Collapsing the two — which the first version did — produces a signal that goes false at every session boundary and cannot be used to choose where a sweep starts | `indicators::evaluator::only_the_run_level_signal_is_monotone` | ✓ |
+| I-14 | `warmed_up` is a **conjunction**, so the slowest family decides. Five 30-bar sessions fills `Prev5` while the 200-period EMA has seen 150 candles, and the signal must be false. Reducing it to the session count alone left every test green until this row asserted the run-level signal directly instead of the per-bar one | `indicators::evaluator::the_slowest_family_decides_and_it_is_not_always_prev5` | ✓ |
+| I-15 | The signals report the boundary the five-session ladder imposes: false at four completed sessions, true at five with the longest window closed | `indicators::evaluator::the_evaluator_reports_when_every_family_can_finally_answer` | ✓ |
+
 **I-10 and I-11 both fail on the obvious slip**, which is why the verdict is taken on
 `self.day` and not `today`: asking about the session that is *starting* rather than the one
 that just *ended* inverts the fix, so the Muhurat session would poison the anchor and the
