@@ -1559,20 +1559,30 @@ pub struct PullView<'a> {
 fn feed_select() -> String {
     let mut choices = String::from("<select name=\"vendor\">");
     for feed in pull::vendor::Feed::ALL {
-        let kind = match feed.descriptor().transport {
-            pull::vendor::Transport::Http(_) => {
-                "broker \u{b7} needs a token, a rate budget and a finished day"
-            }
-            pull::vendor::Transport::LocalArchive(_) => {
-                "archive \u{b7} reads the folder below; no token, no window rules"
-            }
+        // THE NOUN IS `SourceKind`'S, AND ONLY THE CLAUSE IS THIS PAGE'S.
+        //
+        // This matched on `Transport`'s two arms and minted its own words for
+        // them — `broker` and `archive` — which is a fourth vocabulary for a
+        // two-valued fact `pull::vendor::SourceKind` already names. Two of the
+        // other three are gone (`/feeds.json` emits `kind_label`, and the
+        // browser reads it); this one now shares their word, so a page, a
+        // refusal and a receipt cannot call one feed three things.
+        //
+        // The CLAUSE stays here because it is about this form: which of the
+        // fields below the select mean anything. That is a property of the
+        // page, not of the vendor.
+        let kind = feed.source_kind();
+        let says = match kind {
+            pull::vendor::SourceKind::Rest => "needs a token, a rate budget and a finished day",
+            pull::vendor::SourceKind::Folder => "reads the folder below; no token, no window rules",
         };
         let _ = write!(
             choices,
-            "<option value=\"{}\">{} \u{2014} {}</option>",
+            "<option value=\"{}\">{} \u{2014} {} \u{b7} {}</option>",
             escape(feed.wire()),
             escape(feed.display()),
-            kind
+            escape(kind.label()),
+            says
         );
     }
     choices.push_str("</select>");
@@ -3436,7 +3446,24 @@ mod tests {
                 "{} must be named in words too, not only as a wire value",
                 feed.display()
             );
+            // AND THE KIND IS `SourceKind`'S WORD. This option minted its own
+            // (`broker`, `archive`) off a `match` on the transport, which made
+            // it a fourth vocabulary for a two-valued fact the type already
+            // names — and the one an operator on a no-JS page would read.
+            assert!(
+                html.contains(&format!(
+                    "{} \u{2014} {} \u{b7} ",
+                    feed.display(),
+                    feed.source_kind().label()
+                )),
+                "{} is labelled by pull::vendor::SourceKind and not by this file: {html}",
+                feed.display()
+            );
         }
+        assert!(
+            !html.contains("broker \u{b7}") && !html.contains("archive \u{b7}"),
+            "the words this file used to mint for the split are gone: {html}"
+        );
     }
 
     #[test]

@@ -1,0 +1,490 @@
+/**
+ * THE STORE CENSUS — ONE FOLD, ONE CLOCK, ONE ARRAY.
+ *
+ * # What this replaces
+ *
+ * `/store.json` was read SIX times and folded FIVE different ways on SIX
+ * independent clocks:
+ *
+ *   lib/feeds.svelte.js        a sum, to pick a default            once
+ *   routes/+page.svelte        Map<instrument,[{month,rows,tf}]>   per feed
+ *   routes/db/+page.svelte     the raw array                       per feed
+ *   routes/db/+page.svelte     (a second, independent read)
+ *   routes/ingest/+page.svelte Map<"inst|tf|month", rows>          per feed
+ *   routes/ingest/+page.svelte {units,rows,byInstrument,held}      EVERY 5 s
+ *   routes/autopilot/+page     per-month {cells,bars}              every 30 s
+ *
+ * Nothing reconciled them. During a pull `/db` and `/ingest` showed DIFFERENT
+ * totals for the same store and both were "correct" as of their own snapshot;
+ * `/ingest` alone held two independently-clocked copies of the same census and
+ * could disagree with itself. That is not a slow fold — a faster fold would
+ * still be six answers. It is one question asked six times, and the fix is to
+ * ask it once.
+ *
+ * # The shape of the answer
+ *
+ * ONE fetch per (feed, generation). One stamp. Every derived shape any page
+ * needs is built from THE SAME ARRAY in THE SAME PASS, so no page ever scans
+ * and no two pages can disagree:
+ *
+ *   `rows`         the raw array, exactly what the wire sent
+ *   `readable`     the rows whose fields parse, normalised
+ *   `bad`          the rows whose fields do not, each carrying the reason
+ *   `byInstrument` instrument      -> readable cell[], ascending (month, rung)
+ *   `byCell`       "inst|tf|month" -> bar count                        — O(1)
+ *   `byMonth`      "YYYY-MM"       -> { cells, bars, list }            — O(1)
+ *
+ * Building the indexes is O(n) ONCE per read. That is inherent — every row has
+ * to be seen to be indexed — and it is now paid ONCE for the whole product
+ * instead of five times per page-load and again every five seconds. After the
+ * pass, every lookup any page makes is one Map probe.
+ *
+ * # The stamp, and why it carries the feed
+ *
+ * `$lib/index.svelte.js` learned this the expensive way: `catalogue.feed` was
+ * read by two pages as the gate on whether a count could be printed, and it was
+ * never DECLARED and never WRITTEN. `undefined === 'dhan'` is false forever, so
+ * every instrument picker rendered "0 shown of 0" behind a refusal no operator
+ * action could satisfy. A shared census without a feed stamp is that bug again,
+ * one page wider: a fold of one broker's store under another broker's heading,
+ * and every number in it really counted.
+ *
+ * So a read carries THREE things and never fewer: its stamp (`at`), its error,
+ * and the feed it ANSWERED FOR (`feed`). A page compares `store.feed` against
+ * the feed it is asking about before it believes a single number.
+ *
+ * # CLAUDE.md §4 — a failed read never leaves the previous value looking current
+ *
+ * On failure the stamp is CLEARED, the feed stamp is CLEARED, every index is
+ * emptied and `error` names the reason. `lastOk` keeps the previous SUCCESSFUL
+ * read's stamp under a name that cannot be mistaken for the current one — "last
+ * good: 15:29" is an honest sentence; "as of 15:29" over a failed read is the
+ * fallback that hides a failure, and it is worse than a blank because the
+ * minute is real and only the claim is false.
+ */
+
+/* ======================================================================
+   THE RUNGS ON DISK — the store's own list, not a second copy of it.
+   ----------------------------------------------------------------------
+   `store::path::Timeframe::KNOWN` files under these seven directory names and
+   `/store.json` puts the row's OWN rung on the wire. A rung this table cannot
+   map is NEVER guessed at: ordering falls back to the wire's order and the
+   page that cares reports the rung as unmapped, because guessing how many
+   seconds a bar covers draws a convincing chart of the wrong buckets.
+   ====================================================================== */
+export const RUNG_SECONDS = new Map([
+  ['1min', 60],
+  ['3min', 180],
+  ['5min', 300],
+  ['15min', 900],
+  ['30min', 1800],
+  ['60min', 3600],
+  ['1day', 86400]
+]);
+
+/** Seconds one bar of this rung covers, or `null` when this build cannot map it. */
+export const rungSeconds = (t) => RUNG_SECONDS.get(t) ?? null;
+
+const MONTH_KEY = /^\d{4}-\d{2}$/;
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** The key `byCell` is probed with. ONE spelling, so two pages cannot differ. */
+export const cellKey = (instrument, timeframe, month) => `${instrument}|${timeframe}|${month}`;
+
+/**
+ * `null` when the row is readable; otherwise the reason it is not, in words.
+ *
+ * A ROW THAT FAILS IS KEPT, NEVER DROPPED AND NEVER COERCED. A census row whose
+ * `rows` is absent, negative or fractional is a row whose count is UNKNOWN.
+ * Dropping it makes it indistinguishable from a month that does not exist;
+ * writing zero for it prints a measurement nobody took. It goes to `bad` with
+ * the reason, and every total computed without it can say so.
+ */
+function rowFault(row) {
+  if (typeof row?.instrument !== 'string' || row.instrument === '')
+    return `its \`instrument\` field is ${JSON.stringify(row?.instrument)}, which is not an instrument key`;
+  if (typeof row.month !== 'string' || !MONTH_KEY.test(row.month))
+    return `its \`month\` field is ${JSON.stringify(row.month)}, which is not a YYYY-MM month`;
+  if (typeof row.timeframe !== 'string' || row.timeframe === '')
+    return `its \`timeframe\` field is ${JSON.stringify(row.timeframe)}`;
+  if (!Number.isInteger(row.rows) || row.rows < 0)
+    return `its \`rows\` field is ${JSON.stringify(row.rows)}, which is not a whole number of records`;
+  return null;
+}
+
+const empty = () => ({
+  rows: [],
+  readable: [],
+  bad: [],
+  byInstrument: new Map(),
+  badByInstrument: new Map(),
+  byCell: new Map(),
+  byMonth: new Map(),
+  cells: 0,
+  bars: 0
+});
+
+/**
+ * THE ONE READING. Every page reads this object and no page fetches.
+ *
+ *   state       'none' | 'reading' | 'ready' | 'error'
+ *   feed        the feed the CURRENT value answered for — `null` unless ready
+ *   at          when this browser OBSERVED that answer — `null` unless ready
+ *   error       the reason the last read failed, in the words it failed with
+ *   generation  bumped by `refreshStore`; the read key, and the shared clock
+ *   reads       how many reads have SUCCEEDED — the memo key for window folds
+ *   lastOk      { at, feed } of the last successful read. Never "current".
+ */
+export const store = $state({
+  state: 'none',
+  feed: null,
+  at: null,
+  error: null,
+  generation: 0,
+  reads: 0,
+  lastOk: { at: null, feed: null },
+  ...empty()
+});
+
+/* `${feed}#${generation}` already asked for. NOT reactive: it is bookkeeping
+   about a request, and an effect that reads what it writes re-runs forever. */
+let asked = null;
+/* The read in flight, so a caller that needs the answer before it can measure
+   anything — the ingest baseline — awaits the SHARED request. */
+let flight = null;
+let flightToken = null;
+/* The feed the last `syncStore` asked about, so the poll and Refresh know what
+   to re-read without importing the feed selection and making an import cycle. */
+let wanted = null;
+
+function clearValue() {
+  Object.assign(store, empty());
+}
+
+/**
+ * Fold one answer into every shape any page asks for. ONE PASS.
+ *
+ * The readable cells are shared BY REFERENCE between `readable`, `byInstrument`
+ * and `byMonth.list` — three views of one object, never three copies of it.
+ */
+function fold(rows) {
+  const out = empty();
+  out.rows = rows;
+  for (const row of rows) {
+    const why = rowFault(row);
+    if (why !== null) {
+      const it = { instrument: row?.instrument, month: row?.month, timeframe: row?.timeframe, why };
+      out.bad.push(it);
+      if (typeof it.instrument === 'string' && it.instrument !== '') {
+        let list = out.badByInstrument.get(it.instrument);
+        if (!list) out.badByInstrument.set(it.instrument, (list = []));
+        list.push(it);
+      }
+      continue;
+    }
+    const cell = {
+      instrument: row.instrument,
+      month: row.month,
+      timeframe: row.timeframe,
+      rows: row.rows,
+      // THE WINDOW THE MONTH ACTUALLY COVERS, in MICROSECONDS, on the wire
+      // since the census gained it. Deriving it from the month name would be a
+      // guess: a month holding one bar covers one day, and which day is a fact
+      // only the entry has.
+      first: Number.isFinite(row.first_ts) ? row.first_ts : null,
+      last: Number.isFinite(row.last_ts) ? row.last_ts : null
+    };
+    out.readable.push(cell);
+    out.cells += 1;
+    out.bars += cell.rows;
+
+    let byIns = out.byInstrument.get(cell.instrument);
+    if (!byIns) out.byInstrument.set(cell.instrument, (byIns = []));
+    byIns.push(cell);
+
+    out.byCell.set(cellKey(cell.instrument, cell.timeframe, cell.month), cell.rows);
+
+    let byMo = out.byMonth.get(cell.month);
+    if (!byMo) out.byMonth.set(cell.month, (byMo = { cells: 0, bars: 0, list: [] }));
+    byMo.cells += 1;
+    byMo.bars += cell.rows;
+    byMo.list.push(cell);
+  }
+  // ASCENDING BY (month, rung), so "the latest month" is the last element
+  // everywhere and a month held at two rungs keeps them adjacent. Sorted ONCE
+  // here rather than once per page, per render.
+  for (const list of out.byInstrument.values())
+    list.sort(
+      (a, b) => cmp(a.month, b.month) || cmp(rungSeconds(a.timeframe) ?? 0, rungSeconds(b.timeframe) ?? 0)
+    );
+  return out;
+}
+
+/**
+ * The one fetch. At most ONE per (feed, generation), whatever asks for it.
+ *
+ * Returns the in-flight promise when one is already running for this key, so
+ * three pages and a poll all await the SAME request rather than racing four.
+ */
+function read(feed, generation) {
+  const key = `${feed}#${generation}`;
+  if (asked === key) return flight ?? Promise.resolve();
+  asked = key;
+
+  // A FEED CHANGE DROPS THE VALUE BEFORE THE REQUEST LEAVES. Leaving the
+  // previous feed's counts standing under the new feed's name is the stale
+  // value §4 bans, and it is worse than a blank because every number in it was
+  // really counted — from the wrong store. A REFRESH of the same feed keeps the
+  // value: `state` reads 'reading' and the page shows it under a "refreshing"
+  // mark, because it is that feed's own previous answer and is labelled as one.
+  if (store.feed !== feed) {
+    clearValue();
+    store.feed = null;
+    store.at = null;
+  }
+  store.state = 'reading';
+  store.error = null;
+
+  const mine = fetch(`/store.json?feed=${encodeURIComponent(feed)}`)
+    .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))))
+    .then((body) => {
+      if (asked !== key) return; // a newer feed or generation won; this answer is stale
+      if (!Array.isArray(body)) throw new Error('the body of /store.json is not a JSON array');
+      Object.assign(store, fold(body));
+      store.feed = feed;
+      store.at = Date.now();
+      store.state = 'ready';
+      store.error = null;
+      store.reads += 1;
+      store.lastOk = { at: store.at, feed };
+    })
+    .catch((why) => {
+      if (asked !== key) return;
+      // NAMED, NOT SHRUGGED, AND THE STAMP GOES WITH IT. A page that says
+      // "nothing stored" over a failed request states a fact about a disk it
+      // never read. `lastOk` survives under its own name; `at` and `feed` do
+      // not, because they are the claim that THIS value is current.
+      clearValue();
+      store.feed = null;
+      store.at = null;
+      store.state = 'error';
+      store.error = String(why?.message ?? why);
+      // The key is released so a Refresh press can retry the same
+      // (feed, generation) without needing a bump nobody asked for.
+      asked = null;
+    });
+
+  // The token, not the promise, decides whether this read is still the current
+  // one when it lands. A newer feed or generation replaces `flightToken` on its
+  // way past, and this one then clears nothing.
+  const token = {};
+  flightToken = token;
+  flight = mine.finally(() => {
+    if (flightToken === token) flight = null;
+  });
+  return flight;
+}
+
+/**
+ * SUBSCRIBE. Call inside a `$effect`, passing the feed the page is asking about.
+ *
+ *   $effect(() => syncStore(feeds.active));
+ *
+ * The effect reads `feeds.active` (through the argument) and `store.generation`
+ * (inside), so it re-runs on a feed change AND on a generation bump — which is
+ * how a Refresh pressed on one page, or the poll held by another, reaches every
+ * subscriber without any page owning a timer of its own.
+ *
+ * The feed is a PARAMETER rather than an import: `/autopilot` deliberately
+ * follows the autopilot's own target feed rather than the top bar's selection,
+ * and taking the feed here keeps that possible while keeping this module free
+ * of every import — no cycle with `feeds.svelte.js`, which reads it back.
+ */
+export function syncStore(feed) {
+  const generation = store.generation; // TRACKED — this is the shared clock
+  wanted = feed ?? null;
+  if (!feed) return;
+  read(feed, generation);
+}
+
+/**
+ * REFRESH IS A GENERATION BUMP, NOT A PER-PAGE FETCH.
+ *
+ * The bump re-runs every subscriber's effect, which calls `syncStore`, which
+ * finds a key it has not asked for and issues exactly ONE request. Awaiting the
+ * returned promise waits for that same request — the caller that needs a
+ * reading before it can measure anything gets the shared one, not a seventh.
+ */
+export function refreshStore() {
+  store.generation += 1;
+  if (!wanted) return Promise.resolve();
+  return read(wanted, store.generation);
+}
+
+/* ======================================================================
+   THE POLL — ONE CLOCK, HELD BY WHOEVER NEEDS IT, SEEN BY EVERYONE.
+   ----------------------------------------------------------------------
+   `/ingest` wants five seconds while a pull is running; `/autopilot` wants
+   thirty. Two timers reading the same endpoint is how two pages come to hold
+   two different totals for one store. There is ONE timer, its period is the
+   finest any holder asked for, and it bumps the generation — so the answer it
+   fetches is the answer every page is already reading.
+   ====================================================================== */
+let holders = [];
+let ticking = false;
+
+/** Hold the poll at `everyMs`. Returns the release — call it from cleanup. */
+export function watchStore(everyMs) {
+  const holder = { everyMs: Math.max(1000, Math.trunc(everyMs) || 1000), live: true };
+  holders.push(holder);
+  if (!ticking) {
+    ticking = true;
+    tick();
+  }
+  return () => {
+    if (!holder.live) return;
+    holder.live = false;
+    holders = holders.filter((h) => h !== holder);
+  };
+}
+
+async function tick() {
+  while (holders.length > 0) {
+    const period = Math.min(...holders.map((h) => h.everyMs));
+    await new Promise((done) => setTimeout(done, period));
+    if (holders.length === 0) break;
+    // AWAITED, SO A SLOW ANSWER CANNOT STACK REQUESTS ON TOP OF ITSELF. The
+    // period is the gap BETWEEN reads, never the rate they are fired at.
+    await refreshStore();
+  }
+  ticking = false;
+}
+
+/* ======================================================================
+   THE FOLD THAT DEPENDS ON A QUESTION ONE PAGE ASKS.
+   ====================================================================== */
+let foldMemo = { key: null, value: null };
+
+/**
+ * The window fold `/ingest` measures a run against: how many instrument-months
+ * inside these months are held, how many bars they hold, and how many bars each
+ * instrument holds inside them.
+ *
+ * It walks ONLY the months named — `byMonth` is the index, so a one-month window
+ * costs one month and never a pass over the whole store — and it is memoised on
+ * (successful read, months), so re-rendering never re-folds.
+ *
+ * `held` is the WHOLE store's row count, not the window's: it is the figure
+ * "3,353 instrument-month row(s) read" is printed from, and narrowing it to the
+ * window would silently change what that sentence means.
+ */
+export function foldMonths(months) {
+  const list = [...(months ?? [])];
+  const key = `${store.reads} ${list.join(',')}`;
+  if (foldMemo.key === key) return foldMemo.value;
+  const byInstrument = new Map();
+  let units = 0;
+  let rows = 0;
+  for (const m of list) {
+    const bucket = store.byMonth.get(m);
+    if (!bucket) continue;
+    for (const cell of bucket.list) {
+      units += 1;
+      rows += cell.rows;
+      byInstrument.set(cell.instrument, (byInstrument.get(cell.instrument) ?? 0) + cell.rows);
+    }
+  }
+  const value = { at: store.at, units, rows, byInstrument, held: store.rows.length };
+  foldMemo = { key, value };
+  return value;
+}
+
+/* ======================================================================
+   THE SURVEY — a DIFFERENT question, asked once.
+   ----------------------------------------------------------------------
+   "Which feed holds anything at all" is not "what does this feed hold". It
+   spans every feed, it is what picks the default selection on load, and it is
+   what `/db` names when the selected feed is empty and the operator needs
+   somewhere to go. It was two independent N-request folds — one in
+   `loadFeeds`, one in `/db` — answering one question on two clocks.
+   ====================================================================== */
+export const survey = $state({
+  state: 'none', // 'none' | 'reading' | 'ready' | 'error'
+  at: null,
+  error: null,
+  wires: '', // THE FEED LIST IT ANSWERED FOR — the same stamp lesson as `feed`
+  byFeed: new Map() // wire -> { wire, ready, bars, cells, any, error }
+});
+
+let surveyAsked = null;
+let surveyFlight = null;
+
+/**
+ * Read every feed's store once. `list` is `[{ wire, ready }, …]` from
+ * `/feeds.json`. At most one pass per (feed list, generation), so the boot pass
+ * that picks the default is the SAME pass `/db` reads when it finds the selected
+ * feed empty — and a Refresh, which bumps the generation, re-asks it.
+ */
+export function surveyStores(list) {
+  const feedsIn = [...(list ?? [])];
+  const wires = feedsIn.map((f) => f.wire).join(',');
+  const key = `${wires}#${store.generation}`;
+  if (surveyAsked === key) return surveyFlight ?? Promise.resolve(survey);
+  surveyAsked = key;
+  // A DIFFERENT FEED LIST IS A DIFFERENT QUESTION, so the previous answer is
+  // dropped before the new one is asked rather than sitting under it.
+  if (survey.wires !== wires) {
+    survey.byFeed = new Map();
+    survey.at = null;
+    survey.wires = '';
+  }
+  survey.state = 'reading';
+  survey.error = null;
+
+  surveyFlight = Promise.all(
+    feedsIn.map((f) =>
+      fetch(`/store.json?feed=${encodeURIComponent(f.wire)}`)
+        .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+        .then((d) => {
+          const rows = Array.isArray(d) ? d : [];
+          let bars = 0;
+          for (const row of rows) if (Number.isInteger(row?.rows) && row.rows > 0) bars += row.rows;
+          return { wire: f.wire, ready: f.ready, bars, cells: rows.length, any: rows.length > 0, error: null };
+        })
+        // ONE FEED'S FAILURE IS NOT EVERY FEED'S. The reason rides on the row so
+        // a caller can say "this feed could not be read" rather than "this feed
+        // holds nothing", which is a claim about a disk nobody reached.
+        .catch((why) => ({
+          wire: f.wire,
+          ready: f.ready,
+          bars: 0,
+          cells: 0,
+          any: false,
+          error: String(why?.message ?? why)
+        }))
+    )
+  )
+    .then((all) => {
+      if (surveyAsked !== key) return survey;
+      survey.byFeed = new Map(all.map((f) => [f.wire, f]));
+      survey.wires = wires;
+      survey.at = Date.now();
+      survey.state = 'ready';
+      survey.error = null;
+      return survey;
+    })
+    .catch((why) => {
+      if (surveyAsked !== key) return survey;
+      survey.byFeed = new Map();
+      survey.wires = '';
+      survey.at = null;
+      survey.state = 'error';
+      survey.error = String(why?.message ?? why);
+      surveyAsked = null;
+      return survey;
+    })
+    .finally(() => {
+      surveyFlight = null;
+    });
+  return surveyFlight;
+}

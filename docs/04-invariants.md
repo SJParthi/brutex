@@ -2191,3 +2191,49 @@ true of the four census and master headers — `/db` and Markets can now see why
 an array is empty and do not look. `web/src` was held by another session while
 these landed. Three of the five also reach those pages as a status code they
 already branch on, which is the floor rather than the fix.
+
+## The granularity floor and the source kind cross the wire once — D-0126
+
+`pull::vendor::GranularityFloor` existed on every `Descriptor` (D-0118) and
+`/feeds.json` did not emit it, so `web/src/routes/ingest/+page.svelte` carried a
+**transcription of all four consts** — `finest`, `kind`, `because` and `source`,
+copied word for word — and every sentence the rung control printed was built
+from the copy. Two copies of one vendor fact can disagree, and the browser's is
+the one that would be wrong: it is versioned with that file, and nothing
+rebuilds it when a const is reworded.
+
+The same endpoint carried the SOURCE KIND twice: a `transport` word (`broker` /
+`archive`) minted by a `match` in the handler, and a `kind` word (`rest` /
+`folder`) read from `SourceKind`. The page then wrote
+`active?.kind ?? (active?.transport === 'archive' ? 'folder' : 'rest')` — a
+reconstruction of the fact standing behind the fact, looking exactly as
+authoritative as it.
+
+The rows are prefixed `GW-` for the reason `GF-` and `SK-` give: two sessions
+share this tree and a collided identifier is worse than a new prefix. `GF-*`
+holds the fact inside `crates/pull`; these hold what survives the wire.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| GW-01 | **The whole granularity floor is emitted, not the number.** Every feed row carries `finest` with the rung, the kind's word, the kind's own sentence, `tick_stream`, `conflated`, the vendor's reason and its citation. The reason and the source are asserted to be the descriptor's own strings rather than a shape, so a reworded const fails here instead of leaving a browser showing yesterday's reason | `api::server::feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick` | ✓ |
+| GW-02 | **A conflated snapshot never crosses the wire as a tick.** The tick-versus-conflated distinction travels as `tick_stream` and `conflated` — `FinestKind::is_tick_stream` and `is_conflated` answered on the server — beside the word, so no reader has to match on a string to decide what may be printed next to a number. No row carries `tick_stream: true`, and that is asserted as a **field**, not as an omission: a page must be able to see the negative stated. Both one-second rows carry `conflated: true`, both one-minute rows `false` | `api::server::feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick` | ✓ |
+| GW-03 | **`FinestKind::Tick` has a wire word although no descriptor constructs one.** The word lives in its own `const fn` rather than as an arm inside the emitter: an arm nothing reaches is a region that can never run, which is the coverage hole `CLAUDE.md` §9 cannot forgive, and the negative is the sentence that has to survive. All three words are asserted, and the snapshot word is asserted **not** to be the tick word | `api::server::finest_kind_words_are_three_and_the_tick_word_is_one_of_them` | ✓ |
+| GW-04 | **The source kind is on the wire ONCE.** `transport` is gone — asserted absent from the body rather than merely unused — and `kind`, `kind_label` and `verb` are all `SourceKind`'s, reached through one `Feed::source_kind` per row. The readiness rule that used to be a third `match` on the transport now asks `needs_credential`, which is its actual reason: a credential is what proves a broker's entitlement, so an empty store means "nothing pulled yet" for REST and "not bought" for a folder | `api::server::feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it` | ✓ |
+| GW-05 | **The no-JS page labels a feed with `SourceKind`'s word too.** `render::feed_select` minted a fourth vocabulary for the same split off its own `match` on `Transport`. It now prints `SourceKind::label`, and the words it used to coin are asserted absent — so a page, a receipt and a refusal cannot call one feed three things. Only the clause about which of the form's other fields mean anything stays local, because that is a property of the page | `api::render::the_pull_page_offers_every_feed_in_the_table` | ✓ |
+
+**What is NOT held here, and is a `web/` fact rather than a crate one.** The
+browser now reads both fields and holds no copy of either: the four-row `FINEST`
+table, the `KIND_LABEL` map and the `transport`-derived guess are deleted from
+`web/src/routes/ingest/+page.svelte`, and a row that arrives without `finest` or
+without `kind` is reported as a **missing field on a server that predates it**
+rather than answered from a fallback. Nothing above proves that — these rows are
+about `crates/api`, and there is no test harness in this repository that renders
+that page.
+
+**And one second copy is still standing.** The HISTORY floor — `FLOOR_OPERATOR`
+and `FLOOR_DOC` in the same file — is the same defect one layer over, and it is
+NOT fixed by this change. `/feeds.json` has emitted `history` per rung since
+D-0113 and `feedFloor` does not read it. The drift is already visible in the
+copy: `FLOOR_OPERATOR` carries a `zerodha` row for a feed no descriptor in this
+build names, and neither table has a row for `truedata` or `gdfl`, which the
+wire answers for.

@@ -10,6 +10,8 @@
  * table. A fifth feed appears here the day its row exists — nothing in this
  * file names a vendor.
  */
+import { survey, surveyStores } from '$lib/store.svelte.js';
+
 export const feeds = $state({ all: [], active: null, error: null });
 
 export async function loadFeeds() {
@@ -27,15 +29,19 @@ export async function loadFeeds() {
     // build rather than as an unselected feed.
     //
     // So the store decides the default and the credential is the fallback. One
-    // request, and it answers the only question worth asking on load: which of
+    // pass, and it answers the only question worth asking on load: which of
     // these can show me something right now.
-    const held = await Promise.all(
-      feeds.all.map((f) =>
-        fetch(`/store.json?feed=${encodeURIComponent(f.wire)}`)
-          .then((r) => (r.ok ? r.json() : []))
-          .then((d) => ({ wire: f.wire, ready: f.ready, bars: d.reduce((a, r) => a + r.rows, 0) }))
-          .catch(() => ({ wire: f.wire, ready: f.ready, bars: 0 }))
-      )
+    //
+    // THE PASS IS `$lib/store.svelte.js`'s AND NOT THIS FILE'S. It used to be
+    // one of SIX independent reads of `/store.json` across the product, and one
+    // of TWO that asked this same across-every-feed question — `/db` asked it
+    // again, on its own clock, to name where the rows are when the selected
+    // feed is empty. Two folds of one answer is how two surfaces come to
+    // disagree about the same disk. `surveyStores` folds it once and stamps it
+    // with the feed list it answered for; both readers read that.
+    await surveyStores(feeds.all);
+    const held = feeds.all.map(
+      (f) => survey.byFeed.get(f.wire) ?? { wire: f.wire, ready: f.ready, bars: 0 }
     );
     const best =
       held.filter((f) => f.bars > 0).sort((a, b) => b.bars - a.bars)[0] ??

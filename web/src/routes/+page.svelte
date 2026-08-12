@@ -88,6 +88,7 @@
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
+  import { store, syncStore, refreshStore, RUNG_SECONDS, rungSeconds as rungSec } from '$lib/store.svelte.js';
 
   /* ======================================================================
      PRIMITIVES
@@ -139,16 +140,10 @@
      drawn, because drawing it would mean guessing how many seconds a bar
      covers and a wrong guess draws a convincing chart of the wrong buckets.
      ====================================================================== */
-  const RUNG_SECONDS = new Map([
-    ['1min', 60],
-    ['3min', 180],
-    ['5min', 300],
-    ['15min', 900],
-    ['30min', 1800],
-    ['60min', 3600],
-    ['1day', 86400]
-  ]);
-  const rungSec = (t) => RUNG_SECONDS.get(t) ?? null;
+  // THE TABLE ITSELF LIVES IN `$lib/store.svelte.js`, beside the fold that
+  // sorts a series by it. Two copies of "how many seconds is a 15min bar" is
+  // two answers waiting to differ; the census that orders rungs and the page
+  // that draws them now read one.
 
   /* ======================================================================
      THE DERIVED LADDER — N rungs at runtime.
@@ -198,86 +193,43 @@
      ====================================================================== */
   const seriesKey = (row) => `${row.exchange}-${row.segment}-${row.symbol}`;
 
-  // FLAT STATE, WRITTEN BY THE LOADER AND NEVER READ BY IT. An effect that
-  // reads a `$state` object and later reassigns it depends on its own output
-  // and re-runs forever.
-  let censusState = $state('none'); // 'none' | 'wait' | 'ready' | 'error'
-  let censusError = $state(null);
-  let censusMonths = $state(new Map());
-  let censusBad = $state(new Map());
-  let censusStamp = $state(null);
-  let censusToken = 0;
+  /* ----------------------------------------------------------------------
+     THE FOLD IS NOT THIS PAGE'S ANY MORE.
+     ----------------------------------------------------------------------
+     This block used to own a fetch, a token, five pieces of flat state, a
+     field validator and a sort — and it was ONE OF SIX such blocks reading
+     `/store.json` across the product, each on its own clock, none reconciled
+     against the others. During a pull this page and `/db` could show different
+     totals for the same disk and both were "correct" as of their own snapshot.
+     `$lib/store.svelte.js` reads it ONCE per (feed, generation), folds every
+     shape any page needs in ONE pass, and stamps the answer with the feed it
+     answered for. What is left here are the names this page already used,
+     pointed at that one reading.
 
-  const MONTH_KEY = /^\d{4}-\d{2}$/;
+     `syncStore` is the subscription: it reads `feeds.active` and the shared
+     generation, so a feed change re-reads and a Refresh anywhere — including
+     the poll `/ingest` holds while a pull runs — arrives here too.
+     ---------------------------------------------------------------------- */
+  $effect(() => syncStore(feeds.active));
 
-  async function loadCensus(feed) {
-    const mine = ++censusToken;
-    censusState = 'wait';
-    censusError = null;
-    try {
-      const r = await fetch(`/store.json?feed=${encodeURIComponent(feed)}`);
-      if (!r.ok) throw new Error(`HTTP ${r.status} from /store.json`);
-      const rows = await r.json();
-      if (mine !== censusToken) return; // a newer feed won; this answer is stale
-      const good = new Map();
-      const bad = new Map();
-      for (const row of rows) {
-        const instrument = row?.instrument;
-        if (typeof instrument !== 'string' || instrument === '') continue;
-        const why = rowFault(row);
-        const target = why === null ? good : bad;
-        let list = target.get(instrument);
-        if (!list) target.set(instrument, (list = []));
-        list.push(
-          why === null
-            ? {
-                month: row.month,
-                timeframe: row.timeframe,
-                rows: row.rows,
-                // THE WINDOW THE MONTH ACTUALLY COVERS, in MICROSECONDS, on
-                // the wire since the census was written. Deriving it from the
-                // month name would be a guess: a month holding one bar covers
-                // one day, and which day is a fact only the entry has.
-                first: Number.isFinite(row.first_ts) ? row.first_ts : null,
-                last: Number.isFinite(row.last_ts) ? row.last_ts : null
-              }
-            : { month: row.month, timeframe: row.timeframe, why }
-        );
-      }
-      // ASCENDING BY (month, rung), so "the latest month" is the last element
-      // everywhere below and a month held at two rungs keeps them adjacent.
-      for (const list of good.values())
-        list.sort((a, b) => cmp(a.month, b.month) || cmp(rungSec(a.timeframe) ?? 0, rungSec(b.timeframe) ?? 0));
-      censusMonths = good;
-      censusBad = bad;
-      censusStamp = Date.now();
-      censusState = 'ready';
-      censusError = null;
-    } catch (why) {
-      if (mine !== censusToken) return;
-      censusMonths = new Map();
-      censusBad = new Map();
-      censusStamp = null;
-      censusState = 'error';
-      censusError = String(why);
-    }
-  }
-
-  /** `null` when the row is readable; otherwise the reason it is not, in words. */
-  function rowFault(row) {
-    if (typeof row.month !== 'string' || !MONTH_KEY.test(row.month))
-      return `its \`month\` field is ${JSON.stringify(row.month)}, which is not a YYYY-MM month`;
-    if (typeof row.timeframe !== 'string' || row.timeframe === '')
-      return `its \`timeframe\` field is ${JSON.stringify(row.timeframe)}`;
-    if (!Number.isInteger(row.rows) || row.rows < 0)
-      return `its \`rows\` field is ${JSON.stringify(row.rows)}, which is not a whole number of records`;
-    return null;
-  }
-
-  $effect(() => {
-    const feed = feeds.active;
-    if (feed) loadCensus(feed);
-  });
+  // 'none' | 'wait' | 'ready' | 'error', in this page's own words. `store.feed`
+  // is checked, not assumed: a reading that answered for another feed is not
+  // this page's census however recently it landed.
+  const censusState = $derived(
+    store.state === 'error'
+      ? 'error'
+      : store.state === 'ready' && store.feed === feeds.active
+        ? 'ready'
+        : store.state === 'reading' || (store.state === 'ready' && store.feed !== feeds.active)
+          ? 'wait'
+          : 'none'
+  );
+  const censusError = $derived(store.error);
+  const censusMonths = $derived(censusState === 'ready' ? store.byInstrument : new Map());
+  const censusBad = $derived(censusState === 'ready' ? store.badByInstrument : new Map());
+  // THE STAMP IS THE CURRENT VALUE'S OR IT IS NOTHING. `store.at` is already
+  // cleared on a failed read, so this cannot print a minute over a refusal.
+  const censusStamp = $derived(censusState === 'ready' ? store.at : null);
 
   /* ======================================================================
      THE MASTER, AND THE MOMENT THIS PAGE SAW IT ANSWER.
@@ -1216,9 +1168,10 @@
   const rereadMaster = () => {
     if (feeds.active) loadCatalogue(feeds.active);
   };
-  const rereadCensus = () => {
-    if (feeds.active) loadCensus(feeds.active);
-  };
+  // A GENERATION BUMP, NOT A PRIVATE FETCH. Every page subscribed to the shared
+  // census re-reads off the same answer, so this press cannot leave one surface
+  // holding a newer total than another.
+  const rereadCensus = () => refreshStore();
 </script>
 
 <svelte:window onkeydown={onWindowKey} onclick={() => (openTray = null)} />

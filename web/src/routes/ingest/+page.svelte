@@ -556,15 +556,20 @@
   //
   // ══════════════ THIS TABLE IS IN THE WRONG PROCESS AND SAYS SO ══════════════
   //
-  // `GET /feeds.json` emits `wire`, `display`, `transport`, `ready` and `why`
-  // (`crates/api/src/server.rs`), and `pull::vendor::Descriptor` carries
-  // `granularities`, `segments`, `exchange` and the transport — and NO history
-  // floor. There is no field to read, so the browser holds it, which is the one
-  // place it must not live: a floor is a fact about a vendor's endpoint, it is
-  // versioned with the vendor row, and a second copy in a front end is the copy
-  // that goes stale. It belongs on `pull::vendor::Descriptor` beside
-  // `granularities`, per rung, re-derived on every run. Until it moves, this is
-  // ONE table, in ONE place, and every sentence on the page is built from it.
+  // AND IT IS NOW THE LAST ONE LEFT. `GET /feeds.json` emits `wire`, `display`,
+  // `kind`, `kind_label`, `verb`, `ready`, `why`, `finest` and `history`
+  // (`crates/api/src/server.rs`), and `history` is exactly this fact: one row
+  // per rung, carrying the binding claim, the contested one, the resolved
+  // oldest day and the source of each — read off `pull::vendor::Descriptor`,
+  // which HAS carried a per-rung history floor since D-0110.
+  //
+  // So the two tables below are a SECOND COPY of an emitted fact, which is the
+  // defect the granularity table above was deleted for, still standing. They
+  // are not wired to `/feeds.json` yet and this file does not pretend they are.
+  // The drift is already visible: `FLOOR_OPERATOR` carries a `zerodha` row for
+  // a feed no descriptor in this build names, and neither table has a row for
+  // `truedata` or `gdfl`, which the wire answers for. Moving `feedFloor` onto
+  // `active.history` is the remaining half of this change and is not done here.
   //
   // THREE SHAPES, AND THEY BEHAVE DIFFERENTLY:
   //   rolling — N years/months back from TODAY. It moves every single day, so it
@@ -1627,9 +1632,22 @@
       const v = floorVerdict(feeds.active ?? '', x.dir);
       return v.state === 'finest' && v.floor?.conflated === true;
     });
-    if (snap.length > 0 && active) {
+    const snapFloor = finestByWire.get(feeds.active ?? '');
+    if (snap.length > 0 && active && snapFloor) {
       out.push(
-        `${snap.map((x) => x.label.toLowerCase()).join(', ')} is ${active.display}'s finest rung and one record there is a CONFLATED SNAPSHOT — the best bid, the best ask and the best last price as of that second. It is not a tick and must never be read as one: every print between two snapshots was discarded before the file was written and no reader can recover it. Measured in docs/08-vendor-samples.md: whole-second timestamps, no sub-second field, 22,426 rows across 22,500 seconds. THE TIMESTAMP IS KEYED TO THE SECOND, so two rows sharing one second is EXPECTED INPUT and not corruption — three of them at TrueData, four at GDFL, with no sub-second field and no tiebreaker between them. They are folded into one record at that second: the first in file order is its open, the extremes are its high and low, the volumes sum, and the LAST in file order is its close — last wins for the price, and nothing is dropped or refused. File order is the only order there is, so nothing is sorted: a sort would invent a tiebreaker and quietly change which price became the open.`
+        // THE VENDOR'S HALF IS THE VENDOR'S WORDS, AND THIS FILE HOLDS NONE OF
+        // THEM. This sentence used to carry the measurement itself — "22,426
+        // rows across 22,500 seconds", "three of them at TrueData, four at
+        // GDFL" — which is a THIRD copy of the fact and the worst-placed one:
+        // it was written for whichever archive was active and printed one
+        // vendor's numbers under the other's name. `because` and `source` come
+        // off the wire and say it per feed.
+        //
+        // What stays local is the FOLD, and it is not a vendor fact: it is what
+        // this repository's reader does with a shared second — SK-08 in
+        // `docs/04-invariants.md`. Nobody published it, so nothing on
+        // `/feeds.json` could carry it.
+        `${snap.map((x) => x.label.toLowerCase()).join(', ')} is ${active.display}'s finest rung and one record there is a ${snapFloor.label ?? 'conflated snapshot'}. It is not a tick and must never be read as one. ${snapFloor.because} — ${snapFloor.source} THE TIMESTAMP IS KEYED TO THE SECOND, so two rows sharing one second is EXPECTED INPUT and not corruption. They are folded into one record at that second: the first in file order is its open, the extremes are its high and low, the volumes sum, and the LAST in file order is its close — last wins for the price, and nothing is dropped or refused. File order is the only order there is, so nothing is sorted: a sort would invent a tiebreaker and quietly change which price became the open.`
       );
     }
     // THE FORM'S SHAPE IS UNDECIDED, AND THAT IS SAID BEFORE THE CLOCK STARTS.

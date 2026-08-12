@@ -12060,3 +12060,122 @@ generically — so the new word needs no front-end change, and that tree is held
 by another session. `crates/api/src/server.rs` needed two test assertions
 updated, and nothing else: `universe_reach_json` hands the whole body to
 `coverage::Coverage::json`.
+
+## D-0126 · 2026-08-12 · The granularity floor crosses the wire whole, the browser's transcription of it is deleted, and the source kind stops being emitted twice
+
+**Decision.** `GET /feeds.json` emits `finest` on every feed row —
+`pull::vendor::GranularityFloor` in full: the finest rung, the kind's word, the
+kind's own sentence, `tick_stream`, `conflated`, the vendor's reason and the
+place it was read. `web/src/routes/ingest/+page.svelte` reads it and its own
+copy of the table is **deleted**. On the same route the source kind stops being
+emitted twice: `transport` is removed and `kind`, `kind_label` and `verb` — all
+`pull::vendor::SourceKind`'s — are the only spelling.
+
+**Why.** D-0118 put the granularity floor in one place in Rust and D-0121 got it
+onto the page, by TRANSCRIBING it: four objects in `+page.svelte` reproducing the
+four consts in `crates/pull/src/vendor.rs`, `because` and `source` copied word
+for word so the two would diff cleanly. That was the honest thing to do with no
+field to read, and it is still two copies of one vendor fact. They can disagree,
+and the browser's is the one that would be wrong — it is versioned with that
+file, nothing rebuilds it when a const is reworded, and no gate compares them. A
+reader looking at the page cannot tell a transcription from a reading.
+
+The same endpoint was carrying the SOURCE KIND twice, and the second copy had
+already started being used as a fallback:
+
+```js
+const sourceKind = $derived(
+  active?.kind ?? (active?.transport === 'archive' ? 'folder' : 'rest')
+);
+```
+
+`transport` was minted by a `match` on `Transport`'s two arms **in the handler**,
+in a vocabulary (`broker`, `archive`) that existed nowhere else; `kind` came from
+`SourceKind`, the type that exists for exactly this question. One split, two
+words, and a browser reconstructing the fact from the other spelling whenever the
+first was absent — a guess that looks precisely as authoritative as a reading,
+which is the `CLAUDE.md` §4 shape.
+
+**What the wire looks like.** Before, per row:
+
+```
+{"wire","display","transport","kind","verb","ready","why","history":[…]}
+```
+
+After:
+
+```
+{"wire","display","kind","kind_label","verb","ready","why",
+ "finest":{"rung","kind","label","tick_stream","conflated","because","source"},
+ "history":[…]}
+```
+
+A real row, TrueData, abridged at `because`:
+
+```json
+{"wire":"truedata","display":"TrueData","kind":"folder",
+ "kind_label":"folder of files","verb":"read","ready":false,
+ "why":"TrueData has no store prefix, so nothing it pulled could be filed",
+ "finest":{"rung":"1s","kind":"snapshot",
+   "label":"conflated snapshot — best bid, best ask, best last price",
+   "tick_stream":false,"conflated":true,
+   "because":"The archives are named for a print stream and do not hold one. …",
+   "source":"docs/08-vendor-samples.md, the headline finding …"}}
+```
+
+**Why two booleans beside the word.** Because the number is the half that cannot
+be trusted alone. Two of the four feeds bottom out at one second and neither
+serves a tick: what sits on that second is a conflated snapshot of the best bid,
+the best ask and the best last price, and every print between two of them was
+discarded before the file was written. A page handed `1s` and nothing else is
+free to write *tick* beside it — a claim about the data that the data does not
+support, made in a label. `tick_stream` and `conflated` are
+`FinestKind::is_tick_stream` and `is_conflated` answered on the server, so no
+reader matches on a string to decide what may be printed next to a number, and
+the negative is **stated** rather than left to an omission: `tick_stream: false`
+appears on every row, and the test asserts no row carries `true`.
+
+**Why the tick word lives in its own `const fn`.** `FinestKind::Tick` is
+constructed by no descriptor and a `const` block under `DESCRIPTORS` keeps it
+that way, so its arm is unreachable through `feeds_json`. An arm nothing reaches
+is a region that can never run — the coverage hole `CLAUDE.md` §9 has no way to
+forgive. Lifted to `finest_kind_word`, all three arms are reachable from a test
+that names them, and the type keeps the vocabulary it needs in order to refuse.
+
+**What the page does when the field is absent.** It says so. There is no table
+left to fall back to and that is the point: `floorVerdict` gains an `unstated`
+verdict, distinct from `coarser` and from `never`, and the control prints *this
+server sent no granularity floor for X — nothing here refuses any rung for it*
+with the reason on its `title`. `sourceKind` is `null` rather than `'rest'` when
+`kind` is missing, `isBroker` and `isFolderFeed` are then BOTH false, and the
+form refuses to choose a shape rather than drawing the folder field for a broker
+or hiding it from an archive. `!isBroker` had been standing in for *folder* in
+three places and no longer does. The verb falls back to the neutral `ingest`,
+never to `pull`, because printing the network word over a folder read is the
+exact wrong diagnostic frame the field exists to stop.
+
+**What else went with it.** `feeds_json` had **three** independent matches on
+one transport: the emitted word, the wire `kind`, and the readiness rule. The
+third now asks `SourceKind::needs_credential`, which is its actual reason — a
+credential is what proves a broker's entitlement, so an empty store means
+"nothing pulled yet" for REST and "not bought" for a folder. `render::feed_select`
+was a fourth vocabulary for the same split on the no-JS page and now prints
+`SourceKind::label`.
+
+**What this does NOT fix, stated because the same defect is still on the page.**
+The HISTORY floor. `FLOOR_OPERATOR` and `FLOOR_DOC` in the same Svelte file are a
+second copy of a fact `/feeds.json` has emitted per rung since D-0113, and
+`feedFloor` still reads the local tables. The drift is already visible:
+`FLOOR_OPERATOR` carries a `zerodha` row for a feed no descriptor in this build
+names, and neither table has a row for `truedata` or `gdfl`, which the wire
+answers for. Moving `feedFloor` onto `active.history` is the remaining half and
+is deliberately not bundled here.
+
+**Also observed and not touched.** `feeds_json`'s not-ready message says *"X has
+no store prefix, so nothing it pulled could be filed"* whenever `held` is `None`
+— which is also the arm taken when the feed HAS a store prefix and no census row
+matches it. TrueData and GDFL have prefixes (`Feed::store_vendor`) and still read
+that sentence. Pre-existing, unchanged by this entry, and named here so it is not
+found twice.
+
+**Invariants.** `docs/04-invariants.md` GW-01…GW-05.
