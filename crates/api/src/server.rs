@@ -1107,7 +1107,16 @@ fn bars_by_symbol<'a>(
     census: Option<&census::VendorCensus>,
     entries: impl IntoIterator<Item = &'a (census::Series, store::path::YearMonth)>,
 ) -> std::collections::HashMap<brutex_core::symbol::Symbol, u64> {
-    let mut held = std::collections::HashMap::new();
+    // PRE-SIZED FROM THE ENTRIES, not from the census. Gate 11 rule 3 refuses a
+    // map that grows by rehashing, and this function exists to remove a cost —
+    // it replaced an O(entries x universe) nested scan, so a map that rehashes
+    // its way up hands part of that saving straight back. The ceiling is one
+    // symbol per entry: the loop below inserts at most once per entry and
+    // usually far fewer, since a symbol repeats across months. `size_hint().0`
+    // is a LOWER bound by contract, which is what a capacity wants — never an
+    // over-allocation on an iterator that cannot say how long it is.
+    let entries = entries.into_iter();
+    let mut held = std::collections::HashMap::with_capacity(entries.size_hint().0);
     let Some(census) = census else {
         // NOT AN EMPTY MAP OF ZEROES — an empty map, which every caller reads
         // as "no count for this symbol". The distinction is the one D-0124

@@ -1649,7 +1649,7 @@ pub const AUTOPILOT_PAUSE: &str = "pause";
 /// ground, because every one of them is "the operator did not ask".
 #[must_use]
 pub fn stays_paused_from(value: Option<&std::ffi::OsStr>) -> bool {
-    !value.is_some_and(|v| v == std::ffi::OsStr::new(AUTOPILOT_RUN))
+    value.is_none_or(|v| v != std::ffi::OsStr::new(AUTOPILOT_RUN))
 }
 
 /// Whether the environment lets the autopilot fly. It does **only** when the
