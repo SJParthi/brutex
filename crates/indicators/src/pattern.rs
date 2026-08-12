@@ -1078,7 +1078,27 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(run(), run());
+        assert_eq!(run(), run(), "the same bars must give the same bits");
+        // The equality above holds for ANY deterministic body -- including
+        // `bits() -> ConditionMask::ZERO` and any constant -- so it cannot see the one
+        // mutation that matters. An audit applied exactly that mutation and it survived
+        // ALL SIX of these idempotence tests, which between them are §3 rule 5's only
+        // direct guard in this crate.
+        //
+        // This closes it without needing to know what the bits SHOULD be, which is what
+        // the sibling tests in this module are for. A body that ignores its input emits
+        // the same value on every bar, and these fixtures deliberately vary the bars. So:
+        // the run must not be constant.
+        let observed = run();
+        assert!(
+            observed
+                .iter()
+                .skip(1)
+                .zip(observed.iter())
+                .any(|(later, earlier)| later != earlier),
+            "every bar produced an identical result, so this test would pass on a body \
+             that ignores its input entirely"
+        );
     }
 
     /// The thresholds are one struct, and the default is the classical set.
