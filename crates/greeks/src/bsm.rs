@@ -70,8 +70,20 @@ pub const MAX_YEARS: f64 = 100.0;
 
 /// The largest magnitude accepted for the rate or the carry.
 ///
-/// `10.0` is 1000% continuously compounded. Nothing real is near it; the
-/// bound exists so that `e^-rT` cannot overflow.
+/// `10.0` is 1000% continuously compounded. Nothing real is near it, and that is the
+/// whole of what this bound does: it keeps an input plausible.
+///
+/// It does **not** stop `e^-rT` overflowing, and it used to say it did.
+/// `MAX_RATE * MAX_YEARS` is 1000 while `ln(f64::MAX)` is 709.78, so
+/// `rate = -7.1, years_to_expiry = 100` -- both inside every accepted bound -- makes the
+/// discount factor infinite. Measured, not reasoned: at `r = -7.0` the factor is
+/// 1.01e304 and prices; at `r = -7.1` it is `inf`.
+///
+/// What contains it is on the way OUT. [`Contract::greeks`] checks every field of the
+/// result and returns [`GreeksError::NotRepresentable`] rather than a number, which is
+/// the §4-correct shape: refuse loudly rather than hand back a plausible wrong price.
+/// `a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out` pins both
+/// sides of that boundary.
 pub const MAX_RATE: f64 = 10.0;
 
 /// The largest volatility this crate will price at.
@@ -468,6 +480,46 @@ pub(crate) mod tests {
             }
         }
         out
+    }
+
+    /// `MAX_RATE` bounds the input's plausibility, NOT `e^-rT`.
+    ///
+    /// `MAX_RATE`'s doc said "the bound exists so that `e^-rT` cannot overflow". That is
+    /// measurably false: `MAX_RATE * MAX_YEARS` is 1000 and `ln(f64::MAX)` is 709.78, so a
+    /// contract at `rate = -7.1, years_to_expiry = 100` -- both inside every accepted bound
+    /// -- makes `e^-rT` infinite.
+    ///
+    /// What contains it is on the way OUT: `greeks` checks every output and returns
+    /// `NotRepresentable` rather than a number. This test pins that, and pins the boundary,
+    /// so the corrected doc has a mechanism behind it rather than a second sentence.
+    #[test]
+    fn a_rate_inside_the_bound_can_still_overflow_and_is_refused_on_the_way_out() {
+        let at = |rate: f64| Contract {
+            spot: 100.0,
+            strike: 100.0,
+            years_to_expiry: MAX_YEARS,
+            rate,
+            carry: 0.0,
+        };
+        // The input bound admits both of these, which is the whole point.
+        assert!(
+            (-7.1_f64).abs() <= MAX_RATE && MAX_YEARS <= MAX_YEARS,
+            "the witness must sit inside the accepted box or it proves nothing"
+        );
+        // `ln(f64::MAX) / MAX_YEARS` is 7.0978..., so the boundary sits between these two.
+        assert!(
+            at(-7.0).greeks(0.2, OptionKind::Call).is_ok(),
+            "at r = -7.0 and T = 100 the discount factor is 1.01e304, which is finite, so \
+             this must price rather than refuse -- otherwise the assertion below could pass \
+             on a crate that refuses everything"
+        );
+        assert_eq!(
+            at(-7.1).greeks(0.2, OptionKind::Call),
+            Err(GreeksError::NotRepresentable),
+            "at r = -7.1 and T = 100 the discount factor is infinite, and both values are \
+             INSIDE every accepted bound. The refusal happens on the way out, in `greeks`, \
+             not on the way in via MAX_RATE."
+        );
     }
 
     #[test]

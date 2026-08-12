@@ -23,8 +23,15 @@
 //! **Ranking.** `docs/00-charter.md` §6 says "rank the survivors" and names no
 //! statistic; no other document names one either. Under `CLAUDE.md` §3.1 that
 //! makes the ranking metric `UNVERIFIED`, so this module returns frequent
-//! itemsets with their exact hit counts and **refuses to order them by anything
-//! but support**. Support is a frequency, not an edge — see [`Frontier::frequent`].
+//! itemsets with their exact hit counts and **refuses to rank them at all**. Support is a
+//! frequency, not an edge — see [`Frontier::frequent`].
+//!
+//! That includes not ordering by support, and the wording here used to imply otherwise.
+//! `sort_canonically` keys on `(mask.words(), hits)`; the word array is unique per mask
+//! within a level, so the `hits` tiebreak can never fire and the emitted order is
+//! **canonical mask order**, not support order. It is deterministic — which is what §3.5
+//! needs — and it is not a ranking. A reader who wants the strongest first must sort, and
+//! must first decide what "strongest" means, which is the decision §3.1 blocks.
 //!
 //! # Cost
 //!
@@ -36,7 +43,14 @@
 //! | mask evaluation | O(1) | [`vocab::ConditionMask::hits`] — 6 ANDs, 6 XORs, 5 ORs, 1 compare, branchless |
 //! | condition lookup | O(1) | direct index into `vocab`'s fixed table |
 //! | duplicate rejection | O(1) | one `HashSet` probe on a `Hash + Eq` mask |
-//! | result append | O(1) amortised | `Vec::push`, capacity reserved per level |
+//! | result append | O(1) amortised | `Vec::push`. Reserved at k=1; not above it |
+//!
+//! The reservation detail is stated because the row used to claim "capacity reserved per
+//! level" and only k=1 reserves: `next_level` builds `out` and `seen` with `Vec::new` and
+//! `HashSet::new`. The BOUND is unaffected -- amortised O(1) is amortised O(1) -- but the
+//! stated reason was not what the code does, and an audit that read the code rather than
+//! the table found it. Reserving above k=1 would mean sizing for the join's `|F|²/2`
+//! candidates, which is the allocation `docs/06-limits.md` is about, not a cheap win.
 //!
 //! Support counting is O(bars) *by definition* — it is the measurement, not an
 //! operation on a bar — and the level join is O(|F|²) in the frontier, which is
@@ -875,6 +889,53 @@ mod tests {
         assert_eq!(s.depth(), 2, "the ladder should die at k=3");
         assert_eq!(s.levels.len(), 3, "the empty level is recorded, not hidden");
         assert!(s.levels.last().is_some_and(|l| l.frequent.is_empty()));
+    }
+
+    /// The emitted order is canonical MASK order, and it is not support order.
+    ///
+    /// The module doc said this crate "refuses to order them by anything but support",
+    /// which reads as a promise that the output IS support-ordered. It is not, and cannot
+    /// be: `sort_canonically` keys on `(mask.words(), hits)`, `seen` makes every mask
+    /// unique within a level, so the `[u64; 6]` primary key is unique and the `hits`
+    /// tiebreak can never fire.
+    ///
+    /// That is the right behaviour -- §3.1 blocks inventing a ranking metric, and support
+    /// is a frequency rather than an edge -- but the doc had to say what the code does.
+    /// This pins it, so the corrected wording is a mechanism rather than a second sentence.
+    ///
+    /// A high bit sorts FIRST whenever the low words are zero, which is the opposite of
+    /// what a reader expects, and the fixture is chosen to show exactly that.
+    #[test]
+    fn the_emitted_order_is_canonical_mask_order_and_not_support_order() {
+        // bit 279 lives in word 4, so its word 0 is zero and it sorts ahead of bits 0..3.
+        let b = bars(&[&[0, 1, 279], &[1, 2, 279], &[1, 2, 279], &[1], &[3]]);
+        let s = Ladder::with_min_hits(1).walk(&b, &[0, 1, 2, 3, 279]);
+        let first = s.levels.first();
+        assert!(first.is_some(), "k=1 always runs");
+        let level = first.cloned().unwrap_or_default();
+
+        let words: Vec<[u64; 6]> = level.frequent.iter().map(|i| i.mask.words()).collect();
+        let mut sorted = words.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            words, sorted,
+            "the frequent sets must come out in ascending word order, which is what makes a \
+             rerun byte-identical under §3.5"
+        );
+
+        let supports: Vec<u64> = level.frequent.iter().map(|i| i.hits).collect();
+        assert_eq!(
+            supports,
+            vec![3, 1, 4, 2, 1],
+            "bit 279 first with support 3, then bits 0..3 with 1, 4, 2, 1. If this ever \
+             reads as sorted, the ordering contract changed and the module doc is stale."
+        );
+        let mut ascending = supports.clone();
+        ascending.sort_unstable();
+        assert_ne!(
+            supports, ascending,
+            "the output is NOT support-ordered, and the module doc must not imply it is"
+        );
     }
 
     /// Every offer at k=1 lands in exactly one bucket, and a duplicate is not "too rare".
