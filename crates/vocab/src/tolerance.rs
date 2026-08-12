@@ -2,7 +2,7 @@
 //!
 //! # What this is
 //!
-//! Seventy-five of the 185 live positions in [`crate::table`] are `near_*`
+//! Eighty-one of the 238 live positions in [`crate::table`] are `near_*`
 //! conditions: *is the close near the previous day's high*, *near the R2
 //! pivot*, *near the 61.8% rung*. Every one needs a band half-width, and
 //! `docs/00-charter.md`, `docs/03-vocabulary.md` and `docs/04-invariants.md`

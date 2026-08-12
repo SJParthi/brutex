@@ -5,7 +5,7 @@ edition      = { workspace = true }
 rust-version = { workspace = true }
 license      = { workspace = true }
 publish      = { workspace = true }
-description  = "The condition bit table and the 256-bit mask. Bit index is identity. Depends on nothing."
+description  = "The condition bit table and the 384-bit mask. Bit index is identity. Depends on nothing."
 
 # ---------------------------------------------------------------------------
 # THIS SECTION IS DELIBERATELY EMPTY AND STAYS EMPTY.

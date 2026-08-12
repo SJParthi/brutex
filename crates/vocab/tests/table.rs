@@ -345,7 +345,7 @@ fn every_near_name_is_a_near_kind_and_no_other_is() {
             near += 1;
         }
     }
-    assert_eq!(near, 97, "97 of the 276 positions need the tolerance");
+    assert_eq!(near, 97, "97 of the {COUNT} positions need the tolerance");
     let live_near = TABLE
         .iter()
         .filter(|d| d.kind == Kind::Near && d.status == BitStatus::Live)
@@ -471,6 +471,105 @@ fn the_retired_duplicates_were_not_re_added_under_new_names() {
 }
 
 /// Every number in the document's headroom table, checked against the table it
+/// The width and word counts in this crate's own prose match its constants.
+///
+/// # Why this exists
+///
+/// An audit found **thirteen stale counts** in `crates/vocab`'s own doc comments and its
+/// `Cargo.toml` description. "A `256`-bit condition mask" survived two widenings to 384.
+/// (That number is backticked here on purpose. This test scans PROSE, including this doc
+/// comment, so it cannot strip comments the way the four other guards in this workspace
+/// now do -- the comments are the thing being checked. A doc that must quote a forbidden
+/// string has to break the pattern instead, and a backtick between the digits and the
+/// suffix does it. Writing it bare made this test fail on itself, which is the fifth time
+/// in this session that a guard read its own explanation as evidence.)
+/// "The 274 positions" survived two appends to 280. "Thirty-two bytes, checked by the
+/// compiler rather than by a comment" sat three lines above an assertion checking 48.
+/// "Four-word" described a six-word mask, and "Seventy-five of the 185 live positions"
+/// described 81 of 238.
+///
+/// `the_document_counts_match_the_table` below says it best: "A count copied out of the
+/// code is a count that rots, and it rots **silently**, because a table of independent
+/// numbers cannot look wrong." That test guards `docs/03-vocabulary.md`. Nothing guarded
+/// this crate's own prose, which is the same failure one file over.
+///
+/// # What this checks, and what it cannot
+///
+/// Two rules, both narrow enough to have no false positives: every `N-bit` is either
+/// `ConditionMask::BITS` or 64 (a `u64` word is legitimately 64-bit), and every `N-word`
+/// is `WORDS`. That catches the recurring class -- a width restated in prose after a
+/// widening -- and it deliberately does not try to police every number, because
+/// historical narrative is legitimate: `the_document_counts_match_the_table`'s own doc
+/// says the table "grew from 274 positions to 276", and both numbers are correct as
+/// history.
+///
+/// A spelled-out count like "Thirty-two bytes" is outside both rules. No regex catches
+/// the general case, and inventing one would be a guard that looks stronger than it is.
+#[test]
+fn the_widths_in_this_crates_prose_match_its_constants() {
+    const SOURCES: [(&str, &str); 7] = [
+        ("src/lib.rs", include_str!("../src/lib.rs")),
+        ("src/error.rs", include_str!("../src/error.rs")),
+        ("src/mask.rs", include_str!("../src/mask.rs")),
+        ("src/table.rs", include_str!("../src/table.rs")),
+        ("src/tolerance.rs", include_str!("../src/tolerance.rs")),
+        ("Cargo.toml", include_str!("../Cargo.toml")),
+        ("tests/table.rs", include_str!("table.rs")),
+    ];
+    /// Every `<digits><suffix>` in the text, as numbers.
+    fn counts(text: &str, suffix: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        for piece in text.split(suffix).take(text.matches(suffix).count()) {
+            let digits: String = piece
+                .chars()
+                .rev()
+                .take_while(char::is_ascii_digit)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if let Ok(n) = digits.parse::<u32>() {
+                out.push(n);
+            }
+        }
+        out
+    }
+    let words = u32::try_from(vocab::mask::WORDS).unwrap_or(0);
+    let mut checked = 0_u32;
+    for (name, text) in SOURCES {
+        for n in counts(text, "-bit") {
+            // 64 is a `u64` word. 128 is the width this mask outgrew, and `lib.rs`
+            // legitimately contrasts "a stored 128-bit mask and a 384-bit one" when
+            // explaining why an append does not bump `VOCAB_VERSION`.
+            //
+            // **256 is deliberately absent**, and that is the point of the list being
+            // explicit rather than "any historical width". 256 was the stale number this
+            // test exists to have caught -- it survived two widenings in five places --
+            // so re-admitting it would defeat the test while looking more permissive.
+            const ALLOWED: [u32; 2] = [64, 128];
+            assert!(
+                n == ConditionMask::BITS || ALLOWED.contains(&n),
+                "{name} says `{n}-bit`, and the mask is {} bits wide. Only {ALLOWED:?} are \
+                 permitted besides it -- 64 for a `u64` word and 128 for the width this \
+                 mask outgrew. 256 is not on that list on purpose.",
+                ConditionMask::BITS
+            );
+            checked += 1;
+        }
+        for n in counts(text, "-word") {
+            assert_eq!(
+                n, words,
+                "{name} says `{n}-word` and the mask is {words} words wide"
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 0,
+        "no width was found in any of this crate's prose, so this test read nothing"
+    );
+}
+
 /// describes.
 ///
 /// # Why this test exists, and what it caught

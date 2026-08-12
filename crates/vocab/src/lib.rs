@@ -1,4 +1,4 @@
-//! The condition vocabulary: the bit table, the 256-bit mask, and nothing else.
+//! The condition vocabulary: the bit table, the 384-bit mask, and nothing else.
 //!
 //! This crate depends on nothing. `CLAUDE.md` §5 permits it one arrow, to
 //! `core`, and it does not take it -- a position is a `u16` and a name is a
@@ -9,8 +9,8 @@
 //!
 //! | Module | Owns |
 //! |---|---|
-//! | [`mask`] | [`ConditionMask`], the four-word condition mask and the hit test |
-//! | [`table`] | the 274 positions, their names, and the three tombstones |
+//! | [`mask`] | [`ConditionMask`], the six-word condition mask and the hit test |
+//! | [`table`] | the 280 positions, their names, and the three tombstones |
 //! | [`tolerance`] | the `near_*` band half-width, which is UNPINNED |
 //! | [`error`] | every refusal the two above can produce |
 //!
@@ -21,9 +21,9 @@
 //!    that always evaluates false -- [`table::BitStatus`] models that, so a
 //!    later append cannot fall into the hole a retirement did not leave.
 //! 2. **The hit test does the same work for every input.** `(bar & candidate)
-//!    == candidate` over four words, with no loop and no early return. See
+//!    == candidate` over six words, with no loop and no early return. See
 //!    [`ConditionMask::hits`].
-//! 3. **No invented numbers.** Seventy-five live positions are `near_*`
+//! 3. **No invented numbers.** Eighty-one live positions are `near_*`
 //!    conditions and no document defined their band. There are **two** bands,
 //!    because they are fractions of different quantities:
 //!    [`tolerance::TOL_FIB_MILLI`] = 10 thousandths of the session range
@@ -67,7 +67,7 @@ pub use tolerance::Tolerance;
 /// | Version | Table |
 /// |---:|---|
 /// | 1 | the shipped 74 conditions in a `u128`, `docs/03-vocabulary.md` |
-/// | 3 | 274 positions in a [`ConditionMask`], six words wide, three of them tombstones |
+/// | 3 | 280 positions in a [`ConditionMask`], six words wide, three of them tombstones |
 ///
 /// Appending a condition at the next free position does **not** bump it: an
 /// append leaves every existing mask meaning exactly what it meant, which is
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn the_version_is_the_widened_table() {
-        // Still 3, and that is the rule rather than an oversight. 274 and 275 were
+        // Still 3, and that is the rule rather than an oversight. 274 through 279 were
         // APPENDED at NEXT_FREE, and this constant's own documentation says an append
         // does not bump it: every mask recorded before today still means exactly what
         // it meant, so two vocabularies differing only by an append are not

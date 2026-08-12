@@ -862,7 +862,7 @@ pub const TABLE: [BitDef; 280] = [
 ];
 
 /// How many positions the table defines. Not how many bits the mask holds --
-/// [`ConditionMask::BITS`] is 256, and the 78 positions between are unallocated
+/// [`ConditionMask::BITS`] is 384, and the 104 positions between are unallocated
 /// headroom, not free-for-all space.
 pub const COUNT: usize = TABLE.len();
 

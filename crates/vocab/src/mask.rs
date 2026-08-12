@@ -1,7 +1,7 @@
-//! A 256-bit condition mask, because the table no longer fits in a `u128`.
+//! A 384-bit condition mask, because the table no longer fits in a `u128`.
 //!
 //! `docs/03-vocabulary.md` shipped 74 conditions in a `u128` with 54 positions
-//! of headroom. The table in [`crate::table`] defines 274 positions, so every
+//! of headroom. The table in [`crate::table`] defines 280 positions, so every
 //! configuration of that headroom overflows. Four words replace one, and the
 //! claim this module has to carry is that widening does **not** cost the
 //! per-operation bound `CLAUDE.md` §3 rule 4 asks for.
@@ -28,7 +28,7 @@ pub const WORDS: usize = 6;
 #[repr(C)]
 pub struct ConditionMask([u64; WORDS]);
 
-// Thirty-two bytes, checked by the compiler rather than by a comment. A mask
+// Forty-eight bytes, checked by the compiler rather than by a comment. A mask
 // is copied per candidate in the sweep, so its width is a cost and not a
 // detail. `tests/mask.rs` asserts the same thing at run time, because a
 // `const` assertion that someone deletes leaves no failing test behind.
