@@ -2085,7 +2085,18 @@ jobs:
           # already exists for exactly this, was built to retire a
           # `binary_search` over 750 entries, and is smaller machinery than the
           # paragraph justifying an exemption would have been. D-0065.
-          allow_search=''
+          # `partition_point` is the same O(log n) shape as `binary_search` and was
+          # outside rule 1 entirely -- an audit found it live at
+          # crates/store/src/file.rs:956 while this rule reported ZERO occurrences.
+          #
+          # That call is legitimate and the reason is checkable: it partitions the
+          # INCOMING BATCH at the last held timestamp, so the log is over a
+          # caller-supplied slice whose length is the append size, not over the
+          # stored history. `survey` has already proven the batch strictly
+          # increasing, which is what makes a partition correct there at all.
+          allow_search='
+          crates/store/src/file.rs 1
+          '
 
           # ---- rule 2. CLAUDE.md section 7, BOTH HALVES OF IT. --------------
           # THE LAW STRING USED TO SAY ONLY "never a float", AND SECTION 7 DOES
@@ -2244,7 +2255,23 @@ jobs:
           #                 here that is per request and not the layer-12
           #                 exception, and it is the one to look at first if
           #                 this list is ever audited again.
+          # `select_nth_unstable`, `BinaryHeap` and `collect::<BTreeSet/Map>` were
+          # outside rule 4 and are the same class: a selection, a heap and an ordered
+          # collect each cost at least O(n) in what they consume. All three have zero
+          # live occurrences today, so widening costs nothing and shuts the hole
+          # before anybody uses it.
+          #
+          # The two entries below are bounded sorts, not O(universe), and each is
+          # bounded by something the type system or the vocabulary fixes:
+          #   engine   `sort_canonically` orders ONE level's frequent set, which the
+          #            ladder has already bounded, and canonical order is what makes a
+          #            rerun byte-identical under §3.5.
+          #   eval     `Evaluator::positions()` sorts the position list it just built.
+          #            Its length is bounded by `vocab::table::NEXT_FREE`, a
+          #            compile-time constant, and it is called once per run.
           allow_sort='
+          crates/engine/src/lib.rs 1
+          crates/indicators/src/evaluator.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/catalog.rs 2
           crates/api/src/census.rs 2
@@ -2472,7 +2499,7 @@ jobs:
             :
           }
 
-          check 1 '\.binary_search' \
+          check 1 '\.(binary_search|partition_point)' \
                 "$allow_search" \
                 'docs/07 layer 4 — never binary_search'
 
@@ -2480,15 +2507,15 @@ jobs:
                 "$allow_float" \
                 'CLAUDE.md section 7 — prices are paisa i64 and never a float; statistics keep full precision'
 
-          check 3 '\b(HashMap|HashSet)::(new|default)\(\)' \
+          check 3 '\b(HashMap|HashSet)::(new\(\)|default\(\)|with_capacity\(0\))' \
                 "$allow_unsized" \
                 'docs/07 law 2 — pre-size every map'
 
-          check 4 '\.sort(_[a-z_]+)?\(' \
+          check 4 '\.sort(_[a-z_]+)?\(|select_nth_unstable|BinaryHeap|collect::<BTree(Set|Map)' \
                 "$allow_sort" \
                 'docs/07 layer 12 — bounded page, never O(universe)'
 
-          check 5 '(^|[^A-Za-z0-9_])(panic!|todo!|unimplemented!)|\.unwrap\(\)|\.expect\(' \
+          check 5 '(^|[^A-Za-z0-9_])(panic!|todo!|unimplemented!|unreachable!)|\.unwrap\(\)|\.expect\(' \
                 "$allow_panic" \
                 'CLAUDE.md section 4 — degrade loudly or refuse, never die'
 
@@ -2566,7 +2593,6 @@ jobs:
             exit 1
           fi
           echo "OK — no banned construct outside the allowlist."
-
       - name: Gate 12 — every O(1) claim names the test that proves it
         run: |
           set -euo pipefail

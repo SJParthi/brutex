@@ -420,7 +420,13 @@ impl Ladder {
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
         let frequent_prev: HashSet<ConditionMask> = prev.frequent.iter().map(|i| i.mask).collect();
-        let mut seen: HashSet<ConditionMask> = HashSet::new();
+        // Pre-sized, because gate 11 rule 3 is right that an unsized map is a
+        // rehash the caller did not ask for. The floor is the previous level's
+        // survivor count: the join emits at least that many candidates before any
+        // are pruned. The true count is |F|^2/2, and reserving THAT is the
+        // allocation `docs/06-limits.md` §5 is about -- so this reserves the floor
+        // rather than the ceiling, and says which.
+        let mut seen: HashSet<ConditionMask> = HashSet::with_capacity(frequent_prev.len());
         let mut out: Vec<Itemset> = Vec::new();
         let mut generated: u64 = 0;
         let mut duplicates: u64 = 0;
