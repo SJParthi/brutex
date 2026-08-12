@@ -275,51 +275,6 @@ pub fn emit(event: &Event<'_>) -> Emitted {
     global().map_or(Emitted::NotInstalled, |sink| sink.emit(event))
 }
 
-/// Removes scratch directories left by test runs that have already finished.
-///
-/// **Why this exists.** Every `scratch(..)` call names its directory after the
-/// running process id and empties it *before* use. That makes concurrent test
-/// binaries safe, and it made the suite's own doc comment — "this suite deletes
-/// what it creates" — false: nothing deleted anything at exit, and since each
-/// run has a fresh pid, nothing ever collided either. Measured on one machine
-/// after a day of work: **9,958 directories, 2.5 GB**.
-///
-/// Swept by AGE rather than by asking whether a pid is still alive, because that
-/// question needs `libc` and every crate root here is `#![forbid(unsafe_code)]`.
-/// An hour is far longer than any run of this suite and far shorter than the gap
-/// between sessions, so a directory older than that belongs to a process that is
-/// gone. A binary running concurrently keeps writing its own directories, so
-/// their mtimes stay recent and it is never swept out from under itself.
-///
-/// Runs once per process, before the first scratch directory is handed out.
-#[cfg(test)]
-pub(crate) fn sweep_stale_scratch() {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let hour = std::time::Duration::from_secs(3600);
-        let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if !name.starts_with("brutex-telemetry-") {
-                continue;
-            }
-            let stale = entry
-                .metadata()
-                .ok()
-                .and_then(|m| m.modified().ok())
-                .and_then(|t| t.elapsed().ok())
-                .is_some_and(|age| age > hour);
-            if stale {
-                let _ignored = std::fs::remove_dir_all(entry.path());
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
@@ -331,6 +286,50 @@ pub(crate) fn sweep_stale_scratch() {
 )]
 mod tests {
     use super::{Config, Emitted, Event, Level, Query, Sink, install, tail};
+
+    /// Removes scratch directories left by test runs that have already finished.
+    ///
+    /// **Why this exists.** Every `scratch(..)` call names its directory after the
+    /// running process id and empties it *before* use. That makes concurrent test
+    /// binaries safe, and it made the suite's own doc comment — "this suite deletes
+    /// what it creates" — false: nothing deleted anything at exit, and since each
+    /// run has a fresh pid, nothing ever collided either. Measured on one machine
+    /// after a day of work: **9,958 directories, 2.5 GB**.
+    ///
+    /// Swept by AGE rather than by asking whether a pid is still alive, because that
+    /// question needs `libc` and every crate root here is `#![forbid(unsafe_code)]`.
+    /// An hour is far longer than any run of this suite and far shorter than the gap
+    /// between sessions, so a directory older than that belongs to a process that is
+    /// gone. A binary running concurrently keeps writing its own directories, so
+    /// their mtimes stay recent and it is never swept out from under itself.
+    ///
+    /// Runs once per process, before the first scratch directory is handed out.
+    pub(crate) fn sweep_stale_scratch() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let hour = std::time::Duration::from_hours(1);
+            let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                if !name.starts_with("brutex-telemetry-") {
+                    continue;
+                }
+                let stale = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age > hour);
+                if stale {
+                    let _ignored = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        });
+    }
 
     /// The whole surface, exercised the way a caller uses it, end to end.
     #[test]

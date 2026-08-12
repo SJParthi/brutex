@@ -1252,7 +1252,7 @@ mod tests {
         // Clears what earlier RUNS left behind — see `sweep_stale_scratch`.
         // Emptying only the directory about to be used is what let 9,958
         // of them accumulate.
-        crate::sweep_stale_scratch();
+        crate::tests::sweep_stale_scratch();
         let dir =
             std::env::temp_dir().join(format!("brutex-telemetry-{}-{name}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&dir);
