@@ -147,6 +147,21 @@ C-15 is the row that matters most, because it is the audit's own number and it
 needs no baseline: a slope measured between two sizes that draw the same 200
 rows is universe size and nothing else. It went from 85,400 ps to 0–259 ps.
 
+**It came back, and C-15 is what caught it.** On 2026-08-12 `cargo bench -p api`
+exited **1** with **thirty C-15 breaches out of thirty lines, 1,433 – 2,100 ps**.
+The rows, the orders, the pills and the counts were all still flat — the slope
+was in the NOTES the page draws beside them, whose text grows with the universe
+and which the renderer re-read in full on every request. Fixed by D-0130 and
+re-measured on the same machine, exit **0**: **C-15 0 – 280 ps**, **C-14
+0.974× – 1.084×**, **C-16 dashboard 0.974×**, absolute page ~157 µs at 2,787.
+
+**Read the C-16 row of that regression before trusting a ratio ceiling.** While
+C-15 was breaching on all thirty lines, C-16 stayed GREEN at 1.954× against its
+3.0× ceiling — over a dashboard that had gone from 87.1 µs to 170.2 µs and is
+now 10.4 µs. A ratio wide enough to tolerate honest machine variance is wide
+enough to hide a doubling. The slope caught what the ratio could not, which is
+why this table carries three shapes and not one number.
+
 C-17 is the guard on the other three. A page that got flat by rendering nothing
 would pass C-14, C-15 and C-16 and be worse than what it replaced, which is the
 same class of mistake as capping the rows and calling the page constant.
@@ -2275,3 +2290,21 @@ run by hand and they fail loudly when the arithmetic moves.
 | SS-08 | **A row that is its own denominator is `unverified`, never `full`.** The denominator is the fullest row at the same (month, rung); where that group holds ONE row, "short by zero" is a tautology. A store holding `2026-08 1min = 1 bar` reported `Complete 1 of 1 · Bars missing 0 · Coverage 100.00%` with a green chip and a filled meter — and a whole store of one bar reported the same. Such rows are counted in neither direction: `pct` is `null`, no meter is drawn, `Complete` excludes them and says how many, and Coverage's numerator and denominator both drop them. The corroborated cases are untouched — two instruments at one rung, 8,250 against 1, is still a `gap` at 0.01% | `web/tests/completeness.test.js` · *a month whose only row is short is not full* · *a store holding one bar does not report itself complete* · *two instruments in one month at one rung are still judged against each other* | ✓ |
 | SS-09 | **`/ingest`'s progress meter has one population under both halves of its ratio.** The fold counted every row in the window months — every instrument, every rung — while `expectedUnits` counted only the request's reach, so with anything else already held in those months the numerator was in the hundreds against a denominator of 2, `Math.min(1, …)` pinned the bar at `100.0%` and `unitsLeft` clamped to `0`, which silently removed the ETA line, with half the request still on the wire. Two pre-existing rows were enough. Both readings go through `askScope` now, and what falls outside it is COUNTED (`outside`) and named beside the meter rather than credited or hidden | `web/tests/fold.test.js` · *the ask sees only what the ask reaches* · *the rung is part of the ask* | ✓ |
 | SS-10 | **A `200` with no `x-brutex-receipt: pull-spot` is not a receipt.** D-0124 put that marker on all three arms of `pull_spot` and recorded that the browser half was not done, because `web/src` was held by another session. It is done: `notAReceipt` refuses on the marker first, then on the content type, then on the absence of the verdict element — and `readReceipt` can no longer fall open to `verdict: 'OK', good: true` over a request no server ever saw | `web/tests/receipt.test.js` · *a 200 with no receipt marker is refused, whatever it carries* | ✓ |
+
+## The notes a page draws are prepared once, not re-read per request — D-0130
+
+`NP-*` because `C-18` … `C-25` are retired and never reused (D-0045), and
+because this is a **correctness** row, not a complexity one: the complexity
+statement already exists as C-15 and is asserted by
+`crates/api/benches/ratio.rs`. What is new is the thing preparing the notes
+could have broken silently, and did not.
+
+| # | Invariant | Proof | |
+|---|---|---|---|
+| NP-01 | **A note is loud on a page iff its FULL text carries a loud word, however far past the 160-byte display clamp that word sits.** `render::Notes` decides each line's display string and its loudness once, where the notes are built, because the renderer used to ask both questions on every request over text that grows with the universe — five substring searches per line, twice over, plus `clamp` counting the separators in the tail, which is the whole of gate 8's thirty C-15 breaches. Deriving loudness from the CLAMPED head instead would be cheaper still and wrong: a loud word past the cut would stop being loud, a red line would render grey and the summary would count it as routine, which is the silent downgrade `CLAUDE.md` §4 forbids. The test builds a note whose `UNCHECKED` sits past the cut, **asserts the fixture really is past the cut** — without that the test would pass against the broken derivation — and then asserts the line is still counted and still classed | `api::render::a_prepared_note_keeps_the_loudness_of_its_whole_text_and_draws_only_its_head` | ✓ |
+| NP-02 | **Two prepared sets join without either being re-read, and the loud tally is the sum.** `/store` draws its own lines beside the universe's and got the second set by cloning the raw strings — a per-request copy of a note whose length is the universe. `Notes::extend_from` appends the PREPARED lines, which are bounded at 160 bytes each. Dropping the other set's loud count would leave the summary saying "0 needing attention" above a red line, which is the same defect as never marking it, so the sum is asserted rather than the append alone | `api::render::a_prepared_note_keeps_the_loudness_of_its_whole_text_and_draws_only_its_head` (the `extend_from` half) | ✓ |
+
+**What this pair does NOT claim.** That a note's length is bounded. It is not —
+`docs/06-limits.md` §67 records that `coverage::Coverage::notes` grows with the
+universe, that `/health` still writes every byte of it on every poll, and that
+nothing in CI would fail if a third note started growing the same way.

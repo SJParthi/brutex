@@ -1162,6 +1162,20 @@ release-inheriting `bench` profile, minimum of 8 trials:
 Marginal cost per instrument per request: **0 – 259 ps**, against 85,400 ps
 before. C-14 through C-17.
 
+**Re-measured 2026-08-12, and the table above is D-0042's, not today's.** The
+page had regressed to **1,433 – 2,100 ps per instrument per request** on all
+thirty C-15 lines, and the dashboard from 1,705 ns to **87,083 ns at n=2**.
+Neither the orderings nor the filters nor the counts had moved — `Catalog::
+counts`, `Read::status` and `Catalog::page` all timed at slope zero — and every
+figure in the table above was still bought. What changed is that the page
+acquired NOTES it did not have when D-0042 measured it: `constituents::Join::
+notes` (D-0117) and `coverage::Coverage::notes` (D-0120) each name instruments
+inline, and the renderer read every byte of every note on every request. **This
+is an inference from the shape and the dates, not a bisect** — no run against
+the intermediate commits was taken. After D-0130: C-15 **0 – 280 ps**, page
+~157 µs at both sizes, dashboard **10,651 ns at n=2 and 10,374 ns at 50,000**.
+§67 records what is still linear in note length.
+
 ### What is NOT flat, and why no index makes it so
 
 **Substring search.** The page's search box matches a needle anywhere in an
@@ -3884,3 +3898,49 @@ is left standing and named rather than half-made.
 literal. TrueData through this path decodes five columns against ten and fails
 at the decode's own count check rather than filing wrong bars, so the failure is
 loud; it is the *message* that is misleading, not the data.
+
+## 67. A note's LENGTH is data, and `/health` still reads all of it
+
+`api::coverage::Coverage::notes` names, on one line, every instrument a feed
+could not resolve in a spot target. Two of those targets — the swept pair and
+the reference indices — have no published list to be a fraction of, so their
+membership is counted from the masters and the line grows with the universe.
+Measured on `crates/api/benches/ratio.rs`'s own fixture, where every tenth
+instrument is an index: the forty notes total **73,620 bytes at 2,787
+instruments and 168,046 at 50,000**, and the whole of that growth is in those
+two lines — 3,080 → 50,293 bytes and 3,079 → 50,292. Two bytes per instrument.
+
+**What D-0130 fixed.** The RENDER path no longer reads a note's full text.
+`render::Notes` decides each line's display text and its loudness once, where
+the notes are built, so drawing a page is constant in note length. That is what
+took C-15 from 1,433 – 2,100 ps per instrument per request to 0 – 280 ps.
+
+**What is still linear, and where.**
+
+* **`/health`.** `api::server::report_from` writes every note whole, so one poll
+  copies every byte of that line. A monitor polling `/health` pays a cost
+  proportional to the universe, once per poll. It is not on a page path and no
+  gate measures it. It is O(total note bytes), which at the real universe is
+  ~35 index names and at the bench's synthetic 50,000 is 100 KB.
+* **The startup banner.** `announce_universe` prints the same lines when the
+  read is not clean. Once per process, so it is bounded by construction rather
+  than by design.
+* **Building the notes at all.** `Coverage::build` and `Join::build` are
+  whole-universe passes, which is what D-0039 and D-0042 permit at LOAD and
+  nowhere else. This is not a breach; it is named here so the load-time cost is
+  not mistaken for the per-request one that was.
+
+**Why the note was not simply shortened at the source.** The head already
+carries the fact and the count, and `render::clamp` truncates the tail at 160
+bytes before it reaches any page — so the tail is display-dead already. Cutting
+it where it is built would also cut it out of `/health`, which is the one
+consumer that asks for the whole list on purpose. Losing an operator's only
+machine-readable list of unresolved names to make a page faster is a trade this
+file records rather than makes: the page was made constant instead, and the
+list was left whole.
+
+**What no test asserts.** That the note's length is proportional to the
+universe. The two figures above were measured once, by hand, on a throwaway
+bench; nothing in CI would fail if a third note started growing the same way.
+The page would stay flat — that is what `Notes` guarantees — but `/health`
+would quietly get slower and this section would be stale without saying so.

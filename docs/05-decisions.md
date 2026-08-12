@@ -12601,3 +12601,137 @@ named here rather than done quietly.
   and `pull::ingest`'s census lock is unchanged.
 * **`.github/workflows/ci.yml` was not touched**, by choice: another session was
   editing it in this tree.
+
+## D-0130 · 2026-08-12 · Gate 8 was red on all thirty C-15 lines because the RENDERER re-read every note on every request, and a note's length is the universe
+
+**Number taken as max+1 and asserted free before writing.** The highest heading
+in this file was `D-0129`; `grep -rn 'D-0130'` over `crates/`, `docs/`, `web/`,
+`.github/` and `CLAUDE.md` returned nothing immediately before appending.
+
+### What was measured, before anything was changed
+
+`cargo bench -p api`, release, exit **1**:
+
+```
+  C-15 sort="isin" pill=""  marginal      1444 ps per instrument per request  BREACH
+  C-15 sort="symbol" pill="idx" marginal  1874 ps per instrument per request  BREACH
+  C-15 last page marginal                 1971 ps per instrument per request  BREACH
+  A RATIO BREACHED ITS CEILING — see the lines marked BREACH.
+```
+
+**Thirty C-15 lines, thirty breaches, 1,433 – 2,100 ps** against the 1,000 ps
+ceiling. Thirty is every line the gate prints: seven sort orders × four pills,
+plus the escape hatch and the clamped deep page. Not one order and not one
+pill — *all* of them, which is itself the clue: the cost was not in anything
+the parameters select.
+
+### Where it was NOT
+
+`crates/engine`'s session reported the breach and attributed it to "the
+dashboard touching every instrument to build its pill counts". Both halves are
+wrong, and both were checked rather than assumed:
+
+* **No C-15 line is the dashboard.** The dashboard is C-16, which was passing.
+* **`Catalog::counts` is one map lookup** and `dashboard_counts` is two reads —
+  exactly what D-0042 left behind. Timed at both sizes: `counts` 830 → 830 ps,
+  `status` 625 → 835 ps, `Catalog::page` 1.14 → 1.18 µs. **Slope zero on all
+  three.** The comment at `server.rs` claiming "the pill COUNTS are four `usize`
+  reads" was accurate.
+
+The whole slope was in `render::instruments_page`, and it survived being handed
+the **same 200 rows at both sizes** — 233 µs → 325 µs, slope 1,942 ps. So it was
+not the rows, not the ordering, not the filter, and not the counts.
+
+### What it was
+
+**The notes.** The page draws a collapsible list of every line an operator has
+to be told, and a note's LENGTH is data. `coverage::Coverage::notes` names, on
+one line, every instrument a feed could not resolve in a spot target; the swept
+pair and the reference indices are counted from the masters rather than from a
+published list, so those two lines grow with the universe. Measured on the
+bench's own fixture: forty notes totalling **73,620 bytes at 2,787 instruments
+and 168,046 at 50,000**, all of the growth in two lines that went 3,080 → 50,293
+and 3,079 → 50,292 bytes.
+
+The renderer read all of it, per request, three times over:
+
+1. the summary counted the loud lines — `LOUD.iter().any(|w| n.contains(w))`,
+   five substring searches over every byte of every note;
+2. the loop asked the same question again, per line, to set the CSS class;
+3. `clamp` counted the separators in the tail — `note[cut..].matches(", ")` —
+   to say how many names it dropped.
+
+94,426 extra bytes × five needles × two passes is ~944 KB of extra scanning
+between the two sizes. The observed delta was 91.7 µs. That is the whole of it.
+
+**And it was written three times.** `notes_block` carried the docstring "the
+collapsible note list, identical on every page that has one", while
+`instruments_page` and `dashboard_page` each held their own byte-identical copy
+of the same block instead of calling it.
+
+### The decision
+
+**A note is prepared once, where it is built, and a renderer never reads its
+full text.** `render::Notes` holds, per line, the clamped display string and one
+`bool`; `Read::new` builds it from the finished note list, after the last
+`extend`. The three duplicated blocks collapse into the one `notes_block` that
+already claimed to be the only one.
+
+**The loud flag is kept, not recomputed from the clamped head.** Deriving it
+from the head would be cheaper still and wrong: a loud word past byte 160 would
+stop being loud, and a warning that quietly downgrades itself is the failure
+`CLAUDE.md` §4 names.
+`render::a_prepared_note_keeps_the_loudness_of_its_whole_text_and_draws_only_its_head`
+builds a note whose `UNCHECKED` sits past the cut, asserts the fixture really is
+past the cut, and then asserts the line is still counted and still classed loud.
+
+**`/store` stopped cloning raw notes too.** It rendered its own lines plus the
+universe's and got the second set with `site.read.notes.iter().cloned()` — a
+per-request copy of every byte of that 100 KB line. It now appends the PREPARED
+lines, which are bounded at 160 bytes each. No gate measured this page; it is
+the same defect and it is fixed in the same place rather than left because
+nothing was watching.
+
+### What it is worth
+
+`cargo bench -p api`, same machine, exit **0**, "all ratios within the ceiling":
+
+```
+  C-15 sort="isin" pill="fno" marginal      280 ps per instrument per request  ok
+  C-15 last page marginal                   123 ps per instrument per request  ok
+  C-15 sort="" pill="" marginal               0 ps per instrument per request  ok
+```
+
+| | before | after |
+|---|---|---|
+| C-15 marginal, 30 lines | 1,433 – 2,100 ps, **30 breaches** | **0 – 280 ps**, none |
+| C-14 ratio 2,787 → 50,000 | 1.266× – 1.390× | 0.974× – 1.084× |
+| instruments page at 2,787 | ~250 µs | ~157 µs |
+| C-16 dashboard 2 → 50,000 | 1.954×, 87.1 → 170.2 µs | 0.974×, 10.7 → 10.4 µs |
+
+**The dashboard row is the one to read twice.** C-16 was GREEN throughout at
+1.954× against a 3.0× ceiling, while the page it measured had doubled in cost
+and was sixteen times slower than it needed to be. A ratio ceiling wide enough
+to tolerate honest variance is also wide enough to hide a defect that C-15's
+slope caught immediately — which is exactly why `crates/api/benches/ratio.rs`
+asserts three different shapes and not one number.
+
+### What this deliberately does not do
+
+* **The note is not shortened at the source.** The tail is display-dead — every
+  page clamps at 160 bytes — but `/health` emits it whole on purpose, and
+  cutting an operator's only machine-readable list of unresolved names to make a
+  page faster is a trade worth naming rather than making. `docs/06-limits.md`
+  §67 records what stays linear: `/health` per poll, and the startup banner
+  once.
+* **`Read::notes` keeps the full text.** The prepared view is derived from it
+  inside `Read::new`, for the reason `unavailable` is derived from `unread` —
+  two fields a caller fills separately are two fields that can disagree.
+* **No ceiling was moved.** `MARGINAL_CEILING_PS` is still 1,000 and the bench
+  is unchanged. The code was made to fit the number, not the other way round.
+* **`.github/workflows/ci.yml` was not touched**, by choice: another session is
+  editing it in this tree. Its gate-4 comment block still reads "C-15 is
+  undocumented in `docs/06-limits.md` and unrecorded in `docs/11-findings.md`,
+  and gate 8 is red on it." The first clause is now stale — §67 documents it —
+  and so is the last. That comment is the next thing to fix, and it is named
+  here rather than edited across a session boundary.
