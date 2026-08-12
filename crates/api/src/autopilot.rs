@@ -148,7 +148,7 @@ pub const CREDENTIAL_REREADS: u8 = 1;
 /// a later attempt is justified, and an *unbounded* later attempt would be a
 /// quota attack on the owner dressed as resilience.
 ///
-/// The worst case, stated as a number rather than as a feeling:
+/// The upper bound, stated as a number rather than as a feeling:
 /// `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = **9** attempts per stalled month
 /// per process, spread over at least `2 × STALL_RECHECK_SECS` = twelve hours,
 /// and only ever while the ladder has nothing else to do. When the allowance is
@@ -1132,7 +1132,7 @@ impl FeedState {
 /// apart, and **only from the idle branch of [`round`]** — the branch that
 /// already means "nothing is missing that any feed can still be asked for". So
 /// it can never delay forward progress and it can never become a quota attack:
-/// worst case `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = 9 attempts per
+/// at most `MAX_MONTH_ATTEMPTS × (1 + STALL_RETRIES)` = 9 attempts per
 /// stalled month per process. When a month's allowance is spent it stays on the
 /// list, [`stall_note`] says so, and nothing asks for it again.
 ///
