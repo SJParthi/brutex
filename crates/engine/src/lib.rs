@@ -62,6 +62,11 @@
 // module is integer arithmetic over `[u64; 6]` masks and two collections.
 #![forbid(unsafe_code)]
 
+/// The bar column transposed into one bitmap per position, and the support count
+/// that reads only the bitmaps a candidate names. Same answers as [`support`],
+/// far fewer bytes moved -- see the module doc for the arithmetic.
+pub mod column;
+
 use std::collections::HashSet;
 use vocab::ConditionMask;
 
