@@ -529,6 +529,49 @@ mod tests {
         assert_eq!(n, 0, "a bar past the close matched a window");
     }
 
+    /// A LATER bar that sets a new day high can report it, not only the first bar.
+    ///
+    /// The day extremes are a description per D-0080, so they are folded before the emit.
+    /// Moving that fold after `bits()` survived the whole suite, because
+    /// `the_bar_that_sets_the_day_high_can_report_it` below uses the session's FIRST bar --
+    /// and on the first bar `day_high` comes from the RESET branch, which the mutation does
+    /// not touch. Bits 40 to 43 then go wrong on every later bar and nothing notices.
+    #[test]
+    fn a_later_bar_that_sets_a_new_day_high_can_report_it() {
+        // The literal is tied to the name, so a name permutation in `vocab::table` fails
+        // here too -- the same mechanism as
+        // `evaluator::tests::a_positions_name_and_its_meaning_cannot_be_separated`.
+        const AT_DAY_HIGH: u16 = 40;
+        assert_eq!(
+            vocab::table::name(AT_DAY_HIGH),
+            Some("close_at_day_high"),
+            "position {AT_DAY_HIGH} is no longer `close_at_day_high`, so this test would \
+             assert the wrong thing about the right bit"
+        );
+
+        let mut s = SessionState::default();
+        // Bar 0 goes through the reset branch. This is the bar the existing test uses, and
+        // the reason it cannot see the fold order.
+        let _ = ok(
+            &mut s,
+            &at(0, 2_500_000, 2_500_500, 2_499_500, 2_500_000),
+            None,
+        );
+
+        // Bar 1 makes a NEW day high and closes exactly on it, so the else-branch fold is
+        // the only thing that can make bit 40 true.
+        let later = ok(
+            &mut s,
+            &at(1, 2_500_000, 2_501_000, 2_500_000, 2_501_000),
+            None,
+        );
+        assert!(
+            later.get(u32::from(AT_DAY_HIGH)),
+            "a bar that set a new day high and closed on it did not report it. The extremes \
+             fold ran after the emit, so `day_high` was still the previous bar's."
+        );
+    }
+
     /// A description INCLUDES its own bar: the bar that sets the day's high must
     /// be able to report that its close is at the day high.
     #[test]

@@ -775,6 +775,101 @@ mod tests {
         }
     }
 
+    /// Every session's first bar compares itself to nothing -- in EVERY session.
+    ///
+    /// The rollover clears `seeded`, so positions 276 and 277 have no session open to read
+    /// on the bar that establishes one. Deleting that single line survived the whole
+    /// suite: `the_close_against_the_session_open_sets_at_most_one_bit` uses ONE session,
+    /// so it reaches the first-bar case exactly once, and on that bar `seeded` is false
+    /// whether or not the reset exists.
+    ///
+    /// From session two onward the mutation compares the close against the PREVIOUS
+    /// session's open, and `running_high`/`running_low` then span two days -- so the next
+    /// `close_the_books` builds the whole pivot ladder from a two-day range. The fixture
+    /// opens each session far from the last precisely so the wrong comparison is visible.
+    #[test]
+    fn the_first_bar_of_every_session_has_no_session_open_to_compare_against() {
+        let at = |day: i64, m: i64, open: i64, close: i64| Candle {
+            ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+            open,
+            high: open.max(close) + 300,
+            low: open.min(close) - 300,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        let above = named_position("close_above_day_open");
+        let below = named_position("close_below_day_open");
+
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        // Three sessions, each opening a long way from the one before, so a comparison
+        // against the wrong session's open lands decisively on one side.
+        for (day, base) in [
+            (24_000_i64, 2_500_000_i64),
+            (24_001, 2_400_000),
+            (24_002, 2_600_000),
+        ] {
+            let first = e
+                .step(&at(day, 0, base, base + 500))
+                .expect("a sane candle");
+            assert!(
+                !first.get(above) && !first.get(below),
+                "on the first bar of IST day {day} the session open is the bar's own open, \
+                 which is not established until after the emit -- so neither side may be \
+                 claimed. A set bit here means the comparison used another session's open."
+            );
+            // Two more bars so the session is a session, not a single stamp.
+            let _ = e
+                .step(&at(day, 1, base + 500, base + 900))
+                .expect("a sane candle");
+            let _ = e
+                .step(&at(day, 2, base + 900, base + 200))
+                .expect("a sane candle");
+        }
+    }
+
+    /// A regular day is regular, and the calendar's zero padding is not a holiday.
+    ///
+    /// `Calendar` stores `[i64; 8]` with a `len`, and `charter()` fills six and leaves two
+    /// zeros. Dropping `.take(self.len)` from `is_non_regular` makes **IST day 0** --
+    /// 1970-01-01 -- non-regular, and nothing asserted that a regular day is regular. The
+    /// observable consequence measured by an audit: a session on 1970-01-01 flips
+    /// `has_yesterday` from true to false and `sessions_completed` from 1 to 0.
+    ///
+    /// Both directions are checked, and `all_regular()` too, because a calendar that says
+    /// "no" to everything would satisfy only half of this.
+    #[test]
+    fn the_calendar_answers_both_ways_and_its_padding_is_not_a_date() {
+        let charter = Calendar::charter();
+        assert!(
+            !charter.is_non_regular(0),
+            "IST day 0 is 1970-01-01 and is not in the charter. A `true` here is the \
+             zero padding being read as a date, which is what dropping `.take(len)` does."
+        );
+        for day in [1_i64, 18_579, 18_581, 19_288, 20_381, 20_383, 24_000] {
+            assert!(
+                !charter.is_non_regular(day),
+                "IST day {day} is an ordinary session and the charter does not name it"
+            );
+        }
+        for day in CHARTER_NON_REGULAR_IST_DAYS {
+            assert!(
+                charter.is_non_regular(day),
+                "IST day {day} IS one of the charter's six and must be named"
+            );
+        }
+
+        let none = Calendar::all_regular();
+        assert!(!none.is_non_regular(0), "an empty calendar names no day");
+        for day in CHARTER_NON_REGULAR_IST_DAYS {
+            assert!(
+                !none.is_non_regular(day),
+                "`all_regular` must answer no even for a charter date, or the two \
+                 constructors are not distinguishable and the Muhurat tests prove nothing"
+            );
+        }
+    }
+
     /// Nothing outside the live vocabulary ever reaches a caller.
     ///
     /// A retired (6, 19, 25) or void (39 of them) position escaping would be swept
@@ -785,11 +880,24 @@ mod tests {
         for day in 0..3_i64 {
             for bar in &session(20_400 + day, 40) {
                 let mask = e.step(bar).expect("a sane bar");
-                assert_eq!(
-                    vocab::table::only_live(mask),
-                    mask,
-                    "a non-live position escaped"
-                );
+                // NOT `assert_eq!(only_live(mask), mask)`. That re-applies the function
+                // under test to its own output, so it holds for whatever `stepped`
+                // returned and cannot see `only_live` being removed from the emit. The
+                // non-live set is enumerated instead.
+                //
+                // Said plainly, because it matters for what this test is worth: deleting
+                // `only_live` from `Evaluator::stepped` is currently an EQUIVALENT
+                // mutation, since no module in the crate emits a retired or void
+                // position. The call is defence in depth against a future module that
+                // does, and this assertion is what would catch that module.
+                for index in 0..vocab::table::NEXT_FREE {
+                    if !vocab::table::is_live(index) {
+                        assert!(
+                            !mask.get(u32::from(index)),
+                            "non-live position {index} escaped into an emitted mask"
+                        );
+                    }
+                }
                 let claimed = Evaluator::positions();
                 let mut bit: u32 = 0;
                 while bit < vocab::ConditionMask::BITS {
@@ -1644,6 +1752,21 @@ mod tests {
         );
     }
 
+    /// The position carrying `label`, resolved from the table rather than written down.
+    ///
+    /// A bare literal binds a test to an INDEX. Resolving by name binds it to a MEANING,
+    /// which is what makes a name permutation in `vocab::table` fail rather than pass --
+    /// see `a_positions_name_and_its_meaning_cannot_be_separated`.
+    fn named_position(label: &str) -> u32 {
+        let found = (0..vocab::table::NEXT_FREE).find(|i| vocab::table::name(*i) == Some(label));
+        assert!(
+            found.is_some(),
+            "no position is named `{label}`, so the caller resolves nothing and would pass \
+             by looking nowhere"
+        );
+        u32::from(found.unwrap_or(vocab::table::NEXT_FREE))
+    }
+
     /// A position's NAME and the meaning the evaluator gives it are one thing.
     ///
     /// # The hole this closes
@@ -1672,18 +1795,8 @@ mod tests {
     /// recorded in `docs/11-findings.md` rather than claimed closed here.
     #[test]
     fn a_positions_name_and_its_meaning_cannot_be_separated() {
-        let named = |label: &str| -> u32 {
-            let found =
-                (0..vocab::table::NEXT_FREE).find(|i| vocab::table::name(*i) == Some(label));
-            assert!(
-                found.is_some(),
-                "no position is named `{label}`, so this test resolves nothing and would \
-                 pass by looking nowhere"
-            );
-            u32::from(found.unwrap_or(vocab::table::NEXT_FREE))
-        };
-        let above = named("close_above_day_open");
-        let below = named("close_below_day_open");
+        let above = named_position("close_above_day_open");
+        let below = named_position("close_below_day_open");
         assert_ne!(above, below, "two names must resolve to two positions");
 
         let day = 24_000_i64;

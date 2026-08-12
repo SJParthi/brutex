@@ -384,6 +384,84 @@ mod tests {
         assert_eq!(minutes_since_open(open.ts_micros - MICROS_PER_MINUTE), None);
     }
 
+    /// A window no bar ever landed in publishes no level.
+    ///
+    /// `closed` and `seeded` answer different questions. `closed` means a bar arrived at or
+    /// past the window's end; `seeded` means a bar actually traded INSIDE it. A session
+    /// whose first bar arrives at minute 7 leaves the 5-minute window closed and never
+    /// seeded, and its `high`/`low` are still the struct's zeroes.
+    ///
+    /// Dropping `&& x.seeded` from `extremes` survived the whole suite, because no fixture
+    /// built a late-opening session. The audit measured what it does: bit 86,
+    /// `orb5_close_above_high`, fires on every bar of that session against a level of
+    /// **zero** -- §4's zeroed default wearing an answer's clothes.
+    #[test]
+    fn a_window_no_bar_landed_in_publishes_no_level() {
+        let mut o = Orb::default();
+        // Minute 7: past the 5-minute window's end, so it is closed; nothing traded inside
+        // it, so it never seeded.
+        let mask = ok(&mut o, &at(7, 2_501_000, 2_499_000, 2_500_000));
+        assert_eq!(
+            o.extremes(0),
+            None,
+            "no bar traded inside the 5-minute window, so it has no extremes to publish -- \
+             `(0, 0)` here is the struct's default being read as a price"
+        );
+        for r in 0..RELATIONS_PER_WINDOW {
+            let p = u32::from(ORB_FIRST + r);
+            assert!(
+                !mask.get(p),
+                "position {p} fired for a window that never traded. Its level would be 0, \
+                 so every close in the session sits above it."
+            );
+        }
+        // The seeded case still publishes, or a guard that always answered `None` would
+        // satisfy the half above.
+        let mut seeded = Orb::default();
+        let _ = ok(&mut seeded, &at(0, 2_501_000, 2_499_000, 2_500_000));
+        let _ = ok(&mut seeded, &at(6, 2_502_000, 2_498_000, 2_500_000));
+        assert_eq!(
+            seeded.extremes(0),
+            Some((2_501_000, 2_499_000)),
+            "a window a bar DID trade in must publish that bar's extremes"
+        );
+    }
+
+    /// `every_window_closed` means all four, and `any` is not `all`.
+    ///
+    /// The evaluator's warm-up boundary reads this. Changing `all` to `any` flipped
+    /// `every_family_can_answer` from false to true twenty bars into a session, and no test
+    /// noticed -- every fixture sampled states where all four windows agreed.
+    #[test]
+    fn every_window_closed_means_all_four_and_not_any_one() {
+        let mut o = Orb::default();
+        for m in 0..21 {
+            let _ = ok(&mut o, &at(m, 2_501_000, 2_499_000, 2_500_000));
+        }
+        assert!(
+            o.extremes(0).is_some() && o.extremes(1).is_some(),
+            "by minute 20 the 5- and 15-minute windows have both closed"
+        );
+        assert!(
+            o.extremes(2).is_none() && o.extremes(3).is_none(),
+            "and the 30- and 60-minute windows have not"
+        );
+        assert!(
+            !o.every_window_closed(),
+            "two of four is not every one. `any` would say true here, and the warm-up \
+             boundary would report the ORB family ready twenty bars into a session."
+        );
+
+        for m in 21..62 {
+            let _ = ok(&mut o, &at(m, 2_501_000, 2_499_000, 2_500_000));
+        }
+        assert!(
+            o.every_window_closed(),
+            "and once all four have closed it must say true, or a constant false would \
+             satisfy the assertion above"
+        );
+    }
+
     /// **Nothing fires while a window is still open.** The whole point.
     #[test]
     fn a_forming_window_emits_nothing() {

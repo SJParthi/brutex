@@ -502,6 +502,90 @@ mod tests {
         s.step(b, tol()).expect("this fixture bar is sane")
     }
 
+    /// A bar that only RE-TOUCHES an extreme does not move the leg.
+    ///
+    /// `fold`'s comparisons are strict on both sides, and its doc calls that load-bearing.
+    /// Relaxing either to `>=` survived the whole suite: no fixture ever re-touched an
+    /// extreme without also widening the range. A bar that merely equals the running high
+    /// then flips `Leg`, which remaps all eleven rungs of the current-day ladder.
+    #[test]
+    fn a_bar_that_only_retouches_an_extreme_does_not_move_the_leg() {
+        let mut s = CurDayFib::default();
+        // Bar 0 establishes the range through the reset branch.
+        let _ = ok(&mut s, &bar(0, 2_500_000, 2_510_000, 2_490_000, 2_500_000));
+        let before = s.leg();
+
+        // Bar 1 touches the high again -- exactly, not past it -- and its low is strictly
+        // inside. Neither extreme moves, so neither does the leg.
+        let _ = ok(
+            &mut s,
+            &bar(60_000_000, 2_500_000, 2_510_000, 2_495_000, 2_500_000),
+        );
+        assert_eq!(
+            s.leg(),
+            before,
+            "a bar that equalled the running high and stayed inside the low moved the leg. \
+             `>` became `>=`, and all eleven rungs are now measured from the wrong end."
+        );
+
+        // And the LOW side, which needs its own bar. The bar above has a low strictly
+        // INSIDE the range, so `bar.low < self.lo` and `bar.low <= self.lo` agree on it and
+        // the `<=` mutation survives -- it did, on the first run of this test. This bar
+        // equals the running low exactly, which is the only input that separates them.
+        let _ = ok(
+            &mut s,
+            &bar(120_000_000, 2_500_000, 2_505_000, 2_490_000, 2_500_000),
+        );
+        assert_eq!(
+            s.leg(),
+            before,
+            "a bar that equalled the running LOW and stayed inside the high moved the leg. \
+             `<` became `<=`, and the ladder is measured from the wrong end."
+        );
+
+        // The strictly-higher case still moves it, or a fold that never updated would
+        // satisfy every assertion above.
+        let _ = ok(
+            &mut s,
+            &bar(180_000_000, 2_500_000, 2_512_000, 2_495_000, 2_500_000),
+        );
+        assert_eq!(
+            s.leg(),
+            Leg::Up,
+            "a bar that genuinely made a new high must set the leg up"
+        );
+    }
+
+    /// A pre-epoch timestamp gets its own session, because `ist_day` floors.
+    ///
+    /// `ist_day` uses `div_euclid`, and its own doc names the hazard: truncating division
+    /// "rounds up and silently merges that bar into the 1970-01-01 session". No test fed a
+    /// pre-1970 bar, so swapping `div_euclid` for `/` survived -- and the audit measured
+    /// the consequence: IST day -1 and IST day 0 merge into one session, dropping
+    /// `sessions_completed` from 1 to 0 and `has_yesterday` from true to false.
+    ///
+    /// The witness is one microsecond wide. `-19_800_000_001` is the last microsecond
+    /// before the IST epoch day begins; `-19_800_000_000` is its first.
+    #[test]
+    fn a_pre_epoch_timestamp_floors_into_its_own_session() {
+        assert_eq!(
+            ist_day(-19_800_000_001),
+            -1,
+            "one microsecond before the IST epoch day belongs to the day before it. \
+             Truncating division returns 0 here and merges two sessions into one."
+        );
+        assert_eq!(
+            ist_day(-19_800_000_000),
+            0,
+            "and the first microsecond of the IST epoch day is day 0"
+        );
+        assert_eq!(
+            ist_day(-19_800_000_001 - MICROS_PER_DAY),
+            -2,
+            "the floor keeps going down rather than collapsing toward zero"
+        );
+    }
+
     /// The rung order here MUST be the table's order, or every emitted bit means
     /// the wrong rung. Checked against `vocab`'s own names, not against a comment.
     #[test]
