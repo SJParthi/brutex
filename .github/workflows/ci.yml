@@ -1625,21 +1625,32 @@ jobs:
           #       command, plus test output. Deliberately not events: the banner
           #       is printed before a sink is guaranteed to exist, and a banner in
           #       a log file is noise rather than a record.
-          #   api/src/server.rs  eprintln! 3
-          #       A refused bind and a server that stopped — both ALSO emit
-          #       `api.server` events — and the usage text on misuse, which is a
-          #       CLI contract rather than a diagnostic.
+          #   api/src/server.rs  eprintln! 5
+          #       A refused bind (:6404) and a server that stopped (:5805) — both
+          #       ALSO emit `api.server` events — and the usage text on misuse
+          #       (:6409), which is a CLI contract rather than a diagnostic.
+          #       The two added by D-0124 (:5867, :6240) are the store root the
+          #       environment could not name. They do NOT emit, and cannot: the
+          #       sink lives under that root, so at both sites there is no
+          #       directory in which to open a log. :6240's own comment says it —
+          #       "BEFORE ANYTHING IS OPENED OR CREATED" — and the refusal is the
+          #       reason no sink exists rather than an accident of ordering.
+          #       stderr is the only channel that exists at that instant, which is
+          #       the same argument telemetry/src/sink.rs carries below.
           #   pull/src/http.rs   eprintln! 2
           #       Null-price bar notices, which ALSO emit `pull.decode` events.
           #   telemetry/src/sink.rs  eprintln! 1
           #       The sink's own last-resort notice. It is the thing that failed,
           #       so it is the one place stderr is the only channel left.
           #   telemetry/src/record.rs eprintln! 1
-          #   api/src/constituents.rs println! 1
-          #       A cost-benchmark line printed by a TEST for a human reading
-          #       `--nocapture`, past that file's `#[cfg(test)]`. Declared the
-          #       day the file appeared, because this gate refused it — which
-          #       is the whole point of walking `crates/*/src` by glob.
+          #   api/src/constituents.rs println! 2
+          #       Two lines printed by TESTS for a human reading `--nocapture`,
+          #       both past that file's `#[cfg(test)]` at :889 — a cost-benchmark
+          #       line (:1773) and the tier partition's five addends and total
+          #       across twenty-four rows (:1079). Neither is on a production
+          #       path. The first was declared the day the file appeared, because
+          #       this gate refused it — which is the whole point of walking
+          #       `crates/*/src` by glob, and it refused the second the same way.
           #   core/src/universe.rs, core/src/vendor.rs, greeks/src/{bsm,normal,solver}.rs
           #       Test diagnostic output, printed by tests for a human reading
           #       `--nocapture`. Not on any production path.
@@ -1647,9 +1658,9 @@ jobs:
           # An UNDECLARED file with any print fails. That is how a crate added
           # tomorrow is covered on its first day, and it is the whole point of the
           # glob above.
-          declared='api/src/constituents.rs:println!:1
+          declared='api/src/constituents.rs:println!:2
           api/src/server.rs:println!:19
-          api/src/server.rs:eprintln!:3
+          api/src/server.rs:eprintln!:5
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:1
           core/src/vendor.rs:println!:1
