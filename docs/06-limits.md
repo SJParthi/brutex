@@ -69,28 +69,50 @@ it is replaced by the measurement, with the hardware named.
 
 ## 5. The combination count still explodes
 
-At 74 conditions:
+**This section was rewritten because every number in it was wrong.** It tabulated
+`C(74, k)` — the predecessor repository's 74-condition vocabulary — at "32 bytes
+each", which was that repository's mask width. The vocabulary here has **238 live
+positions** and an `Itemset` is **56 bytes**: a 48-byte `ConditionMask` plus a
+`u64` hit count, asserted at compile time in `crates/engine` so this arithmetic
+cannot drift again. A mask widening now fails the build rather than quietly
+falsifying the table below.
 
-| k | C(74, k) |
-|---:|---:|
-| 4 | 1,150,626 |
-| 5 | 16,108,764 |
-| 6 | 185,250,786 |
-| 7 | 1,799,579,064 |
-| 8 | 15,071,474,661 |
+At 238 live conditions, holding one level exactly:
 
-Holding every candidate exactly, at 32 bytes each, reaches 6 GiB at k=6 and
-**59.7 GiB at k=7** — past the reference machine's memory.
+| k | C(238, k) | `Vec<Itemset>` | `HashSet<ConditionMask>` |
+|---:|---:|---:|---:|
+| 2 | 28,203 | 1.51 MiB | 1.29 MiB |
+| 3 | 2,218,636 | 118.49 MiB | 101.56 MiB |
+| 4 | 130,344,865 | 6.80 GiB | 5.83 GiB |
+| 5 | 6,100,139,682 | 318.15 GiB | 272.70 GiB |
+| 6 | 236,888,757,651 | 12.07 TiB | 10.34 TiB |
+| 7 | 7,851,170,253,576 | 399.87 TiB | 342.75 TiB |
+| 8 | 226,702,541,072,007 | 11,546.35 TiB | 9,896.87 TiB |
 
-What the design does about it: it never enumerates those levels. Apriori
-pruning means level k is generated only from level k−1's survivors, and the
-ladder stops at extinction. If pruning leaves nothing at k=5, k=7 does not
-exist as a set to be too large.
+The `HashSet` column is the raw key bytes and understates the real cost: hashbrown
+keeps a load factor near 7/8 and adds one control byte per slot.
 
-What the design does **not** do: make a fully-dense vocabulary tractable. If
-every condition were frequent and independent, the ladder would run to
-exhaustion and the memory bound would bite. That would be a data problem
-surfacing as a resource refusal, and the refusal is loud rather than an OOM.
+**k=4 is the wall, and it is memory rather than time.** 6.80 GiB of `out` plus
+5.83 GiB of `seen` is past the reference machine before the clock becomes the
+problem. At k=5 the join itself dominates everything: `|F|²/2` pair-unions is
+8.49 × 10¹⁵ six-word ORs, months of work independent of the bars.
+
+What the design does about it: it never enumerates those levels. Apriori pruning
+generates level k only from level k−1's survivors, and the ladder stops at
+extinction. If pruning leaves nothing at k=5, k=7 does not exist as a set to be
+too large.
+
+What the design does **not** do, stated plainly because this section previously
+claimed the opposite: **there is no refusal.** `crates/engine` has no cap, no
+`try_reserve`, no progress report and no bound check. `next_level` builds `out`
+with `Vec::new` and `seen` with `HashSet::new` and lets them grow; an allocation
+failure aborts the process. The earlier text said "the refusal is loud rather
+than an OOM". It is an OOM, and it is silent until the process dies.
+
+Whether the worst case is REACHABLE is **UNMEASURED**. It depends on how fast the
+frequent frontier collapses on real bars at a real `min_hits`, and §4 of this
+document already records that no full production sweep has ever been run. The
+extrapolation above is an extrapolation, per §3.6.
 
 ---
 

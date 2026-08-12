@@ -114,6 +114,16 @@ pub struct Excluded {
 }
 
 /// One frequent combination and its exact hit count.
+///
+/// # Size, because a document quotes it
+///
+/// `docs/06-limits.md` §5 tabulates what a level would cost to hold, and its numbers are
+/// per-`Itemset`. It quoted **32 bytes**, which was the predecessor's mask width, and the
+/// figures downstream of it were wrong by 75%. The assertion below derives the size from
+/// `ConditionMask` plus one `u64` rather than writing a number down, and
+/// `vocab::mask` pins `ConditionMask` at `WORDS * 8` -- so 48 + 8 = **56 bytes**, and a
+/// mask widening moves the document's arithmetic through a failing build rather than
+/// silently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Itemset {
     /// The combination. A bar matches iff `bar_bits.hits(&mask)`.
@@ -121,6 +131,11 @@ pub struct Itemset {
     /// How many loaded bars matched. Never below the ladder's `min_hits`.
     pub hits: u64,
 }
+
+const _: () = assert!(
+    core::mem::size_of::<Itemset>()
+        == core::mem::size_of::<ConditionMask>() + core::mem::size_of::<u64>()
+);
 
 /// Everything one level of the ladder produced.
 #[derive(Clone, Debug, Default)]
