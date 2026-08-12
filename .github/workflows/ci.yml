@@ -3711,7 +3711,17 @@ jobs:
     runs-on: ubuntu-24.04
     needs: language-purity
     steps:
+      # `fetch-depth: 0`, BECAUSE TWO TESTS READ GIT HISTORY.
+      #
+      # `crates/core/tests/findings.rs` resolves the commit hashes named in the
+      # findings ledger and checks each is real and on this branch. On the
+      # default SHALLOW clone no commit resolves, so the tests cannot tell "this
+      # hash is wrong" from "this clone has no history" — and they refuse rather
+      # than pass vacuously, which is why CI went red with the fix printed in the
+      # assertion message. The `mutants` job already checks out this way for the
+      # same reason.
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -3833,7 +3843,17 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build
     steps:
+      # `fetch-depth: 0`, BECAUSE TWO TESTS READ GIT HISTORY.
+      #
+      # `crates/core/tests/findings.rs` resolves the commit hashes named in the
+      # findings ledger and checks each is real and on this branch. On the
+      # default SHALLOW clone no commit resolves, so the tests cannot tell "this
+      # hash is wrong" from "this clone has no history" — and they refuse rather
+      # than pass vacuously, which is why CI went red with the fix printed in the
+      # assertion message. The `mutants` job already checks out this way for the
+      # same reason.
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
         with: { components: llvm-tools-preview }
       - uses: Swatinem/rust-cache@v2
