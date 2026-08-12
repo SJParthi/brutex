@@ -6,7 +6,12 @@ rust-version = "1.97"
 publish      = false
 
 [dependencies]
-vocab = { path = "../vocab" }
+# `version` is not decoration. `deny.toml` sets `wildcards = "deny"`, and a path
+# dependency with no version IS a wildcard -- `cargo deny check bans` failed on
+# this one line, and it was the workspace's only wildcard. `crates/indicators`
+# had always written it the other way, so the two spellings of the same
+# dependency disagreed and only one of them was legal.
+vocab = { path = "../vocab", version = "0.1.0" }
 
 [lints]
 workspace = true
