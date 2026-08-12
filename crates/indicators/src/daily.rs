@@ -63,6 +63,26 @@ pub enum Unusable {
     /// already refuses the same overflow; this is that policy, applied once per crate
     /// instead of twice in opposite directions.
     LevelOverflows,
+    /// The close sits outside `[low, high]`.
+    ///
+    /// `Evaluator::stepped` already refuses such a bar with
+    /// [`crate::Corrupt::PriceOutsideRange`], and these constructors did not -- so the
+    /// crate had two entry points that disagreed about what a valid session is, and the
+    /// looser one fed the band arithmetic.
+    ///
+    /// It is not a theoretical gap. `(high: i64::MIN + 1, low: i64::MIN, close: i64::MAX)`
+    /// passes `HighBelowLow` and `RangeOverflows`, and produces `band_half` =
+    /// `6_148_914_691_236_517_205` -- two thirds of `i64::MAX`. The emit then doubles that
+    /// for the band base, which clamped, handing `Tolerance::covers` a band **25% too
+    /// narrow**, so twelve `near_*` bits read false on bars the real band covers.
+    ///
+    /// With the close inside the range the arithmetic is bounded by derivation rather than
+    /// by luck. `pivot - bc = (2c - h - l) / 6`, and `|2c - h - l|` is largest when the
+    /// close sits on an edge, where it equals `h - l`. So
+    /// `band_half <= (h - l) / 6 <= i64::MAX / 6`, and doubling it reaches at most a third
+    /// of the type. That is the same ceiling `cpr_width`'s doc derives, one step further
+    /// along.
+    CloseOutsideRange,
 }
 
 /// Where the cuts between a narrow, a neutral and a wide CPR fall, in thousandths of
@@ -161,6 +181,13 @@ impl DailyLevels {
     pub fn from_previous_session(high: i64, low: i64, close: i64) -> Result<Self, Unusable> {
         if high < low {
             return Err(Unusable::HighBelowLow);
+        }
+        // Before the range, because `close` outside `[low, high]` is a broken record and
+        // not an extreme market -- and because everything downstream, including the band
+        // base the emit doubles, is bounded only when this holds. See
+        // `Unusable::CloseOutsideRange` for the derivation and the witness.
+        if close < low || close > high {
+            return Err(Unusable::CloseOutsideRange);
         }
         let Some(range) = high.checked_sub(low) else {
             return Err(Unusable::RangeOverflows);
@@ -555,6 +582,20 @@ pub fn bits_with(
             Rel::Near(index) => {
                 // The band is a fraction of the CPR WIDTH, which is twice the
                 // half-width — the base `vocab` expects for a pivot band.
+                //
+                // This CANNOT clamp, and the reason is a constructor guard rather than a
+                // hope. `Unusable::CloseOutsideRange` refuses a close outside
+                // `[low, high]`, and with that held `half = |2c - h - l| / 6` is at most
+                // `(h - l) / 6 <= i64::MAX / 6`, so the double reaches a third of the
+                // type. It clamped before that guard existed: at
+                // `(i64::MIN + 1, i64::MIN, i64::MAX)` the band base came back 25% narrow
+                // and twelve `near_*` bits read false on bars the band covers.
+                //
+                // `saturating_mul` stays rather than becoming a bare `*`. A bare multiply
+                // panics if the derivation is ever wrong, and a derivation in this file has
+                // been wrong before -- an earlier report claimed `cpr_width`'s
+                // `saturating_sub` could not fire and it demonstrably could. Saturating is
+                // the same answer with no panic and no branch to leave uncovered.
                 let width = half.saturating_mul(2);
                 mask = vocab::table::set_near(mask, index, tolerance, close, level, width)
                     .unwrap_or(mask);
@@ -667,6 +708,79 @@ mod tests {
     }
 
     /// The band half-width is always exactly half the CPR width — the identity
+    /// A close outside the session's range is refused, not silently narrowed.
+    ///
+    /// # The witness, and why the BAND is what broke
+    ///
+    /// `(high: i64::MIN + 1, low: i64::MIN, close: i64::MAX)` passes `HighBelowLow` -- the
+    /// high IS above the low -- and passes `RangeOverflows`, because the span is 1. It then
+    /// produced `band_half` = `6_148_914_691_236_517_205`, and the emit doubles that for the
+    /// band base `Tolerance::covers` expects. The double clamped at `i64::MAX`, which is
+    /// three quarters of the real width, so twelve `near_*` positions read FALSE on bars
+    /// the real band covers -- 42 verified (position, close) pairs.
+    ///
+    /// `daily` was the one family in this crate that clamped. `trend.rs`, `orb.rs`,
+    /// `fib.rs` and `gap.rs` each reach the same arithmetic, each use `checked_*`, and each
+    /// explain at length why. Abstaining is the wrong repair HERE, though, and that is
+    /// worth stating: `bits` returns a mask and has no channel for "do not know", so an
+    /// abstained `near_*` bit and a narrowed one are the same observable false. The refusal
+    /// has to happen where a `Result` still exists, which is the constructor.
+    #[test]
+    fn a_close_outside_the_session_range_is_refused_rather_than_narrowing_the_band() {
+        assert!(
+            matches!(
+                DailyLevels::from_previous_session(i64::MIN + 1, i64::MIN, i64::MAX),
+                Err(Unusable::CloseOutsideRange)
+            ),
+            "the audit's witness must be refused, and by this name rather than another"
+        );
+        // Both directions, adjacent by one, so the boundary is exact rather than roughly
+        // right -- a `<`/`<=` slip here would let the witness family back in.
+        assert!(matches!(
+            DailyLevels::from_previous_session(100, 10, 101),
+            Err(Unusable::CloseOutsideRange)
+        ));
+        assert!(matches!(
+            DailyLevels::from_previous_session(100, 10, 9),
+            Err(Unusable::CloseOutsideRange)
+        ));
+        assert!(
+            DailyLevels::from_previous_session(100, 10, 100).is_ok(),
+            "a close ON the high is a real session, not a broken record"
+        );
+        assert!(
+            DailyLevels::from_previous_session(100, 10, 10).is_ok(),
+            "a close ON the low is a real session too"
+        );
+
+        // The consequence the refusal exists for, MEASURED rather than derived: for every
+        // session this constructor accepts, doubling the band half stays inside the type.
+        // The derivation is in `Unusable::CloseOutsideRange`; this is the check that the
+        // derivation is not merely plausible.
+        for (high, low) in [
+            (i64::MAX, 0),
+            (i64::MAX, i64::MIN),
+            (0, i64::MIN),
+            (i64::MAX, i64::MAX),
+            (i64::MIN, i64::MIN),
+            (1, 0),
+            (2_500_000, 2_400_000),
+        ] {
+            let mid =
+                i64::try_from(i128::midpoint(i128::from(low), i128::from(high))).unwrap_or(low);
+            for close in [low, high, mid] {
+                if let Ok(levels) = DailyLevels::from_previous_session(high, low, close) {
+                    assert!(
+                        levels.band_half().checked_mul(2).is_some(),
+                        "({high}, {low}, {close}) built with band_half {} and doubling it \
+                         leaves the type, so the emit's band base would clamp",
+                        levels.band_half()
+                    );
+                }
+            }
+        }
+    }
+
     /// D-0079 rests on, and the reason the pivot band IS the CPR body.
     #[test]
     fn the_band_is_always_half_the_cpr_width() {
