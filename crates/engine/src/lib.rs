@@ -87,8 +87,14 @@ pub enum Why {
 pub struct Excluded {
     /// The condition bit index.
     pub position: u32,
-    /// Its measured support over the loaded bars.
-    pub support: u64,
+    /// Its measured support over the loaded bars, or `None` when none was taken.
+    ///
+    /// `None` is [`Why::NotLive`] and only that. §3.6 forbids naming a measurement that
+    /// was not made, and this field used to read `0` there -- a number indistinguishable
+    /// from a position genuinely absent on every bar. Two of the three `NotLive` causes
+    /// cannot be measured even in principle: `p >= ConditionMask::BITS` has no bit to
+    /// build a mask from, so `with_bit(p)` is a no-op and the empty mask hits every bar.
+    pub support: Option<u64>,
     /// The reason, for the run output.
     pub reason: Why,
 }
@@ -276,6 +282,11 @@ impl Ladder {
         // dropped. A support-0 position poisons its whole subtree; a support-1
         // position partitions nothing.
         let mut first: Vec<Itemset> = Vec::with_capacity(live.len());
+        // Both counted inside the loop below, so every entry in `live` increments exactly
+        // one bucket and `Frontier::reconciles` becomes an invariant of the loop rather
+        // than an identity one residual makes true by construction.
+        let mut duplicates = 0_u64;
+        let mut infrequent = 0_u64;
         let mut offered: HashSet<u32> = HashSet::with_capacity(live.len());
         for &p in live {
             // The caller's list is checked rather than trusted, and each rejection is
@@ -292,16 +303,21 @@ impl Ladder {
             //     and at k=2 a pair of identical bits whose union has popcount 1, which
             //     the join silently drops — so the frontier width no longer matches the
             //     list the caller handed in.
+            // Dedup FIRST. It used to run after the liveness check, so a repeated dead
+            // position was pushed to `excluded` once per occurrence -- D-0080 requires an
+            // excluded position be NAMED, and naming one three times reports three
+            // exclusions where there is one position.
+            if !offered.insert(p) {
+                duplicates = duplicates.saturating_add(1);
+                continue;
+            }
             let live_position = u16::try_from(p).is_ok_and(vocab::table::is_live);
             if p >= ConditionMask::BITS || !live_position {
                 sweep.excluded.push(Excluded {
                     position: p,
-                    support: 0,
+                    support: None,
                     reason: Why::NotLive,
                 });
-                continue;
-            }
-            if !offered.insert(p) {
                 continue;
             }
             let m = ConditionMask::default().with_bit(p);
@@ -309,31 +325,38 @@ impl Ladder {
             if hits == 0 {
                 sweep.excluded.push(Excluded {
                     position: p,
-                    support: hits,
+                    support: Some(hits),
                     reason: Why::AlwaysFalse,
                 });
             } else if hits == bars {
                 sweep.excluded.push(Excluded {
                     position: p,
-                    support: hits,
+                    support: Some(hits),
                     reason: Why::AlwaysTrue,
                 });
             } else if hits >= self.min_hits {
                 first.push(Itemset { mask: m, hits });
+            } else {
+                // Counted here, not derived afterwards. `infrequent` used to be
+                // `generated - frequent - excluded`, which absorbed every silently
+                // dropped duplicate and reported it as a condition that HAD been
+                // measured against the bars and found too rare. It had never been
+                // measured at all.
+                infrequent = infrequent.saturating_add(1);
             }
         }
         sort_canonically(&mut first);
         let generated = count_u64(live.iter());
-        let infrequent = generated
-            .saturating_sub(count_u64(first.iter()))
-            .saturating_sub(count_u64(sweep.excluded.iter()));
-        // No duplicates are possible at k=1: `live` is deduplicated, so each
-        // position is offered exactly once.
+        // `duplicates` was hardcoded `0` here, under a comment claiming none were
+        // possible because "`live` is deduplicated". `live` is deduplicated BY THIS LOOP,
+        // out of a caller list that may contain anything -- so the claim described the
+        // output of the code below rather than its input, and the count was wrong whenever
+        // it mattered.
         let mut current = Frontier {
             k: 1,
             frequent: first,
             generated,
-            duplicates: 0,
+            duplicates,
             excluded: count_u64(sweep.excluded.iter()),
             pruned: 0,
             infrequent,
@@ -647,7 +670,10 @@ mod tests {
                 }
             }
             for e in &s.excluded {
-                let _ = writeln!(out, "excluded {} {} {:?}", e.position, e.support, e.reason);
+                let shown = e
+                    .support
+                    .map_or_else(|| "unmeasured".to_owned(), |n| n.to_string());
+                let _ = writeln!(out, "excluded {} {shown} {:?}", e.position, e.reason);
             }
             out
         };
@@ -851,6 +877,106 @@ mod tests {
         assert!(s.levels.last().is_some_and(|l| l.frequent.is_empty()));
     }
 
+    /// Every offer at k=1 lands in exactly one bucket, and a duplicate is not "too rare".
+    ///
+    /// # Three witnesses, two of them from an adversarial audit
+    ///
+    /// `live = [0, 0, 1, 1, 1]` over bars `[{0,1}, {0,1}, {0}, {1}]` at `min_hits = 1`.
+    /// The engine reported `generated 5, duplicates 0, infrequent 3, frequent 2`. The
+    /// truth is two frequent singletons, ZERO infrequent, and three duplicate offers.
+    /// `infrequent` was `generated - frequent - excluded`, so the three dropped duplicates
+    /// landed in it and were reported as conditions that had been measured against the
+    /// bars and found too rare. Not one of them was ever measured.
+    ///
+    /// `live = [0, 1, D, D, D]` with `D` a tombstone. The engine emitted three identical
+    /// `Excluded` rows and `excluded 3`, because the liveness check ran BEFORE the dedup
+    /// probe. D-0080 asks for an excluded position to be named -- once, because there is
+    /// one position.
+    ///
+    /// The third witness is mine and covers the bucket the other two leave at zero: a
+    /// position genuinely below the threshold. Without it a fix that simply stopped
+    /// counting `infrequent` at all would pass.
+    #[test]
+    fn every_offer_at_k1_lands_in_exactly_one_bucket() {
+        /// k=1 always runs, so `levels` is never empty -- said with an assertion rather
+        /// than an `expect`, and cloned so the three witnesses below each read one line.
+        fn level_one(s: &Sweep) -> Frontier {
+            let first = s.levels.first();
+            assert!(first.is_some(), "k=1 always runs, so levels is never empty");
+            first.cloned().unwrap_or_default()
+        }
+
+        // `assert` then `unwrap_or`, not `expect`: the workspace denies `expect_used`, and
+        // the fallback is itself a non-live index so a broken table cannot make this test
+        // pass by accident.
+        let dead = (0..vocab::table::NEXT_FREE)
+            .find(|b| !vocab::table::is_live(*b))
+            .map(u32::from);
+        assert!(
+            dead.is_some(),
+            "§3.8 keeps retired indices reserved forever, so at least one is not live"
+        );
+        let dead = dead.unwrap_or(u32::from(vocab::table::NEXT_FREE));
+
+        // Witness 1 — three duplicate offers, and nothing is infrequent.
+        let b = bars(&[&[0, 1], &[0, 1], &[0], &[1]]);
+        let s = Ladder::with_min_hits(1).walk(&b, &[0, 0, 1, 1, 1]);
+        let k1 = level_one(&s);
+        assert_eq!(
+            (
+                k1.generated,
+                k1.duplicates,
+                k1.infrequent,
+                k1.excluded,
+                k1.frequent.len()
+            ),
+            (5, 3, 0, 0, 2),
+            "five offers: three repeats and two frequent singletons. Nothing here was \
+         measured and found too rare."
+        );
+        assert!(k1.reconciles());
+
+        // Witness 2 — a repeated tombstone is one exclusion, named once, unmeasured.
+        let s = Ladder::with_min_hits(1).walk(&b, &[0, 1, dead, dead, dead]);
+        let k1 = level_one(&s);
+        assert_eq!(
+            s.excluded.iter().filter(|e| e.position == dead).count(),
+            1,
+            "position {dead} is one position and D-0080 asks for it to be named once"
+        );
+        assert_eq!(
+            (k1.generated, k1.duplicates, k1.excluded, k1.infrequent),
+            (5, 2, 1, 0)
+        );
+        assert_eq!(
+            s.excluded
+                .iter()
+                .find(|e| e.position == dead)
+                .map(|e| e.support),
+            Some(None),
+            "a tombstone's support was never measured, and §3.6 forbids reporting a 0 \
+         that cannot be told apart from a position absent on every bar"
+        );
+        assert!(k1.reconciles());
+
+        // Witness 3 — the infrequent bucket, so a fix that zeroed it would not pass.
+        let b = bars(&[&[0, 1], &[0, 1], &[0], &[1], &[0]]);
+        let s = Ladder::with_min_hits(4).walk(&b, &[0, 1]);
+        let k1 = level_one(&s);
+        assert_eq!(
+            (
+                k1.generated,
+                k1.duplicates,
+                k1.infrequent,
+                k1.excluded,
+                k1.frequent.len()
+            ),
+            (2, 0, 1, 0, 1),
+            "bit 0 hits 4 of 5 and clears min_hits; bit 1 hits 3 and does not"
+        );
+        assert!(k1.reconciles());
+    }
+
     #[test]
     fn a_position_true_on_every_bar_is_excluded_and_named() {
         // D-0080: support exactly 1.000 partitions nothing, and the exclusion
@@ -862,7 +988,7 @@ mod tests {
             got,
             Some(&Excluded {
                 position: 9,
-                support: 3,
+                support: Some(3),
                 reason: Why::AlwaysTrue
             }),
             "position 9 is set on all three bars"
@@ -881,7 +1007,7 @@ mod tests {
             s.excluded.iter().find(|e| e.position == 7),
             Some(&Excluded {
                 position: 7,
-                support: 0,
+                support: Some(0),
                 reason: Why::AlwaysFalse
             })
         );
