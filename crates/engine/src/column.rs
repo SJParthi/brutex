@@ -83,9 +83,22 @@ pub struct Column {
 impl Column {
     /// Transposes a row-major column into one bitmap per position.
     ///
-    /// Allocates `BITS * ceil(bars / 64)` words once -- 36.4 MB at 1.22M bars and 384
-    /// positions -- and is the only allocation this type makes. Pre-sized rather than
-    /// grown, which is what gate 11 rule 3 asks of every collection on an O(1) path.
+    /// Allocates `BITS * ceil(bars / 64)` words once and makes no other allocation.
+    /// At 1,222,791 bars the stride is 19,107 words, so the figure is
+    /// `384 * 19_107 * 8` = **58.7 MB**. Proved by
+    /// `engine::column::the_allocation_is_bits_by_stride_and_not_the_live_count`.
+    ///
+    /// THE FIRST FACTOR IS `BITS` AND NOT THE LIVE POSITION COUNT, deliberately. Only
+    /// 238 of the 384 are live, and sizing to those would be 36.4 MB -- 22.3 MB less.
+    /// It is not done, because [`Self::bitmap`] addresses a bitmap as
+    /// `position * stride`, and that multiply is the whole reason a lookup is O(1). To
+    /// pack out the dead positions the type would have to carry a live-position map and
+    /// pay an indirection per access, trading a constant-time address for a smaller
+    /// allocation on the hottest path in the sweep. The 22.3 MB is the price of the
+    /// multiply, and it is a price and not an oversight.
+    ///
+    /// Pre-sized rather than grown, which is what gate 11 rule 3 asks of every
+    /// collection on an O(1) path.
     #[must_use]
     pub fn transpose(bar_bits: &[ConditionMask]) -> Self {
         let bars = bar_bits.len();
@@ -319,6 +332,49 @@ mod tests {
     }
 
     /// A column with no bars answers 0 for everything, including the empty candidate.
+    /// The allocation is `BITS * stride`, and the doc block on [`Column::transpose`]
+    /// states the byte figure it implies.
+    ///
+    /// Guards the claim in two directions at once. A change that sized the allocation to
+    /// the LIVE position count would shrink it to 238 strides and fail here, which is the
+    /// trade the doc block argues against; and a change to `WORDS` or to `BARS_PER_WORD`
+    /// moves the figure, so the number in the prose cannot rot while the code moves. The
+    /// arithmetic is written out rather than recomputed from the same expression the code
+    /// uses, because a test that repeats the implementation asserts nothing.
+    #[test]
+    fn the_allocation_is_bits_by_stride_and_not_the_live_count() {
+        let bars = 1_222_791_usize;
+        let stride = 19_107_usize;
+        assert_eq!(
+            bars.div_ceil(64),
+            stride,
+            "ceil(1222791 / 64) is 19107; if this moved, BARS_PER_WORD moved"
+        );
+        // COMPARED AS `u32`, so no conversion is needed and no `expect` appears. The
+        // test module here carries none of the panic exemptions `lib.rs`'s does, and
+        // that is deliberate -- see the note above `mod tests`.
+        assert_eq!(ConditionMask::BITS, 384, "the mask is 6 words of 64 bits");
+        let words = 384_usize * stride;
+        assert_eq!(words, 7_337_088, "384 x 19107");
+        assert_eq!(
+            words * 8,
+            58_696_704,
+            "58.7 MB, which is the figure `transpose`'s doc block states"
+        );
+        // AND THE LIVE COUNT WOULD BE SMALLER, which is the trade being refused.
+        let live = 238_usize;
+        assert!(
+            live * stride * 8 < words * 8,
+            "sizing to the live positions would be smaller -- that is why the doc \
+             block has to say why it is not done"
+        );
+        assert_eq!(
+            words * 8 - live * stride * 8,
+            22_316_976,
+            "22.3 MB is the price of addressing a bitmap as position * stride"
+        );
+    }
+
     #[test]
     fn an_empty_column_supports_nothing() {
         let vertical = Column::transpose(&[]);
