@@ -71,34 +71,80 @@ jobs:
       - name: Gate 1e — the engine builds with no front-end toolchain
         run: |
           set -euo pipefail
-          # D-0053 lets `web/` hold anything. The rule that replaces the
-          # extension check is this one: the ENGINE must not depend on the front
-          # end's toolchain. A clone with no Node, that has never run a `web/`
-          # build, must still produce a working binary.
+          # WHAT §2 ACTUALLY REQUIRES, quoted, because the previous version of this
+          # gate tested something else and that is why it enforced nothing:
           #
-          # Checked by building with web/ moved aside. If any crate reaches into
-          # it at build time -- an include_str! of generated output, a build.rs
-          # shelling out to a bundler -- this fails here rather than on a
-          # contributor's machine.
-          if [ ! -d web ]; then
-            echo "OK — no web/ tree yet, nothing to detach."
-            exit 0
-          fi
-          mv web .web-detached
-          # `api` embeds assets from web/, so a missing tree is expected to fail
-          # the EMBED. What must not happen is a crate invoking a toolchain.
-          # Restore first, then assert on the failure's shape.
+          #   "no crate may depend on the front end's toolchain to build, test or
+          #    run. `cargo build`, `cargo test` and `cargo clippy` must pass on a
+          #    machine with no Node, no package manager and no `web/` build ever
+          #    run."
+          #
+          # The operative words are "no `web/` BUILD ever run". `web/build/` is
+          # TRACKED, so a fresh clone already has the bundle and `crates/api` may
+          # embed it without any bundler existing. §2 does not require the build to
+          # survive `web/` being absent -- it requires it to survive the TOOLCHAIN
+          # being absent.
+          #
+          # The old gate moved the whole `web/` tree aside, which breaks `api`'s
+          # embed by construction. Its own comment called that failure "expected",
+          # and so it captured the output with `set +e` and NEVER READ THE EXIT
+          # STATUS -- it only grepped for seven toolchain words. An audit proved the
+          # consequence with a stub cargo exiting 101: the gate exited 0. So §2's
+          # central build promise was enforced by nothing at all.
+          #
+          # This version shadows the toolchain instead. Every binary a crate could
+          # reach for is replaced by a stub that logs and fails, then the workspace
+          # is built with that stub directory first on PATH. Two things must hold,
+          # and both are now checked:
+          #
+          #   1. the build SUCCEEDS -- the exit status is read
+          #   2. no stub was ever invoked
+          #
+          # A crate that shells out to a bundler trips clause 2 AND, because the
+          # stub exits 127, clause 1 as well.
+          stub="$(mktemp -d)"
+          # Each stub APPENDS TO A FILE as well as writing to stderr, and the file is
+          # what the check reads. Cargo suppresses a build script's stderr unless the
+          # script itself fails, so a `build.rs` doing
+          # `let _ = Command::new("vite").status();` invoked the stub and left no
+          # trace in the captured output at all -- the first version of this clause
+          # missed exactly that, verified by injecting it. A file on disk is outside
+          # cargo's output capture.
+          invoked="$stub/.invoked"
+          for tool in node npm npx yarn pnpm bun deno vite webpack esbuild rollup tsc; do
+            printf '#!/bin/sh\nprintf "%%s\\n" "%s" >> "%s"\necho "GATE-1E-INVOKED: %s" >&2\nexit 127\n' \
+              "$tool" "$invoked" "$tool" > "$stub/$tool"
+            chmod +x "$stub/$tool"
+          done
+          echo "shadowed: $(ls "$stub" | tr '\n' ' ')"
+
           set +e
-          out="$(cargo build --workspace --locked 2>&1)"
+          out="$(PATH="$stub:$PATH" cargo build --workspace --locked --all-targets 2>&1)"
+          status=$?
           set -e
-          mv .web-detached web
-          if printf '%s' "$out" | grep -qiE 'npm|yarn|pnpm|node_modules|vite|webpack|esbuild'; then
-            echo "FORBIDDEN: a crate reached for a front-end toolchain during build."
-            printf '%s\n' "$out" | grep -iE 'npm|yarn|pnpm|node_modules|vite|webpack|esbuild'
+
+          if [ -s "$invoked" ]; then
+            echo "FORBIDDEN: a crate invoked a front-end toolchain during the build:"
+            sort -u "$invoked" | sed 's/^/  /'
             exit 1
           fi
-          echo "OK — no crate invoked a front-end toolchain."
-
+          # The check the old gate discarded. A failing build with no toolchain on
+          # PATH is exactly what §2 forbids, whatever the reason.
+          if [ "$status" -ne 0 ]; then
+            echo "GATE 1E FAILED: cargo build exited $status with the front-end"
+            echo "toolchain shadowed. §2 requires it to pass on a machine with no"
+            echo "Node and no package manager. The tail of the build:"
+            printf '%s\n' "$out" | tail -40
+            exit 1
+          fi
+          # And the words, kept as a second signal: a crate could reach a toolchain
+          # by an absolute path the stub directory does not shadow.
+          if printf '%s' "$out" | grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json'; then
+            echo "FORBIDDEN: the build read front-end package metadata."
+            printf '%s\n' "$out" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
+            exit 1
+          fi
+          echo "OK — the workspace builds with node, npm, yarn, pnpm and five bundlers shadowed."
       - name: Gate 1b — .json and .yml are confined
         run: |
           set -euo pipefail
