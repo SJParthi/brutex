@@ -149,6 +149,72 @@ fn two_sided_ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
 }
 
 /// Refuses loudly rather than unwrapping into a panic message nobody reads.
+/// The machine's own floor: [`cost_ps`] on the cheapest operation there is,
+/// timed by this same loop in this same build.
+///
+/// # Why this exists
+///
+/// Every ratio in this file compares one INPUT to another input of the same
+/// operation. An independent audit measured what that structurally cannot see: a
+/// mask operation made 174x slower passed its crate's ratio rows at 0.98x-1.00x,
+/// because a cost that slows BOTH legs cancels in a quotient. The same blindness
+/// applies here, and worse -- `step` is the per-bar cost of the entire condition
+/// vocabulary, so a regression in ANY family slows every leg of every ratio
+/// equally and every row still reports ok.
+///
+/// A picosecond ceiling would catch it and would also measure the runner. This is
+/// the third option: a denominator that cannot move when the numerator does.
+/// `wrapping_add` on a black-boxed `u64` is one instruction and is not part of
+/// `Evaluator`, so nothing that changes a condition family can change it.
+fn floor_ps() -> u128 {
+    cost_ps(20_000, || black_box(1u64).wrapping_add(black_box(1)))
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on the data. A breached BUDGET says the
+/// cost rose for every input at once, which no ratio in this file can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps * 1_000 / floor;
+    let ok = floors <= allowed * 1_000;
+    println!(
+        "  {label:<58} {:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        at_ps,
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-I-05 — one bar's whole evaluation costs a bounded multiple of the floor.
+fn a_candle_stays_within_its_budget(floor: u128) -> bool {
+    /// Floors allowed for one `step`.
+    ///
+    /// Measured, arm64 laptop, release, `lto = "fat"`, floor 556 ps: **682.856
+    /// floors** for one bar through every family. Two thousand leaves 2.9x for a
+    /// different microarchitecture and still refuses a 3x across-the-board
+    /// regression -- the kind every ratio in this file divides out, because one
+    /// bar's evaluation is the numerator AND the denominator of all of them.
+    ///
+    /// The number is large because the work is: one `step` folds every condition
+    /// family in the vocabulary. It is a budget, not a target.
+    const ALLOWED: u128 = 2_000;
+
+    let mut state = warmed(1_000);
+    let mut m = 1_000_i64;
+    let at = cost_ps(20_000, || {
+        m += 1;
+        let c = wandering(m);
+        black_box(state.step(black_box(&c)))
+    });
+    budget("C-I-05 step: one bar, every family", floor, at, ALLOWED)
+}
+
 fn refuse(what: &str) -> ! {
     println!("BENCH SETUP FAILED — {what}");
     std::process::exit(1)
@@ -470,7 +536,10 @@ fn main() {
         core::mem::size_of::<Evaluator>(),
         Evaluator::positions().len()
     );
+    let floor = floor_ps();
+    println!("  the machine's floor is {floor} ps — one black-boxed wrapping_add");
     let mut ok = true;
+    ok &= a_candle_stays_within_its_budget(floor);
     ok &= a_candle_costs_the_same_however_many_came_before();
     ok &= a_candle_costs_the_same_whatever_it_contains();
     ok &= the_integer_square_root_is_bounded_and_flat_per_iteration();

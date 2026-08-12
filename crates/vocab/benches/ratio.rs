@@ -103,6 +103,56 @@ fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
     ok
 }
 
+/// The machine's own floor: what [`cost_ps`] reports for the cheapest operation
+/// there is, timed by this same loop, in this same build.
+///
+/// # Why this exists
+///
+/// Every other measurement in this file is a ratio between two INPUTS to the
+/// same operation, and an independent audit measured exactly what that cannot
+/// see. A `hits` rewritten as a per-bit probe scan over all [`ConditionMask::BITS`]
+/// positions -- 174x slower than the shipped one -- passed C-V-01, C-V-02 and
+/// C-V-03 at 0.985x, 1.004x and 0.984x. A cost that slows BOTH legs cancels in a
+/// quotient. That is not a loose ceiling or a noisy runner; it is structural, and
+/// it holds on any CPU at any ceiling.
+///
+/// An absolute picosecond ceiling would catch it, and would also measure the
+/// runner -- which is the reason this file has ratios at all. This is the third
+/// option: a denominator that cannot move when the numerator does.
+/// `wrapping_add` on a black-boxed `u64` is one instruction, it is not part of
+/// `ConditionMask`, and no change to a mask operation can change it. So the
+/// quotient scales with the runner and does NOT scale with a regression.
+///
+/// The floor is not zero-cost and is not meant to be: it carries this harness's
+/// own loop and `black_box` overhead, which every numerator carries too. That
+/// makes it the right unit -- "how many of the cheapest thing does this cost".
+fn floor_ps() -> u128 {
+    cost_ps(200_000, || black_box(1u64).wrapping_add(black_box(1)))
+}
+
+/// Prints one budget and returns whether it held.
+///
+/// Separate from [`ratio`] because the failure means something different. A
+/// breached RATIO says the cost depends on the data. A breached BUDGET says the
+/// operation got slower for every input at once, which no ratio in this file can
+/// report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps * 1_000 / floor;
+    let ok = floors <= allowed * 1_000;
+    println!(
+        "  {label:<58} {:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        at_ps,
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
 /// A bar carrying every live bit. The most permissive bar there is: every
 /// candidate drawn from `LIVE` hits it.
 fn every_live_bit() -> ConditionMask {
@@ -238,6 +288,69 @@ fn the_set_operations_do_not_grow_with_the_bits_set() -> bool {
     ok
 }
 
+/// C-V-05 — every mask operation costs a bounded multiple of the floor.
+///
+/// The measurement C-V-01 through C-V-04 structurally cannot take: they compare
+/// an operation to ITSELF on a different input, so a uniform slowdown divides
+/// out. This compares each operation to something that cannot slow down with it.
+///
+/// The budget is the measured multiple with headroom for a different
+/// microarchitecture, not a round number picked to pass. Measured on an arm64
+/// laptop, release, `lto = "fat"`, floor 554 ps: `get` 1.445 floors, `hits`
+/// 1.485, `popcount` 1.866, `intersect` 2.007, `union` 2.009, `with_bit` 3.375.
+/// Twelve leaves 3.5x over the widest of those and still refuses the 174x
+/// regression above by a factor of twenty.
+///
+/// What this does NOT catch, stated rather than implied: a regression smaller
+/// than the headroom. `hits` could become eight times slower and stay inside the
+/// budget. The structural half is `vocab::mask::hits_does_the_same_work_for_every_input`,
+/// which pins the function line for line, so the shapes that cause a large
+/// slowdown -- a loop, a branch, a per-bit scan -- fail the suite before they
+/// reach a clock. Recorded in `docs/06-limits.md`.
+fn no_operation_costs_more_than_its_budget(floor: u128) -> bool {
+    /// Floors allowed per operation. One number, because every operation here is
+    /// the same shape -- a fixed number of word operations and no loop over set
+    /// bits -- so a per-operation budget would be six copies of one fact.
+    const ALLOWED: u128 = 12;
+
+    let bar = every_live_bit();
+    let cand = one_bit_in_word(0);
+    let full = all_live_bits();
+
+    let mut ok = true;
+    for (label, at) in [
+        (
+            "C-V-05 hits",
+            cost_ps(200_000, || black_box(&bar).hits(black_box(&cand))),
+        ),
+        (
+            "C-V-05 popcount",
+            cost_ps(200_000, || black_box(&full).popcount()),
+        ),
+        (
+            "C-V-05 union",
+            cost_ps(200_000, || black_box(&full).union(black_box(&cand))),
+        ),
+        (
+            "C-V-05 intersect",
+            cost_ps(200_000, || black_box(&full).intersect(black_box(&cand))),
+        ),
+        (
+            "C-V-05 with_bit",
+            cost_ps(200_000, || {
+                black_box(&ConditionMask::ZERO).with_bit(black_box(279))
+            }),
+        ),
+        (
+            "C-V-05 get",
+            cost_ps(200_000, || black_box(&full).get(black_box(279))),
+        ),
+    ] {
+        ok &= budget(label, floor, at, ALLOWED);
+    }
+    ok
+}
+
 fn main() {
     println!("gate 8 — crates/vocab, ceiling {CEILING_PERMILLE} permille");
     println!(
@@ -246,7 +359,10 @@ fn main() {
         NEXT_FREE,
         LIVE.popcount()
     );
+    let floor = floor_ps();
+    println!("  the machine's floor is {floor} ps — one black-boxed wrapping_add");
     let mut ok = true;
+    ok &= no_operation_costs_more_than_its_budget(floor);
     ok &= a_hit_and_a_miss_cost_the_same();
     ok &= a_miss_costs_the_same_in_every_word();
     ok &= the_cost_does_not_grow_with_what_the_candidate_requires();

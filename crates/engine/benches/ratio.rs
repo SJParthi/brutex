@@ -123,6 +123,90 @@ fn ratio(label: &str, base_ps: u128, at_ps: u128) -> bool {
 }
 
 /// Refuses loudly rather than unwrapping into a panic message nobody reads.
+/// The per-bar floor: the cheapest possible walk over the same column.
+///
+/// # Why this exists
+///
+/// Every ratio in this file divides one per-bar cost by another per-bar cost of
+/// the SAME operation -- column length against column length, depth against
+/// depth, hit against miss. An independent audit measured what that cannot see: a
+/// mask operation 174x slower passed its crate's ratio rows at 0.98x-1.00x,
+/// because a uniform cost cancels in a quotient. `support` calls `hits` once per
+/// bar, so exactly that regression would leave every row here reporting ok.
+///
+/// The denominator has to be something that cannot move when `support` does. This
+/// walks the same slice, touching each bar, doing one `wrapping_add` instead of
+/// one `hits`. It carries the same loop, the same bounds checks and the same
+/// memory traffic, so the quotient is "how many of the cheapest per-bar things
+/// does a supported bar cost" -- and it scales with the runner without scaling
+/// with a regression.
+fn floor_ps_per_bar(bars: &[ConditionMask]) -> u128 {
+    let n = u128::try_from(bars.len()).unwrap_or(1).max(1);
+    let total = once_ps(|| {
+        let mut acc = 0u64;
+        for b in black_box(bars) {
+            acc = acc.wrapping_add(black_box(b.words()[0]));
+        }
+        black_box(acc)
+    });
+    total / n
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on the data. A breached BUDGET says the
+/// cost rose for every input at once, which no ratio in this file can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps * 1_000 / floor;
+    let ok = floors <= allowed * 1_000;
+    println!(
+        "  {label:<58} {:>8} ps/bar = {}.{:03} floors, budget {allowed}   {}",
+        at_ps,
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-E-05 — one supported bar costs a bounded multiple of the per-bar floor.
+fn support_stays_within_its_budget() -> bool {
+    /// Floors allowed per bar.
+    ///
+    /// Measured, arm64 laptop, release, `lto = "fat"`: **1.287 floors** at a floor
+    /// of 1202 ps/bar, and **2.031** at a floor of 417 ps/bar on the next run --
+    /// k=1 and k=8 agreeing to three digits within each run. That spread is
+    /// reported rather than averaged: `once_ps` takes 8 trials, both legs walk 100
+    /// 000 masks, and the floor is the noisier of the two because it does less work
+    /// per unit of memory traffic. The budget is sized on the WORST observed
+    /// multiple, not the mean. The multiple is near one because
+    /// both legs walk the same 100_000-mask slice and are memory-bound rather than
+    /// arithmetic-bound -- which is the point: the floor carries the same traffic
+    /// `support` does, so what remains in the quotient is the `hits` call itself.
+    ///
+    /// Six leaves 4.6x for a different microarchitecture and refuses the 174x
+    /// regression that every ratio in this file reports as ok by a factor of 37.
+    const ALLOWED: u128 = 6;
+
+    let bars = column(100_000);
+    let floor = floor_ps_per_bar(&bars);
+    println!("  the per-bar floor is {floor} ps — one black-boxed wrapping_add per bar");
+    let mut ok = true;
+    for k in [1usize, DRAWN_FROM.len()] {
+        ok &= budget(
+            &format!("C-E-05 support at k={k}"),
+            floor,
+            support_ps_per_bar(&bars, &candidate(k)),
+            ALLOWED,
+        );
+    }
+    ok
+}
+
 fn refuse(what: &str) -> ! {
     println!("BENCH SETUP FAILED — {what}");
     std::process::exit(1)
@@ -319,6 +403,7 @@ fn main() {
         ConditionMask::BITS
     );
     let mut ok = true;
+    ok &= support_stays_within_its_budget();
     ok &= support_costs_the_same_per_bar_at_every_column_length();
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
