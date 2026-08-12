@@ -565,6 +565,11 @@ impl Join {
     /// lists this build carries) and one probe per constituent per vendor.
     /// Nothing here is on a request path: `Read::new` calls it where
     /// `Catalog::build` is called, which is once per process — D-0039.
+    ///
+    /// The constant-time part is proved by
+    /// `api::constituents::the_two_lookups_do_not_grow_with_the_universe`, which
+    /// holds both lookups to a ratio ceiling across two universe sizes rather
+    /// than to a duration.
     #[must_use]
     pub fn build(merged: &Merged) -> Self {
         let by_isin = index_by_isin(merged);

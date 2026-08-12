@@ -7205,6 +7205,14 @@ mod tests {
     /// assertion on a shared machine is a flake. The iterator counts what it
     /// yields, so a future edit that puts the scan back inside the per-symbol
     /// path fails here by COST.
+    ///
+    /// The proof of the claim above is this test itself,
+    /// `api::server::instrument_bar_counts_are_one_pass_over_the_census`. Named
+    /// rather than left implicit because gate 12 reads a cost claim in any doc
+    /// block, including a test's own, and cannot tell that the assertion is six
+    /// lines below the sentence. The two DURATIONS quoted -- 15.5 ms and 819.2 ms
+    /// -- are measurements and are not asserted anywhere, which is what the
+    /// paragraph above says and why the pass count is the thing pinned.
     #[test]
     fn instrument_bar_counts_are_one_pass_over_the_census() {
         let entries: Vec<(census::Series, store::path::YearMonth)> = Vec::new();

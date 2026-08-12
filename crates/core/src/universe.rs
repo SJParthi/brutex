@@ -4266,6 +4266,12 @@ impl<const N: usize> MemberIndex<N> {
     /// is what makes a positionally aligned array beside the list readable in
     /// constant time: `crate::universe::nse_isin` is one call to this plus one
     /// index.
+    ///
+    /// The bound is proved by
+    /// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`,
+    /// which asserts the worst probe is `<= 8` for all five tiers; it measures 6
+    /// on 750 members and 7 on 213. `docs/06-limits.md` carries the same figures
+    /// and D-0065 is where the correction from `binary_search` is signed.
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
