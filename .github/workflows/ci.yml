@@ -3434,6 +3434,11 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
+        # Full history, for the same reason the `build` job needs it: this job runs
+        # `cargo llvm-cov ... --workspace`, which runs the tests, and two in
+        # `crates/core/tests/findings.rs` resolve the sha each FIXED ledger row names.
+        # At the default depth of one they refuse commits that exist.
+        with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
         with: { components: llvm-tools-preview }
       - uses: Swatinem/rust-cache@v2
