@@ -1076,14 +1076,64 @@ jobs:
           # this check from being satisfied by the two lines you are reading:
           # they begin `if grep` and match neither anchor.
           wf=.github/workflows/ci.yml
-          if grep -qE '^[[:space:]]+cargo deny check[[:space:]]*$' "$wf"; then
-            echo "  present  gate 3 invokes cargo deny check"
+          # A line's PRESENCE is not a line's EXECUTION, and this is the repair.
+          # An audit confirmed by running it that a step carrying `if: false`
+          # satisfies every grep below while the command never runs -- so all four
+          # of these checks were decorative. Each pattern is now tested against the
+          # enclosing STEP: the line must be there AND its step must be REACHABLE.
+          #
+          # `[ \t]` and not `[[:space:]]`, because the latter matches a newline and
+          # would let a pattern span lines in the buffered step text.
+          #
+          # A job-level `if:` would disable this gate too, and a skipped job is
+          # visible in the checks list rather than reported as a pass, so it is out
+          # of scope here deliberately.
+          runs_unconditionally () {
+            awk -v pat="$1" '
+              function finish() {
+                if (buf ~ pat) {
+                  found = 1
+                  # Only an `if:` THAT CAN BE FALSE is refused, and getting here
+                  # took two wrong rules. "No `if:` at all" refused the real
+                  # workflow, because gate 3 legitimately carries
+                  # `if: steps.probe.outputs.has_crates ==`. "No `if:` without a
+                  # context reference" also refused it, because gate 8 carries
+                  # `if: always()` -- constant TRUE, the opposite of a bypass.
+                  #
+                  # So the rule names the always-skip forms instead. `false` in any
+                  # quoting, `0`, and `failure()`/`cancelled()` -- which run the step
+                  # only when something has already gone wrong, and so skip it on
+                  # every green run. Everything else, constant or not, is allowed.
+                  n = split(buf, L, "\n")
+                  for (i = 1; i <= n; i++) {
+                    if (L[i] !~ /^[ \t]+if:[ \t]/) continue
+                    e = L[i]
+                    sub(/^[ \t]+if:[ \t]*/, "", e)
+                    gsub(/\$\{\{|\}\}|[ \t]/, "", e)
+                    e = tolower(e)
+                    # The character class permits the quoting a YAML scalar may
+                    # carry, without needing a quote literal inside this program.
+                    if (e ~ /^[^a-z0-9]*(false|0|failure\(\)|cancelled\(\))[^a-z0-9]*$/) {
+                      dead = 1
+                    }
+                  }
+                }
+                buf = ""
+              }
+              /^      - / { finish() }
+              { buf = buf "\n" $0 }
+              END { finish(); exit (found && !dead) ? 0 : 1 }
+            ' "$wf"
+          }
+          if runs_unconditionally '(^|\n)[ \t]+cargo deny check[ \t]*(\n|$)'; then
+            echo "  present  gate 3 invokes cargo deny check, unconditionally"
           else
-            echo "  REFUSED  nothing in this workflow invokes cargo deny check"
+            echo "  REFUSED  nothing in this workflow RUNS cargo deny check. Either"
+            echo "           the line is gone or its step carries an \`if:\`."
             bad=1
           fi
-          if grep -qE '^[[:space:]]+cargo install cargo-deny --version [0-9]' "$wf"; then
-            echo "  present  cargo-deny is installed at a pinned version"
+          if runs_unconditionally '(^|\n)[ \t]+cargo install cargo-deny --version [0-9]'; then
+            echo "  present  cargo-deny is installed at a pinned version, unconditionally"
           else
             echo "  REFUSED  cargo-deny is installed unpinned — a security verdict"
             echo "           that can change with no commit is a verdict nobody"
@@ -1103,7 +1153,6 @@ jobs:
             exit 1
           fi
           echo "OK — no foreign runtime is declared, resolved, or built for."
-
       - name: Gate 15 — the forbidden word appears in no tracked file
         run: |
           set -euo pipefail
@@ -3102,14 +3151,63 @@ jobs:
           # those begin with `if`, so neither anchor matches.
           echo
           echo "layer 5: gate 8 still runs what this gate counted"
-          if grep -qE '^[[:space:]]+cargo bench --workspace --locked[[:space:]]*$' "$wf"; then
+          # A line's PRESENCE is not a line's EXECUTION, and this is the repair.
+          # An audit confirmed by running it that a step carrying `if: false`
+          # satisfies every grep below while the command never runs -- so all four
+          # of these checks were decorative. Each pattern is now tested against the
+          # enclosing STEP: the line must be there AND its step must be REACHABLE.
+          #
+          # `[ \t]` and not `[[:space:]]`, because the latter matches a newline and
+          # would let a pattern span lines in the buffered step text.
+          #
+          # A job-level `if:` would disable this gate too, and a skipped job is
+          # visible in the checks list rather than reported as a pass, so it is out
+          # of scope here deliberately.
+          runs_unconditionally () {
+            awk -v pat="$1" '
+              function finish() {
+                if (buf ~ pat) {
+                  found = 1
+                  # Only an `if:` THAT CAN BE FALSE is refused, and getting here
+                  # took two wrong rules. "No `if:` at all" refused the real
+                  # workflow, because gate 3 legitimately carries
+                  # `if: steps.probe.outputs.has_crates ==`. "No `if:` without a
+                  # context reference" also refused it, because gate 8 carries
+                  # `if: always()` -- constant TRUE, the opposite of a bypass.
+                  #
+                  # So the rule names the always-skip forms instead. `false` in any
+                  # quoting, `0`, and `failure()`/`cancelled()` -- which run the step
+                  # only when something has already gone wrong, and so skip it on
+                  # every green run. Everything else, constant or not, is allowed.
+                  n = split(buf, L, "\n")
+                  for (i = 1; i <= n; i++) {
+                    if (L[i] !~ /^[ \t]+if:[ \t]/) continue
+                    e = L[i]
+                    sub(/^[ \t]+if:[ \t]*/, "", e)
+                    gsub(/\$\{\{|\}\}|[ \t]/, "", e)
+                    e = tolower(e)
+                    # The character class permits the quoting a YAML scalar may
+                    # carry, without needing a quote literal inside this program.
+                    if (e ~ /^[^a-z0-9]*(false|0|failure\(\)|cancelled\(\))[^a-z0-9]*$/) {
+                      dead = 1
+                    }
+                  }
+                }
+                buf = ""
+              }
+              /^      - / { finish() }
+              { buf = buf "\n" $0 }
+              END { finish(); exit (found && !dead) ? 0 : 1 }
+            ' "$wf"
+          }
+          if runs_unconditionally '(^|\n)[ \t]+cargo bench --workspace --locked[ \t]*(\n|$)'; then
             echo "  present  gate 8 invokes cargo bench --workspace --locked"
           else
             echo "  REFUSED  nothing in this workflow runs the benches. Every"
             echo "           ceiling above is then an assertion no machine makes."
             bad=1
           fi
-          if grep -qE '^[[:space:]]*echo "GATE 8 MEASURED NOTHING' "$wf"; then
+          if runs_unconditionally '(^|\n)[ \t]*echo "GATE 8 MEASURED NOTHING'; then
             echo "  present  gate 8 still refuses an empty bench set"
           else
             echo "  REFUSED  gate 8 no longer fails when no bench exists. A skip"
