@@ -529,6 +529,31 @@ jobs:
           # Both name a scratch path this repository chose, not a segment any
           # vendor or account uses.
           late_scaffold='census-incremental fits skipped daily unstorable'
+          # `crates/pull/src/folder.rs` and its tests, added by another line of work. Read in
+          # context before declaring, one at a time, because declaring a literal is a claim
+          # that it is not a parameter-path segment:
+          #
+          #   vendor-data     `pub const ROOT_DIR` -- a LOCAL filesystem directory the folder
+          #                   scanner walks. Not a Parameter Store segment; nothing joins it
+          #                   into a `/<org>/<env>/<vendor>/<field>` path.
+          #   bent            scratch directory names in `tests/folder.rs`, each naming the
+          #   bought-nothing  case it sets up -- a folder whose files are bent, one that
+          #   wrong-kind      bought nothing, one holding the wrong kind, one never created,
+          #   never-created   one already sealed.
+          #   sealed
+          #   earliest        ordinary field and label words in the same module.
+          #   latest
+          #   files
+          #   pulled
+          #   read
+          #   verb
+          #
+          # Declared rather than left refusing, and the distinction from gate 11's
+          # `crates/pull/src/totp.rs` entry is the point: THAT one is a real §4 violation left
+          # visible for its owner, because blessing it would hide a defect. These are not
+          # defects -- a scratch directory called `sealed` is not a credential path, and saying
+          # so is what this gate asks for. Their owner should still confirm the list.
+          folder_scaffold='vendor-data bent bought-nothing wrong-kind never-created sealed earliest latest files pulled read verb'
 
           # ---- group 20: THE MANIFEST FORMAT'S OWN FIELD NAMES, and nothing
           # else. `pull::manifest::Layout::declare` refuses a degenerate format
@@ -639,7 +664,7 @@ jobs:
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
-          ${totp_vector} ${late_scaffold} ${layout_field}
+          ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
           ${telemetry_field} ${year_month}"
           bad=0
           while IFS= read -r word; do
@@ -662,7 +687,6 @@ jobs:
             exit 1
           fi
           echo "OK — every segment-shaped literal under crates/pull is declared."
-
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
