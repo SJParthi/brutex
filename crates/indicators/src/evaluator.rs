@@ -431,7 +431,7 @@ impl Evaluator {
         mask = mask.union(&self.orb.step(bar, self.widths.fib)?);
         mask = mask.union(&self.session.step(bar, self.previous, self.widths.fib)?);
         mask = mask.union(&self.prev5.bits(bar.close, self.widths.fib));
-        mask = mask.union(&self.gap.step(bar, self.widths.fib)?);
+        mask = mask.union(&self.gap.step(bar, self.widths.fib, &self.calendar)?);
         mask = mask.union(&self.trend.step(bar, self.widths.fib)?);
         if let Some(levels) = self.yesterday.as_ref() {
             mask = mask.union(&crate::daily::bits(levels, bar.close, self.widths.pivot));

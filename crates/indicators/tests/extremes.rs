@@ -42,7 +42,7 @@
 )]
 
 use indicators::daily::DailyLevels;
-use indicators::evaluator::{Evaluator, Widths};
+use indicators::evaluator::{Calendar, Evaluator, Widths};
 use indicators::gap::GapFib;
 use indicators::orb::Orb;
 use indicators::pattern::{Patterns, Thresholds};
@@ -388,7 +388,7 @@ fn every_module_refuses_exactly_what_the_evaluator_refuses() {
 
         let mut gap = GapFib::new();
         assert_eq!(
-            gap.step(&candle, tol()).is_err(),
+            gap.step(&candle, tol(), &Calendar::charter()).is_err(),
             refused,
             "{name}: GapFib disagreed"
         );

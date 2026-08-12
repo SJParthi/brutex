@@ -61,6 +61,7 @@
 //! first-3 low. A session satisfying neither is not a gap.
 
 use crate::Candle;
+use crate::evaluator::Calendar;
 use vocab::{ConditionMask, Tolerance};
 
 /// The first vocabulary position of the gap-Fibonacci group.
@@ -234,12 +235,23 @@ impl GapFib {
         &mut self,
         bar: &Candle,
         tolerance: Tolerance,
+        calendar: &Calendar,
     ) -> Result<ConditionMask, crate::Corrupt> {
         bar.check()?;
 
         let today = crate::ist_day(bar.ts_micros);
         if today != self.day {
-            self.close_the_session();
+            // The session that just ENDED is `self.day`, not `today`. That is the
+            // same slip `Evaluator::stepped` names at its own rollover, and asking
+            // about the wrong one inverts the fix here exactly as it does there: the
+            // Muhurat edge would be handed forward and the regular day after it
+            // discarded.
+            //
+            // Before the first bar `self.day` is `i64::MIN`, which appears in no
+            // calendar, so the verdict is "regular" -- and the fold below then finds
+            // an empty tail and promotes nothing, so the answer does not matter.
+            let ending_was_regular = !calendar.is_non_regular(self.day);
+            self.close_the_session(ending_was_regular);
             self.day = today;
         }
 
@@ -249,7 +261,22 @@ impl GapFib {
     }
 
     /// Hand the finished session's last 3-minute candle forward and reset.
-    fn close_the_session(&mut self) {
+    ///
+    /// # Why this takes a verdict
+    ///
+    /// `docs/00-charter.md` states the Muhurat rule in three clauses, and this is
+    /// the third: the Muhurat day's own OHLC never enters the previous-day anchor,
+    /// the multi-day rolling history, **or the previous-session edge**. D-0110
+    /// closed the first two in `Evaluator::close_the_books` and left this one open,
+    /// because this module kept its own day cursor and consulted no calendar at
+    /// all. A Muhurat session's last three minutes became the next day's gap
+    /// anchor, which inverted the leg's direction on the sessions after it.
+    ///
+    /// `ending_was_regular` decides only whether the edge is HANDED FORWARD. Every
+    /// reset below is unconditional, and deliberately: a Muhurat session is still a
+    /// session, and leaving its tail, its bar count or its leg in place would carry
+    /// it into the next day by a different route than the one this parameter shuts.
+    fn close_the_session(&mut self, ending_was_regular: bool) {
         // Fold whatever the tail holds. Fewer than three entries is a short session,
         // and the source's "last 3-minute candle" is then whatever traded — refusing
         // a half-day outright would drop a real gap.
@@ -261,7 +288,7 @@ impl GapFib {
             .reduce(|(ah, al), (bh, bl)| {
                 (if bh > ah { bh } else { ah }, if bl < al { bl } else { al })
             });
-        if folded.is_some() {
+        if ending_was_regular && folded.is_some() {
             self.yesterday = folded;
         }
         self.tail = [None; CANDLE_MINUTES];
@@ -431,7 +458,8 @@ mod tests {
     /// this file calls sane while `Candle::check` refuses it names itself once rather
     /// than at every site.
     fn ok(g: &mut GapFib, bar: &Candle) -> ConditionMask {
-        g.step(bar, tol()).expect("this fixture bar is sane")
+        g.step(bar, tol(), &Calendar::charter())
+            .expect("this fixture bar is sane")
     }
 
     /// The two sheets are one formula. Checked against both branches written out
@@ -651,8 +679,97 @@ mod tests {
             volume: 0,
             open_interest: i64::MIN,
         };
-        assert_eq!(g.step(&inverted, tol()), Err(crate::Corrupt::HighBelowLow));
+        assert_eq!(
+            g.step(&inverted, tol(), &Calendar::charter()),
+            Err(crate::Corrupt::HighBelowLow)
+        );
         assert_eq!(g.leg(), None);
+    }
+
+    /// The charter's THIRD Muhurat clause, which D-0110 left open.
+    ///
+    /// `docs/00-charter.md`: the Muhurat day's own OHLC never enters the previous-day
+    /// anchor, the multi-day rolling history, "or the previous-session edge". This
+    /// module IS the previous-session edge, and it consulted no calendar at all.
+    ///
+    /// Two `GapFib`s, the same bars, and the only difference between them is which
+    /// calendar they were handed. That second half is what gives this test teeth: a
+    /// "fix" that simply stopped promoting anything would satisfy the first
+    /// assertion and fail the second.
+    #[test]
+    fn a_muhurat_sessions_edge_never_becomes_the_next_days_anchor() {
+        /// 2025-10-21, the afternoon Muhurat session -- the one the pull's
+        /// 09:15-15:30 window admits, and the fifth entry of
+        /// `CHARTER_NON_REGULAR_IST_DAYS`.
+        const MUHURAT: i64 = 20_382;
+
+        let regular = [
+            at(MUHURAT - 1, 0, 2_501_000, 2_499_000, 2_500_000),
+            at(MUHURAT - 1, 1, 2_502_000, 2_498_000, 2_500_000),
+            at(MUHURAT - 1, 2, 2_503_000, 2_497_000, 2_500_000),
+        ];
+        let muhurat = [
+            at(MUHURAT, 0, 2_900_000, 2_800_000, 2_850_000),
+            at(MUHURAT, 1, 2_901_000, 2_799_000, 2_850_000),
+            at(MUHURAT, 2, 2_902_000, 2_798_000, 2_850_000),
+        ];
+        let after = at(MUHURAT + 1, 0, 2_600_000, 2_590_000, 2_595_000);
+
+        let edge_after = |calendar: &Calendar| {
+            let mut g = GapFib::new();
+            for bar in regular.iter().chain(muhurat.iter()).chain([&after]) {
+                g.step(bar, tol(), calendar)
+                    .expect("every fixture bar here is sane");
+            }
+            g.yesterday
+        };
+
+        assert_eq!(
+            edge_after(&Calendar::charter()),
+            Some((2_503_000, 2_497_000)),
+            "the anchor for the day after a Muhurat session must be the last REGULAR \
+             session's edge"
+        );
+        assert_eq!(
+            edge_after(&Calendar::all_regular()),
+            Some((2_902_000, 2_798_000)),
+            "told every day is regular, the Muhurat edge IS promoted -- so the calendar \
+             is what prevents it, rather than this gate having stopped promoting at all"
+        );
+    }
+
+    /// A one-bar session hands forward its own bar and nothing older.
+    ///
+    /// `close_the_session` clears the tail unconditionally and nothing pinned that: a
+    /// mutation deleting `self.tail = [None; CANDLE_MINUTES];` survived the entire
+    /// suite, because every other fixture gives each session at least
+    /// `CANDLE_MINUTES` bars, which overwrites the whole ring and hides the staleness.
+    /// A single-bar session is the shortest input that can see it.
+    #[test]
+    fn a_one_bar_session_hands_forward_only_its_own_bar() {
+        let mut g = GapFib::new();
+        for m in 0..3 {
+            ok(
+                &mut g,
+                &at(
+                    1,
+                    m,
+                    2_510_000 + m * 1_000,
+                    2_490_000 - m * 1_000,
+                    2_500_000,
+                ),
+            );
+        }
+        // Day 2 trades once. Day 3 opening is what closes it.
+        ok(&mut g, &at(2, 0, 2_600_000, 2_599_000, 2_599_500));
+        ok(&mut g, &at(3, 0, 2_700_000, 2_699_000, 2_699_500));
+
+        assert_eq!(
+            g.yesterday,
+            Some((2_600_000, 2_599_000)),
+            "the anchor is the one-bar session's own edge; day 1's tail must have been \
+             cleared when day 1 closed"
+        );
     }
 
     /// `Default` must be `new`, or a caller writing `GapFib::default()` starts a run in
