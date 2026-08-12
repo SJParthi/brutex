@@ -70,23 +70,30 @@
      and offers no way to change it is a dead end, and the operator's only
      move is the browser's back button.
 
-     `/ingest` now carries the feed as the FIRST control of its picker
-     strip, because on that page the feed is not chrome — it is the first
-     rung of the cascade, and universe, instruments, segments, timeframe
-     and the day window are all literally its answer. Drawing the picker
-     up here as well would be the two-control defect.
+     `/ingest` and `/db` each carry the feed as the FIRST control of their
+     own control strip, because on both pages the feed is not chrome — it
+     is the first rung of the cascade, and everything below it is literally
+     that feed's answer. Drawing the picker up here as well would be the
+     two-control defect, which is what stood on `/db` until the feed rung
+     landed there: a `.scopeline` READOUT in the strip and the only real
+     control in this bar, two rows apart, both naming one value.
+
+     `/db` DRAWS ITS RUNG IN EVERY STATE, not only the one with rows —
+     the failed read, the unchosen feed, the loading store and the empty
+     store all render the same snippet. That is the condition of joining
+     this list: a page whose control disappears with its data would hand
+     back the dead end this comment is about, at exactly the moment the
+     operator needs another feed.
 
      SO THE BAR YIELDS, ROUTE BY ROUTE, RATHER THAN GLOBALLY. Removing it
      outright would leave `/`, `/autopilot` and `/audit` with no way to
-     change the feed at all — none of the three has ever had its own — and
-     `/db` reads the feed everywhere and only offers shortcuts to a feed
-     that HOLDS rows, which is not a picker. A route joins this list on
-     the day it grows a control of its own, and the count stays at one in
-     both directions.
+     change the feed at all — none of the three has ever had its own. A
+     route joins this list on the day it grows a control of its own, and
+     the count stays at one in both directions.
 
-     Prefix-matched with `current()` so `/ingest/anything` is covered by
-     the same entry, for the same reason the nav is. ==================== */
-  const FEED_OWNED = ['/ingest'];
+     Prefix-matched with `current()` so `/ingest/anything` and `/db/anything`
+     are covered by the same entries, for the same reason the nav is. ==== */
+  const FEED_OWNED = ['/ingest', '/db'];
   const feedInBar = $derived(!FEED_OWNED.some(current));
 
   /* ====================================================================

@@ -1917,12 +1917,31 @@
    * Two reasons and they are opposites — an unread store is a wait, a store
    * with no contract in it is a fact about the pull — so one greyed control
    * spells whichever it is rather than going dim and silent.
+   *
+   * NEITHER REASON IS "EXPIRED CONTRACTS ARE FILTERED OUT", AND THE CONTROL
+   * DOES NOT FILTER THEM. `expiriesAll` is folded from `deco`, which is
+   * `/store.json`'s own rows before any membership join, and `expiryOf` is a
+   * suffix test on the name with no comparison to today anywhere in it — so an
+   * expired contract that is ON DISK is listed, counted and selectable, and the
+   * default universe is `''`, no join at all, which is the one setting that
+   * also reaches a stored instrument this feed's master no longer lists.
+   * Nothing here is live-only.
+   *
+   * WHY THE STORE HOLDS NONE TODAY IS A DIFFERENT FACT AND IT IS NAMED, because
+   * "this control lists nothing" and "this control hides something" look
+   * identical from the outside. Measured, not assumed: `decode_master_row` in
+   * `crates/core/src/vendor.rs` declines every FUT/CE/PE row as
+   * `Skip::LiveContract`, and `fno_answer` in `crates/api/src/server.rs` answers
+   * `POST /pull/fno` with 503 and `audit::Outcome::NotStarted` — its own reason
+   * string is quoted below. So nothing in this build can put an expired contract
+   * on the disk this page reads; the day one lands, this rung shows it with no
+   * change here.
    */
   const expiryRefusal = $derived.by(() => {
     if (expiriesAll.length > 0) return null;
     if (deco.length === 0)
       return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without contracts`;
-    return `not one of the ${fmt(deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is named the way this repository names a contract. crates/core/src/instrument.rs ends a future “-<YYYY-MM-DD>-FUT” and an option “-<YYYY-MM-DD>-<strike in paisa>-CE|PE”, and nothing in this store ends either way: it holds indices and equities, whose names carry no expiry at all. /store.json sends no expiry field, so an expiry here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at. Nothing is being held back, because there is nothing to hold.`;
+    return `not one of the ${fmt(deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is named the way this repository names a contract. crates/core/src/instrument.rs ends a future “-<YYYY-MM-DD>-FUT” and an option “-<YYYY-MM-DD>-<strike in paisa>-CE|PE”, and nothing in this store ends either way: it holds indices and equities, whose names carry no expiry at all. /store.json sends no expiry field, so an expiry here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at. THIS RUNG IS NOT LIVE-ONLY AND NEVER WAS: an expired contract on disk would be listed here, because the list is folded off the stored names and nothing in it is compared to today. There is none because nothing in this build can fetch one — crates/api/src/server.rs answers POST /pull/fno with 503 and the reason “expired F&O has no local-archive path and no HTTP transport in this build”, and crates/core/src/vendor.rs declines every FUT/CE/PE master row as Skip::LiveContract. Nothing is being held back, because there is nothing to hold.`;
   });
 
   /* ---- THE SIDE — the finest rung on the page --------------------------
@@ -4408,6 +4427,11 @@
         count on this page would be trustworthy — including a zero.
       </p>
       <button class="btn primary" onclick={() => refreshStore()}>Try again</button>
+      <!-- THE FEED RUNG SURVIVES THE FAILURE, and this is the state that
+           most needs it: one feed's store is unreadable and the operator's
+           next move is another feed. Without it the only way out of a failed
+           read would be the browser's back button. -->
+      <section class="strip solo" aria-label="Query">{@render feedRung()}</section>
     </div>
   {:else if !feeds.active}
     <!-- AN UNMADE CHOICE IS NOT AN EMPTY STORE, and this branch exists because
@@ -4420,6 +4444,12 @@
     <div class="blank fade-in">
       <h2>No feed chosen</h2>
       <p>{blocked?.why ?? 'No feed is selected, so no store has been read.'}</p>
+      <!-- THE CONTROL THAT ANSWERS THE HEADING, on the panel that states the
+           problem. The shortcut buttons below are a different offer — they
+           name the feeds that HOLD rows — and neither replaces the other: a
+           feed with nothing in it is still a feed an operator may want to
+           select before pulling into it. -->
+      <section class="strip solo" aria-label="Query">{@render feedRung()}</section>
       {#if elsewhere.length}
         <div class="alt">
           <span class="lbl">Rows exist under</span>
@@ -4452,10 +4482,19 @@
         <span class="seg"><span class="skel line" style="width:{54 + i * 9}px"></span></span>
       {/each}
     </div>
-    <section class="strip" aria-hidden="true">
+    <!-- THE FIRST CELL IS REAL WHILE THE REST ARE PLACEHOLDERS, and the count
+         is unchanged: six cells, one of them the feed rung and five standing
+         in. A read that is taking a long time is a state in which the operator
+         may well want a different feed, and a skeleton cannot be pressed.
+
+         SO THE SECTION IS NOT `aria-hidden` ANY MORE — it holds a live control
+         — and the attribute moved onto the five placeholder cells, which is
+         where it belonged: a `.skel` line has nothing to announce. -->
+    <section class="strip" aria-label="Query">
       <span class="lead">Query</span>
-      {#each [0, 1, 2, 3, 4, 5] as i (i)}
-        <div class="cell">
+      {@render feedRung()}
+      {#each [0, 1, 2, 3, 4] as i (i)}
+        <div class="cell" aria-hidden="true">
           <span class="skel line" style="width:{44 + ((i * 11) % 26)}px"></span>
           <span class="skel" style="width:{96 + ((i * 17) % 40)}px;height:18px;border-radius:5px"
           ></span>
@@ -4510,6 +4549,11 @@
     <div class="blank fade-in">
       <h2>Nothing stored for {feedName}</h2>
       <p>This feed has never landed a bar in this store.</p>
+      <!-- THE RUNG, ON THE PANEL THAT NAMES THE FEED IT IS ABOUT. The
+           shortcuts below name only the feeds that HOLD rows; this names
+           every feed the server lists, including the empty ones and the
+           refused ones with the server's reason on them. -->
+      <section class="strip solo" aria-label="Query">{@render feedRung()}</section>
       {#if elsewhere.length}
         <div class="alt">
           <span class="lbl">Rows exist under</span>
@@ -4609,33 +4653,21 @@
     <section class="strip" aria-label="Query">
       <span class="lead">Query</span>
 
-      <!-- THE FEED IS THE PAGE'S SCOPE, AND IT IS CHOSEN IN ONE PLACE ONLY.
-           A second picker stood here writing the same `feeds.active` the top bar
-           writes. Two controls for one value teach the reader they are
-           independent when they are not, and the owner counted the feed section
-           twice on this page and once on /markets — which was doing it right.
-           The CONTROL is gone; the FACT it carried is not, because "every count
-           below is this feed's store" is what tells a reader the whole page is
-           scoped to one vendor. It is now a scope line, and the long sentence
-           that lived on the button's title lives on the line it describes. -->
-      <div class="cell scopeline">
-        <span>Broker feed <i>the page's whole scope — chosen in the top bar</i></span>
-        <span
-          class="feedname mono"
-          title={`${feedName}. Every count on this page is this feed's store: every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — no page in this product puts one feed's numbers beside another's. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one. Change it in the top bar.`}
-          >{feedName}</span
-        >
-        <span class="count"
-          >every count below is this feed's store · {fmt(deco.length)} instrument-month(s) held ·
-          read {clock(fetchedAt)}</span
-        >
-      </div>
+      <!-- THE FEED IS THE PAGE'S SCOPE AND IT IS CHOSEN HERE — the strip's
+           first cell, because every rung after it is this feed's answer. One
+           control for one value, on this route and in this bar: the shell's
+           `FEED_OWNED` list carries `/db`, so the top bar draws no picker
+           here. See the snippet at the foot of this file for why it is a
+           snippet and not markup in place. -->
+      {@render feedRung()}
 
       <!-- THE UNIVERSE RUNG — the cascade's second step. `tierRefusal` is
            unchanged and still whole on the row it belongs to, and a refusal is
            DRAWN AND DISABLED rather than hidden. -->
       <div class="cell">
-        <span>Universe <i>which membership to hold this store against</i></span>
+        <span title="Which membership to hold this store against — the cascade's second rung."
+          >Universe</span
+        >
         <div class="picker" data-drop="uni">
           <button
             class="mnyb"
@@ -4734,7 +4766,7 @@
            five-minute bar, would be a control promising a set that does not
            exist. The rows are counted off the rows. -->
       <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
-        <span>Timeframe <i>bar length — the rung each row is stored at</i></span>
+        <span title="Bar length — the rung each row is stored at.">Timeframe</span>
         <div class="picker" data-drop="tf">
           <button
             class="mnyb"
@@ -4856,7 +4888,7 @@
            case is the menu's own empty row rather than a card band that
            silently collapses to nothing. -->
       <div class="cell">
-        <span>Month <i>one month file, or all of them</i></span>
+        <span title="One month file, or all of them.">Month</span>
         <div class="picker" data-drop="month">
           <button
             class="mnyb"
@@ -4957,7 +4989,9 @@
            rung cannot drift from the same control on /markets and /ingest. -->
       {#if instrumentRows.length > 0}
         <div class="cell">
-          <span>Instrument <i>held, not offered</i></span>
+          <span title="Held, not offered — every name here is a name this store can prove it has."
+            >Instrument</span
+          >
           <Picker
             single
             filter
@@ -4995,7 +5029,10 @@
       <!-- THE TEXT BOX. It reaches an instrument OR a month, which is why it is
            not folded into the picker above it, and it is the `/` target. -->
       <div class="cell combo">
-        <span>Find <i>instrument or month</i></span>
+        <span
+          title="Instrument or month — this box reaches either, which is why it is not folded into the picker beside it."
+          >Find</span
+        >
         <!-- A `.picker` FOR THE POSITIONING CONTEXT AND NOTHING ELSE, and
              deliberately WITHOUT `data-drop`: `onWindowDown` closes the one
              menu `drop` governs by testing `.picker[data-drop]`, and this
@@ -5122,7 +5159,7 @@
            rung rather than a toggle hiding in a tail. The button states the
            CURRENT VALUE, which is what a `.mnyb` face is for. -->
       <div class="cell">
-        <span>Rows <i>everything held, or only what is short</i></span>
+        <span title="Everything held, or only what is short.">Rows</span>
         <button
           class="mnyb toggle"
           type="button"
@@ -5185,7 +5222,7 @@
            `undefined` rather than `''` so a rung with nothing to explain
            carries no attribute at all. -->
       <div class="cell" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
-        <span>Expiry <i>which contract — futures and options show nothing without one</i></span>
+        <span title="Which contract — futures and options show nothing without one.">Expiry</span>
         <div class="picker" data-drop="exp">
           <button
             class="mnyb"
@@ -5280,7 +5317,7 @@
       </div>
 
       <div class="cell mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
-        <span>Strike <i>an absolute price on the chain</i></span>
+        <span title="An absolute price on the chain.">Strike</span>
         <Picker
           filter
           label="strikes"
@@ -5314,7 +5351,10 @@
            absolute price and a rung is a distance from spot; the same tick
            means two different queries and neither is a view of the other. -->
       <div class="cell mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
-        <span>Moneyness <i>a distance measured along that chain</i></span>
+        <span
+          title="A distance measured along that chain — the same 35,000 is ITM-2 for a call and OTM+2 for a put, which is why it is its own control."
+          >Moneyness</span
+        >
         <Picker
           filter
           label="rungs"
@@ -5362,7 +5402,7 @@
         class:off={Boolean(sideRefusal || sideEmpty)}
         title={sideRefusal ?? sideEmpty ?? undefined}
       >
-        <span>Option type <i>which side of the contract</i></span>
+        <span title="Which side of the contract.">Option type</span>
         <div class="picker" data-drop="side">
           <button
             class="mnyb"
@@ -6601,6 +6641,143 @@
 </div>
 
 <!-- ======================================================================
+     THE FEED RUNG — FIRST IN THE STRIP, AND A CONTROL RATHER THAN A READOUT.
+     ----------------------------------------------------------------------
+     WHAT STOOD HERE AND DOES NOT ANY MORE: `.cell.scopeline`, a caption over
+     a `.feedname` span of plain text. It was drawn to `.mnyb`'s exact metrics
+     — same size, same weight, same mono family — so it sat in a row of six
+     dropdowns looking like the seventh and doing nothing, and the one real
+     selector was two rows away in the top bar. A face that looks like a
+     control and refuses the press is worse than no control at all.
+
+     SO THE CONTROL IS HERE AND THE TOP BAR YIELDS. `/db` is on the shell's
+     `FEED_OWNED` list as of the same commit that added this rung, so the
+     count of feed pickers on this route is exactly one, in the place the
+     approved design draws it: the FIRST cell of the query strip, because the
+     feed is this page's whole scope and every rung after it is that feed's
+     answer.
+
+     A SNIPPET RATHER THAN MARKUP IN PLACE, because the strip is not the only
+     place it has to appear. The failed read, the unchosen feed, the loading
+     store and the empty store are four states with no strip in them, and each
+     is exactly the state in which an operator most needs another feed. A
+     control that vanishes with its data is the dead end this snippet exists
+     to make impossible.
+
+     IT IS `.picker`/`.mnyb`/`.menu`/`.opt` AND NOT A `Picker`, for the reason
+     Universe, Month and Timeframe are not: a `Picker` row is a checkbox, the
+     feed is a SELECTION — exactly one, never a set — and a feed the server
+     refuses needs a row that is DRAWN, DEAD, and carrying `/feeds.json`'s own
+     reason. A tick cannot say why it is unavailable.
+     ====================================================================== -->
+{#snippet feedRung()}
+  <div class="cell">
+    <!-- THE CAPTION IS THE CAPTION. What the italic sub-clause used to say —
+         that this is the page's whole scope, and where it is chosen — is on
+         the button's `title` now, one hover from the control it is about, and
+         the clause below states the same in the document. -->
+    <span>Broker feed</span>
+    <div class="picker" data-drop="feed">
+      <button
+        class="mnyb"
+        type="button"
+        aria-haspopup="true"
+        aria-expanded={drop === 'feed'}
+        title={`${feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
+        onclick={(e) => {
+          e.stopPropagation();
+          drop = drop === 'feed' ? null : 'feed';
+        }}
+        >{feeds.error
+          ? 'Feed list unread'
+          : feeds.all.length === 0
+            ? 'No feeds'
+            : feeds.active
+              ? feedName
+              : 'Select a feed'}</button
+      >
+      {#if drop === 'feed'}
+        <div class="menu" role="group" aria-label="Broker feed — the page's whole scope">
+          {#each feeds.all as f (f.wire)}
+            {@const ready = f.ready === true}
+            {@const held = survey.byFeed.get(f.wire)}
+            <button
+              class="opt"
+              type="button"
+              class:off={!ready}
+              disabled={!ready}
+              aria-pressed={feeds.active === f.wire}
+              title={ready
+                ? `Selects ${f.display}. Every count and every row below becomes this feed's, read again from /store.json?feed=${f.wire} and /instruments.json?feed=${f.wire} — nothing is deleted, nothing is merged with the feed you are leaving, and no figure on this page ever puts the two side by side.${
+                    held
+                      ? held.error
+                        ? ` Its store could not be read on the last survey: ${held.error}.`
+                        : ` The last survey read ${fmt(held.cells)} instrument-month(s) and ${fmt(held.bars)} bar(s) under it.`
+                      : ' Its store has not been surveyed in this session, so the count beside it is a dash rather than a zero.'
+                  }`
+                : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+              onclick={() => {
+                feeds.active = f.wire;
+                drop = null;
+              }}
+            >
+              <span class="tk">{feeds.active === f.wire ? '✓' : ''}</span>
+              <span class="nm">{f.display}</span>
+              <span class="ct" class:warn={!ready || Boolean(held?.error)}
+                >{#if !ready}unavailable{:else if held?.error}not read{:else if held}{fmt(
+                    held.cells
+                  )} held{:else}not surveyed{/if}</span
+              >
+            </button>
+          {/each}
+          <!-- THE CONTROL IS NEVER DISABLED, WHICH IS WHAT KEEPS THIS ROW
+               REACHABLE. Greying the button on an empty list would put the two
+               reasons the list can be empty — the server has no descriptor
+               row, or the list could not be read at all — behind a press that
+               no longer works, and a dead control with the reason inside it is
+               the shape `CLAUDE.md` §4 bans. `feeds.error` is quoted as the
+               server's own string rather than paraphrased. -->
+          {#if feeds.all.length === 0}
+            <p class="none">
+              {#if feeds.error}
+                <code>/feeds.json</code> could not be read, so this page is scoped to nothing and
+                every count below it is absent rather than zero: {feeds.error}
+              {:else}
+                <code>/feeds.json</code> answered with an empty list, so there is no vendor to
+                select and no store to read. A feed appears here the day its descriptor row exists
+                on the Rust side — nothing in this file names one.
+              {/if}
+            </p>
+          {/if}
+        </div>
+      {/if}
+    </div>
+    <!-- THE SCOPE SENTENCE, KEPT. It was the `.scopeline`'s own counted line;
+         it is this control's clause now, which is where every other fact in
+         this strip lives. It CLIPS, so the whole of it is on the control's
+         `title` as well — the page's standing rule. The states before a store
+         answers are NAMED rather than counted: a "0 held" under a feed nobody
+         chose, or under a read that failed, is a claim about a disk nobody
+         reached. -->
+    <span class="count" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
+      {#if feeds.error}
+        the feed list could not be read, so nothing below is scoped to anything
+      {:else if error}
+        the store could not be read for this feed — every count on this page is this feed's store,
+        so none is shown
+      {:else if !feeds.active}
+        no feed is chosen, so no store has been read — this control is the page's whole scope
+      {:else if loading && rows.length === 0}
+        reading this feed's store — every count below is this feed's store
+      {:else}
+        every count below is this feed's store · {fmt(deco.length)} instrument-month(s) held · read
+        {clock(fetchedAt)}
+      {/if}
+    </span>
+  </div>
+{/snippet}
+
+<!-- ======================================================================
      ONE END OF THE MONTH WINDOW — the field, the ▦, and the calendar.
      ----------------------------------------------------------------------
      ONE SNIPPET, RENDERED TWICE. From and To differ in three things and only
@@ -6619,10 +6796,18 @@
   /** @type {string} */ caption,
   /** @type {string} */ none
 )}
+  <!-- THE COUNT OF WHAT THIS END ADMITS, measured off `monthsAll` — the same
+       list the calendar draws from, so the clause and the grid can never
+       disagree about which months exist. It is inclusive because the window
+       is, and it is counted for THIS end alone: how many months the pair
+       leaves is the table's own figure and is stated there. -->
+  {@const admits = value
+    ? monthsAll.filter(([m]) => (which === 'from' ? m >= value : m <= value)).length
+    : monthsAll.length}
   <div class="cell dcell" class:dright={which === 'to'}>
     <span
-      title="Both ends are inclusive, and both are raw YYYY-MM keys — the store's own spelling, which is what makes a string comparison chronological order. An inverted range is NAMED, never swapped: saying which two months are the wrong way round is the only version an operator can act on."
-      >{caption} <i>the span of month files to read</i></span
+      title="The span of month files to read. Both ends are inclusive, and both are raw YYYY-MM keys — the store's own spelling, which is what makes a string comparison chronological order. An inverted range is NAMED, never swapped: saying which two months are the wrong way round is the only version an operator can act on."
+      >{caption}</span
     >
     <span class="dwrap">
       <!-- THE FIELD IS A BUTTON, NOT A TEXT BOX, and that is the difference
@@ -6653,6 +6838,24 @@
         aria-expanded={calOpen === which}
         onclick={(e) => (calOpen === which ? closeCal() : openCal(which, e.currentTarget))}>▦</button
       >
+    </span>
+
+    <!-- THE THIRD ROW OF THE CELL, AND EVERY CELL IN THIS STRIP HAS ONE.
+         These two were the only rungs without a clause, so their content
+         stacked two rows deep in a row of three — the cells are stretched to
+         one height, so what that produced was a visible hole under the field
+         rather than a short cell. The clause is a real count, not filler:
+         how many of the store's months this end of the window admits. -->
+    <span class="count" class:warn={rangeInverted}>
+      {#if rangeInverted}
+        this window holds no month at all — the two ends are the wrong way round
+      {:else if value}
+        {fmt(admits)} of {fmt(monthsAll.length)} month(s) held are {which === 'from'
+          ? 'at or after'
+          : 'at or before'} it
+      {:else}
+        unbounded · every month the rungs above reach
+      {/if}
     </span>
 
     <!-- THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, and it
@@ -6902,18 +7105,59 @@
      One row of controls on one raised board. `overflow: visible` is
      load-bearing and not an oversight: every menu and every calendar in the
      strip hangs BELOW its own cell, and a clipped popup is a control that opens
-     into nothing. */
+     into nothing.
+
+     ONE ROW, AND THE `nowrap` IS THE WHOLE FIX FOR A BROKEN BASELINE.
+     ----------------------------------------------------------------------
+     This was `flex-wrap: wrap` over cells with a 232px flex BASIS, and nine
+     rungs at 232px cannot share a line at any width this pane is ever given —
+     so the strip broke into two flex lines. A wrapped flex line is stretched
+     to ITS OWN tallest cell, not the container's, so the second line began
+     wherever the first one ended: two captions, two heights, and a row that
+     reads as an accident rather than a design. Nothing was wrong with any
+     individual rung — there were simply more of them than the basis allowed.
+
+     `nowrap` here plus `flex: 1 1 0` on the cell below is what makes ONE line
+     unconditional: a zero basis means the sum of the hypothetical sizes is
+     zero, which is never greater than the line, so there is no width at which
+     the browser may wrap. Every cell then takes an equal share of what is
+     left, which is the same statement as "one baseline and one height" —
+     every caption starts at the same y, every control sits 2px under it, and
+     every clause closes the cell on the same line.
+
+     WHAT PAYS FOR IT IS CLIPPING, WHICH THIS STRIP ALREADY CHOSE. The
+     caption, the `.mnyb` face, `Picker`'s face and the `.count` clause are all
+     `nowrap`/ellipsis with the whole text on a `title` and in the document —
+     that was the rule before this change and it is why narrowing a cell costs
+     no fact. */
   .strip {
     flex: none;
     display: flex;
     align-items: stretch;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
     min-width: 0;
     overflow: visible;
     border: 1px solid var(--line);
     border-radius: var(--r4);
     background: linear-gradient(180deg, var(--panel-2), var(--panel));
     box-shadow: var(--e1);
+  }
+  /* THE ONE-CELL STRIP THE BLANK STATES DRAW. The feed rung is the only
+     control on a page that has no table yet, so it is given a width rather
+     than the whole panel: `flex: 1 1 0` would stretch one cell across a
+     centred empty state, and a lone dropdown 900px wide reads as a mistake. */
+  .strip.solo {
+    width: max-content;
+    max-width: 100%;
+    margin: var(--s6) auto 0;
+    /* `.blank` CENTRES ITS PROSE AND THIS IS NOT PROSE. Without this the
+       caption, the face and the clause would each centre inside the cell,
+       which is the one place on this page a control would not line up with
+       the control it is the same control as. */
+    text-align: left;
+  }
+  .strip.solo .cell {
+    flex: 0 1 300px;
   }
   /* THE CONTRACT STRIP IS THE QUIETER OF THE TWO, and it is ALWAYS DRAWN. The
      approved design collapses it when the segment carries no contract; here it
@@ -6945,6 +7189,12 @@
      a universe answered with a longer refusal. The text is WHOLE in the
      document, so anything reading rather than looking gets all of it, and the
      full sentence is also on the control's own `title`. */
+  /* THE CELL IS THE SAME THREE ROWS EVERYWHERE — caption, control, clause —
+     and that is what makes "one height" true of the CONTENT and not only of
+     the boxes. `align-items: stretch` has always given the boxes one height;
+     it cannot give the text one, and the two month fields carried no clause,
+     so their content stopped one line short and left a hole under the field
+     in a row that was otherwise closed. They have a counted clause now. */
   .strip .cell {
     position: relative;
     display: flex;
@@ -6952,9 +7202,11 @@
     gap: var(--s1);
     padding: var(--s4) var(--s5);
     border-right: 1px solid var(--line-soft);
+    /* ZERO BASIS, EQUAL SHARE — see the block on `.strip`. `min-width: 0` is
+       what lets the share go below the cell's own content, which is the only
+       reason an ellipsis ever gets to do its job inside a flex item. */
     min-width: 0;
-    flex: 1 1 232px;
-    max-width: 420px;
+    flex: 1 1 0;
   }
   /* NO HAIRLINE ON THE LAST CELL. Every cell draws a divider on its right, and
      with the strip left-packed the last one would hang in the middle of an
@@ -6994,14 +7246,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .strip .cell > span:first-of-type i {
-    font-style: normal;
-    font-weight: var(--w-mid);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--faint);
-    margin-left: var(--s3);
-  }
+  /* THERE IS NO `> span:first-of-type i` RULE ANY MORE, and the node it drew
+     is gone rather than hidden. Every caption in this strip carried an italic
+     sub-clause — "which membership to hold this store against", "bar length —
+     the rung each row is stored at" — set inside a `nowrap`/ellipsis label.
+     At a full-width basis it merely looked busy; at an EQUAL SHARE of one
+     unbroken row it clips mid-word, and a caption that reads "UNIVERSE which
+     membe…" is a label the page spent its width failing to say. Each clause
+     moved onto the caption's own `title`, whole, which is where a gloss on a
+     word belongs — and the substantive fact was never in the gloss anyway: it
+     is the `.count` clause under the control. A rule left standing for a node
+     nothing builds is how the sub-clause finds its way back. */
   .strip .cell > .count {
     margin: 0;
     font-size: var(--fs-xs);
@@ -7017,12 +7272,18 @@
   /* THE FIND BOX AND THE TWO CONTRACT RUNGS ASK FOR MORE OF THE ROW, and they
      are the only three that do: the box holds a typed instrument key and the
      two `Picker`s hold a summary like "412 of 1,204 strikes". Every other cell
-     is a label and a short face. */
+     is a label and a short face.
+
+     A LARGER `flex-grow` AND STILL A ZERO BASIS. The basis is what decides
+     whether the row may break; the grow is what decides how the one row is
+     divided. Asking for more of the line therefore costs nothing here — a
+     wider Find box cannot push a rung onto a second baseline, which is
+     exactly what a 264px basis used to do. */
   .strip .cell.combo {
-    flex: 1.4 1 264px;
+    flex: 1.5 1 0;
   }
   .strip .cell.mcell {
-    flex: 1 1 264px;
+    flex: 1.3 1 0;
   }
 
   /* THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, AND IT POINTS
@@ -7073,19 +7334,17 @@
      four need a row that is DRAWN, DISABLED and carries its own refusal — the
      feed that is not ready, the universe tier with no source on the wire. A
      tick cannot say why it is unavailable. */
-  /* THE SCOPE LINE READS LIKE THE CONTROL IT REPLACED, MINUS THE AFFORDANCE.
-     Same face as `.mnyb` — same size, weight and mono family — so the strip's
-     rhythm is unbroken, but no caret, no hover, no pointer: nothing here
-     invites a click, because the feed is chosen in the top bar. `default`
-     rather than `text` keeps it from reading as an editable field. */
-  .scopeline .feedname {
-    color: var(--ink);
-    font-size: var(--fs-base);
-    font-weight: var(--w-semi);
-    font-family: var(--mono);
-    cursor: default;
-    align-self: start;
-  }
+  /* `.scopeline .feedname` IS GONE WITH THE READOUT IT PAINTED. It drew a span
+     of plain text to `.mnyb`'s exact metrics — same size, same weight, same
+     mono family — so that the strip's rhythm survived the feed not being a
+     control here. It survived it too well: the face was indistinguishable from
+     the six dropdowns beside it and refused every press, and the one real
+     selector was in the top bar. The feed is a `.mnyb` now, so the rule has
+     nothing to bring to the same metrics, and a rule kept for a node nothing
+     builds is how a readout comes back without anyone deciding to bring it
+     back. Feed, Universe, Timeframe, Month and the holes toggle now wear the
+     face below; Strike, Moneyness and Instrument are `$lib/Picker.svelte`,
+     brought to the same metrics further down. */
   .mnyb {
     appearance: none;
     background-color: transparent;
@@ -7323,11 +7582,22 @@
   /* The month field is the same face at the same height — it is a button rather
      than a text box, for the reason stated at the snippet, but nothing about
      that should be visible in the row. */
+  /* NO `min-width` ON THE MONTH FIELD INSIDE THE STRIP, and that is the one
+     change the unbroken row demanded of it. `.dval` sets `min-width: 5.4rem`
+     so the two ends of the window stay the same width and the ▦ beside them
+     stays put; inside a cell that may be narrowed to an equal share of one
+     row, a floor of 5.4rem plus the button is a cell that cannot shrink, and
+     a flex item that will not shrink overflows its own border rather than
+     wrapping. The floor is dropped here and the month ellipses like every
+     other face in the strip — `Sep 2024` is eight characters and reaches that
+     point long after the captions do. */
   .strip .cell .dval {
     font-size: var(--fs-base);
     height: 19px;
     line-height: 19px;
-    min-width: 4.6rem;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   /* ---- THE ANCHOR -----------------------------------------------------
