@@ -266,23 +266,56 @@ mod tests {
         // name and says the same thing.
         const FOLDS: usize = WORDS - 1;
 
+        // The anchor is the WHOLE signature and it begins with a real newline,
+        // which is the point. `split_once` takes the first match, and this file
+        // contains the string being searched for twice -- once as the definition
+        // and once here. In this literal the leading newline is the two
+        // characters `\` and `n`, so the pattern matches the definition and
+        // never this line. A prefix like `pub const fn hits(` would match here
+        // too, and if `hits` were ever deleted the extraction would silently
+        // read this test instead of refusing.
+        const ANCHOR: &str = "\n    pub const fn hits(&self, candidate: &Self) -> bool {\n";
+
         let src = include_str!("mask.rs");
         let body = src
-            .split_once("pub const fn hits(")
+            .split_once(ANCHOR)
             .and_then(|(_, rest)| rest.split_once("\n    }"))
             .map(|(body, _)| body);
         assert!(
             body.is_some(),
-            "`hits` is no longer a `pub const fn hits(` in this file closing at \
-             one indent, so this test read nothing and proves nothing"
+            "`hits` no longer has the signature `{ANCHOR}` closing at one indent, \
+             so this test read nothing and proves nothing"
         );
         // Not `let Some(body) = .. else { unreachable!(..) }`: that `else` is a
         // panic inside this crate that a correct build can never enter, so it
         // is a coverage region no test can close. The assertion above is the
         // check, and an empty body fails every count below rather than passing
         // quietly -- `matches(..).count()` on "" is 0 and WORDS is 6.
-        let body = body.unwrap_or_default();
-        for banned in ["for ", "while ", "loop ", "return", "if "] {
+        let extracted = body.unwrap_or_default();
+
+        // Comments are stripped before anything is inspected, and this line is
+        // load-bearing. Every check below reads TEXT, and text inside a comment
+        // is text. An adversarial audit beat the previous version of this test
+        // by moving the word-5 term into a comment and folding `d4` twice: the
+        // operator counts were satisfied by the comment while `hits` ignored
+        // bits 320..383 outright, so any candidate requiring one of them would
+        // have hit every bar. `hits` contains no string literal, so splitting
+        // each line at the first `//` cannot cut a comment marker out of one.
+        let body: String = extracted
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // `&&` and `||` are on this list because the same audit beat the
+        // previous version a second way, with
+        // `(d0 | d1 | d2 | d3 | d4) == 0 && (d5 | d5) == 0` -- every count
+        // satisfied, every banned word absent, and the second comparison
+        // evaluated only when the first says maybe. Short-circuiting IS a
+        // branch; it just is not spelled `if`.
+        for banned in [
+            "for ", "while ", "loop ", "return", "if ", "match ", "&&", "||",
+        ] {
             assert!(
                 !body.contains(banned),
                 "`hits` contains `{banned}`, so its cost now depends on the data. \
@@ -290,33 +323,52 @@ mod tests {
             );
         }
 
-        // The shape, counted rather than described. This is what catches a word
-        // added to `WORDS` and not to the body: the function would still be
-        // branchless, still pass every behavioural test, and silently ignore the
-        // new word's bits -- so a combination requiring one of them would hit
-        // every bar. The doc comment above said "four ANDs" through two widenings
-        // because nothing counted.
-        assert_eq!(
-            body.matches(" & candidate.0[").count(),
-            WORDS,
-            "`hits` must AND every one of the {WORDS} words: {body}"
-        );
-        assert_eq!(
-            body.matches(") ^ candidate.0[").count(),
-            WORDS,
-            "`hits` must XOR every one of the {WORDS} words: {body}"
-        );
-        assert_eq!(
-            body.matches(" | d").count(),
-            FOLDS,
-            "{FOLDS} ORs fold {WORDS} differences into one: {body}"
-        );
+        // The function, written out from `WORDS` and compared line for line.
+        //
+        // This replaced three `matches(..).count()` assertions, and the reason is
+        // the project's own rule that removing the second copy beats testing that
+        // two copies agree. A count is a PROXY for the shape: it says six ANDs
+        // appear somewhere, which a comment can satisfy and a doubled term can
+        // satisfy. These say what each line IS. Both attacks that beat the counts
+        // die here without either being enumerated, and so does a word added to
+        // `WORDS` and not to the body -- the loop simply demands a line that is
+        // not there.
         for w in 0..WORDS {
+            let line = format!("let d{w} = (self.0[{w}] & candidate.0[{w}]) ^ candidate.0[{w}];");
             assert!(
-                body.contains(&format!("self.0[{w}]")),
-                "`hits` never reads word {w}, so every bit in it is ignored"
+                body.lines().any(|l| l.trim() == line),
+                "`hits` must contain exactly `{line}`, so that word {w} is read, \
+                 masked and compared like every other: {body}"
             );
         }
+
+        // The decision is ONE expression naming every difference. The ban list
+        // above is a list, and a list is only as complete as whoever wrote it;
+        // this is the complement, and it does not need to anticipate the trick.
+        let terms = (0..WORDS).map(|w| format!("d{w}")).collect::<Vec<_>>();
+        let fold = format!("({}) == 0", terms.join(" | "));
+        let last = body
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default()
+            .trim();
+        assert_eq!(
+            last, fold,
+            "`hits` must decide with exactly `{fold}`: {body}"
+        );
+
+        // And nothing else is in there. The two checks above say what must be
+        // present; this says that is ALL that is present, which is what stops a
+        // branch being inserted between two of the differences.
+        let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
+        assert_eq!(
+            lines,
+            WORDS + 1,
+            "`hits` is {lines} lines of code and must be exactly {}: {WORDS} \
+             differences and one fold, nothing between them: {body}",
+            WORDS + 1
+        );
     }
 
     #[test]
