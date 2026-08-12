@@ -395,6 +395,65 @@ fn a_ladder_walk_costs_the_same_per_bar_at_every_column_length() -> bool {
     )
 }
 
+/// C-E-06 — the transposed column costs a fraction of the row-major walk.
+///
+/// Not a ratio between two inputs to one operation, like every row above, but a ratio
+/// between two LAYOUTS answering the same question. That makes it the one row here that
+/// can catch a broken transpose by cost rather than by answer: `column::tests` already
+/// proves the two agree, and this proves the second one is worth having.
+///
+/// Measured on an arm64 laptop, release, `lto = "fat"`, 1,222,791 bars:
+///
+///     k=1  row-major 928 ps/bar  bitmaps  9.6 ps/bar   96.9x
+///     k=2            906         bitmaps 18.1          50.0x
+///     k=4            911         bitmaps 45.4          20.1x
+///     k=8            891         bitmaps 74.5          12.0x
+///
+/// The row-major cost is flat in k -- that is what C-E-02 measures -- while the bitmap
+/// cost grows with k, because k bitmaps must be ANDed. They would meet somewhere past
+/// k=90, which no frontier reaches, so the transpose wins at every depth that runs.
+///
+/// The floor is FOUR, not twelve. The measured worst case in range is 12x at k=8 and the
+/// budget leaves 3x for a different microarchitecture -- a gate that fails on a slower
+/// runner is a gate that gets ignored. What it refuses is the case that matters: a
+/// transpose that has quietly become a full-column walk again.
+fn the_transposed_column_beats_the_row_major_walk() -> bool {
+    /// The smallest speedup accepted at any k tested.
+    const FLOOR: u128 = 4;
+
+    let bars = column(100_000);
+    let vertical = engine::column::Column::transpose(&bars);
+    let mut ok = true;
+    for k in [1_usize, 4, DRAWN_FROM.len()] {
+        let cand = candidate(k);
+        // Same answer, first. A faster wrong number is not a measurement.
+        let row = support(&bars, &cand);
+        let bmp = vertical.support(&cand);
+        if row != bmp {
+            println!("  C-E-06 k={k:<2} LAYOUTS DISAGREE — row-major {row}, bitmaps {bmp}");
+            ok = false;
+            continue;
+        }
+        let row_ps = once_ps(|| black_box(support(black_box(&bars), black_box(&cand))));
+        let bmp_ps = once_ps(|| black_box(vertical.support(black_box(&cand))));
+        let times = if bmp_ps == 0 {
+            u128::MAX
+        } else {
+            row_ps / bmp_ps
+        };
+        let good = times >= FLOOR;
+        println!(
+            "  {:<58} {:>8} ps -> {:>8} ps   {times}x faster, floor {FLOOR}   {}",
+            format!("C-E-06 support at k={k}: row-major -> bitmaps"),
+            row_ps,
+            bmp_ps,
+            if good { "ok" } else { "TOO SLOW" }
+        );
+        ok &= good;
+    }
+    ok
+}
+
 fn main() {
     println!("engine — gate 8, ceiling {CEILING_PERMILLE} permille");
     println!(
@@ -404,6 +463,7 @@ fn main() {
     );
     let mut ok = true;
     ok &= support_stays_within_its_budget();
+    ok &= the_transposed_column_beats_the_row_major_walk();
     ok &= support_costs_the_same_per_bar_at_every_column_length();
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
