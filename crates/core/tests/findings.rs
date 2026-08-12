@@ -126,6 +126,80 @@ fn every_finding_has_a_disposition() {
     }
 }
 
+/// Which disposition a cell carries, by LONGEST matching prefix.
+///
+/// Longest rather than first-match, so the answer cannot be changed by reordering
+/// `DISPOSITIONS`. `PARTLY FIXED` and `FIXED` happen to be unambiguous under
+/// `starts_with` today; a future disposition that EXTENDS an existing one would not be,
+/// and `every_fixed_finding_names_a_commit` already records being bitten once by a check
+/// that narrowed silently as this vocabulary grew.
+fn disposition_kind(cell: &str) -> Option<&'static str> {
+    DISPOSITIONS
+        .iter()
+        .filter(|d| cell.starts_with(**d))
+        .max_by_key(|d| d.len())
+        .copied()
+}
+
+/// The disposition tally is stated in the document, so a mass flip is a visible diff.
+///
+/// # What this catches, and it was demonstrated rather than imagined
+///
+/// An adversarial audit flipped **all 80 `OPEN` rows to `FIXED f5874ca`** and ran the
+/// suite. Zero failures. The row digest was byte-identical, the section counts were
+/// untouched, `FIXED` is a known disposition, seven hex characters is a commit, and
+/// `f5874ca` resolves. The prose still said "99 stood".
+///
+/// Widening the digest is the wrong repair. Disposition sits outside it deliberately --
+/// it is the one column that changes legitimately, and putting it inside would make every
+/// honest update require a digest recompute, which trains a reader to regenerate the line
+/// without reading it.
+///
+/// So this applies the digest's own trick to the column the digest cannot cover. State the
+/// tally. Hiding a disposition change now requires editing this line in the same commit,
+/// where a reader sees it -- which is the entire mechanism, and the only one available for
+/// a value that is supposed to move.
+///
+/// Zero counts are stated too, so the first `REFUTED` row also changes the line.
+#[test]
+fn the_disposition_tally_matches_the_rows() {
+    let rows = rows();
+    assert!(
+        !rows.is_empty(),
+        "no finding rows parsed, so this test proves nothing"
+    );
+
+    let mut counted: BTreeMap<&str, usize> = DISPOSITIONS.iter().map(|d| (*d, 0)).collect();
+    for row in &rows {
+        // No panic arm here: `every_finding_has_a_disposition` owns the unrecognised case,
+        // and a panic this build cannot reach is a coverage region no test can close. An
+        // unrecognised cell adds a key the tally line does not state, so it still fails --
+        // loudly, and with a readable diff.
+        let kind = disposition_kind(&row.disposition).unwrap_or("UNRECOGNISED");
+        *counted.entry(kind).or_insert(0) += 1;
+    }
+
+    let mut want = counted
+        .iter()
+        .map(|(kind, n)| format!("{kind} {n}"))
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    want.push_str(&format!(" \u{b7} total {}", rows.len()));
+
+    let stated = LEDGER
+        .split("<!-- dispositions: ")
+        .nth(1)
+        .and_then(|rest| rest.split_once(" -->"))
+        .map(|(tally, _)| tally.trim());
+    assert_eq!(
+        stated,
+        Some(want.as_str()),
+        "the stated disposition tally does not match the rows. If a disposition genuinely \
+         changed, update the comment in the same commit -- that visible line IS the guard. \
+         If it did not, some row's disposition moved without anyone saying so."
+    );
+}
+
 /// A `FIXED` row names the commit that fixed it.
 ///
 /// Without this, `FIXED` is a claim with nothing behind it. With it, anyone can run
@@ -432,5 +506,71 @@ fn every_named_commit_exists() {
         checked > 0,
         "no commit was verified, so this test proves nothing — either every FIXED row lost its \
          sha or git could not run at all"
+    );
+}
+
+/// A named commit is in THIS branch's history, not merely an object that resolves.
+///
+/// `git rev-parse --verify` answers "does this object exist". It says nothing about where.
+/// It resolves a commit on an abandoned branch, one that was reverted, one reachable only
+/// from a stash, and any of the other 180 commits in this repository's history. An
+/// adversarial audit used exactly that: `FIXED <any real sha>` satisfied the check whose
+/// whole purpose was to stop that claim.
+///
+/// `merge-base --is-ancestor` is the stronger question, and it is the one a reader means
+/// when they read a sha in this column: is the fix actually in the history I am looking at.
+///
+/// What it still cannot say, stated rather than implied: that the commit is RELEVANT. The
+/// obvious strengthening -- the commit must touch a file the row's `where` cell names --
+/// was tried and rejected, because it false-positives on three honest rows here. `F-72F226`
+/// names the last of four commits that fixed four sites, and that one touched only the
+/// fourth. `F-0C28E4` and `F-506ED7` are PARTLY FIXED by a commit that published a boundary
+/// in `crates/indicators` for a defect whose `where` is `crates/engine` -- the partial fix
+/// legitimately lives in a different crate from the finding. A guard that refuses correct
+/// rows gets an exemption list, and an exemption list is where guarantees go to die.
+#[test]
+fn every_named_commit_is_in_this_branchs_history() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("crates/core is two levels below the repository root")
+        .to_owned();
+
+    let mut checked = 0_u32;
+    for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
+        let after = row
+            .disposition
+            .split_once("FIXED")
+            .map_or("", |(_, rest)| rest.trim_start());
+        let sha: String = after.chars().take_while(char::is_ascii_hexdigit).collect();
+        if sha.len() < 7 {
+            continue; // the sha-presence test owns this case
+        }
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["merge-base", "--is-ancestor"])
+            .arg(&sha)
+            .arg("HEAD")
+            .output();
+        let Ok(out) = out else {
+            println!(
+                "SKIPPED: git is not runnable here, so {} was not verified",
+                row.id
+            );
+            continue;
+        };
+        assert!(
+            out.status.success(),
+            "finding {} says it was fixed by {sha}, and that commit is not an ancestor of \
+             HEAD. It exists somewhere -- a dropped branch, a revert, a stash -- but the fix \
+             is not in the history this ledger describes.",
+            row.id
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 0,
+        "no commit was checked for ancestry, so this test proves nothing"
     );
 }

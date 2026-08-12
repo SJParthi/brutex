@@ -201,3 +201,4 @@ It does not claim a `FIXED` row is beyond question. It claims a test exists that
 claim than correctness, and the only one that can be made mechanically.
 
 <!-- rows-digest: d215823742a90839 -->
+<!-- dispositions: FIXED 9 · IN PROGRESS 0 · NEEDS A DECISION 7 · OPEN 80 · PARTLY FIXED 3 · REFUTED 0 · total 99 -->
