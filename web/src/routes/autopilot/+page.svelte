@@ -83,6 +83,8 @@
    * the backfill runs oldest-first is that the store cannot prepend.
    */
   import { feeds } from '$lib/feeds.svelte.js';
+  import { store, syncStore, watchStore } from '$lib/store.svelte.js';
+  import { untrack } from 'svelte';
 
   /** The live state. Small payload, so a short period is cheap. */
   const TICK_MS = 2000;
@@ -554,74 +556,89 @@
      fraction whenever it disagrees with the target.
      ====================================================================== */
 
-  let census = $state({
-    kind: 'probing',
-    why: null,
-    at: 0,
-    feed: null,
-    months: new Map(),
-    cells: 0,
-    bars: 0
-  });
-
-  async function readCensus(w) {
-    if (!w) return;
-    try {
-      const r = await fetch(`/store.json?feed=${encodeURIComponent(w)}`, { cache: 'no-store' });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const ct = r.headers.get('content-type') ?? '';
-      if (!ct.includes('json')) throw new Error(`answered ${ct || 'no content-type'}, not JSON`);
-      const rowsIn = await r.json();
-      if (!Array.isArray(rowsIn)) throw new Error('the body is not a JSON array');
-
-      const byMonth = new Map();
-      let cells = 0;
-      let bars = 0;
-      for (const c of rowsIn) {
-        const m = typeof c?.month === 'string' ? c.month : null;
-        if (!m) continue;
-        const n = typeof c.rows === 'number' ? c.rows : 0;
-        let acc = byMonth.get(m);
-        if (!acc) byMonth.set(m, (acc = { cells: 0, bars: 0 }));
-        acc.cells += 1;
-        acc.bars += n;
-        cells += 1;
-        bars += n;
-      }
-      const was = census;
-      census = { kind: 'ok', why: null, at: Date.now(), feed: w, months: byMonth, cells, bars };
-      if (was.kind !== 'ok' || was.feed !== w) {
-        note(`the census was read for ${feedName(w)} — ${inrs(cells)} instrument-months, ${inrs(bars)} bars.`);
-      } else if (cells !== was.cells || bars !== was.bars) {
-        note(
-          `the store gained ${inrs(cells - was.cells)} instrument-month(s) and ${inrs(bars - was.bars)} bar(s) for ${feedName(w)}.`
-        );
-      }
-    } catch (e) {
-      census = {
-        kind: 'broken',
-        why: String(e?.message ?? e),
-        at: Date.now(),
-        feed: w,
-        months: new Map(),
-        cells: 0,
-        bars: 0
-      };
-      note(`/store.json could not be read for ${feedName(w)} — ${String(e?.message ?? e)}`);
-    }
-  }
-
   // The feed is part of the question: the brokers do not hold the same
   // instruments, so a census is per feed and re-reads when the selection moves.
   // THE SELECTION ITSELF IS THE TOP BAR'S, and this page never writes it — one
-  // feed picker per product, in `+layout.svelte`, and no second one here.
+  // feed picker per product, in `+layout.svelte`, and no second one here. The
+  // autopilot's OWN target wins when it names one, because a fraction of a
+  // target has to be counted out of the store that target is being written to.
   const wire = $derived(ap?.target?.feed ?? feeds.active);
+
+  /* THE FETCH, THE FOLD AND THE TIMER ARE ALL SHARED NOW.
+     ----------------------------------------------------------------------
+     This page used to own the third of SIX independent reads of `/store.json`,
+     on the third of six clocks — thirty seconds here, five on `/ingest` during
+     a pull, once per feed change on `/db` and `/`. Nothing reconciled them, so
+     two surfaces could hold two totals for one disk and each was right about
+     its own snapshot. `$lib/store.svelte.js` reads it ONCE per (feed,
+     generation) and folds `byMonth` in the same pass that builds every other
+     page's shape, so the per-month totals below are the SAME numbers `/db` is
+     showing rather than a second opinion about them.
+
+     `watchStore` is the thirty seconds, held rather than owned: the shared poll
+     runs at the finest period any holder asked for, and every subscriber sees
+     the answer it fetches. */
+  $effect(() => syncStore(wire));
+  $effect(() => watchStore(CENSUS_MS));
+
+  const census = $derived.by(() => {
+    if (store.state === 'error')
+      return { kind: 'broken', why: store.error, at: null, feed: null, months: new Map(), cells: 0, bars: 0 };
+    // THE FEED STAMP IS THE GATE, NOT DECORATION. A reading that answered for
+    // another feed is not this page's census however recently it landed — and
+    // that includes the instant between the target moving and the effect that
+    // re-reads for it, which would otherwise draw one feed's fill under the
+    // other feed's name with every number in it really counted.
+    if (store.state === 'ready' && store.feed !== null && store.feed === wire)
+      return {
+        kind: 'ok',
+        why: null,
+        at: store.at,
+        feed: store.feed,
+        months: store.byMonth,
+        cells: store.cells,
+        bars: store.bars
+      };
+    return { kind: 'probing', why: null, at: 0, feed: null, months: new Map(), cells: 0, bars: 0 };
+  });
+
+  /* THE TRAIL STILL SAYS WHAT MOVED. The note used to be written by the reader;
+     with the reader shared it is written by whoever is WATCHING the reading,
+     which is this page. `store.reads` counts successful reads, so this fires
+     once per landed answer and never on a re-render. */
+  let notedRead = 0;
+  let notedCells = 0;
+  let notedBars = 0;
+  let notedFeed = null;
+  let notedError = null;
   $effect(() => {
-    const f = wire;
-    if (!f) return;
-    readCensus(f);
-    const id = setInterval(() => readCensus(f), CENSUS_MS);
-    return () => clearInterval(id);
+    const reads = store.reads;
+    const state = store.state;
+    const why = store.error;
+    untrack(() => {
+      if (state === 'error' && why !== null && why !== notedError) {
+        notedError = why;
+        notedRead = 0;
+        note(`/store.json could not be read for ${feedName(wire)} — ${why}`);
+        return;
+      }
+      if (state !== 'ready' || reads === notedRead) return;
+      notedError = null;
+      const first = notedRead === 0 || notedFeed !== store.feed;
+      notedRead = reads;
+      if (first) {
+        note(
+          `the census was read for ${feedName(store.feed)} — ${inrs(store.cells)} instrument-months, ${inrs(store.bars)} bars.`
+        );
+      } else if (store.cells !== notedCells || store.bars !== notedBars) {
+        note(
+          `the store gained ${inrs(store.cells - notedCells)} instrument-month(s) and ${inrs(store.bars - notedBars)} bar(s) for ${feedName(store.feed)}.`
+        );
+      }
+      notedFeed = store.feed;
+      notedCells = store.cells;
+      notedBars = store.bars;
+    });
   });
 
   /* ======================================================================

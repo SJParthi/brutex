@@ -1071,7 +1071,15 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `:0` port and asks the server for the same one, so the refusal is the
     /// kernel's and needs no vendor, credential or bar. Neither was added to the
     /// struck-through table below, for the reason that table itself teaches.
-    const REACHED_IN_SERVER_TESTS: usize = 10;
+    ///
+    /// Two more joined them with the batch that closed the adversarial sweep's
+    /// silent-startup findings: `api.server the server stopped after serving a
+    /// DEGRADED universe`, driven directly through `stopped_over(Ok(()),
+    /// false)`, and `api.serve refused: another instance is serving this store`,
+    /// driven by the second-server test in `server::tests` — which holds the
+    /// store's own lock file on a handle of its own, so the refusal is the OS's
+    /// and needs no second process.
+    const REACHED_IN_SERVER_TESTS: usize = 12;
     /// The rows of the table above, every one of them struck through.
     const UNREACHABLE: usize = 0;
     // COUNTED FROM THE SOURCE, not declared. A twenty-EIGHTH emit added
@@ -1080,7 +1088,7 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     // the accounting.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 27,
+        lib_sites, 29,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

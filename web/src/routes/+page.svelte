@@ -88,7 +88,14 @@
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
-  import { store, syncStore, refreshStore, RUNG_SECONDS, rungSeconds as rungSec } from '$lib/store.svelte.js';
+  import {
+    store,
+    syncStore,
+    refreshStore,
+    RUNG_SECONDS,
+    MONTH_KEY,
+    rungSeconds as rungSec
+  } from '$lib/store.svelte.js';
 
   /* ======================================================================
      PRIMITIVES

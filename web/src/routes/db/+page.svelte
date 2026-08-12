@@ -74,15 +74,44 @@
      from the 2nd to the 31st from one held on the 2nd alone; the window says
      which, in the `02 Sep 2024` form this product uses everywhere. */
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
+  import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
 
   /* ======================================================================
      DATA
      ====================================================================== */
-  let rows = $state([]);
-  let error = $state(null);
-  let loading = $state(false);
-  let fetchedAt = $state(0);
-  let nonce = $state(0); /* bumped by Refresh; the store grows under a pull */
+  /* THE ROWS ARE NOT THIS PAGE'S READ ANY MORE.
+     ----------------------------------------------------------------------
+     `/store.json` was fetched from SIX places across this product on six
+     clocks, and TWO of them were on this page. Nothing reconciled them: while a
+     pull ran, this page and `/ingest` printed different totals for the same
+     disk and each was right about its own snapshot. `$lib/store.svelte.js`
+     reads it ONCE per (feed, generation) and folds every shape any page needs
+     in one pass; these four names are the same four this file always used,
+     pointed at that reading.
+
+     `rows` IS THE RAW ARRAY, exactly what the wire sent — this page reads ten
+     fields off a row and derives its own denominators, so it takes the array
+     and not the census's normalised view of it. */
+  const rows = $derived(store.feed === feeds.active ? store.rows : []);
+  const error = $derived(store.error);
+  /* A READING THIS FEED HAS NOT ANSWERED FOR YET IS STILL "IN FLIGHT", even in
+     the instant between the selection moving and the effect that re-reads it.
+     Without the second clause that instant renders as a finished read of an
+     empty store — "Nothing stored for Groww" over a store nobody has asked
+     about — which is a claim about the disk, not a state of the page. */
+  const loading = $derived(
+    store.state === 'reading' ||
+      (feeds.active != null && store.state !== 'error' && store.feed !== feeds.active)
+  );
+  /* WHEN THIS FEED'S STORE LAST ANSWERED — 0 when it never has. `store.lastOk`
+     is the last SUCCESSFUL read and carries the feed it was for, so a failed
+     refresh keeps the minute (under the word "last good") and a feed switch
+     drops it, which is what this page's `as of` line has always meant. */
+  const fetchedAt = $derived(store.lastOk.feed === feeds.active ? (store.lastOk.at ?? 0) : 0);
+  /* Bumped by Refresh; the store grows under a pull. IT IS THE SHARED CLOCK:
+     the bump re-reads the census for every page at once, so Refresh here can no
+     longer leave `/ingest` holding an older total than this table. */
+  const nonce = $derived(store.generation);
 
   let filter = $state('');
   let month = $state(''); /* '' = every month */
@@ -500,45 +529,26 @@
    */
   let loadedFeed = null;
 
+  /* THE SUBSCRIPTION. `syncStore` reads `feeds.active` and the shared
+     generation, so a feed change re-reads and any Refresh — this page's, or the
+     five-second poll `/ingest` holds while a pull runs — lands here too. The
+     staleness this comment block describes is now impossible by construction
+     rather than by care: the shared reading CLEARS its value on a feed change
+     before the request leaves, and `rows` above refuses to hand back anything
+     the reading did not stamp with this feed. */
+  $effect(() => syncStore(feeds.active));
+
   $effect(() => {
     const f = feeds.active;
-    void nonce; /* read, so Refresh re-runs this effect */
-    if (!f) return;
-    if (loadedFeed !== f) {
-      loadedFeed = f;
-      rows = [];
-      fetchedAt = 0;
-      // A FUNCTION DECLARATION, CALLED FROM ABOVE ITSELF ON PURPOSE. The state
-      // it clears is declared further down beside the code that owns it, and a
-      // `const` arrow there would be a temporal-dead-zone reference from here —
-      // the exact thing the FORMATTING block above says was already found and
-      // fixed once on this file. A `function` hoists whole, so this call is
-      // valid wherever it appears in the script.
-      forgetPreviousFeed();
-    }
-    let dead = false;
-    loading = true;
-    error = null;
-    fetch(`/store.json?feed=${encodeURIComponent(f)}`)
-      .then((r) =>
-        r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))
-      )
-      .then((j) => {
-        if (dead) return;
-        rows = Array.isArray(j) ? j : [];
-        fetchedAt = Date.now();
-        loading = false;
-      })
-      .catch((why) => {
-        if (dead) return;
-        // NAMED, NOT SHRUGGED. The operator gets the actual failure and a
-        // button; a page that says "no data" over a failed request is the
-        // fallback that hides a failure `CLAUDE.md` §4 bans.
-        error = String(why && why.message ? why.message : why);
-        rows = [];
-        loading = false;
-      });
-    return () => (dead = true);
+    if (!f || loadedFeed === f) return;
+    loadedFeed = f;
+    // A FUNCTION DECLARATION, CALLED FROM ABOVE ITSELF ON PURPOSE. The state
+    // it clears is declared further down beside the code that owns it, and a
+    // `const` arrow there would be a temporal-dead-zone reference from here —
+    // the exact thing the FORMATTING block above says was already found and
+    // fixed once on this file. A `function` hoists whole, so this call is
+    // valid wherever it appears in the script.
+    forgetPreviousFeed();
   });
 
   // WHERE ELSE THE DATA IS. An empty page that only says "nothing here" makes
@@ -552,22 +562,31 @@
   // while Groww is the selected feed and the panel above it says Groww holds
   // nothing — a live control offering a move the page has already made. It is
   // a small stale value, but it is one produced by a query nobody re-ran.
-  let elsewhere = $state([]);
+  //
+  // THE SECOND READ OF `/store.json` ON THIS PAGE IS GONE. This was an
+  // independent N-request fold answering a question `loadFeeds` had ALREADY
+  // asked and folded at boot — "which feed holds anything at all" — on a second
+  // clock, with no stamp, and re-fired every time the condition below held.
+  // `$lib/store.svelte.js` folds it once, keyed by wire, stamped with the feed
+  // list it answered for; `surveyStores` is a no-op when that answer is already
+  // in hand for this generation, so the common case costs nothing at all.
   $effect(() => {
     if (loading || error || rows.length || !feeds.all.length) return;
-    let dead = false;
-    Promise.all(
-      feeds.all.map((f) =>
-        fetch(`/store.json?feed=${encodeURIComponent(f.wire)}`)
-          .then((r) => (r.ok ? r.json() : []))
-          .then((d) => ({ feed: f, any: Array.isArray(d) && d.length > 0 }))
-          .catch(() => ({ feed: f, any: false }))
-      )
-    ).then((all) => {
-      if (!dead) elsewhere = all.filter((x) => x.any && x.feed.wire !== feeds.active);
-    });
-    return () => (dead = true);
+    void nonce; /* a Refresh re-asks it — the store may have gained a feed */
+    surveyStores(feeds.all);
   });
+
+  // DERIVED, SO IT CANNOT SURVIVE THE QUESTION THAT PRODUCED IT. The old list
+  // excluded whichever feed was active WHEN IT RESOLVED, so carrying it across
+  // a switch rendered "Rows exist under Groww" while Groww was selected — a
+  // live control offering a move the page had already made. Filtering against
+  // the CURRENT selection at read time makes that shape unrepresentable, which
+  // is why `forgetPreviousFeed` no longer has to remember to drop it.
+  const elsewhere = $derived(
+    feeds.all
+      .map((f) => ({ feed: f, any: survey.byFeed.get(f.wire)?.any === true }))
+      .filter((x) => x.any && x.feed.wire !== feeds.active)
+  );
 
   /* ======================================================================
      THE TRADING CALENDAR, DERIVED FROM THE STORE ITSELF
@@ -3611,7 +3630,9 @@
     flash = {};
     moved = new Map();
     openKey = null;
-    elsewhere = [];
+    // `elsewhere` IS NOT DROPPED HERE ANY MORE — it is `$derived` off the
+    // shared survey and filtered against the CURRENT selection, so the stale
+    // shape this function used to have to remember cannot be built.
   }
 
   /**
@@ -4309,7 +4330,7 @@
     <button
       class="btn ghost sm"
       type="button"
-      onclick={() => (nonce += 1)}
+      onclick={() => refreshStore()}
       disabled={loading}
       title="Re-read /store.json. The store grows while a pull runs."
     >
@@ -4326,7 +4347,7 @@
         This page shows nothing rather than guessing. Until <code>/store.json</code> answers, no
         count on this page would be trustworthy — including a zero.
       </p>
-      <button class="btn primary" onclick={() => (nonce += 1)}>Try again</button>
+      <button class="btn primary" onclick={() => refreshStore()}>Try again</button>
     </div>
   {:else if !feeds.active}
     <!-- AN UNMADE CHOICE IS NOT AN EMPTY STORE, and this branch exists because
@@ -6047,7 +6068,7 @@
                         Nothing is drawn rather than a plausible blank: a grid with no rows and no
                         reason reads as an empty store, and this is a failed read.
                       </p>
-                      <button class="btn" onclick={() => (nonce += 1)}>Try again</button>
+                      <button class="btn" onclick={() => refreshStore()}>Try again</button>
                     </div>
                   </td>
                 </tr>
@@ -6097,7 +6118,7 @@
                           empty query.
                         {/if}
                       </p>
-                      <button class="btn" onclick={() => (nonce += 1)}>Read again</button>
+                      <button class="btn" onclick={() => refreshStore()}>Read again</button>
                     </div>
                   </td>
                 </tr>

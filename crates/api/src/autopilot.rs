@@ -713,6 +713,14 @@ pub struct TickOutcome {
     pub complete: bool,
     /// Set when the operator stopped the sweep part-way. Not a failure.
     pub stopped: bool,
+    /// Why this tick's record did not reach the journal, verbatim. `None` when
+    /// it did.
+    ///
+    /// It does NOT change what the tick decides — a pull that stored bars stored
+    /// them whether or not the audit line landed — and it may not be silent
+    /// either, so it travels to [`Status::journal_error`] and onto
+    /// `/autopilot.json`.
+    pub journal_error: Option<String>,
 }
 
 /// What to do after a tick.
@@ -1277,6 +1285,14 @@ pub struct Status {
     pub failures: Vec<Failed>,
     /// Where the run journal is, so an operator can go and read it.
     pub journal: String,
+    /// Why the last tick's record did not reach that journal. Empty when every
+    /// record this process wrote landed.
+    ///
+    /// **A path is not a proof.** `journal` said where the file is and every
+    /// page read it as evidence the runs were being recorded; the append's
+    /// answer was discarded at the one site that produces it. This is that
+    /// answer, and `/autopilot.json` carries it as `journal_error`.
+    pub journal_error: String,
     /// Milliseconds spent waiting between units, this process.
     pub waiting_ms: u64,
     /// Milliseconds of vendor throttling the governor absorbed, this process.
@@ -1307,6 +1323,7 @@ impl Default for Status {
             cursor: String::new(),
             failures: Vec::new(),
             journal: String::new(),
+            journal_error: String::new(),
             waiting_ms: 0,
             absorbed_ms: 0,
             feeds: Vec::new(),
@@ -1403,11 +1420,12 @@ impl Status {
         let mut out = String::with_capacity(2048);
         let _ = write!(
             out,
-            r#"{{"state":{},"why":{},"cursor":{},"journal":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
+            r#"{{"state":{},"why":{},"cursor":{},"journal":{},"journal_error":{},"waiting_ms":{},"absorbed_ms":{},"target":{{"from":{},"to":{},"instruments":{},"timeframe":{},"feed":{}}},"now":"#,
             render::json_string(self.state()),
             render::json_string(&self.why()),
             render::json_string(&self.cursor),
             render::json_string(&self.journal),
+            render::json_string(&self.journal_error),
             self.waiting_ms,
             self.absorbed_ms,
             render::json_string(&self.target.from),
@@ -2655,8 +2673,14 @@ async fn round(
 
     let out = tick(site, state, &unit, granularity, series).await;
     let stored = u64::try_from(out.stored).unwrap_or(u64::MAX);
+    // THE JOURNAL'S ANSWER TRAVELS WITH THE BARS. Published beside
+    // `bars_stored` because it is a fact about the same tick, and cleared on a
+    // tick whose record landed so the page shows the CURRENT state of the file
+    // rather than the worst one this process ever saw.
+    let journal_error = out.journal_error.clone().unwrap_or_default();
     site.autopilot.publish(move |status| {
         status.bars_stored = status.bars_stored.saturating_add(stored);
+        status.journal_error = journal_error;
     });
 
     settle(site, state, &out)
@@ -2773,7 +2797,14 @@ async fn tick(
             &run.total,
         )
     };
-    let _ignored = site.journal().append(&record);
+    // THE APPEND'S OWN ANSWER, CARRIED OUT OF HERE. This was
+    // `let _ignored = ...`: the ONE record per tick, and the one write whose
+    // failure nobody could see. `/audit` reads the journal, so a journal that
+    // cannot be WRITTEN shows as a quiet page — and this page's own footnote
+    // tells the operator that a failure missing from `/audit` "was never
+    // written down, and that is a defect in the journal, not in this page".
+    // It was a defect in this line. `CLAUDE.md` §4.
+    let journal_error = site.journal().append(&record).err();
 
     // THE STORE IS THE AUTHORITY ON WHETHER THE MONTH IS DONE, not the
     // counters this run happens to hold. One census read and one probe per
@@ -2818,6 +2849,7 @@ async fn tick(
         reason,
         complete,
         stopped: run.stopped.is_some(),
+        journal_error,
     }
 }
 
@@ -3517,6 +3549,7 @@ mod tests {
             reason: Some("connection reset by peer".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert_eq!(
             state.observe(&failed),
@@ -3623,6 +3656,7 @@ mod tests {
             reason: Some("the transport is not blipping, it is down".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         let mut verdicts = Vec::new();
         for _ in 0..MAX_MONTH_ATTEMPTS {
@@ -4078,6 +4112,7 @@ mod tests {
             reason: Some(String::from("connection reset by peer")),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
 
         // BACKOFF: waits, and says how long and why.
@@ -4179,6 +4214,51 @@ mod tests {
             site.journal().path.exists(),
             "the run journal was written at {}",
             site.journal().path.display()
+        );
+    }
+
+    /// **A tick whose record cannot be journalled says so on `/autopilot.json`.**
+    ///
+    /// # What this holds up
+    ///
+    /// `tick` builds exactly one `Record` per pass and appended it as
+    /// `let _ignored = site.journal().append(&record);`. On a read-only store
+    /// root, a full disk, or an `audit` path that is a file — the state this
+    /// test creates, and the same one `emitted.rs` drives on purpose — every
+    /// record this process produced went nowhere and no surface said so. The
+    /// page beside it tells the operator the opposite in as many words: *"A
+    /// failure that appears here and not there is a failure that was never
+    /// written down, and that is a defect in the journal, not in this page."*
+    ///
+    /// Before the fix this asserted nothing, because there was no field: the
+    /// payload carried `journal` — the PATH — and a path is not a proof that
+    /// anything reached it.
+    #[tokio::test]
+    async fn a_tick_that_cannot_be_journalled_carries_the_reason_to_the_page() {
+        let site = empty_site("journal-refused");
+        // A FILE WHERE THE `audit` DIRECTORY HAS TO BE, so `create_dir_all`
+        // refuses and the append refuses with it. Nothing is mocked: this is
+        // the shipped `Journal::append` meeting a disk it cannot use.
+        std::fs::write(site.store_root.join("audit"), b"not a directory")
+            .expect("a file in the way");
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let axis = [series("NIFTY")];
+        let mut feeds = drivable(yesterday);
+
+        let _waited = round(&site, &mut feeds, &axis, pull::vendor::Granularity::Minute1).await;
+
+        let json = site.autopilot.json();
+        assert!(
+            json.contains(r#""journal_error":"#),
+            "the payload carries the field: {json}"
+        );
+        assert!(
+            json.contains("audit directory"),
+            "and it carries the journal's own reason, verbatim: {json}"
+        );
+        assert!(
+            !site.journal().path.exists(),
+            "nothing was recorded, which is the fact the page now states"
         );
     }
 
@@ -4319,6 +4399,7 @@ mod tests {
             reason: Some("NIFTY — disk full writing /store/x.bin".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert!(matches!(state.observe(&full), Next::Wait { .. }));
         let Next::Halt { reason } = state.observe(&full) else {
@@ -4344,6 +4425,7 @@ mod tests {
             reason: Some("timed out".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert!(matches!(state.observe(&failed), Next::Wait { .. }));
         assert_eq!(state.attempts, 1);
@@ -4380,6 +4462,7 @@ mod tests {
             reason: None,
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert_eq!(
             state.observe(&dry),
@@ -4406,6 +4489,7 @@ mod tests {
             reason: None,
             complete: false,
             stopped: true,
+            journal_error: None,
         };
         assert_eq!(state.observe(&stopped), Next::Retry);
         assert_eq!(state.attempts, 0);
@@ -4855,6 +4939,7 @@ mod tests {
             reason: Some("SOMEBOND — refused with status 401".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert_eq!(
             classify("SOMEBOND — refused with status 401"),
@@ -4912,6 +4997,7 @@ mod tests {
             reason: Some("the credential configuration at ~/.brutex is not usable".to_owned()),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         assert!(credential_is_feedwide(&blocked));
     }
@@ -5165,6 +5251,7 @@ mod tests {
             reason: Some(String::from("NIFTY — disk full writing /store/x.bin")),
             complete: false,
             stopped: false,
+            journal_error: None,
         };
         let first = feeds.first_mut().expect("a drivable feed");
         assert!(matches!(first.observe(&disk), Next::Wait { .. }));

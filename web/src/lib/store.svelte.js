@@ -85,7 +85,8 @@ export const RUNG_SECONDS = new Map([
 /** Seconds one bar of this rung covers, or `null` when this build cannot map it. */
 export const rungSeconds = (t) => RUNG_SECONDS.get(t) ?? null;
 
-const MONTH_KEY = /^\d{4}-\d{2}$/;
+/** The shape a census month is written in. One spelling of the test, shared. */
+export const MONTH_KEY = /^\d{4}-\d{2}$/;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /** The key `byCell` is probed with. ONE spelling, so two pages cannot differ. */
@@ -156,6 +157,13 @@ let flightToken = null;
 /* The feed the last `syncStore` asked about, so the poll and Refresh know what
    to re-read without importing the feed selection and making an import cycle. */
 let wanted = null;
+/* THE FEED THE CURRENT VALUE BELONGS TO, MIRRORED OUTSIDE THE `$state`.
+   `syncStore` is called FROM an effect, so everything `read` touches
+   synchronously is inside that effect's tracking scope. Reading `store.feed`
+   there — a field this function also WRITES — would make the subscription
+   depend on its own output and re-run until Svelte aborts it. The mirror is
+   written beside every write of `store.feed` and never diverges. */
+let valueFeed = null;
 
 function clearValue() {
   Object.assign(store, empty());
@@ -237,8 +245,9 @@ function read(feed, generation) {
   // really counted — from the wrong store. A REFRESH of the same feed keeps the
   // value: `state` reads 'reading' and the page shows it under a "refreshing"
   // mark, because it is that feed's own previous answer and is labelled as one.
-  if (store.feed !== feed) {
+  if (valueFeed !== feed) {
     clearValue();
+    valueFeed = null;
     store.feed = null;
     store.at = null;
   }
@@ -251,6 +260,7 @@ function read(feed, generation) {
       if (asked !== key) return; // a newer feed or generation won; this answer is stale
       if (!Array.isArray(body)) throw new Error('the body of /store.json is not a JSON array');
       Object.assign(store, fold(body));
+      valueFeed = feed;
       store.feed = feed;
       store.at = Date.now();
       store.state = 'ready';
@@ -265,6 +275,7 @@ function read(feed, generation) {
       // never read. `lastOk` survives under its own name; `at` and `feed` do
       // not, because they are the claim that THIS value is current.
       clearValue();
+      valueFeed = null;
       store.feed = null;
       store.at = null;
       store.state = 'error';
@@ -447,9 +458,22 @@ export function surveyStores(list) {
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => {
           const rows = Array.isArray(d) ? d : [];
+          // THE SAME TEST FOR "READABLE" AS THE CENSUS FOLD, and deliberately
+          // the same function. Two definitions of which rows count is how the
+          // feed picker comes to report a bar total the page it opens cannot
+          // reproduce, and the operator has no way to tell which one lied.
           let bars = 0;
-          for (const row of rows) if (Number.isInteger(row?.rows) && row.rows > 0) bars += row.rows;
-          return { wire: f.wire, ready: f.ready, bars, cells: rows.length, any: rows.length > 0, error: null };
+          let cells = 0;
+          for (const row of rows) {
+            if (rowFault(row) !== null) continue;
+            bars += row.rows;
+            cells += 1;
+          }
+          // `any` IS "THIS FEED HAS ENTRIES", NOT "THIS FEED HAS COUNTABLE
+          // ONES". It is what `/db` points at when the selected feed is empty,
+          // and a store whose rows this build cannot parse is still somewhere
+          // to go — saying otherwise would hide a store behind a parse fault.
+          return { wire: f.wire, ready: f.ready, bars, cells, any: rows.length > 0, error: null };
         })
         // ONE FEED'S FAILURE IS NOT EVERY FEED'S. The reason rides on the row so
         // a caller can say "this feed could not be read" rather than "this feed

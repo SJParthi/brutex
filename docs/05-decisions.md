@@ -12179,3 +12179,96 @@ that sentence. Pre-existing, unchanged by this entry, and named here so it is no
 found twice.
 
 **Invariants.** `docs/04-invariants.md` GW-01…GW-05.
+
+## D-0127 · 2026-08-12 · `/store.json` is read once, folded once, on one clock, and every page subscribes
+
+**Decision.** The store census is a single shared reading in
+`web/src/lib/store.svelte.js`. Exactly one `GET /store.json` per
+(feed, generation); one O(n) pass builds every shape any page needs; one timer,
+held rather than owned, drives the poll. No page fetches `/store.json` and no
+page folds it. A refresh is a **generation bump**, not a per-page timer.
+
+**What it replaces.** Six independent reads, folded five different ways, on six
+clocks — confirmed by an adversarial pass over `web/src`:
+
+| call site | shape it folded | its clock |
+|---|---|---|
+| `lib/feeds.svelte.js` | a sum, to pick the default feed | once, per feed in the list |
+| `routes/+page.svelte` | `Map<instrument, [{month, rows, timeframe}]>` | on feed change |
+| `routes/db/+page.svelte` | the raw array | feed change / Refresh |
+| `routes/db/+page.svelte` | which OTHER feeds hold anything | re-fired per render condition |
+| `routes/ingest/+page.svelte` | `Map<"inst\|tf\|month", rows>` | once per feed |
+| `routes/ingest/+page.svelte` | `{units, rows, byInstrument, held}` | **every 5 s while a pull runs** |
+| `routes/autopilot/+page.svelte` | per-month `{cells, bars}` | every 30 s |
+
+**Nothing reconciled them.** During a pull, `/db` and `/ingest` could show
+different totals for the same store and both were "correct" as of their own
+snapshot. `/ingest` alone held two independently-clocked copies of one census —
+the table and the progress bay — and could disagree with itself while a single
+operator watched both. `/db` and `loadFeeds` each ran their own N-request
+across-every-feed fold to answer one question.
+
+*Why this is the O(1) rule failing at the architecture level rather than a slow
+fold.* `CLAUDE.md` §3 rule 4 is about per-operation cost, and each of these folds
+was already a single pass. Making any one of them faster changes nothing: the
+defect is that the same question has six answers, and the operator has no way to
+tell which one is the disk. The fix is one fold with one clock, not a better
+fold.
+
+**The shape of the one reading.** `rows` is the raw array, exactly what the wire
+sent, because `/db` reads ten fields off a row. `readable` is the rows whose
+fields parse, normalised; `bad` is the rows whose fields do not, each carrying
+the reason it did not — a census row whose `rows` is absent, negative or
+fractional has an UNKNOWN count, and dropping it makes it indistinguishable from
+a month that does not exist while writing zero for it prints a measurement
+nobody took. The keyed shapes are built in the same pass and are Map probes
+afterwards, never scans: `byInstrument`, `byCell` (`instrument|timeframe|month`),
+`byMonth`. The readable cells are shared **by reference** across all three views
+— three views of one object, not three copies of it.
+
+**Why the read carries its feed.** This is the `catalogue.feed` lesson, one page
+wider. `$lib/index.svelte.js` declared a gate two pages compared against, never
+wrote the field, and `undefined === 'dhan'` is false forever — every instrument
+picker rendered "0 shown of 0" behind a refusal no operator action could satisfy.
+A shared census with no feed stamp is that bug again in the other direction: one
+broker's disk folded under another broker's heading, every number in it really
+counted. A read carries three things and never fewer — its stamp, its error, and
+the feed it ANSWERED FOR — and a page compares that feed against the one it is
+asking about before printing a single figure. Four pages now do.
+
+**§4, and what a failed read may not leave standing.** A failure clears the time
+stamp, clears the feed stamp, empties every index and names the reason. The
+previous successful read survives only as `lastOk`, under a name that cannot be
+read as current: *last good: 15:29* is honest, *as of 15:29* over a refused read
+is the fallback that hides a failure, and it is worse than a blank because the
+minute is real and only the claim is false. A feed change drops the value BEFORE
+the request leaves, for the same reason; a refresh of the SAME feed keeps it, and
+the state says `reading` so the page can mark it.
+
+**Why the feed is a parameter and not an import.** `syncStore(feed)` takes the
+feed rather than reading the selection, so `web/src/lib/store.svelte.js` imports
+nothing at all — no cycle with `feeds.svelte.js`, which reads the survey back —
+and `/autopilot` keeps following the autopilot's OWN target feed rather than the
+top bar, which is what makes its fill a fraction of the right store.
+
+**Why the mirror beside `store.feed`.** `syncStore` is called FROM an effect, so
+everything the read touches synchronously sits in that effect's tracking scope.
+Reading `store.feed` there — a field the same function writes — makes the
+subscription depend on its own output and re-run until Svelte aborts it. The
+current feed is mirrored in a plain module variable, written beside every write
+of `store.feed`.
+
+**Not done here, and named so it is not found twice.** `/db` still derives its
+own `monthFull` denominator and its own decorated rows from the shared array;
+those are that page's questions and nothing else asks them, so they stay where
+they are read. The survey remains N requests — it spans every feed by
+construction — and is asked once per (feed list, generation) rather than twice
+per condition.
+
+**Verified.** A harness over the module exercises 37 assertions: one fetch for
+three subscribers, the keyed probes, the `(month, rung)` ordering, the window
+fold and its memo, the generation bump, the value cleared on a feed change
+before the request leaves, the stamp and feed cleared on failure with `lastOk`
+surviving, retry after failure without a bump, the survey's single pass and its
+feed-list stamp, and the shared poll starting and stopping with its holder.
+`npm run build` is clean with no Svelte warnings.

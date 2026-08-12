@@ -45,6 +45,7 @@
   // to nothing else — see the rung-drop effect for why an effect that reacts to
   // its own write is a hazard rather than a nicety.
   import { onMount, untrack } from 'svelte';
+  import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
 
   // ---------------------------------------------------------------- constants
 
@@ -2449,30 +2450,41 @@
   //   reach      the feed's floor at the ticked rungs, which is already what
   //              refuses a day in the date control.
 
-  /** The store, read once per feed. Keyed `instrument|timeframe|month` — O(1). */
-  let storeRead = $state({ at: 0, feed: '', bars: new Map(), rows: 0, error: null, busy: false });
-  /** Not state: which feed a read has already been ASKED for, so a failed read
-      is not retried forever by the effect that starts it. */
-  let storeAsked = '';
-
-  async function readStore() {
-    const feed = feeds.active ?? '';
-    if (!feed || storeRead.busy) return;
-    storeRead = { ...storeRead, busy: true, error: null };
-    try {
-      const r = await fetch(`/store.json?feed=${encodeURIComponent(feed)}`);
-      if (!r.ok) throw new Error(`/store.json answered HTTP ${r.status}`);
-      const rows = await r.json();
-      const bars = new Map();
-      for (const row of rows) bars.set(`${row.instrument}|${row.timeframe}|${row.month}`, row.rows);
-      storeRead = { at: Date.now(), feed, bars, rows: rows.length, error: null, busy: false };
-    } catch (why) {
-      // NAMED, NOT SWALLOWED. A census built on a failed read would print
-      // "never pulled" on every row, which is a finding this page would have
-      // invented out of a network error.
-      storeRead = { ...storeRead, busy: false, error: String(why) };
-    }
-  }
+  /**
+   * The store, keyed `instrument|timeframe|month` — O(1).
+   *
+   * # THIS PAGE HELD TWO INDEPENDENTLY-CLOCKED COPIES OF ONE CENSUS
+   *
+   * `/store.json` was fetched from SIX places across this product and TWO of
+   * them were on this page: this one, once per feed, and the run watcher below,
+   * every five seconds while a pull was running. Nothing reconciled them, so
+   * the census table and the progress bay could state different totals for the
+   * same disk at the same moment and both were right about their own snapshot.
+   * `/db` was a third opinion on a seventh clock.
+   *
+   * `$lib/store.svelte.js` reads it ONCE per (feed, generation), builds
+   * `byCell` in the same pass that builds every other page's shape, and stamps
+   * the answer with the feed it answered for. This object is the four names
+   * this page already used, pointed at that one reading — and the run watcher
+   * below now reads the SAME one, so the two can no longer disagree.
+   *
+   * `bars` and `rows` are gated on the feed stamp rather than assumed: a
+   * reading that answered for another feed would put one broker's held counts
+   * against this broker's window, which is the §4 failure this page's whole
+   * census exists to prevent.
+   */
+  const storeMine = $derived(store.feed !== null && store.feed === (feeds.active ?? ''));
+  const storeRead = $derived({
+    at: storeMine && store.state === 'ready' ? (store.at ?? 0) : 0,
+    feed: store.feed ?? '',
+    bars: storeMine ? store.byCell : new Map(),
+    rows: storeMine ? store.rows.length : 0,
+    // NAMED, NOT SWALLOWED. A census built on a failed read would print
+    // "never pulled" on every row, which is a finding this page would have
+    // invented out of a network error.
+    error: store.error,
+    busy: store.state === 'reading'
+  });
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
@@ -2498,12 +2510,10 @@
     }
   }
 
-  $effect(() => {
-    const f = feeds.active ?? '';
-    if (!f || storeAsked === f) return;
-    storeAsked = f;
-    readStore();
-  });
+  /* THE SUBSCRIPTION. One line, and it replaces the fetch, the token, the "have
+     I asked for this feed" latch and the retry rule — the shared reading owns
+     all four, and a Refresh pressed anywhere (or the poll below) arrives here. */
+  $effect(() => syncStore(feeds.active));
   $effect(() => {
     if (pilotAsked) return;
     pilotAsked = true;
@@ -2966,53 +2976,64 @@
   // ------------------------------------------------------------ store census
 
   /**
-   * One reading of the store, reduced to two numbers and a map before the array
-   * is dropped. The array is ~266 KB at 3,353 rows today and grows toward the
-   * ~93,776 the store is heading for, so nothing holds on to it.
+   * One reading of the store, narrowed to the window and reduced to two numbers
+   * and a map. The array is ~266 KB at 3,353 rows today and grows toward the
+   * ~93,776 the store is heading for, so nothing here holds on to it.
+   *
+   * IT IS NO LONGER A SEVENTH FETCH. `refreshStore` bumps the shared generation
+   * and returns the ONE request that bump causes — the same answer the census
+   * table thirty lines up is reading, so a run's baseline and the "held" column
+   * beside it can no longer come from two different snapshots of one disk.
+   * `foldMonths` walks only the months the window names, off the shared
+   * `byMonth` index, and memoises on (read, months) so a re-render never
+   * re-folds.
    */
-  async function snapshot(signal) {
-    const feed = feeds.active ?? '';
-    const r = await fetch(`/store.json?feed=${encodeURIComponent(feed)}`, { signal });
-    if (!r.ok) throw new Error(`/store.json answered HTTP ${r.status}`);
-    const rows = await r.json();
-    const want = new Set(windowMonths);
-    const byInstrument = new Map();
-    let unitsIn = 0;
-    let rowsIn = 0;
-    for (const row of rows) {
-      if (!want.has(row.month)) continue;
-      unitsIn += 1;
-      rowsIn += row.rows;
-      byInstrument.set(row.instrument, (byInstrument.get(row.instrument) ?? 0) + row.rows);
-    }
-    return { at: Date.now(), units: unitsIn, rows: rowsIn, byInstrument, held: rows.length };
+  async function snapshot() {
+    await refreshStore();
+    // REFUSED, NOT ZEROED. Every outcome on this page is a difference against
+    // this reading; measuring against a failed one would credit the run with
+    // whatever the store already held.
+    if (store.state !== 'ready')
+      throw new Error(store.error ?? '/store.json could not be read, and it named no reason');
+    return foldMonths(windowMonths);
   }
 
   /**
-   * The watcher. A self-scheduling loop rather than an interval, so a slow
-   * response cannot stack requests on top of each other, and a generation
-   * counter so a second run does not race the first one's tail.
+   * The watcher. It is no longer a loop this page owns: `watchStore` is ONE
+   * timer for the whole product, held at the finest period any page asked for
+   * and released on cleanup, and it bumps the shared generation rather than
+   * fetching — so the five-second reading a run is measured against IS the
+   * reading every other surface is showing.
+   *
+   * The awaited poll still cannot stack requests on top of each other; that
+   * rule moved into the shared clock with the timer.
    */
-  let watchGen = 0;
-  async function watch(gen) {
-    while (gen === watchGen && phase === 'running') {
-      try {
-        const shot = await snapshot();
-        if (gen !== watchGen) return;
-        pollError = null;
-        if (!live || shot.units > live.units || shot.rows > live.rows) lastGrowthAt = shot.at;
-        live = shot;
-        samples = [...samples, { t: shot.at, units: shot.units, rows: shot.rows }].slice(-12);
-      } catch (why) {
-        if (gen !== watchGen) return;
+  let releaseWatch = null;
+  /** The last landed read this page has already folded into `live`. */
+  let seenRead = 0;
+
+  $effect(() => {
+    const reads = store.reads;
+    const state = store.state;
+    const why = store.error;
+    untrack(() => {
+      if (phase !== 'running') return;
+      if (state === 'error') {
         // NAMED, NOT SWALLOWED. A watcher that quietly stops is a progress
         // display that silently freezes, which is the failure this page exists
         // to remove.
-        pollError = String(why);
+        pollError = why ?? '/store.json could not be read, and it named no reason';
+        return;
       }
-      await new Promise((done) => setTimeout(done, 5000));
-    }
-  }
+      if (state !== 'ready' || reads === seenRead) return;
+      seenRead = reads;
+      const shot = foldMonths(windowMonths);
+      pollError = null;
+      if (!live || shot.units > live.units || shot.rows > live.rows) lastGrowthAt = shot.at;
+      live = shot;
+      samples = [...samples, { t: shot.at, units: shot.units, rows: shot.rows }].slice(-12);
+    });
+  });
 
   // ------------------------------------------------------------- the receipt
 
@@ -3821,8 +3842,11 @@
     lastGrowthAt = startedAt;
     finishedAt = 0;
     phase = 'running';
-    watchGen += 1;
-    watch(watchGen);
+    // HELD, NOT OWNED. One five-second clock for the whole product, released
+    // the moment this run stops needing it.
+    releaseWatch?.();
+    seenRead = store.reads;
+    releaseWatch = watchStore(5000);
 
     controller = new AbortController();
     for (const b of bodies) {
@@ -3852,7 +3876,8 @@
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
-    watchGen += 1;
+    releaseWatch?.();
+    releaseWatch = null;
 
     // THE AFTER READING. Taken even when the request failed — a run that
     // refused halfway still wrote whatever landed before it, and pretending
@@ -3866,7 +3891,8 @@
     classifyBuild();
     // THE CENSUS IS A READING OF THE STORE AND THE STORE JUST MOVED. Leaving it
     // stale would show "never pulled" beside an outcome row saying bars landed.
-    readStore();
+    // The `snapshot()` above already bumped the shared generation, so the
+    // census table is reading that same answer and no second fetch is needed.
     readPilot();
   }
 
@@ -3905,7 +3931,8 @@
     return () => {
       clearInterval(tick);
       document.removeEventListener('pointerdown', away, true);
-      watchGen += 1;
+      releaseWatch?.();
+      releaseWatch = null;
       controller?.abort();
     };
   });
@@ -5306,7 +5333,7 @@
                 ? 'A reading is already in flight. A second press would duplicate it, and /store.json rebuilds the census server-side.'
                 : 'Reads /store.json and /ingest/status.json again. Every number below is one of those two answers — nothing here is cached beyond this press.'}
               onclick={() => {
-                readStore();
+                refreshStore();
                 readPilot();
               }}
             >

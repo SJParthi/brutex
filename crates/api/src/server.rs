@@ -976,15 +976,10 @@ async fn instruments_json(
     // boolean, and 1,125 is what the boolean threw away.
     // FRESH, so a row's bar count moves as a backfill lands. See `census_now`.
     let (censuses, entries) = census_now(&site);
-    let bars_of = |sym: brutex_core::symbol::Symbol| -> u64 {
-        censuses.iter().find(|c| c.vendor == feed).map_or(0, |c| {
-            entries
-                .iter()
-                .filter(|(series, _)| series.symbol == sym)
-                .filter_map(|(series, month)| c.rows_for(&series.at(*month)))
-                .sum()
-        })
-    };
+    // ONE PASS OVER THE CENSUS, NOT ONE PER INSTRUMENT. See `bars_by_symbol`.
+    let held = bars_by_symbol(censuses.iter().find(|c| c.vendor == feed), &entries);
+    let bars_of =
+        |sym: brutex_core::symbol::Symbol| -> u64 { held.get(&sym).copied().unwrap_or(0) };
     listing.sort_unstable_by_key(|(key, _)| {
         (
             bars_of(key.underlying) == 0,
@@ -1079,6 +1074,52 @@ async fn instruments_json(
         axum::http::StatusCode::OK
     };
     (code, headers, out)
+}
+
+/// Bars held per symbol, folded out of the census in ONE pass.
+///
+/// # What this replaces, and what it cost
+///
+/// The closure this replaces scanned the whole entry vector for every symbol:
+///
+/// ```text
+/// entries.iter().filter(|(series, _)| series.symbol == sym)
+/// ```
+///
+/// and it was the `sort_unstable_by_key` key as well as the emitted field, so
+/// the scan ran once per *comparison* — about 22.6 scans per row at n=785, plus
+/// one per emitted row: ~18,565 full passes over the census for one request.
+/// The cost was the PRODUCT of the tracked universe and the census, on a
+/// response whose size never moves. Measured, in an optimised build with no
+/// disk I/O, at universe 785: 750 entries 15.5 ms, 9,000 entries 165.9 ms,
+/// 43,422 entries 819.2 ms — for 25 KB of JSON. `docs/06-limits.md` §34
+/// projects a 93,776-row census, and `/instruments.json` is on the load path of
+/// every page in the front end (`web/src/lib/index.svelte.js`).
+///
+/// Now: one pass over the entries, a hash probe per symbol, `CLAUDE.md` §3
+/// rule 4. The per-request cost is O(entries + universe) and no longer their
+/// product. `api::unit::instrument_bar_counts_are_one_pass_over_the_census`
+/// holds the pass count at one for two universe sizes, so a future edit that
+/// reintroduces the inner scan fails by cost and not by taste.
+///
+/// The iterator is taken generically for that test: it counts what it yields.
+fn bars_by_symbol<'a>(
+    census: Option<&census::VendorCensus>,
+    entries: impl IntoIterator<Item = &'a (census::Series, store::path::YearMonth)>,
+) -> std::collections::HashMap<brutex_core::symbol::Symbol, u64> {
+    let mut held = std::collections::HashMap::new();
+    let Some(census) = census else {
+        // NOT AN EMPTY MAP OF ZEROES — an empty map, which every caller reads
+        // as "no count for this symbol". The distinction is the one D-0124
+        // makes on the wire: an unreadable census is not a store of zeroes.
+        return held;
+    };
+    for (series, month) in entries {
+        if let Some(rows) = census.rows_for(&series.at(*month)) {
+            *held.entry(series.symbol).or_insert(0) += rows;
+        }
+    }
+    held
 }
 
 /// One sentence saying how much of a target the chosen feed can actually name.
@@ -3021,6 +3062,53 @@ pub fn refusal_html(scope: &str, why: &ingest::Refusal) -> String {
     })
 }
 
+/// The refusal page, plus what became of the record of the refusal.
+///
+/// # The asymmetry this removes
+///
+/// Every accepted run's receipt already names the journal's answer:
+/// [`recorded_fact`] renders `NO — this run is NOT in the journal. {why}` on an
+/// `Err`, under a doc comment citing `CLAUDE.md` §4. Nine paths honoured that.
+/// The three refusal paths did not — each was
+///
+/// ```text
+/// let _ignored = journal.append(&record);
+/// ```
+///
+/// so on a store root mounted read-only, or a full disk, or an `audit`
+/// directory a file is sitting where it should be — a state this crate's own
+/// `emitted.rs` drives on purpose and asserts refuses — the refusal was
+/// answered with a page that says nothing about the journal, and `/audit` then
+/// showed no such refusal ever happening. The autopilot page says it outright:
+/// *"A failure that appears here and not there is a failure that was never
+/// written down"* — and the write that failed was the one this page hid.
+///
+/// The append happens HERE rather than at the call site, so the outcome and the
+/// page cannot come apart: there is no way to record a refusal and answer with a
+/// page that does not carry the result.
+fn refused_and_recorded(
+    scope: &str,
+    why: &ingest::Refusal,
+    journal: &audit::Journal,
+    record: &audit::Record,
+) -> String {
+    let facts = [
+        (
+            "Outcome",
+            "nothing was requested, no vendor was contacted, and nothing was written".to_owned(),
+        ),
+        recorded_fact(journal, record),
+    ];
+    render::receipt_page(&render::Receipt {
+        scope,
+        verdict: "REFUSED",
+        reason: &why.to_string(),
+        good: false,
+        facts: &facts,
+        footnote: "Nothing here was written to the store.",
+    })
+}
+
 /// The page a valid request answers with, given that nothing can run.
 fn accepted_html(scope: &str, mut facts: Vec<(&'static str, String)>, broker: Broker) -> String {
     facts.push(("Status", "NOT STARTED".to_owned()));
@@ -3123,10 +3211,11 @@ async fn spot_answer(
             // A REFUSAL IS RECORDED TOO. "What was asked" includes the requests
             // that were not honoured — an operator debugging a form that never
             // starts anything needs the refusals more than the successes.
-            let _ignored = journal.append(&record);
+            // AND THE RECORD'S OWN OUTCOME IS ON THE PAGE. See
+            // `refused_and_recorded`.
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                refusal_html("Spot pull", &why),
+                refused_and_recorded("Spot pull", &why, &journal, &record),
             )
         }
         Ok(asked) => {
@@ -3220,10 +3309,9 @@ async fn spot_answer(
                             &param(body, "target"),
                             &why.to_string(),
                         );
-                        let _ignored = journal.append(&record);
                         return (
                             axum::http::StatusCode::BAD_REQUEST,
-                            refusal_html("Spot pull", &why),
+                            refused_and_recorded("Spot pull", &why, &journal, &record),
                         );
                     }
                     facts.push(("Source", format!("local folder · {folder}")));
@@ -5058,10 +5146,9 @@ fn fno_answer(
                 &param(body, "underlying"),
                 &why.to_string(),
             );
-            let _ignored = journal.append(&record);
             (
                 axum::http::StatusCode::BAD_REQUEST,
-                refusal_html("Expired F&O pull", &why),
+                refused_and_recorded("Expired F&O pull", &why, journal, &record),
             )
         }
         Ok(asked) => {
@@ -5780,15 +5867,280 @@ pub async fn serve(
         .await
 }
 
+/// The banner line naming where the front end is and what state it is in.
+///
+/// Split out of [`run_in`] for the reason [`announce_log`] is.
+///
+/// THE STATE, NOT THE BIT. `Assets::built` is true for any directory that
+/// exists, so an empty `build/`, a half-written one, and a bundle older than
+/// the sources beside it all printed `serving` while every page answered 503.
+/// See [`assets::Build`].
+fn announce_front_end(front: &assets::Assets) {
+    println!(
+        "  web:     {} ({})",
+        front.named().display(),
+        front.build().note()
+    );
+}
+
+/// The serve lock, or the exit code a refused second instance earns.
+///
+/// Split from the serve arm because a refusal that is only printed is a refusal
+/// that exists for whoever was watching the terminal — and because the arm it
+/// came out of is already at the line ceiling.
+///
+/// # Errors
+///
+/// [`FAILED`] — the work could not be done. It is not [`DEGRADED`]: nothing was
+/// served, so there is no answer whose trust is in question.
+fn sole_server(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLock, u8> {
+    match take_serve_lock(store_root, addr) {
+        Ok(lock) => Ok(lock),
+        Err(why) => {
+            let _noted = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Error,
+                    "api.serve",
+                    "refused: another instance is serving this store",
+                )
+                .with("why", telemetry::Value::Str(&why)),
+            );
+            eprintln!("{why}");
+            Err(FAILED)
+        }
+    }
+}
+
+/// Prints what the masters read found, and answers whether it was clean.
+///
+/// # The banner had no line for this
+///
+/// Eight `println!`s and not one of them named the universe. The masters are
+/// read one line above the banner and the verdict was discarded, so a serve
+/// with one master missing was byte-identical, on the terminal, to a clean
+/// one — and then exited `0`. `/health` answered `503` for the whole session
+/// and nothing else did. `CLAUDE.md` §4.
+///
+/// The word is [`Read::status`]'s own, so the banner, `/health`, `/audit.json`
+/// and the exit code cannot drift into four opinions about one read.
+fn announce_universe(read: &Read) -> bool {
+    println!("  universe: {}", read.status());
+    let clean = read.is_clean();
+    if !clean {
+        for note in &read.notes {
+            println!("            {note}");
+        }
+        println!(
+            "            this process will exit {DEGRADED} when it stops, because it \
+             served this whole session over a universe it could not fully read."
+        );
+    }
+    clean
+}
+
+/// The file that proves this process is the only one serving this store.
+///
+/// # What was not detected before
+///
+/// The only guard on a second instance was the bind, and a bind is honest for
+/// exactly one shape of collision: a byte-identical address. Measured on this
+/// machine — `mio` sets `SO_REUSEADDR` — `127.0.0.1:8080` and `0.0.0.0:8080`
+/// both bind, in either order, and every other port is not even a collision.
+/// Both processes then print `listening`, both open a browser, and both spawn
+/// `autopilot::fly` against the same `BRUTEX_STORE`: two backfills spending one
+/// shared vendor token's quota, against one append-only store, with nothing on
+/// either terminal saying so. The file locks that do exist are taken *after*
+/// the vendor has been paid — `pull::ingest`'s census lock is on the install
+/// path and `store::file`'s is per bar file — so the quota is spent before
+/// either refuses.
+///
+/// The subject of this lock is the **store**, not the address: the store is
+/// what two processes corrupt each other over, and it is the thing an operator
+/// gets wrong by starting a second server "on a different port".
+///
+/// # Held by the OS, released by the OS
+///
+/// `File::try_lock` is an advisory lock on the open file description. It is
+/// released when the handle closes, which includes a process that was killed —
+/// so an abandoned lock file never wedges the next start, the way a PID file
+/// written by hand does. The handle is kept alive for the whole session by this
+/// value; nothing reads it again.
+#[derive(Debug)]
+struct ServeLock {
+    /// The locked handle. `None` when this process already holds the lock — see
+    /// [`take_serve_lock`].
+    _held: Option<std::fs::File>,
+    /// The store this lock is over, canonical, so [`Drop`] releases the same
+    /// key that was taken.
+    root: PathBuf,
+}
+
+impl Drop for ServeLock {
+    fn drop(&mut self) {
+        if let Ok(mut held) = serving_roots().lock() {
+            held.remove(&self.root);
+        }
+    }
+}
+
+/// The store roots this process is already serving.
+///
+/// # Why a second serve inside ONE process is allowed
+///
+/// The defect is two *processes*. A second `serve` in one process is the test
+/// harness — this crate drives `run_in` from tokio tests that run in parallel
+/// against the developer's real store root — and an advisory lock is held per
+/// open file description, so a second handle in the same process would refuse
+/// itself. That would turn a suite into a race and would not detect one extra
+/// instance of the thing this guards against.
+fn serving_roots() -> &'static std::sync::Mutex<std::collections::BTreeSet<PathBuf>> {
+    static ROOTS: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeSet::new()))
+}
+
+/// The name of the lock file inside the store root.
+const SERVE_LOCK: &str = "serve.lock";
+
+/// Takes the serve lock for `store_root`, or names who holds it.
+///
+/// # Errors
+///
+/// A sentence naming the store, the lock file, and — read out of the lock file
+/// the holder wrote — the other instance's address and pid. The reason reaches
+/// the operator's terminal and the exit code, because a second instance is not
+/// a state to degrade through: `CLAUDE.md` §4 — degrade loudly and name the
+/// reason, or refuse.
+fn take_serve_lock(store_root: &Path, addr: std::net::SocketAddr) -> Result<ServeLock, String> {
+    let path = store_root.join(SERVE_LOCK);
+    if let Err(why) = std::fs::create_dir_all(store_root) {
+        return Err(format!(
+            "REFUSED: the store root {} cannot be created, so the one-server lock \
+             cannot be taken there — {why}",
+            store_root.display()
+        ));
+    }
+    // CANONICAL, so `~/.brutex/store` and `~/.brutex/store/` and a path through
+    // a symlink are one key rather than three.
+    let key = std::fs::canonicalize(store_root).unwrap_or_else(|_| store_root.to_path_buf());
+    match serving_roots().lock() {
+        // A POISONED MUTEX IS NOT A LICENCE TO SKIP THE CHECK. It means another
+        // thread panicked holding it; the set is still readable and the lock
+        // below is still the real guard, so this continues rather than refusing
+        // a server for a fault in a test harness.
+        Err(poisoned) => {
+            if !poisoned.into_inner().insert(key.clone()) {
+                return Ok(ServeLock {
+                    _held: None,
+                    root: key,
+                });
+            }
+        }
+        Ok(mut held) => {
+            if !held.insert(key.clone()) {
+                return Ok(ServeLock {
+                    _held: None,
+                    root: key,
+                });
+            }
+        }
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(why) => {
+            release_root(&key);
+            return Err(format!(
+                "REFUSED: the one-server lock {} could not be opened — {why}",
+                path.display()
+            ));
+        }
+    };
+    if let Err(refusal) = file.try_lock() {
+        // WHO HOLDS IT, NOT MERELY THAT SOMEBODY DOES. The holder wrote its
+        // address and pid into this file after taking the lock, and reading a
+        // locked file is not itself a locked operation.
+        let held_by = std::fs::read_to_string(&path).unwrap_or_default();
+        let held_by = held_by.trim();
+        release_root(&key);
+        return Err(format!(
+            "REFUSED: another brutex api is already serving this store.\n  \
+             store: {}\n  lock:  {} ({refusal})\n  held by: {}\n\
+             Two servers over one store run two autopilots against one \
+             append-only tree and spend one shared vendor token's quota twice. \
+             A different port is not a second store. Stop the other instance, \
+             or point this one at another BRUTEX_STORE.",
+            store_root.display(),
+            path.display(),
+            if held_by.is_empty() {
+                "an instance that had not yet stamped the file"
+            } else {
+                held_by
+            }
+        ));
+    }
+    // STAMPED AFTER THE LOCK IS HELD, so the value a refused instance reads was
+    // written by the instance that actually holds it.
+    let stamp = format!("addr={addr} pid={}\n", std::process::id());
+    let _ignored_stamp = std::io::Write::write_all(&mut (&file), stamp.as_bytes());
+    Ok(ServeLock {
+        _held: Some(file),
+        root: key,
+    })
+}
+
+/// Drops a root out of the in-process set after a failed take.
+fn release_root(key: &Path) {
+    if let Ok(mut held) = serving_roots().lock() {
+        held.remove(key);
+    }
+}
+
 /// The exit code of a server that has stopped, and the reason if it fell over.
 ///
 /// A separate function because a server that fails while accepting is not a
 /// state a test can conjure on demand — and an untestable arm inside `run`
 /// would be an uncovered branch that the coverage gate could never accept, so
 /// the branch lives where it can be exercised directly.
-fn stopped(outcome: std::io::Result<()>) -> u8 {
+///
+/// # Why a clean stop is not always a clean exit
+///
+/// A `serve` that ran its whole life with one instrument master missing did the
+/// work it was asked for — every request was answered — and the answers were
+/// drawn over a universe that was never fully read. `Ok(())` from the graceful
+/// shutdown was mapped straight to [`OK`], which `api::main`'s `exit_note`
+/// prints as *"everything went as asked"*, and a monitor reading the exit code
+/// of a supervised process saw green for a session `/health` had been answering
+/// `503` for the whole time.
+///
+/// D-0026 already decided this for `report` — [`reported`] returns [`DEGRADED`]
+/// on exactly this state, and `tests/binary.rs` asserts it. This is the same
+/// rule on the path that actually runs. A failure still outranks it: a server
+/// that fell over is [`FAILED`], and the universe is beside the point.
+fn stopped_over(outcome: std::io::Result<()>, clean: bool) -> u8 {
     match outcome {
-        Ok(()) => OK,
+        Ok(()) if clean => OK,
+        Ok(()) => {
+            let _noted = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Error,
+                    "api.server",
+                    "the server stopped after serving a DEGRADED universe",
+                )
+                .with("exit", telemetry::Value::Uint(u64::from(DEGRADED))),
+            );
+            eprintln!(
+                "server stopped: the universe was DEGRADED for this whole session — \
+                 exiting {DEGRADED} rather than 0, because every answer it gave was \
+                 drawn over a read that did not complete. /health said so throughout."
+            );
+            DEGRADED
+        }
         Err(e) => {
             // THE EVENT FIRST. A server that stopped on an error is the single
             // most important line in any post-mortem, and printing it to stderr
@@ -6256,6 +6608,13 @@ async fn run_in_over(
                 // subsystem whose absence costs no correctness — but a silent
                 // fallback to no logging is exactly what `CLAUDE.md` §4 bans,
                 // so the reason is named on stdout where the operator sees it.
+                // ONE SERVER PER STORE, PROVED BEFORE ANYTHING IS OPENED.
+                // The listener above is dropped unserved if this refuses. See
+                // `take_serve_lock`.
+                let _one_server = match sole_server(&store_root, addr) {
+                    Ok(lock) => lock,
+                    Err(code) => return code,
+                };
                 let log_dir = served_log_dir(&store_root);
                 // The ENV DECIDES THE LEVELS AND THE CALLER DECIDES THE
                 // DIRECTORY. `served_log_level` builds a template it cannot
@@ -6275,18 +6634,24 @@ async fn run_in_over(
                 // broken, and the operator has no way to tell the two apart
                 // from the browser. `CLAUDE.md` §4.
                 let front = std::sync::Arc::new(assets::Assets::new(&assets::web_dir()));
-                println!(
-                    "  web:     {} ({})",
-                    front.named().display(),
-                    if front.built() {
-                        "serving"
-                    } else {
-                        "NOT BUILT — / says so and names the command"
-                    }
-                );
+                announce_front_end(&front);
                 // `serving`, not `load`: this is the one process that may
                 // reach a broker. See `Broker`.
                 let site = Loaded::new(Site::serving(dir, &store_root));
+                // THE READ'S OWN VERDICT, ON THE BANNER AND IN THE EXIT CODE.
+                //
+                // The masters are read HERE, one line above, and until now
+                // nothing printed what the read found: a serve that ran its
+                // whole life over a universe with one master missing was
+                // byte-identical, on the terminal, to a clean one — and then
+                // exited `0`, which `main` logs as "everything went as asked".
+                // `/health` answered 503 the entire time and nobody polls it.
+                //
+                // D-0026 applied this to `report` and not to `serve`; this is
+                // the other half of it. The word is `Read::status`'s own, so
+                // the banner, `/health` and the exit code cannot disagree.
+                let universe = site.read.status();
+                let clean = announce_universe(&site.read);
                 // THE BANNER NAMES THE STATE IT IS IN, NOT THE ONE IT WOULD BE
                 // IN IF THE OPERATOR HAD OPTED IN.
                 //
@@ -6341,6 +6706,11 @@ async fn run_in_over(
                         )
                         .with("masters", telemetry::Value::Str(&dir.display().to_string()))
                         .with("web_built", telemetry::Value::Bool(front.built()))
+                        .with("web_state", telemetry::Value::Str(front.build().word()))
+                        // THE FIELD THAT WAS MISSING. Five facts were recorded
+                        // about this process and the state of the universe it
+                        // was about to serve was not one of them.
+                        .with("universe", telemetry::Value::Str(universe))
                         .with("autopilot_flies", telemetry::Value::Bool(flying_on_start)),
                 );
                 if !first.is_written() {
@@ -6378,7 +6748,10 @@ async fn run_in_over(
                 // window. It holds the same `Arc`, so pause/resume and the
                 // status it publishes are the ones the routes read.
                 let flying = tokio::spawn(autopilot::fly(Loaded::clone(&site)));
-                let code = stopped(serve(listener, router_serving(site, front), shutdown).await);
+                let code = stopped_over(
+                    serve(listener, router_serving(site, front), shutdown).await,
+                    clean,
+                );
                 // Ctrl-C stopped the HTTP surface; stop the backfill too. A
                 // sweep aborted mid-append is safe by construction — the bar
                 // file commits its header after the records are synced, so a
@@ -6616,12 +6989,241 @@ mod tests {
 
     #[test]
     fn a_server_that_falls_over_says_so_and_exits_non_zero() {
-        assert_eq!(stopped(Ok(())), OK);
+        assert_eq!(stopped_over(Ok(()), true), OK);
         assert_eq!(
-            stopped(Err(std::io::Error::other("the socket went away"))),
+            stopped_over(Err(std::io::Error::other("the socket went away")), true),
             FAILED
         );
         assert_ne!(FAILED, MISUSED, "a misuse is not a failure");
+    }
+
+    /// **A serve that ran its whole life over a DEGRADED universe does not exit
+    /// zero, and the reason is in the log.**
+    ///
+    /// The graceful-shutdown path mapped `Ok(())` straight to [`OK`], which
+    /// `api::main`'s `exit_note` prints as *"everything went as asked"* — over a
+    /// session in which `/health` had been answering `503` from the first
+    /// request to the last. D-0026 had already decided this for `report`;
+    /// [`reported`] returns [`DEGRADED`] on exactly this state and
+    /// `tests/binary.rs` asserts it. This is the same rule on the path that
+    /// actually runs.
+    ///
+    /// Both arms, because the distinction is the whole point: a clean serve is
+    /// still `0`, and a serve that FELL OVER is still [`FAILED`] — a universe
+    /// verdict does not outrank a server that stopped on an error.
+    #[test]
+    fn a_serve_over_a_degraded_universe_exits_non_zero_rather_than_claiming_success() {
+        let _shared = crate::emitted::sink();
+        let from = crate::emitted::mark();
+
+        assert_eq!(stopped_over(Ok(()), true), OK, "a clean serve is zero");
+        assert_eq!(
+            stopped_over(Ok(()), false),
+            DEGRADED,
+            "a serve over a universe that was never fully read is not"
+        );
+        assert_eq!(
+            stopped_over(Err(std::io::Error::other("the socket went away")), false),
+            FAILED,
+            "and a server that fell over is a failure, whatever the universe was"
+        );
+
+        let landed = crate::emitted::landed(
+            from,
+            "api.server",
+            "the server stopped after serving a DEGRADED universe",
+        );
+        assert!(
+            landed
+                .iter()
+                .any(|record| record.level == telemetry::Level::Error),
+            "the exit is on the record at Error, not only on the terminal that saw it"
+        );
+    }
+
+    /// **Two servers over one store are refused, and the refusal names the
+    /// other one.**
+    ///
+    /// The only guard was the bind, which is honest for a byte-identical
+    /// address and for nothing else: `127.0.0.1:8080` and `0.0.0.0:8080` both
+    /// bind, in either order, and any other port is not even a collision. Both
+    /// processes then spawn `autopilot::fly` against one `BRUTEX_STORE` and
+    /// spend one shared vendor token's quota twice.
+    ///
+    /// The lock file stands in for the other process here — a handle this test
+    /// holds and never registers, so `take_serve_lock` meets it exactly as it
+    /// would meet another `brutex api`. Advisory locks are per open file
+    /// description, so this conflicts even inside one process, which is why the
+    /// refusal is reachable from a test at all.
+    #[tokio::test]
+    async fn a_second_server_over_one_store_is_refused_and_the_reason_reaches_the_operator() {
+        let _shared = crate::emitted::sink();
+        let root = crate::scratch::path("serve-lock");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+
+        // THE OTHER INSTANCE. It writes its own stamp first, so the refusal can
+        // quote it the way a real holder's would be quoted.
+        let squatter = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(root.join(SERVE_LOCK))
+            .expect("the lock file");
+        squatter.try_lock().expect("nothing else holds it");
+        std::io::Write::write_all(&mut (&squatter), b"addr=127.0.0.1:8080 pid=4242\n")
+            .expect("stamp");
+
+        let refused = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
+            .expect_err("a store already being served is a refusal");
+        assert!(refused.contains("already serving this store"), "{refused}");
+        assert!(
+            refused.contains("pid=4242") && refused.contains("addr=127.0.0.1:8080"),
+            "and it names the instance that holds it: {refused}"
+        );
+        assert!(
+            refused.contains("A different port is not a second store"),
+            "and the mistake it is actually made by: {refused}"
+        );
+
+        // THE WHOLE COMMAND REFUSES, not just the helper: the listener is
+        // dropped unserved and the exit code says so.
+        let from = crate::emitted::mark();
+        let code = run_in_over(
+            &agreeing("serve-lock-masters"),
+            Ok(root.clone()),
+            &argv(&["serve", "127.0.0.1:0"]),
+            Box::pin(std::future::pending()),
+        )
+        .await;
+        assert_eq!(code, FAILED, "a second server is a refusal to run");
+        let landed = crate::emitted::landed(
+            from,
+            "api.serve",
+            "refused: another instance is serving this store",
+        );
+        assert!(
+            landed.iter().any(|record| {
+                record.level == telemetry::Level::Error
+                    && crate::emitted::says(record, "why", "already serving this store")
+            }),
+            "the refusal is in the file as well as on the terminal"
+        );
+
+        // AND IT IS RELEASED WITH THE HANDLE. Nothing wedges the next start.
+        drop(squatter);
+        let taken = take_serve_lock(&root, "127.0.0.1:9999".parse().expect("an address"))
+            .expect("the store is free once the other instance is gone");
+        drop(taken);
+    }
+
+    /// **A refusal that could not be journalled says so on its own page.**
+    ///
+    /// Nine paths named the journal's answer through [`recorded_fact`], under a
+    /// doc comment citing `CLAUDE.md` §4. The three refusal paths threw it away
+    /// — `let _ignored = journal.append(&record);` — so on a store root where
+    /// the journal cannot be written, `/audit` showed no refusal ever happening
+    /// and the receipt said nothing. The autopilot page tells the operator to
+    /// conclude the opposite: a failure missing from `/audit` "was never written
+    /// down".
+    #[tokio::test]
+    async fn a_refusal_that_never_reached_the_journal_says_so_on_the_receipt() {
+        let root = crate::scratch::path("refusal-journal");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("mkdir");
+        // A FILE WHERE THE `audit` DIRECTORY HAS TO BE — the same disk state
+        // `emitted.rs` drives, and one `Journal::append` genuinely refuses.
+        std::fs::write(root.join("audit"), b"not a directory").expect("a file in the way");
+        let site = Site::load(
+            &masters("refusal-journal", Some(GROWW_HEAD), Some(DHAN_HEAD)),
+            &root,
+        );
+
+        // A BODY THE PARSER REFUSES, so this is the refusal path and no vendor
+        // is reachable from it.
+        let (code, html) = spot_answer(
+            "target=nonsense&from=2020-01-01&to=2020-01-02",
+            Day::new(2026, 8, 12).expect("a real day"),
+            std::time::SystemTime::UNIX_EPOCH,
+            &site,
+        )
+        .await;
+        assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
+        assert!(html.contains("REFUSED"), "{html}");
+        assert!(
+            html.contains("NOT in the journal"),
+            "the receipt names what became of the record: {html}"
+        );
+        assert!(
+            html.contains("audit directory"),
+            "and it carries the journal's own reason: {html}"
+        );
+
+        // AND THE OTHER WAY ROUND: a journal that works says which file it
+        // landed in, so the two states are never the same page.
+        let good = crate::scratch::path("refusal-journal-ok");
+        let _ = std::fs::remove_dir_all(&good);
+        std::fs::create_dir_all(&good).expect("mkdir");
+        let ok_site = Site::load(
+            &masters("refusal-journal-ok", Some(GROWW_HEAD), Some(DHAN_HEAD)),
+            &good,
+        );
+        let (_, html) = spot_answer(
+            "target=nonsense&from=2020-01-01&to=2020-01-02",
+            Day::new(2026, 8, 12).expect("a real day"),
+            std::time::SystemTime::UNIX_EPOCH,
+            &ok_site,
+        )
+        .await;
+        assert!(
+            html.contains("appended to") && !html.contains("NOT in the journal"),
+            "{html}"
+        );
+    }
+
+    /// **The bar count per instrument is ONE pass over the census, whatever the
+    /// universe is.**
+    ///
+    /// `/instruments.json` folded the census inside a closure that was both the
+    /// sort key and the emitted field, so the scan ran once per comparison —
+    /// ~22.6 per row at n=785 — and the request cost the PRODUCT of the universe
+    /// and the census for a response whose size never moves. Measured in an
+    /// optimised build with no disk I/O: 750 entries 15.5 ms, 43,422 entries
+    /// 819.2 ms, response flat at ~25 KB.
+    ///
+    /// The assertion is the pass count and not a duration, because a timing
+    /// assertion on a shared machine is a flake. The iterator counts what it
+    /// yields, so a future edit that puts the scan back inside the per-symbol
+    /// path fails here by COST.
+    #[test]
+    fn instrument_bar_counts_are_one_pass_over_the_census() {
+        let entries: Vec<(census::Series, store::path::YearMonth)> = Vec::new();
+        let visits = std::cell::Cell::new(0_usize);
+        let counted = || {
+            entries.iter().inspect(|_| {
+                visits.set(visits.get() + 1);
+            })
+        };
+
+        // NO CENSUS IS AN EMPTY MAP, not a map of zeroes: the caller reads a
+        // missing key as "no count", which is the distinction D-0124 put on the
+        // wire.
+        let none = bars_by_symbol(None, counted());
+        assert!(none.is_empty(), "an unreadable census counts nothing");
+        assert_eq!(visits.get(), 0, "and it does not even walk the entries");
+
+        let census = census::read_vendor(
+            &crate::scratch::path("bars-by-symbol"),
+            brutex_core::vendor::Vendor::Dhan,
+        );
+        let held = bars_by_symbol(Some(&census), counted());
+        assert!(held.is_empty(), "an absent manifest holds nothing");
+        assert_eq!(
+            visits.get(),
+            entries.len(),
+            "one visit per entry, and the universe is not a factor in it"
+        );
     }
 
     #[test]
@@ -8813,7 +9415,22 @@ mod tests {
         let from = crate::emitted::mark();
         // The server binds an ephemeral port, accepts nothing, and stops --
         // which is the whole path through `run` minus the waiting.
-        assert_eq!(run(&argv(&["serve", "127.0.0.1:0"]), fired()).await, OK);
+        //
+        // THE EXIT CODE IS THE UNIVERSE'S OWN VERDICT, not a constant. `run`
+        // reads the masters directory of whatever machine this suite is on:
+        // this developer's holds a real pair of vendor masters that disagree,
+        // and CI's fixtures are clean. A hardcoded `OK` here asserted the
+        // machine rather than the code, and `stopped_over` — the reason a
+        // degraded serve no longer exits 0 — would have made this test's
+        // failure look like its own defect. The expectation is computed from
+        // the same `report` D-0026 gave the `report` command.
+        let expected =
+            masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
+        assert_eq!(
+            run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+            expected,
+            "a serve exits on the verdict of the universe it served"
+        );
 
         let listening = crate::emitted::landed(from, "api.serve", "listening");
         let mine = listening

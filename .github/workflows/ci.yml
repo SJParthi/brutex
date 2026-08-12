@@ -2569,19 +2569,60 @@ jobs:
           #   eval     `Evaluator::positions()` sorts the position list it just built.
           #            Its length is bounded by `vocab::table::NEXT_FREE`, a
           #            compile-time constant, and it is called once per run.
-          # `crates/api/src/constituents.rs` (2 sorts) and `crates/api/src/coverage.rs` (1)
-          # each carry a bounded, determinism-motivated sort of the same shape as the two
-          # entries below -- `coverage.rs` cites §3 rule 5 in its own comment for exactly
-          # that reason. They are deliberately NOT listed.
+          # THE TWO ENTRIES BELOW WERE PREDICTED HERE AND ARE NOW DUE. The note that stood
+          # here said `constituents.rs` and `coverage.rs` were not in the committed tree
+          # yet -- another session had them staged -- so an entry naming them would have
+          # been a STALE ALLOWLIST ENTRY, which this gate treats as a failure rather than a
+          # note, correctly, because such an entry makes the gate read stronger than it is.
+          # It closed: "when those files land, rule 4 will refuse them and their owner adds
+          # the entries." They landed in 6a58d7c and 6a58d7c's successors, both are tracked
+          # and clean, and rule 4 refuses them. So the entries go in -- but re-derived from
+          # the code rather than trusted from that prediction, because a forecast is not a
+          # trace:
           #
-          # Neither file is in the committed tree yet: another session has them staged, so
-          # `git ls-files --error-unmatch` succeeds in a local working tree and fails on a
-          # fresh checkout. Gate 11 treats an entry naming an absent file as a FAILURE
-          # rather than a note, correctly, because such an entry makes the gate read
-          # stronger than it is -- and that is exactly how this was caught: CI reported
-          # STALE ALLOWLIST ENTRY for both after I added them. When those files land, rule 4
-          # will refuse them and their owner adds the entries.
+          #   ALL THREE SORTS ARE STARTUP-ONLY. Not one is reachable from an HTTP handler.
+          #   Every one funnels through `Read::new` (server.rs), reached only as
+          #   `universe()` <- `Site::load` <- `Site::serving` <- `run_in`, once per process
+          #   and BEFORE the router is built. The route handlers consume the finished
+          #   `Vec<String>` -- `health` reads `report_from(&site.read)`, and
+          #   `render::notes_block` takes `&[String]`. The only other production caller of
+          #   `universe()` is the `report` CLI subcommand, one invocation per process;
+          #   `instruments_html` re-parses per call but every call site is past that file's
+          #   `#[cfg(test)]`. D-0039/D-0042 is the decision that makes this so.
+          #
+          #     constituents.rs  TWO sorts, both bounded by ONE index tier's published
+          #                      membership, never the universe. `unresolved_lines` sorts
+          #                      `join.lacks`; `reason_lines` sorts one decline reason's
+          #                      names inside one unjoinable bucket. `Tier::published`
+          #                      states every size -- Nifty50 50, Nifty100 100, Nifty200
+          #                      200, Nifty500 500, TotalMarket 750, FnoUnderlyings 213 --
+          #                      and `TierJoin::accounted` asserts the five buckets sum to
+          #                      it. So the longest possible sort is 750 names, and
+          #                      `reason_lines` is at most 2 groups per bucket because
+          #                      `NoIsin::reason` is a four-word vocabulary that
+          #                      `is_a_malformed_name` splits two and two.
+          #     coverage.rs      ONE sort, and it is the only one of the three whose reason
+          #                      is written at the site: "a `HashMap` walk is not ordered
+          #                      and a reason list that reshuffles between restarts is a
+          #                      list an operator cannot diff. `CLAUDE.md` §3 rule 5."
+          #                      `from_master` runs only where `target.tier()` is None,
+          #                      which `ingest.rs` pins to Swept and Indices: Swept is
+          #                      bounded by `InstrumentKey::SWEPT`, which is two entries,
+          #                      NIFTY and BANKNIFTY; Indices is the merged index series,
+          #                      measured at 35. That 35 is a MEASUREMENT and not a
+          #                      compile-time cap -- a vendor adding index series grows it
+          #                      -- and it is recorded that way rather than as a bound.
+          #
+          # WHAT THIS DOES NOT COVER, said plainly so the entry cannot be read as wider
+          # than it is: `crates/api`'s own ratio bench reports THIRTY C-15 breaches, up to
+          # 2,346 ps per instrument per request against a 1,000 ps ceiling. That is
+          # per-request work and these three sorts are not on a request path, so declaring
+          # them here cannot and does not silence it. C-15 is undocumented in
+          # `docs/06-limits.md` and unrecorded in `docs/11-findings.md`, and gate 8 is red
+          # on it.
           allow_sort='
+          crates/api/src/constituents.rs 2
+          crates/api/src/coverage.rs 1
           crates/engine/src/lib.rs 1
           crates/indicators/src/evaluator.rs 1
           crates/api/src/autopilot.rs 1
@@ -2627,7 +2668,20 @@ jobs:
           # has not seen yet is not this gate's job. The count is pinned, so a second
           # `unreachable!` anywhere in that file fails. This entry is the report, and it
           # is meant to be removed rather than kept.
+          # `crates/api/src/server.rs` 2, and ONE OF THE TWO IS PROSE. `note_header` carries
+          # a real `.expect("a sanitised note is visible ASCII")`, sound because
+          # `note_alphabet` emits only 0x20..=0x7E, exactly the alphabet a header value
+          # admits, so the `Result` arm is a project region no input can enter -- which the
+          # coverage floor cannot hold and which `unreachable!()` would only rename. The
+          # SECOND match is not code at all: the words `unreachable!()` appear inside that
+          # attribute's own `reason = "..."` string, explaining why `unreachable!()` was
+          # avoided. The corpus drops whole-line `//` but an attribute's reason text is not
+          # a comment, so the rule counts its own explanation -- the same self-referential
+          # shape gate 15 already documents about a gate that spells its banned word out.
+          # Declared rather than papered over by rewording the justification, because the
+          # justification is the useful artefact and the miscount is the gate's.
           allow_panic='
+          crates/api/src/server.rs 2
           crates/pull/src/totp.rs 1
           crates/pull/src/ssm.rs 1
           crates/telemetry/src/json.rs 5
@@ -2635,13 +2689,19 @@ jobs:
           '
 
           # ---- rule 5c. Nothing disarms those lints outside a test module. --
-          # One entry, and it is the same line rule 5 allows above: ssm.rs
-          # carries `#[allow(clippy::expect_used, reason = ...)]` on `hmac`.
+          # Two entries, each the same line rule 5 allows above. ssm.rs carries
+          # `#[allow(clippy::expect_used, reason = ...)]` on `hmac`, and
+          # api/src/server.rs carries one on `note_header` for the `.expect`
+          # described there. Rule 5c's awk walk counts only a real attribute at
+          # bracket depth 0, so unlike rule 5 this count of 1 is exact and holds
+          # no prose. Both would read better as `#[expect]`, which reports an
+          # exemption nobody needs any more; that is their owners' call.
           # Kept as its own list rather than folded into `allow_panic` because
           # the two ask different questions — "this construct appears" and
           # "the lint that would have caught it is switched off here" — and a
           # file could earn one without the other.
           allow_disarm='
+          crates/api/src/server.rs 1
           crates/pull/src/ssm.rs 1
           '
 

@@ -74,6 +74,12 @@ const IMMUTABLE_DIR: &str = "_app";
 /// The type-ahead script, which is a source file rather than build output.
 const TYPEAHEAD: &str = "typeahead.js";
 
+/// The front end's own sources, beside the build rather than inside it.
+///
+/// Read for one purpose: [`Build::Stale`] compares the bundle's shell against
+/// the newest file here. Nothing under it is ever served.
+const SOURCES: &str = "src";
+
 /// The front-end directory: [`WEB_ENV`], or `web/` beside this workspace.
 #[must_use]
 pub fn web_dir() -> PathBuf {
@@ -433,7 +439,7 @@ fn known(value: Option<bool>) -> telemetry::Value<'static> {
 /// rather than by the tree. Nothing per request, and nothing per file served —
 /// `CLAUDE.md` §3 rule 4 is about the per-operation cost, and this is not on an
 /// operation.
-fn note_front_end(named: &Path, root: Option<&Path>) {
+fn note_front_end(named: &Path, root: Option<&Path>, build: &Build) {
     let tree = root.map(walk);
     let shell = root.map(|dir| dir.join(INDEX).is_file());
     let _dropped_when_filtered = telemetry::emit(
@@ -456,8 +462,176 @@ fn note_front_end(named: &Path, root: Option<&Path>) {
         .with("dirs", counted(tree.map(|held| held.dirs)))
         .with("unreadable", counted(tree.map(|held| held.unreadable)))
         .with("capped", known(tree.map(|held| held.capped)))
-        .with("shell", known(shell)),
+        .with("shell", known(shell))
+        // THE VERDICT, NOT ONLY ITS INPUTS. `built:true files:3 shell:false`
+        // was four fields a reader had to combine to learn the one thing they
+        // came for; this is that answer, in the words the banner uses.
+        .with("state", telemetry::Value::Str(build.word()))
+        .with("state_note", telemetry::Value::Str(&build.note())),
     );
+}
+
+/// What the named build directory actually is.
+///
+/// # The one bit this replaces was true for an empty directory
+///
+/// `built()` was `self.root.is_some()`, and `root` was `canonicalize().ok()`
+/// filtered by `is_dir()`. Existence was the whole test, so a `build/` that a
+/// half-finished `npm run build` left empty, a checkout whose bundle was never
+/// built, and a `BRUTEX_WEB` pointing at last month's tree all printed the same
+/// word on the banner: **serving**. The operator's only statement about the
+/// front end was a bit that could not distinguish a working bundle from an
+/// empty folder, while every page answered 503 — `CLAUDE.md` §4, a fallback
+/// that hides a failure.
+///
+/// Four answers now, and each names the fix. `built()` is unchanged and still
+/// means *the directory resolved*, because that is what [`Assets::respond`]
+/// branches on; this is what the banner and the log say.
+///
+/// # Staleness is a comparison, not a guess
+///
+/// [`Build::Stale`] is `mtime(build/index.html) < mtime(newest file under
+/// web/src)`. Both sides are measurements. When `web/src` is not there — a
+/// binary shipped with a bundle and no sources — nothing is compared and
+/// nothing is claimed: the answer is [`Build::Serving`], because a comparison
+/// that cannot be made is not evidence of freshness *or* of staleness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Build {
+    /// No directory resolved. Every page answers 503.
+    Missing,
+    /// The directory is there and holds no readable `index.html`.
+    NoShell {
+        /// Why the shell could not be read — absent, or the reason it could not
+        /// be stat-ed.
+        why: String,
+    },
+    /// The shell is older than a file under `web/src`.
+    Stale {
+        /// The newest source file, named — so the operator can see which edit
+        /// the bundle does not carry.
+        newer: String,
+        /// How many seconds newer that file is than the shell.
+        by_secs: u64,
+    },
+    /// A shell is there, and no source is newer than it.
+    Serving,
+}
+
+impl Build {
+    /// How many entries under `web/src` are looked at before the walk stops.
+    ///
+    /// The same bound and the same reason as [`MAX_WALK`]: a startup answer may
+    /// not become a function of somebody's `node_modules`.
+    const MAX_SOURCES: u64 = MAX_WALK;
+
+    /// Reads the state of the build beside its sources.
+    fn read(web: &Path, root: Option<&Path>) -> Self {
+        let Some(root) = root else {
+            return Self::Missing;
+        };
+        let shell = root.join(INDEX);
+        let built_at = match std::fs::metadata(&shell).and_then(|m| m.modified()) {
+            Ok(at) => at,
+            Err(why) => {
+                return Self::NoShell {
+                    why: format!("{} — {why}", shell.display()),
+                };
+            }
+        };
+        // NOT THERE IS NOT A VERDICT. A tree with no `web/src` — a binary
+        // shipped beside a bundle — has nothing to compare against, and an
+        // absent comparison may not be reported as a fresh one OR as a stale
+        // one. `CLAUDE.md` §3 rule 6.
+        let src = web.join(SOURCES);
+        let Some((newest, at)) = newest_under(&src, Self::MAX_SOURCES) else {
+            return Self::Serving;
+        };
+        match at.duration_since(built_at) {
+            Ok(gap) if gap.as_secs() > 0 => Self::Stale {
+                newer: newest.display().to_string(),
+                by_secs: gap.as_secs(),
+            },
+            // `Err` is the ordinary case: the shell is NEWER than every source,
+            // so the subtraction runs backwards. Sub-second is not staleness —
+            // a build writes its own output while the walk is running.
+            _ => Self::Serving,
+        }
+    }
+
+    /// Whether this build can answer a page.
+    #[must_use]
+    pub const fn serving(&self) -> bool {
+        matches!(self, Self::Serving | Self::Stale { .. })
+    }
+
+    /// The word for a log field. One token, never a sentence.
+    #[must_use]
+    pub const fn word(&self) -> &'static str {
+        match *self {
+            Self::Missing => "missing",
+            Self::NoShell { .. } => "no-shell",
+            Self::Stale { .. } => "STALE",
+            Self::Serving => "serving",
+        }
+    }
+
+    /// The banner's parenthesis: the word, and the reason when there is one.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match *self {
+            Self::Missing => "NOT BUILT — / says so and names the command".to_owned(),
+            Self::NoShell { ref why } => format!(
+                "NO SHELL — the directory is there and {INDEX} is not readable: {why}. \
+                 Every page answers 503. Run `npm run build` in web/"
+            ),
+            Self::Stale { ref newer, by_secs } => format!(
+                "STALE — {newer} is {by_secs}s newer than {INDEX}. \
+                 The bundle being served does not carry that edit. \
+                 Run `npm run build` in web/"
+            ),
+            Self::Serving => "serving".to_owned(),
+        }
+    }
+}
+
+/// The newest file under `dir`, and when it was written.
+///
+/// `None` when the directory is not there, holds no file, or holds none whose
+/// modification time can be read — three absences, and not one of them is a
+/// timestamp this may invent.
+///
+/// Iterative, bounded, and keyed on [`std::fs::DirEntry::file_type`] so a
+/// symlink is one entry rather than a descent — the same rule, and the same
+/// reason, as [`walk_within`].
+fn newest_under(dir: &Path, limit: u64) -> Option<(PathBuf, std::time::SystemTime)> {
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    let mut seen: u64 = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(next) = stack.pop() {
+        if seen >= limit {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&next) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen = seen.saturating_add(1);
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(_, held)| at > *held) {
+                best = Some((entry.path(), at));
+            }
+        }
+    }
+    best
 }
 
 /// The front end on disk, and everything that decides what a path answers.
@@ -470,6 +644,8 @@ pub struct Assets {
     /// The canonicalised root, when it is there and is a directory. `None` is
     /// the not-built state, and it is a state the server runs in.
     root: Option<PathBuf>,
+    /// What was found inside that root, read once at startup. See [`Build`].
+    build: Build,
     /// The type-ahead script. A source file beside the build, not inside it.
     typeahead: PathBuf,
     /// How many requests have named an asset that is not on disk. Held so the
@@ -492,17 +668,27 @@ impl Assets {
         let root = std::fs::canonicalize(&named)
             .ok()
             .filter(|resolved| resolved.is_dir());
+        // WHAT IS IN IT, NOT MERELY THAT IT IS THERE. See [`Build`].
+        let build = Build::read(web, root.as_deref());
         // ONCE PER PROCESS, AND THE ONLY PLACE THIS ANSWER EXISTS. See
         // [`note_front_end`]: the directory this server resolved was written
         // nowhere outside the 503 page, so "the front end is not being served"
         // and "the front end is broken" were the same observation.
-        note_front_end(&named, root.as_deref());
+        note_front_end(&named, root.as_deref(), &build);
         Self {
             named,
             root,
+            build,
             typeahead: web.join(TYPEAHEAD),
             missing: AtomicU64::new(0),
         }
+    }
+
+    /// What the named directory actually holds — the answer [`Assets::built`]
+    /// could not give. Read once, at startup, and never per request.
+    #[must_use]
+    pub fn build(&self) -> &Build {
+        &self.build
     }
 
     /// The built asset directory this was pointed at, existing or not.
@@ -1155,6 +1341,97 @@ mod tests {
         assert!(!assets.built(), "a file named `build` is not a build");
         let (status, _, _) = get(&assets, "/").await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// **`built()` was true for any directory that exists, and the banner said
+    /// `serving` for all of them.**
+    ///
+    /// Four states, one word each. The empty-directory case is the repository's
+    /// own green test one screen down: it asserts `built()` and then asserts
+    /// `503` from every page — a build that is *serving* and answers nothing.
+    /// A stale one is worse, because it answers, with the bundle from before
+    /// the edit.
+    #[test]
+    fn a_build_directory_that_exists_is_not_the_same_as_a_build() {
+        // 1. NO DIRECTORY AT ALL.
+        let bare = crate::scratch::path("assets-build-missing");
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).expect("mkdir");
+        let missing = Assets::new(&bare);
+        assert_eq!(*missing.build(), Build::Missing);
+        assert!(!missing.build().serving());
+        assert_eq!(missing.build().word(), "missing");
+        assert!(missing.build().note().contains("NOT BUILT"));
+
+        // 2. THE DIRECTORY IS THERE AND EMPTY — the case that used to print
+        //    `serving` while every page answered 503.
+        let dir = web("build-empty");
+        let empty = Assets::new(&dir);
+        assert!(
+            empty.built(),
+            "the directory resolved, which is all that meant"
+        );
+        assert!(
+            !empty.build().serving(),
+            "and it cannot serve a page, which is what the operator is told"
+        );
+        assert_eq!(empty.build().word(), "no-shell");
+        let note = empty.build().note();
+        assert!(note.contains("NO SHELL") && note.contains(INDEX), "{note}");
+        assert!(note.contains("npm run build"), "and the fix: {note}");
+
+        // 3. A SHELL, AND NO SOURCES TO COMPARE IT WITH. Nothing is claimed
+        //    about freshness, because nothing was measured.
+        let fresh = furnished("build-fresh");
+        assert_eq!(*Assets::new(&fresh).build(), Build::Serving);
+
+        // 4. A SOURCE NEWER THAN THE SHELL.
+        let stale = furnished("build-stale");
+        let src = stale.join(SOURCES).join("routes");
+        std::fs::create_dir_all(&src).expect("mkdir");
+        let edited = src.join("+page.svelte");
+        std::fs::write(&edited, "<h1>the edit the bundle does not carry</h1>").expect("write");
+        // The shell was written first, but a filesystem's resolution is not
+        // this test's to assume: the timestamps are set explicitly, so the
+        // comparison is over values this test chose.
+        let shell = std::fs::File::options()
+            .write(true)
+            .open(stale.join(BUILD_DIR).join(INDEX))
+            .expect("the shell");
+        let long_ago =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        shell
+            .set_modified(long_ago)
+            .expect("a filesystem that carries mtimes");
+        let source = std::fs::File::options()
+            .write(true)
+            .open(&edited)
+            .expect("the source");
+        source
+            .set_modified(long_ago + std::time::Duration::from_mins(10))
+            .expect("a filesystem that carries mtimes");
+
+        let built = Assets::new(&stale);
+        let Build::Stale { ref newer, by_secs } = *built.build() else {
+            panic!(
+                "a source newer than the shell is STALE, not {:?}",
+                built.build()
+            );
+        };
+        assert!(
+            newer.ends_with("+page.svelte"),
+            "it names the file: {newer}"
+        );
+        assert_eq!(by_secs, 600, "and by how much");
+        assert!(
+            built.build().serving(),
+            "a stale bundle does answer pages — that is exactly why it is dangerous"
+        );
+        let note = built.build().note();
+        assert!(
+            note.contains("STALE") && note.contains("does not carry that edit"),
+            "{note}"
+        );
     }
 
     #[tokio::test]
