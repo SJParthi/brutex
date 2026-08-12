@@ -29,6 +29,12 @@ pub enum PriceError {
     OutOfRange,
     /// An arithmetic operation on two prices would have wrapped.
     Overflow,
+    /// The text is not a decimal number.
+    ///
+    /// Raised by [`crate::price::Paisa::from_rupee_text_half_up`], which exists because a
+    /// vendor that sends a price as TEXT has not lost any precision yet, and routing it
+    /// through a binary float is what loses it.
+    NotDecimal,
 }
 
 impl fmt::Display for PriceError {
@@ -37,6 +43,7 @@ impl fmt::Display for PriceError {
             Self::NotFinite => "price is not a finite number",
             Self::OutOfRange => "price does not fit in i64 paisa",
             Self::Overflow => "price arithmetic would overflow i64",
+            Self::NotDecimal => "price text is not a decimal number",
         };
         f.write_str(msg)
     }

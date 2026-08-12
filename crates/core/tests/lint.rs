@@ -145,7 +145,19 @@ fn no_float_in_price() {
             !text.contains("allow(clippy::float_arithmetic)"),
             "{name}: only the boundary conversion is excepted from the lint",
         );
-        let lines: Vec<&str> = text.lines().collect();
+        // COMMENTS ARE STRIPPED FIRST, and this is the fourth guard in this workspace to
+        // need that line. `contains` reads TEXT, and text in a comment is text -- so a doc
+        // comment on `PriceError::NotDecimal` mentioning the float type failed this test
+        // while introducing no float at all. The same defect was just fixed in
+        // `vocab::mask::hits_does_the_same_work_for_every_input`,
+        // `engine::the_sweep_cannot_compute_a_condition_bit` and gate 22 clause A.
+        //
+        // Everything from the first `//` to the end of the line goes, which is exact here:
+        // `core` has no string literal containing `//`.
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+            .collect();
         for (i, line) in lines.iter().enumerate() {
             if !line.contains("f64") && !line.contains("f32") {
                 continue;

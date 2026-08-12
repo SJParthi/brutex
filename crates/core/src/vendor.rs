@@ -1273,8 +1273,13 @@ fn parse_expiry(text: &str) -> Result<Expiry, InstrumentError> {
 /// [`InstrumentError::Malformed`] if the value is not a number or does not fit
 /// in `i64` paisa.
 fn parse_strike(text: &str) -> Result<Paisa, InstrumentError> {
-    let rupees: f64 = text.parse().map_err(|_| InstrumentError::Malformed)?;
-    Paisa::from_rupees_half_up(rupees).map_err(|_| InstrumentError::Malformed)
+    // Exact, from the TEXT. This used to parse the column into a binary float and hand it
+    // to `Paisa::from_rupees_half_up`, discarding an exact decimal one line before the only
+    // function in the workspace allowed to approximate one. An audit measured 271 mismatches
+    // across the 40,000 three-decimal strings from "0.000" to "39.999" -- "0.145" became 14
+    // paisa where exact half-up is 15 -- always losing downward. The master file is text and
+    // nothing has been lost yet when this is called.
+    Paisa::from_rupee_text_half_up(text).map_err(|_| InstrumentError::Malformed)
 }
 
 #[cfg(test)]
