@@ -46,6 +46,7 @@
   // its own write is a hazard rather than a nicety.
   import { onMount, untrack } from 'svelte';
   import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
+  import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
 
   // ---------------------------------------------------------------- constants
 
@@ -362,6 +363,41 @@
    * `/pull/spot` fills a whole target in one request, `/pull/fno` fills one
    * settled contract. Offering a control that produces a request nothing can
    * send is the fallback that hides a failure.
+   *
+   * ══════ WHY THIS LIST LOOKED LIKE ONE ITEM, AND WHY IT NO LONGER DOES ══════
+   *
+   * The two refused rows were FILTERED OUT of the menu and counted in a clause
+   * beside it. A one-item dropdown reads as "this axis does not exist"; the
+   * operator asked why expired futures and options were missing, which is
+   * exactly the question a hidden row cannot answer. Every row is drawn now —
+   * dead, in place, carrying its own refusal — the same shape the universe menu
+   * has always used, and the shape `$lib/Picker.svelte` documents its
+   * `disabled`/`why` fields for.
+   *
+   * THE REFUSAL IS THREE MEASURED FACTS, not one. All three were read out of
+   * this repository's own Rust, not assumed:
+   *
+   *   1. NO EXPIRED CONTRACT IS IN ANY MASTER. `core::vendor::decode_master_row`
+   *      declines every `FUT`, `CE` and `PE` row with `Skip::LiveContract`
+   *      ("live derivative contract"), and its comment states the measurement:
+   *      both vendors PURGE ON EXPIRY, and the earliest expiry in either master
+   *      is three days from now — so every derivative row a master carries is
+   *      live by definition, and the master is not where history comes from.
+   *      Declined rows never enter `api::merge::Merged::by_key`, so
+   *      `/instruments.json` has no FNO row to list and this page's catalogue
+   *      cannot show one. The dropdown is empty of them because the DATA is.
+   *   2. NOTHING IN THIS BUILD FETCHES ONE. `POST /pull/fno` is registered
+   *      (`api::server`) and parses in full, and then answers `503` with
+   *      `Outcome::NotStarted` — "expired F&O has no local-archive path and no
+   *      HTTP transport in this build". A well-formed request is refused, not
+   *      served.
+   *   3. THE REQUEST SHAPES DO NOT MEET. `api::ingest::FnoRequest` carries ONE
+   *      underlying, ONE series and ONE settled expiry; a segment tick here
+   *      names a whole target. There is no route that takes the two together.
+   *
+   * `short` is the VISIBLE sentence on the row; `why` is the long form on its
+   * `title`. Both, because a refusal only a hover reveals is one most readers
+   * never meet.
    */
   const SEGMENTS = [
     {
@@ -369,6 +405,7 @@
       label: 'Spot',
       note: 'continuous series — no expiry',
       served: true,
+      short: null,
       why: 'POST /pull/spot — the request this form builds.'
     },
     {
@@ -376,14 +413,18 @@
       label: 'Expired futures',
       note: 'contracts that have already settled',
       served: false,
-      why: 'Needs POST /pull/fno. api::ingest::FnoRequest carries ONE underlying, ONE series and ONE settled expiry — no set — so a segment naming a whole target has nothing to put on the wire. This form drives /pull/spot only.'
+      short:
+        'No expired future is listed anywhere this page can read, and no route in this build fetches one.',
+      why: 'THREE REASONS, ALL MEASURED.\n\n1. Not in the master. core::vendor::decode_master_row declines every FUT row as Skip::LiveContract — "live derivative contract". Both vendors purge the master on expiry and the earliest expiry in either one is three days from now, so every derivative row a master carries is a LIVE contract and none of it is backtest data. A declined row never reaches api::merge::Merged::by_key, so /instruments.json emits no FNO row and this control has nothing to offer.\n\n2. Not fetchable. POST /pull/fno exists and parses in full, then answers 503 with audit Outcome::NotStarted: "expired F&O has no local-archive path and no HTTP transport in this build".\n\n3. Not the same request. api::ingest::FnoRequest carries ONE underlying, ONE series and ONE settled expiry — no set — so a segment naming a whole target has nothing to put on the wire. This form drives /pull/spot only.\n\nExpired history comes from the vendors’ historical endpoints and from the existing lake, never from the live instrument master. Until one of those is wired to a route, this row is a refusal and not a gap.'
     },
     {
       key: 'options',
       label: 'Expired options',
       note: 'contracts that have already settled',
       served: false,
-      why: 'Needs POST /pull/fno, same shape as futures: one underlying and one expiry per request, and the expiry has to be strictly behind today. There is no route that takes a target and a segment together.'
+      short:
+        'Same three reasons as expired futures — purged from the master, no transport, one contract per request.',
+      why: 'THREE REASONS, ALL MEASURED, and they are the futures ones.\n\n1. Not in the master. core::vendor::decode_master_row declines every CE and PE row as Skip::LiveContract after parsing its expiry and strike. Both vendors purge on expiry, so the ~148,000 contracts a live chain would add are all live and none of them is history.\n\n2. Not fetchable. POST /pull/fno answers 503 — no local-archive path and no HTTP transport in this build.\n\n3. Not the same request. One underlying, one series, one expiry per request, and the expiry must be strictly behind today (api::ingest::parse_fno refuses Refusal::LiveContract otherwise). There is no route that takes a target and a segment together.'
     }
   ];
 
@@ -982,7 +1023,7 @@
   /**
    * EVERY ONE OF THESE IS INTENT AND SURVIVES A FEED CHANGE.
    *
-   * Nothing below resets them when the feed in the top bar moves, and that is
+   * Nothing below resets them when the feed in the first control moves, and that is
    * deliberate: unticking a feed and re-ticking it must RESTORE the choice, not
    * destroy it. What a feed change does move is what those choices can REACH —
    * counted separately, further down, and never read off these.
@@ -1319,15 +1360,17 @@
    * pointer-capture handler in `onMount` closes this one for the same press,
    * so the two never overlap in either direction.
    *
-   * `'uni' | 'ins' | null`.
+   * `'feed' | 'uni' | 'ins' | null`.
    *
-   * `'feed'` WAS A THIRD VALUE AND IS NOT ONE ANY MORE. The strip carried its
-   * own feed dropdown, writing the same `feeds.active` the top bar writes. Two
-   * controls for one value teach the reader they are independent when they are
-   * not — the top bar in `+layout.svelte` is the one selector, `/markets`
-   * writes it from nowhere, and this page now writes it from nowhere either.
-   * `pickFeed` went with the menu: there is no longer a site on this page that
-   * assigns `feeds.active`.
+   * `'feed'` IS BACK, AND IT IS THE ONLY ONE OF ITS KIND. This page carried its
+   * own feed dropdown, then lost it because the top bar carried one too, and
+   * two controls for one value teach the reader they are independent when they
+   * are not. The rule was right and the remedy was aimed at the wrong control:
+   * the feed is the FIRST RUNG of this page's cascade — universe, instruments,
+   * segments, timeframe and window are all its answer — so the control belongs
+   * beside the four it governs. `+layout.svelte` now omits its picker on the
+   * routes that own one (FEED_OWNED there), which keeps the count at exactly
+   * one on every route rather than at one page-wide.
    */
   let drop = $state(null);
 
@@ -2018,8 +2061,8 @@
    */
   const universeTitle = $derived.by(() => {
     const head = reachKnown
-      ? `${universeSpec.label} — ${n(reach)} name(s) reachable on ${feedName(feeds.active)}, pulls with target=${target}.`
-      : `${universeSpec.label} — not counted: ${reachWhy}`;
+      ? `The set this feed is asked for. ${universeSpec.label} — ${n(reach)} name(s) reachable on ${feedName(feeds.active)}, pulls with target=${target}.`
+      : `The set this feed is asked for. ${universeSpec.label} — not counted: ${reachWhy}`;
     if (!refusalSummary) return head;
     const un = refusalSummary.anyUnspellable
       ? ` Counted here, not requestable: ${refusalSummary.unspellable} — membership is measured off the universes array this server sends, and what is missing is a target. api::ingest::SpotTarget spells swept, indices and equities and nothing else, so a rebuild does not close it: a docs/05-decisions.md entry and a crates/api change do.`
@@ -2083,7 +2126,7 @@
       // A difference needs BOTH sides. The union is the far side; this feed's
       // own names are the near one, and without them a subtraction would be
       // taken against nothing and print a total that looks like a measurement.
-      return `${feedName(feeds.active)}'s own names are not counted yet, and this measurement is a difference that needs both sides — ${reachWhy} — so it settles when /instruments.json?feed=${feeds.active ?? ''} answers for the feed named in the top bar. Until it does, a union measured here would be subtracted from nothing and the total would read like a measurement.`;
+      return `${feedName(feeds.active)}'s own names are not counted yet, and this measurement is a difference that needs both sides — ${reachWhy} — so it settles when /instruments.json?feed=${feeds.active ?? ''} answers for the feed named in the first control of the strip. Until it does, a union measured here would be subtracted from nothing and the total would read like a measurement.`;
     }
     return null;
   });
@@ -2320,7 +2363,7 @@
       {
         id: 'universe',
         parentReady: Boolean(active) && !archiveHidden,
-        why: 'Select a broker feed in the top bar — the universe below is that feed’s answer.'
+        why: 'Select a broker feed in the first control of this strip — the universe below is that feed’s answer.'
       },
       {
         id: 'instruments',
@@ -2988,6 +3031,30 @@
    * `byMonth` index, and memoises on (read, months) so a re-render never
    * re-folds.
    */
+  /**
+   * THE ASK'S OWN POPULATION — the census keys and the rungs this request
+   * reaches, and nothing else.
+   *
+   * # The 100% meter this removes
+   *
+   * `snapshot()` counted EVERY row in the window months — every instrument at
+   * every rung — while `expectedUnits` counted only this request's reach
+   * (instruments × segments × rungs × months). With anything else already held
+   * in those months (the 750-name NIFTY Total Market backfill is the ordinary
+   * case) the numerator was in the hundreds against a denominator of 2,
+   * `Math.min(1, …)` pinned the bar at 100.0%, and `unitsLeft` clamped to 0 —
+   * which silently removed the ETA line as well — with half the request still
+   * on the wire. It took two pre-existing rows, not 750.
+   *
+   * Both readings are taken through this, so the numerator and the denominator
+   * are over one population. What lands outside it is not discarded: the fold
+   * counts it as `outside` and the card names it.
+   */
+  const askScope = $derived({
+    instruments: new Set(ticked.map(censusKey)),
+    rungs: new Set(rungsChosen.map((r) => r.dir))
+  });
+
   async function snapshot() {
     await refreshStore();
     // REFUSED, NOT ZEROED. Every outcome on this page is a difference against
@@ -2995,7 +3062,7 @@
     // whatever the store already held.
     if (store.state !== 'ready')
       throw new Error(store.error ?? '/store.json could not be read, and it named no reason');
-    return foldMonths(windowMonths);
+    return foldMonths(windowMonths, askScope);
   }
 
   /**
@@ -3027,7 +3094,7 @@
       }
       if (state !== 'ready' || reads === seenRead) return;
       seenRead = reads;
-      const shot = foldMonths(windowMonths);
+      const shot = foldMonths(windowMonths, askScope);
       pollError = null;
       if (!live || shot.units > live.units || shot.rows > live.rows) lastGrowthAt = shot.at;
       live = shot;
@@ -3046,7 +3113,12 @@
    * instruments — is a string and never markup. Nothing on this page is ever
    * assigned through `innerHTML`.
    */
-  function readReceipt(html, ok, status) {
+  function readReceipt(html, ok, status, ctype, marker) {
+    // A PAGE IS NOT A RECEIPT. See `$lib/receipt.js`: the content-type is
+    // tested before anything is believed, and the parsed document must carry
+    // the verdict element every answer this route gives carries.
+    const wrong = notAReceipt({ html, status, ctype, marker, hasVerdict: true });
+    if (wrong) return wrong;
     const doc = new DOMParser().parseFromString(html, 'text/html');
     const facts = [];
     for (const tr of doc.querySelectorAll('table.kv tr')) {
@@ -3055,6 +3127,11 @@
       if (k) facts.push({ k, v });
     }
     const badge = doc.querySelector('.badge');
+    // THE SECOND TEST. `wrong` above cleared the content-type; this one is the
+    // document's own verdict element, and its absence is the answer that used
+    // to render as a green OK.
+    const noVerdict = notAReceipt({ html, status, ctype, marker, hasVerdict: Boolean(badge) });
+    if (noVerdict) return noVerdict;
     const halt = doc.querySelector('.halt');
     const scope = halt?.querySelector('b')?.textContent?.trim() ?? '';
     let reason = halt?.textContent?.trim() ?? '';
@@ -3063,7 +3140,7 @@
       ok,
       status,
       verdict: badge?.textContent?.trim() || (ok ? 'OK' : `HTTP ${status}`),
-      good: badge ? badge.classList.contains('good') : ok,
+      good: badge?.classList.contains('good') === true,
       scope,
       reason,
       facts,
@@ -3858,7 +3935,16 @@
           body: b.body,
           signal: controller.signal
         });
-        const one = { ...readReceipt(await r.text(), r.ok, r.status), rung: b.label };
+        const one = {
+          ...readReceipt(
+            await r.text(),
+            r.ok,
+            r.status,
+            r.headers.get('content-type'),
+            r.headers.get(RECEIPT_HEADER)
+          ),
+          rung: b.label
+        };
         receipts = [...receipts, one];
         // THE ONE THE CARD SHOWS IS THE FIRST BAD ONE. A later success must not
         // paint over a rung that refused — the list below it carries all of them.
@@ -3971,19 +4057,29 @@
     <a class="link" href="/audit">The record of every run</a>
   </div>
 
+  <!-- THE CONTROL COMES WITH THE REFUSAL. Each of these three states is the
+       page saying "not with this feed", and the one action every one of them
+       asks for is a change of feed — so the control is drawn inside the
+       refusal rather than named in it. It used to point at the top bar; the
+       top bar no longer carries a picker on this route, and a page that both
+       refuses and offers no way out is a dead end. `.blankpick` is the one
+       rule that keeps the dropdown from stretching to the width of a page. -->
   {#if feeds.error}
     <div class="blank">
       <h2>The feed list could not be read</h2>
       <p>Nothing can be ingested until the server names a feed to ingest into.</p>
       <p class="mono down">{feeds.error}</p>
+      <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else if !active}
     <div class="blank">
       <h2>No feed is selected</h2>
       <p>
         Ingest writes into exactly one feed's store, so one has to be chosen before a window means
-        anything. Pick one in the top bar.
+        anything. Pick one here — it is the same control that stands first in the strip once a feed
+        is chosen, and it is the only one on this page.
       </p>
+      <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else if archiveHidden}
     <div class="blank">
@@ -3995,10 +4091,11 @@
       <p class="warn mono">{active.why}</p>
       <p class="alt">
         <span class="lbl">What to do</span>
-        Buy the archive and give the feed a store prefix, or select a broker feed in the top bar. The
-        folder form appears here the day this feed reports itself ready — nothing on this page names
-        a vendor.
+        Buy the archive and give the feed a store prefix, or select a broker feed below. The folder
+        form appears here the day this feed reports itself ready — nothing on this page names a
+        vendor.
       </p>
+      <div class="blankpick">{@render feedRung()}</div>
     </div>
   {:else}
     <div class="grid body">
@@ -4042,50 +4139,33 @@
                  inside one column, which is the shape this page is being
                  rewritten out of. -->
             <fieldset class="pickers" disabled={phase === 'running'}>
-              <!-- THE FEED IS THE PAGE'S SCOPE, AND IT IS CHOSEN IN ONE PLACE
-                   ONLY. A second picker stood here — a `.dd` menu over
-                   `feeds.all` whose rows wrote the same `feeds.active` the top
-                   bar writes. Two controls for one value teach the reader they
-                   are independent when they are not; the top bar in
-                   `+layout.svelte` is the one selector, and `/markets` has
-                   always been right about this.
+              <!-- THE FEED IS THE FIRST RUNG OF THE CASCADE, AND THEREFORE THE
+                   FIRST CONTROL IN THE ROW. It stood across the top of the
+                   strip as a full-width SCOPE LINE — a label, the feed's name
+                   wearing a control's face with no affordance, and a clause —
+                   which is a paragraph pretending to be a control. It is a
+                   dropdown again, and it is a PEER: same track, same label
+                   style, same button height and the same one baseline as
+                   Universe · Instruments · Segments · Timeframe.
 
-                   THE CONTROL IS GONE; THE FACT IT CARRIED IS NOT. "Broker feed
-                   — everything below is this feed's answer · what it does not
+                   ONE CONTROL FOR ONE VALUE, STILL. The top bar's picker is not
+                   drawn on the routes that carry their own — see FEED_OWNED in
+                   `+layout.svelte`. Two controls writing one `feeds.active`
+                   teach the reader they are independent when they are not, and
+                   that is the defect the scope line was introduced to fix; the
+                   fix is which control exists, not whether the page has one.
+
+                   THE SCOPE SENTENCE SURVIVES AS THE CONTROL'S OWN CLAUSE,
+                   which is where it was always headed: "everything below is
+                   this feed's answer · carries N name(s) · what it does not
                    carry is not measured" is what tells a reader the whole page
-                   is scoped to one vendor, and it is load-bearing. It is now a
-                   SCOPE LINE, in the same three parts `/db` uses so the two
-                   pages agree: the label with the page's scope and where the
-                   feed is chosen, the feed's own name wearing the control's
-                   face minus the affordance, and the clipped clause carrying
-                   what this feed reaches. The long sentence that lived on the
-                   button's `title` lives on the line it describes.
+                   is scoped to one vendor, and it is load-bearing. The long
+                   sentence is on the button's `title`.
 
-                   THE REFUSAL THE MENU CARRIED IS NOT LOST EITHER: a feed the
-                   list marks not ready is refused in the top bar, which draws
-                   it, disables it and quotes `/feeds.json`'s own reason. This
-                   page never had a second opinion about that and now has no
-                   opinion at all. -->
-              <div class="pk scope scopeline">
-                <span class="plbl">
-                  Broker feed
-                  <i>the page's whole scope — chosen in the top bar</i>
-                </span>
-                <span
-                  class="feedname"
-                  title={`${active.display} · ${active.kind_label ?? 'source kind not stated by this server'}. Every count below is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone — no page in this product puts one feed's numbers beside another's. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted, not the view of one thing. Change it in the top bar.`}
-                  >{active.display}</span
-                >
-                <!-- A `.pknote` CLIPS, so the sentence is on its own `title`
-                     too — the page's standing rule, and the reason the clause
-                     may be one line at all. -->
-                <span
-                  class="pknote"
-                  class:warn={!reachKnown}
-                  title={`everything below is this feed's answer · ${scopeNote}`}
-                  >everything below is this feed's answer · {scopeNote}</span
-                >
-              </div>
+                   A REFUSED FEED IS DRAWN AND REFUSED, never omitted:
+                   `/feeds.json` marks a feed not ready and states why, and the
+                   row quotes that reason rather than paraphrasing it. -->
+              {@render feedRung()}
 
               {#if shows.get('universe')}
                 <!-- THE UNIVERSE RUNG, AND IT IS A DROPDOWN. The eight in NSE's
@@ -4095,7 +4175,12 @@
                      the same sentence the deleted paragraph printed, on the
                      row it is about. -->
                 <div class="pk">
-                  <span class="plbl">Universe <i>the set this feed is asked for</i></span>
+                  <!-- THE SUB-CLAUSE IS ON THE CONTROL, NOT IN THE LABEL. "The
+                       set this feed is asked for" is a true and useful sentence
+                       and it is the FIRST thing `universeTitle` now says. In the
+                       label it was a second line in one cell and no line in the
+                       next, which is half of why this row had no baseline. -->
+                  <span class="plbl">Universe</span>
                   <div class="dd">
                     <button
                       class="ddb"
@@ -4174,15 +4259,13 @@
                      measures and reports on — the ask, the census, the outcome
                      rows. -->
                 <div class="pk">
-                  <span class="plbl"
-                    >Instruments in that universe <i>ticked — this is what is counted</i></span
-                  >
+                  <span class="plbl">Instruments in that universe</span>
                   <div class="dd">
                     <button
                       class="ddb"
                       type="button"
                       aria-expanded={drop === 'ins'}
-                      title={`${insSummary}. A tick decides what this page counts — the ask line, the census below and the outcome list after a run. It cannot narrow the REQUEST: api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so target=${target} asks for all ${reachKnown ? n(reach) : '—'} either way.`}
+                      title={`Ticked — this is what is counted. ${insSummary}. A tick decides what this page counts — the ask line, the census below and the outcome list after a run. It cannot narrow the REQUEST: api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so target=${target} asks for all ${reachKnown ? n(reach) : '—'} either way.`}
                       onclick={(e) => {
                         e.stopPropagation();
                         drop = drop === 'ins' ? null : 'ins';
@@ -4319,7 +4402,11 @@
                      unfilable by the store — stays live and says so, because
                      each of those names work somebody could do. -->
                 <div class="pk">
-                  <span class="plbl">Timeframe <i>bar lengths — the granularity field</i></span>
+                  <span
+                    class="plbl"
+                    title="Bar lengths — the granularity field on the wire. Timeframe is the cascade's word for this rung and the word /db and /markets use for the same axis; bar length is what it means; granularity is what it is called on the wire. All three name one thing."
+                    >Timeframe</span
+                  >
                   <Picker
                     label="bar lengths"
                     summary={rungsChosen.length === 0
@@ -4446,15 +4533,13 @@
                        answered by anybody. -->
                   <span
                     class="plbl"
-                    title={isBroker
-                      ? `${active.display} is a broker. The window is split to its per-request cap by the server and the rate budget is charged per request. Both ends are inclusive here; on the wire crates/pull must send the day after "to", which Dhan documents as non-inclusive.`
-                      : 'Both ends are inclusive here and in every count on this page.'}
-                    >Days to {verb}
-                    <i
-                      >{isFolderFeed
-                        ? 'the range is whatever files are in the folder'
-                        : 'the range the vendor answers'}</i
-                    ></span
+                    title={(isFolderFeed
+                      ? 'The range is whatever files are in the folder. '
+                      : 'The range the vendor answers. ') +
+                      (isBroker
+                        ? `${active.display} is a broker. The window is split to its per-request cap by the server and the rate budget is charged per request. Both ends are inclusive here; on the wire crates/pull must send the day after "to", which Dhan documents as non-inclusive.`
+                        : 'Both ends are inclusive here and in every count on this page.')}
+                    >Days to {verb}</span
                   >
                   <div class="dates">
                     <div
@@ -4543,12 +4628,12 @@
 
                 {#if isFolderFeed}
                   <div class="pk" class:bad={showProblems && problemFor.has('folder')}>
-                    <span class="plbl">Folder <i>CSV files already bought</i></span>
+                    <span class="plbl">Folder</span>
                     <input
                       class="din mono"
                       bind:value={folder}
                       placeholder={folderReach.body?.path ?? '/path/to/vendor/csvs'}
-                      title="No token, no rate budget and no 'not today' — a file's last day is not a question about the clock."
+                      title="CSV files already bought. No token, no rate budget and no 'not today' — a file's last day is not a question about the clock."
                     />
                     <!-- WHERE THE REACH WAS READ, WHICH IS THE FOLDER THIS
                          BUILD RESOLVES ON ITS OWN.
@@ -4613,17 +4698,6 @@
                 >
               </p>
 
-              <!-- THE FOUR FACTORS ARE FOUR CONTROLS AND THE PRODUCT IS THEIRS.
-                   Where the ticked count and the reachable count differ, the
-                   difference is stated in words: the request cannot be narrowed
-                   and this line is the only place that can say so beside the
-                   number it changes. -->
-              {#if askGap}
-                <p class="caution">
-                  <span class="tag warn">ticked ≠ requested</span><span class="msg">{askGap}</span>
-                </p>
-              {/if}
-
               <!-- ================================ THE TWO BULK ACTIONS =====
                    One clears the selection; the other would clear the store,
                    and it cannot. Both are drawn, because a control that is
@@ -4641,18 +4715,28 @@
                 >
                   Clear all instruments
                 </button>
+                <!-- THE LONG GREY SENTENCE BESIDE THIS BUTTON IS ON THE BUTTON.
+                     It read "Deleting is refused, not missing: the store is
+                     append-only (§3 rule 8) and the server registers no delete
+                     route. The button stays so the absence is visible." — every
+                     word of which is now the first two sentences of the `title`
+                     below. It was a paragraph of grey prose in a control panel
+                     that the mockup draws as two quiet buttons and nothing else;
+                     it is not deleted, it is on the control it is about.
+
+                     THE LABEL IS THE LABEL. "— no route deletes" was the refusal
+                     wedged into the button's face, which is what made this
+                     control read as an error message rather than as a button. It
+                     is `disabled`, which is the visible refusal; the reason is
+                     one hover away and the sentence is longer than any label. -->
                 <button
                   class="qb danger"
                   type="button"
                   disabled
-                  title="There is no route that deletes a bar. crates/api/src/server.rs registers no DELETE at all, and CLAUDE.md §3 rule 8 makes the store append-only: a month file is never mutated in place and never removed. Deleting bars is an operator action on the store directory itself, outside this application."
+                  title="Deleting is refused, not missing, and the button stays so the absence is visible. There is no route that deletes a bar: crates/api/src/server.rs registers no DELETE at all, and CLAUDE.md §3 rule 8 makes the store append-only — a month file is never mutated in place and never removed. Deleting bars is an operator action on the store directory itself, outside this application."
                 >
-                  Delete all stored bars — no route deletes
+                  Delete all stored bars
                 </button>
-                <span class="hint">
-                  Deleting is refused, not missing: the store is append-only (§3 rule 8) and the
-                  server registers no delete route. The button stays so the absence is visible.
-                </span>
               </div>
             </fieldset>
 
@@ -4688,77 +4772,6 @@
                 {/each}
               </ul>
             {/if}
-
-            {#each cautions as c (c)}
-              <p class="caution">
-                <span class="tag warn">caution</span><span class="msg">{c}</span>
-              </p>
-            {/each}
-
-            <details class="wire">
-              <summary>What goes on the wire</summary>
-              <!-- ONE LINE PER TICKED RUNG, because one POST carries one
-                   `granularity`. A single line here while two rungs were ticked
-                   would be the page describing a request it does not send. -->
-              {#each wireBodies as w (w.dir)}
-                <p class="mono wirebody">POST /pull/spot<br />{w.body}</p>
-              {/each}
-              {#if wireBodies.length === 0}
-                <p class="mono wirebody">
-                  Nothing would be sent: no timeframe is ticked, and `granularity` is not an
-                  optional field on a request this form builds.
-                </p>
-              {:else if wireBodies.length > 1}
-                <p class="hint">
-                  {n(wireBodies.length)} requests, sent one after another in the ladder's order —
-                  <span class="mono">{wireBodies.map((w) => w.dir).join(', ')}</span>. They are not
-                  sent in parallel: <span class="mono">/pull/spot</span> is synchronous and the store
-                  appends, so two in flight would interleave two answers into one month file.
-                </p>
-              {/if}
-              <p class="hint">
-                Every field the server reads is here. <span class="mono">granularity</span> is a
-                field <span class="mono">api::ingest::parse_spot</span> has always parsed; the
-                server's own form never emitted one, so an absent value has meant
-                <span class="mono">1min</span> by omission.
-              </p>
-              <!-- WHAT IS ABSENT IS AS INFORMATIVE AS WHAT IS PRESENT. Two of
-                   the controls above are readings, not fields, and the body is
-                   where that is provable rather than asserted. -->
-              <p class="hint">
-                Two things above are NOT on this line and cannot be. There is no member field, so
-                the instrument list is what <span class="mono">target=</span> resolves to on the
-                server rather than something this form sends. There is no segment field either —
-                the route IS the segment: <span class="mono">/pull/spot</span> is spot, and an
-                expired contract goes to <span class="mono">/pull/fno</span> one expiry at a time.
-              </p>
-              <!-- NO UNIT CHANGES ANYWHERE ON THIS LINE, and that is the point
-                   of the day control. What the reader picked is what is sent,
-                   character for character. The MONTH is still real — it is the
-                   store's file — and it appears as the set the window touches,
-                   never as something the request was widened to. -->
-              <p class="hint">
-                <span class="mono">from</span> and <span class="mono">to</span> are the two days
-                above, verbatim: {isValidIso(fromDay) ? dayLabel(fromDay) : 'the from date'} is
-                <span class="mono">{fromDay || 'unset'}</span> and
-                {isValidIso(toDay) ? dayLabel(toDay) : 'the to date'} is
-                <span class="mono">{toDay || 'unset'}</span>. Nothing is rounded to a month
-                boundary and nothing is clamped behind you — a day past
-                <span class="mono">{dayLabel(maxDay)}</span> is refused with its reason instead.
-              </p>
-              <!-- A REQUEST-ENCODING RULE FOR crates/pull, STATED WHERE IT
-                   PRODUCES ITS SYMPTOM. It is not this page's bound and no
-                   ceiling fixes it: a pull that forwards `to` verbatim to a
-                   vendor documenting it as non-inclusive loses exactly the last
-                   day, silently — which looks identical to a short window. -->
-              <p class="hint">
-                Both ends are inclusive HERE. On the wire, Dhan documents the daily endpoint's
-                <span class="mono">toDate</span> as NON-INCLUSIVE (Dhan Docs /
-                12-historical-data.md), so the request must send the day after — a rule for
-                <span class="mono">crates/pull</span>, and the reason a window can come back one
-                session short with nothing on this page able to see it.
-              </p>
-            </details>
 
             <div class="actions">
               <button class="btn primary" type="submit" disabled={phase === 'running'}>
@@ -4843,6 +4856,18 @@
                   <b class="warn">This share is an estimate.</b> The denominator is names × months
                   from your own request — the server states no total, and a name the vendor has no
                   history for will never fill.
+                  <!-- BOTH SIDES OVER ONE POPULATION, AND WHAT FELL OUTSIDE IT
+                       IS STILL NAMED. The numerator counted every row in these
+                       months — every instrument, every rung — against a
+                       denominator that counted only this request, so one
+                       unrelated backfill in the window pinned this bar at
+                       100.0% with half the request outstanding. `askScope` is
+                       what both readings are taken through now. -->
+                  {#if live && live.outside > 0}
+                    <span class="mono">{n(live.outside)}</span> instrument-month(s) in these months
+                    are outside this request — other instruments, or other rungs — and are counted
+                    in neither half of this ratio.
+                  {/if}
                 </p>
               {:else if phase === 'running'}
                 <div class="meter indet"><i></i></div>
@@ -4997,6 +5022,108 @@
             </div>
         </section>
         {/if}
+
+        <!-- ══════════════════ BELOW THE PANEL, NOT INSIDE IT ══════════════════
+             THE CONTROL PANEL CARRIES CONTROLS. A caution box, a fold of wire
+             bodies and a paragraph of grey prose are all TRUE and all belong to
+             this form, and every one of them was standing between the operator
+             and the five dropdowns he came here to set. The panel above is the
+             mockup's panel now — a row of controls, a day window, two quiet
+             buttons — and everything that was crowding it is here, one row
+             below, at full width where a sentence can be a sentence.
+
+             NOTHING IS DELETED. The three cautions are the same `cautions`
+             array rendered by the same loop; `askGap` is the same derived
+             sentence; the wire fold is byte for byte the fold that was inside
+             the form, still closed by default, still one `<p>` per ticked rung.
+             What changed is which side of the panel edge they sit on.
+
+             STILL INSIDE `.cols`, spanning both tracks, so it sits under the
+             form and the run card rather than becoming a third column beside
+             them. -->
+        <div class="belowsel">
+          <!-- THE FOUR FACTORS ARE FOUR CONTROLS AND THE PRODUCT IS THEIRS.
+               Where the ticked count and the reachable count differ, the
+               difference is stated in words: the request cannot be narrowed and
+               this is the only line that can say so. It sat in a 248px grid
+               track and wrapped into a ribbon; at full width it is a sentence. -->
+          {#if askGap}
+            <p class="caution">
+              <span class="tag warn">ticked ≠ requested</span><span class="msg">{askGap}</span>
+            </p>
+          {/if}
+
+          {#each cautions as c (c)}
+            <p class="caution">
+              <span class="tag warn">caution</span><span class="msg">{c}</span>
+            </p>
+          {/each}
+
+          <details class="wire">
+            <summary>What goes on the wire</summary>
+            <!-- ONE LINE PER TICKED RUNG, because one POST carries one
+                 `granularity`. A single line here while two rungs were ticked
+                 would be the page describing a request it does not send. -->
+            {#each wireBodies as w (w.dir)}
+              <p class="mono wirebody">POST /pull/spot<br />{w.body}</p>
+            {/each}
+            {#if wireBodies.length === 0}
+              <p class="mono wirebody">
+                Nothing would be sent: no timeframe is ticked, and `granularity` is not an
+                optional field on a request this form builds.
+              </p>
+            {:else if wireBodies.length > 1}
+              <p class="hint">
+                {n(wireBodies.length)} requests, sent one after another in the ladder's order —
+                <span class="mono">{wireBodies.map((w) => w.dir).join(', ')}</span>. They are not
+                sent in parallel: <span class="mono">/pull/spot</span> is synchronous and the store
+                appends, so two in flight would interleave two answers into one month file.
+              </p>
+            {/if}
+            <p class="hint">
+              Every field the server reads is here. <span class="mono">granularity</span> is a
+              field <span class="mono">api::ingest::parse_spot</span> has always parsed; the
+              server's own form never emitted one, so an absent value has meant
+              <span class="mono">1min</span> by omission.
+            </p>
+            <!-- WHAT IS ABSENT IS AS INFORMATIVE AS WHAT IS PRESENT. Two of
+                 the controls above are readings, not fields, and the body is
+                 where that is provable rather than asserted. -->
+            <p class="hint">
+              Two things above are NOT on this line and cannot be. There is no member field, so
+              the instrument list is what <span class="mono">target=</span> resolves to on the
+              server rather than something this form sends. There is no segment field either —
+              the route IS the segment: <span class="mono">/pull/spot</span> is spot, and an
+              expired contract goes to <span class="mono">/pull/fno</span> one expiry at a time.
+            </p>
+            <!-- NO UNIT CHANGES ANYWHERE ON THIS LINE, and that is the point
+                 of the day control. What the reader picked is what is sent,
+                 character for character. The MONTH is still real — it is the
+                 store's file — and it appears as the set the window touches,
+                 never as something the request was widened to. -->
+            <p class="hint">
+              <span class="mono">from</span> and <span class="mono">to</span> are the two days
+              above, verbatim: {isValidIso(fromDay) ? dayLabel(fromDay) : 'the from date'} is
+              <span class="mono">{fromDay || 'unset'}</span> and
+              {isValidIso(toDay) ? dayLabel(toDay) : 'the to date'} is
+              <span class="mono">{toDay || 'unset'}</span>. Nothing is rounded to a month
+              boundary and nothing is clamped behind you — a day past
+              <span class="mono">{dayLabel(maxDay)}</span> is refused with its reason instead.
+            </p>
+            <!-- A REQUEST-ENCODING RULE FOR crates/pull, STATED WHERE IT
+                 PRODUCES ITS SYMPTOM. It is not this page's bound and no
+                 ceiling fixes it: a pull that forwards `to` verbatim to a
+                 vendor documenting it as non-inclusive loses exactly the last
+                 day, silently — which looks identical to a short window. -->
+            <p class="hint">
+              Both ends are inclusive HERE. On the wire, Dhan documents the daily endpoint's
+              <span class="mono">toDate</span> as NON-INCLUSIVE (Dhan Docs /
+              12-historical-data.md), so the request must send the day after — a rule for
+              <span class="mono">crates/pull</span>, and the reason a window can come back one
+              session short with nothing on this page able to see it.
+            </p>
+          </details>
+        </div>
       </div>
 
       <!-- ============================================== THE OUTCOMES ====== -->
@@ -5687,7 +5814,7 @@
            does list it — which is where the reader is already looking. -->
       <span class="hint">
         All {n(missingHere.length)} of them are in the list above, drawn and refused, each with the
-        feed that does list it on its own row. Tick that feed in the top bar and they become
+        feed that does list it on its own row. Choose that feed in the first control of the strip and they become
         selectable; nothing here is hidden and nothing is deleted from the store.
       </span>
     {/if}
@@ -5695,36 +5822,132 @@
 {/snippet}
 
 <!-- ===================================================================== -->
-<!-- THE SEGMENTS RUNG. Spot is offered because `/pull/spot` fills it. The   -->
-<!-- other two are SHOWN AND REFUSED with the route that would fill them     -->
-<!-- named, because a segment quietly absent from a list reads as a segment  -->
-<!-- that does not exist rather than one this form does not drive.           -->
+<!-- THE FEED RUNG — FIRST IN THE ROW, AND A PEER OF THE FOUR IT GOVERNS.    -->
+<!--                                                                        -->
+<!-- A snippet rather than markup in place, because the strip is not the     -->
+<!-- only place it has to appear: the three blank states above render it too -->
+<!-- (no feed selected, an archive with nothing to ingest, and the feed list -->
+<!-- failing), and each of those is exactly the state in which the operator  -->
+<!-- most needs to change the feed. A control that vanishes precisely when   -->
+<!-- it is needed is the dead end this snippet exists to make impossible.    -->
+<!--                                                                        -->
+<!-- It is `.dd`/`.ddb`/`.ddr` and NOT a `Picker`, for the reason the        -->
+<!-- Universe and Instruments menus are not: a Picker row is a checkbox and  -->
+<!-- the feed is a SELECTION — exactly one, never a set — and a refused feed -->
+<!-- needs a row that is drawn, dead, and carrying `/feeds.json`'s own why.  -->
+<!-- ===================================================================== -->
+{#snippet feedRung()}
+  <div class="pk">
+    <!-- THE LABEL IS THE LABEL. Everything the sub-clause used to say — that
+         this is the page's whole scope, what a change costs, and where the
+         counts are read from — is on the button's `title`, one hover from the
+         control it is about. A two-line label in one cell and a one-line label
+         in the next is what broke this row's baseline. -->
+    <span class="plbl">Broker feed</span>
+    <div class="dd">
+      <button
+        class="ddb"
+        type="button"
+        aria-expanded={drop === 'feed'}
+        title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone — no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing. What this feed does not carry is not measured here.`}
+        onclick={(e) => {
+          e.stopPropagation();
+          drop = drop === 'feed' ? null : 'feed';
+        }}>{active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}</button
+      >
+      {#if drop === 'feed'}
+        <div class="ddm" role="group" aria-label="Broker feed — the page's whole scope">
+          {#each feeds.all as f (f.wire)}
+            {@const ready = f.ready === true}
+            <button
+              class="ddr"
+              type="button"
+              class:off={!ready}
+              disabled={!ready}
+              aria-pressed={feeds.active === f.wire}
+              title={ready
+                ? `Selects ${f.display}. Every count and every bar below becomes this feed's, measured again from /instruments.json?feed=${f.wire} and /store.json — nothing is deleted and nothing is merged with the feed you are leaving.`
+                : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+              onclick={() => {
+                feeds.active = f.wire;
+                drop = null;
+              }}
+            >
+              <span class="tk">{feeds.active === f.wire ? '✓' : ''}</span>
+              <span class="nm">{f.display}</span>
+              <span class="ct" class:warn={!ready}
+                >{f.kind_label ?? 'kind not stated'}{ready ? '' : ' · unavailable'}</span
+              >
+            </button>
+          {/each}
+          {#if feeds.all.length === 0}
+            <p class="insnone">
+              The server answered <span class="mono">/feeds.json</span> with an empty list, so there
+              is no vendor to select and nothing to pull. A feed appears here the day its descriptor
+              row exists on the Rust side — nothing in this file names one.
+            </p>
+          {/if}
+        </div>
+      {/if}
+    </div>
+    <!-- THE SCOPE SENTENCE, KEPT WORD FOR WORD. It was a paragraph in a
+         full-width block; it is this control's clause now, which is where every
+         other fact on this strip lives. A `.pknote` CLIPS, so the whole of it is
+         on the clause's own `title` as well — the page's standing rule. -->
+    <span
+      class="pknote"
+      class:warn={!reachKnown}
+      title={`everything below is this feed's answer · ${scopeNote}`}
+      >everything below is this feed's answer · {scopeNote}</span
+    >
+  </div>
+{/snippet}
+
+<!-- ===================================================================== -->
+<!-- THE SEGMENTS RUNG. Every segment the store keys on is DRAWN. Spot is    -->
+<!-- offered because `/pull/spot` fills it; the two expired ones are drawn   -->
+<!-- dead, in place, each carrying the three measured reasons no build can   -->
+<!-- fetch it. See `SEGMENTS` for all three and where each was read.         -->
 <!-- ===================================================================== -->
 {#snippet segmentRung()}
-  <!-- SPOT IS OFFERED BECAUSE `/pull/spot` FILLS IT. The other two are counted
-       and refused ON THE CONTROL rather than in a fold under it: the clause
-       says how many this form cannot fill and the `title` names each one and
-       the route that would fill it. A segment quietly absent from a list reads
-       as a segment that does not exist rather than one this form does not
-       drive, and `segmentsUnserved` is counted, never assumed. -->
+  <!-- A ONE-ITEM DROPDOWN IS AN UNANSWERED QUESTION. The two expired segments
+       were FILTERED OUT of this menu and summarised in a clause beside it, and
+       the operator asked the only question that shape provokes: why are expired
+       futures and options not here. A hidden row cannot answer it. Both are
+       rows now — disabled, in the store's own order, with the short reason
+       VISIBLE on the row and the long one on its `title` — which is the shape
+       `$lib/Picker.svelte` documents `disabled`/`why` for and the shape the
+       universe menu beside it has always used.
+
+       `segmentsReached` is unchanged and still gates everything downstream:
+       ticked AND served. A disabled row cannot be ticked, so nothing below this
+       control can be reached by a segment this build cannot fill. -->
   <div class="pk">
-    <span class="plbl">Segments <i>the store's own key</i></span>
+    <span class="plbl">Segments</span>
     <Picker
       label="segments"
       summary={segmentsReached.length > 0
         ? segmentsReached.map((s) => s.label).join(', ')
         : 'No segment selected'}
-      rows={SEGMENTS.filter((s) => s.served).map((s) => ({
+      rows={SEGMENTS.map((s) => ({
         key: s.key,
         name: s.label,
-        detail: s.note
+        detail: s.note,
+        disabled: !s.served,
+        why: s.short,
+        title: s.why
       }))}
       selected={segSet}
       onchange={(sel) => (segSet = sel)}
     />
-    <span class="pknote" title={segmentsUnserved.map((s) => `${s.label} — ${s.why}`).join('\n\n')}>
+    <span
+      class="pknote"
+      title={`The store keys on three segments and all three are drawn. ${segmentsUnserved
+        .map((s) => `${s.label} — ${s.why}`)
+        .join('\n\n')}`}
+    >
       {n(segmentsReached.length)} of {n(SEGMENTS.length)} active{segmentsUnserved.length > 0
-        ? ` · ${n(segmentsUnserved.length)} this form cannot fill`
+        ? ` · ${n(segmentsUnserved.length)} refused, drawn with the reason`
         : ''}
     </span>
   </div>
@@ -6035,12 +6258,43 @@
   /* auto-fit, not a fixed four: the panel is half the width while a run card
      is beside it, and four 248px tracks cannot fit there. The track floor is
      the width at which a monospace instrument name and its caret stop
-     colliding. */
+     colliding.
+
+     ══════════ WHY THIS ROW WAS NOT A ROW, AND WHAT ACTUALLY BROKE IT ══════════
+
+     `align-items: end` was the cause, and it is worth naming exactly, because
+     the symptom pointed at the wrong control. Bottom-aligning grid items makes
+     every cell's LAST pixel share a line. The cells do not have the same
+     content below their control: Universe carries one `.pknote`; Timeframe
+     carries up to four (the feed's granularity floor, the dropped-rung notice,
+     the ticked/refused tally, and the missing-`served` warning); Days to pull
+     carries a two-field `.dates` block and its own note. Align the bottoms of
+     cells with two, five and seven lines of tail and their TOPS land three
+     different places — so Timeframe's label floated far above Universe's, and
+     Days to pull's did the same. Nothing was wrong with Timeframe. It simply
+     had the most to say.
+
+     Two changes, and they are the cause rather than a nudge:
+
+       1. `align-items: start`. The tops share a line, so every label starts at
+          the same y and every control sits directly under its own label. A
+          longer tail now hangs BELOW its cell, which is where a tail belongs
+          and where it cannot move anything above it.
+       2. One-line labels (see `.plbl`). Top-alignment alone is not enough: a
+          label that wraps to two lines in one cell and one line in the next
+          pushes that cell's control down by a line, and the row breaks again
+          one level lower. Every sub-clause moved to the control's `title` —
+          §4's own remedy — and what is left is a single short noun phrase that
+          is held to one line by rule, not by hope.
+
+     A NUDGE WOULD NOT HAVE HELD. A margin tuned against today's four notes is
+     wrong the moment a fifth appears, and the fifth is a `{#if}` away in half
+     these cells. */
   .pickers {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
     gap: var(--s6) var(--s5);
-    align-items: end;
+    align-items: start;
     border: 0;
     margin: 0;
     padding: 0;
@@ -6052,66 +6306,62 @@
     gap: var(--s2);
     min-width: 0;
   }
-  /* The feed is the page's scope, not a peer of what it scopes: it spans the
-     strip, it reads first, and the rule under it is where its answer begins. */
-  .pk.scope {
-    grid-column: 1 / -1;
-    padding-bottom: var(--s5);
-    border-bottom: 1px solid var(--line);
-  }
-  .pk.scope .plbl {
-    color: var(--acc);
-  }
-  /* THE SCOPE LINE READS LIKE THE CONTROL IT REPLACED, MINUS THE AFFORDANCE.
-     Same face as `.ddb` — same size, weight, mono family and 320px clamp — so
-     the strip's rhythm is unbroken where the dropdown used to sit, but no
-     caret, no hover border, no focus ring and no pointer: nothing here invites
-     a click, because the feed is chosen in the top bar. `default` rather than
-     `text` keeps it from reading as an editable field. `/db`'s `.scopeline
-     .feedname` is the same rule against ITS control's metrics, and the two
-     pages were written to agree. */
-  .pk.scope .feedname {
-    display: block;
-    max-width: 320px;
-    color: var(--ink);
-    font-size: 15px;
-    font-weight: var(--w-semi);
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    cursor: default;
-    align-self: start;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  /* Two fields in one rung, so it takes two of the grid's tracks — WHERE THERE
-     ARE TWO TO TAKE. `span 2` does not clamp itself: auto-fit settles the
-     track count from the container, and a span wider than that count grows the
-     grid an implicit, auto-sized column and pushes the panel past its own box.
-     Below the width where a second track fits, the span is dropped and the
-     pair wraps inside `.dates` instead. */
+  /* THE DAY WINDOW STARTS ITS OWN ROW, WHICH IS WHAT THE MOCKUP DRAWS: the
+     dropdowns across the top, the two dates below them. `1 / -1` rather than
+     `span 2` does that at EVERY track count — a spanning item is placed on the
+     first line that fits it, so `span 2` let it finish a row of dropdowns
+     whenever an even number of tracks left a gap, and the row it finished was
+     the row it then broke. Full width also removes the old hazard the media
+     query existed for: `span 2` in a one-track grid grew an implicit second
+     column and pushed the panel past its own box, and `1 / -1` cannot, because
+     `-1` is whatever the last line happens to be.
+
+     `.dates` is capped rather than stretched. Two date fields spread across
+     1,200px would read as the panel's most important control, and they are its
+     last one. */
   .pk.wide2 {
-    grid-column: span 2;
+    grid-column: 1 / -1;
   }
-  @media (max-width: 700px) {
-    .pk.wide2 {
-      grid-column: auto;
-    }
+  .pk.wide2 .dates {
+    max-width: 560px;
   }
+  /* ONE LINE, ALWAYS, AND THAT IS THE SECOND HALF OF THE ROW FIX. A label is a
+     short noun phrase — Broker feed, Universe, Instruments in that universe,
+     Segments, Timeframe, Days to pull — and each one used to carry an italic
+     sub-clause after it ("bar lengths — the granularity field", "ticked — this
+     is what is counted"). At a 248px track those wrapped, and they wrapped to
+     DIFFERENT heights per cell, which moves that cell's control down a line and
+     breaks the baseline the row is supposed to have. Every one of those clauses
+     is now the first sentence of its control's `title`, which is where §4 sends
+     a fact that does not fit; the label is held to one line here so the rule
+     cannot be broken by a longer word later. */
   .plbl {
     font-size: var(--fs-xs);
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
   }
-  .plbl i {
-    font-style: normal;
-    font-weight: var(--w-mid);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--faint);
-    margin-left: var(--s3);
+  /* THE FEED PICKER INSIDE A BLANK STATE. The three refusals above the strip
+     render the same `feedRung` snippet, and a `.pk` is a flex column that would
+     take the whole width of an empty page. Clamped to one track's worth so it
+     reads as the control it is in the strip. */
+  .blankpick {
+    max-width: 320px;
+    margin-top: var(--s5);
+  }
+  /* EVERYTHING THAT WAS CROWDING THE PANEL, ONE ROW UNDER IT. Both tracks, so
+     it is a band beneath the form and the run card and never a third column. */
+  .belowsel {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    min-width: 0;
   }
   /* ONE LINE, AND IT CLIPS RATHER THAN WRAPS. This is where a fact that used
      to be a paragraph now lives, and a clause that can grow to three lines
@@ -6169,6 +6419,19 @@
   .dd {
     position: relative;
     min-width: 0;
+  }
+  /* ONE HEIGHT FOR EVERY BUTTON IN THE STRIP, INCLUDING THE TWO THAT ARE NOT
+     OURS. `$lib/Picker.svelte`'s `.pbtn` already agrees with `.ddb` on every
+     metric — 15px semibold mono, 11px/14px padding, 9px radius — but it does
+     not clip, so a long summary ("All 11 this feed can serve, 1min, 3min, …")
+     wraps to a second line and that ONE control becomes taller than its four
+     neighbours. That is the row broken again, by a string rather than by a
+     rule. Picker is shared and is not edited from here; the clip is applied
+     from this page, to Pickers inside this strip only. */
+  .pk :global(.pbtn) {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .ddb {
     appearance: none;
@@ -6296,14 +6559,26 @@
      A flex pair rather than a 1fr/1fr grid, so that when the rung loses its
      second track the two cells wrap instead of being squeezed to half a
      monospace date each. */
+  /* `flex-start`, FOR THE REASON `.pickers` IS. Bottom-aligning two cells makes
+     their labels move apart the instant one of them grows — the `.bad` state
+     and the calendar are both per-cell — and FROM DATE / TO DATE sitting at two
+     heights is the same broken row one level down. Their tops share a line now,
+     so the two labels share a baseline and the two fields share a top edge
+     whatever either cell is doing.
+
+     THE FLOOR IS WHAT MAKES THE WRAP CLEAN. `flex: 1 1 0` with `min-width: 0`
+     let both cells shrink without limit, so at a narrow width they went on
+     shrinking side by side until "02 Sep 2024" no longer fit its own box
+     instead of dropping to a second line. A basis wide enough for the text and
+     the ▦ makes the second cell wrap whole. */
   .dates {
     display: flex;
-    align-items: flex-end;
+    align-items: flex-start;
     flex-wrap: wrap;
     gap: var(--s5);
   }
   .dcell {
-    flex: 1 1 0;
+    flex: 1 1 190px;
     min-width: 0;
     display: flex;
     flex-direction: column;
@@ -6315,6 +6590,7 @@
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--faint);
+    white-space: nowrap;
   }
   /* THE FIELD IS THE SAME HEIGHT AND THE SAME FACE AS THE DROPDOWN BUTTONS
      BESIDE IT. At the old 13px/7px it sat two pixels short of them and the
@@ -7152,19 +7428,34 @@
   .pickers > .caution {
     grid-column: 1 / -1;
   }
+  /* BOTTOM RIGHT, WHICH IS WHERE THE MOCKUP PUTS THEM AND WHERE A DESTRUCTIVE
+     CONTROL BELONGS: past everything the reader came here to set, on the far
+     side of a hairline, so neither is on the path to the form's own controls.
+     They were left-aligned in the flow of the strip with a paragraph of grey
+     prose beside them, which read as three more things to fill in. */
   .acts {
     grid-column: 1 / -1;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: var(--s4);
     flex-wrap: wrap;
+    /* NO SECOND HAIRLINE. `.ask` sits directly above these two and already
+       draws the rule that ends the controls; a border here would put two lines
+       three text-rows apart and read as a mistake. Space alone separates the
+       foot's two members. */
+    margin-top: calc(-1 * var(--s3));
   }
+  /* QUIET BY DEFAULT. `--dim` rather than `--ink`: these two are the panel's
+     last controls, not its verb, and the submit button below is the only thing
+     on this form that should read as loud. Colour arrives on hover, which is
+     where intent is. */
   .qb {
     padding: var(--s3) var(--s5);
     border-radius: var(--r2);
     border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--ink);
+    background: transparent;
+    color: var(--dim);
     font: inherit;
     font-size: var(--fs-xs);
     font-weight: var(--w-semi);
@@ -7172,14 +7463,22 @@
   }
   .qb:hover:not(:disabled) {
     border-color: var(--line-hard);
+    color: var(--ink);
     background: var(--panel-2);
   }
   .qb:disabled {
     opacity: 0.5;
     cursor: not-allowed;
   }
+  /* AN OUTLINE, NOT A FILL. A filled red button is a button that has already
+     decided; this one is permanently refused and its whole job is to be VISIBLE
+     as an absence. The border carries the warning and the face stays quiet. */
   .qb.danger {
     border-color: var(--down);
+    color: var(--dim);
+    background: transparent;
+  }
+  .qb.danger:hover:not(:disabled) {
     color: var(--down);
     background: var(--down-soft);
   }

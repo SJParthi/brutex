@@ -1791,24 +1791,72 @@ jobs:
           : > /tmp/io-sites.txt
           for f in crates/telemetry/src/*.rs; do
             base=$(basename "$f")
-            # THE TEST BOUNDARY, asserted rather than assumed. This gate scans
-            # everything BEFORE the first `#[cfg(test)]`. If a second one
-            # appears, "before the first" stops meaning "production" and the
-            # gate would quietly scan the wrong region while still printing a
-            # verdict. An unsound window that reports PASS is worse than no gate.
-            n=$(grep -c '^#\[cfg(test)\]' "$f" || true)
-            if [ "$n" -gt 1 ]; then
-              echo "  REFUSED  $base has $n cfg(test) blocks; this gate assumes one."
-              echo "           Fix the gate before trusting it again, not the file."
+            # THE TEST BOUNDARY, asserted rather than assumed. This USED to cut at
+            # the first `^#[cfg(test)]` and refuse outright on a second, on the
+            # ground that "before the first" then stops meaning "production" and an
+            # unsound window reporting PASS is worse than no gate. That ground was
+            # right and the tool was wrong: a second block is ordinary, and 823c18d
+            # added one -- a `#[cfg(test)] pub(crate) fn sweep_stale_scratch` sitting
+            # ABOVE `mod tests` -- so the gate refused a file it had no quarrel with
+            # and said so itself: "fix the gate before trusting it again, not the
+            # file." This is that fix.
+            #
+            # Every `#[cfg(test)]` block is now skipped by BRACE COUNTING, so there
+            # may be any number of them, and the attribute may cover a `fn` as well
+            # as a `mod`. Intervening attributes are stepped over -- `mod tests`
+            # carries a multi-line `#[allow(..., reason = "...")]` between the
+            # `#[cfg(test)]` and the `mod` keyword.
+            #
+            # THE SOUNDNESS PRINCIPLE IS KEPT, three ways. The walk exits 3 if it
+            # reaches EOF still inside a block, because an unbalanced brace means the
+            # window is not the one it thinks it is. The emitted body is then checked
+            # to contain NO `#[cfg(test)]` at all, which catches an over- or
+            # under-skip that happened to balance. And the surviving line count is
+            # PRINTED for every file, so a future edit that silently moves the
+            # boundary shows up in the log as a changed number rather than as nothing.
+            awk '
+              BEGIN { st = 0 }
+              st == 0 {
+                if ($0 ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; next }
+                print; next
+              }
+              # BETWEEN THE ATTRIBUTE AND THE ITEM IT COVERS. Further attributes and
+              # their continuation lines are stepped over -- `mod tests` carries a
+              # multi-line `#[allow(..., reason = "...")]` before the `mod` keyword.
+              st == 1 {
+                t = $0; sub(/^[ \t]+/, "", t)
+                # A braceless item -- `use`, `const` -- is the whole block, and ends
+                # at its own semicolon.
+                if (index($0, "{") == 0 && t ~ /;[ \t]*$/) { st = 0; next }
+                if (index($0, "{") > 0) { st = 2 }
+                next
+              }
+              # INSIDE THE ITEM. It closes at a `}` in COLUMN ZERO and nowhere else.
+              # NOT by counting braces: that was tried and it is unsound here --
+              # `json.rs` and `tail.rs` both hold `{` and `}` inside string literals,
+              # so the count never returns to zero and the walk ran off the end of
+              # both files. A top-level item under rustfmt closes at column zero, and
+              # a brace inside a string is never a lone `}` there.
+              st == 2 {
+                if ($0 ~ /^\}/) { st = 0 }
+                next
+              }
+              END { if (st != 0) exit 3 }
+            ' "$f" > /tmp/body.txt || {
+              echo "  REFUSED  $base: a cfg(test) block does not close before EOF."
+              echo "           The production window cannot be established, so no"
+              echo "           verdict is printed for this file. CLAUDE.md section 4."
+              fail=1
+              continue
+            }
+            if grep -q '^#\[cfg(test)\]' /tmp/body.txt; then
+              echo "  REFUSED  $base: a cfg(test) attribute survived the walk."
+              echo "           The skip is wrong in one direction or the other."
               fail=1
               continue
             fi
-            if [ "$n" -eq 1 ]; then
-              cut=$(grep -n '^#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
-              awk -v c="$cut" 'NR<c' "$f" > /tmp/body.txt
-            else
-              cp "$f" /tmp/body.txt
-            fi
+            printf '  window   %-14s %s production line(s) of %s\n' \
+              "$base" "$(awk 'END{print NR}' /tmp/body.txt)" "$(awk 'END{print NR}' "$f")"
             # Drop comment lines, so a construct merely NAMED in prose above is
             # not counted as a call to it.
             grep -vE '^[[:space:]]*(//|\*|/\*)' /tmp/body.txt > /tmp/code.txt || true

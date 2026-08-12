@@ -63,6 +63,10 @@
  * minute is real and only the claim is false.
  */
 
+// THE WINDOW FOLD'S ARITHMETIC, in a module with no runes in it so a test can
+// drive it. See `$lib/fold.js`.
+import { foldWindow, foldKey } from '$lib/fold.js';
+
 /* ======================================================================
    THE RUNGS ON DISK — the store's own list, not a second copy of it.
    ----------------------------------------------------------------------
@@ -136,6 +140,7 @@ const empty = () => ({
  *   reads       how many reads have SUCCEEDED — the memo key for window folds
  *   lastOk      { at, feed } of the last successful read. Never "current".
  */
+
 export const store = $state({
   state: 'none',
   feed: null,
@@ -388,24 +393,31 @@ let foldMemo = { key: null, value: null };
  * `held` is the WHOLE store's row count, not the window's: it is the figure
  * "3,353 instrument-month row(s) read" is printed from, and narrowing it to the
  * window would silently change what that sentence means.
+ *
+ * # THE SCOPE, AND THE 100% METER IT REMOVES
+ *
+ * `scope` is `{ instruments: Set, rungs: Set }` — the census keys and the rung
+ * names the caller's own request reaches — and either half may be absent, which
+ * means "every one of them".
+ *
+ * It exists because the month was the ONLY predicate here. `/ingest` divides
+ * this fold's `units` by a denominator it computes from its own request
+ * (instruments × segments × rungs × months), so with a 750-name equity backfill
+ * already in the window month, a two-index request measured 751 held units
+ * against a denominator of 2, `Math.min(1, …)` pinned the meter at 100.0%, and
+ * `unitsLeft` clamped to 0 — which also removed the ETA line — while half the
+ * request was still outstanding. A numerator and a denominator over two
+ * different populations is not a ratio. The threshold was two pre-existing rows
+ * in the window, not 750.
  */
-export function foldMonths(months) {
+export function foldMonths(months, scope) {
   const list = [...(months ?? [])];
-  const key = `${store.reads} ${list.join(',')}`;
+  const key = foldKey(store.reads, list, scope);
   if (foldMemo.key === key) return foldMemo.value;
-  const byInstrument = new Map();
-  let units = 0;
-  let rows = 0;
-  for (const m of list) {
-    const bucket = store.byMonth.get(m);
-    if (!bucket) continue;
-    for (const cell of bucket.list) {
-      units += 1;
-      rows += cell.rows;
-      byInstrument.set(cell.instrument, (byInstrument.get(cell.instrument) ?? 0) + cell.rows);
-    }
-  }
-  const value = { at: store.at, units, rows, byInstrument, held: store.rows.length };
+  // THE ARITHMETIC IS IN `$lib/fold.js`, WHERE A TEST CAN REACH IT. This
+  // function owns the shared reading, the stamp and the memo; what a scoped
+  // window actually counts is a pure function with no runes in it.
+  const value = { at: store.at, held: store.rows.length, ...foldWindow(store.byMonth, list, scope) };
   foldMemo = { key, value };
   return value;
 }

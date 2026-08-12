@@ -75,6 +75,13 @@
      which, in the `02 Sep 2024` form this product uses everywhere. */
   import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
+  // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
+  // defects lived in these expressions — a denominator taken from whichever
+  // rung's row arrived first, and a row that was its own denominator reporting
+  // `full` — and neither was reachable by anything but loading this page
+  // against a store in exactly the right state. `web/tests/completeness.test.js`
+  // drives them under `node --test`.
+  import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
 
   /* ======================================================================
      DATA
@@ -616,17 +623,43 @@
     // bars) beside a 1day row (19) judges every daily row ~8,231 short — 0.23%
     // complete for a month that is actually full. Correct today only because
     // the store happens to hold one rung; that is not a property to rely on.
-    const most = new Map();
-    for (const r of rows) {
-      const at = `${r.month}\u0000${r.timeframe}`;
-      const seen = most.get(at);
-      if (seen === undefined || r.rows > seen) most.set(at, r.rows);
-    }
-    return most;
+    return denominators(rows).fullest;
   });
 
+  /**
+   * HOW MANY ROWS STAND BEHIND EACH DENOMINATOR — the fact that decides
+   * whether "0 short" is a measurement or a tautology.
+   *
+   * `monthFull` is "the fullest instrument in this (month, rung)". Where that
+   * group holds ONE row, the row IS the denominator: it is short of itself by
+   * zero, whatever it holds. The store holding `NSE-INDEX-NIFTY 2026-08 1min =
+   * 1 bar` and nothing else for that month reported, on the one page built to
+   * find holes: `Complete 1 of 1`, `Bars missing 0`, `Coverage 100.00%`, a
+   * green `full` chip and a filled meter — over a single bar. The same
+   * arithmetic reports a whole store of one bar as complete.
+   *
+   * A month held at a rung by one instrument is therefore UNVERIFIED, not full:
+   * nothing in the store contradicts it and nothing corroborates it either, and
+   * `CLAUDE.md` §3 rule 6 says which of those two to print. The same-month
+   * many-instruments case was fixed by the D-0089-era rewrite; this is the
+   * few-rows case it left behind.
+   */
+  const monthSupport = $derived(denominators(rows).support);
+
   /** The denominator key for one row: its month AND its rung. */
-  const fullestKey = (r) => `${r.month}\u0000${r.timeframe}`;
+  const fullestKey = (r) => denomKey(r.month, r.timeframe);
+
+  /**
+   * Whether this row is its own denominator — one row at this (month, rung),
+   * so `short === 0` says nothing about the month.
+   */
+  const soleDenom = (r) => isSole(monthSupport, r);
+
+  /** What the page says instead of a verdict it cannot support. */
+  const SOLE_WHY =
+    'This is the only instrument-month stored at this rung for this month, so the denominator is this row itself. ' +
+    'Being short of itself by zero is a tautology, not a measurement: nothing here says the month is complete, and nothing says it is not. ' +
+    'Pull a second instrument for this month, or read the Days column beside it.';
 
   /**
    * Bars this instrument-month is short of the fullest one in the same month.
@@ -797,6 +830,8 @@
       // path for a value that changes only when the store is re-read.
       const ex = expiryOf(r.instrument);
       const denom = monthFull.get(fullestKey(r)) ?? r.rows;
+      // ITS OWN DENOMINATOR, OR A REAL ONE. See `soleDenom` and `SOLE_WHY`.
+      const sole = soleDenom(r);
       const cut = r.instrument.lastIndexOf('-');
       const parts = r.instrument.split('-');
       return {
@@ -814,7 +849,12 @@
         short,
         days: sessions(r),
         lost: barsPerSession(r.timeframe) === null ? null : short / barsPerSession(r.timeframe),
-        pct: denom > 0 ? r.rows / denom : 1,
+        // NULL, NOT 100.00%. A ratio against itself is 1 for every row that
+        // ever existed; `pctText` draws the dash and every meter beside it is
+        // suppressed rather than filled — the rule the Coverage tile already
+        // keeps: "a bar is a length, and a length is a claim".
+        pct: sole ? null : denom > 0 ? r.rows / denom : 1,
+        sole,
         denom,
         // THE WIRE IS TOTAL, AND SO IS THIS. `chg_bps` is an integer or it is
         // null, and `chg_why` is the reason for the null — exactly one of the
@@ -859,7 +899,9 @@
         // 375 bars — so two missing trading days read as 'near', the state
         // that means "a late start on one day".
         state:
-          short === 0
+          sole
+            ? 'sole'
+            : short === 0
             ? 'full'
             // NO 375 FALLBACK. A rung with no recorded session size has no
               // threshold either, and `?? BARS_PER_SESSION` quietly restored the
@@ -2525,7 +2567,12 @@
       if (k === 'rows') d = a.rows - b.rows;
       else if (k === 'days') d = a.days - b.days;
       else if (k === 'short') d = a.short - b.short;
-      else if (k === 'pct') d = a.pct - b.pct;
+      // AN UNKNOWN SORTS AS AN UNKNOWN. `a.pct` is null for a row that is its
+      // own denominator, and `null - null` is 0 while `0.9 - null` is 0.9 —
+      // a comparator that treats "not measured" as zero orders the table by a
+      // number nobody computed. Below every real ratio, and stable among
+      // themselves.
+      else if (k === 'pct') d = (a.pct ?? -1) - (b.pct ?? -1);
       else if (k === 'month') d = txt(a.month, b.month);
       // BY LENGTH, NOT BY SPELLING. `txt` stood here, which ordered the rungs
       // `15min`, `1day`, `1min`, `30min` — by first character, which is the
@@ -3179,8 +3226,18 @@
      THE SUMMARY, over the MATCHED set — the question actually on screen
      ====================================================================== */
   const total = $derived(matched.reduce((a, r) => a + r.rows, 0));
-  const full = $derived(matched.reduce((a, r) => a + (r.short === 0 ? 1 : 0), 0));
+  /**
+   * COMPLETE MEANS COMPARED. A row that is the only one stored at its (month,
+   * rung) is not counted here in either direction: it is not complete and it is
+   * not short, because nothing in the store can tell which. See `SOLE_WHY`.
+   */
+  const full = $derived(matched.reduce((a, r) => a + (r.short === 0 && !r.sole ? 1 : 0), 0));
+  const unverified = $derived(matched.reduce((a, r) => a + (r.sole ? 1 : 0), 0));
   const gaps = $derived(matched.reduce((a, r) => a + r.short, 0));
+  /** The rows a denominator other than themselves stands behind. */
+  const comparable = $derived(matched.filter((r) => !r.sole));
+  /** Bars in those rows — the numerator Coverage is entitled to use. */
+  const judgedBars = $derived(comparable.reduce((a, r) => a + r.rows, 0));
 
   /**
    * Session-equivalents across the selection, each row converted AT ITS OWN
@@ -3223,7 +3280,12 @@
     matched.reduce((a, r) => a + (barsPerSession(r.timeframe) === null ? 0 : 1), 0)
   );
 
-  const owed = $derived(total + gaps); /* what the matched set would hold if full */
+  /* WHAT THE COMPARABLE SET WOULD HOLD IF FULL.
+     `total + gaps` counted the self-denominated rows into the numerator AND
+     gave them a shortfall of zero, so a store holding one bar reported
+     100.00% coverage with a full meter. Those rows are now outside both
+     halves, and the tile says how many. */
+  const owed = $derived(judgedBars + gaps);
 
   /**
    * Bars held over bars owed — or `null`, which is a THIRD answer and not a
@@ -3236,7 +3298,7 @@
    * shape of a measurement. 0/0 is not one; it is undefined, `pctText` draws
    * the dash, and the tile names which absence it is.
    */
-  const coverage = $derived(owed > 0 ? total / owed : null);
+  const coverage = $derived(owed > 0 ? judgedBars / owed : null);
   const monthsIn = $derived.by(() => {
     const s = new Set();
     for (const r of matched) s.add(r.month);
@@ -3483,54 +3545,50 @@
      month is the altitude the answer actually lives at. Each card is also the
      filter for that month, because seeing a hole and then having to type its
      name is a page that shows a problem and hides the way in. */
-  const monthCards = $derived.by(() => {
-    const by = new Map();
-    for (const it of pool) {
-      let m = by.get(it.month);
-      if (!m) {
-        by.set(
-          it.month,
-          (m = {
-            month: it.month,
-            n: 0,
-            bars: 0,
-            full: 0,
-            missing: 0,
-            fullest: monthFull.get(fullestKey(it)) ?? 0,
-            worst: null
-          })
-        );
-      }
-      m.n += 1;
-      // THE RUNG THIS MONTH IS STORED AT, or `false` once two disagree. A month
-      // holding both 1min and 1day rows has no single session size, and
-      // inventing one is how `0.05 sessions observed` appeared beside a
-      // complete daily month.
-      m.tf = m.tf === undefined ? it.timeframe : m.tf === it.timeframe ? m.tf : false;
-      m.bars += it.rows;
-      m.missing += it.short;
-      if (it.short === 0) m.full += 1;
-      if (!m.worst || it.short > m.worst.short) m.worst = it;
-    }
-    return [...by.values()]
+  /**
+   * THE DENOMINATOR IS SUMMED PER ROW, NOT SNAPSHOT FROM THE FIRST ONE.
+   *
+   * `fullest` was read once, inside `if (!m)` — from whichever row of that
+   * month `/store.json` happened to send first — and then multiplied by the
+   * row count. `monthFull` is keyed on (month, RUNG) and says why three lines
+   * into its own comment; this took a (month, rung) figure and applied it to
+   * every rung in the month. Measured on 2021-08 holding NIFTY@1day=23,
+   * NIFTY@1min=8,625 and BANKNIFTY@1min=8,625 — a month that is genuinely
+   * complete at both rungs — the card read `25,033.33%` with a meter 250 times
+   * its own width and the title "every one of the 3 instruments holds all 23
+   * bars" if the daily row arrived first, and `66.75%` tagged SHORT if the
+   * minute row did. One headline number with two values, decided by row order.
+   *
+   * `owed` is the sum of each row's OWN (month, rung) denominator, so every row
+   * is judged at its own rung and the ratio is the same whatever order the wire
+   * used. `fullest` survives only as a display figure and only where the month
+   * holds one rung — `sessions` already worked this way.
+   */
+  const monthCards = $derived.by(() =>
+    rollUpMonths(pool)
       .map((m) => ({
         ...m,
+        // THE FULLEST ROW, AND ONLY WHERE ONE RUNG MAKES THAT A SINGLE NUMBER.
+        // `null` draws a dash and the title says the month holds two rungs.
+        fullest: m.tf ? (m.n > 0 ? m.owed / m.n : 0) : null,
         // NULL RATHER THAN A NUMBER when the rung is unknown or mixed; the
         // renderer draws a dash. `dayText` owns that rule for every caller.
         sessions:
-          m.tf && barsPerSession(m.tf) !== null ? m.fullest / barsPerSession(m.tf) : null,
-        pct: m.n > 0 && m.fullest > 0 ? m.bars / (m.n * m.fullest) : 1,
-        // THE BAND IS THE MONTH'S COVERAGE, NOT A BAR COUNT. Comparing an
-        // aggregate over hundreds of rows against the 375-bar single-row
-        // threshold is a category error: it makes every month with more than
-        // one short instrument read "gap" whatever its real coverage, so the
-        // signal saturates and stops distinguishing 99.9% from 81%.
-        state: m.missing === 0 ? 'full' : m.bars >= 0.99 * m.n * m.fullest ? 'near' : 'gap'
+          m.tf && barsPerSession(m.tf) !== null && m.n > 0
+            ? m.owed / m.n / barsPerSession(m.tf)
+            : null
       }))
-      .sort((a, b) => txt(b.month, a.month)); /* newest first: that is where a pull lands */
-  });
+      .sort((a, b) => txt(b.month, a.month))
+  ); /* newest first: that is where a pull lands */
 
-  const holeMonths = $derived(monthCards.filter((m) => m.state !== 'full').length);
+  /* A HOLE IS A HOLE, AND AN UNKNOWN IS NOT ONE. `state !== 'full'` counted the
+     months that hold too little AND the months nothing can be said about into
+     one figure labelled "with holes". They are different answers and the strip
+     now prints both. */
+  const holeMonths = $derived(
+    monthCards.filter((m) => m.state === 'near' || m.state === 'gap').length
+  );
+  const unprovenMonths = $derived(monthCards.filter((m) => m.state === 'sole').length);
 
   /* ======================================================================
      VALUE-CHANGE FLASH — THE ONLY GREEN AND RED ON THIS PAGE
@@ -4161,12 +4219,14 @@
     let bars = 0;
     let missing = 0;
     let complete = 0;
+    let unproven = 0;
     for (const m of openMonths) {
       bars += m.rows;
       missing += m.short;
-      if (m.short === 0) complete += 1;
+      if (m.sole) unproven += 1;
+      else if (m.short === 0) complete += 1;
     }
-    return { bars, missing, complete, n: openMonths.length };
+    return { bars, missing, complete, unproven, n: openMonths.length };
   });
 
   $effect(() => {
@@ -4842,9 +4902,11 @@
                       month = month === m.month ? '' : m.month;
                       drop = null;
                     }}
-                    title={m.missing === 0
-                      ? `${monthLabel(m.month)}: every one of the ${fmt(m.n)} instruments holds all ${fmt(m.fullest)} bars of the ${dayText(m.sessions)} sessions observed.`
-                      : `${monthLabel(m.month)}: ${fmt(m.n - m.full)} of ${fmt(m.n)} instruments short, ${fmt(m.missing)} bars missing — ${m.tf && barsPerSession(m.tf) !== null ? `${fmt(Math.floor(m.missing / barsPerSession(m.tf)))} session-equivalents` : 'session count unavailable at this rung'}. Worst: ${m.worst?.instrument} holds ${fmt(m.worst?.rows ?? 0)} of ${fmt(m.fullest)}. The store's own key for this month is ${m.month}.`}
+                    title={m.unverified === m.n
+                      ? `${monthLabel(m.month)}: ${fmt(m.n)} row(s), each the only one stored at its rung for this month. ${SOLE_WHY}`
+                      : m.missing === 0
+                        ? `${monthLabel(m.month)}: every one of the ${fmt(m.n)} instruments holds all ${m.fullest === null ? 'the bars of its own rung — this month is held at two rungs, so there is no single bar count for it' : `${fmt(m.fullest)} bars of the ${dayText(m.sessions)} sessions observed`}.${m.unverified > 0 ? ` ${fmt(m.unverified)} of them is the only row at its rung and is counted in neither direction.` : ''}`
+                        : `${monthLabel(m.month)}: ${fmt(m.n - m.full - m.unverified)} of ${fmt(m.n)} instruments short, ${fmt(m.missing)} bars missing — ${m.tf && barsPerSession(m.tf) !== null ? `${fmt(Math.floor(m.missing / barsPerSession(m.tf)))} session-equivalents` : 'session count unavailable at this rung'}. Worst: ${m.worst?.instrument} holds ${fmt(m.worst?.rows ?? 0)} of ${m.fullest === null ? 'the fullest row at its own rung' : fmt(m.fullest)}. The store's own key for this month is ${m.month}.`}
                   >
                     <span class="tk">{month === m.month ? '✓' : ''}</span>
                     <!-- RELABELLED ON THE WAY TO THE SCREEN, NEVER ON THE WAY
@@ -4854,9 +4916,10 @@
                     <span class="nm">{monthLabel(m.month)}</span>
                     <span class="ct" class:warn={m.state !== 'full'}>
                       <span class="pip" aria-hidden="true"></span>
-                      {pctText(m.pct)}{#if m.missing === 0}
+                      {pctText(m.pct)}{#if m.unverified === m.n}
+                        · not comparable{:else if m.missing === 0}
                         · complete{:else}
-                        · {fmt(m.n - m.full)} short{/if}
+                        · {fmt(m.n - m.full - m.unverified)} short{/if}
                     </span>
                   </button>
                 {/each}
@@ -4872,7 +4935,8 @@
               monthCards.find((m) => m.month === month)?.n ?? 0
             )} row(s) · {pctText(monthCards.find((m) => m.month === month)?.pct ?? null)} covered
           {:else}
-            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} with holes
+            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} with holes{#if unprovenMonths > 0}
+              · <span title={SOLE_WHY}>{fmt(unprovenMonths)} not comparable</span>{/if}
           {/if}
         </span>
       </div>
@@ -5511,7 +5575,10 @@
             class:flash-down={flash.full?.dir === 'down'}>{fmt(full)}</b
           >
         {/key}
-        <span class="u">of {fmt(matched.length)} · {fmt(matched.length - full)} short</span>
+        <span class="u"
+          >of {fmt(matched.length)} · {fmt(matched.length - full - unverified)} short{#if unverified > 0}
+            · <span title={SOLE_WHY}>{fmt(unverified)} not comparable</span>{/if}</span
+        >
 
         <span class="k">Bars missing</span>
         {#key flash.gaps?.n}
@@ -5540,13 +5607,23 @@
              0% coverage, which is the opposite lie to the 100.00% the value
              used to print. The reason takes the meter's place. -->
         {#if coverage === null}
-          <span class="u">{blocked?.tsub ?? 'no bars in this selection, so there is no ratio'}</span>
+          <span class="u"
+            >{unverified > 0 && comparable.length === 0
+              ? 'every row here is the only one stored at its (month, rung), so each is its own denominator and there is no ratio'
+              : (blocked?.tsub ?? 'no bars in this selection, so there is no ratio')}</span
+          >
         {:else}
           <span
             class="meter"
             data-state={coverage >= 1 ? 'full' : coverage >= 0.99 ? 'near' : 'gap'}
             aria-hidden="true"><span class="fill" style="width:{coverage * 100}%"></span></span
           >
+          {#if unverified > 0}
+            <span class="u" title={SOLE_WHY}
+              >over {fmt(comparable.length)} comparable row(s); {fmt(unverified)} more are their own
+              denominator and are in neither half</span
+            >
+          {/if}
         {/if}
 
         <span class="k">Months</span>
@@ -5830,7 +5907,12 @@
                     >
                     <span class="cell num dimnum" role="gridcell">{dayText(it.days)}</span>
                     <span class="cell num short" role="gridcell">
-                      {#if it.short === 0}
+                      <!-- A TAUTOLOGY IS NOT A VERDICT. `short === 0` against a
+                           denominator that is this row itself printed the green
+                           word `full` over a month holding one bar. -->
+                      {#if it.sole}
+                        <span class="unproven" title={SOLE_WHY}>unverified</span>
+                      {:else if it.short === 0}
                         <span class="okword">full</span>
                       {:else}
                         <span class="missnum">−{fmt(it.short)}</span>
@@ -5840,10 +5922,17 @@
                       {/if}
                     </span>
                     <span class="cell comp" role="gridcell">
-                      <span class="meter" aria-hidden="true"
-                        ><span class="fill" style="width:{it.pct * 100}%"></span></span
+                      <!-- NO METER FOR A RATIO THAT DOES NOT EXIST — the rule
+                           the Coverage tile already keeps. An empty track reads
+                           as 0% and a full one as complete; both are claims. -->
+                      {#if it.pct !== null}
+                        <span class="meter" aria-hidden="true"
+                          ><span class="fill" style="width:{it.pct * 100}%"></span></span
+                        >
+                      {/if}
+                      <span class="cpct" title={it.pct === null ? SOLE_WHY : undefined}
+                        >{pctText(it.pct)}</span
                       >
-                      <span class="cpct">{pctText(it.pct)}</span>
                     </span>
                     <!-- THE TWO PERCENTAGES. A number carries its sign, two
                          decimals and its direction's colour; an unknown is a
@@ -5911,7 +6000,12 @@
               <span class="k">Months held</span><span class="v">{fmt(openTotals.n)}</span>
             </div>
             <div class="dstat">
-              <span class="k">Complete</span><span class="v">{fmt(openTotals.complete)}</span>
+              <span class="k">Complete</span><span class="v"
+                >{fmt(openTotals.complete)}{#if openTotals.unproven > 0}<span
+                    class="unproven"
+                    title={SOLE_WHY}>&nbsp;+{fmt(openTotals.unproven)} unverified</span
+                  >{/if}</span
+              >
             </div>
             <div class="dstat">
               <span class="k">Bars</span><span class="v">{fmt(openTotals.bars)}</span>
@@ -5964,12 +6058,16 @@
                     : `${monthLabel(m.month)} — the store's own key for it is ${m.month}`}
                   >{monthLabel(m.month)}</span
                 >
-                <span class="meter" aria-hidden="true"
-                  ><span class="fill" style="width:{m.pct * 100}%"></span></span
+                {#if m.pct !== null}
+                  <span class="meter" aria-hidden="true"
+                    ><span class="fill" style="width:{m.pct * 100}%"></span></span
+                  >
+                {/if}
+                <span class="dpct" title={m.pct === null ? SOLE_WHY : undefined}
+                  >{pctText(m.pct)}</span
                 >
-                <span class="dpct">{pctText(m.pct)}</span>
-                <span class="dshort"
-                  >{#if m.short === 0}full{:else}−{fmt(m.short)}{/if}</span
+                <span class="dshort" title={m.sole ? SOLE_WHY : undefined}
+                  >{#if m.sole}unverified{:else if m.short === 0}full{:else}−{fmt(m.short)}{/if}</span
                 >
               </div>
             {/each}
@@ -5981,9 +6079,15 @@
               title={`${monthLabel(openRowData.month)} — the store's own key for it is ${openRowData.month}`}
               >{monthLabel(openRowData.month)}</span
             >
-            held {fmt(openRowData.denom)} bars at its fullest, so this row's {fmt(
-              openRowData.rows
-            )} is {pctText(openRowData.pct)} of the month.
+            {#if openRowData.sole}
+              held {fmt(openRowData.denom)} bars at its fullest — and this row IS that fullest, and
+              the only one stored at this rung for that month. The denominator is this row, so no
+              share of the month can be stated for it. {SOLE_WHY}
+            {:else}
+              held {fmt(openRowData.denom)} bars at its fullest, so this row's {fmt(
+                openRowData.rows
+              )} is {pctText(openRowData.pct)} of the month.
+            {/if}
           </p>
         </div>
       {/if}
@@ -8094,6 +8198,16 @@
     color: var(--dim);
     font-family: var(--sans);
     font-size: var(--fs-xs);
+    letter-spacing: 0.04em;
+  }
+  /* NOT A SEVERITY AND NOT A PASS. `unverified` is the absence of a
+     comparison, so it wears neither the amber of a hole nor the plain weight
+     of `full`: it is dimmed and italic, and it carries its reason on hover. */
+  .unproven {
+    color: var(--dim);
+    font-family: var(--sans);
+    font-size: var(--fs-xs);
+    font-style: italic;
     letter-spacing: 0.04em;
   }
   .missnum {

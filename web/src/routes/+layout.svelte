@@ -60,6 +60,36 @@
   }
 
   /* ====================================================================
+     WHICH ROUTES CARRY THEIR OWN FEED CONTROL
+     --------------------------------------------------------------------
+     EXACTLY ONE CONTROL FOR ONE VALUE, ON EVERY ROUTE. That is the rule,
+     and it has two failure modes, not one. Two controls writing the same
+     `feeds.active` teach the reader they are independent when they are
+     not — that is the one this bar was protecting against. ZERO controls
+     is the other, and it is worse: a page that shows one feed's answer
+     and offers no way to change it is a dead end, and the operator's only
+     move is the browser's back button.
+
+     `/ingest` now carries the feed as the FIRST control of its picker
+     strip, because on that page the feed is not chrome — it is the first
+     rung of the cascade, and universe, instruments, segments, timeframe
+     and the day window are all literally its answer. Drawing the picker
+     up here as well would be the two-control defect.
+
+     SO THE BAR YIELDS, ROUTE BY ROUTE, RATHER THAN GLOBALLY. Removing it
+     outright would leave `/`, `/autopilot` and `/audit` with no way to
+     change the feed at all — none of the three has ever had its own — and
+     `/db` reads the feed everywhere and only offers shortcuts to a feed
+     that HOLDS rows, which is not a picker. A route joins this list on
+     the day it grows a control of its own, and the count stays at one in
+     both directions.
+
+     Prefix-matched with `current()` so `/ingest/anything` is covered by
+     the same entry, for the same reason the nav is. ==================== */
+  const FEED_OWNED = ['/ingest'];
+  const feedInBar = $derived(!FEED_OWNED.some(current));
+
+  /* ====================================================================
      THEME
      --------------------------------------------------------------------
      Three states, and the third one is the point: `auto` REMOVES the
@@ -244,6 +274,19 @@
     };
     window.addEventListener('pointerdown', away, true);
     return () => window.removeEventListener('pointerdown', away, true);
+  });
+
+  /* AN UNMOUNTED MENU IS NOT A CLOSED ONE. `open` is state, and the combo it
+     belongs to is now conditionally rendered: leaving a route with the list
+     down takes the markup away and leaves the flag standing, so the next route
+     that DOES draw the bar's picker would mount it already open, under a
+     pointer that never asked for it. Closed on the way out, where the leaving
+     happens, rather than repaired on the way back in.
+
+     `refocus: false` — there is nothing left to focus, and calling `focus()` on
+     a detached trigger would move the caret to the body mid-navigation. */
+  $effect(() => {
+    if (!feedInBar && open) close({ refocus: false });
   });
 
   function retryFeeds() {
@@ -452,7 +495,15 @@
       {/if}
     </button>
 
-    <!-- THE FEED. One is selected; the others are named, not rendered. -->
+    <!-- THE FEED. One is selected; the others are named, not rendered.
+
+         NOT DRAWN ON A ROUTE THAT CARRIES ITS OWN. See FEED_OWNED above: the
+         rule is one control per value per route, and it is broken by a second
+         copy exactly as surely as by none at all. `/ingest` puts the feed where
+         it belongs on that page — first in the row of controls it governs — so
+         the bar stands down there and nowhere else. Everything else in this
+         header is genuinely cross-cutting and is always drawn. -->
+    {#if feedInBar}
     <div class="combo" bind:this={comboEl}>
       <span class="lbl" id="feed-label">Feed</span>
       <div
@@ -546,6 +597,7 @@
         </div>
       {/if}
     </div>
+    {/if}
 
     <!-- THEME. Three explicit states, because "auto" is a real choice and a
          two-way switch cannot express it — it can only silently pin whatever
