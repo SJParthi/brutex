@@ -184,7 +184,8 @@ fn the_disposition_tally_matches_the_rows() {
         .map(|(kind, n)| format!("{kind} {n}"))
         .collect::<Vec<_>>()
         .join(" \u{b7} ");
-    want.push_str(&format!(" \u{b7} total {}", rows.len()));
+    want.push_str(" \u{b7} total ");
+    want.push_str(&rows.len().to_string());
 
     let stated = LEDGER
         .split("<!-- dispositions: ")

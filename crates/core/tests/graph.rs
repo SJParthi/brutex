@@ -81,31 +81,150 @@ fn member_names() -> BTreeSet<&'static str> {
 /// target of `core` is renamed — `brutex_core = { path = "../core", package =
 /// "core" }` — so the `package =` key is preferred over the dependency key when
 /// present, which is why this reads the value and not just the name.
-fn declared_deps(manifest: &str) -> BTreeSet<String> {
-    let members = member_names();
-    let Some(after) = manifest.split("\n[dependencies]").nth(1) else {
-        return BTreeSet::new();
-    };
-    let table = after.split("\n[").next().unwrap_or(after);
-    let mut found = BTreeSet::new();
-    for line in table.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+/// The table kinds whose keys are dependency names.
+///
+/// `dev-` and `build-` are here because they LINK. A dev-dependency is compiled into
+/// every test and bench, and a build-dependency runs at compile time -- so a crate that
+/// declares one can reach it, whatever the normal graph says. The previous version of this
+/// parser read only `[dependencies]`.
+const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
+
+/// Every dependency a manifest declares, as `(key, the text after the `=`)`.
+///
+/// # Why this exists rather than a `split("\n[dependencies]")`
+///
+/// Cargo accepts four spellings of one dependency and the previous parser saw one:
+///
+/// ```text
+/// [dependencies]
+/// store = { path = "../store" }        the only form it read
+/// store.path = "../store"             a dotted key -- read as a crate called "store.path"
+///
+/// [dependencies.store]                a table header -- invisible
+/// path = "../store"
+///
+/// [dev-dependencies]                  links into every test and bench -- invisible
+/// [target.'cfg(unix)'.dependencies]   links on that target -- invisible
+/// ```
+///
+/// An adversarial audit confirmed by running it that one `[dependencies.store]` stanza
+/// defeated NINE guarantees at once, four of which are the tests in this file: the
+/// acyclicity proof, the four roots, the shareable six, and every documented arrow. The
+/// other five were gate 9, gate 9b, gate 21 clause A, gate 22 clause A and
+/// `engine::the_sweep_cannot_compute_a_condition_bit`. Nine mechanisms, one parser shape,
+/// one bypass.
+///
+/// The one limit, stated: a `#` inside a quoted value would be read as a comment. No
+/// manifest in this workspace has one, and a dependency name cannot contain one.
+fn declarations(manifest: &str) -> Vec<(String, String)> {
+    /// Are this table's KEYS dependency names? `[target.'cfg(unix)'.dependencies]` counts.
+    fn keys_are_deps(table: &str) -> bool {
+        DEPENDENCY_TABLES.contains(&table.rsplit('.').next().unwrap_or(""))
+    }
+    /// Does this table's HEADER name a dependency, as `[dependencies.store]` does?
+    fn named_by_header(table: &str) -> Option<&str> {
+        let mut segments = table.rsplit('.');
+        let leaf = segments.next()?;
+        DEPENDENCY_TABLES
+            .contains(&segments.next()?)
+            .then_some(leaf)
+    }
+
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut table = String::new();
+    // The `[dependencies.NAME]` currently open, carried so a `package = "x"` line inside
+    // it can rename it the same way an inline table can.
+    let mut pending: Option<(String, String)> = None;
+
+    for raw in manifest.lines() {
+        let line = raw.split_once('#').map_or(raw, |(code, _)| code).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(inner) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+            if let Some(done) = pending.take() {
+                out.push(done);
+            }
+            table.clear();
+            table.push_str(inner.trim_start_matches('[').trim_end_matches(']').trim());
+            pending = named_by_header(&table).map(|n| (n.to_owned(), String::new()));
+            continue;
+        }
+        if let Some((_, value)) = pending.as_mut() {
+            if let Some((key, rest)) = line.split_once('=').filter(|(k, _)| k.trim() == "package") {
+                let _ = key;
+                value.clear();
+                value.push_str("package =");
+                value.push_str(rest);
+            }
+            continue;
+        }
+        if !keys_are_deps(&table) {
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };
+        // `store.path = ".."` declares `store`, not a crate called `store.path`.
+        let name = key.trim().split('.').next().unwrap_or("").trim();
+        if !name.is_empty() {
+            out.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    if let Some(done) = pending.take() {
+        out.push(done);
+    }
+    out
+}
+
+fn declared_deps(manifest: &str) -> BTreeSet<String> {
+    let members = member_names();
+    let mut found = BTreeSet::new();
+    for (key, value) in declarations(manifest) {
         // `package = "core"` renames; otherwise the key is the crate name.
         let renamed = value
             .split_once("package")
             .and_then(|(_, rest)| rest.split('"').nth(1));
-        let named = renamed.map_or_else(|| key.trim().to_owned(), str::to_owned);
+        let named = renamed.map_or(key, str::to_owned);
         if members.contains(named.as_str()) {
             found.insert(named);
         }
     }
     found
+}
+
+/// The parser is tested against the spellings it exists for.
+///
+/// A parser nothing tests is the previous version of this parser.
+#[test]
+fn every_spelling_of_a_dependency_is_seen() {
+    let cases: [(&str, &[&str]); 7] = [
+        (
+            "[dependencies]\nstore = { path = \"../store\" }",
+            &["store"],
+        ),
+        ("[dependencies]\nstore.path = \"../store\"", &["store"]),
+        ("[dependencies.store]\npath = \"../store\"", &["store"]),
+        ("[dev-dependencies]\nstore = \"1\"", &["store"]),
+        (
+            "[target.'cfg(unix)'.dependencies]\nstore = \"1\"",
+            &["store"],
+        ),
+        ("[dependencies]\n# store = { path = \"../store\" }", &[]),
+        // The rename, both ways round: an inline table and a header table.
+        (
+            "[dependencies]\nbc = { path = \"../core\", package = \"core\" }\n\n[dependencies.st]\npackage = \"store\"",
+            &["core", "store"],
+        ),
+    ];
+    for (manifest, want) in cases {
+        let got = declared_deps(manifest);
+        let want: BTreeSet<String> = want.iter().map(|s| (*s).to_owned()).collect();
+        assert_eq!(
+            got, want,
+            "declared_deps read {got:?} from:\n{manifest}\nand must read {want:?}"
+        );
+    }
 }
 
 /// The table in §1, as `crate -> the dependencies its row claims`.
