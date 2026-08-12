@@ -410,7 +410,7 @@ fn a_ladder_walk_costs_the_same_per_bar_at_every_column_length() -> bool {
 ///     k=8            891         bitmaps 74.5          12.0x
 ///
 /// The row-major cost is flat in k -- that is what C-E-02 measures -- while the bitmap
-/// cost grows with k, because k bitmaps must be ANDed. They would meet somewhere past
+/// cost grows with k, because k bitmaps must be combined. They would meet somewhere past
 /// k=90, which no frontier reaches, so the transpose wins at every depth that runs.
 ///
 /// The floor is FOUR, not twelve. The measured worst case in range is 12x at k=8 and the
@@ -436,11 +436,7 @@ fn the_transposed_column_beats_the_row_major_walk() -> bool {
         }
         let row_ps = once_ps(|| black_box(support(black_box(&bars), black_box(&cand))));
         let bmp_ps = once_ps(|| black_box(vertical.support(black_box(&cand))));
-        let times = if bmp_ps == 0 {
-            u128::MAX
-        } else {
-            row_ps / bmp_ps
-        };
+        let times = row_ps.checked_div(bmp_ps).unwrap_or(u128::MAX);
         let good = times >= FLOOR;
         println!(
             "  {:<58} {:>8} ps -> {:>8} ps   {times}x faster, floor {FLOOR}   {}",
