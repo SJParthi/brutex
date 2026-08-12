@@ -1620,23 +1620,35 @@ jobs:
           # CLAUSE A — the print surface is exactly this, and every line says
           # which kind it is.
           #
-          #   api/src/server.rs  println! 19, print! 1
-          #       The startup banner on STDOUT for the operator who just typed the
-          #       command, plus test output. Deliberately not events: the banner
-          #       is printed before a sink is guaranteed to exist, and a banner in
-          #       a log file is noise rather than a record.
-          #   api/src/server.rs  eprintln! 5
-          #       A refused bind (:6404) and a server that stopped (:5805) — both
-          #       ALSO emit `api.server` events — and the usage text on misuse
-          #       (:6409), which is a CLI contract rather than a diagnostic.
-          #       The two added by D-0124 (:5867, :6240) are the store root the
-          #       environment could not name. They do NOT emit, and cannot: the
-          #       sink lives under that root, so at both sites there is no
-          #       directory in which to open a log. :6240's own comment says it —
-          #       "BEFORE ANYTHING IS OPENED OR CREATED" — and the refusal is the
-          #       reason no sink exists rather than an accident of ordering.
-          #       stderr is the only channel that exists at that instant, which is
-          #       the same argument telemetry/src/sink.rs carries below.
+          #   api/src/server.rs  println! 22, print! 1
+          #       The startup banner and the `report` subcommand's output on STDOUT for
+          #       the operator who just typed the command, plus test output. Deliberately
+          #       not events: the banner is printed before a sink is guaranteed to exist,
+          #       and a banner in a log file is noise rather than a record. 19 -> 22 is
+          #       three more report lines -- a per-note line, a `universe:` line and a
+          #       refusal reason -- all STDOUT report output, none a diagnostic.
+          #   api/src/server.rs  eprintln! 7
+          #       LINE NUMBERS ARE NOT PINNED HERE, deliberately: this file is being
+          #       actively rewritten and every earlier count in this entry cited numbers
+          #       that had moved by the next commit. The sites are named by their
+          #       function instead, which survives an edit.
+          #
+          #       FIVE EMIT AND ARE FINE. A refused bind, a server that stopped, and
+          #       `sole_server`'s "another instance is serving this store" each call
+          #       `telemetry::emit` at `Level::Error` with a `why` immediately before the
+          #       print; `stopped_over`'s DEGRADED-session notice emits with an `exit`
+          #       field. The usage text on misuse is a CLI contract rather than a
+          #       diagnostic. 5 -> 7 is the last two of those, both added with their
+          #       emit already in place, which is the shape this gate is asking for.
+          #
+          #       TWO DO NOT EMIT, AND CANNOT. `run_from`'s D-0124 arm and the store-root
+          #       refusal inside the `Serve` arm both fire when the environment could not
+          #       name a store root. The sink lives UNDER that root, so at both sites
+          #       there is no directory in which to open a log -- the refusal is the
+          #       reason no sink exists rather than an accident of ordering, and the
+          #       second says so itself: "BEFORE ANYTHING IS OPENED OR CREATED". stderr is
+          #       the only channel in existence at that instant, which is the same
+          #       argument telemetry/src/sink.rs carries below.
           #   pull/src/http.rs   eprintln! 2
           #       Null-price bar notices, which ALSO emit `pull.decode` events.
           #   telemetry/src/sink.rs  eprintln! 1
@@ -1659,8 +1671,8 @@ jobs:
           # tomorrow is covered on its first day, and it is the whole point of the
           # glob above.
           declared='api/src/constituents.rs:println!:2
-          api/src/server.rs:println!:19
-          api/src/server.rs:eprintln!:5
+          api/src/server.rs:println!:22
+          api/src/server.rs:eprintln!:7
           api/src/server.rs:print!:1
           core/src/universe.rs:println!:1
           core/src/vendor.rs:println!:1
