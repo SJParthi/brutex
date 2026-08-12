@@ -662,7 +662,6 @@ jobs:
             exit 1
           fi
           echo "OK — every segment-shaped literal under crates/pull is declared."
-
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
@@ -2155,9 +2154,12 @@ jobs:
           #                 ENCODER type, not a value type: `Value::paisa`
           #                 exists and produces `Value::Int`, and the `Float`
           #                 variant's own doc reads "Never a price."
+          # `crates/core/src/vendor.rs` had an entry here because `parse_strike` routed the
+          # strike through a binary float. It parses the digits now, so the entry is removed
+          # rather than left loose -- CI warned `no longer matches rule 2 -- tighten it`, and
+          # a loose allowlist is a gate reading stronger than it is.
           allow_float='
           crates/core/src/price.rs 4
-          crates/core/src/vendor.rs 1
           crates/greeks/src/bsm.rs 36
           crates/greeks/src/normal.rs 21
           crates/greeks/src/error.rs 17
@@ -2280,11 +2282,21 @@ jobs:
           #   eval     `Evaluator::positions()` sorts the position list it just built.
           #            Its length is bounded by `vocab::table::NEXT_FREE`, a
           #            compile-time constant, and it is called once per run.
+          # `crates/api/src/constituents.rs` (2 sorts) and `crates/api/src/coverage.rs` (1)
+          # each carry a bounded, determinism-motivated sort of the same shape as the two
+          # entries below -- `coverage.rs` cites §3 rule 5 in its own comment for exactly
+          # that reason. They are deliberately NOT listed.
+          #
+          # Neither file is in the committed tree yet: another session has them staged, so
+          # `git ls-files --error-unmatch` succeeds in a local working tree and fails on a
+          # fresh checkout. Gate 11 treats an entry naming an absent file as a FAILURE
+          # rather than a note, correctly, because such an entry makes the gate read
+          # stronger than it is -- and that is exactly how this was caught: CI reported
+          # STALE ALLOWLIST ENTRY for both after I added them. When those files land, rule 4
+          # will refuse them and their owner adds the entries.
           allow_sort='
           crates/engine/src/lib.rs 1
           crates/indicators/src/evaluator.rs 1
-          crates/api/src/constituents.rs 2
-          crates/api/src/coverage.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/catalog.rs 2
           crates/api/src/census.rs 2
