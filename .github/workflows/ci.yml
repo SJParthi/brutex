@@ -1443,6 +1443,129 @@ jobs:
   # ==========================================================================
   # GATES 3-6 — the toolchain gates.
   # ==========================================================================
+      - name: Gate 22 — the sweep crates cannot read a bar
+        run: |
+          set -euo pipefail
+          # WHY. The owner's constraint, in their words: "at any point we should
+          # never ever pull any real data or even by mistake pulled bars or data
+          # should never ever be used." The second half is the hard part. The
+          # first is discipline and can be kept; the second is a claim about what
+          # the code is CAPABLE of, and only a structural check can make it.
+          #
+          # It is not hypothetical. Two real bar files appeared under
+          # ~/.brutex/store/bars/groww/NSE/INDEX/{NIFTY,BANKNIFTY}/1min/2020-01.bin
+          # during a session whose whole premise was that none existed. Nobody
+          # in that session pulled them. So the question "could the sweep have
+          # read them" must be answerable without trusting anyone's account of
+          # what they ran.
+          #
+          # Gate 21 makes this guarantee for crates/telemetry. This makes it for
+          # the three crates that compute and search conditions, which are the
+          # ones whose output a strategy is built on.
+          #
+          # FOUR CLAUSES. Each is weak alone and the conjunction is not.
+          fail=0
+          SWEEP='vocab indicators engine'
+
+          # CLAUSE A — the dependency closure cannot reach a filesystem.
+          #
+          # The load-bearing one, because it is transitive. `vocab` declares
+          # nothing; `indicators` and `engine` declare `vocab` and nothing else.
+          # A crate that cannot NAME `store`, `pull`, `lake` or `api` cannot call
+          # into one, whatever its own source says.
+          for c in $SWEEP; do
+            # `|| true` is load-bearing, not defensive noise. `vocab` declares
+            # NOTHING, so grep finds no match and exits 1; under `set -e` with
+            # `pipefail` that killed this gate before it printed a single line,
+            # and an early `exit 1` with no output is indistinguishable from a
+            # real refusal. The empty list is the CORRECT answer for `vocab` and
+            # the comparison below is what judges it.
+            deps=$(sed -n '/^\[dependencies\]/,/^\[[a-z]/p' "crates/$c/Cargo.toml" \
+                   | { grep -oE '^[a-z_]+ =' || true; } | sed 's/ =//' | tr '\n' ' ')
+            case "$c" in
+              vocab)                 want='' ;;
+              indicators|engine)     want='vocab ' ;;
+            esac
+            if [ "$deps" != "$want" ]; then
+              echo "REFUSED  crates/$c declares [$deps] and must declare [$want]"
+              echo "         A new dependency here is how a bar reaches the sweep."
+              fail=1
+            fi
+          done
+
+          # CLAUSE B — no filesystem call site in their own source.
+          #
+          # Clause A already forbids reaching one through a dependency; this
+          # forbids reaching one through `std`. `include_str!` is EXEMPT and must
+          # be: it is compile-time, it reads only paths written as literals in
+          # tracked source, and the document-guard tests depend on it. A bar file
+          # is not a literal in any of these crates, and clause D pins that.
+          BANNED='File::open|File::create|OpenOptions|fs::read|fs::write|fs::File|std::fs|MmapOptions|Mmap::|memmap'
+          for c in $SWEEP; do
+            hits=$(grep -rnE "$BANNED" "crates/$c/src" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "REFUSED  crates/$c opens a file:"
+              printf '%s\n' "$hits" | sed 's/^/           /'
+              fail=1
+            fi
+          done
+
+          # CLAUSE C — `store` is not named in their source, even in a use.
+          #
+          # Comments may cite `store::format::Bar` and several do, because that
+          # record is what `indicators::Candle` replaced and the history is worth
+          # keeping. A `use` is a different thing, so the pattern is anchored to
+          # one.
+          for c in $SWEEP; do
+            hits=$(grep -rnE '^\s*use +(brutex_)?(store|pull|lake|api)(::|;)' \
+                   "crates/$c/src" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "REFUSED  crates/$c imports a crate that reads the store:"
+              printf '%s\n' "$hits" | sed 's/^/           /'
+              fail=1
+            fi
+          done
+
+          # CLAUSE D — every `include_str!` path is a document or a source file.
+          #
+          # The one exemption clause B grants, bounded so it cannot become the
+          # hole. A `.bin`, a `.parquet`, a `.csv` or anything under a `bars`
+          # directory is refused outright: those are the shapes a bar arrives in.
+          for c in $SWEEP; do
+            for p in $(grep -rhoE 'include_str!\("[^"]+"\)' "crates/$c/src" "crates/$c/tests" 2>/dev/null \
+                       | sed 's/include_str!("//; s/")//' || true); do
+              case "$p" in
+                *.md|*.rs|*.toml|*.lock) : ;;
+                *) echo "REFUSED  crates/$c includes '$p', which is not a document or a source file"
+                   fail=1 ;;
+              esac
+              case "$p" in
+                *bars*|*.bin|*.parquet|*.csv)
+                   echo "REFUSED  crates/$c includes '$p', which is bar-shaped"
+                   fail=1 ;;
+                *) : ;;
+              esac
+            done
+          done
+
+          # WHAT THIS GATE CANNOT SEE, said rather than implied. A caller can
+          # still read bars itself and hand them to `Evaluator::step` -- that is
+          # the whole point of the API and cannot be forbidden. What it
+          # guarantees is narrower and is the half that was in question: these
+          # three crates cannot go and find data on their own. `crates/api` and
+          # `crates/pull` are the ones that may touch the store, deliberately,
+          # and gate 9 and gate 13 govern them.
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "GATE 22 FAILED."
+            echo
+            echo "A sweep crate that can reach the filesystem can be handed real"
+            echo "bars by accident, and the owner's constraint is that even bars"
+            echo "pulled by mistake are never used. Keep the capability absent."
+            exit 1
+          fi
+          echo "OK — vocab, indicators and engine cannot reach a bar."
+
       - name: Gate 19 — a failure an operator can see is a failure the log records
         run: |
           set -euo pipefail
