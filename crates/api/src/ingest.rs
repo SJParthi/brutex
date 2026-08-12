@@ -303,6 +303,46 @@ impl SpotTarget {
         }
     }
 
+    /// The published constituent list whose JOIN answers this target, when one
+    /// does.
+    ///
+    /// # Why this exists beside [`Self::members`] rather than instead of it
+    ///
+    /// `members` is the roster — the names the exchange published — and it is
+    /// the same list for every feed. This is the pointer to the *answer* for
+    /// **one** feed: [`crate::constituents::Join::tier`] holds, per vendor, the
+    /// ids that roster resolved to and the whole of what did not. A form that
+    /// shows a roster length tells the operator what NSE published; a form that
+    /// shows the matched bucket tells them what the pull they are about to
+    /// start can actually name. Those are different numbers the moment one
+    /// master is missing a row, and the second is the one on the button.
+    ///
+    /// # `None` hides nothing, for the same two targets as `members`
+    ///
+    /// [`Self::Swept`] is the engine surface — two `(exchange, symbol)` pairs
+    /// from `InstrumentKey::SWEPT`, not a constituent file — and
+    /// [`Self::Indices`] is whatever a vendor's master calls an index series,
+    /// which NSE publishes no file for. Neither has a published count to be a
+    /// denominator, so neither gets a join, and
+    /// [`crate::server::Coverage`] counts both off the merged universe and says
+    /// so on the wire rather than inventing a roster for them.
+    ///
+    /// **NO CATCH-ALL**, for the reason [`Self::names`] has none: an eighth
+    /// variant must be a compile error here, because a `_` arm would silently
+    /// hand a new target some other tier's ids.
+    #[must_use]
+    pub const fn tier(self) -> Option<crate::constituents::Tier> {
+        use crate::constituents::Tier;
+        match self {
+            Self::Swept | Self::Indices => None,
+            Self::Equities => Some(Tier::TotalMarket),
+            Self::Nifty500 => Some(Tier::Nifty500),
+            Self::Nifty200 => Some(Tier::Nifty200),
+            Self::Nifty100 => Some(Tier::Nifty100),
+            Self::Nifty50 => Some(Tier::Nifty50),
+        }
+    }
+
     /// The target a form field names.
     #[must_use]
     pub fn from_slug(slug: &str) -> Option<Self> {
@@ -902,7 +942,7 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
 /// The result is discarded under the name the workspace uses for it: a
 /// level-filtered event legitimately reaches no file, so asserting it was
 /// written would fire on a clean run.
-fn note_refused(form: &str, why: &Refusal) {
+pub(crate) fn note_refused(form: &str, why: &Refusal) {
     let text = why.to_string();
     let event = telemetry::Event::warn("api.ingest", "form refused")
         .with("form", telemetry::Value::Str(form))
@@ -2045,6 +2085,58 @@ mod tests {
                 target.slug()
             );
         }
+    }
+
+    /// The tier a target JOINS THROUGH, and the two that join through nothing.
+    ///
+    /// [`SpotTarget::tier`] is the half of the wiring that turns a form field
+    /// into `crate::constituents::Join::tier` — the ids one feed can be asked
+    /// for. It is pinned against [`SpotTarget::members`] rather than asserted
+    /// on its own: the two answer the same question from opposite ends, one
+    /// naming the roster and one naming the join over it, and a target that has
+    /// a published list and no tier (or the reverse) is the pairing that would
+    /// silently hand `/ingest` an empty control.
+    #[test]
+    fn every_target_with_a_published_list_joins_through_that_lists_tier() {
+        for target in SpotTarget::ALL {
+            let slug = target.slug();
+            assert_eq!(
+                target.tier().is_some(),
+                target.members().is_some(),
+                "{slug}: a target has a tier exactly when it has a published list"
+            );
+            let Some(tier) = target.tier() else {
+                continue;
+            };
+            // THE SAME LIST, BY BOTH ROUTES. `members` borrows the const from
+            // `core` and `tier().members()` borrows it through
+            // `constituents::Tier` — if these two ever name different lists,
+            // the count on the form and the ids in the request are for
+            // different universes.
+            assert_eq!(
+                target.members(),
+                Some(tier.members()),
+                "{slug}: the roster and the joined tier are the same list"
+            );
+            assert_eq!(
+                target.universe(),
+                tier.universe(),
+                "{slug}: and the same membership bit"
+            );
+        }
+        // The two with nothing to join through, named rather than inferred.
+        assert_eq!(SpotTarget::Swept.tier(), None);
+        assert_eq!(SpotTarget::Indices.tier(), None);
+        assert_eq!(
+            SpotTarget::Nifty50.tier(),
+            Some(crate::constituents::Tier::Nifty50),
+            "and no tier is wired to a neighbour's list, which a positional \
+             mapping is exactly how you get"
+        );
+        assert_eq!(
+            SpotTarget::Equities.tier(),
+            Some(crate::constituents::Tier::TotalMarket)
+        );
     }
 
     /// **An unknown slug is still refused BY NAME**, and the refusal now says

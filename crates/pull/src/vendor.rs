@@ -92,6 +92,7 @@ use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::vendor::Vendor;
 use store::path::Timeframe;
 
+use crate::csv::Columns;
 use crate::session::{
     BARS_PER_REGULAR_SESSION, Cadence, Day, SECS_PER_MINUTE, SESSION_CLOSE_MINUTE,
     SESSION_OPEN_MINUTE,
@@ -317,6 +318,30 @@ impl Granularity {
         1u16 << (self as u16)
     }
 
+    /// Whether a caller may ASK FOR this rung at all.
+    ///
+    /// `false` for [`Self::Tick`] and true for every other rung, on the
+    /// operator's rule of 12 Aug 2026: a tick is raw input that gets keyed
+    /// down to a second, never a granularity anybody requests. Both feeds sold
+    /// as tick-by-tick were measured at one-second resolution with no
+    /// sub-second field (`docs/08-vendor-samples.md`), and a REST broker
+    /// publishes nothing finer than a minute, so the rung would be a promise no
+    /// source on this tree can keep.
+    ///
+    /// # Why the variant stays on the ladder
+    ///
+    /// Because the ladder is the VOCABULARY of rungs and `tick` is a word both
+    /// vendors print on an invoice. Deleting it would leave nothing to refuse
+    /// BY NAME, and a rung that is absent from an enum is refused as "not a
+    /// rung" — which reads, wrongly, as a typo. [`FinestKind::is_tick_stream`]
+    /// answers the neighbouring question about what a record IS; this answers
+    /// whether anyone may ask for one. Proven by
+    /// `pull::folder::tick_is_never_a_rung_anybody_can_ask_for`.
+    #[must_use]
+    pub const fn is_requestable(self) -> bool {
+        !matches!(self, Self::Tick)
+    }
+
     /// The `store::path::Timeframe` this rung writes under, when one exists.
     ///
     /// `None` for every rung `crates/store` has not yet been widened to carry.
@@ -331,7 +356,80 @@ impl Granularity {
             _ => None,
         }
     }
+
+    /// How wide one record at this rung is, as a number that can be ordered.
+    ///
+    /// The ladder has four different grids and no single unit spans them, so
+    /// this is a **rank** rather than a duration: an event grid is finer than
+    /// any interval, and a session and a week are wider than any interval this
+    /// ladder carries. It exists to be compared, never to be arithmetic — a
+    /// day is not `u32::MAX - 1` seconds long and nothing here says it is.
+    #[must_use]
+    pub const fn coarseness(self) -> u32 {
+        match self.grid() {
+            Grid::Event => 0,
+            Grid::Intraday(secs) => secs,
+            Grid::Daily => u32::MAX - 1,
+            Grid::Weekly => u32::MAX,
+        }
+    }
+
+    /// Whether this rung is finer than `other`.
+    ///
+    /// **One `u8` comparison — O(1), and the bound does not move when the
+    /// ladder grows**, because the discriminants ascend with coarseness and
+    /// the `const` block below pins that for every adjacent pair. Comparing
+    /// [`Self::coarseness`] instead would be equally constant and strictly
+    /// weaker: it would be true by arithmetic rather than by the table, and
+    /// the table is what a new rung is added to.
+    /// `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer`
+    /// is the test, and it walks every ordered pair rather than the adjacent
+    /// ones the compiler already has.
+    #[must_use]
+    pub const fn is_finer_than(self, other: Self) -> bool {
+        (self as u8) < (other as u8)
+    }
 }
+
+// THE LADDER ASCENDS, AND THAT IS WHAT MAKES ONE COMPARISON SOUND.
+//
+// `is_finer_than` compares discriminants. That is only meaningful if the
+// discriminants are ordered the way the grids are, and nothing about an
+// `enum` guarantees it — a rung inserted in the middle of the list with the
+// wrong tag would silently make a coarser rung read as finer, and the vendor
+// granularity floor below would then refuse the wrong half of the ladder.
+//
+// Destructured rather than indexed, the same device `DESCRIPTORS` uses: a
+// twelfth rung makes this pattern itself a compile error before any assertion
+// is evaluated.
+const _: () = {
+    let [
+        tick,
+        sec1,
+        sec5,
+        min1,
+        min3,
+        min5,
+        min15,
+        min30,
+        hour1,
+        day1,
+        week1,
+    ] = Granularity::ALL;
+    assert!(tick as u8 == 0 && sec1 as u8 == 1 && sec5 as u8 == 2 && min1 as u8 == 3);
+    assert!(min3 as u8 == 4 && min5 as u8 == 5 && min15 as u8 == 6 && min30 as u8 == 7);
+    assert!(hour1 as u8 == 8 && day1 as u8 == 9 && week1 as u8 == 10);
+    assert!(tick.coarseness() < sec1.coarseness());
+    assert!(sec1.coarseness() < sec5.coarseness());
+    assert!(sec5.coarseness() < min1.coarseness());
+    assert!(min1.coarseness() < min3.coarseness());
+    assert!(min3.coarseness() < min5.coarseness());
+    assert!(min5.coarseness() < min15.coarseness());
+    assert!(min15.coarseness() < min30.coarseness());
+    assert!(min30.coarseness() < hour1.coarseness());
+    assert!(hour1.coarseness() < day1.coarseness());
+    assert!(day1.coarseness() < week1.coarseness());
+};
 
 // The rungs the two spellings share, tied together by the compiler. If
 // `store::path::Timeframe::MINUTE_1` is ever renamed or re-timed, this stops
@@ -396,6 +494,22 @@ impl GranularitySet {
     #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    /// Whether every rung in this set is `finest` or coarser.
+    ///
+    /// **One mask — O(1) whatever the ladder's length.** The rungs finer than
+    /// `finest` are exactly the bits below its own, because the ladder's
+    /// discriminants ascend with coarseness; that is the property the `const`
+    /// block under [`Granularity::is_finer_than`] pins, and
+    /// `pull::vendor::a_build_never_fetches_a_rung_its_vendor_cannot_serve`
+    /// is what drives this function from outside.
+    ///
+    /// `Tick` has no bit below it, so nothing is finer than it and every set
+    /// passes — which is the honest answer and not a special case.
+    #[must_use]
+    pub const fn none_finer_than(self, finest: Granularity) -> bool {
+        self.0 & (finest.bit() - 1) == 0
     }
 }
 
@@ -1567,6 +1681,208 @@ pub struct FloorRow {
     pub binds_because: &'static str,
 }
 
+// ---------------------------------------------------------------------------
+// the OTHER floor: how FINE a feed goes, beside how far BACK it goes
+// ---------------------------------------------------------------------------
+
+/// What one record at a feed's finest rung actually **is**.
+///
+/// # Why a conflated snapshot is not a tick, and why the type has to say so
+///
+/// Two of the four archives in this build are named for a tick and hold no
+/// tick. `docs/08-vendor-samples.md` measured it rather than assuming it: the
+/// rows carry a whole-second timestamp with **no sub-second field**, about one
+/// row per second across a session, and several rows share a second with **no
+/// tiebreaker**. What is in the file is one conflated snapshot per second —
+/// the best bid, the best ask and the best last price as of that instant —
+/// and every print between two snapshots was never written down and cannot be
+/// recovered by any reader.
+///
+/// Calling that a tick would be a claim about the data itself, made in a
+/// label, that the data does not support. It is the same defect
+/// `CLAUDE.md` §4 names as a fallback that hides a failure: the operator asks
+/// for prints, is handed snapshots, and nothing in the path ever says the
+/// substitution happened. So the distinction is a **variant**, it travels with
+/// the floor, and it survives to whatever renders it.
+///
+/// # [`Self::Tick`] exists and no row constructs it
+///
+/// Deliberately. A type that cannot spell "tick stream" cannot say "this is
+/// not one" either, and the sentence that has to survive is the negative. No
+/// feed in this build serves a tick stream — that is not a floor some feed
+/// clears, it is a rung no vendor here publishes at all — and the `const`
+/// block under [`DESCRIPTORS`] makes a row that claims one a **build
+/// failure** rather than a review comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FinestKind {
+    /// Every print, in order. **No feed in this repository serves this**, and
+    /// the compiler is what enforces it — see the type's header.
+    Tick,
+    /// One record per grid slot carrying the best bid, the best ask and the
+    /// best last price as of that instant. Prints between two slots are not in
+    /// the file. `TrueData` and GDFL, measured in `docs/08-vendor-samples.md`.
+    ConflatedSnapshot,
+    /// An open, high, low and close aggregating the whole interval. What both
+    /// brokers serve, at every rung they serve.
+    Bar,
+}
+
+impl FinestKind {
+    /// What a page calls it. Prose, and never parsed.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "tick stream — every print",
+            Self::ConflatedSnapshot => "conflated snapshot — best bid, best ask, best last price",
+            Self::Bar => "bar — open, high, low, close",
+        }
+    }
+
+    /// Whether this is a true tick stream.
+    ///
+    /// The question a caller must ask before writing the word *tick* beside a
+    /// number. It is `false` for every feed this build ships.
+    #[must_use]
+    pub const fn is_tick_stream(self) -> bool {
+        matches!(self, Self::Tick)
+    }
+
+    /// Whether records between two of this feed's own slots were discarded
+    /// before the file was written.
+    ///
+    /// `true` only for [`Self::ConflatedSnapshot`]. A bar aggregates its
+    /// interval and says so; a conflated snapshot samples it and does not.
+    #[must_use]
+    pub const fn is_conflated(self) -> bool {
+        matches!(self, Self::ConflatedSnapshot)
+    }
+}
+
+/// The finest rung a feed can **ever** serve, and why nothing below it exists.
+///
+/// # This is a second floor, and it is not the first one
+///
+/// [`FloorRow`] answers *how far back*. This answers *how fine*, and the two
+/// refusals have nothing in common except the word:
+///
+/// | | fixable by |
+/// |---|---|
+/// | below [`FloorRow`]'s day | nothing — but the vendor still serves the rung |
+/// | below this floor | **nothing at all.** No pull, no entitlement, no code |
+/// | absent from the store | **a pull.** The vendor serves it; nobody asked yet |
+///
+/// The third row is the one that made this type necessary. A page was showing
+/// Groww's `tick`, `1s` and `5s` rungs as ordinary selectable choices
+/// annotated *no directory* — an annotation about the **store**, meaning
+/// "nothing saved here yet", which is fixable by pulling. The fact that
+/// mattered was "Groww can never serve this", which is fixable by nothing.
+/// Two refusals of opposite kinds rendered identically is exactly the failure
+/// `CLAUDE.md` §4 bans, and it happened because this fact lived nowhere: the
+/// vendor row could say which rungs it serves TODAY and could not say which
+/// rungs the vendor is capable of, so the browser was left to infer it and
+/// inferred nothing.
+///
+/// # Why the kind is here and not derived
+///
+/// Because the answer differs between two feeds whose `granularities` are
+/// identical. `TrueData` and GDFL both bottom out at one second; one second of
+/// GDFL and one second of Groww would be two different objects if Groww served
+/// it. See [`FinestKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GranularityFloor {
+    /// The finest rung this vendor serves. Every rung below it is refused, and
+    /// the refusal is permanent.
+    pub finest: Granularity,
+    /// What one record at [`Self::finest`] is. The tick-versus-conflated
+    /// distinction, carried rather than inferred.
+    pub kind: FinestKind,
+    /// Why nothing finer exists, **in the vendor's own terms** — the words an
+    /// operator can go and check, not this repository's paraphrase of them.
+    pub because: &'static str,
+    /// Where those words were read. `CLAUDE.md` §3 rule 1: a vendor claim with
+    /// no source is indistinguishable from one somebody typed.
+    pub source: &'static str,
+}
+
+/// A rung refused because it is finer than anything the vendor serves.
+///
+/// Carries the whole refusal rather than a boolean, so the caller that renders
+/// it cannot reduce it to a single word meaning `unavailable` — the same reason
+/// [`SessionRefusal`] names the venue, the window and the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FloorRefusal {
+    /// The rung that was asked for.
+    pub asked: Granularity,
+    /// The finest rung the vendor does serve.
+    pub finest: Granularity,
+    /// What a record at [`Self::finest`] is — so a caller offering it as the
+    /// nearest alternative cannot offer it under the wrong word.
+    pub finest_kind: FinestKind,
+    /// Why, in the vendor's terms. [`GranularityFloor::because`].
+    pub because: &'static str,
+    /// Where that was read. [`GranularityFloor::source`].
+    pub source: &'static str,
+}
+
+/// What a feed's granularity floor says about one rung.
+///
+/// Three arms and **two verdicts**: [`Self::Refused`] is the vendor saying
+/// never, and the other two are it not saying so. They are kept apart because
+/// only one rung per feed can answer the tick-versus-conflated question — at
+/// any coarser rung the floor has no opinion, and inventing one would be
+/// `CLAUDE.md` §3 rule 1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RungVerdict {
+    /// This rung **is** the vendor's finest, and this is what a record at it
+    /// is. The one place the conflated-versus-tick distinction is answerable.
+    Finest(FinestKind),
+    /// Coarser than the vendor's finest, so the granularity floor does not
+    /// refuse it.
+    ///
+    /// It says **nothing** about whether this build fetches the rung — that is
+    /// `Descriptor::granularities`, a different question with its own answer,
+    /// and the two are deliberately not merged: Dhan's minute rung is one the
+    /// vendor serves and this build does not wire up, which is a refusal a
+    /// code change fixes.
+    Coarser,
+    /// Finer than anything the vendor has ever served. No pull, no
+    /// entitlement, no configuration and no code change makes this rung exist.
+    Refused(FloorRefusal),
+}
+
+impl RungVerdict {
+    /// Whether the vendor refuses this rung outright.
+    ///
+    /// The two-verdict reading of the three arms, written once here so no
+    /// caller has to spell the match and get it subtly different.
+    #[must_use]
+    pub const fn is_refused(self) -> bool {
+        matches!(self, Self::Refused(_))
+    }
+
+    /// The refusal, or `None` when the floor does not refuse.
+    #[must_use]
+    pub const fn refusal(self) -> Option<FloorRefusal> {
+        match self {
+            Self::Refused(refusal) => Some(refusal),
+            Self::Finest(_) | Self::Coarser => None,
+        }
+    }
+
+    /// What a record at this rung is, when the floor is what states it.
+    ///
+    /// `None` at a coarser rung and at a refused one — for opposite reasons,
+    /// and both honest: above the floor nothing here has measured the shape,
+    /// and below it there is no record to have a shape.
+    #[must_use]
+    pub const fn kind(self) -> Option<FinestKind> {
+        match self {
+            Self::Finest(kind) => Some(kind),
+            Self::Coarser | Self::Refused(_) => None,
+        }
+    }
+}
+
 /// Whether a feed's budget is shared across request kinds or held per kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pooling {
@@ -1891,6 +2207,22 @@ pub struct ColumnLayout {
     pub segment: Segment,
     /// The columns, in file order.
     pub columns: &'static [Column],
+    /// THE DECODER'S NAME FOR THIS SAME SHAPE.
+    ///
+    /// [`Self::columns`] says what each field *means*; [`Columns`] is the
+    /// variant [`crate::csv::decode`] and [`crate::archive::read_dir`] are
+    /// actually handed. Both describe one file, and until this field existed
+    /// the second one was chosen by a `match` at the call site — twice in
+    /// `crates/api/src/server.rs`, both hardcoded to `Columns::Gdfl`, which is
+    /// the wrong shape for the other archive vendor and would have read
+    /// `TrueData`'s five columns as ten.
+    ///
+    /// It is a field rather than a branch for the reason the module header
+    /// gives, and it cannot drift from [`Self::columns`]: the `const` block
+    /// below [`DESCRIPTORS`] holds the count, the header row and the date
+    /// format of the two against each other, so a layout whose two spellings
+    /// disagree fails the build.
+    pub shape: Columns,
 }
 
 /// What kind of record a feed writes.
@@ -1970,6 +2302,162 @@ impl ArchiveSpec {
     }
 }
 
+/// WHERE A FEED'S BYTES COME FROM, as a property of the vendor.
+///
+/// # The operator's rule, 12 Aug 2026, verbatim
+///
+/// > "for truedata and gdfl alone, one and only, we will pull the data
+/// > especially entirely from csv files from the precise folder — because we
+/// > will buy those data from them as csv files and we will put that into the
+/// > specified folder, only from there it should be read."
+/// >
+/// > "except these two alone only, for all other vendors or brokers feeds it
+/// > should be always REST."
+///
+/// That is a two-valued property of the vendor, and it decides five separate
+/// behaviours that were previously decided one at a time by matching on
+/// [`Transport`]'s payload:
+///
+/// | | [`Self::Rest`] | [`Self::Folder`] |
+/// |---|---|---|
+/// | credential | required — `CLAUDE.md` §8 | **none, and §8 must not run** |
+/// | quota | a published budget, governed | **none** |
+/// | reach | a [`HistoryFloor`], a vendor constant | **the files present** |
+/// | finest rung | one minute | one **second** |
+/// | the verb | pull | **read** |
+///
+/// # Why beside [`Transport`] rather than instead of it
+///
+/// [`Transport`] carries the *specification* — a base URL and an auth header,
+/// or a naming pattern and a column layout — and it is therefore large, and
+/// its two arms cannot be compared, hashed or written into a table cell
+/// without dragging a whole [`HttpSpec`] along. Callers that only need to know
+/// *which kind* were pattern-matching `Transport::Http(_)` with a discarded
+/// payload, in four places, and each one was free to disagree with the others.
+///
+/// This is that question as one two-valued word. [`Transport::kind`] is the
+/// single `match` that answers it, so a fifth feed lands on the right side of
+/// every one of the five rows above by declaring its transport and nothing
+/// else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceKind {
+    /// A network request against a vendor's API. Has a token, a quota, and a
+    /// published history floor that this repository does not get to choose.
+    Rest,
+    /// A folder of files the operator bought and put there. No socket, no
+    /// token, no quota, and no vendor-stated floor: its reach is exactly which
+    /// files are present, which is why [`crate::folder::Reach`] is read rather
+    /// than declared.
+    Folder,
+}
+
+impl SourceKind {
+    /// A short, stable label for a page or a report.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rest => "REST API",
+            Self::Folder => "folder of files",
+        }
+    }
+
+    /// THE HONEST VERB for getting data out of this source.
+    ///
+    /// A folder is not pulled, fetched or requested. Nothing is asked of
+    /// anybody, no quota moves, nothing can rate-limit it and there is no
+    /// remote party to be unavailable — the bytes are already on the disk the
+    /// process is running on. Calling it a pull put an operator in the wrong
+    /// diagnostic frame every time one failed: the first questions asked were
+    /// about tokens, entitlements and outages, and the answer was always a
+    /// path.
+    ///
+    /// Present tense, lower case, and no punctuation, so it drops into a
+    /// sentence: `format!("{verb} refused")`.
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Rest => "pull",
+            Self::Folder => "read",
+        }
+    }
+
+    /// [`Self::verb`] in the past tense, for a receipt.
+    ///
+    /// Spelled out rather than suffixed: `read` does not take a `-ed`, and a
+    /// helper that appended one would have written `readed` on the arm this
+    /// whole type exists for.
+    #[must_use]
+    pub const fn verb_past(self) -> &'static str {
+        match self {
+            Self::Rest => "pulled",
+            Self::Folder => "read",
+        }
+    }
+
+    /// Whether `CLAUDE.md` §8's credential machinery applies at all.
+    ///
+    /// `false` for a folder, and that is a **behaviour**, not a label: a
+    /// missing credential must not block a source that has nothing to
+    /// authenticate against, and `crate::config` asks this rather than naming
+    /// vendors.
+    #[must_use]
+    pub const fn needs_credential(self) -> bool {
+        matches!(self, Self::Rest)
+    }
+
+    /// Whether a rate governor applies at all.
+    #[must_use]
+    pub const fn needs_quota(self) -> bool {
+        matches!(self, Self::Rest)
+    }
+
+    /// Whether a [`HistoryFloor`] is the right way to ask how far back this
+    /// source reaches.
+    ///
+    /// `false` for a folder. Its reach is not a claim anybody published, it is
+    /// the set of files present — see [`crate::folder::Reach`], which is read
+    /// off the disk. An empty folder therefore has an EMPTY reach and says so;
+    /// it does not fall back to a REST-shaped floor, and
+    /// [`Descriptor::history`] is empty for every folder feed so there is
+    /// nothing to fall back to.
+    #[must_use]
+    pub const fn has_history_floor(self) -> bool {
+        matches!(self, Self::Rest)
+    }
+
+    /// The finest rung this KIND of source can ever offer — one **minute** over
+    /// REST, one **second** out of a folder.
+    ///
+    /// # Not a second copy of [`GranularityFloor`]
+    ///
+    /// [`GranularityFloor`] is the per-vendor fact, with the vendor's own words
+    /// and the place they were read, and it is what refuses a rung. This is the
+    /// operator's rule of 12 Aug 2026 about the two KINDS, and it exists so the
+    /// two can be cross-checked: the `const` block under [`DESCRIPTORS`] holds
+    /// every feed's own floor against its kind's, so a folder feed that claimed
+    /// milliseconds or a REST feed that claimed seconds fails the build rather
+    /// than being believed.
+    ///
+    /// Neither arm is [`Granularity::Tick`], and that is the same rule seen
+    /// from the other side — see [`Granularity::is_requestable`]. Both feeds
+    /// sold as tick-by-tick were measured at one-second resolution with no
+    /// sub-second field (`docs/08-vendor-samples.md`), so a second is the
+    /// finest thing that ever lands from either of them.
+    #[must_use]
+    pub const fn finest_possible(self) -> Granularity {
+        match self {
+            Self::Rest => Granularity::Minute1,
+            Self::Folder => Granularity::Second1,
+        }
+    }
+}
+
+impl fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// How a feed's bytes are obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Transport {
@@ -1981,28 +2469,45 @@ pub enum Transport {
 }
 
 impl Transport {
+    /// WHICH KIND OF SOURCE THIS IS, with the specification dropped.
+    ///
+    /// **The only place the two arms are told apart.** Everything below, and
+    /// `crate::config`'s credential requirement, and `crate::folder`'s reach,
+    /// go through this one `match` — so a fifth transport answers every one of
+    /// them by adding a single arm here, and cannot answer two of them
+    /// inconsistently.
+    #[must_use]
+    pub const fn kind(self) -> SourceKind {
+        match self {
+            Self::Http(_) => SourceKind::Rest,
+            Self::LocalArchive(_) => SourceKind::Folder,
+        }
+    }
+
     /// A short, stable label for a page or a report.
+    ///
+    /// The words are [`SourceKind`]'s, so a page and a refusal cannot call the
+    /// same feed two different things. The old spelling here was
+    /// `local archive`, which named a *file layout*; the fact an operator needs
+    /// is that it is a folder on this machine.
     #[must_use]
     pub const fn label(self) -> &'static str {
-        match self {
-            Self::Http(_) => "HTTP API",
-            Self::LocalArchive(_) => "local archive",
-        }
+        self.kind().label()
     }
 
     /// Whether this transport needs a credential at all.
     ///
-    /// The page reads this rather than asking which vendor it is: an archive
+    /// The page reads this rather than asking which vendor it is: a folder
     /// feed must never be shown a token field.
     #[must_use]
     pub const fn needs_credential(self) -> bool {
-        matches!(self, Self::Http(_))
+        self.kind().needs_credential()
     }
 
     /// Whether this transport needs a rate governor at all.
     #[must_use]
     pub const fn needs_governor(self) -> bool {
-        matches!(self, Self::Http(_))
+        self.kind().needs_quota()
     }
 }
 
@@ -2101,6 +2606,36 @@ impl Feed {
     #[must_use]
     pub const fn serves(self, granularity: Granularity) -> bool {
         self.descriptor().granularities.contains(granularity)
+    }
+
+    /// The finest rung this vendor can **ever** serve.
+    ///
+    /// Distinct from [`Self::serves`] in kind, not in degree: that one answers
+    /// what this build fetches today, and this one answers what the vendor
+    /// publishes at all. See [`GranularityFloor`].
+    #[must_use]
+    pub const fn finest_rung(self) -> Granularity {
+        self.descriptor().granularity_floor.finest
+    }
+
+    /// What this vendor's granularity floor says about `granularity`.
+    ///
+    /// The `Feed`-level spelling of [`Descriptor::granularity_verdict`], whose
+    /// doc carries the cost argument and names its tests.
+    #[must_use]
+    pub const fn granularity_verdict(self, granularity: Granularity) -> RungVerdict {
+        self.descriptor().granularity_verdict(granularity)
+    }
+
+    /// WHERE THIS FEED'S BYTES COME FROM — REST, or a folder on this machine.
+    ///
+    /// The operator's rule of 12 Aug 2026 in one call: `TrueData` and GDFL are
+    /// folders, every other vendor and broker is REST. Derived from the
+    /// transport the descriptor already declares rather than being a second
+    /// field that could disagree with it. See [`SourceKind`].
+    #[must_use]
+    pub const fn source_kind(self) -> SourceKind {
+        self.descriptor().transport.kind()
     }
 }
 
@@ -2229,6 +2764,25 @@ pub struct Descriptor {
     /// An absent rung is [`HistoryFloor::Unstated`] — see
     /// [`Descriptor::history_floor`]. It is never zero and never "no limit".
     pub history: &'static [FloorRow],
+    /// How **fine** it goes, and what a record at that rung is.
+    ///
+    /// # The second floor, beside the first, on purpose
+    ///
+    /// `history` above says how far BACK a rung answers. This says which rungs
+    /// exist at all, and the two are one vendor fact asked from two directions
+    /// — Groww has both a 12 May 2026 for its one-minute rung and a one-minute
+    /// bottom, and a page that models only the first offers `tick`, `1s` and
+    /// `5s` as ordinary choices the operator can tick.
+    ///
+    /// Keyed on the FEED and not on the rung, which is the opposite of
+    /// `history` and is the honest shape for what it states: a floor is one
+    /// number per vendor, and every rung's verdict is derived from it by
+    /// [`Descriptor::granularity_verdict`] rather than restated per row where
+    /// eleven rows could disagree with each other.
+    ///
+    /// See [`GranularityFloor`] for why this could not be inferred from
+    /// `granularities`, which is a fact about **this build**.
+    pub granularity_floor: GranularityFloor,
     /// Which segments it serves.
     pub segments: SegmentSet,
     /// Which exchange its rows belong to.
@@ -2265,6 +2819,43 @@ impl Descriptor {
         match self.history_row(rung) {
             Some(row) => row.binding.floor,
             None => HistoryFloor::Unstated,
+        }
+    }
+
+    /// What this feed's granularity floor says about `rung`.
+    ///
+    /// # O(1), and by construction rather than by measurement
+    ///
+    /// One field read and at most two `u8` comparisons. There is no table to
+    /// walk here and no rung count in the cost: the floor is a single rung and
+    /// the ladder's discriminants ascend with coarseness, so "is this finer
+    /// than the floor" is `<` on two bytes. The bound does not move when the
+    /// ladder grows to twenty rungs or the feed table to forty rows.
+    /// `pull::vendor::every_feed_answers_every_rung_with_one_of_two_verdicts`
+    /// walks the whole 4 × 11 matrix, and
+    /// `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer`
+    /// proves the ordering the single comparison rests on.
+    ///
+    /// # What it does **not** answer
+    ///
+    /// Whether this build fetches the rung. That is `granularities`, and
+    /// [`RungVerdict::Coarser`] says why the two must not be collapsed.
+    #[must_use]
+    pub const fn granularity_verdict(&self, rung: Granularity) -> RungVerdict {
+        let floor = self.granularity_floor;
+        if rung.is_finer_than(floor.finest) {
+            return RungVerdict::Refused(FloorRefusal {
+                asked: rung,
+                finest: floor.finest,
+                finest_kind: floor.kind,
+                because: floor.because,
+                source: floor.source,
+            });
+        }
+        if rung as u8 == floor.finest as u8 {
+            RungVerdict::Finest(floor.kind)
+        } else {
+            RungVerdict::Coarser
         }
     }
 }
@@ -2376,6 +2967,94 @@ const GROWW_HISTORY: &[FloorRow] = &[
                         refuses first.",
     },
 ];
+
+// --- the granularity floors ------------------------------------------------
+//
+// FOUR ROWS, TWO SHAPES, AND ONE SENTENCE THAT COVERS ALL OF THEM: no feed in
+// this build serves a tick stream. The two brokers bottom out at a minute
+// because their historical endpoints are CANDLE endpoints with no sub-minute
+// word to ask with; the two archives bottom out at a second because that is
+// the resolution the bytes on disk were measured to carry, and what sits on
+// that second is a conflated snapshot rather than a print.
+//
+// THE SOURCE IS THE OPERATOR, AND THE DOCUMENTS AGREE WITH HIM. He stated the
+// rule on 12 Aug 2026 and it is quoted in D-0118. `docs/00-charter.md` §4 and
+// `docs/08-vendor-samples.md` were both read against it before these rows were
+// written and neither contradicts it; where a document is SILENT rather than
+// agreeing, the row below says so in its own source string rather than
+// borrowing the operator's sentence as if a page had printed it.
+
+/// Dhan's granularity floor: one minute, and it is a candle.
+const DHAN_FLOOR: GranularityFloor = GranularityFloor {
+    finest: Granularity::Minute1,
+    kind: FinestKind::Bar,
+    because: "Dhan's historical endpoints are candle endpoints. The intraday \
+              one names candles of 1, 5, 15, 25 and 60 minutes and the daily \
+              one names a session; neither request carries a field a shorter \
+              interval could be written into, and this vendor publishes no \
+              second-level or print-level history on this path at all.",
+    source: "docs/00-charter.md section 4, Dhan: the endpoint row reads \
+             intraday charts, 1/5/15/25/60 min, verified from the SDK; and \
+             the operator, 12 Aug 2026, stating that a broker's historical \
+             floor is one minute and that no vendor serves a print stream. \
+             See D-0118.",
+};
+
+/// Groww's granularity floor: one minute, and it is a candle.
+const GROWW_FLOOR: GranularityFloor = GranularityFloor {
+    finest: Granularity::Minute1,
+    kind: FinestKind::Bar,
+    because: "Groww's own candle-interval annexure is the whole alphabet this \
+              vendor's requests can be written in, and its finest row is one \
+              minute; it runs upward from there to a month. There is no \
+              second-level and no print-level word in that table, so a rung \
+              below a minute cannot be spelled on this vendor's wire — the \
+              request would have nothing to put in its interval field.",
+    source: "docs/00-charter.md section 4, Groww: Granularity fetched — the \
+             one-minute word only, and the daily-interval row citing the same \
+             annexure, verified from the vendor's own document; and the \
+             operator, 12 Aug 2026. See D-0118.",
+};
+
+/// `TrueData`'s granularity floor: one second, and it is a CONFLATED SNAPSHOT.
+///
+/// The archive's file names say otherwise and the file names are not evidence.
+const TRUEDATA_FLOOR: GranularityFloor = GranularityFloor {
+    finest: Granularity::Second1,
+    kind: FinestKind::ConflatedSnapshot,
+    because: "The archives are named for a print stream and do not hold one. \
+              Measured, not assumed: every row's timestamp resolves to a whole \
+              second, there is no sub-second field anywhere in the layout, and \
+              a session of 22,500 seconds produced 22,426 rows — one per \
+              second, not one per trade. Up to three rows share a second and \
+              carry no tiebreaker, so even their order is file order rather \
+              than time. What the file holds is a once-a-second conflated \
+              snapshot of the best bid, the best ask and the best last price; \
+              every print between two snapshots was discarded before the file \
+              was written and no reader can recover it.",
+    source: "docs/08-vendor-samples.md, the headline finding — neither vendor \
+             sells print-by-print — with the measured table beside it: \
+             timestamp resolution second, sub-second field none, 22,426 rows \
+             across 22,500 seconds; and the operator, 12 Aug 2026, stating \
+             that this vendor's floor is a one-second conflated snapshot and \
+             not a print stream. See D-0118.",
+};
+
+/// GDFL's granularity floor: the same shape, measured the same way.
+const GDFL_FLOOR: GranularityFloor = GranularityFloor {
+    finest: Granularity::Second1,
+    kind: FinestKind::ConflatedSnapshot,
+    because: "As the archive above, and measured on its own files: whole-second \
+              timestamps, no sub-second field, and up to four rows sharing one \
+              second with no tiebreaker between them. The header itself names \
+              what a row is — a last price with a best bid and a best ask \
+              beside it — which is a snapshot of the book at an instant and \
+              not the prints that moved it.",
+    source: "docs/08-vendor-samples.md, the same headline finding and the same \
+             measured table, GDFL column; and the operator, 12 Aug 2026, \
+             stating that this vendor's floor is a one-second conflated \
+             snapshot and not a print stream. See D-0118.",
+};
 
 const DHAN: Descriptor = Descriptor {
     // MEASURED against Groww on the same instrument and the same five sessions:
@@ -2545,6 +3224,7 @@ const DHAN: Descriptor = Descriptor {
     // `granularity_tokens`. UNVERIFIED until both exist.
     granularities: GranularitySet::EMPTY.with(Granularity::Day1),
     history: DHAN_HISTORY,
+    granularity_floor: DHAN_FLOOR,
     segments: SegmentSet::EMPTY
         .with(Segment::Index)
         .with(Segment::Cash)
@@ -2735,6 +3415,7 @@ const GROWW: Descriptor = Descriptor {
         .with(Granularity::Minute1)
         .with(Granularity::Day1),
     history: GROWW_HISTORY,
+    granularity_floor: GROWW_FLOOR,
     segments: SegmentSet::EMPTY
         .with(Segment::Index)
         .with(Segment::Cash)
@@ -2756,6 +3437,7 @@ const TRUEDATA_INDEX: ColumnLayout = ColumnLayout {
         Column::Ignored,
         Column::Ignored,
     ],
+    shape: Columns::TrueDataIndex,
 };
 
 const TRUE_DATA: Descriptor = Descriptor {
@@ -2805,6 +3487,7 @@ const TRUE_DATA: Descriptor = Descriptor {
     // today. Every rung therefore answers `HistoryFloor::Unstated`, which
     // `/feeds.json` renders as a claim NOT MADE rather than as "no limit".
     history: &[],
+    granularity_floor: TRUEDATA_FLOOR,
     segments: SegmentSet::EMPTY.with(Segment::Index),
     exchange: Exchange::Nse,
 };
@@ -2825,6 +3508,7 @@ const GDFL_FNO: ColumnLayout = ColumnLayout {
         Column::LastQty,
         Column::OpenInterest,
     ],
+    shape: Columns::Gdfl,
 };
 
 const GDFL_HEADER: &str = "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest";
@@ -2861,6 +3545,7 @@ const GDFL: Descriptor = Descriptor {
     granularities: GranularitySet::EMPTY.with(Granularity::Second1),
     // Empty for the reason the archive above is empty.
     history: &[],
+    granularity_floor: GDFL_FLOOR,
     segments: SegmentSet::EMPTY.with(Segment::Fno),
     exchange: Exchange::Nse,
 };
@@ -2908,6 +3593,194 @@ const _: () = {
     assert!(!truedata.transport.needs_governor());
     assert!(!gdfl.transport.needs_credential());
     assert!(!gdfl.transport.needs_governor());
+};
+
+// THE OWNER'S RULE OF 12 AUG 2026, AS A BUILD FAILURE.
+//
+//   "for truedata and gdfl alone, one and only, we will pull the data
+//    especially entirely from csv files from the precise folder … except these
+//    two alone only, for all other vendors or brokers feeds it should be
+//    always REST."
+//
+// Two feeds are folders and every other is REST, so the membership itself is
+// checked here rather than being a sentence in a doc comment that a fifth row
+// could silently contradict. `store_vendor` is `TrueData`/`Gdfl` on exactly
+// the two rows whose transport is a folder, which is the same statement seen
+// from the store-prefix side.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(matches!(dhan.transport.kind(), SourceKind::Rest));
+    assert!(matches!(groww.transport.kind(), SourceKind::Rest));
+    assert!(matches!(truedata.transport.kind(), SourceKind::Folder));
+    assert!(matches!(gdfl.transport.kind(), SourceKind::Folder));
+};
+
+// AND NO FEED MAY CLAIM A RUNG ITS KIND CANNOT CARRY.
+//
+// The other half of the same rule: a folder reaches one second because that is
+// what a bought file holds, and a REST broker reaches one minute because that
+// is the finest rung either published API answers. `GranularityFloor::finest`
+// stays the per-vendor authority — this only refuses a row that claims FINER
+// than its kind, which is the direction that would have a page offering a rung
+// no source on this tree can produce.
+//
+// Written as a `u8` comparison because the ladder's discriminants ascend
+// coarsest-last, so "no finer than" is one integer comparison and needs no
+// table.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(dhan.granularity_floor.finest as u8 >= dhan.transport.kind().finest_possible() as u8);
+    assert!(groww.granularity_floor.finest as u8 >= groww.transport.kind().finest_possible() as u8);
+    assert!(
+        truedata.granularity_floor.finest as u8
+            >= truedata.transport.kind().finest_possible() as u8
+    );
+    assert!(gdfl.granularity_floor.finest as u8 >= gdfl.transport.kind().finest_possible() as u8);
+};
+
+// AND NOBODY MAY ASK FOR A TICK.
+//
+// `FinestKind::is_tick_stream` above says no feed PRODUCES one. This says no
+// caller may ASK for one, which is the other half of the owner's rule and a
+// different sentence: a rung nothing produces could still sit on a page as a
+// selectable control, which is exactly what `GranularityFloor` was written
+// after finding.
+const _: () = {
+    assert!(!Granularity::Tick.is_requestable());
+    assert!(Granularity::Second1.is_requestable());
+    assert!(SourceKind::Rest.finest_possible() as u8 > Granularity::Tick as u8);
+    assert!(SourceKind::Folder.finest_possible() as u8 > Granularity::Tick as u8);
+};
+
+// A LAYOUT AND ITS `Columns` ARE TWO SPELLINGS OF ONE FILE.
+//
+// [`ColumnLayout::columns`] is what each field MEANS; [`ColumnLayout::shape`]
+// is what the decoder is handed. Two descriptions of one file is exactly the
+// arrangement `CLAUDE.md` warns about, so they are held against each other
+// here on all three things that can silently mis-read a row:
+//
+//   * the COUNT — a shape one column wider reads every field after the
+//     mismatch from the wrong offset, which is the defect `Columns::offsets`
+//     records having already shipped once,
+//   * the HEADER row — a shape that expects one where the archive has none
+//     eats a real record, and the reverse refuses a whole file,
+//   * the DATE format — `DD/MM/YYYY` read as `YYYY-MM-DD` shifts every bar by
+//     months, silently, which `DateFormat::SlashedDmy`'s own doc names.
+//
+// `DateFormat` is fieldless, so the comparison is one `u8` cast and needs no
+// per-variant table that a sixth format could fall outside of.
+const _: () = {
+    let [_dhan, _groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(shape_agrees(&TRUEDATA_INDEX, truedata));
+    assert!(shape_agrees(&GDFL_FNO, gdfl));
+};
+
+/// Whether a layout's two spellings describe the same file.
+///
+/// Used only by the `const` block above, which is why it takes the whole
+/// [`Descriptor`]: the header row and the date format are properties of the
+/// ARCHIVE, and reading them from anywhere else would be comparing the layout
+/// against a second copy rather than against the spec it belongs to.
+const fn shape_agrees(layout: &ColumnLayout, row: &Descriptor) -> bool {
+    let Transport::LocalArchive(spec) = row.transport else {
+        // A REST feed has no archive spec, so it has no layout to agree with.
+        // Reaching here means a layout was written for a broker row, which is
+        // a wiring mistake and not a mismatch to report.
+        return false;
+    };
+    layout.columns.len() == layout.shape.count()
+        && layout.shape.has_header() == matches!(spec.header, HeaderRow::Present(_))
+        && layout.shape.date_format() as u8 == spec.date_format as u8
+}
+
+// NO ROW MAY CLAIM A TICK STREAM.
+//
+// The owner's rule, 12 Aug 2026, and it is not a floor some feed clears — no
+// feed in this system serves one. `FinestKind::Tick` exists so the negative
+// can be SAID; a row that ever asserts it positively is a claim about a vendor
+// with no source, and CLAUDE.md section 3 rule 1 makes that a stop rather than
+// a review comment. Here it is a build failure.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(!dhan.granularity_floor.kind.is_tick_stream());
+    assert!(!groww.granularity_floor.kind.is_tick_stream());
+    assert!(!truedata.granularity_floor.kind.is_tick_stream());
+    assert!(!gdfl.granularity_floor.kind.is_tick_stream());
+};
+
+// A BUILD CANNOT FETCH WHAT A VENDOR CANNOT SERVE.
+//
+// `granularities` is what this build asks for and `granularity_floor` is what
+// the vendor has; the first may be narrower than the second — Dhan's minute
+// rung is exactly that — and it may never be WIDER. A row that declared a rung
+// below its own floor would put a control on a page that no pull could ever
+// satisfy, and the refusal would arrive from the vendor as an empty answer,
+// which reads like a holiday. One mask per row, checked by the compiler.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(
+        dhan.granularities
+            .none_finer_than(dhan.granularity_floor.finest)
+    );
+    assert!(
+        groww
+            .granularities
+            .none_finer_than(groww.granularity_floor.finest)
+    );
+    assert!(
+        truedata
+            .granularities
+            .none_finer_than(truedata.granularity_floor.finest)
+    );
+    assert!(
+        gdfl.granularities
+            .none_finer_than(gdfl.granularity_floor.finest)
+    );
+};
+
+// EVERY GRANULARITY FLOOR CARRIES ITS REASON AND ITS SOURCE.
+//
+// `has_content` is the same check the session regime rows get, for the same
+// reason: a blank citation is a row with no citation wearing one. A refusal an
+// operator cannot check is a refusal they have to take on faith, and this
+// repository does not ask for faith about a vendor.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(has_content(dhan.granularity_floor.because));
+    assert!(has_content(dhan.granularity_floor.source));
+    assert!(has_content(groww.granularity_floor.because));
+    assert!(has_content(groww.granularity_floor.source));
+    assert!(has_content(truedata.granularity_floor.because));
+    assert!(has_content(truedata.granularity_floor.source));
+    assert!(has_content(gdfl.granularity_floor.because));
+    assert!(has_content(gdfl.granularity_floor.source));
+};
+
+// THE FLOOR'S KIND AND THE ROW'S RECORD SHAPE SAY THE SAME THING.
+//
+// `RecordShape` already distinguishes a bar from a snapshot, and it is what
+// the store refuses on. `FinestKind` adds the one thing that shape cannot
+// express — whether the snapshot is a PRINT — and the two must not drift: a
+// row whose record shape said snapshot while its floor said bar would let a
+// conflated second be labelled a candle at the boundary that renders it.
+const _: () = {
+    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    assert!(matches!(
+        (dhan.record, dhan.granularity_floor.kind),
+        (RecordShape::Ohlcv, FinestKind::Bar)
+    ));
+    assert!(matches!(
+        (groww.record, groww.granularity_floor.kind),
+        (RecordShape::Ohlcv, FinestKind::Bar)
+    ));
+    assert!(matches!(
+        (truedata.record, truedata.granularity_floor.kind),
+        (RecordShape::Snapshot, FinestKind::ConflatedSnapshot)
+    ));
+    assert!(matches!(
+        (gdfl.record, gdfl.granularity_floor.kind),
+        (RecordShape::Snapshot, FinestKind::ConflatedSnapshot)
+    ));
 };
 
 // ---------------------------------------------------------------------------
@@ -4676,5 +5549,354 @@ mod tests {
                 }
             }
         }
+    }
+
+    // -- the granularity floor -----------------------------------------------
+
+    /// THE LADDER ASCENDS, SO ONE COMPARISON IS THE WHOLE LOOKUP.
+    ///
+    /// [`Granularity::is_finer_than`] compares two `u8` discriminants, and that
+    /// is only an answer if the discriminants are ordered the way the grids
+    /// are. The `const` block beside the function pins the ten ADJACENT pairs,
+    /// which is what the compiler needs; this walks all 121 ORDERED pairs,
+    /// which is what a reader needs — a ladder can ascend between neighbours
+    /// and still not be a total order if a rung is compared to one three steps
+    /// away.
+    #[test]
+    fn the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer() {
+        for finer in Granularity::ALL {
+            for coarser in Granularity::ALL {
+                assert_eq!(
+                    black_box(finer).is_finer_than(black_box(coarser)),
+                    black_box(finer).coarseness() < black_box(coarser).coarseness(),
+                    "{finer} against {coarser}: the discriminant and the grid disagree"
+                );
+            }
+            assert!(
+                !finer.is_finer_than(finer),
+                "{finer} is not finer than itself"
+            );
+        }
+        // The two ends, named rather than derived, so a re-ordered ladder fails
+        // here and not only in the matrix above.
+        assert!(Granularity::Tick.is_finer_than(Granularity::Second1));
+        assert!(Granularity::Second1.is_finer_than(Granularity::Minute1));
+        assert!(Granularity::Day1.is_finer_than(Granularity::Week1));
+        assert_eq!(
+            black_box(Granularity::Tick).coarseness(),
+            0,
+            "an event grid"
+        );
+        assert_eq!(
+            black_box(Granularity::Minute1).coarseness(),
+            SECS_PER_MINUTE_U32,
+            "an interval grid ranks as its own width"
+        );
+        assert!(
+            black_box(Granularity::Day1).coarseness() < black_box(Granularity::Week1).coarseness(),
+            "a session is narrower than a week, and neither is an interval"
+        );
+    }
+
+    /// EVERY FEED ANSWERS EVERY RUNG, AND THE ANSWER IS ONE OF TWO VERDICTS.
+    ///
+    /// The whole 4 × 11 matrix, because a capability with a hole in it is a
+    /// capability a caller has to guess at. Two verdicts: the vendor refuses
+    /// the rung outright, or it does not — and the second splits into the one
+    /// rung that IS the floor and the rungs above it, which is where the
+    /// tick-versus-conflated answer lives.
+    #[test]
+    fn every_feed_answers_every_rung_with_one_of_two_verdicts() {
+        for feed in Feed::ALL {
+            let floor = feed.descriptor().granularity_floor;
+            let mut refused = 0_usize;
+            let mut at_floor = 0_usize;
+            let mut coarser = 0_usize;
+            for rung in Granularity::ALL {
+                let verdict = black_box(feed).granularity_verdict(black_box(rung));
+                assert_eq!(
+                    verdict,
+                    feed.descriptor().granularity_verdict(rung),
+                    "{feed} at {rung}: the two spellings must agree"
+                );
+                assert_eq!(
+                    verdict.is_refused(),
+                    rung.is_finer_than(floor.finest),
+                    "{feed} at {rung}: refused exactly when finer than the floor"
+                );
+                match verdict {
+                    RungVerdict::Refused(refusal) => {
+                        refused += 1;
+                        assert_eq!(refusal.asked, rung, "the refusal names what was asked");
+                        assert_eq!(refusal.finest, floor.finest, "and what is served instead");
+                        assert_eq!(refusal.finest_kind, floor.kind);
+                        assert!(
+                            has_content(refusal.because),
+                            "{feed} refuses with no reason"
+                        );
+                        assert!(has_content(refusal.source), "{feed} refuses with no source");
+                        assert_eq!(verdict.kind(), None, "a refused rung has no record shape");
+                        assert_eq!(verdict.refusal(), Some(refusal));
+                    }
+                    RungVerdict::Finest(kind) => {
+                        at_floor += 1;
+                        assert_eq!(rung, floor.finest, "only the floor rung answers Finest");
+                        assert_eq!(kind, floor.kind);
+                        assert_eq!(verdict.kind(), Some(kind));
+                        assert_eq!(verdict.refusal(), None);
+                    }
+                    RungVerdict::Coarser => {
+                        coarser += 1;
+                        assert!(floor.finest.is_finer_than(rung));
+                        assert_eq!(
+                            verdict.kind(),
+                            None,
+                            "{feed} at {rung}: nothing here measured what a record at a \
+                             rung above the floor is, so nothing here claims it"
+                        );
+                        assert_eq!(verdict.refusal(), None);
+                    }
+                }
+            }
+            assert_eq!(
+                at_floor, 1,
+                "{feed} has exactly one finest rung, or the floor is not a floor"
+            );
+            assert_eq!(
+                refused + at_floor + coarser,
+                GRANULARITY_COUNT,
+                "{feed} left a rung unanswered"
+            );
+            assert!(refused > 0, "{feed} refuses at least the print rung");
+            assert_eq!(
+                feed.finest_rung(),
+                floor.finest,
+                "{feed} disagrees with its own row about its finest rung"
+            );
+        }
+    }
+
+    /// NO FEED IN THIS BUILD SERVES A PRINT STREAM, AND THAT IS PERMANENT.
+    ///
+    /// The owner's rule of 12 Aug 2026, asserted rather than commented: the
+    /// finest rung of the ladder is refused by every feed, and no row's floor
+    /// claims to be a print stream. This is the refusal that a pull cannot
+    /// fix, an entitlement cannot fix and a code change cannot fix — which is
+    /// exactly what separates it from an empty directory.
+    #[test]
+    fn no_feed_in_this_build_serves_a_tick_and_the_refusal_is_permanent() {
+        for feed in Feed::ALL {
+            let verdict = feed.granularity_verdict(Granularity::Tick);
+            let refusal = verdict
+                .refusal()
+                .expect("the finest rung of the ladder is served by nobody");
+            assert_eq!(refusal.asked, Granularity::Tick);
+            assert!(
+                !refusal.finest_kind.is_tick_stream(),
+                "{feed} offers its floor as a print stream, which no source says"
+            );
+            assert!(
+                !feed.descriptor().granularity_floor.kind.is_tick_stream(),
+                "{feed} claims a print stream in its own row"
+            );
+            assert!(
+                !feed.serves(Granularity::Tick),
+                "{feed} cannot fetch a rung its vendor does not have"
+            );
+        }
+        // THE ARM ITSELF, EXERCISED. It exists so the negative above can be
+        // said at all; a variant no test ever constructs is a variant whose
+        // behaviour nobody has checked.
+        let print_stream = black_box(FinestKind::Tick);
+        assert!(print_stream.is_tick_stream());
+        assert!(
+            !print_stream.is_conflated(),
+            "a print stream discards nothing, which is the whole difference"
+        );
+        assert!(has_content(black_box(print_stream).label()));
+        assert_ne!(
+            black_box(FinestKind::Tick).label(),
+            black_box(FinestKind::ConflatedSnapshot).label(),
+            "the two must not read the same on a page"
+        );
+        assert_ne!(
+            black_box(FinestKind::Bar).label(),
+            black_box(FinestKind::ConflatedSnapshot).label()
+        );
+    }
+
+    /// A CONFLATED SECOND IS NOT A PRINT, AND THE TYPE REFUSES TO LET IT PASS
+    /// FOR ONE.
+    ///
+    /// Both archives bottom out at one second and both were MEASURED to be
+    /// snapshots — `docs/08-vendor-samples.md`. Both brokers bottom out at one
+    /// minute and both are candles. The two facts are carried separately from
+    /// the rung, because the rung alone cannot tell them apart: one second of
+    /// an archive and one second of a broker would be two different objects.
+    #[test]
+    fn a_conflated_second_is_never_labelled_a_tick() {
+        for feed in [Feed::TrueData, Feed::Gdfl] {
+            let verdict = feed.granularity_verdict(Granularity::Second1);
+            assert_eq!(
+                verdict,
+                RungVerdict::Finest(FinestKind::ConflatedSnapshot),
+                "{feed}'s finest rung is a once-a-second snapshot of the book"
+            );
+            let kind = verdict.kind().expect("the floor states its own shape");
+            assert!(
+                kind.is_conflated(),
+                "{feed} discards what falls between slots"
+            );
+            assert!(
+                !kind.is_tick_stream(),
+                "{feed} is named for a print stream and holds none"
+            );
+            assert_eq!(
+                feed.descriptor().record,
+                RecordShape::Snapshot,
+                "{feed}'s record shape and its floor's kind say the same thing"
+            );
+        }
+        for feed in [Feed::Dhan, Feed::Groww] {
+            let verdict = feed.granularity_verdict(Granularity::Minute1);
+            assert_eq!(
+                verdict,
+                RungVerdict::Finest(FinestKind::Bar),
+                "{feed}'s finest rung is a candle"
+            );
+            let kind = verdict.kind().expect("the floor states its own shape");
+            assert!(
+                !kind.is_conflated(),
+                "{feed} aggregates its interval and says so"
+            );
+            assert!(!kind.is_tick_stream());
+            assert!(
+                feed.granularity_verdict(Granularity::Second1).is_refused(),
+                "{feed} has no second-level word to ask with"
+            );
+            assert!(
+                feed.granularity_verdict(Granularity::Second5).is_refused(),
+                "{feed} has no five-second word either"
+            );
+        }
+    }
+
+    /// THE TWO FLOORS REFUSE DIFFERENT THINGS, AND ONE OF THEM IS FIXABLE.
+    ///
+    /// This is the confusion the field was added to end. Groww at one second
+    /// and Groww at one minute in 2019 are both refusals, and they are not the
+    /// same kind of fact: the first is the vendor having no such rung at all,
+    /// and the second is the vendor having the rung and not that far back.
+    /// A pull fixes neither, but only one of them is a bound that could ever
+    /// move.
+    #[test]
+    fn the_granularity_floor_and_the_history_floor_refuse_different_things() {
+        let groww = Feed::Groww.descriptor();
+        assert!(
+            groww.granularity_verdict(Granularity::Second1).is_refused(),
+            "no second-level rung exists on this vendor at any date"
+        );
+        assert_eq!(
+            groww.history_floor(Granularity::Second1),
+            HistoryFloor::Unstated,
+            "and no source states a depth for a rung the vendor does not have"
+        );
+        assert!(
+            !groww.granularity_verdict(Granularity::Minute1).is_refused(),
+            "the minute rung exists"
+        );
+        assert_eq!(
+            groww.history_floor(Granularity::Minute1),
+            HistoryFloor::RollingMonths { months: 3 },
+            "and it is the DEPTH that is bounded there, not the existence"
+        );
+        // The archives are the mirror image: their granularity floor is
+        // stated and measured, and their history floor is stated by nobody.
+        for feed in [Feed::TrueData, Feed::Gdfl] {
+            assert!(has_content(feed.descriptor().granularity_floor.source));
+            assert!(
+                feed.descriptor().history.is_empty(),
+                "{feed} states how fine it goes and nothing states how far back"
+            );
+        }
+    }
+
+    /// A BUILD NEVER FETCHES A RUNG ITS VENDOR CANNOT SERVE.
+    ///
+    /// `granularities` may be NARROWER than the floor allows — Dhan's minute
+    /// rung is exactly that, and the reason is this build's single `bars_path`
+    /// rather than anything Dhan does. It may never be wider. The one-mask
+    /// check is driven here from outside the `const` block that pins it.
+    #[test]
+    fn a_build_never_fetches_a_rung_its_vendor_cannot_serve() {
+        for feed in Feed::ALL {
+            let row = feed.descriptor();
+            assert!(
+                black_box(row.granularities)
+                    .none_finer_than(black_box(row.granularity_floor.finest)),
+                "{feed} declares a rung below its own vendor floor"
+            );
+            for rung in Granularity::ALL {
+                if feed.serves(rung) {
+                    assert!(
+                        !feed.granularity_verdict(rung).is_refused(),
+                        "{feed} fetches {rung} and its vendor refuses it"
+                    );
+                }
+            }
+        }
+        // THE NARROWER-THAN-ALLOWED CASE, NAMED. Dhan's vendor floor is a
+        // minute and this build does not fetch the rung; the two refusals must
+        // not read the same, because one of them a code change fixes.
+        assert!(!Feed::Dhan.serves(Granularity::Minute1));
+        assert!(
+            !Feed::Dhan
+                .granularity_verdict(Granularity::Minute1)
+                .is_refused(),
+            "the vendor serves the minute rung; this build is what does not ask for it"
+        );
+        // And the edge of the mask: nothing is finer than the finest rung, so
+        // every set passes against it.
+        assert!(
+            black_box(GranularitySet::EMPTY.with(Granularity::Tick))
+                .none_finer_than(black_box(Granularity::Tick)),
+            "the ladder has no rung below its own first one"
+        );
+        assert!(
+            !black_box(GranularitySet::EMPTY.with(Granularity::Tick))
+                .none_finer_than(black_box(Granularity::Second1)),
+            "and one rung down, the same set is refused"
+        );
+    }
+
+    /// EVERY GRANULARITY FLOOR NAMES A REASON AND A SOURCE, IN VENDOR TERMS.
+    ///
+    /// `CLAUDE.md` §3 rule 1. A refusal an operator cannot go and check is a
+    /// refusal they have to take on faith, and four rows sharing one
+    /// paraphrase would be this repository's sentence rather than four
+    /// vendors'.
+    #[test]
+    fn every_granularity_floor_names_a_reason_and_a_source() {
+        let mut reasons = HashSet::new();
+        let mut sources = HashSet::new();
+        for feed in Feed::ALL {
+            let floor = feed.descriptor().granularity_floor;
+            assert!(has_content(floor.because), "{feed} refuses with no reason");
+            assert!(has_content(floor.source), "{feed} refuses with no source");
+            assert!(
+                reasons.insert(floor.because),
+                "{feed} reuses another vendor's words"
+            );
+            assert!(
+                sources.insert(floor.source),
+                "{feed} reuses another vendor's citation"
+            );
+            assert!(
+                has_content(floor.kind.label()),
+                "{feed} has no word for what a record at its floor is"
+            );
+        }
+        assert_eq!(reasons.len(), FEED_COUNT);
+        assert_eq!(sources.len(), FEED_COUNT);
     }
 }

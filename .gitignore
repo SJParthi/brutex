@@ -44,3 +44,24 @@
 
 # macOS.
 .DS_Store
+
+# The rolling log, written into the project root so the Run window and the
+# project tree show the same thing. `crates/api::served_log_dir` picks this
+# path when the process starts from a Cargo workspace, which is what pressing
+# Run does. Untracked: gate 1 walks TRACKED files, and `.ndjson` is on no
+# allowlist — a committed log would be the build failure CLAUDE.md section 2
+# describes.
+logs/
+
+# IntelliJ. Untracked but NOT ignored until now: a single `git add -A` would
+# stage `.idea/*.xml`, and `.xml` is on no gate 1 allowlist. The same hazard the
+# `.claude/` block above is written for, for the other editor directory.
+.idea/
+
+# Local operator config and logs. These live in ~/.brutex, not here — but a
+# stray copy inside a PUBLIC repository is the failure mode §8 exists to prevent,
+# so the pattern is denied by name rather than by where the file happens to sit.
+/.env
+/server.log
+**/.env
+**/*.log

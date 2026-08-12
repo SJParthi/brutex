@@ -440,6 +440,27 @@ static SITES: &[Site] = &[
         drive: drive_archive_refused,
     },
     Site {
+        at: "crates/pull/src/folder.rs — note_read",
+        target: "pull.folder",
+        message: "folder reach read",
+        // THE VERB, which is the whole of the honest-verb rule: a log read
+        // after the fact is where the wrong diagnostic frame does its damage,
+        // and `read` beside the path is what stops the next hour going on a
+        // token nobody needs.
+        says: ("verb", Says::Holds("read")),
+        drive: drive_folder_read,
+    },
+    Site {
+        at: "crates/pull/src/folder.rs — note_refused",
+        target: "pull.folder",
+        message: "folder refused",
+        // THE PATH. A folder feed that produced no bars used to say nothing at
+        // all, and the one thing an operator needs next is which directory to
+        // open.
+        says: ("dir", Says::Holds("NO-SUCH-FOLDER")),
+        drive: drive_folder_refused,
+    },
+    Site {
         at: "crates/pull/src/fetch.rs:585",
         target: "pull.land",
         message: "window decoded",
@@ -627,6 +648,32 @@ fn drive_archive_refused(scratch: &Scratch) {
     assert!(
         crate::archive::read_dir(&missing, Columns::TrueDataIndex).is_err(),
         "a walk over nothing refuses rather than returning an empty import"
+    );
+}
+
+/// A folder whose reach is read off the files in it.
+fn drive_folder_read(scratch: &Scratch) {
+    let dir = scratch.archive(&[(INSTRUMENT, BODY)]);
+    let reach =
+        crate::folder::read_reach(&dir, crate::vendor::Feed::TrueData, Columns::TrueDataIndex)
+            .expect("the folder is there and its one member decodes");
+    assert!(
+        !reach.is_empty(),
+        "a folder holding a real member reaches the days that member covers"
+    );
+}
+
+/// A folder that is not there — the halt that names the path.
+fn drive_folder_refused(scratch: &Scratch) {
+    let missing = scratch.root.join("NO-SUCH-FOLDER");
+    assert!(
+        crate::folder::read_reach(
+            &missing,
+            crate::vendor::Feed::TrueData,
+            Columns::TrueDataIndex
+        )
+        .is_err(),
+        "a folder that is not there halts rather than reporting an empty reach"
     );
 }
 

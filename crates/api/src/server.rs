@@ -14,7 +14,10 @@
 //! sees decides the run on its own.
 
 use crate::catalog::{Catalog, PAGE_ROWS, Selection};
-use crate::{assets, audit, audit_json, autopilot, bars, census, ingest, master, merge, render};
+use crate::{
+    assets, audit, audit_json, autopilot, bars, census, constituents, coverage, ingest, master,
+    merge, render,
+};
 use brutex_core::vendor::Vendor;
 use pull::session::{Day, IstMoment};
 use std::fmt::Write as _;
@@ -117,8 +120,11 @@ pub fn master_paths(dir: &Path) -> Vec<(Vendor, PathBuf)> {
 /// argument, so nothing else has to touch process-wide state to be
 /// deterministic — and nothing can, since setting an environment variable is
 /// `unsafe` under edition 2024 and this crate forbids `unsafe`.
-#[must_use]
-pub fn masters_dir() -> PathBuf {
+///
+/// # Errors
+///
+/// Neither variable set. See [`masters_dir_from`].
+pub fn masters_dir() -> Result<PathBuf, String> {
     masters_dir_from(std::env::var_os("BRUTEX_MASTERS"))
 }
 
@@ -126,9 +132,12 @@ pub fn masters_dir() -> PathBuf {
 ///
 /// Split from [`masters_dir`] so both outcomes are testable without mutating
 /// the environment of a process running tests in parallel.
-#[must_use]
-fn masters_dir_from(value: Option<std::ffi::OsString>) -> PathBuf {
-    value.map_or_else(default_masters_dir, PathBuf::from)
+///
+/// # Errors
+///
+/// No value and no `HOME`. See [`default_masters_dir_from`].
+fn masters_dir_from(value: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    value.map_or_else(default_masters_dir, |v| Ok(PathBuf::from(v)))
 }
 
 /// The directory the bar store and its manifests are read from.
@@ -136,8 +145,11 @@ fn masters_dir_from(value: Option<std::ffi::OsString>) -> PathBuf {
 /// `BRUTEX_STORE`, or `$HOME/.brutex/store`. Split exactly as
 /// [`masters_dir`] is, and for the same reason: the environment is consulted in
 /// one place and every function below takes the directory as an argument.
-#[must_use]
-pub fn store_dir() -> PathBuf {
+///
+/// # Errors
+///
+/// Neither variable set. See [`store_dir_from`].
+pub fn store_dir() -> Result<PathBuf, String> {
     store_dir_from(std::env::var_os("BRUTEX_STORE"), std::env::var_os("HOME"))
 }
 
@@ -146,17 +158,51 @@ pub fn store_dir() -> PathBuf {
 /// Both outcomes have to be testable and a test cannot set either variable:
 /// `set_var` is `unsafe` under edition 2024, this crate forbids `unsafe`, and
 /// mutating process-wide state would race every other test in the binary.
-#[must_use]
-fn store_dir_from(value: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
-    value.map_or_else(
-        || {
-            home.map_or_else(
-                || PathBuf::from("."),
-                |h| PathBuf::from(h).join(".brutex").join("store"),
-            )
-        },
-        PathBuf::from,
-    )
+///
+/// # A relative fallback for the store is a REFUSAL, not a default
+///
+/// This returned `PathBuf::from(".")` when `HOME` was unset, and a test asserted
+/// it: *"no HOME is a broken environment, not a supported one"*. The sentence
+/// was right and the return value contradicted it. `.` is the process working
+/// directory, which for the run configuration this is launched from is the
+/// **repository checkout** — so the first append creates `bars/`, `manifest/`
+/// and `audit/` inside the git tree, under names CI gate 1 never sees because
+/// it walks `git ls-files` and these are untracked. The banner printed
+/// `store:   .`, which reads as a deliberate relative path rather than as a
+/// broken environment.
+///
+/// `CLAUDE.md` §8 is the governing rule and it is about configuration in
+/// general, not only about credentials: *a missing or malformed configuration
+/// halts loudly — there is no default and no fallback.* A store root is the
+/// most consequential path this process holds, so an absent one halts.
+///
+/// An explicit `BRUTEX_STORE` is honoured whatever it says, relative included:
+/// that is an operator's stated choice, and refusing a choice is a different
+/// act from inventing one.
+///
+/// # Errors
+///
+/// Both `BRUTEX_STORE` and `HOME` unset: a sentence naming both variables, the
+/// working directory the old fallback would have written into, and what to set.
+fn store_dir_from(
+    value: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    if let Some(value) = value {
+        return Ok(PathBuf::from(value));
+    }
+    let Some(home) = home else {
+        return Err(format!(
+            "REFUSED: no store root. BRUTEX_STORE is unset and so is HOME, so there is \
+             nothing to derive $HOME/.brutex/store from. This used to fall back to \
+             \".\" — the working directory, which here is {} — and the first append \
+             would have built bars/, manifest/ and audit/ inside it. Set BRUTEX_STORE \
+             to an absolute path, or run under an environment that has HOME.",
+            std::env::current_dir()
+                .map_or_else(|e| format!("unreadable ({e})"), |p| p.display().to_string())
+        ));
+    };
+    Ok(PathBuf::from(home).join(".brutex").join("store"))
 }
 
 /// Where the masters live when `BRUTEX_MASTERS` says nothing.
@@ -169,10 +215,13 @@ fn store_dir_from(value: Option<std::ffi::OsString>, home: Option<std::ffi::OsSt
 /// `UNAVAILABLE`, correctly reporting a real absence caused entirely by the
 /// default.
 ///
-/// Falls back to `.` only if `HOME` is unset, which is a broken environment
-/// rather than a supported one; the page then says `UNAVAILABLE` and names the
-/// vendor, as it does for any missing file.
-fn default_masters_dir() -> PathBuf {
+/// # Errors
+///
+/// `HOME` unset. That used to fall back to `.` and the page then said
+/// `UNAVAILABLE` for both vendors — a true sentence about a wrong directory,
+/// which is worse than a refusal because it names the vendor rather than the
+/// environment. See [`default_masters_dir_from`].
+fn default_masters_dir() -> Result<PathBuf, String> {
     default_masters_dir_from(std::env::var_os("HOME"))
 }
 
@@ -182,11 +231,25 @@ fn default_masters_dir() -> PathBuf {
 /// testable, and a test cannot unset `HOME` — `set_var` is `unsafe` under
 /// edition 2024, this crate forbids `unsafe`, and mutating process-wide state
 /// would race every other test in the binary.
-#[must_use]
-fn default_masters_dir_from(home: Option<std::ffi::OsString>) -> PathBuf {
+///
+/// # Errors
+///
+/// `HOME` unset, for the reason [`store_dir_from`] gives at length: a relative
+/// fallback is a wrong answer that reads like a chosen one, and `CLAUDE.md` §8
+/// leaves no default and no fallback for a configured path.
+fn default_masters_dir_from(home: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
     home.map_or_else(
-        || PathBuf::from("."),
-        |home| PathBuf::from(home).join(".brutex").join("masters"),
+        || {
+            Err(String::from(
+                "REFUSED: no masters directory. BRUTEX_MASTERS is unset and so is HOME, \
+                 so there is nothing to derive $HOME/.brutex/masters from. This used to \
+                 fall back to the working directory and then report both vendors as \
+                 missing, which names the wrong thing: the vendors were never looked \
+                 for where they live. Set BRUTEX_MASTERS to an absolute path, or run \
+                 under an environment that has HOME.",
+            ))
+        },
+        |home| Ok(PathBuf::from(home).join(".brutex").join("masters")),
     )
 }
 
@@ -204,7 +267,20 @@ pub struct Read {
     /// Distinct from a merge conflict, and tracked separately because "the two
     /// vendors disagree" and "there was only one vendor" are different facts
     /// that must not collapse into one status.
+    ///
+    /// Derived from [`Self::unread`] rather than set beside it, so the boolean
+    /// and the list cannot disagree.
     pub unavailable: bool,
+    /// WHICH vendor was never read, and what refused it.
+    ///
+    /// The boolean above answers "was any master missing" and every consumer
+    /// of it — `/health`, the exit code, the dashboard — asks exactly that.
+    /// `/instruments.json` asks a different question: the list it returns is
+    /// **one feed's**, so a Groww master that failed to decode empties the body
+    /// for `?feed=groww` and changes nothing for `?feed=dhan`. A boolean cannot
+    /// separate those two responses and the notes could only be grepped, so the
+    /// route returned `[]` at 200 either way. D-0124.
+    pub unread: Vec<(Vendor, String)>,
     /// How many rows were declined under a listing class nobody recognises.
     ///
     /// Not a merge disagreement — it is one vendor's file using a code this
@@ -224,6 +300,25 @@ pub struct Read {
     /// D-0042: the masters are parsed once into an `Arc<Site>`, and that parse
     /// is the only place a whole-universe pass may happen.
     pub catalog: Catalog,
+    /// What each published NSE tier resolves to, per vendor, keyed on
+    /// `(exchange, ISIN)`.
+    ///
+    /// Here for the same reason [`Self::catalog`] is: it is a whole-universe
+    /// pass, so it happens once at load and never on a request. Before D-0117
+    /// there was no join at all — `core` held the constituent lists, `master`
+    /// held the vendor rows, and nothing turned a tier into the ids a pull must
+    /// name. See [`constituents::Join`].
+    pub constituents: constituents::Join,
+    /// What each FEED can actually name in each spot target, and every name it
+    /// cannot.
+    ///
+    /// Here for the reason [`Self::catalog`] and [`Self::constituents`] are: it
+    /// is a whole-universe pass, so it happens once at load and never on a
+    /// request (D-0039/D-0042). The five list-defined targets are read straight
+    /// off [`Self::constituents`] — the join D-0117 built — so this holds no
+    /// second answer to "who is in the NIFTY 200", and the two master-counted
+    /// ones share one fold. See [`coverage::Coverage`]. D-0120.
+    pub coverage: coverage::Coverage,
 }
 
 impl Read {
@@ -235,19 +330,46 @@ impl Read {
     #[must_use]
     pub fn new(
         merged: merge::Merged,
-        notes: Vec<String>,
-        unavailable: bool,
+        mut notes: Vec<String>,
+        unread: Vec<(Vendor, String)>,
         unrecognised: usize,
         unreadable: usize,
     ) -> Self {
         let catalog = Catalog::build(&merged);
+        // THE JOIN IS BUILT HERE, AND ITS BUCKETS ARE NOTES.
+        //
+        // A tier that resolves to nothing for a feed is a result, and a result
+        // an operator never sees is the same as no result: the `/ingest`
+        // universe menu said `no target` beside every NIFTY tier and nothing
+        // anywhere said which names failed to resolve, or whether any had. Each
+        // line names the four buckets and their sum. D-0117.
+        let constituents = constituents::Join::build(&merged);
+        notes.extend(constituents.notes());
+        // AND WHAT EACH FEED REACHES, WHICH IS A DIFFERENT NUMBER.
+        //
+        // The join answers per `(vendor, tier)` for the five targets a
+        // published list defines. The two it cannot — the swept pair and the
+        // reference indices — have no published list to be a fraction of, and
+        // those are precisely the two where the universe count and the feed's
+        // reach diverge most: `indices` is 35 merged rows, of which Groww lists
+        // 24 and Dhan 15. A note per shortfall, so the divergence is on
+        // `/health` rather than discovered mid-run. D-0120.
+        let coverage = coverage::Coverage::build(&merged, &constituents);
+        notes.extend(coverage.notes());
         Self {
             merged,
             notes,
-            unavailable,
+            // ONE SOURCE, TWO SHAPES. `unavailable` was a separate `bool` a
+            // caller set beside the notes; nothing made the two agree, and a
+            // list that grows a vendor while the boolean stays false is the
+            // silent-degradation shape this file keeps finding. D-0124.
+            unavailable: !unread.is_empty(),
+            unread,
             unrecognised,
             unreadable,
             catalog,
+            constituents,
+            coverage,
         }
     }
 
@@ -286,6 +408,82 @@ impl Read {
     pub fn status(&self) -> &'static str {
         if self.is_clean() { "ok" } else { "DEGRADED" }
     }
+
+    /// What became of ONE feed's master, and the sentence that says why.
+    ///
+    /// [`Self::status`] answers for the whole read, which is what `/health` and
+    /// the exit code want. A route that returns one feed's list needs the
+    /// per-feed answer, because a Groww master that failed to decode empties
+    /// `?feed=groww` and leaves `?feed=dhan` complete — one status word cannot
+    /// carry both, and before D-0124 neither reached the caller at all.
+    #[must_use]
+    pub fn master(&self, vendor: Vendor) -> (MasterState, String) {
+        if let Some((_, why)) = self.unread.iter().find(|(v, _)| *v == vendor) {
+            return (
+                MasterState::Unavailable,
+                format!(
+                    "{}: UNAVAILABLE — {why}. The list below is what could be read, \
+                     which for this feed is nothing — it is NOT this feed listing \
+                     nothing.",
+                    vendor.as_str()
+                ),
+            );
+        }
+        if !Vendor::MASTERED.contains(&vendor) {
+            return (
+                MasterState::NotMastered,
+                format!(
+                    "{}: this build parses no instrument master for this feed, so it \
+                     names no instruments. An empty list is the true answer.",
+                    vendor.as_str()
+                ),
+            );
+        }
+        (
+            MasterState::Read,
+            format!(
+                "{}: master read; {} instrument(s) in the merged universe",
+                vendor.as_str(),
+                self.merged.by_key.len()
+            ),
+        )
+    }
+}
+
+/// What became of one feed's instrument master.
+///
+/// Three states and no boolean, for the reason [`Broker`] gives about its own
+/// pair: "this feed has no master in this build" and "this feed's master would
+/// not decode" produce the SAME empty list on `/instruments.json`, and only one
+/// of them is a failure. Collapsing them is the fallback that hides a failure
+/// `CLAUDE.md` §4 bans. D-0124.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MasterState {
+    /// The file was found and decoded. The list below it is real.
+    Read,
+    /// The file is one this build expects and it could not be read. Every
+    /// number derived from it is absent rather than zero.
+    Unavailable,
+    /// This feed has no master file in this build at all — it is an archive
+    /// source, not a broker whose scrip file is parsed. An empty list for it is
+    /// a true answer, not a failed read.
+    NotMastered,
+}
+
+impl MasterState {
+    /// The one stable word that goes on the wire.
+    ///
+    /// A total match rather than a `matches!` at each call site, for the reason
+    /// [`census::Census::name`] gives: a fourth state fails to compile here
+    /// rather than falling through a wildcard somewhere else.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Unavailable => "UNAVAILABLE",
+            Self::NotMastered => "not-mastered",
+        }
+    }
 }
 
 /// Every vendor's kept listings, merged, plus one note per vendor.
@@ -299,7 +497,7 @@ impl Read {
 pub fn universe(dir: &Path) -> Read {
     let mut notes = Vec::new();
     let mut sources = Vec::new();
-    let mut unavailable = false;
+    let mut unread: Vec<(Vendor, String)> = Vec::new();
     let mut unrecognised = 0;
     let mut unreadable = 0;
     for (vendor, path) in master_paths(dir) {
@@ -345,8 +543,12 @@ pub fn universe(dir: &Path) -> Read {
                 });
             }
             Err(e) => {
-                unavailable = true;
+                // THE REASON IS KEPT BESIDE THE VENDOR, not only inside a
+                // sentence. `notes` renders; it does not answer "was THIS feed
+                // read", and `/instruments.json` has to ask exactly that before
+                // it may call an empty list an empty universe. D-0124.
                 notes.push(format!("{}: UNAVAILABLE — {e}", vendor.as_str()));
+                unread.push((vendor, e));
             }
         }
     }
@@ -372,7 +574,7 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read::new(merged, notes, unavailable, unrecognised, unreadable)
+    Read::new(merged, notes, unread, unrecognised, unreadable)
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.
@@ -709,10 +911,30 @@ async fn page(
 /// Hand-written JSON rather than a serialiser, because adding one would be a
 /// dependency for six fields whose shapes are all known here, and every value
 /// below is escaped through [`render::json_string`] rather than trusted.
+///
+/// # Two silent answers this route used to give, and what now separates them
+///
+/// Both were `200` with no status anywhere on the wire, while `Read::notes` and
+/// [`Read::status`] — which `/health` reads and answers `503` from — sat one
+/// field away and were discarded here.
+///
+/// * **The counter would not load.** `rows_for` answers `None` for an
+///   unreadable census, so `bars_of` summed to `0` for every row and the page
+///   drew the same em dash a genuinely un-pulled instrument shows. The universe
+///   was intact; the count was not a measurement.
+/// * **The selected feed's master would not decode.** No row then carries that
+///   feed's id, the filter admits nothing, and the body is `[]` — indistinguishable
+///   from a feed that lists nothing. [`Read::master`] is the per-feed answer the
+///   whole-read boolean could not give.
+///
+/// Both now answer `503` and stamp the reason: [`UNIVERSE_STATUS_HEADER`],
+/// [`MASTER_STATE_HEADER`], [`MASTER_NOTE_HEADER`] and the three census headers
+/// [`census_headers`] writes. **The body shape does not move** — it is a JSON
+/// array in every state, exactly as it was. D-0124.
 async fn instruments_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     // THE LIST IS THE SELECTED FEED'S, NOT THE MERGE OF ALL OF THEM.
     //
     // This returned the merged universe whatever feed was chosen, so switching
@@ -825,12 +1047,160 @@ async fn instruments_json(
         );
     }
     out.push(']');
+
+    // THE READ'S OWN VERDICT, ON THE WIRE. `read.status()` and `read.master`
+    // were computed at startup and consulted by `/health` and the HTML pages
+    // and by nothing on this route, which is the whole defect: the numbers
+    // below are only measurements when the master decoded and the counter
+    // loaded, and until now nothing said which of those held.
+    let census = censuses.iter().find(|c| c.vendor == feed);
+    let (master, master_note) = site.read.master(feed);
+    let mut headers = census_headers(census);
+    headers.insert(
+        axum::http::HeaderName::from_static(UNIVERSE_STATUS_HEADER),
+        note_header(site.read.status()),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static(MASTER_STATE_HEADER),
+        axum::http::HeaderValue::from_static(master.name()),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static(MASTER_NOTE_HEADER),
+        note_header(&master_note),
+    );
+    // 503 FOR THE TWO STATES WHERE EVERY NUMBER BELOW IS ABSENT RATHER THAN
+    // MEASURED, and 200 for everything else — including a merge disagreement,
+    // which makes `status()` say `DEGRADED` while the list and the counts are
+    // both real. Refusing the type-ahead for a routine ISIN conflict would take
+    // the console down for a fact the header already carries.
+    let code = if census_is_unreadable(census) || master == MasterState::Unavailable {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    (code, headers, out)
+}
+
+/// One sentence saying how much of a target the chosen feed can actually name.
+///
+/// Three answers, and none of them is a bare number:
+///
+/// * the feed reaches everything the target holds — the count, and that it is
+///   all of it, so an operator is not left wondering what the denominator was;
+/// * the feed is short — both numbers and the first names, because "500
+///   requested, 486 fetched" with no list is the failure `CLAUDE.md` §4 calls a
+///   fallback that hides one;
+/// * the feed publishes no instrument master at all — an archive, whose folder
+///   of CSVs is its own listing, so the master has nothing to say and says so
+///   rather than reporting a zero it did not measure.
+///
+/// The names are capped at five with the remainder counted, and the cap is
+/// stated in the sentence. This is a fixed-width fact on an HTML receipt beside
+/// a journal record of 256 bytes; the whole list is on `/universes.json`, which
+/// is the surface that can carry it, and the sentence says so.
+fn reach_text(target: ingest::SpotTarget, feed: pull::vendor::Feed, site: &Site) -> String {
+    /// How many unresolved names the receipt spells before it counts the rest.
+    const SHOWN: usize = 5;
+    let Some(covered) = feed
+        .store_vendor()
+        .and_then(|vendor| site.read.coverage.of(vendor, target))
+    else {
+        return format!(
+            "{} publishes no instrument master — a folder of CSVs is its own listing — \
+             so the master cannot say, and nothing here counts on its behalf",
+            feed.display()
+        );
+    };
+    let short = covered.accounted().saturating_sub(covered.matched);
+    if short == 0 {
+        return format!(
+            "{} — every name this target holds, by {} id",
+            covered.matched,
+            feed.display()
+        );
+    }
+    let names: Vec<&str> = covered
+        .unresolved
+        .iter()
+        .take(SHOWN)
+        .map(|u| u.symbol.as_str())
+        .collect();
+    let rest = short.saturating_sub(names.len());
+    let tail = if rest == 0 {
+        String::new()
+    } else {
+        format!(" and {rest} more")
+    };
+    format!(
+        "{} of {} — {short} cannot be named by {}: {}{tail}. Every one of them, with its \
+         reason, is on /universes.json?feed={}",
+        covered.matched,
+        covered.accounted(),
+        feed.display(),
+        names.join(", "),
+        feed.wire(),
+    )
+}
+
+/// What each spot target resolves to FOR ONE FEED — the counts, and every name
+/// that did not resolve.
+///
+/// # The route the `/ingest` universe menu was missing
+///
+/// That menu drew four NIFTY tiers as `no target` and could not do otherwise:
+/// nothing on the wire said what a tier resolves to for the selected feed, so a
+/// page could either disable the row or synthesise a request the server cannot
+/// honour. `/instruments.json` carries the membership — the `universes` array
+/// has named `n500`, `n200`, `n100` and `n50` since D-0089 — but membership is
+/// not reachability. A NIFTY 50 constituent that Groww's master has no row for
+/// is in the tier and cannot be fetched from that feed, and folding
+/// `/instruments.json` rows counts it or does not depending on which of two
+/// filters a browser happens to apply.
+///
+/// This answers the question directly, once per feed: the slug to POST as
+/// `target=`, the number that belongs on the control, and the buckets behind
+/// the shortfall. D-0120.
+///
+/// # Cost
+///
+/// One [`coverage::Coverage::of`] per target — seven array indices — plus the
+/// string. Nothing walks the universe: [`Read::coverage`] was built at load
+/// (D-0039/D-0042), and the only thing that grows with the answer is the
+/// `unresolved` list, which is the whole reason the operator asked.
+///
+/// A feed this build cannot read is REFUSED BY NAME rather than answered as
+/// Dhan. `/instruments.json` defaults an unknown feed and that is a shipped
+/// behaviour this does not copy: a page that mistypes a feed here would
+/// otherwise enable four controls against a set the other broker reaches.
+async fn universe_reach_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    String,
+) {
+    let json = "application/json; charset=utf-8";
+    let asked = param(uri.query().unwrap_or(""), "feed");
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        let known: Vec<&str> = Vendor::ALL.into_iter().map(Vendor::as_str).collect();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            [(axum::http::header::CONTENT_TYPE, json)],
+            format!(
+                r#"{{"refused":{},"feed":{}}}"#,
+                render::json_string(&format!(
+                    "this build reads no feed called that. The feeds it knows are {}.",
+                    known.join(", ")
+                )),
+                render::json_string(&asked),
+            ),
+        );
+    };
     (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        out,
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, json)],
+        site.read.coverage.json(feed),
     )
 }
 
@@ -934,12 +1304,101 @@ fn claim_fields(
     )
 }
 
+/// The wire word for what one record at a feed's finest rung IS.
+///
+/// Its own function, and not an arm inlined into `finest_fields`, for one
+/// reason: `FinestKind::Tick` is constructed by NO descriptor in this build and
+/// the `const` block under `DESCRIPTORS` makes a row that claims one a build
+/// failure. An arm nothing reaches is an uncovered region, and a region that
+/// can never run is the thing `CLAUDE.md` §9's 100% floor has no way to
+/// forgive. Lifted out, all three arms are reachable from a test that names
+/// them — see `finest_kind_words_are_three_and_the_tick_word_is_one_of_them`.
+///
+/// The word is `snapshot` rather than `conflated_snapshot` because it is a KEY,
+/// and `label` beside it carries the sentence.
+const fn finest_kind_word(kind: pull::vendor::FinestKind) -> &'static str {
+    match kind {
+        pull::vendor::FinestKind::Tick => "tick",
+        pull::vendor::FinestKind::ConflatedSnapshot => "snapshot",
+        pull::vendor::FinestKind::Bar => "bar",
+    }
+}
+
+/// One feed's GRANULARITY FLOOR, as a JSON object.
+///
+/// The finest rung this vendor can **ever** serve, what one record at that rung
+/// is, why nothing finer exists in the vendor's own terms, and where those
+/// words were read — `pull::vendor::GranularityFloor`, whole, with nothing
+/// paraphrased on the way out.
+///
+/// # Why the whole thing crosses, rather than the number
+///
+/// Because the number is the half that cannot be trusted alone. Two of the four
+/// feeds bottom out at one second and NEITHER serves a tick: what sits on that
+/// second is a conflated snapshot of the best bid, the best ask and the best
+/// last price, and every print between two snapshots was discarded before the
+/// file was written and cannot be recovered by any reader. A page handed `1s`
+/// and nothing else is free to write *tick* beside it — a claim about the data
+/// that the data does not support, made in a label, which is exactly the
+/// substitution `CLAUDE.md` §4 bans.
+///
+/// So `kind` travels as a word, and `tick_stream` and `conflated` travel beside
+/// it as `FinestKind::is_tick_stream` and `FinestKind::is_conflated` — the two
+/// questions that decide what may be printed next to a number, answered here by
+/// the enum rather than by a reader matching on a string and getting it subtly
+/// different. `because` and `source` travel verbatim: `CLAUDE.md` §3 rule 1
+/// makes a vendor claim with no source indistinguishable from one somebody
+/// typed, and a browser that received the claim without the citation would have
+/// nothing to show an operator who asks how it is known.
+///
+/// One field read, three `const fn` calls and no allocation beyond the strings
+/// the descriptor already holds. No filesystem call — this route renders on
+/// every page load, which is why the folder's REACH is `/folder.json` and not
+/// here.
+fn finest_fields(feed: pull::vendor::Feed) -> String {
+    let floor = feed.descriptor().granularity_floor;
+    format!(
+        r#"{{"rung":{},"kind":{},"label":{},"tick_stream":{},"conflated":{},"because":{},"source":{}}}"#,
+        render::json_string(floor.finest.dir()),
+        render::json_string(finest_kind_word(floor.kind)),
+        render::json_string(floor.kind.label()),
+        floor.kind.is_tick_stream(),
+        floor.kind.is_conflated(),
+        render::json_string(floor.because),
+        render::json_string(floor.source),
+    )
+}
+
 /// Every feed this build can read, for the browser's feed selector.
 ///
 /// Built from `DESCRIPTORS`, so a fifth feed appears in the UI the day its row
-/// exists and nothing in the front end names a vendor. `transport` is included
-/// because it is what decides which of the other controls mean anything — an
-/// archive feed has no token, no rate budget and no window rules.
+/// exists and nothing in the front end names a vendor.
+///
+/// # `kind` — REST or a folder, and it is emitted ONCE
+///
+/// This route used to carry the same two-valued fact TWICE: a `transport` word
+/// (`broker` / `archive`) matched off `Transport`'s two arms right here, and a
+/// `kind` word (`rest` / `folder`) read from `pull::vendor::SourceKind`. Two
+/// spellings of one split, produced by two independent `match`es in one
+/// function, is the defect this endpoint exists to remove rather than an
+/// example of it — and the browser had begun cross-deriving them, reading
+/// `kind` with a fallback that guessed it from `transport`.
+///
+/// `transport` is GONE from the wire. `kind`, `kind_label` and `verb` are all
+/// `SourceKind`'s, all `const fn`, and the enum is reached exactly once per feed
+/// through `Feed::source_kind`. Everything that turns on the split — whether a
+/// credential is required, whether a quota exists, whether a history floor is
+/// the right question, and whether the honest verb is *pull* or *read* — is
+/// asked of that one value.
+///
+/// # `finest` — how FINE this vendor can ever answer, and who says so
+///
+/// A second floor, and not the first one. `history` below answers *how far
+/// back*; this answers *how fine*, and only one of the two refusals is
+/// permanent. See `finest_fields`, which also says why the tick-versus-conflated
+/// distinction crosses the wire as a field instead of being left to a reader.
+///
+/// # `history` — how far back each rung answers, and who says so
 ///
 /// # `history` — how far back each rung answers, and who says so
 ///
@@ -970,10 +1429,15 @@ async fn feeds_json(
         if n > 0 {
             out.push(',');
         }
-        let transport = match feed.descriptor().transport {
-            pull::vendor::Transport::Http(_) => "broker",
-            pull::vendor::Transport::LocalArchive(_) => "archive",
-        };
+        // WHERE THIS FEED'S BYTES COME FROM, READ ONCE.
+        //
+        // Every question below that used to `match` on `Transport`'s two arms
+        // separately — the emitted word, and whether an empty store means "not
+        // pulled yet" or "not bought" — is asked of this one value. Three
+        // independent matches on one enum in one function is three chances to
+        // disagree, and the third of them is what decided whether a feed was
+        // offered at all.
+        let kind = feed.source_kind();
 
         // THE HISTORY FLOORS, ONE ROW PER RUNG.
         //
@@ -1039,12 +1503,14 @@ async fn feeds_json(
         //
         // An ARCHIVE is different: there is no credential, so the only evidence
         // of ownership is data read from files the operator bought.
-        let is_broker = matches!(
-            feed.descriptor().transport,
-            pull::vendor::Transport::Http(_)
-        );
+        //
+        // ASKED AS "DOES A CREDENTIAL PROVE ENTITLEMENT HERE", which is
+        // `SourceKind::needs_credential` and is the actual reason, rather than
+        // as a second `match` on the transport that happens to land the same
+        // way. The two were separate and could have drifted; the predicate is
+        // now the same value `kind`, `kind_label` and `verb` are read from.
         let (ready, why) = match held {
-            _ if is_broker => (true, String::new()),
+            _ if kind.needs_credential() => (true, String::new()),
             Some(n) if n > 0 => (true, String::new()),
             Some(_) => (
                 false,
@@ -1062,13 +1528,34 @@ async fn feeds_json(
             ),
         };
 
+        // THE KIND, ITS LABEL AND THE VERB — ALL THREE FROM ONE VALUE, ALL
+        // THREE FREE.
+        //
+        // `kind` is `pull::vendor::SourceKind`, the operator's rule of 12 Aug
+        // 2026 as a type. `kind_label` is that type's own words, so a page and
+        // a refusal cannot call the same feed two different things — the page
+        // used to print `transport`, whose words (`broker`, `archive`) were
+        // this file's and nothing else's. `verb` is the honest word for getting
+        // data out of it: a folder is READ, never pulled. All three are
+        // `const fn`, so none costs a filesystem call and all three can sit on
+        // this per-render path.
+        //
+        // The REACH of a folder feed is NOT here: it cannot be answered
+        // without walking the folder, and this route renders on every page
+        // load. `/folder.json` answers it on demand — see `crate::folder`.
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"transport":{},"ready":{ready},"why":{},"history":{history}}}"#,
+            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},"finest":{finest},"history":{history}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
-            render::json_string(transport),
+            render::json_string(match kind {
+                pull::vendor::SourceKind::Rest => "rest",
+                pull::vendor::SourceKind::Folder => "folder",
+            }),
+            render::json_string(kind.label()),
+            render::json_string(kind.verb()),
             render::json_string(&why),
+            finest = finest_fields(feed),
         );
     }
     out.push(']');
@@ -1547,6 +2034,155 @@ fn month_before(month: store::path::YearMonth) -> Option<store::path::YearMonth>
     store::path::YearMonth::new(year, ordinal).ok()
 }
 
+/// The state of the selected feed's census, as one stable word.
+///
+/// `held` · `absent` · `unreadable` — [`census::Census::name`]'s words, which
+/// are `/audit.json`'s words. A feed with no census row in this build reads
+/// `absent`, exactly as `audit_json::store_block` renders it, so the two
+/// surfaces cannot drift into two vocabularies for one fact.
+pub const CENSUS_STATE_HEADER: &str = "x-brutex-census-state";
+/// The sentence [`census::VendorCensus::note`] produces for that state.
+pub const CENSUS_NOTE_HEADER: &str = "x-brutex-census-note";
+/// What loading the census had to step over, or empty when it stepped over
+/// nothing. `/audit.json` writes `null` here; a header has no `null`, and an
+/// **always-present, sometimes-empty** value keeps "nothing was stepped over"
+/// and "this build does not say" apart — an absent header is the second.
+pub const CENSUS_DEGRADED_HEADER: &str = "x-brutex-census-degraded";
+/// [`Read::status`] — `ok` or `DEGRADED`, the same word `/health` answers with.
+pub const UNIVERSE_STATUS_HEADER: &str = "x-brutex-universe-status";
+/// [`MasterState::name`] for the feed the request named.
+pub const MASTER_STATE_HEADER: &str = "x-brutex-master-state";
+/// The sentence behind [`MASTER_STATE_HEADER`].
+pub const MASTER_NOTE_HEADER: &str = "x-brutex-master-note";
+
+/// The longest a stamped note may be.
+///
+/// A note carries a filesystem path and a refusal in the refusal's own words,
+/// and neither is bounded by anything this crate owns. `docs/07-o1-architecture.md`
+/// law 5 is bound every input at the boundary, and a response header block is a
+/// boundary: an unbounded one is a request-sized allocation an operator's own
+/// directory name decides. Truncation is marked, never silent.
+const NOTE_HEADER_CHARS: usize = 400;
+
+/// One note, in the only alphabet a header value may hold.
+///
+/// # Why a sanitiser rather than a fallible conversion
+///
+/// `HeaderValue::from_str` refuses anything outside visible ASCII, and every
+/// string stamped here holds a path — which on this platform is arbitrary bytes
+/// — and a vendor's own refusal text, which has already been observed to carry
+/// `·` and `—`. A `unwrap_or(<empty>)` at the call site would answer a corrupt
+/// census with a BLANK reason, which is the failure this whole change exists to
+/// remove, arriving one layer lower down. So the alphabet is enforced here and
+/// the conversion below cannot fail.
+///
+/// Every character outside `0x20..=0x7E` becomes `?`; the count is preserved so
+/// a mangled note still reads as a note. Truncation is marked with `...`.
+///
+/// # Why the conversion below has no failure arm
+///
+/// `HeaderValue::from_str` refuses a byte outside `0x20..=0x7E`, and every byte
+/// this builds is inside it. A `Result` arm here would be a project region no
+/// input could enter, which the coverage gate cannot hold and `unreachable!()`
+/// would only rename. [`note_alphabet`] is the guarantee, and
+/// `api::server::a_hostile_note_is_still_a_header` is what holds it up.
+#[allow(
+    clippy::expect_used,
+    reason = "`note_alphabet` emits only 0x20..=0x7E, which is exactly the \
+              alphabet a header value admits, so this cannot refuse. A fallback \
+              arm would be a project region no input could enter, which the \
+              coverage gate cannot hold and `unreachable!()` would only rename; \
+              the panic named here lives in `http`."
+)]
+fn note_header(text: &str) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(&note_alphabet(text))
+        .expect("a sanitised note is visible ASCII")
+}
+
+/// One note, reduced to the alphabet a header value admits and bounded.
+///
+/// Split from [`note_header`] so the alphabet is assertable directly, against
+/// inputs a fixture can hold — a header value's own accessor hands back bytes
+/// and would make the test about `http`'s parser rather than about this rule.
+fn note_alphabet(text: &str) -> String {
+    let mut clean = String::with_capacity(text.len().min(NOTE_HEADER_CHARS));
+    for (n, ch) in text.chars().enumerate() {
+        if n >= NOTE_HEADER_CHARS {
+            clean.push_str("...");
+            break;
+        }
+        clean.push(if ch.is_ascii_graphic() || ch == ' ' {
+            ch
+        } else {
+            '?'
+        });
+    }
+    clean
+}
+
+/// The three census facts, stamped on a JSON response that cannot carry them
+/// in its body.
+///
+/// # Why headers and not a field
+///
+/// `/store.json` answers a JSON **array** and `/db` reads it as one —
+/// `rows = Array.isArray(j) ? j : []`. Wrapping the rows in an object to make
+/// room for a status would turn every existing reader into a reader of `[]`,
+/// which is the very outcome being fixed. A header is additive: an array stays
+/// an array, and a reader that wants the reason asks for it by name.
+///
+/// # What a page must read
+///
+/// `r.headers.get('x-brutex-census-state')` — `unreadable` means the array is
+/// EMPTY BECAUSE THE COUNTER IS DAMAGED, not because the store is. The sentence
+/// to show is `x-brutex-census-note`. The response also carries a non-200 for
+/// that state, so a reader that only checks `r.ok` stops calling it empty.
+/// D-0124.
+fn census_headers(census: Option<&census::VendorCensus>) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_STATE_HEADER),
+        axum::http::HeaderValue::from_static(match census.map(|c| &c.state) {
+            Some(census::Census::Held { .. }) => "held",
+            Some(census::Census::Unreadable { .. }) => "unreadable",
+            // A feed with no row is `absent`, which is what
+            // `audit_json::store_block` already answers for the same input.
+            Some(census::Census::Absent) | None => "absent",
+        }),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_NOTE_HEADER),
+        note_header(&census.map_or_else(
+            || String::from("no census row for this feed in this build"),
+            census::VendorCensus::note,
+        )),
+    );
+    headers.insert(
+        axum::http::HeaderName::from_static(CENSUS_DEGRADED_HEADER),
+        note_header(
+            &census
+                .and_then(census::VendorCensus::degraded)
+                .unwrap_or_default(),
+        ),
+    );
+    headers
+}
+
+/// Whether the selected feed's counter refused to load.
+///
+/// The one state where a body of `[]` and a body of every row this store holds
+/// are produced by the same code path, and the reason a status code moves.
+fn census_is_unreadable(census: Option<&census::VendorCensus>) -> bool {
+    matches!(
+        census.map(|c| &c.state),
+        Some(census::Census::Unreadable { .. })
+    )
+}
+
 /// The census row for one key — the counters and the closes in **one probe**.
 ///
 /// `pull::manifest::Manifest::held` is one hash probe into a table the load
@@ -1712,24 +2348,47 @@ fn store_body(
 /// is a real month that closed where it opened. The five codes are
 /// [`Unknown::code`]: `corporate_action_unverified`, `not_recorded`,
 /// `no_earlier_month`, `base_not_positive`, `overflow`.
+///
+/// # An empty array is not one fact, and it used to be answered as one
+///
+/// `held_row` folds `Census::Absent` and `Census::Unreadable` into the same
+/// `None`, so every row was skipped either way and the body was `[]` at 200
+/// with nothing else on the wire. **A corrupt manifest over a store holding
+/// millions of bars was byte-identical to a store holding none** — asserted
+/// equal, socket to socket — and `/db` then rendered "this feed holds no bars",
+/// which is a claim about the store made from a fact about its counter.
+///
+/// Two things now separate them, and neither changes the body's SHAPE:
+///
+/// * the status is `503` when the counter would not load, so a reader that only
+///   tests `r.ok` leaves the success path;
+/// * [`CENSUS_STATE_HEADER`], [`CENSUS_NOTE_HEADER`] and
+///   [`CENSUS_DEGRADED_HEADER`] carry `/audit.json`'s own three words.
+///
+/// A consumer expecting an array still receives an array, in every state.
+/// D-0124.
 async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
-) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     let query = uri.query().unwrap_or("");
     let feed =
         ingest::parse_vendor(&param(query, "feed")).unwrap_or(brutex_core::vendor::Vendor::Dhan);
 
     // FRESH, NOT THE STARTUP SNAPSHOT. See `census_now`.
     let (censuses, entries) = census_now(&site);
+    let census = censuses.iter().find(|c| c.vendor == feed);
+    // 503, FOR THE REASON `health` GIVES: a monitor reads the status code and
+    // nothing else. The body stays an array so the readers that only want rows
+    // are untouched.
+    let code = if census_is_unreadable(census) {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    let headers = census_headers(census);
 
-    (
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "application/json; charset=utf-8",
-        )],
-        store_body(&censuses, &entries, feed),
-    )
+    (code, headers, store_body(&censuses, &entries, feed))
 }
 
 /// The health endpoint.
@@ -1943,14 +2602,22 @@ pub struct Site {
     /// [`Site::load`], which only the served process calls — and left
     /// [`Broker::Refused`] everywhere else.
     pub broker: Broker,
-    /// How many instruments each spot target covers, in
-    /// [`ingest::SpotTarget::ALL`] order.
+    /// How many instruments each spot target covers **in the merged
+    /// universe**, in [`ingest::SpotTarget::ALL`] order.
     ///
     /// Counted once, here, rather than folded over the universe per request:
     /// the form shows a real number and the page still costs O(rows shown).
     /// Sized from the enum, not from a literal. It was `[usize; 3]` and D-0105
     /// appended four targets; a hand-written length is a second place the
     /// target count lives, and the shorter of the two silently drops the tail.
+    ///
+    /// **FEED-AGNOSTIC, AND THAT IS NOT THE NUMBER FOR A BUTTON.** This is what
+    /// NSE and the two masters between them name — the union. A pull runs
+    /// against ONE feed, and a feed can only fetch what its own master gives it
+    /// an id for: `indices` is 35 here and Groww lists 24 of them. Anything
+    /// that knows which feed was chosen must read [`Self::coverage`] instead;
+    /// this stays because "how big is this set" is a real question and the
+    /// legacy `/pull` form is rendered before a feed is picked. D-0120.
     pub targets: [usize; ingest::SpotTarget::ALL.len()],
     /// Where the manifests were read from, named on the page so an absence is
     /// actionable rather than mysterious.
@@ -2467,11 +3134,24 @@ async fn spot_answer(
                 .into_iter()
                 .position(|t| t == asked.target)
                 .unwrap_or(0);
+            let in_universe = site.targets.get(slot).copied().unwrap_or(0);
             let mut facts = vec![
                 ("Target", asked.target.label().to_owned()),
                 (
                     "Instruments covered",
-                    site.targets.get(slot).copied().unwrap_or(0).to_string(),
+                    format!("{in_universe} in the merged universe"),
+                ),
+                // THE SECOND NUMBER, AND IT IS THE ONE THAT DECIDES.
+                //
+                // The receipt used to print the line above alone. It is the
+                // union of what both masters name, and this run reaches exactly
+                // one feed: on the masters read on 2026-08-12, `indices` is 35
+                // there and Groww lists 24 of them. An operator was told 35,
+                // watched eleven instruments refuse by name, and had nothing on
+                // the receipt that had predicted it. D-0120.
+                (
+                    "This feed can name",
+                    reach_text(asked.target, asked.feed, site),
                 ),
             ];
             facts.extend(window_facts(asked.window));
@@ -2520,6 +3200,19 @@ async fn spot_answer(
                         let why = ingest::Refusal::ArchiveFolderMissing {
                             feed: asked.feed.display(),
                         };
+                        // NOTED LIKE EVERY OTHER REFUSAL. This variant was the
+                        // one built HERE rather than inside `parse_spot_inner`,
+                        // so it never passed through `note_refused` and was the
+                        // only refusal shape invisible in the log — which makes
+                        // the log imply it never happens. The journal entry below
+                        // is the audit record, not a log event; the two surfaces
+                        // are separate and an operator reading `/logs` saw
+                        // nothing.
+                        //
+                        // "One event per submission" still holds by construction:
+                        // `parse_spot` returned `Ok` for this body, so no earlier
+                        // "form refused" event exists for it.
+                        ingest::note_refused("spot", &why);
                         let record = audit::Record::refused(
                             audit::Scope::Spot,
                             audit::Outcome::Refused,
@@ -4215,6 +4908,25 @@ fn run_local(
         // always was, and this argument did not narrow it.
         granularity,
     };
+    // THE COLUMN SHAPE IS STILL A LITERAL HERE, AND IT IS A KNOWN DEFECT.
+    //
+    // `Columns::Gdfl` is GDFL's ten-column shape, used for EVERY archive feed.
+    // `TrueData`'s index rows carry five (`docs/08-vendor-samples.md`), so this
+    // constant decodes one of the two vendors against the other's shape.
+    //
+    // The measured shape now EXISTS to read — `ColumnLayout::shape`, keyed on
+    // `(feed, segment)` and cross-checked against the layout's own column list
+    // by a `const` block in `pull::vendor` — and `crate::folder` reads it.
+    // This site cannot simply take it, because the segment below is also a
+    // literal: this function files every archive bar under `FNO`, and
+    // `TrueData` declares a layout for `INDEX` only. Deriving the shape without
+    // also deciding the segment turns a wrong decode into a refusal for the
+    // one feed whose files this path is exercised with.
+    //
+    // Left as it stands, deliberately and named, rather than half-fixed. The
+    // segment is a store-path decision — it decides where bars are FILED — and
+    // `CLAUDE.md` §8's append-only rule means getting it wrong writes a
+    // directory nothing can rename. Recorded in `docs/06-limits.md`.
     let plan = pull::ingest::Plan {
         columns: pull::csv::Columns::Gdfl,
         request: &request,
@@ -4228,11 +4940,54 @@ fn run_local(
         .map_err(|why| why.to_string())
 }
 
+/// Names this response as a pull receipt written by this build.
+///
+/// # Why a receipt has to say that it is one
+///
+/// `/pull/spot` answers `text/html`, and the page parses the answer by looking
+/// for a `.badge` element and a `table.kv`. A `200` carrying HTML that is **not
+/// a receipt** — an authenticating proxy's interstitial, a captive portal, a
+/// misdirected origin, or this build's own markup after a rename — finds
+/// neither, and the parser falls open: `verdict: badge?.textContent?.trim() ||
+/// (ok ? 'OK' : ...)` yields the string `OK`, and `good: badge ? ... : ok`
+/// yields `true`. A request that never reached this process renders a green
+/// dot reading OK with a blank reason, and every instrument is then classified
+/// "already held" or "no bars landed" rather than "the request never arrived".
+///
+/// A content type cannot separate the two, because a receipt legitimately IS
+/// `text/html`. A header this handler writes can: nothing between the browser
+/// and this function has any reason to invent it, and it is stamped on **every**
+/// answer this handler gives — the refusals as well as the successes, so a
+/// reader may require it unconditionally.
+///
+/// # What the page must read
+///
+/// `r.headers.get('x-brutex-receipt') === 'pull-spot'` before `readReceipt` is
+/// called at all. Anything else is not a receipt and must render as "this
+/// answer did not come from the API" rather than as a verdict. D-0124.
+pub const RECEIPT_HEADER: &str = "x-brutex-receipt";
+
+/// The value [`RECEIPT_HEADER`] carries on a spot-pull answer.
+pub const SPOT_RECEIPT: &str = "pull-spot";
+
 /// Starting a spot pull. **POST only.**
 async fn pull_spot(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
-) -> (axum::http::StatusCode, axum::response::Html<String>) {
+) -> (
+    axum::http::StatusCode,
+    [(axum::http::HeaderName, &'static str); 1],
+    axum::response::Html<String>,
+) {
+    // ONE STAMP, EVERY ARM. Built once here rather than at each `return`, so a
+    // later arm cannot be the one that forgets it — the receipt marker is only
+    // worth requiring if it is unconditional.
+    let receipt = || {
+        [(
+            axum::http::HeaderName::from_static(RECEIPT_HEADER),
+            SPOT_RECEIPT,
+        )]
+    };
     // ONE READING OF THE CLOCK, USED TWICE. The day the gate checks against and
     // the second stamped into the record come from the same `SystemTime`, so a
     // request that straddles midnight cannot be gated against one day and
@@ -4249,6 +5004,7 @@ async fn pull_spot(
     let Some(_seat) = site.autopilot.take_seat() else {
         return (
             axum::http::StatusCode::CONFLICT,
+            receipt(),
             axum::response::Html(accepted_html(
                 "Spot pull",
                 vec![(
@@ -4276,7 +5032,7 @@ async fn pull_spot(
             refusal_html("Spot pull", &why),
         ),
     };
-    (code, axum::response::Html(page))
+    (code, receipt(), axum::response::Html(page))
 }
 
 /// What one expired-series request is answered with, given a day to check the
@@ -4914,6 +5670,18 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         // saw. D-0052.
         .route("/instruments.json", axum::routing::get(instruments_json))
         .route("/feeds.json", axum::routing::get(feeds_json))
+        // WHAT A UNIVERSE RESOLVES TO FOR THE SELECTED FEED. The one thing
+        // `/ingest` needed to stop drawing four tiers as `no target`, and the
+        // one thing no route said. D-0120.
+        .route("/universes.json", axum::routing::get(universe_reach_json))
+        // HOW FAR A FOLDER FEED REACHES — the files present, and nothing else.
+        // Its own route rather than a field on `/feeds.json` because answering
+        // it means WALKING the folder, and `/feeds.json` renders on every page
+        // load. See `crate::folder`.
+        .route(
+            "/folder.json",
+            axum::routing::get(crate::folder::folder_json),
+        )
         .route("/bars.json", axum::routing::get(bars_json))
         .route("/store.json", axum::routing::get(store_json))
         // READ FROM DISK, NOT `include_str!`. It is a file under `web/`, and a
@@ -5022,6 +5790,18 @@ fn stopped(outcome: std::io::Result<()>) -> u8 {
     match outcome {
         Ok(()) => OK,
         Err(e) => {
+            // THE EVENT FIRST. A server that stopped on an error is the single
+            // most important line in any post-mortem, and printing it to stderr
+            // alone means it exists only for whoever was watching the terminal
+            // at the time. The log file is what gets handed to a diagnosis.
+            let _noted = telemetry::emit(
+                &telemetry::Event::new(
+                    telemetry::Level::Error,
+                    "api.server",
+                    "the server stopped on an error",
+                )
+                .with("why", telemetry::Value::Str(&e.to_string())),
+            );
             eprintln!("server stopped: {e}");
             FAILED
         }
@@ -5065,7 +5845,29 @@ fn reported(dir: &Path) -> u8 {
 /// Returns the exit code as a number rather than calling `exit`, so the whole
 /// thing — every arm of it — is callable from a test.
 pub async fn run(args: &[String], shutdown: Shutdown) -> u8 {
-    run_in(&masters_dir(), args, shutdown).await
+    run_from(masters_dir(), args, shutdown).await
+}
+
+/// [`run`], over a masters directory the environment may not have named.
+///
+/// Split for the reason [`run_in`] is split from [`run`], and this time for a
+/// branch rather than for a path: the refusal arm below is only reachable on a
+/// machine with no `HOME` and no `BRUTEX_MASTERS`, which no test may create —
+/// `set_var` is `unsafe` under edition 2024 and this crate forbids `unsafe`.
+/// Taking the `Result` as an argument makes both arms drivable.
+async fn run_from(dir: Result<PathBuf, String>, args: &[String], shutdown: Shutdown) -> u8 {
+    // A DIRECTORY THAT COULD NOT BE DERIVED IS NOT A DIRECTORY. `.` used to
+    // stand in here, and the report it produced named two vendors as missing
+    // rather than naming the environment that never pointed at them. `FAILED`
+    // and not `DEGRADED`: nothing was read, so there is no output whose trust
+    // is in question. D-0124.
+    match dir {
+        Ok(dir) => run_in(&dir, args, shutdown).await,
+        Err(why) => {
+            eprintln!("{why}");
+            FAILED
+        }
+    }
 }
 
 /// The environment variable naming where the rolling log is written.
@@ -5360,8 +6162,35 @@ fn log_dir_from(
 /// Read here rather than threaded through [`run_in`] for the same reason
 /// [`masters_dir`] is read in [`run`]: the environment is consulted once, at
 /// the edge, and everything below takes a path.
-fn served_store_root() -> PathBuf {
+///
+/// # Errors
+///
+/// The environment names no store root. See [`store_dir_from`].
+fn served_store_root() -> Result<PathBuf, String> {
     store_dir()
+}
+
+/// The two banner lines about the rolling log, or the one that says there is
+/// none.
+///
+/// Split out of [`run_in`], which is at `clippy::too_many_lines`' bound. That
+/// bound is not a style rule here: a function that must grow to add a refusal
+/// is a function whose next refusal gets left out, and this change added one.
+/// The install itself stays in [`run_in`] because the log is opened **before**
+/// the first line is printed, and moving the call would move that.
+fn announce_log(logging: Result<&&'static telemetry::Sink, &String>, level_note: &str) {
+    match logging {
+        Ok(sink) => {
+            println!(
+                "  log:     {} (rolling, {} files x {} MiB ceiling)",
+                sink.path().display(),
+                telemetry::DEFAULT_KEEP_FILES,
+                telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
+            );
+            println!("  level:   {level_note}");
+        }
+        Err(why) => println!("  log:     NOT WRITABLE — {why}"),
+    }
 }
 
 /// [`run`], over a directory the caller names.
@@ -5381,11 +6210,37 @@ fn served_store_root() -> PathBuf {
 /// Taking the directory as an argument makes the answer a property of the
 /// files, which a test owns, rather than of the machine, which it does not.
 async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
+    run_in_over(dir, served_store_root(), args, shutdown).await
+}
+
+/// [`run_in`], over a store root the environment may not have named.
+///
+/// The third layer of the same split, for the same reason and for a branch this
+/// time: `served_store_root` reads the environment, so the refusal arm is only
+/// reachable on a machine with no `HOME` and no `BRUTEX_STORE`. A test cannot
+/// make one — `set_var` is `unsafe` and this crate forbids `unsafe` — so the
+/// value is taken as an argument and both arms are drivable.
+async fn run_in_over(
+    dir: &Path,
+    store: Result<PathBuf, String>,
+    args: &[String],
+    shutdown: Shutdown,
+) -> u8 {
     match Command::parse(args) {
         Ok(Command::Report) => reported(dir),
         Ok(Command::Serve(addr)) => match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
-                let store_root = served_store_root();
+                // BEFORE ANYTHING IS OPENED OR CREATED. A store root the
+                // environment could not name is a refusal, not a `.`, and the
+                // listener is dropped unserved rather than bound over a tree
+                // the first append would have built inside the checkout.
+                let store_root = match store {
+                    Ok(root) => root,
+                    Err(why) => {
+                        eprintln!("{why}");
+                        return FAILED;
+                    }
+                };
                 // THE LOG IS OPENED BEFORE THE FIRST LINE IS PRINTED.
                 //
                 // Installed here rather than inside `Site::serving` because a
@@ -5408,24 +6263,13 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
                 // known, rather than threaded into a parser.
                 let (asked, level_note) = served_log_level();
                 let logging = telemetry::install(&telemetry::Config {
-                    dir: log_dir.clone(),
+                    dir: log_dir,
                     ..asked
                 });
                 println!("brutex api listening on http://{addr}/");
                 println!("  masters: {}", dir.display());
                 println!("  store:   {}", store_root.display());
-                match &logging {
-                    Ok(sink) => {
-                        println!(
-                            "  log:     {} (rolling, {} files x {} MiB ceiling)",
-                            sink.path().display(),
-                            telemetry::DEFAULT_KEEP_FILES,
-                            telemetry::DEFAULT_MAX_FILE_BYTES / (1024 * 1024),
-                        );
-                        println!("  level:   {level_note}");
-                    }
-                    Err(why) => println!("  log:     NOT WRITABLE — {why}"),
-                }
+                announce_log(logging.as_ref(), &level_note);
                 // NAMED WHETHER OR NOT IT IS THERE. A front end that silently
                 // is not being served looks exactly like a front end that is
                 // broken, and the operator has no way to tell the two apart
@@ -5544,6 +6388,19 @@ async fn run_in(dir: &Path, args: &[String], shutdown: Shutdown) -> u8 {
                 code
             }
             Err(e) => {
+                // A refused bind is the failure an operator most often has to
+                // explain later — the port was taken, the address was wrong, the
+                // permission was missing. It belongs in the file, not only on
+                // the terminal that happened to be open.
+                let _noted = telemetry::emit(
+                    &telemetry::Event::new(
+                        telemetry::Level::Error,
+                        "api.server",
+                        "cannot bind the listening address",
+                    )
+                    .with("addr", telemetry::Value::Str(&addr.to_string()))
+                    .with("why", telemetry::Value::Str(&e.to_string())),
+                );
                 eprintln!("cannot bind {addr}: {e}");
                 FAILED
             }
@@ -5624,6 +6481,42 @@ mod tests {
                              INSTRUMENT_TYPE,SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n";
 
     /// Both vendors, agreeing about NIFTY and RELIANCE.
+    /// **A refused bind reaches the LOG, not only the terminal.**
+    ///
+    /// This site was one `eprintln!` and nothing else: the port was taken, the
+    /// operator saw a line on whatever terminal was open, and the log file --
+    /// the thing handed to somebody diagnosing it afterwards -- said nothing.
+    /// Gate 23 exists for that shape, and this drives the event it now emits.
+    ///
+    /// **Not listed as unreachable, because it is not.** `emitted::UNREACHABLE`
+    /// carries three struck-through rows whose lesson is that every one of them
+    /// named a dependency the site did not have. A refused bind needs no vendor,
+    /// no credential and no byte of real data -- it needs a port somebody else
+    /// already holds, which is two lines of `tokio`.
+    #[tokio::test]
+    async fn a_refused_bind_is_logged_and_not_only_printed() {
+        // The kernel supplies the refusal. `:0` asks for any free port, so this
+        // cannot collide with a real service or with a concurrent test binary.
+        let squatter = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a port to sit on");
+        let taken = squatter.local_addr().expect("the address it took");
+
+        assert_eq!(
+            run_in(
+                &agreeing("bindrefused"),
+                &argv(&["serve", &taken.to_string()]),
+                fired()
+            )
+            .await,
+            FAILED,
+            "a port already held is a refused bind, and the exit code says so"
+        );
+        // The listener is dropped here, not before: releasing it early would
+        // race the bind and this test would pass for the wrong reason.
+        drop(squatter);
+    }
+
     fn agreeing(name: &str) -> PathBuf {
         masters(
             name,
@@ -5690,24 +6583,34 @@ mod tests {
             default_masters_dir_from(std::env::var_os("HOME"))
         );
         assert!(
-            !default_masters_dir().as_os_str().is_empty(),
-            "it always names somewhere; an empty path is not a directory"
+            !default_masters_dir().is_ok_and(|d| d.as_os_str().is_empty()),
+            "when it names somewhere, an empty path is not a directory"
         );
         assert_eq!(
             masters_dir_from(Some("/somewhere/else".into())),
-            PathBuf::from("/somewhere/else")
+            Ok(PathBuf::from("/somewhere/else"))
         );
         // Both arms of the default, driven by value rather than by mutating
         // the environment.
         assert_eq!(
             default_masters_dir_from(Some("/home/who".into())),
-            PathBuf::from("/home/who/.brutex/masters")
+            Ok(PathBuf::from("/home/who/.brutex/masters"))
         );
-        assert_eq!(
-            default_masters_dir_from(None),
-            PathBuf::from("."),
-            "no HOME is a broken environment, not a supported one — the page \
-             then says UNAVAILABLE and names the vendor"
+        // NO HOME IS A REFUSAL AND THE REFUSAL NAMES THE VARIABLES.
+        //
+        // This asserted `PathBuf::from(".")` beside the words "no HOME is a
+        // broken environment, not a supported one" — the sentence and the
+        // return value said opposite things, and the return value won on every
+        // machine that ran it. D-0124.
+        let refused = default_masters_dir_from(None).expect_err("a broken environment refuses");
+        assert!(refused.starts_with("REFUSED:"), "{refused}");
+        assert!(
+            refused.contains("BRUTEX_MASTERS") && refused.contains("HOME"),
+            "the refusal names both variables an operator can set: {refused}"
+        );
+        assert!(
+            !refused.contains("UNAVAILABLE"),
+            "it names the environment, not the vendors it never looked for: {refused}"
         );
     }
 
@@ -6452,6 +7355,22 @@ mod tests {
             "the route wins, not the file: {json}"
         );
 
+        // 1b. AND `/universes.json` IS ROUTED, not merely written. A handler
+        //     that answers correctly and is never reachable is the exact shape
+        //     of the defect D-0120 exists to close — `/ingest` could not ask a
+        //     question no route served. This drives the real router.
+        let reach = get(addr, "/universes.json?feed=groww").await;
+        assert!(reach.contains("200 OK"), "{reach}");
+        assert!(
+            reach.contains(r#""feed":"groww""#) && reach.contains(r#""target":"n50""#),
+            "the four tiers reach the wire through the router: {reach}"
+        );
+        let refused = get(addr, "/universes.json?feed=nobody").await;
+        assert!(
+            refused.contains("400 Bad Request"),
+            "and an unknown feed is refused rather than answered as Dhan: {refused}"
+        );
+
         // 2. A SERVER-RENDERED PAGE WINS TOO.
         let dashboard = get(addr, "/dashboard").await;
         assert!(dashboard.contains("nav class"), "{dashboard}");
@@ -6687,8 +7606,17 @@ mod tests {
             )
             .await;
             assert!(
-                swept.contains("<th>Instruments covered</th><td>1</td>"),
+                swept.contains("<th>Instruments covered</th><td>1 in the merged universe</td>"),
                 "the swept count is the swept count: {swept}"
+            );
+            // AND THE SECOND NUMBER, WHICH IS THE ONE THE RUN OBEYS. The line
+            // above is the union of what both masters name; this run reaches
+            // one feed, and D-0120 put that on the receipt beside it.
+            assert!(
+                swept.contains(
+                    "<th>This feed can name</th><td>1 — every name this target holds, by Dhan id</td>"
+                ),
+                "the receipt says what THIS feed reaches, not what the universe holds: {swept}"
             );
         })
         .await;
@@ -7355,17 +8283,38 @@ mod tests {
     fn the_store_root_comes_from_the_environment_or_defaults_under_home() {
         assert_eq!(
             store_dir_from(Some("/somewhere/else".into()), Some("/home/who".into())),
-            PathBuf::from("/somewhere/else"),
+            Ok(PathBuf::from("/somewhere/else")),
             "an explicit value wins"
+        );
+        // An explicit RELATIVE value is still honoured: that is an operator's
+        // stated choice, and refusing a choice is a different act from
+        // inventing one. Only the fallback is refused.
+        assert_eq!(
+            store_dir_from(Some(".".into()), None),
+            Ok(PathBuf::from(".")),
+            "BRUTEX_STORE is obeyed as given"
         );
         assert_eq!(
             store_dir_from(None, Some("/home/who".into())),
-            PathBuf::from("/home/who/.brutex/store")
+            Ok(PathBuf::from("/home/who/.brutex/store"))
         );
-        assert_eq!(
-            store_dir_from(None, None),
-            PathBuf::from("."),
-            "no HOME is a broken environment, not a supported one"
+        // THE FALLBACK IS GONE, AND WHAT REPLACED IT NAMES THE CAUSE.
+        //
+        // `PathBuf::from(".")` was asserted here beside the words "no HOME is a
+        // broken environment, not a supported one". `.` is the working
+        // directory, which for the launcher this runs under is the repository
+        // checkout, and the first append would have built `bars/`, `manifest/`
+        // and `audit/` inside it — untracked, so CI gate 1 walks past them.
+        // D-0124.
+        let refused = store_dir_from(None, None).expect_err("a broken environment refuses");
+        assert!(refused.starts_with("REFUSED:"), "{refused}");
+        assert!(
+            refused.contains("BRUTEX_STORE") && refused.contains("HOME"),
+            "the refusal names both variables an operator can set: {refused}"
+        );
+        assert!(
+            refused.contains("bars/") && refused.contains("manifest/"),
+            "and what the old fallback would have created, and where: {refused}"
         );
         // And the environment is read in exactly one place, which is this one.
         // Asserted against the pure function fed the SAME environment rather
@@ -7379,8 +8328,8 @@ mod tests {
             "store_dir is exactly store_dir_from over the environment"
         );
         assert!(
-            !store_dir().as_os_str().is_empty(),
-            "and it always names somewhere; an empty path is not a store root"
+            !store_dir().is_ok_and(|d| d.as_os_str().is_empty()),
+            "and when it names somewhere, an empty path is not a store root"
         );
         assert_eq!(served_store_root(), store_dir(), "one reader, one answer");
     }
@@ -7420,6 +8369,64 @@ mod tests {
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(page, "2026-08-07");
     }
+
+    /// What every spot target must put on its own receipt, on the
+    /// `targetcounts` fixture, for the default feed.
+    ///
+    /// A module-level table rather than forty lines inside the test, because
+    /// the test drives a real server and the rows are data. `covered` is the
+    /// merged universe's count for the slot; `reach` is what the feed named on
+    /// the request can actually be asked for — D-0120's second number, and the
+    /// only one of the two that predicts what comes back. The five list-defined
+    /// targets show it as a fraction of the published list, so `1 of 750` is a
+    /// Total Market pull that will fetch one name, a sentence that was
+    /// previously nowhere on the page. `broker_run` still ATTEMPTS the first
+    /// number and refuses the difference by name — `docs/06-limits.md` §63 —
+    /// so this is a prediction of the outcome and not of the request count.
+    const TARGET_RECEIPTS: [(&str, &str, usize, &str); ingest::SpotTarget::ALL.len()] = [
+        (
+            "swept",
+            "Swept indices",
+            1,
+            "1 — every name this target holds, by Dhan id",
+        ),
+        (
+            "indices",
+            "Reference indices",
+            2,
+            "2 — every name this target holds, by Dhan id",
+        ),
+        (
+            "equities",
+            "NIFTY Total Market equities",
+            1,
+            "1 of 750 — 749 cannot be named by Dhan",
+        ),
+        (
+            "n500",
+            "NIFTY 500 equities",
+            1,
+            "1 of 500 — 499 cannot be named by Dhan",
+        ),
+        (
+            "n200",
+            "NIFTY 200 equities",
+            1,
+            "1 of 200 — 199 cannot be named by Dhan",
+        ),
+        (
+            "n100",
+            "NIFTY 100 equities",
+            1,
+            "1 of 100 — 99 cannot be named by Dhan",
+        ),
+        (
+            "n50",
+            "NIFTY 50 equities",
+            1,
+            "1 of 50 — 49 cannot be named by Dhan",
+        ),
+    ];
 
     #[tokio::test]
     async fn each_spot_target_reports_its_own_population_and_not_a_neighbours() {
@@ -7479,23 +8486,47 @@ mod tests {
         // slug that parses and then reports another target's population is the
         // defect this test was written for, and appending variants is exactly
         // when a positional lookup goes wrong.
-        for (slug, label, covered) in [
-            ("swept", "Swept indices", 1),
-            ("indices", "Reference indices", 2),
-            ("equities", "NIFTY Total Market equities", 1),
-            ("n500", "NIFTY 500 equities", 1),
-            ("n200", "NIFTY 200 equities", 1),
-            ("n100", "NIFTY 100 equities", 1),
-            ("n50", "NIFTY 50 equities", 1),
-        ] {
+        //
+        // TWO NUMBERS PER ROW, and they are different questions. `covered` is
+        // the merged universe's count for the slot; `reach` is what the feed
+        // this request named can actually be asked for, which is the number
+        // D-0120 put on the receipt because it is the one that predicts what
+        // comes back. See `TARGET_RECEIPTS`, and `docs/06-limits.md` §63 for
+        // the half of this that the pull path does not yet honour.
+        for (slug, label, covered, reach) in TARGET_RECEIPTS {
             let form = format!("target={slug}&from=2022-01-08&to=2022-01-08");
             let out = post(addr, "/pull/spot", &form).await;
             assert!(out.contains(label), "{slug} echoes as {label}: {out}");
             assert!(
-                out.contains(&format!("<th>Instruments covered</th><td>{covered}</td>")),
+                out.contains(&format!(
+                    "<th>Instruments covered</th><td>{covered} in the merged universe</td>"
+                )),
                 "{slug} covers {covered}: {out}"
             );
+            assert!(
+                out.contains(&format!("<th>This feed can name</th><td>{reach}")),
+                "{slug} must report {reach:?} for the feed it was asked with: {out}"
+            );
         }
+        // AND THE REASON IS REACHABLE, not merely counted. Five names, then a
+        // remainder, then the route that carries all 749 of them.
+        let equities = post(
+            addr,
+            "/pull/spot",
+            "target=equities&from=2022-01-08&to=2022-01-08",
+        )
+        .await;
+        assert!(
+            equities.contains("and 744 more."),
+            "the 749 that cannot be named are five names and a remainder, not a \
+             bare number: {equities}"
+        );
+        assert!(
+            equities.contains("/universes.json?feed=dhan"),
+            "and the receipt points at the surface that carries all 749 with their \
+             reasons, so a shortfall has a way down rather than being a dead end: \
+             {equities}"
+        );
 
         let _ = tokio::net::TcpStream::connect(stop_addr).await;
         served
@@ -7849,6 +8880,435 @@ mod tests {
             .await
             .expect("task")
             .expect("a graceful shutdown is not a failure");
+    }
+
+    /// The body of a raw HTTP response, so an assertion names the payload
+    /// rather than a substring of the whole exchange.
+    fn body_of(response: &str) -> &str {
+        response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+    }
+
+    /// A store root whose Groww counter exists and will not decode.
+    ///
+    /// Sixteen bytes, which is shorter than the header region, so
+    /// `Manifest::open` refuses it by name and `census::read_vendor` answers
+    /// `Census::Unreadable`. NOT an absent file — that is the other state, and
+    /// telling the two apart is the whole point of what is asserted below.
+    fn corrupt_census(name: &str) -> PathBuf {
+        let root = store_root(name);
+        std::fs::write(
+            pull::manifest::manifest_path(&root, Vendor::Groww),
+            [0xFF_u8; 16],
+        )
+        .expect("a damaged counter");
+        root
+    }
+
+    /// Serves `site` and hands the body its address.
+    async fn served_over<F, Fut>(name: &str, built: Loaded, body: F)
+    where
+        F: FnOnce(SocketAddr) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stopper = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let stop_addr = stopper.local_addr().expect("addr");
+        let served = tokio::spawn(serve(
+            listener,
+            router_serving(built, front(name)),
+            Box::pin(async move { stopper.accept().await.map(|_| ()) }),
+        ));
+        body(addr).await;
+        let _ = tokio::net::TcpStream::connect(stop_addr).await;
+        served
+            .await
+            .expect("task")
+            .expect("a graceful shutdown is not a failure");
+    }
+
+    /// **A CORRUPT COUNTER AND AN EMPTY STORE ARE NOT THE SAME ANSWER.**
+    ///
+    /// `held_row` folds `Census::Absent` and `Census::Unreadable` into one
+    /// `None`, so `store_body` skips every entry either way and `/store.json`
+    /// answered `[]` at `200` for both — **byte for byte**, which is asserted
+    /// here as the thing that must NOT happen. `/db` reads that as an empty
+    /// feed and the Markets page renders "holds no bars", which is a claim
+    /// about the store made from a fact about its counter, over a store that
+    /// may hold every bar it ever pulled.
+    ///
+    /// Three things are asserted, and the reason is one of them — a status code
+    /// alone would say only "something", and `CLAUDE.md` §4 wants the reason:
+    ///
+    /// * the status separates them (`503` against `200`);
+    /// * `x-brutex-census-state` carries `unreadable` against `absent`;
+    /// * `x-brutex-census-note` carries the refusal in the refusal's own words.
+    ///
+    /// And the fourth thing, which is what makes the change safe to ship: the
+    /// **body is still a JSON array** in both states. A consumer that only ever
+    /// reads rows sees exactly what it saw before. D-0124.
+    #[tokio::test]
+    async fn a_corrupt_census_is_not_answered_as_an_empty_store() {
+        let dir = agreeing("censusloud");
+        let root = corrupt_census("censusloud");
+        let built = Loaded::new(Site::load(&dir, &root));
+        served_over("censusloud", built, |addr| async move {
+            let damaged = get(addr, "/store.json?feed=groww").await;
+            let empty = get(addr, "/store.json?feed=dhan").await;
+
+            // THE OLD DEFECT, NAMED. Same body, and before D-0124 that was the
+            // whole response — so this pair was indistinguishable.
+            assert_eq!(body_of(&damaged), "[]", "{damaged}");
+            assert_eq!(body_of(&empty), "[]", "{empty}");
+            assert_ne!(
+                damaged, empty,
+                "a corrupt counter and a store that holds nothing must not be \
+                 the same response"
+            );
+
+            assert!(
+                damaged.starts_with("HTTP/1.1 503"),
+                "a counter that will not load cannot answer the question: {damaged}"
+            );
+            assert!(
+                damaged.contains("x-brutex-census-state: unreadable"),
+                "{damaged}"
+            );
+            assert!(
+                damaged.contains("x-brutex-census-note:") && damaged.contains("UNREADABLE"),
+                "the refusal reaches the caller in its own words: {damaged}"
+            );
+            assert!(
+                damaged.contains("groww.man"),
+                "and names the file to look at: {damaged}"
+            );
+            assert!(
+                damaged.contains("x-brutex-census-degraded:"),
+                "always present, so absent means this build does not say: {damaged}"
+            );
+
+            // THE ORDINARY STATE IS STILL ORDINARY. A fresh install has no
+            // manifest and that is not a failure — 200, and the state says
+            // which of the two it is.
+            assert!(empty.starts_with("HTTP/1.1 200"), "{empty}");
+            assert!(empty.contains("x-brutex-census-state: absent"), "{empty}");
+            assert!(
+                !empty.contains("x-brutex-census-state: unreadable"),
+                "{empty}"
+            );
+            // AND THE CONTENT TYPE IS UNCHANGED. The route still answers JSON;
+            // nothing about the shape moved.
+            assert!(
+                damaged.contains("content-type: application/json"),
+                "{damaged}"
+            );
+        })
+        .await;
+    }
+
+    /// **`/instruments.json` used to answer both of its failures with `200`
+    /// and nothing else.**
+    ///
+    /// Two states, one route, and neither reached the caller:
+    ///
+    /// * the counter would not load, so `rows_for` answered `None` for every
+    ///   key and every row read `"bars":0` — the same em dash an un-pulled
+    ///   instrument shows;
+    /// * the selected feed's master would not decode, so no row carried that
+    ///   feed's id, the filter admitted nothing, and the body was `[]` —
+    ///   identical to a feed that lists nothing.
+    ///
+    /// `Read::notes` and `Read::status` were one field away, and `/health`
+    /// answers `503` off exactly them. Both are on the wire now, and the second
+    /// case gets the per-feed answer a whole-read boolean could never give:
+    /// `?feed=dhan` on the very same site is `200` and complete.
+    #[tokio::test]
+    async fn instruments_json_says_when_its_zeroes_are_not_measurements() {
+        // (a) THE COUNTER IS DAMAGED. The universe is intact, so the LIST is
+        // real and only the counts are absent — 503, and the census headers say
+        // which half is not to be believed.
+        let dir = agreeing("instrcensus");
+        let root = corrupt_census("instrcensus");
+        let built = Loaded::new(Site::load(&dir, &root));
+        served_over("instrcensus", built, |addr| async move {
+            let answer = get(addr, "/instruments.json?feed=groww").await;
+            assert!(answer.starts_with("HTTP/1.1 503"), "{answer}");
+            assert!(
+                answer.contains("x-brutex-census-state: unreadable"),
+                "{answer}"
+            );
+            assert!(
+                answer.contains("x-brutex-census-note:") && answer.contains("UNREADABLE"),
+                "the reason, not just a code: {answer}"
+            );
+            assert!(
+                answer.contains("x-brutex-master-state: read"),
+                "the master decoded — it is the counter that did not: {answer}"
+            );
+            // THE ZEROES ARE STILL THERE AND STILL AN ARRAY. Nothing about the
+            // body moved; what moved is that the response now says the zeroes
+            // are absent rather than measured.
+            let body = body_of(&answer);
+            assert!(body.starts_with('['), "still an array: {body}");
+            assert!(body.contains(r#""bars":0"#), "{body}");
+        })
+        .await;
+
+        // (b) THE SELECTED FEED'S MASTER NEVER DECODED. The body is `[]` and
+        // that is not this feed listing nothing.
+        let half = masters(
+            "instrmaster",
+            None,
+            Some(&format!(
+                "{DHAN_HEAD}\
+                 NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let built = Loaded::new(Site::load(&half, &store_root("instrmaster")));
+        served_over("instrmaster", built, |addr| async move {
+            let missing = get(addr, "/instruments.json?feed=groww").await;
+            assert_eq!(body_of(&missing), "[]", "{missing}");
+            assert!(
+                missing.starts_with("HTTP/1.1 503"),
+                "an empty list from a failed read is not an empty universe: {missing}"
+            );
+            assert!(
+                missing.contains("x-brutex-master-state: UNAVAILABLE"),
+                "{missing}"
+            );
+            assert!(
+                missing.contains("groww_instruments.csv"),
+                "the note names the file that was not read: {missing}"
+            );
+            assert!(
+                missing.contains("x-brutex-universe-status: DEGRADED"),
+                "the same word /health answers with: {missing}"
+            );
+
+            // AND THE OTHER FEED ON THE SAME SITE IS FINE. This is what a
+            // whole-read boolean cannot say, and it is why `Read::master`
+            // exists: one master failed, one did not, and the route answers per
+            // feed.
+            let ok = get(addr, "/instruments.json?feed=dhan").await;
+            assert!(ok.starts_with("HTTP/1.1 200"), "{ok}");
+            assert!(ok.contains("x-brutex-master-state: read"), "{ok}");
+            assert!(
+                body_of(&ok).contains(r#""symbol":"NIFTY""#),
+                "and it lists what it read: {ok}"
+            );
+        })
+        .await;
+    }
+
+    /// **A pull receipt says that it is one, on every arm.**
+    ///
+    /// `/pull/spot` answers `text/html`, and the page finds the verdict by
+    /// looking for a `.badge`. A `200` carrying HTML that is not a receipt — an
+    /// interstitial, a misdirected origin, this build's markup after a rename —
+    /// has no badge, and the parser falls open to `verdict: 'OK', good: true`.
+    /// A request that never reached this process renders a green OK.
+    ///
+    /// A content type cannot separate them, because a receipt legitimately is
+    /// `text/html`. This header can: it is written by the handler, on the
+    /// refusals as well as the successes, so a reader may require it
+    /// unconditionally — and no other route in this server carries it, which is
+    /// the second half of what is asserted here.
+    #[tokio::test]
+    async fn every_spot_answer_names_itself_a_receipt_and_no_other_route_does() {
+        let dir = agreeing("receipt");
+        let built = Loaded::new(site("receipt", &dir));
+        // A SECOND HANDLE ON THE SAME CONTROL, so the seat-conflict arm can be
+        // driven from outside the handler — it is the one arm no request can
+        // reach on its own.
+        let holder = std::sync::Arc::clone(&built);
+        served_over("receipt", built, |addr| async move {
+            // A REFUSAL, so nothing is asked of a vendor: `Site::load` sets
+            // `Broker::Refused` and the answer is a 503 receipt.
+            let refused = post(
+                addr,
+                "/pull/spot",
+                "target=swept&from=2024-01-01&to=2024-01-31",
+            )
+            .await;
+            assert!(
+                refused.contains("x-brutex-receipt: pull-spot"),
+                "a receipt says so whatever its verdict: {refused}"
+            );
+
+            // A malformed request takes a different arm and must carry it too —
+            // the marker is only worth requiring if it is unconditional.
+            let bad = post(addr, "/pull/spot", "target=nonsense").await;
+            assert!(
+                bad.contains("x-brutex-receipt: pull-spot"),
+                "including the arm that refuses the form: {bad}"
+            );
+
+            // AND THE DISCRIMINATOR. Another 200 that is HTML — which is
+            // exactly what a proxy interstitial looks like to the page — does
+            // not carry it, so requiring the header separates a receipt from
+            // any other HTML answer.
+            let page = get(addr, "/dashboard").await;
+            assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+            assert!(page.contains("text/html"), "{page}");
+            assert!(
+                !page.contains("x-brutex-receipt"),
+                "only a receipt claims to be one: {page}"
+            );
+
+            // THE THIRD ARM: the pull seat is already held, so the handler
+            // refuses before it parses anything. `409` is not a receipt the
+            // page would ever draw a verdict from, and it carries the marker
+            // for the same reason the other two do — the reader tests one
+            // thing, unconditionally.
+            let seat = holder.autopilot.take_seat().expect("the seat is free");
+            let conflict = post(
+                addr,
+                "/pull/spot",
+                "target=swept&from=2024-01-01&to=2024-01-31",
+            )
+            .await;
+            drop(seat);
+            assert!(conflict.starts_with("HTTP/1.1 409"), "{conflict}");
+            assert!(
+                conflict.contains("x-brutex-receipt: pull-spot"),
+                "every arm, or the marker is not worth requiring: {conflict}"
+            );
+        })
+        .await;
+    }
+
+    /// **A NOTE IS NEVER LOST TO THE ALPHABET A HEADER ADMITS.**
+    ///
+    /// The note carries a filesystem path — arbitrary bytes on this platform —
+    /// and a vendor's own refusal text, which has already been observed to hold
+    /// `·` and `—`. `HeaderValue::from_str` refuses every one of those. A
+    /// `unwrap_or(<empty>)` at the call site would answer a corrupt census with
+    /// a BLANK reason, which is the failure this whole change removes arriving
+    /// one layer down, so the alphabet is enforced before the conversion and
+    /// the conversion cannot fail.
+    #[test]
+    fn a_hostile_note_is_still_a_header() {
+        // The real note's own punctuation, a newline, a NUL and a DEL — the
+        // three bytes that would otherwise split or truncate a header.
+        let hostile = "groww UNREADABLE · header\r\nInjected: yes\u{0}\u{7f} — at /tmp/x";
+        let clean = note_alphabet(hostile);
+        assert!(
+            clean.chars().all(|c| c.is_ascii_graphic() || c == ' '),
+            "{clean}"
+        );
+        assert!(
+            !clean.contains('\r') && !clean.contains('\n'),
+            "a note can never open a second header: {clean}"
+        );
+        assert!(
+            clean.contains("groww UNREADABLE") && clean.contains("at /tmp/x"),
+            "and what an operator has to read survives it: {clean}"
+        );
+        // BOUNDED, AND THE TRUNCATION SAYS SO. An operator's own directory name
+        // is not a bound this crate owns.
+        let long = note_alphabet(&"x".repeat(NOTE_HEADER_CHARS * 2));
+        assert_eq!(long.chars().count(), NOTE_HEADER_CHARS + 3, "{long}");
+        assert!(long.ends_with("..."), "{long}");
+        // And the value the route actually stamps is built from exactly that.
+        assert_eq!(note_header(hostile).to_str().expect("visible ASCII"), clean);
+    }
+
+    /// **A feed with no census row at all still says which state that is.**
+    ///
+    /// `census::read_all` answers one row per `Vendor::ALL`, so the `None` arm
+    /// is not reachable through a request — it is reachable here, and it must
+    /// answer the same word `/audit.json` answers for the same input rather
+    /// than a fourth one invented at this call site.
+    #[test]
+    fn a_missing_census_row_is_absent_and_says_so() {
+        let headers = census_headers(None);
+        assert_eq!(
+            headers
+                .get(CENSUS_STATE_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("absent"),
+            "the same word audit_json::store_block answers with"
+        );
+        assert!(
+            headers
+                .get(CENSUS_NOTE_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|n| n.contains("no census row")),
+            "and the note says which absence it is"
+        );
+        assert!(!census_is_unreadable(None));
+    }
+
+    /// **A feed this build parses no master for is not a feed that lists
+    /// nothing.**
+    ///
+    /// `/instruments.json?feed=truedata` answers `[]` and always did. The
+    /// difference is that `[]` now travels with the reason: an archive source
+    /// publishes no scrip file, so there is nothing to have failed to read, and
+    /// `200` is the honest status. Collapsing this into `UNAVAILABLE` would
+    /// send an operator looking for a file that does not exist in this design.
+    #[tokio::test]
+    async fn an_archive_feed_names_itself_unmastered_rather_than_empty() {
+        let dir = agreeing("notmastered");
+        let built = Loaded::new(Site::load(&dir, &store_root("notmastered")));
+        served_over("notmastered", built, |addr| async move {
+            let answer = get(addr, "/instruments.json?feed=truedata").await;
+            assert_eq!(body_of(&answer), "[]", "{answer}");
+            assert!(
+                answer.starts_with("HTTP/1.1 200"),
+                "nothing failed, so nothing is refused: {answer}"
+            );
+            assert!(
+                answer.contains("x-brutex-master-state: not-mastered"),
+                "{answer}"
+            );
+            assert!(
+                answer.contains("parses no instrument master"),
+                "and says why the list is empty: {answer}"
+            );
+        })
+        .await;
+    }
+
+    /// **A store root the environment never named is a refusal, and the
+    /// listener is dropped rather than served.**
+    ///
+    /// `served_store_root` reads the environment, so this arm is only reachable
+    /// on a machine with no `HOME` and no `BRUTEX_STORE` — which no test may
+    /// create, since `set_var` is `unsafe` under edition 2024 and this crate
+    /// forbids `unsafe`. `run_in_over` takes the value, so both arms are
+    /// drivable by argument. The exit code is `FAILED`: nothing was read, so
+    /// there is no output whose trust is in question, which is what `DEGRADED`
+    /// would have meant.
+    #[tokio::test]
+    async fn a_serve_with_no_store_root_refuses_instead_of_serving_the_checkout() {
+        let dir = agreeing("nostoreroot");
+        let code = run_in_over(
+            &dir,
+            Err(String::from(
+                "REFUSED: no store root. BRUTEX_STORE is unset",
+            )),
+            &argv(&["serve", "127.0.0.1:0"]),
+            Box::pin(std::future::pending()),
+        )
+        .await;
+        assert_eq!(
+            code, FAILED,
+            "a refused store root is a failure to run, not a degraded answer"
+        );
+
+        // AND THE SAME SPLIT ONE LAYER UP, for the masters directory.
+        let refused = run_from(
+            Err(String::from("REFUSED: no masters directory")),
+            &argv(&["report"]),
+            Box::pin(std::future::pending()),
+        )
+        .await;
+        assert_eq!(refused, FAILED);
     }
 
     #[test]
@@ -8363,7 +9823,7 @@ mod tests {
         let site = site("tajson", &dir);
         let loaded: Loaded = std::sync::Arc::new(site);
 
-        let (_headers, json) = instruments_json(
+        let (_code, _headers, json) = instruments_json(
             axum::extract::State(std::sync::Arc::clone(&loaded)),
             // The feed is part of the question now: the two brokers do not
             // list the same instruments, so the index is per feed.
@@ -8464,7 +9924,7 @@ mod tests {
         let dir = agreeing("unijson");
         let site = site("unijson", &dir);
         let loaded: Loaded = std::sync::Arc::new(site);
-        let (_headers, json) = instruments_json(
+        let (_code, _headers, json) = instruments_json(
             axum::extract::State(loaded),
             "/instruments.json?feed=groww".parse().expect("a legal uri"),
         )
@@ -8493,6 +9953,207 @@ mod tests {
         let full = json.matches(r#""universes":"#).count();
         assert_eq!(frozen, json.matches(r#""symbol":"#).count());
         assert_eq!(full, frozen, "neither field is optional");
+    }
+
+    #[test]
+    fn a_compound_bitset_has_no_single_token() {
+        use brutex_core::universe::Universe;
+
+        // The reverse of `universe_tokens`, and it takes ONE bit. Every one of
+        // the seven answers its own word — that is the property `/universes.json`
+        // leans on to tell a page which token of the `universes` array picks
+        // out the rows a target covers.
+        for (bit, token) in UNIVERSE_TOKENS {
+            assert_eq!(universe_token_of(bit), token, "one word per bit");
+        }
+        // NEITHER OF THE TWO NON-ANSWERS IS A GUESS. An empty bitset names no
+        // universe, and two bits at once is a SET whose name is the array
+        // field; both answer with the empty string rather than with the first
+        // bit that happens to match, which would have made a compound row look
+        // like a single-universe one on the wire.
+        assert_eq!(universe_token_of(Universe::NONE), "");
+        assert_eq!(
+            universe_token_of(Universe::NIFTY_50.union(Universe::NIFTY_100)),
+            "",
+            "a compound bitset is not one universe and does not get one word"
+        );
+    }
+
+    #[tokio::test]
+    async fn universes_json_says_what_each_target_resolves_to_for_the_named_feed() {
+        // THE ROUTE THE `/ingest` UNIVERSE MENU HAD NO ANSWER FROM. Its four
+        // NIFTY rows drew `no target` because nothing on the wire turned a
+        // tier into a request for the selected feed. D-0120.
+        let dir = agreeing("reachjson");
+        let loaded: Loaded = std::sync::Arc::new(site("reachjson", &dir));
+
+        let (status, _headers, json) = universe_reach_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/universes.json?feed=groww".parse().expect("a legal uri"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(
+            json.starts_with(r#"{"feed":"groww","mastered":true,"#),
+            "{json}"
+        );
+
+        // ALL SEVEN ROWS, EACH WITH THE SLUG A POST WOULD CARRY. The four
+        // tiers are the point: a page that reads this can enable them.
+        for target in ingest::SpotTarget::ALL {
+            let slug = target.slug();
+            assert!(
+                json.contains(&format!(r#""target":"{slug}""#)),
+                "{slug} must be requestable from this answer: {json}"
+            );
+        }
+        // RELIANCE is in every equity list this fixture's master carries, so
+        // each tier resolves to exactly one Groww id and the rest of the
+        // published list is named as unreachable rather than dropped.
+        assert!(
+            json.contains(r#""target":"n50","label":"NIFTY 50 equities""#),
+            "{json}"
+        );
+        assert!(
+            json.contains(
+                r#""counted_from":"join","published":50,"matched":1,"lacks":49,"ambiguous":0,"malformed":0,"no_nse_isin":0"#
+            ),
+            "the count on the control is the matched bucket and the shortfall is \
+             beside it, not behind it: {json}"
+        );
+        // AND THE BUCKET IS THE RIGHT ONE, WHICH D-0125 CHANGED. The join is
+        // keyed on NSE's OWN ISIN now, so every NIFTY 50 name HAS an identity
+        // whether or not a master mentions it — the forty-nine this fixture's
+        // master does not carry are `lacks`, each naming the ISIN the exchange
+        // printed, and `malformed` is empty because no published name here is
+        // unusable. The two are still not interchangeable: `lacks` is a row to
+        // go and ask Groww about, `malformed` would be a transcription to fix
+        // in this repository, and `no_nse_isin` is a cell NSE left empty.
+        assert!(
+            json.contains(
+                r#""symbol":"3MINDIA","bucket":"lacks","why":"this feed's master carries no row for ISIN INE470A01017""#
+            ),
+            "{json}"
+        );
+        assert!(
+            json.contains(r#""counted_from":"master","published":null,"matched":1,"lacks":0"#),
+            "and the two targets no published list defines say where THEIR count \
+             came from rather than reporting a denominator nobody published: {json}"
+        );
+
+        // THE FEED DECIDES THE ANSWER. Dhan's master in this fixture carries
+        // the same two instruments, so the counts match and the ids do not —
+        // what must differ is the feed the document is about.
+        let (status, _headers, other) = universe_reach_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/universes.json?feed=dhan".parse().expect("a legal uri"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(other.starts_with(r#"{"feed":"dhan","#), "{other}");
+
+        // AN ARCHIVE FEED IS NOT AN EMPTY ONE. A folder of CSVs is its own
+        // listing and publishes no master, so every count is null.
+        let (status, _headers, archive) = universe_reach_json(
+            axum::extract::State(std::sync::Arc::clone(&loaded)),
+            "/universes.json?feed=truedata"
+                .parse()
+                .expect("a legal uri"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert!(
+            archive.contains(r#""mastered":false"#)
+                && archive.contains(r#""counted_from":"no master""#),
+            "{archive}"
+        );
+
+        // AND AN UNKNOWN FEED IS REFUSED BY NAME. `/instruments.json` answers
+        // an unrecognised feed as Dhan; copying that here would silently
+        // enable four controls against the other broker's reach.
+        let (status, _headers, refused) = universe_reach_json(
+            axum::extract::State(loaded),
+            "/universes.json?feed=zerodha".parse().expect("a legal uri"),
+        )
+        .await;
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            refused.contains(r#""feed":"zerodha""#)
+                && refused.contains("this build reads no feed called that")
+                && refused.contains("groww")
+                && refused.contains("dhan"),
+            "the refusal names what was asked and what is known: {refused}"
+        );
+    }
+
+    #[test]
+    fn the_receipt_reports_reach_for_the_feed_and_never_a_number_it_did_not_measure() {
+        let dir = agreeing("reachtext");
+        let built = site("reachtext", &dir);
+
+        // EVERY NAME — no fraction, because there is nothing missing to be a
+        // fraction of, and "1 of 1" invites the reader to look for the zero.
+        let whole = reach_text(ingest::SpotTarget::Swept, pull::vendor::Feed::Groww, &built);
+        assert_eq!(whole, "1 — every name this target holds, by Groww id");
+
+        // SHORT: both numbers, the first names, the remainder, and the route
+        // that carries the rest.
+        let short = reach_text(
+            ingest::SpotTarget::Nifty50,
+            pull::vendor::Feed::Groww,
+            &built,
+        );
+        assert!(
+            short.starts_with("1 of 50 — 49 cannot be named by Groww: "),
+            "{short}"
+        );
+        assert!(short.contains("and 44 more."), "{short}");
+        assert!(short.ends_with("/universes.json?feed=groww"), "{short}");
+
+        // A SHORTFALL SMALLER THAN THE CAP IS NAMED IN FULL, with no "and N
+        // more" tacked on: a remainder of zero is not a remainder, and
+        // printing "and 0 more" is the shape of a sentence generated rather
+        // than written. Groww's master here omits NIFTY, so `indices` is short
+        // by exactly one.
+        let partial = masters(
+            "reachone",
+            Some(&format!(
+                "{GROWW_HEAD}\
+                 NSE,CASH,,INDIAVIX,IDX,,NIFTY,,,NSE-INDIAVIX\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}\
+                 NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n\
+                 NSE,I,NA,INDEX,INDIAVIX,INDIA VIX,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let one_short = site("reachone", &partial);
+        let short_one = reach_text(
+            ingest::SpotTarget::Indices,
+            pull::vendor::Feed::Groww,
+            &one_short,
+        );
+        assert_eq!(
+            short_one,
+            "1 of 2 — 1 cannot be named by Groww: NIFTY. Every one of them, with its \
+             reason, is on /universes.json?feed=groww"
+        );
+
+        // AN ARCHIVE MEASURES NOTHING AND SAYS SO. A zero here would be a
+        // reading of a file this feed does not publish.
+        let archive = reach_text(
+            ingest::SpotTarget::Nifty50,
+            pull::vendor::Feed::TrueData,
+            &built,
+        );
+        assert!(
+            archive.contains("publishes no instrument master"),
+            "{archive}"
+        );
+        assert!(
+            !archive.contains('0'),
+            "and it reports no count at all, because it took no measurement: {archive}"
+        );
     }
 
     /// A transport blip is retried; a vendor's answer is not.
@@ -10252,11 +11913,136 @@ mod tests {
         ] {
             assert!(body.contains(key), "every entry carries {key}: {body}");
         }
-        // And the array is still the array it was: the five fields the page
-        // already reads are untouched.
+        // THE SOURCE KIND IS ON THE WIRE ONCE. `transport` is gone: it was a
+        // second spelling (`broker` / `archive`) of the split `kind` already
+        // carries, produced by its own `match` in the same function, and the
+        // browser had started guessing one from the other. `kind`, `kind_label`
+        // and `verb` are all `SourceKind`'s, read from one value per feed.
         assert!(body.starts_with(
-            r#"[{"wire":"dhan","display":"Dhan","transport":"broker","ready":true,"why":""#
-        ));
+            r#"[{"wire":"dhan","display":"Dhan","kind":"rest","kind_label":"REST API","verb":"pull","ready":true,"why":""#
+        ), "{body}");
+        assert!(
+            !body.contains(r#""transport":"#),
+            "the second spelling of the source kind is gone, not merely unused: {body}"
+        );
+        // A BROKER IS PULLED; A FOLDER IS READ. The two archive vendors carry
+        // the other word, and no row carries both.
+        for (wire, kind, verb) in [
+            ("truedata", "folder", "read"),
+            ("gdfl", "folder", "read"),
+            ("groww", "rest", "pull"),
+        ] {
+            let row = body
+                .split("{\"wire\":")
+                .find(|part| part.starts_with(&format!("\"{wire}\"")))
+                .unwrap_or_else(|| panic!("a row for {wire}: {body}"));
+            assert!(
+                row.contains(&format!(r#""kind":"{kind}""#)),
+                "{wire} is a {kind}: {row}"
+            );
+            assert!(
+                row.contains(&format!(r#""verb":"{verb}""#)),
+                "{wire} is {verb}: {row}"
+            );
+        }
+        // AND THE LABEL IS THE TYPE'S OWN WORDS. The page prints this; it used
+        // to print `transport`, whose vocabulary lived in this file alone.
+        for (wire, label) in [("dhan", "REST API"), ("gdfl", "folder of files")] {
+            let row = body
+                .split("{\"wire\":")
+                .find(|part| part.starts_with(&format!("\"{wire}\"")))
+                .unwrap_or_else(|| panic!("a row for {wire}: {body}"));
+            assert!(
+                row.contains(&format!(r#""kind_label":"{label}""#)),
+                "{wire} is labelled by SourceKind: {row}"
+            );
+        }
+    }
+
+    /// THE GRANULARITY FLOOR LEAVES THIS PROCESS WHOLE, AND A SNAPSHOT IS
+    /// NEVER CALLED A TICK.
+    ///
+    /// The /ingest page held a transcription of all four `GranularityFloor`
+    /// consts because there was no field to read. Every part of the fact is
+    /// emitted here — the rung, what one record at it IS, the two booleans that
+    /// decide what may be printed beside a number, and the vendor's own words
+    /// with the place they were read — so the copy in the browser is one that
+    /// can be deleted rather than one that has to be kept in step by hand.
+    #[tokio::test]
+    async fn feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick() {
+        let dir = masters("feeds-finest", None, None);
+        let site = Loaded::new(Site::load(&dir, &store_root("feeds-finest")));
+        let (_, body) = feeds_json(axum::extract::State(site)).await;
+
+        // TWO SHAPES, FOUR ROWS. The brokers bottom out at a minute and one
+        // record there is a BAR; the archives bottom out at a second and one
+        // record there is a CONFLATED SNAPSHOT, which is a different object at
+        // the same number.
+        for (wire, rung, kind, conflated) in [
+            ("dhan", "1min", "bar", false),
+            ("groww", "1min", "bar", false),
+            ("truedata", "1s", "snapshot", true),
+            ("gdfl", "1s", "snapshot", true),
+        ] {
+            let row = body
+                .split("{\"wire\":")
+                .find(|part| part.starts_with(&format!("\"{wire}\"")))
+                .unwrap_or_else(|| panic!("a row for {wire}: {body}"));
+            assert!(
+                row.contains(&format!(
+                    r#""finest":{{"rung":"{rung}","kind":"{kind}","label":""#
+                )),
+                "{wire}'s floor is {rung} and one record is a {kind}: {row}"
+            );
+            assert!(
+                row.contains(&format!(r#""tick_stream":false,"conflated":{conflated},"#)),
+                "{wire}: the two booleans that decide what may be written beside \
+                 the number: {row}"
+            );
+        }
+
+        // NO ROW CLAIMS A TICK STREAM, and the wire says so in a field rather
+        // than by omission. `FinestKind::Tick` is constructed by no descriptor
+        // in this build; a reader must be able to see that stated.
+        assert!(
+            !body.contains(r#""tick_stream":true"#),
+            "no feed in this build serves a tick stream: {body}"
+        );
+
+        // THE VENDOR'S WORDS TRAVEL VERBATIM, NOT PARAPHRASED. Compared against
+        // the descriptor itself, so a reworded const is a failing test here
+        // rather than a browser quietly showing yesterday's reason.
+        for feed in pull::vendor::Feed::ALL {
+            let floor = feed.descriptor().granularity_floor;
+            assert!(
+                body.contains(render::json_string(floor.because).trim_matches('"')),
+                "{} carries its own reason: {body}",
+                feed.wire()
+            );
+            assert!(
+                body.contains(render::json_string(floor.source).trim_matches('"')),
+                "{} carries where that was read — CLAUDE.md section 3 rule 1: {body}",
+                feed.wire()
+            );
+        }
+    }
+
+    /// THREE KINDS, THREE WORDS, AND THE UNREACHED ONE IS NAMED HERE.
+    ///
+    /// `FinestKind::Tick` is constructed by no descriptor and the `const` block
+    /// under `DESCRIPTORS` keeps it that way. Its arm is therefore unreachable
+    /// through `feeds_json`, which is why the word lives in its own `const fn`
+    /// — a region that can never run is a coverage hole `CLAUDE.md` section 9
+    /// has no way to forgive, and this test is what runs it.
+    #[test]
+    fn finest_kind_words_are_three_and_the_tick_word_is_one_of_them() {
+        assert_eq!(finest_kind_word(pull::vendor::FinestKind::Tick), "tick");
+        assert_eq!(
+            finest_kind_word(pull::vendor::FinestKind::ConflatedSnapshot),
+            "snapshot",
+            "and it is NOT the tick word — the whole point of the variant"
+        );
+        assert_eq!(finest_kind_word(pull::vendor::FinestKind::Bar), "bar");
     }
 
     /// A FLOOR THAT NAMES NO DAY RESOLVES TO NO DAY — both of them, and for
@@ -10442,6 +12228,27 @@ const UNIVERSE_TOKENS: [(brutex_core::universe::Universe, &str); 7] = [
     (brutex_core::universe::Universe::NIFTY_100, "n100"),
     (brutex_core::universe::Universe::NIFTY_50, "n50"),
 ];
+
+/// The one word the wire spells ONE universe bit as.
+///
+/// The reverse of [`universe_tokens`], which takes a whole bitset. This takes a
+/// single named bit — what `ingest::SpotTarget::universe` hands back — so
+/// `/universes.json` can tell a page which token of the `universes` ARRAY picks
+/// out the rows a target covers, WITHOUT a second table of these words. Two
+/// lists of them is how one says `ntm` and the other says `total_market`.
+///
+/// `""` for a bitset that is not exactly one of the seven — the empty set, or
+/// two bits at once. Empty rather than a guess, and rather than a panic: this
+/// is called from a JSON writer, and a caller with a compound bitset wanted the
+/// array field. `api::server::a_compound_bitset_has_no_single_token` pins it.
+///
+/// One pass over a compile-time array of seven. `CLAUDE.md` §3 rule 4.
+pub(crate) fn universe_token_of(u: brutex_core::universe::Universe) -> &'static str {
+    UNIVERSE_TOKENS
+        .into_iter()
+        .find(|(bit, _)| *bit == u)
+        .map_or("", |(_, token)| token)
+}
 
 /// How many of [`UNIVERSE_TOKENS`] the compatibility field may name.
 ///

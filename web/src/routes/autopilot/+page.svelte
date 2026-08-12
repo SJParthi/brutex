@@ -2,30 +2,53 @@
   /**
    * THE AUTOPILOT — what it is doing right now, and the proof it is doing it.
    *
-   * The operator's requirement is one click and no manual step. The failure
-   * mode of that requirement is not a crash; it is a process that is up,
-   * answering, and quietly doing nothing, which from the outside is
-   * indistinguishable from a process that is working. This page exists to make
-   * those two states distinguishable at a glance. It is the difference between
-   * "automated" and "hung".
+   * The operator presses Run api in IntelliJ and walks away. This page is how
+   * he finds out what happened. It answers three questions and refuses
+   * everything else: WHAT IS HAPPENING, WHAT HAPPENED, WHAT IS STUCK.
+   *
+   * The failure mode of "one click and no manual step" is not a crash; it is a
+   * process that is up, answering, and quietly doing nothing, which from the
+   * outside is indistinguishable from a process that is working. Everything
+   * below exists to make those two states distinguishable at a glance.
    *
    * ---------------------------------------------------------------------------
-   * TWO SOURCES, AND THEY ARE NEVER MERGED
+   * THREE SOURCES, NEVER MERGED, EVERY FIGURE LABELLED WITH ITS OWN
    * ---------------------------------------------------------------------------
    *
-   * 1. `/autopilot.json` — what the autopilot SAYS it is doing. Live, small,
-   *    polled every 2s. It is the only thing that can answer "what is in
-   *    flight", "why did it stop" and "what failed".
+   *   reported  `/autopilot.json` — what the process SAYS. A claim. Live, small,
+   *             polled every 2s. The only thing that can answer "what is in
+   *             flight", "why did it stop" and "what failed".
    *
-   * 2. `/store.json` — what the store ACTUALLY HOLDS. The census, measured off
-   *    disk, 400 KB on a real store, polled every 30s. It owes the autopilot
-   *    nothing and would report the same numbers if the autopilot were deleted.
+   *   measured  `/store.json` — what the disk HOLDS. The census, measured off
+   *             disk, polled every 30s. It owes the autopilot nothing and would
+   *             report the same numbers with the autopilot deleted.
    *
-   * Coverage is drawn from (2), never from (1). A progress bar fed by the
-   * process reporting its own progress is a progress bar that reads 100% when
-   * the process is lying to itself. Every figure on this page is labelled with
-   * which of the two it came from, because "reported" and "measured" are not
-   * the same claim and CLAUDE.md §3 rule 6 says so.
+   *   observed  this page — successive polls. The only thing the browser itself
+   *             can honestly claim to know, and what answers "what changed
+   *             while I was away". It dies with the tab.
+   *
+   * Coverage is drawn from the second, never from the first. A progress bar fed
+   * by the process reporting its own progress reads 100% when the process is
+   * lying to itself. `CLAUDE.md` §3 rule 6: "reported" and "measured" are not
+   * the same claim, so they are not the same chip.
+   *
+   * ---------------------------------------------------------------------------
+   * THE CLAIM AND ITS EVIDENCE ARE ONE ELEMENT
+   * ---------------------------------------------------------------------------
+   *
+   * `verdict` is the ONLY place on this page that produces a verdict, and it is
+   * handed measured numbers rather than a sentence. No branch in it reaches the
+   * word "Complete" without `counted === true`, a valid span, a denominator and
+   * two pairs of numbers that are equal. The beam then REFUSES to render a
+   * claim whose evidence list is empty — the claim and the numbers under it are
+   * built in one pass and live in one element, so "The store is complete" over
+   * an unread or empty store is not a thing this page knows how to draw.
+   *
+   * That is not hypothetical. With the instrument masters missing, the process
+   * reports `complete` and the store holds nothing: both a run that fetched
+   * everything and a run whose masters never loaded find nothing missing. The
+   * layout this replaces rendered the claim in one panel and the count in
+   * another, so the two could disagree in silence. They are one element now.
    *
    * ---------------------------------------------------------------------------
    * WHEN THE ENDPOINT IS NOT THERE
@@ -36,22 +59,26 @@
    * unknown, and STILL renders the measured coverage — because the census is
    * true either way. What it must never do is render a calm empty panel: a
    * missing autopilot and an idle autopilot look identical in a blank, and
-   * CLAUDE.md §4 bans a fallback that hides a failure.
+   * `CLAUDE.md` §4 bans a fallback that hides a failure.
    *
    * The same applies to a 200 with the wrong shape. The reader below validates
    * the payload field by field and reports the FIRST field that was not what
    * the contract says, by name. A page that silently renders `undefined` as an
-   * em-dash is a page that turns a broken server into a design quirk.
+   * em-dash turns a broken server into a design quirk.
    *
    * ---------------------------------------------------------------------------
    * THE CONTRACT — docs/05-decisions.md D-0057
    * ---------------------------------------------------------------------------
    *
-   *   GET  /autopilot.json    the state, the current cell, the target, failures
-   *   POST /autopilot/pause   stop after the cell in flight; never mid-write
-   *   POST /autopilot/resume  continue from the census, not from a variable
+   *   GET  /autopilot.json     the state, the current cell, the target, failures
+   *   POST /autopilot/control  `action=stop` finishes the cell in flight and
+   *                            stops; `action=resume` continues from the census,
+   *                            not from a variable. Both answer
+   *                            `{action, accepted, why, status}` — and `why` is
+   *                            the server's own sentence, which this page prints
+   *                            verbatim and never paraphrases. See `send`.
    *
-   * Pause is "finish this cell and stop", not "abort". An aborted write is a
+   * Stop is "finish this cell and stop", not "abort". An aborted write is a
    * half-month the append-only store can never correct, and the whole reason
    * the backfill runs oldest-first is that the store cannot prepend.
    */
@@ -61,12 +88,195 @@
   const TICK_MS = 2000;
   /** The census. ~400 KB on a real store — polled slowly, on purpose. */
   const CENSUS_MS = 30000;
+  /** One route for stop and resume, and the only one that answers a sentence. */
+  const CONTROL = '/autopilot/control';
+  /** Where the durable record is, when the payload does not say. */
+  const JOURNAL = '~/.brutex/store/audit/pull.journal';
+  /** `crates/api/src/autopilot.rs` — the grace window before the first socket. */
+  const GRACE_SECS = 20;
+
+  /** What each state is DOING, in one clause, for the deck's own face. */
+  const SAYS = {
+    starting: 'opening the store and reading the census',
+    running: 'fetching',
+    waiting: 'waiting on the rate governor — absorbing throttle rather than failing',
+    paused: 'paused by the operator',
+    halted: 'halted, and it named why',
+    complete: 'reported done — the beam above is whether the store agrees'
+  };
+
+  /* ======================================================================
+     NUMBERS — Indian grouping, by hand.
+
+     Not `toLocaleString`: this has to produce the same digits on every
+     runtime, and a non-finite value must NOT come back as "NaN" — it comes
+     back as null, which forces the caller to name what it does not know.
+     There is no path in this file that can print the three characters N a N.
+     ====================================================================== */
+
+  function inr(v) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) return null;
+    const neg = v < 0;
+    const s = String(Math.round(Math.abs(v)));
+    if (s.length <= 3) return (neg ? '-' : '') + s;
+    const last3 = s.slice(-3);
+    const rest = s.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
+    return (neg ? '-' : '') + rest + ',' + last3;
+  }
+  /** The same, as a string, for the places that must be one (title=, sentences). */
+  const inrs = (v, dash) => {
+    const t = inr(v);
+    return t === null ? (dash ?? '—') : t;
+  };
+  /** The default sentence on an unnamed unknown. Every dash carries one. */
+  const NO_NUMBER = 'this page was not given a number here, and will not invent one';
+
+  /* ======================================================================
+     MONTHS — a literal three-letter table, never `Intl`.
+
+     `en-IN` and `en-GB` both render September as "Sept" — four letters where
+     every other month is three, which breaks a monospace column on one row a
+     year. The KEY form (`YYYY-MM`) is what every comparison, every `{#each}`
+     key and every request carries; the label is only ever a text node.
+     ====================================================================== */
+
+  const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const MKEY = /^(\d{4})-(0[1-9]|1[0-2])$/;
+  const DKEY = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
+
+  /** `YYYY-MM` -> `Apr 2024`. Anything else comes back null, never a guess. */
+  function monthLabel(k) {
+    const m = typeof k === 'string' ? MKEY.exec(k) : null;
+    return m ? `${MON[+m[2] - 1]} ${m[1]}` : null;
+  }
+  /** `YYYY-MM-DD` -> `11 Aug 2026`. */
+  function dayLabel(k) {
+    const m = typeof k === 'string' ? DKEY.exec(k) : null;
+    return m ? `${m[3]} ${MON[+m[2] - 1]} ${m[1]}` : null;
+  }
+
+  /** A duration the SERVER measured, plus local drift bounded by the poll. */
+  function clock(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null;
+    const s = Math.floor(ms / 1000);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const r = s % 60;
+    const p2 = (x) => String(x).padStart(2, '0');
+    return h ? `${h}:${p2(m)}:${p2(r)}` : `${p2(m)}:${p2(r)}`;
+  }
+  /** IST, always, and it says IST. An operator abroad should not do arithmetic. */
+  function istTime(epoch) {
+    if (typeof epoch !== 'number' || !Number.isFinite(epoch) || epoch <= 0) return null;
+    const d = new Date(epoch + 19800000);
+    const p2 = (x) => String(x).padStart(2, '0');
+    return `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
+  }
+  const ago = (ms) =>
+    ms < 1500 ? 'just now' : ms < 60000 ? `${Math.floor(ms / 1000)}s ago` : `${Math.floor(ms / 60000)}m ago`;
+
+  /**
+   * THREE-WAY, ALWAYS. Returning 1 for equal makes a sort unstable and a
+   * "did this change" test lie; it has reappeared three times in this
+   * repository and it does not appear here.
+   */
+  const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+  /** The feed's own name, from `/feeds.json`. Nothing here names a vendor. */
+  const feedName = (w) => (feeds.all ?? []).find((f) => f.wire === w)?.display ?? (w ? String(w) : null);
+
+  /* ======================================================================
+     THE SPAN — the single reason 1,200 unreadable rows can no longer be drawn.
+
+     The ladder this replaces walked a guarded loop from `from` to `to` and
+     checked only two of the four numbers it had parsed:
+
+         if (!Number.isFinite(fy) || !Number.isFinite(tm)) return out;
+
+     `ty` and `fm` were never checked, so a `to` of "20x6-13" left `ty` NaN,
+     every `y > ty` comparison false, and the loop ran to its 1,200 ceiling —
+     1,200 rows of months the payload never named, in one unreadable block.
+
+     This validates BOTH endpoints against the store's own key form, names
+     which endpoint failed and prints what it carried, and returns rows only
+     when it can. There is no path from a bad target to a row.
+     ====================================================================== */
+
+  /** Fifty years. A target wider than this is a typo, not a backfill. */
+  const MAX_SPAN = 600;
+
+  function span(from, to) {
+    const f = typeof from === 'string' ? MKEY.exec(from) : null;
+    if (!f)
+      return {
+        ok: false,
+        field: 'target.from',
+        raw: from,
+        why: 'the store writes one file per month and keys it YYYY-MM. This is not that.'
+      };
+    const t = typeof to === 'string' ? MKEY.exec(to) : null;
+    if (!t)
+      return {
+        ok: false,
+        field: 'target.to',
+        raw: to,
+        why: 'the store writes one file per month and keys it YYYY-MM. This is not that.'
+      };
+    if (cmp(from, to) > 0)
+      return {
+        ok: false,
+        field: 'target.from … target.to',
+        raw: `${from} → ${to}`,
+        why: 'the span ends before it begins. The backfill runs oldest first, so the order is not a preference.'
+      };
+    const n = (+t[1] - +f[1]) * 12 + (+t[2] - +f[2]) + 1;
+    if (n > MAX_SPAN)
+      return {
+        ok: false,
+        field: 'target.from … target.to',
+        raw: `${from} → ${to}`,
+        why: `that is ${inrs(n)} month files. The ladder is not drawn for a span this wide — read the number, not ${inrs(n)} rows.`
+      };
+    const out = [];
+    let y = +f[1];
+    let m = +f[2];
+    for (let i = 0; i < n; i += 1) {
+      out.push(`${y}-${String(m).padStart(2, '0')}`);
+      m += 1;
+      if (m > 12) {
+        m = 1;
+        y += 1;
+      }
+    }
+    return { ok: true, months: out };
+  }
+
+  /* ======================================================================
+     THE SECOND AXIS, AND WHY IT IS NOT FILLED IN
+
+     A month is held on two axes: the instrument-months in it (cells), and the
+     bars inside those cells. The first has a denominator — `target.instruments`
+     travels on the payload. The second does not: NO ROUTE ON THIS SERVER
+     STATES HOW MANY SESSIONS A MONTH HAS, and a session count cannot be
+     derived in a browser without inventing a holiday calendar, which
+     `CLAUDE.md` §3 rule 1 forbids.
+
+     So bars are COUNTED and never DIVIDED. `expectedBars` returns null with a
+     name for its refusal, every fraction built from it is null, and no
+     sentence on this page calls a span finished on the strength of the axis
+     that is measured while the other is not. The day a route states a month's
+     sessions, this function is the one place that changes.
+     ====================================================================== */
+
+  const BARS_NO_DENOM =
+    'no route states how many sessions a month holds, so bars are counted here and never divided — a fraction needs both numbers';
+  const expectedBars = () => null;
 
   /* ======================================================================
      THE CONTRACT READER
      ----------------------------------------------------------------------
-     Strict by construction. Every refusal below names the field, because
-     "the autopilot looks wrong" is not a bug report and "the payload has no
+     Strict by construction. Every refusal below names the field, because "the
+     autopilot looks wrong" is not a bug report and "the payload has no
      `target.from`" is.
      ====================================================================== */
 
@@ -123,7 +333,7 @@
     // `now` is null when nothing is in flight, and that is a legal answer —
     // but only for a state that is not running. A "running" autopilot with
     // nothing in flight is exactly the hang this page exists to expose.
-    let now = null;
+    let flight = null;
     if (raw.now !== null && raw.now !== undefined) {
       const n = raw.now;
       if (typeof n !== 'object') return { ok: false, why: '`now` is neither null nor an object' };
@@ -131,7 +341,7 @@
       // A start instant would have to be compared against the browser's clock,
       // and two clocks that disagree by a minute render a cell that has been
       // running for "-00:47". A duration the server measured has no such term.
-      now = {
+      flight = {
         instrument: str(n.instrument),
         month: str(n.month),
         timeframe: str(n.timeframe),
@@ -141,10 +351,10 @@
         of: num(n.of)
       };
       for (const k of ['instrument', 'month']) {
-        if (now[k] === null) return { ok: false, why: `no \`now.${k}\`` };
+        if (flight[k] === null) return { ok: false, why: `no \`now.${k}\`` };
       }
     }
-    if (state === 'running' && now === null) {
+    if (state === 'running' && flight === null) {
       return {
         ok: false,
         why: '`state` is "running" and `now` is null — nothing is in flight, so it is not running'
@@ -154,15 +364,14 @@
     // `failures` IS MANDATORY, and defaulting it to `[]` was the one fallback
     // that had crept into this reader. A payload with no `failures` key would
     // have rendered "Nothing has failed" — the exact sentence CLAUDE.md §4
-    // bans, and one the panel below already claims cannot happen. A missing
-    // list and an empty list are different facts; only the second is good news.
+    // bans. A missing list and an empty list are different facts; only the
+    // second is good news.
     if (!Array.isArray(raw.failures)) {
       return {
         ok: false,
         why: 'no `failures` array — an absent failure list rendered as "none" is a fallback that hides a failure'
       };
     }
-    const failures = raw.failures;
     return {
       ok: true,
       value: {
@@ -170,18 +379,34 @@
         why,
         cursor: str(raw.cursor),
         target,
-        now,
+        now: flight,
         waiting_ms: num(raw.waiting_ms),
         absorbed_ms: num(raw.absorbed_ms),
         journal: str(raw.journal),
-        failures: failures.map((f) => ({
+        // `month`, `why` and `at` STAY NULL WHEN THEY ARE ABSENT. Substituting
+        // a sentence here would make a malformed payload indistinguishable
+        // from a well-formed one; the snag rows name each absence instead, on
+        // the row it happened to.
+        failures: raw.failures.map((f) => ({
           instrument: str(f?.instrument) ?? '(unnamed)',
-          month: str(f?.month) ?? '(no month)',
-          why: str(f?.why) ?? '(the payload carried no reason — that is itself the bug)',
+          month: str(f?.month),
+          why: str(f?.why),
           at: str(f?.at)
         }))
       }
     };
+  }
+
+  /* ======================================================================
+     OBSERVED BY THIS PAGE — the third source, and the only one the browser
+     can honestly claim. It is what answers "what happened while I was away".
+     ====================================================================== */
+
+  let trail = $state([]);
+  const watchAt = Date.now();
+
+  function note(text) {
+    trail = [{ t: Date.now(), text }, ...trail].slice(0, 60);
   }
 
   /* ======================================================================
@@ -198,18 +423,63 @@
   let ap = $state(null);
   let now = $state(Date.now());
 
+  /** Adopt a validated payload, and note what moved since the last one. */
+  function adopt(next) {
+    const prev = ap;
+    if (!prev) {
+      note(`the first read of /autopilot.json landed — state ${next.state}.`);
+    } else {
+      if (prev.state !== next.state) {
+        note(`state moved from ${prev.state} to ${next.state}${next.why ? ` — ${next.why}` : '.'}`);
+      }
+      if (prev.cursor !== next.cursor && next.cursor) {
+        const was = monthLabel(prev.cursor) ?? prev.cursor ?? 'nothing';
+        note(`the cursor moved from ${was} to ${monthLabel(next.cursor) ?? next.cursor}.`);
+      }
+      const grew = next.failures.length - prev.failures.length;
+      if (grew > 0) {
+        const fresh = next.failures.slice(0, Math.min(grew, 3));
+        for (const f of fresh) {
+          const when = monthLabel(f.month) ?? f.month ?? 'no month';
+          const cause = f.why ?? 'the payload carried no reason, which is itself the bug';
+          note(`${f.instrument} · ${when} stalled — ${cause}`);
+        }
+        if (grew > fresh.length) {
+          note(`${inrs(grew - fresh.length)} further failure(s) were reported in the same round.`);
+        }
+      }
+    }
+    ap = next;
+  }
+
+  /** Move `link`, and say so once, when the kind actually changes. */
+  function setLink(next) {
+    if (link.kind !== next.kind) {
+      note(
+        next.kind === 'ok'
+          ? '/autopilot.json answered the contract.'
+          : next.kind === 'absent'
+            ? 'GET /autopilot.json answered 404 — this binary has no autopilot route.'
+            : next.kind === 'broken'
+              ? `/autopilot.json stopped being readable — ${next.why}`
+              : 'probing /autopilot.json.'
+      );
+    }
+    link = next;
+  }
+
   async function tick() {
     const t0 = performance.now();
     try {
       const r = await fetch('/autopilot.json', { cache: 'no-store' });
       const ms = Math.round(performance.now() - t0);
       if (r.status === 404) {
-        link = {
+        setLink({
           kind: 'absent',
           why: 'GET /autopilot.json answered 404 — this binary has no autopilot route',
           at: Date.now(),
           ms
-        };
+        });
         ap = null;
         return;
       }
@@ -227,23 +497,23 @@
       }
       const parsed = readState(await r.json());
       if (!parsed.ok) {
-        link = {
+        setLink({
           kind: 'broken',
           why: `the autopilot answered, and the payload does not match the contract: ${parsed.why}`,
           at: Date.now(),
           ms
-        };
+        });
         return;
       }
-      ap = parsed.value;
-      link = { kind: 'ok', why: null, at: Date.now(), ms };
+      adopt(parsed.value);
+      setLink({ kind: 'ok', why: null, at: Date.now(), ms });
     } catch (e) {
-      link = {
+      setLink({
         kind: 'broken',
         why: String(e?.message ?? e),
         at: Date.now(),
         ms: Math.round(performance.now() - t0)
-      };
+      });
     }
   }
 
@@ -260,10 +530,11 @@
     };
   });
 
-  // The elapsed clock ticks only while something is genuinely in flight.
+  // ONE SECOND, ALWAYS. Three readings on this page are durations rather than
+  // values — the cell in flight, how long this tab has watched, and how stale
+  // the census read is — and a duration that only moves when a poll lands is a
+  // clock that is wrong between polls.
   $effect(() => {
-    if (!ap?.now) return;
-    now = Date.now();
     const id = setInterval(() => (now = Date.now()), 1000);
     return () => clearInterval(id);
   });
@@ -275,14 +546,28 @@
      O(cells returned) and happens on arrival, not on render: a derived value
      recomputed per keystroke over 60,000 cells is a page that stutters for a
      number that changed thirty seconds ago.
+
+     IT IS STAMPED WITH THE FEED IT ANSWERED FOR. Without that stamp one feed's
+     numbers render under another feed's name for a whole poll period after the
+     selection moves — a stale value shown as current, which CLAUDE.md §4 bans.
+     `scope` below is the only reader of that stamp, and the beam refuses a
+     fraction whenever it disagrees with the target.
      ====================================================================== */
 
-  let census = $state({ kind: 'probing', why: null, at: 0, months: [], cells: 0, rows: 0 });
+  let census = $state({
+    kind: 'probing',
+    why: null,
+    at: 0,
+    feed: null,
+    months: new Map(),
+    cells: 0,
+    bars: 0
+  });
 
-  async function readCensus(feed) {
-    if (!feed) return;
+  async function readCensus(w) {
+    if (!w) return;
     try {
-      const r = await fetch(`/store.json?feed=${encodeURIComponent(feed)}`, { cache: 'no-store' });
+      const r = await fetch(`/store.json?feed=${encodeURIComponent(w)}`, { cache: 'no-store' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const ct = r.headers.get('content-type') ?? '';
       if (!ct.includes('json')) throw new Error(`answered ${ct || 'no content-type'}, not JSON`);
@@ -291,43 +576,48 @@
 
       const byMonth = new Map();
       let cells = 0;
-      let rows = 0;
+      let bars = 0;
       for (const c of rowsIn) {
         const m = typeof c?.month === 'string' ? c.month : null;
         if (!m) continue;
         const n = typeof c.rows === 'number' ? c.rows : 0;
         let acc = byMonth.get(m);
-        if (!acc) byMonth.set(m, (acc = { month: m, cells: 0, rows: 0 }));
+        if (!acc) byMonth.set(m, (acc = { cells: 0, bars: 0 }));
         acc.cells += 1;
-        acc.rows += n;
+        acc.bars += n;
         cells += 1;
-        rows += n;
+        bars += n;
       }
-      census = {
-        kind: 'ok',
-        why: null,
-        at: Date.now(),
-        months: [...byMonth.values()].sort((a, b) => (a.month < b.month ? -1 : 1)),
-        cells,
-        rows
-      };
+      const was = census;
+      census = { kind: 'ok', why: null, at: Date.now(), feed: w, months: byMonth, cells, bars };
+      if (was.kind !== 'ok' || was.feed !== w) {
+        note(`the census was read for ${feedName(w)} — ${inrs(cells)} instrument-months, ${inrs(bars)} bars.`);
+      } else if (cells !== was.cells || bars !== was.bars) {
+        note(
+          `the store gained ${inrs(cells - was.cells)} instrument-month(s) and ${inrs(bars - was.bars)} bar(s) for ${feedName(w)}.`
+        );
+      }
     } catch (e) {
       census = {
         kind: 'broken',
         why: String(e?.message ?? e),
         at: Date.now(),
-        months: [],
+        feed: w,
+        months: new Map(),
         cells: 0,
-        rows: 0
+        bars: 0
       };
+      note(`/store.json could not be read for ${feedName(w)} — ${String(e?.message ?? e)}`);
     }
   }
 
   // The feed is part of the question: the brokers do not hold the same
   // instruments, so a census is per feed and re-reads when the selection moves.
-  const feed = $derived(ap?.target?.feed ?? feeds.active);
+  // THE SELECTION ITSELF IS THE TOP BAR'S, and this page never writes it — one
+  // feed picker per product, in `+layout.svelte`, and no second one here.
+  const wire = $derived(ap?.target?.feed ?? feeds.active);
   $effect(() => {
-    const f = feed;
+    const f = wire;
     if (!f) return;
     readCensus(f);
     const id = setInterval(() => readCensus(f), CENSUS_MS);
@@ -335,704 +625,2194 @@
   });
 
   /* ======================================================================
-     THE MONTH LADDER — oldest at the top, because that is the order it works
-     ----------------------------------------------------------------------
-     The backfill runs oldest -> newest and the ladder is drawn the same way,
-     so "where is it" is a position on the page rather than an inference. The
-     store is append-only with monotonic timestamps and one file per month: a
-     later month written first permanently blocks the earlier days inside that
-     same month-file. The ordering is not a preference.
+     DERIVED — and every one of them gated on whether it was actually MEASURED.
+
+     `census.cells` is 0 before the first read lands and 0 again after a refused
+     one. Zero is also a legitimate answer. The number alone cannot say which,
+     so nothing below reads the number without reading `counted` first.
      ====================================================================== */
 
-  function monthsBetween(from, to) {
-    // Bounded by construction: a target that is somehow reversed or absurd
-    // yields an empty ladder rather than an infinite loop in a render path.
-    const out = [];
-    const [fy, fm] = from.split('-').map(Number);
-    const [ty, tm] = to.split('-').map(Number);
-    if (!Number.isFinite(fy) || !Number.isFinite(tm)) return out;
-    let y = fy;
-    let m = fm;
-    for (let guard = 0; guard < 1200; guard += 1) {
-      if (y > ty || (y === ty && m > tm)) break;
-      out.push(`${y}-${String(m).padStart(2, '0')}`);
-      m += 1;
-      if (m > 12) {
-        m = 1;
-        y += 1;
-      }
-    }
-    return out;
-  }
-
-  const held = $derived(new Map(census.months.map((m) => [m.month, m])));
-
-  /**
-   * The ladder. When the target is known it runs the whole span, so a month
-   * with nothing in it is a VISIBLE GAP rather than a row that was never
-   * drawn. When it is not known, only the observed months appear — and the
-   * page says so, rather than inventing a floor.
-   */
-  const ladder = $derived(
-    ap?.target
-      ? monthsBetween(ap.target.from, ap.target.to).map((m) => ({
-          month: m,
-          ...(held.get(m) ?? { cells: 0, rows: 0 })
-        }))
-      : census.months
+  const counted = $derived(census.kind === 'ok');
+  const notCounted = $derived(
+    census.kind === 'broken' ? `/store.json could not be read — ${census.why}` : 'reading /store.json…'
   );
 
-  const per = $derived(ap?.target?.instruments ?? null);
-  const monthsDone = $derived(per ? ladder.filter((m) => m.cells >= per).length : null);
-  const monthsPartial = $derived(per ? ladder.filter((m) => m.cells > 0 && m.cells < per).length : null);
-  const cellsTarget = $derived(per ? per * ladder.length : null);
+  /** Is the census answering the same question the target asks? */
+  const scope = $derived.by(() => {
+    const t = ap?.target;
+    if (!t || !t.feed || !counted) return { same: true, why: null };
+    if (census.feed === t.feed) return { same: true, why: null };
+    return {
+      same: false,
+      why: `the autopilot is working ${feedName(t.feed)} and this census is ${feedName(census.feed)} — two different questions, so nothing here is a fraction of anything there.`
+    };
+  });
+
+  /**
+   * The ladder, or a named refusal. Never a row whose month is not a month.
+   *
+   * When the target is known it runs the whole span, so a month with nothing in
+   * it is a VISIBLE GAP rather than a row that was never drawn. When it is not
+   * known, only the observed months appear — and the page says so, rather than
+   * inventing a floor.
+   */
+  const ladder = $derived.by(() => {
+    const t = ap?.target;
+    if (t) {
+      const sp = span(t.from, t.to);
+      if (!sp.ok) return { ok: false, refuse: sp, months: [], framed: true };
+      return { ok: true, refuse: null, months: sp.months, framed: true };
+    }
+    if (!counted) return { ok: true, refuse: null, months: [], framed: false };
+    return { ok: true, refuse: null, months: [...census.months.keys()].sort(cmp), framed: false };
+  });
+
+  const per = $derived(
+    scope.same && typeof ap?.target?.instruments === 'number' ? ap.target.instruments : null
+  );
+
+  /** One month's reading: what is held, and what it is held against. */
+  function rowOf(key) {
+    const h = census.months.get(key) ?? { cells: 0, bars: 0 };
+    const exp = expectedBars(key, per);
+    return {
+      key,
+      cells: h.cells,
+      bars: h.bars,
+      per,
+      expBars: exp,
+      cellPct: per === null || per <= 0 ? null : Math.min(100, (h.cells / per) * 100),
+      barPct: exp === null || exp <= 0 ? null : Math.min(100, (h.bars / exp) * 100)
+    };
+  }
+
+  const rows = $derived(ladder.ok ? ladder.months.map((k) => rowOf(k)) : []);
+
+  /** Cells against the whole span, when there is a denominator for them. */
+  const cellsTarget = $derived(per === null || !ladder.ok ? null : per * ladder.months.length);
+  /** Bars against the whole span. Null, and named — see `expectedBars`. */
+  const barsTarget = $derived.by(() => {
+    if (per === null || !ladder.ok) return null;
+    let sum = 0;
+    for (const k of ladder.months) {
+      const e = expectedBars(k, per);
+      if (e === null) return null;
+      sum += e;
+    }
+    return sum;
+  });
+
+  /**
+   * THE CONTRADICTION TEST — ONE FUNCTION, BOTH AXES, read by the beam, the
+   * deck and the watch bay, so no panel can render the completeness claim
+   * calmly while another calls it a contradiction.
+   *
+   * It tests CELLS AND BARS. Testing cells alone is the same defect it exists
+   * to catch: a span whose every cell is present and whose bars are short is
+   * exactly the case that reads finished, and a test that stops at the coarse
+   * axis passes it. Returns null only when no axis it can measure disagrees.
+   */
+  const contradicted = $derived.by(() => {
+    if (!ap || ap.state !== 'complete' || !counted || !ladder.ok) return null;
+    if (cellsTarget === null) return null;
+    const out = cellsTarget - census.cells;
+    const barsOut = barsTarget === null ? 0 : barsTarget - census.bars;
+    if (out <= 0 && barsOut <= 0) return null;
+    return {
+      axis: out > 0 ? 'cells' : 'bars',
+      target: cellsTarget,
+      held: census.cells,
+      out: Math.max(0, out),
+      barsExp: barsTarget,
+      barsHeld: census.bars,
+      barsOut: Math.max(0, barsOut)
+    };
+  });
+
+  /**
+   * MAY THE WORD "COMPLETE" BE PRINTED — one function, and every sentence that
+   * would say a rerun fetches nothing reads it.
+   *
+   * Both axes must be MEASURED and satisfied. Today the bar axis is never
+   * measured (see `expectedBars`), so `ok` is false whatever the store holds,
+   * and the page names the axis it cannot certify rather than rounding the
+   * unmeasured one up to done. That is the defect this page exists to refuse,
+   * applied to itself.
+   */
+  const certified = $derived.by(() => {
+    if (!counted) return { ok: false, why: notCounted };
+    if (!ladder.ok) return { ok: false, why: 'the reported target is not a span' };
+    if (cellsTarget === null || cellsTarget <= 0) {
+      return { ok: false, why: scope.same ? 'the target names no instrument count' : scope.why };
+    }
+    if (census.cells < cellsTarget) {
+      return { ok: false, why: `${inrs(cellsTarget - census.cells)} instrument-months are outstanding` };
+    }
+    if (barsTarget === null) return { ok: false, why: BARS_NO_DENOM };
+    if (census.bars < barsTarget) {
+      return { ok: false, why: `${inrs(barsTarget - census.bars)} bars are outstanding` };
+    }
+    return { ok: true, why: null };
+  });
+
+  /** What one rung is, as one word. The tape, the buckets and the filter read
+      the same call, so a row cannot be counted as one thing and drawn as
+      another. */
+  function classOf(r) {
+    if (r.cells <= 0 && r.bars <= 0) return 'none';
+    if (r.per === null) return 'nod';
+    if (r.cells >= r.per) return r.expBars !== null && r.bars < r.expBars ? 'short' : 'full';
+    return 'part';
+  }
+
+  /**
+   * The partition of the ladder. It must sum, and the foot prints the sum.
+   *
+   * `nod` is its own bucket: without a denominator a month cannot be called
+   * partial any more than it can be called complete, and folding it into `part`
+   * is a claim the census did not support.
+   */
+  const buckets = $derived.by(() => {
+    const b = { full: 0, short: 0, part: 0, none: 0, nod: 0 };
+    for (const r of rows) b[classOf(r)] += 1;
+    return b;
+  });
+  const bucketSum = $derived(buckets.full + buckets.short + buckets.part + buckets.none + buckets.nod);
 
   /* ======================================================================
-     THE CONTROL
+     THE CLAIM, AND WHY IT CANNOT BE MADE WITHOUT THE EVIDENCE
+
+     This is the ONLY place on the page that produces a verdict. It is handed
+     measured numbers rather than a sentence, and the facts it returns are the
+     ones the beam draws underneath the claim — one element, one pass.
      ====================================================================== */
 
-  let control = $state({ busy: false, note: null, bad: false });
+  const verdict = $derived.by(() => {
+    const lk = link;
 
-  async function send(path, label) {
-    control = { busy: true, note: null, bad: false };
-    try {
-      const r = await fetch(path, { method: 'POST' });
-      if (r.status === 404) {
-        throw new Error(`POST ${path} answered 404 — this binary has no ${label} control`);
+    if (lk.kind === 'absent' || lk.kind === 'broken') {
+      const facts = [];
+      if (counted) {
+        facts.push({ k: 'instrument-months held', v: inrs(census.cells), s: 'mea' });
+        facts.push({ k: 'bars held', v: inrs(census.bars), s: 'mea' });
+        facts.push({ k: 'census read', v: `${istTime(census.at) ?? '—'} IST`, s: 'mea' });
+      } else {
+        facts.push({ k: 'the census', v: notCounted, s: 'mea' });
       }
-      if (!r.ok) throw new Error(`POST ${path} answered HTTP ${r.status}`);
-      control = { busy: false, note: `${label} accepted`, bad: false };
-      await tick();
+      return {
+        tone: 'bad',
+        claim:
+          lk.kind === 'absent'
+            ? 'This process is serving pages, and nothing is driving the pull.'
+            : 'The autopilot answered, and the answer cannot be trusted.',
+        sub: `${lk.why}. What is in flight, what failed and whether anything is advancing are all unknown. Coverage below is still measured off the store — but a number that is stalled and a number that is finished look identical from here. Until the route answers, the backfill advances only for as long as somebody drives it, oldest month first: a later month written first permanently blocks the earlier days inside that same month-file.`,
+        facts
+      };
+    }
+
+    if (lk.kind === 'probing' || !ap) {
+      return {
+        tone: 'unknown',
+        claim: 'Nothing can be claimed yet.',
+        sub: 'The first read of /autopilot.json has not landed. An unread store and an empty store are different facts, so no figure is drawn from either.',
+        facts: [
+          { k: 'the state', v: 'reading /autopilot.json…', s: 'rep' },
+          {
+            k: 'the census',
+            v: counted ? `${inrs(census.cells)} instrument-months held` : notCounted,
+            s: 'mea'
+          }
+        ]
+      };
+    }
+
+    if (!scope.same) {
+      return {
+        tone: 'unknown',
+        claim: 'The census and the target are about different feeds.',
+        sub: `${scope.why} The ladder is drawn without a denominator until they agree.`,
+        facts: [
+          { k: 'target feed', v: feedName(ap.target.feed), s: 'rep' },
+          { k: 'census feed', v: feedName(census.feed), s: 'mea' },
+          { k: 'instrument-months held', v: inrs(census.cells), s: 'mea' }
+        ]
+      };
+    }
+
+    if (!counted) {
+      return {
+        tone: 'unknown',
+        claim: 'How much is held cannot be stated.',
+        sub: `${ap.state} is a claim about what the process is doing, not evidence of what the store holds. The /store.json read has not answered, so no fraction of it is drawn.`,
+        facts: [
+          { k: 'reported state', v: ap.state, s: 'rep' },
+          { k: 'the census', v: notCounted, s: 'mea' }
+        ]
+      };
+    }
+
+    if (!ladder.ok) {
+      return {
+        tone: 'bad',
+        claim: 'The target the autopilot reports is not a span.',
+        sub: `${ladder.refuse.field} carries ${JSON.stringify(ladder.refuse.raw)} — ${ladder.refuse.why} The ladder is refused rather than filled with rows nobody can read.`,
+        facts: [
+          { k: 'instrument-months held', v: inrs(census.cells), s: 'mea' },
+          { k: 'bars held', v: inrs(census.bars), s: 'mea' },
+          { k: 'reported state', v: ap.state, s: 'rep' }
+        ]
+      };
+    }
+
+    const held = census.cells;
+    const out = cellsTarget === null ? null : Math.max(0, cellsTarget - held);
+    const b = buckets;
+
+    const facts = [];
+    facts.push({
+      k: 'instrument-months held',
+      v: inrs(held) + (cellsTarget === null ? '' : ` of ${inrs(cellsTarget)}`),
+      s: 'mea'
+    });
+    if (out !== null) facts.push({ k: 'outstanding', v: inrs(out), s: 'mea' });
+    facts.push({
+      k: 'bars held',
+      v: inrs(census.bars) + (barsTarget === null ? '' : ` of ${inrs(barsTarget)}`),
+      s: 'mea'
+    });
+    const parts = [
+      ['every cell held', b.full],
+      ['partial', b.part],
+      ['empty', b.none]
+    ];
+    if (b.short) parts.push(['bars short', b.short]);
+    if (b.nod) parts.push(['no denominator', b.nod]);
+    facts.push({
+      k: `months: ${parts.map((x) => x[0]).join(' · ')}`,
+      v: parts.map((x) => inrs(x[1])).join(' · '),
+      s: 'mea'
+    });
+    facts.push({ k: 'census read', v: `${istTime(census.at) ?? '—'} IST`, s: 'mea' });
+    facts.push({ k: 'reported state', v: ap.state, s: 'rep' });
+
+    // A CONTRADICTION IS A FIRST-CLASS STATE, and `contradicted` is the only
+    // thing that decides one — the deck and the watch bay read the same call.
+    const con = contradicted;
+    if (con && con.axis === 'cells') {
+      return {
+        tone: 'bad',
+        claim:
+          held === 0
+            ? 'The autopilot reports COMPLETE and the store is empty.'
+            : `The autopilot reports COMPLETE and the store is ${inrs(con.out)} instrument-months short.`,
+        sub: `Both cannot be true. A process that has fetched everything and one whose instrument masters never loaded look identical from inside: both find nothing missing. Check the masters, then the journal at ${ap.journal ?? JOURNAL}.`,
+        facts
+      };
+    }
+    if (con) {
+      return {
+        tone: 'bad',
+        claim: `The autopilot reports COMPLETE and the store is ${inrs(con.barsOut)} bars short.`,
+        sub: 'Every instrument-month exists and the sessions inside them do not. Counting cells alone is how a backfill reads finished over a store that is not.',
+        facts
+      };
+    }
+
+    if (certified.ok) {
+      return {
+        tone: 'good',
+        claim: 'Complete — the span is held, and these are the numbers that say so.',
+        sub: `All ${inrs(ladder.months.length)} month files from ${monthLabel(ap.target.from)} to ${monthLabel(ap.target.to)} hold every one of the ${inrs(per)} instruments and every session inside them. A rerun fetches nothing.`,
+        facts
+      };
+    }
+
+    if (cellsTarget !== null && cellsTarget > 0 && held >= cellsTarget) {
+      // EVERY CELL, AND THE BARS INSIDE THEM DIVIDED BY NOTHING. The tone is
+      // grey and not green: the coarse axis is satisfied and the fine one is
+      // unmeasured, which is a different fact from finished.
+      return {
+        tone: 'unknown',
+        claim: `All ${inrs(cellsTarget)} instrument-months in the span are held — and this page will not call it finished.`,
+        sub: `Every month file from ${monthLabel(ap.target.from)} to ${monthLabel(ap.target.to)} holds all ${inrs(per)} instruments. Whether the bars inside them are complete is the second axis, and ${BARS_NO_DENOM}. Counting cells alone is how a backfill reads done at 62% of the bars.`,
+        facts
+      };
+    }
+
+    if (held === 0) {
+      return {
+        tone: 'warn',
+        claim: `The store holds nothing for ${feedName(census.feed) ?? 'this feed'} yet.`,
+        sub: '/store.json answered with no rows — the state before the first month lands, which is a different fact from a census that has not been read.',
+        facts
+      };
+    }
+
+    if (cellsTarget === null) {
+      return {
+        tone: 'unknown',
+        claim: `${inrs(held)} instrument-months are held, against nothing.`,
+        sub: 'The reported target names no instrument count, so this is a count and not a fraction.',
+        facts
+      };
+    }
+
+    const pct = Math.round((held / cellsTarget) * 100);
+    return {
+      tone: ap.state === 'halted' ? 'bad' : ap.state === 'running' ? 'good' : 'warn',
+      claim: `${inrs(held)} of ${inrs(cellsTarget)} instrument-months are held — ${pct}% of the target span.`,
+      sub: `${ap.why ? `${ap.why.charAt(0).toUpperCase()}${ap.why.slice(1)}. ` : ''}${inrs(out)} outstanding; the ladder says which months they are in.`,
+      facts
+    };
+  });
+
+  /**
+   * THE GUARD. A claim with nothing under it is not renderable here: the beam
+   * takes this list, and when it is empty it prints the refusal instead of the
+   * claim. A completeness claim over an unread store cannot reach the screen,
+   * because the claim and its evidence are one element.
+   */
+  const evidence = $derived(
+    (verdict.facts ?? []).filter((f) => f && f.v !== null && f.v !== undefined && f.v !== '')
+  );
+
+  /* ======================================================================
+     THE CONTROL, AND ITS RECEIPT
+
+     THERE IS NO SUCCESS TEMPLATE ON THIS PAGE. `send` prints the server's own
+     sentence, verbatim, in mono, and takes its TONE from that sentence — so
+     "started, and it is NOT a full recovery: 1 of the feeds below is terminal
+     for the life of this process and this did not clear it" cannot be rendered
+     as a plain green "resume accepted", which is what the control this replaces
+     did with it. The three tones are done / partial / refused, and the middle
+     one exists precisely because the server has an answer that is accepted and
+     incomplete at the same time.
+
+     ONE ROUTE, `POST /autopilot/control`, because it is the one that answers
+     `{action, accepted, why, status}` for BOTH words. `/autopilot/pause`
+     answers a bare status with no sentence, and a receipt with no sentence
+     would have to be written here — which is the success template again.
+     ====================================================================== */
+
+  let control = $state({ busy: false });
+  let receipt = $state(null);
+
+  /** The tone comes from the SENTENCE, never from the status code alone. */
+  const classify = (accepted, why) =>
+    !accepted ? 'refused' : /NOT a full recovery|terminal|could not|poisoned/.test(why) ? 'partial' : 'done';
+
+  async function send(action) {
+    control = { busy: true };
+    let code = 0;
+    try {
+      const r = await fetch(CONTROL, {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: `action=${encodeURIComponent(action)}`
+      });
+      code = r.status;
+      if (r.status === 404) {
+        throw new Error(`POST ${CONTROL} answered 404 — this binary has no autopilot control`);
+      }
+      const ct = r.headers.get('content-type') ?? '';
+      if (!ct.includes('json')) {
+        throw new Error(
+          `POST ${CONTROL} answered ${ct || 'no content-type'}, not JSON — the API is not behind this route (in development, add ${CONTROL} to the proxy list in web/vite.config.js)`
+        );
+      }
+      const body = await r.json();
+      const accepted = body?.accepted === true;
+      const why = str(body?.why);
+      if (why === null) {
+        // A CONTROL THAT ANSWERED WITHOUT A SENTENCE. Refused rather than
+        // dressed up: the sentence is the only thing that says what happened,
+        // and writing one here is the success template this page bans.
+        throw new Error(
+          `POST ${CONTROL} answered HTTP ${r.status} with no \`why\` — the control's own answer carries the reason, and this one carried none`
+        );
+      }
+      const tone = classify(accepted, why);
+      receipt = { action, tone, code: r.status, why, at: Date.now() };
+      note(
+        `POST ${CONTROL} action=${action} answered ${r.status} — ${
+          tone === 'partial'
+            ? 'accepted, and NOT a full recovery'
+            : tone === 'refused'
+              ? 'refused'
+              : 'accepted'
+        }.`
+      );
+
+      // THE ANSWER EMBEDS THE STATUS, so the page re-reads from that rather
+      // than fetching again and racing a round that landed in between.
+      const parsed = readState(body?.status);
+      if (parsed.ok) {
+        adopt(parsed.value);
+        link = { kind: 'ok', why: null, at: Date.now(), ms: link.ms };
+      }
     } catch (e) {
       // A control that failed and said nothing is a button that lies. The
-      // reason goes on the page beside the button that produced it.
-      control = { busy: false, note: String(e?.message ?? e), bad: true };
+      // reason goes on the page beside the button that produced it, in the
+      // same element the server's own sentence would have used.
+      const why = String(e?.message ?? e);
+      receipt = { action, tone: 'refused', code, why, at: Date.now() };
+      note(`POST ${CONTROL} action=${action} failed — ${why}`);
+    } finally {
+      control = { busy: false };
     }
   }
 
-  /* ======================================================================
-     FORMATTING
-     ====================================================================== */
-
-  const nf = new Intl.NumberFormat('en-IN');
-  const n = (v) => (typeof v === 'number' && Number.isFinite(v) ? nf.format(v) : '—');
-
-  function clock(ms) {
-    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return '—';
-    const s = Math.floor(ms / 1000);
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const r = s % 60;
-    const pad = (x) => String(x).padStart(2, '0');
-    return h ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
-  }
-
-  const TONE = {
-    starting: 'acc',
-    running: 'up',
-    waiting: 'warn',
-    paused: 'warn',
-    halted: 'down',
-    complete: 'up'
-  };
-
-  const SAYS = {
-    starting: 'Opening the store and reading the census',
-    running: 'Fetching',
-    waiting: 'Waiting on the rate governor — absorbing throttle rather than failing',
-    paused: 'Paused by the operator',
-    halted: 'Halted',
-    complete: 'The target span is complete'
-  };
+  /** Which button is offered, what it does, and why — one place, four answers. */
+  const offer = $derived.by(() => {
+    if (!ap) return { label: null, action: null, go: false, why: 'No control: /autopilot.json did not answer.' };
+    if (ap.state === 'paused') {
+      return {
+        label: 'Resume',
+        action: 'resume',
+        go: true,
+        why: 'Resumes from the store’s census, not a progress variable.'
+      };
+    }
+    if (ap.state === 'halted') {
+      return {
+        label: 'Retry',
+        action: 'resume',
+        go: true,
+        why: 'It halted rather than skipping — nothing was passed over. Fix the reason above first.'
+      };
+    }
+    if (ap.state === 'complete') {
+      return {
+        label: null,
+        action: null,
+        go: false,
+        why: 'Nothing to pause. Whether the store agrees is the beam to the left.'
+      };
+    }
+    return {
+      label: 'Pause',
+      action: 'stop',
+      go: false,
+      why: 'Finishes the cell in flight, then stops. Never aborts mid-write.'
+    };
+  });
 
   /**
    * How long the current cell has been running.
    *
    * The server's own measurement, plus the local drift since that measurement
    * arrived. Only the drift is the browser's guess, and it is bounded by the
-   * poll period — so the number ticks smoothly between polls without ever
-   * being derived from a comparison of two machines' clocks.
+   * poll period — so the number ticks smoothly between polls without ever being
+   * derived from a comparison of two machines' clocks.
    */
   const elapsed = $derived(
     ap?.now && ap.now.elapsed_ms !== null ? ap.now.elapsed_ms + Math.max(0, now - link.at) : null
   );
+
+  /** Seconds of the grace window left, by this page's own clock. */
+  const graceLeft = $derived(Math.max(0, GRACE_SECS - Math.floor((now - watchAt) / 1000)));
+
+  /* ======================================================================
+     THE DIALS — this page's one control primitive.
+
+     A dial shows its CURRENT VALUE on its face. It is not a row of links and it
+     is not a segmented bar: there are three to fourteen answers behind each one
+     and the face has to survive all of them.
+     ====================================================================== */
+
+  let drop = $state(null);
+  let show = $state('all');
+  let group = $state('month');
+  let openRung = $state(null);
+
+  const SHOW = [
+    { k: 'all', n: 'every month', y: 'the whole target span, gaps included' },
+    { k: 'gap', n: 'only the gaps', y: 'anything a rerun would still have to touch' },
+    { k: 'done', n: 'only cells held', y: 'every instrument-month the target names is present' },
+    // OFFERED AND DEAD, WITH THE REASON ON ITS FACE. Dropping the row would say
+    // the question cannot be asked; drawing it live would promise a filter that
+    // can never match. CLAUDE.md §4: name the reason on the control it is about.
+    { k: 'short', n: 'only bars short', y: BARS_NO_DENOM, off: true }
+  ];
+  const GROUPS = [
+    { k: 'month', n: 'by month', y: 'oldest first — the order the backfill needs them' },
+    { k: 'instrument', n: 'by instrument', y: 'one heading per symbol that is stalled' },
+    { k: 'reason', n: 'by reason', y: 'the vendor code, or the store refusal' }
+  ];
+
+  const shown = $derived(
+    rows.filter((r) => {
+      const c = classOf(r);
+      if (show === 'gap') return c !== 'full';
+      if (show === 'done') return c === 'full';
+      if (show === 'short') return c === 'short';
+      return true;
+    })
+  );
+
+  function onWindowDown(e) {
+    if (drop && !e.target?.closest?.('.dial')) drop = null;
+  }
+  function onWindowKey(e) {
+    if (e.key === 'Escape' && drop) drop = null;
+  }
+
+  /* ======================================================================
+     THE SNAGS — what is stuck. A failure is never a count on its own.
+     ====================================================================== */
+
+  function reasonOf(f) {
+    if (!f.why) return 'no reason in the payload';
+    const m = /^([A-Z]{2}-\d{3})/.exec(f.why);
+    if (m) return m[1];
+    return f.why.startsWith('the store refused') ? 'store refused the batch' : 'transport';
+  }
+  const groupKey = (f) =>
+    group === 'month'
+      ? (monthLabel(f.month) ?? f.month ?? 'no month')
+      : group === 'instrument'
+        ? f.instrument
+        : reasonOf(f);
+  /** THE SORT KEY IS THE RAW MONTH, so the order is chronological and not
+      alphabetical — "Apr 2021" before "Feb 2020" is what the label sorts to. */
+  const sortKey = (f) => (group === 'month' ? (f.month ?? '') : groupKey(f));
+
+  const snags = $derived(
+    (ap?.failures ?? [])
+      .map((f, i) => ({ ...f, i }))
+      .sort((a, b) => cmp(sortKey(a), sortKey(b)) || cmp(a.i, b.i))
+  );
 </script>
 
-<div class="pane">
+<svelte:window onkeydown={onWindowKey} onpointerdown={onWindowDown} />
+
+<!-- =====================================================================
+     THE HELPERS. Every number, every month and every provenance chip on this
+     page goes through one of these three, so an unknown is NAMED and never
+     blanked, and a month is never rendered from anything but its key.
+     ===================================================================== -->
+
+{#snippet N(v, why)}
+  {#if inr(v) !== null}
+    <span class="mono">{inr(v)}</span>
+  {:else}
+    <span class="unk" title={why ?? NO_NUMBER}>—</span>
+  {/if}
+{/snippet}
+
+{#snippet monthNode(k)}
+  {#if monthLabel(k)}
+    <span class="mono" title={k}>{monthLabel(k)}</span>
+  {:else}
+    <span class="unk" title="not a month key this page can read — the store writes YYYY-MM"
+      >{k === null || k === undefined ? 'no month' : String(k)}</span
+    >
+  {/if}
+{/snippet}
+
+{#snippet src(kind)}
+  <span
+    class="src"
+    class:mea={kind === 'mea'}
+    class:rep={kind === 'rep'}
+    class:obs={kind === 'obs'}
+    title={kind === 'mea'
+      ? 'Measured off disk by /store.json. True whether or not the autopilot exists.'
+      : kind === 'rep'
+        ? 'Reported by /autopilot.json. This is what the process says about itself — a claim, not evidence.'
+        : 'Observed by this page across successive polls. Nothing else knows it, and it dies with this tab.'}
+    >{kind === 'mea' ? 'measured' : kind === 'rep' ? 'reported' : 'observed'}</span
+  >
+{/snippet}
+
+{#snippet dial(id, label, value, opts, pick)}
+  {@const cur = opts.find((o) => o.k === value) ?? { n: String(value), y: '' }}
+  <span class="dial" class:open={drop === id}>
+    <button
+      class="dial-face"
+      type="button"
+      aria-haspopup="listbox"
+      aria-expanded={drop === id}
+      title="{label}: {cur.n}{cur.y ? ` — ${cur.y}` : ''}"
+      onclick={(e) => {
+        e.stopPropagation();
+        drop = drop === id ? null : id;
+      }}
+    >
+      <span class="dl">{label}</span>
+      <span class="dv">{cur.n}</span>
+      <span class="dc" aria-hidden="true"></span>
+    </button>
+    {#if drop === id}
+      <div class="dial-list" role="listbox" aria-label={label}>
+        {#each opts as o (o.k)}
+          <button
+            class="dial-opt"
+            type="button"
+            role="option"
+            aria-selected={o.k === value}
+            disabled={Boolean(o.off)}
+            title={o.y}
+            onclick={() => {
+              drop = null;
+              pick(o.k);
+            }}
+          >
+            <span class="on">{o.n}</span>
+            <span class="oy">{o.y}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </span>
+{/snippet}
+
+<div class="pane autopilot">
   <div class="pane-head">
     <span class="pane-title">Autopilot</span>
-    {#if ap}
-      <span class="tag {TONE[ap.state] ?? ''}">{ap.state}</span>
-      {#if ap.target.feed}<span class="tag acc">{ap.target.feed}</span>{/if}
-      {#if ap.target.timeframe}<span class="tag">{ap.target.timeframe}</span>{/if}
-    {:else if link.kind === 'absent'}
-      <span class="tag down">not in this binary</span>
-    {:else if link.kind === 'broken'}
-      <span class="tag down">contract broken</span>
-    {:else}
-      <span class="tag">probing</span>
-    {/if}
 
     <span class="spacer"></span>
 
-    <span class="status" title="Round trip to /autopilot.json, measured. Last read {link.at ? new Date(link.at).toLocaleTimeString() : 'never'}.">
-      <span
-        class="dot"
-        class:up={link.kind === 'ok'}
-        class:down={link.kind === 'absent' || link.kind === 'broken'}
-        class:warn={link.kind === 'probing'}
-        class:live={ap?.state === 'running'}
-      ></span>
-      <span class="txt">/autopilot.json</span>
-      <span class="ms">{link.ms} ms</span>
+    <!-- THE LINK, ON THE PAGE'S OWN HEAD, AT THE RIGHT END OF THE BAR. Two
+         chips, both OBSERVED by this page and by nothing else: whether it is
+         being answered, and how long this tab has been the one watching.
+         THE ROUND TRIP IS NOT HERE. It is the deck's sixth gauge, where it
+         carries its `observed` chip — a millisecond count wearing no
+         provenance beside a state that came off the wire is the merge of two
+         sources this page exists to keep apart. -->
+    <span
+      class="chip"
+      class:up={link.kind === 'ok'}
+      class:am={link.kind === 'probing'}
+      class:dn={link.kind === 'absent' || link.kind === 'broken'}
+      title={link.why ?? `GET /autopilot.json every ${TICK_MS / 1000}s; GET /store.json every ${CENSUS_MS / 1000}s.`}
+    >
+      {link.kind === 'ok'
+        ? 'polling'
+        : link.kind === 'probing'
+          ? 'probing'
+          : link.kind === 'absent'
+            ? 'no route'
+            : 'contract broken'}
     </span>
+    <span
+      class="chip"
+      title="How long this tab has been open and polling. Observed by this page; it dies with the tab."
+      >watching {clock(now - watchAt) ?? '00:00'}</span
+    >
   </div>
 
-  <!-- ================================================================
-       THE LOUD BANNER. It is the first thing on the page when the thing
-       this page is about is not there.
-       ================================================================ -->
-  {#if link.kind === 'absent' || link.kind === 'broken'}
-    <div class="alarm" role="alert">
-      <div class="alarm-h">
-        <span class="tag down">{link.kind === 'absent' ? 'no autopilot' : 'contract violated'}</span>
-        <strong>
-          {link.kind === 'absent'
-            ? 'This process is serving pages, but nothing is driving the pull.'
-            : 'The autopilot answered, and the answer cannot be trusted.'}
-        </strong>
-      </div>
-      <p class="alarm-why">{link.why}</p>
-      <p class="alarm-what">
-        <span class="lbl">What is therefore unknown</span>
-        What is in flight, what has been attempted, what failed and why, and whether anything is
-        advancing at all. The coverage below is still real — it is read from the store's own census
-        and it would report the same numbers if this route never existed — but a number that is not
-        moving cannot be told apart from a number that is finished.
-      </p>
-      <p class="alarm-what">
-        <span class="lbl">What still has to be done by hand</span>
-        Until <code>GET /autopilot.json</code> exists, the backfill advances only for as long as
-        somebody drives it. Oldest month first, always:
-        <b>a later month written first permanently blocks the earlier days inside that same
-        month-file.</b>
-      </p>
-    </div>
-  {/if}
-
-  <!-- ================================================================
-       THE FIVE NUMBERS. Each says where it came from.
-       ================================================================ -->
-  <div class="stats">
-    <div class="stat">
-      <span class="k">State</span>
-      <span class="v {ap ? (TONE[ap.state] ?? '') : 'down'}">{ap ? ap.state : 'unknown'}</span>
-      <span class="n">{ap ? (SAYS[ap.state] ?? '') : 'reported by /autopilot.json'}</span>
-    </div>
-
-    <div class="stat">
-      <span class="k">In flight</span>
-      <span class="v">{ap?.now ? clock(elapsed) : '—'}</span>
-      <span class="n">
-        {#if ap?.now}
-          {ap.now.instrument} · {ap.now.month}
-        {:else if ap}
-          nothing in flight
-        {:else}
-          unknown — the route did not answer
-        {/if}
-      </span>
-    </div>
-
-    <div class="stat">
-      <span class="k">Months complete</span>
-      <span class="v">{monthsDone === null ? '—' : n(monthsDone)}</span>
-      <!-- COMPLETE MEANS EVERY INSTRUMENT, and the label says so. A month
-           holding 481 of 774 is genuinely not done, and rounding that up to
-           "complete" would be the silent skip CLAUDE.md §4 bans — but "0"
-           beside "10 partial" reads as broken unless the denominator is
-           named. Audit's grid uses the same denominator and paints those
-           months PARTIAL for the same reason. -->
-      <span class="n">
-        {#if monthsDone === null}
-          needs target.instruments from /autopilot.json
-        {:else}
-          of {n(ladder.length)}{monthsPartial ? ` · ${n(monthsPartial)} partial` : ''} · complete =
-          all {n(per)} instruments held
-        {/if}
-      </span>
-    </div>
-
-    <div class="stat">
-      <span class="k">Instrument-months held</span>
-      <span class="v">{n(census.cells)}</span>
-      <span class="n">
-        {cellsTarget ? `of ${n(cellsTarget)} · ` : ''}measured from /store.json
-      </span>
-    </div>
-
-    <div class="stat">
-      <span class="k">Bars stored</span>
-      <span class="v">{n(census.rows)}</span>
-      <span class="n">measured from /store.json{feed ? ` · ${feed}` : ''}</span>
-    </div>
-
-    <div class="stat">
-      <span class="k">Failures</span>
-      <span class="v" class:down={(ap?.failures?.length ?? 0) > 0}>
-        {ap ? n(ap.failures.length) : '—'}
-      </span>
-      <span class="n">{ap ? 'named below, never counted only' : 'unknown'}</span>
-    </div>
-  </div>
-
-  <div class="body">
-    <!-- ============================================ RIGHT NOW ========= -->
-    <section class="card">
-      <header class="card-h">
-        <span class="pane-title">Right now</span>
-        <span class="spacer"></span>
-        {#if ap?.state === 'running'}
-          <span class="status busy" role="status" aria-live="polite">
-            <span class="dot acc live"></span><span class="txt">fetching</span>
-          </span>
-        {/if}
-      </header>
-
-      {#if !ap}
-        <div class="empty">
-          Nothing can be said about the current cell: <code>/autopilot.json</code> did not answer
-          with a payload this page can read. The reason is in the banner above.
+  <div class="board">
+    <!-- ==============================================================
+         THE BEAM. One claim, and the evidence it was made from, in one
+         element. Nothing else on this page states a verdict.
+         ============================================================== -->
+    {#if evidence.length === 0}
+      <!-- THE GUARD. If a claim ever reaches here with nothing to stand on, the
+           page says THAT, loudly, instead of publishing the claim. -->
+      <div class="beam bad" role="alert">
+        <div>
+          <p class="claim">This page tried to state a verdict it has no measurement for.</p>
+          <p class="claim-sub">
+            The claim was: “{verdict.claim}”. It was refused rather than printed, because a claim and the
+            evidence for it are one element here, and this one arrived with no evidence. That is a defect in
+            this page, not in the store.
+          </p>
         </div>
-      {:else if ap.now}
-        <dl class="kv">
-          <dt>Instrument</dt>
-          <dd class="mono">{ap.now.instrument}</dd>
-          <dt>Month</dt>
-          <dd class="mono">{ap.now.month}</dd>
-          {#if ap.now.timeframe}
-            <dt>Timeframe</dt>
-            <dd class="mono">{ap.now.timeframe}</dd>
-          {/if}
-          {#if ap.now.feed}
-            <dt>Feed</dt>
-            <dd class="mono">{ap.now.feed}</dd>
-          {/if}
-          <dt>Elapsed</dt>
-          <dd class="mono">{clock(elapsed)}</dd>
-          {#if ap.now.index !== null && ap.now.of !== null}
-            <dt>Position</dt>
-            <dd class="mono">{n(ap.now.index)} of {n(ap.now.of)} in this month</dd>
-          {/if}
-        </dl>
-        {#if ap.now.index !== null && ap.now.of}
-          <div class="track" aria-hidden="true">
-            <i style="width:{Math.max(0, Math.min(100, (ap.now.index / ap.now.of) * 100))}%"></i>
+      </div>
+    {:else}
+      <div
+        class="beam"
+        class:good={verdict.tone === 'good'}
+        class:warn={verdict.tone === 'warn'}
+        class:bad={verdict.tone === 'bad'}
+        class:unknown={verdict.tone === 'unknown'}
+        role={verdict.tone === 'bad' ? 'alert' : undefined}
+      >
+        <div>
+          <p class="claim">{verdict.claim}</p>
+          {#if verdict.sub}<p class="claim-sub">{verdict.sub}</p>{/if}
+          <div class="because">
+            {#each evidence as f (f.k)}
+              <div class="fact">
+                {@render src(f.s)}
+                <b>{f.v}</b>
+                <span>{f.k}</span>
+              </div>
+            {/each}
           </div>
-        {/if}
-      {:else}
-        <div class="empty">
-          <b>Nothing is in flight.</b>
-          {#if ap.why}
-            {ap.why}
-          {:else if ap.state === 'complete'}
-            The target span is complete — a re-run would fetch nothing, which is what makes
-            restarting safe.
-          {:else}
-            The autopilot reported state <code>{ap.state}</code> and no current cell.
+        </div>
+
+        <div class="beam-act">
+          <div class="act">
+            {#if offer.label}
+              <button
+                class="gobtn"
+                class:go={offer.go}
+                type="button"
+                disabled={control.busy}
+                onclick={() => send(offer.action)}
+                title="POST {CONTROL} action={offer.action}"
+              >
+                {control.busy ? 'sending…' : offer.label}
+              </button>
+            {/if}
+            <span class="act-why">{offer.why}</span>
+          </div>
+
+          {#if receipt}
+            <!-- THE RECEIPT. The server's own sentence, verbatim, and the tone
+                 comes from that sentence rather than from the status code. -->
+            <div
+              class="receipt"
+              class:done={receipt.tone === 'done'}
+              class:partial={receipt.tone === 'partial'}
+              class:refused={receipt.tone === 'refused'}
+              role="status"
+            >
+              <b
+                >POST /autopilot/control action={receipt.action} → {receipt.code || 'no answer'} · {receipt.tone ===
+                'refused'
+                  ? 'refused'
+                  : receipt.tone === 'partial'
+                    ? 'accepted, and NOT complete'
+                    : 'accepted'}</b
+              >
+              {receipt.why}
+              <span class="verb">The server’s own sentence, verbatim, at {istTime(receipt.at)} IST.</span>
+            </div>
           {/if}
         </div>
-      {/if}
-
-      {#if ap?.waiting_ms}
-        <p class="note warn">
-          <span class="tag warn">throttled</span>
-          Waiting <b>{clock(ap.waiting_ms)}</b> on the rate governor. This is the governor doing its
-          job: it <b>waits</b> rather than refusing, so a throttled window costs time and never costs
-          a month.
-        </p>
-      {/if}
-      {#if ap?.absorbed_ms}
-        <p class="note">
-          <span class="lbl">Throttle absorbed since start</span>
-          <b class="mono">{clock(ap.absorbed_ms)}</b> — time spent waiting rather than failing.
-        </p>
-      {/if}
-
-      <!-- ---------------------------------------- THE CONTROL --------- -->
-      <div class="ctl">
-        {#if ap?.state === 'paused'}
-          <button class="btn primary" type="button" disabled={control.busy} onclick={() => send('/autopilot/resume', 'resume')}>
-            Resume
-          </button>
-          <span class="ctl-why">
-            Resume continues from the store's own census, not from a progress variable — so it picks
-            up exactly where the store stops, whatever happened in between.
-          </span>
-        {:else if ap && ap.state !== 'halted' && ap.state !== 'complete'}
-          <button class="btn" type="button" disabled={control.busy} onclick={() => send('/autopilot/pause', 'pause')}>
-            Pause
-          </button>
-          <span class="ctl-why">
-            Pause finishes the cell in flight and then stops. It never aborts mid-write: a half
-            month is a hole the append-only store cannot go back and fill.
-          </span>
-        {:else if ap?.state === 'halted'}
-          <button class="btn primary" type="button" disabled={control.busy} onclick={() => send('/autopilot/resume', 'resume')}>
-            Retry
-          </button>
-          <span class="ctl-why">
-            It halted rather than skipping. Fix the reason above, then retry — nothing was silently
-            passed over while it was down.
-          </span>
-        {:else}
-          <span class="ctl-why">
-            No control is offered: the autopilot has not reported a state this page can act on.
-          </span>
-        {/if}
-        {#if control.note}
-          <span class="ctl-note" class:bad={control.bad} role="status">{control.note}</span>
-        {/if}
       </div>
-    </section>
+    {/if}
 
-    <!-- ============================================ COVERAGE ========== -->
-    <section class="card">
-      <header class="card-h">
-        <span class="pane-title">Coverage — oldest first</span>
-        <span class="spacer"></span>
-        {#if ap?.target}
-          <span class="tag">{ap.target.from} → {ap.target.to}</span>
-        {/if}
-        <span class="tag {census.kind === 'ok' ? 'up' : 'down'}">
-          {census.kind === 'ok' ? 'measured' : census.kind}
-        </span>
-      </header>
-
-      <p class="note">
-        Read from <code>/store.json</code>, not from the autopilot. The ladder runs oldest at the
-        top because that is the order the backfill must run: the store is append-only with monotonic
-        timestamps and one file per month, so a later month written first permanently blocks the
-        earlier days in that same file.
-        {#if !ap?.target}
-          <b>The target span is not known here</b> — only the months the store already holds are
-          listed, because <code>/autopilot.json</code> is what states the target and it did not
-          answer. A month missing from this list may be a gap or may be outside the target; this
-          page will not guess which.
-        {/if}
-        <br />
-        <span class="lbl">Why this is not the Audit grid</span>
-        <a class="link" href="/audit">Audit</a> draws the same census as a year-by-month grid against
-        the target <code>docs/07-plan.md</code> R-2 states, and that is the picture to read for
-        <em>how much of the backfill exists</em>. This ladder answers a different question — <em>what
-        is the autopilot working on, and what is next</em> — so it is linear, oldest first, and it
-        marks the cursor. The target here is the one the autopilot reports rather than one re-derived
-        in the browser: two derivations of one window are two things that can drift apart, and the
-        one that decides what to fetch is the one worth showing.
-      </p>
-
-      {#if census.kind === 'broken'}
-        <div class="empty down">
-          <b>The census could not be read.</b> {census.why}
-          <br />Nothing below is current.
+    <!-- ==============================================================
+         THE DECK. Six readings, each carrying the source it came from.
+         ============================================================== -->
+    <div class="deck">
+      <!-- 1 — STATE. The word never travels alone: when the census disagrees
+           with a reported "complete", the gauge carries the disagreement on
+           its own face rather than leaving it to the beam. -->
+      <div class="gauge">
+        <span class="g-k">State</span>
+        <div
+          class="g-v"
+          class:up={Boolean(ap) && !contradicted && (ap.state === 'running' || ap.state === 'complete')}
+          class:am={Boolean(ap) && !contradicted && (ap.state === 'waiting' || ap.state === 'paused')}
+          class:cy={Boolean(ap) && !contradicted && ap.state === 'starting'}
+          class:dn={Boolean(ap) && (Boolean(contradicted) || ap.state === 'halted')}
+        >
+          {#if ap}
+            <span>{contradicted ? 'complete?' : ap.state}</span>
+          {:else}
+            <span class="unk" title={link.why ?? 'the first read has not landed'}
+              >{link.kind === 'probing' ? 'reading…' : 'unknown'}</span
+            >
+          {/if}
         </div>
-      {:else if ladder.length === 0}
-        <div class="empty">
-          The store holds nothing for {feed ?? 'this feed'} yet. That is the state before the first
-          month lands, not an error.
+        <div class="g-n">
+          {@render src('rep')}
+          <em
+            >{#if !ap}{link.kind === 'absent'
+                ? 'GET /autopilot.json answered 404'
+                : link.kind === 'broken'
+                  ? 'the payload did not match the contract'
+                  : 'the first read has not landed'}{:else if contradicted}{contradicted.axis === 'cells'
+                ? `${inrs(contradicted.out)} instrument-months short — read the beam`
+                : `${inrs(contradicted.barsOut)} bars short — read the beam`}{:else}{SAYS[ap.state] ??
+                ap.state}{/if}</em
+          >
         </div>
-      {:else}
-        <div class="grid">
-          <table>
-            <thead>
-              <tr>
-                <th>Month</th>
-                <th class="num">Instrument-months</th>
-                <th class="num">Bars</th>
-                <th>Coverage</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each ladder as m (m.month)}
-                {@const pct = per ? Math.min(100, (m.cells / per) * 100) : null}
-                {@const done = per !== null && m.cells >= per}
-                <tr class:cursor={ap?.cursor === m.month}>
-                  <td class="mono">
-                    {m.month}
-                    {#if ap?.cursor === m.month}<span class="tag acc">working</span>{/if}
-                  </td>
-                  <td class="num mono">{n(m.cells)}{per ? ` / ${n(per)}` : ''}</td>
-                  <td class="num mono">{n(m.rows)}</td>
-                  <td>
-                    {#if pct === null}
-                      <span class="faint">no target to compare against</span>
-                    {:else}
-                      <span class="bar" title="{Math.round(pct)}%">
-                        <i class:done style="width:{pct}%"></i>
-                      </span>
+      </div>
+
+      <!-- 2 — IN FLIGHT -->
+      <div class="gauge">
+        <span class="g-k">In flight</span>
+        <div class="g-v" class:cy={Boolean(ap?.now)}>
+          {#if ap?.now}
+            <span class="mono">{clock(elapsed) ?? '—'}</span>
+          {:else if ap}
+            <span class="unk" title="the autopilot reports no current cell">nothing</span>
+          {:else}
+            <span class="unk" title="unknown — the route did not answer">—</span>
+          {/if}
+        </div>
+        <div class="g-n">
+          {@render src('rep')}
+          <em title={ap?.now?.month ?? undefined}
+            >{#if ap?.now}{ap.now.instrument} · {monthLabel(ap.now.month) ?? ap.now.month}{:else if ap}nothing
+              is in flight — the reason is in Right now{:else}unknown — the route did not answer{/if}</em
+          >
+        </div>
+      </div>
+
+      <!-- 3 — INSTRUMENT-MONTHS HELD. Measured, or not drawn. -->
+      <div class="gauge">
+        <span class="g-k">Instrument-months held</span>
+        <div class="g-v" class:am={!counted}>
+          {#if counted}{@render N(census.cells)}{:else}{@render N(null, notCounted)}{/if}
+        </div>
+        <div class="g-n">
+          {@render src('mea')}
+          <em
+            >{#if counted}{cellsTarget === null
+                ? `no denominator — ${scope.same ? 'the target names no instrument count' : 'a different feed'}`
+                : `of ${inrs(cellsTarget)}`} · read {ago(now - census.at)}{:else}{notCounted}{/if}</em
+          >
+        </div>
+      </div>
+
+      <!-- 4 — BARS STORED. Counted, and divided by nothing — see `expectedBars`. -->
+      <div class="gauge">
+        <span class="g-k">Bars stored</span>
+        <div class="g-v" class:am={!counted}>
+          {#if counted}{@render N(census.bars)}{:else}{@render N(null, notCounted)}{/if}
+        </div>
+        <div class="g-n">
+          {@render src('mea')}
+          <em title={counted ? BARS_NO_DENOM : undefined}
+            >{#if counted}{feedName(census.feed) ?? 'no feed'} · {ap?.target?.timeframe ??
+              'timeframe not stated'} · no denominator{:else}{notCounted}{/if}</em
+          >
+        </div>
+      </div>
+
+      <!-- 5 — STALLED. Counted here, NAMED to the right, never counted only. -->
+      <div class="gauge">
+        <span class="g-k">Stalled months</span>
+        <div class="g-v" class:dn={Boolean(ap?.failures?.length)}>
+          {#if ap}{@render N(ap.failures.length)}{:else}{@render N(
+              null,
+              `/autopilot.json did not answer, so the failure list is unknown. The durable record is the journal at ${JOURNAL}`
+            )}{/if}
+        </div>
+        <div class="g-n">
+          {@render src('rep')}
+          <em
+            >{#if !ap}unknown — which is not zero{:else if ap.failures.length}every one named to the right{:else}a
+              real zero from the payload, not a missing field{/if}</em
+          >
+        </div>
+      </div>
+
+      <!-- 6 — THE LINK ITSELF, measured by this page and by nothing else. -->
+      <div class="gauge">
+        <span class="g-k">/autopilot.json</span>
+        <div class="g-v" class:dn={link.kind !== 'ok'}>
+          {#if link.at}
+            <span class="mono">{link.ms} ms</span>
+          {:else}
+            <span class="unk" title="never read — a round trip of 0 ms is a measurement nobody took">—</span>
+          {/if}
+        </div>
+        <div class="g-n">
+          {@render src('obs')}
+          <em
+            >{#if link.at}last read {istTime(link.at)} IST · polled every {TICK_MS / 1000}s{:else}never read —
+              a round trip of 0 ms is a measurement nobody took{/if}</em
+          >
+        </div>
+      </div>
+    </div>
+
+    <div class="floor">
+      <div class="col">
+        <!-- ==========================================================
+             THE WATCH BAY — what is happening right now, and the partition
+             that makes a full meter over outstanding work impossible to draw.
+             ========================================================== -->
+        <section class="bay">
+          <div class="bay-h">
+            <span class="bay-t">Right now</span>
+            {#if ap?.state === 'running' && ap.now}
+              <span class="chip cy" role="status" aria-live="polite">
+                <span class="dot acc live"></span> fetching
+              </span>
+            {/if}
+            <span class="sp"></span>
+            {@render src('rep')}
+          </div>
+
+          {#if !ap}
+            <div class="void">
+              <b>Nothing can be said about the current cell.</b>
+              {link.kind === 'probing'
+                ? 'The first read has not landed, so what is in flight is unknown — and unknown is not "nothing".'
+                : 'No readable payload. The reason is in the beam above.'}
+            </div>
+          {:else if ap.state === 'starting'}
+            <div class="void">
+              <b>Opening the store. Nothing has been asked of a vendor yet.</b>
+              There are {@render N(
+                graceLeft,
+                'the grace countdown, measured by this page since it opened'
+              )} seconds of the {GRACE_SECS}-second grace window left — the one chance to say no before the first
+              socket opens.
+            </div>
+          {:else if !ap.now}
+            <div class="void">
+              <b>Nothing is in flight.</b>
+              {#if contradicted}{contradicted.axis === 'cells'
+                  ? `Nothing is being attempted, and the store is ${inrs(contradicted.out)} instrument-months short of the span. A rerun has work to do.`
+                  : `Nothing is being attempted, and the store is ${inrs(contradicted.barsOut)} bars short of the span — every cell exists, the sessions inside them do not. A rerun has work to do.`}{:else if ap.why}{ap.why}{:else if ap.state ===
+                  'complete' && certified.ok}Nothing left to ask for, and the census agrees on both axes — the
+                numbers are in the beam. A rerun fetches nothing.{:else if ap.state === 'complete'}The autopilot
+                reports the span is done. This page does not repeat that as fact: {certified.why}.{:else}The
+                autopilot reported state “{ap.state}” and no current cell.{/if}
+            </div>
+          {:else}
+            <div class="flight">
+              <div class="fclock mono">{clock(elapsed) ?? '—'}</div>
+              <div class="fwho">
+                <b>{ap.now.instrument}</b>
+                <span
+                  >{monthLabel(ap.now.month) ?? ap.now.month} · {ap.now.timeframe ??
+                    'timeframe not stated'} · {feedName(ap.now.feed) ?? 'feed not stated'}</span
+                >
+              </div>
+            </div>
+
+            {#if typeof ap.now.of === 'number' && typeof ap.now.index === 'number' && ap.now.of > 0}
+              <!-- THE PARTITION. held + in flight + outstanding = the instruments
+                   in this month. Outstanding is a SEGMENT with a width and a
+                   printed count, so the meter cannot fill while anything is
+                   owed — and the sum line under it says so, or shouts MISMATCH
+                   when the three parts do not reach the whole. -->
+              {@const of = ap.now.of}
+              {@const idx = Math.max(0, Math.min(of, ap.now.index))}
+              {@const inflight = 1}
+              {@const outstanding = Math.max(0, of - idx - inflight)}
+              {@const total = idx + inflight + outstanding}
+              <div class="meter" aria-hidden="true">
+                <i class="seg done" style="width:{(idx / of) * 100}%"></i>
+                <i class="seg now" style="width:{(inflight / of) * 100}%"></i>
+                <i class="seg out" style="width:{(outstanding / of) * 100}%"></i>
+              </div>
+              <div class="mkey">
+                <div class="mk"><i class="done"></i><b class="mono">{inrs(idx)}</b>held in this month</div>
+                <div class="mk"><i class="now"></i><b class="mono">{inrs(inflight)}</b>in flight</div>
+                <div class="mk"><i class="out"></i><b class="mono">{inrs(outstanding)}</b>outstanding</div>
+              </div>
+              <div class="msum" class:bad={total !== of}>
+                {#if total === of}adds to <b>{inrs(of)}</b> instruments in {monthLabel(ap.now.month) ??
+                    ap.now.month}. Full only when outstanding is zero.{:else}MISMATCH — <b>{inrs(of)}</b>
+                  instruments in this month, {inrs(total)} accounted for.{/if}
+              </div>
+            {:else}
+              <div class="bay-note">
+                <b>No position inside the month.</b>
+                No <b>now.index</b> / <b>now.of</b> in the payload, so how
+                far into {monthLabel(ap.now.month) ?? 'this month'} it has reached is not drawn — neither as zero
+                nor as full.
+              </div>
+            {/if}
+          {/if}
+
+          {#if ap?.waiting_ms}
+            <div class="bay-note">
+              <span class="chip am">throttled</span> Waiting <b>{clock(ap.waiting_ms) ?? '—'}</b> on the rate
+              governor — it waits rather than refusing, so a throttled window costs time and never costs a month.
+            </div>
+          {/if}
+          {#if ap?.absorbed_ms}
+            <div class="bay-note">
+              Throttle absorbed since start <b>{clock(ap.absorbed_ms) ?? '—'}</b> — waiting, not failing.
+            </div>
+          {/if}
+        </section>
+
+        <!-- ==========================================================
+             THE TAPE — the month ladder, oldest at the top, because that is
+             the order the work runs in. The store is append-only with one file
+             per month: a later month written first permanently blocks the
+             earlier days inside that file.
+             ========================================================== -->
+        <section class="bay">
+          <div class="bay-h">
+            <span class="bay-t">Coverage — oldest first</span>
+            {#if ap?.target}
+              {@const sp = span(ap.target.from, ap.target.to)}
+              <span
+                class="chip"
+                class:dn={!sp.ok}
+                title="{String(ap.target.from)} → {String(ap.target.to)} — the span reported by /autopilot.json"
+                >{sp.ok
+                  ? `${monthLabel(ap.target.from)} → ${monthLabel(ap.target.to)}`
+                  : 'target is not a span'}</span
+              >
+            {/if}
+            {#if counted && census.feed}
+              <span
+                class="chip"
+                title="The feed this census answered for. It follows the target the autopilot reports, and otherwise the top bar's selection — this page never writes that selection."
+                >{feedName(census.feed)}</span
+              >
+            {/if}
+            <span class="sp"></span>
+            {@render dial('show', 'Show', show, SHOW, (v) => (show = v))}
+          </div>
+
+          {#if !scope.same}
+            <div class="bay-note"><span class="chip am">different question</span> {scope.why}</div>
+          {:else if !counted}
+            <div class="void">
+              <b>The census has not answered.</b>
+              Withheld rather than painted as a span of zeroes — an unread
+              month and an empty month are different facts.
+            </div>
+          {:else if !ladder.ok}
+            <!-- NO ROWS. The ladder this replaces walked a guarded loop and
+                 emitted 1,200 rows of months the payload never named. Here the
+                 refusal names the field, prints the raw value it carried, and
+                 stops. There is no path from a bad target to a row. -->
+            <div class="refuse" role="alert">
+              <b>The ladder is not drawn: {ladder.refuse.field} is not a month key.</b>
+              <div>
+                /autopilot.json reported <code>{JSON.stringify(ladder.refuse.raw)}</code> — {ladder.refuse.why}
+              </div>
+              <div class="pad">
+                What the store holds is still measured, in the deck above. Fix the target; there is nothing to
+                fix here.
+              </div>
+            </div>
+          {:else if rows.length === 0}
+            <div class="void">
+              <b>The store holds nothing for {feedName(census.feed) ?? 'this feed'} yet.</b>
+              /store.json answered
+              with no rows — the state before the first month lands, not an error.
+            </div>
+          {:else}
+            <div class="tape">
+              {#each shown as r (r.key)}
+                {@const k = classOf(r)}
+                {@const here = ap?.cursor === r.key}
+                <div
+                  class="rung"
+                  class:here
+                  class:open={openRung === r.key}
+                  class:void={k === 'none'}
+                  role="button"
+                  tabindex="0"
+                  aria-expanded={openRung === r.key}
+                  onclick={() => (openRung = openRung === r.key ? null : r.key)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openRung = openRung === r.key ? null : r.key;
+                    }
+                  }}
+                >
+                  <div class="rung-m">
+                    {@render monthNode(r.key)}
+                    {#if here}
+                      <!-- VIOLET, because the cursor is the one REPORTED fact in
+                           a row of measured ones. The colour is the provenance. -->
+                      <span class="chip vi" title="the cursor /autopilot.json reports — reported, not measured"
+                        >here</span
+                      >
                     {/if}
-                  </td>
-                </tr>
+                  </div>
+
+                  <!-- THE BAR IS DRAWN ON THE AXIS THAT HAS A DENOMINATOR, and
+                       hatched when even that one is missing: drawing it full
+                       over nothing is the 100%-over-nothing this page exists to
+                       refuse. The tick is the second axis, and it appears only
+                       if something ever measures it. -->
+                  <div
+                    class="rung-bar"
+                    class:nod={r.cellPct === null}
+                    title={r.per === null
+                      ? 'no denominator — the target does not name a comparable instrument count for this census'
+                      : `${inrs(r.cells)} of ${inrs(r.per)} instrument-months · ${inrs(r.bars)} bars — ${BARS_NO_DENOM}`}
+                  >
+                    <i
+                      class:full={k === 'full'}
+                      class:short={k === 'short'}
+                      style="width:{r.cellPct === null ? 0 : Math.round(r.cellPct * 10) / 10}%"
+                    ></i>
+                    {#if r.barPct !== null}
+                      <span
+                        class="rung-tick"
+                        style="left:calc({Math.round(r.barPct * 10) / 10}% - 1px)"
+                        title="bars held {Math.round(r.barPct)}%"
+                      ></span>
+                    {/if}
+                  </div>
+
+                  <div class="rung-n" title="instrument-months held in this month file">
+                    {@render N(r.cells, 'not measured')}{r.per === null ? ' cells' : ` / ${inrs(r.per)}`}
+                  </div>
+                  <div class="rung-n" title="bars held in this month file — {BARS_NO_DENOM}">
+                    {@render N(r.bars, 'not measured')}
+                  </div>
+                  <div class="rung-x">{openRung === r.key ? '▾' : '▸'}</div>
+
+                  {#if openRung === r.key}
+                    <div class="rung-why">
+                      <b>{monthLabel(r.key) ?? r.key}</b> — {#if r.per === null}there is no denominator to
+                        compare this against: {scope.same
+                          ? 'the reported target names no instrument count.'
+                          : `the census is ${feedName(census.feed)} and the target is ${feedName(ap?.target?.feed)}.`}{:else if k === 'full'}all
+                        {inrs(r.per)} instrument-months exist, holding {inrs(r.bars)} bars. Whether that is every
+                        session no route states, so this month is held and not certified.{:else if k === 'short'}all
+                        {inrs(r.per)} instrument-months exist, holding {inrs(r.bars)} of {inrs(r.expBars)} bars.
+                        Counting cells alone would call this month done.{:else if k === 'none'}nothing is held.
+                        The store appends and cannot prepend, so this month must be fetched before any later month
+                        sharing its file.{:else}{inrs(r.cells)} of {inrs(r.per)} instrument-months, holding {inrs(
+                          r.bars
+                        )} bars. {inrs(r.per - r.cells)} instruments have nothing in this month at all.{/if}
+                    </div>
+                  {/if}
+                </div>
               {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-    </section>
+            </div>
 
-    <!-- ============================================ FAILURES ========== -->
-    <section class="card">
-      <header class="card-h">
-        <span class="pane-title">What failed, and why</span>
-        <span class="spacer"></span>
-        {#if ap}
-          <span class="tag" class:down={ap.failures.length > 0} class:up={ap.failures.length === 0}>
-            {ap.failures.length === 0 ? 'none' : `${ap.failures.length}`}
-          </span>
-        {/if}
-      </header>
+            <!-- THE FOOT. The buckets partition the ladder and the total says
+                 so — or says MISMATCH, because a partition that does not add up
+                 is a tidy number hiding a month nobody accounted for. -->
+            <div class="tape-foot">
+              <div class="bkt" title="every instrument-month the target names is present in that month file">
+                <i class="full"></i><b class="mono">{inrs(buckets.full)}</b>every cell held
+              </div>
+              {#if buckets.short}
+                <div class="bkt"><i class="short"></i><b class="mono">{inrs(buckets.short)}</b>bars short</div>
+              {/if}
+              <div class="bkt"><i class="part"></i><b class="mono">{inrs(buckets.part)}</b>partial</div>
+              <div class="bkt"><i class="none"></i><b class="mono">{inrs(buckets.none)}</b>empty</div>
+              {#if buckets.nod}
+                <div class="bkt" title={scope.why ?? 'the target names no instrument count'}>
+                  <i class="nod"></i><b class="mono">{inrs(buckets.nod)}</b>no denominator
+                </div>
+              {/if}
+              <span class="tot" class:bad={bucketSum !== rows.length}
+                >{bucketSum === rows.length
+                  ? `of ${inrs(rows.length)} ${ladder.framed ? 'months in the target span' : 'months the store holds'}`
+                  : `MISMATCH — ${inrs(rows.length)} months, ${inrs(bucketSum)} accounted for`}</span
+              >
+            </div>
 
-      {#if !ap}
-        <div class="empty">
-          Unknown. The failure list lives in <code>/autopilot.json</code>, which did not answer.
-          The durable record is the run journal at
-          <code>~/.brutex/store/audit/pull.journal</code>, rendered at <a class="link" href="/audit">Audit</a>.
-        </div>
-      {:else if ap.failures.length === 0}
-        <div class="empty">
-          Nothing has failed. This is a real zero from the autopilot, not an empty list because the
-          field was missing — a payload with no <code>failures</code> key is refused by the reader
-          above rather than shown as none.
-        </div>
-      {:else}
-        <div class="grid">
-          <table>
-            <thead>
-              <tr>
-                <th>Instrument</th>
-                <th>Month</th>
-                <th>Why</th>
-                <th>When</th>
-              </tr>
-            </thead>
-            <tbody>
-              {#each ap.failures as f, i (`${f.instrument}-${f.month}-${i}`)}
-                <tr>
-                  <td class="mono">{f.instrument}</td>
-                  <td class="mono">{f.month}</td>
-                  <td class="why">{f.why}</td>
-                  <td class="mono faint">{f.at ?? '—'}</td>
-                </tr>
+            {#if shown.length !== rows.length}
+              <div class="bay-note">
+                Showing {inrs(shown.length)} of {inrs(rows.length)} rows — Show is “{SHOW.find(
+                  (s) => s.k === show
+                )?.n ?? show}”. The buckets count the whole span either way.
+              </div>
+            {/if}
+
+            <div class="bay-note">
+              {@render src('mea')} Fill is instrument-months held, read from /store.json and never from the autopilot;
+              bars are counted beside it because {BARS_NO_DENOM}. Oldest at the top, because a later month written
+              first permanently blocks the earlier days in that same file.{#if !ap?.target}
+                <b>The target span is not known here</b> — only the months the store already holds are listed,
+                so a month missing from this list may be a gap or may be outside the target.{/if}
+              <a class="link" href="/audit">Audit</a> draws the same census as a year-by-month grid; this ladder answers
+              what the autopilot is working on and what is next.
+            </div>
+          {/if}
+        </section>
+      </div>
+
+      <div class="col">
+        <!-- ==========================================================
+             THE SNAG BAY — what is stuck. A failure is never a count alone.
+             ========================================================== -->
+        <section class="bay">
+          <div class="bay-h">
+            <span class="bay-t">What is stuck</span>
+            {#if ap}
+              <span class="chip" class:dn={ap.failures.length > 0} class:up={ap.failures.length === 0}
+                >{ap.failures.length ? `${inrs(ap.failures.length)} stalled` : 'none'}</span
+              >
+            {:else}
+              <span class="chip am" title={link.why ?? 'the first read has not landed'}>unknown</span>
+            {/if}
+            <span class="sp"></span>
+            {#if ap?.failures.length}
+              {@render dial('grp', 'Group', group, GROUPS, (v) => (group = v))}
+            {/if}
+          </div>
+
+          {#if !ap}
+            <div class="void">
+              <b>Unknown — and unknown is not zero.</b>
+              The failure list lives in /autopilot.json, which did not
+              answer. The durable record is <code>{JOURNAL}</code>, rendered at
+              <a class="link" href="/audit">Audit</a>.
+            </div>
+          {:else if ap.failures.length === 0}
+            <div class="void">
+              <b>Nothing has failed.</b>
+              A real zero from the payload — a body with no <code>failures</code> key
+              is refused by the reader above, never shown as none.
+            </div>
+          {:else}
+            {#each snags as f, i (`${f.instrument}-${f.month}-${f.i}`)}
+              {#if i === 0 || groupKey(snags[i - 1]) !== groupKey(f)}
+                <div class="grp">{groupKey(f)}</div>
+              {/if}
+              <div class="snag">
+                <div class="snag-who">{f.instrument} · {@render monthNode(f.month)}</div>
+                <div class="snag-when">
+                  {#if f.at === null}
+                    <span
+                      class="unk"
+                      title="no `at` on this failure — the payload carried an empty string, which is a different fact from “no timestamp needed”."
+                      >—</span
+                    >
+                  {:else if dayLabel(f.at)}
+                    <span class="mono" title="{f.at} — the form a journal line carries, which is the form to copy"
+                      >{dayLabel(f.at)}</span
+                    >
+                  {:else}
+                    <span
+                      class="unk"
+                      title="not a day this page can read. The raw value is shown rather than swallowed: accepting it silently would throw away the only evidence that the payload is malformed."
+                      >{f.at}</span
+                    >
+                  {/if}
+                </div>
+                <div class="snag-why">
+                  {#if f.why}{f.why}{:else}<span
+                      class="unk"
+                      title="A stop that does not name its reason is the failure CLAUDE.md §4 bans."
+                      >the payload carried no reason — that is itself the bug</span
+                    >{/if}
+                </div>
+              </div>
+            {/each}
+
+            <div class="bay-note">
+              {@render src('rep')} Each of these stalled after its attempts and was passed over, so later months
+              were not blocked behind it. This list dies with the process; the durable record is
+              <code>{ap.journal ?? JOURNAL}</code>, rendered at <a class="link" href="/audit">Audit</a>. A failure
+              here and not there was never written down, and that is a defect in the journal, not in this page.
+            </div>
+          {/if}
+        </section>
+
+        <!-- ==========================================================
+             THE TRAIL — what changed while nobody was looking. Observed by
+             this page, and by nothing else. This is the panel the owner reads
+             when he comes back.
+             ========================================================== -->
+        <section class="bay">
+          <div class="bay-h">
+            <span class="bay-t">While you were away</span>
+            <span class="chip" title="How long this tab has been watching.">{clock(now - watchAt) ?? '00:00'}</span>
+            <span class="sp"></span>
+            {@render src('obs')}
+          </div>
+
+          <div class="bay-note top">
+            Changes this page saw between two of its own reads. Not a server log, and gone when the tab is. The
+            durable record is <code>{ap?.journal ?? JOURNAL}</code>.
+          </div>
+
+          <div class="trail">
+            {#if trail.length === 0}
+              <div class="void">
+                Nothing has changed since this page opened — an observation, not a verdict. A process quietly
+                doing nothing looks exactly like this.
+              </div>
+            {:else}
+              {#each trail as t (`${t.t}-${t.text}`)}
+                <div class="tr">
+                  <div class="tr-t">{istTime(t.t)}</div>
+                  <div class="tr-x">{t.text}</div>
+                </div>
               {/each}
-            </tbody>
-          </table>
-        </div>
-      {/if}
-
-      <p class="note">
-        <span class="lbl">The durable record</span>
-        This list is what the running process holds. The record that survives a restart is the run
-        journal — <code>{ap?.journal ?? '~/.brutex/store/audit/pull.journal'}</code> — rendered at
-        <a class="link" href="/audit">Audit</a>. A failure that appears here and not there is a
-        failure that was never written down, and that is a defect in the journal, not in this page.
-      </p>
-    </section>
+            {/if}
+          </div>
+        </section>
+      </div>
+    </div>
   </div>
 </div>
 
 <style>
-  /* Local shapes only. Every colour, space, radius and weight below resolves
-     through a token in $lib/theme.css — no literal is introduced here, so a
-     theme edit reaches this page for free. */
-  .body {
+  /* THE RAMP IS THE APP'S OWN, VALUE FOR VALUE, off `$lib/theme.css`. Not one
+     literal colour appears below: the design's `--cy` is `--acc`, its
+     `--up`/`--dn`/`--amber`/`--violet` are `--up`/`--down`/`--warn`/`--info`,
+     and its greys are the neutral ramp through `--bg`, `--panel`, `--panel-2`,
+     `--well`, `--line`, `--line-soft`, `--line-hard`, `--ink`, `--dim` and
+     `--faint`. A literal here would be a second theme the top bar's toggle
+     cannot reach, and it would be the wrong colour in one of the two modes by
+     construction.
+
+     THE CONTROL VOCABULARY IS THIS PAGE'S OWN — beam, deck, gauge, bay, meter,
+     tape, rung, snag, trail, dial — because the question is its own: /db and
+     /ingest narrow a selection, and this page watches unattended work. None of
+     these names collide with `.strip`, `.cell`, `.picker`, `.menu` or
+     `.pager`. */
+
+  /* ---- THE BOARD — the field everything sits on ----------------------
+     The wash is two very wide radial tints mixed OUT OF THE THEME'S OWN
+     accents rather than typed in, exactly as /db builds its board. At 5% and
+     4% the eye reads it as depth and never as a hue. */
+  .board {
     flex: 1;
+    min-height: 0;
     overflow: auto;
     padding: var(--s5);
+    background-color: var(--bg);
+    background-image:
+      radial-gradient(1100px 620px at 6% 0%, color-mix(in srgb, var(--acc) 5%, transparent), transparent 60%),
+      radial-gradient(900px 520px at 96% 0%, color-mix(in srgb, var(--info) 4%, transparent), transparent 58%);
+  }
+
+  .chip {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 10.5px;
+    font-weight: var(--w-bold);
+    padding: 2px var(--s4);
+    border-radius: var(--r-full);
+    background: var(--panel-2);
+    color: var(--dim);
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .chip.up {
+    color: var(--up);
+    background: var(--up-soft);
+  }
+  .chip.dn {
+    color: var(--down);
+    background: var(--down-soft);
+  }
+  .chip.am {
+    color: var(--warn);
+    background: var(--warn-soft);
+  }
+  .chip.cy {
+    color: var(--acc);
+    background: var(--acc-soft);
+  }
+  .chip.vi {
+    color: var(--info);
+    background: var(--info-soft);
+  }
+
+  /* ---- PROVENANCE. Three sources, never merged, never unlabelled ------
+     .mea  measured off disk       — /store.json, true whether or not it runs
+     .rep  reported by the process — /autopilot.json, a claim, not evidence
+     .obs  observed by this page   — successive polls, the only thing it owns */
+  .src {
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: var(--w-heavy);
+    padding: 2px 7px;
+    border-radius: var(--r-full);
+    white-space: nowrap;
+    flex: none;
+  }
+  .src.mea {
+    color: var(--acc);
+    background: var(--acc-soft);
+  }
+  .src.rep {
+    color: var(--info);
+    background: var(--info-soft);
+  }
+  .src.obs {
+    color: var(--faint);
+    background: var(--panel-2);
+  }
+
+  /* AN UNKNOWN IS NAMED, NEVER BLANKED. Every em dash on this page is this
+     element, it is amber, and it carries the reason on its title. */
+  .unk {
+    color: var(--warn);
+    border-bottom: 1px dotted var(--warn);
+    cursor: help;
+    font-weight: var(--w-bold);
+  }
+
+  /* ---- THE BEAM — the one claim, and the evidence it is made of -------
+     Structurally one element: `.claim` and `.because` are siblings inside it,
+     and the template cannot build one without the other. */
+  .beam {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(250px, auto);
+    gap: var(--s6);
+    padding: var(--s5) var(--s6);
+    border-radius: var(--r4);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--tone);
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    box-shadow: var(--e2);
+    margin: 0 0 var(--s5);
+    --tone: var(--line-hard);
+  }
+  @media (max-width: 860px) {
+    .beam {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .beam.good {
+    --tone: var(--up);
+  }
+  .beam.warn {
+    --tone: var(--warn);
+  }
+  .beam.bad {
+    --tone: var(--down);
+  }
+  .beam.unknown {
+    --tone: var(--line-hard);
+  }
+  .claim {
+    font-size: var(--fs-lg);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.02em;
+    line-height: 1.28;
+    margin: 0;
+    color: var(--ink);
+  }
+  .beam.good .claim {
+    color: var(--up);
+  }
+  .beam.bad .claim {
+    color: var(--down);
+  }
+  .beam.warn .claim {
+    color: var(--warn);
+  }
+  .beam.unknown .claim {
+    color: var(--dim);
+  }
+  .claim-sub {
+    margin: var(--s3) 0 0;
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    max-width: 92ch;
+    line-height: var(--lh-base);
+  }
+  .because {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px var(--s6);
+    margin: var(--s5) 0 0;
+    padding: var(--s5) 0 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .fact {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    font-size: var(--fs-sm);
+    color: var(--faint);
+    min-width: 0;
+  }
+  .fact b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-base);
+    font-weight: var(--w-bold);
+    color: var(--ink);
+  }
+  .beam-act {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--s4);
+    justify-content: flex-start;
+  }
+
+  /* ---- THE CONTROL, and its receipt ---- */
+  .act {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: var(--s4);
+  }
+  .gobtn {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--ink);
+    font: inherit;
+    font-weight: var(--w-bold);
+    font-size: var(--fs-base);
+    padding: 9px var(--s6);
+    border-radius: var(--r3);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .gobtn:hover:not(:disabled) {
+    border-color: var(--acc);
+  }
+  .gobtn.go {
+    background: linear-gradient(135deg, var(--acc), var(--acc-hi));
+    color: var(--on-acc);
+    border-color: transparent;
+  }
+  .gobtn:disabled {
+    opacity: 0.42;
+    cursor: not-allowed;
+  }
+  .act-why {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    text-align: right;
+    max-width: 36ch;
+    line-height: var(--lh-base);
+  }
+  /* THE RECEIPT PRINTS THE SERVER'S OWN SENTENCE, VERBATIM, AND NOTHING ELSE.
+     There is no success template on this page — see `send`. */
+  .receipt {
+    margin: 0;
+    padding: var(--s5);
+    border-radius: var(--r3);
+    border-left: 3px solid var(--tone);
+    background: var(--bgc);
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-base);
+    color: var(--ink);
+    max-width: 44ch;
+    --tone: var(--line-hard);
+    --bgc: var(--panel-2);
+  }
+  .receipt.done {
+    --tone: var(--up);
+    --bgc: var(--up-soft);
+  }
+  .receipt.partial {
+    --tone: var(--warn);
+    --bgc: var(--warn-soft);
+  }
+  .receipt.refused {
+    --tone: var(--down);
+    --bgc: var(--down-soft);
+  }
+  .receipt b {
+    display: block;
+    font-family: var(--sans);
+    font-size: var(--fs-mini);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    margin-bottom: var(--s3);
+    color: var(--tone);
+  }
+  .receipt .verb {
+    display: block;
+    margin-top: 7px;
+    font-family: var(--sans);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+
+  /* ---- THE DECK — one band, hairline divisions, never tiles ---- */
+  .deck {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    overflow: hidden;
+    margin: 0 0 var(--s6);
+  }
+  .gauge {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: var(--s5) var(--s6);
+    border-right: 1px solid var(--line-soft);
+    min-width: 0;
+  }
+  .gauge:last-child {
+    border-right: 0;
+  }
+  .g-k {
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-heavy);
+    white-space: nowrap;
+  }
+  .g-v {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-xl);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.025em;
+    line-height: 1.15;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--ink);
+  }
+  .g-v.up {
+    color: var(--up);
+  }
+  .g-v.dn {
+    color: var(--down);
+  }
+  .g-v.am {
+    color: var(--warn);
+  }
+  .g-v.cy {
+    color: var(--acc);
+  }
+  .g-n {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .g-n em {
+    font-style: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* ---- THE FLOOR: what is happening | what needs you ---- */
+  .floor {
+    display: grid;
+    grid-template-columns: minmax(0, 1.24fr) minmax(0, 0.86fr);
+    gap: var(--s5);
+    align-items: start;
+  }
+  @media (max-width: 1080px) {
+    .floor {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .col {
     display: flex;
     flex-direction: column;
     gap: var(--s5);
-  }
-
-  .card {
-    border: 1px solid var(--line);
-    border-radius: var(--r3);
-    background: var(--panel);
-    display: flex;
-    flex-direction: column;
     min-width: 0;
   }
-  .card-h {
+  .bay {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    min-width: 0;
+  }
+  .bay-h {
     display: flex;
     align-items: center;
-    gap: var(--s3);
-    padding: var(--s4) var(--s5);
+    gap: var(--s5);
+    padding: var(--s4) var(--s6);
     border-bottom: 1px solid var(--line-soft);
-  }
-  /* ---- the banner. It is loud because the thing it reports is loud. ---- */
-  .alarm {
-    margin: var(--s5) var(--s5) 0;
-    padding: var(--s5);
-    border: 1px solid var(--down);
-    border-left-width: 3px;
-    border-radius: var(--r3);
-    background: var(--down-soft);
-  }
-  .alarm-h {
-    display: flex;
-    align-items: center;
-    gap: var(--s3);
-    font-size: var(--fs-md);
-    color: var(--ink);
-  }
-  .alarm-why {
-    margin: var(--s4) 0 0;
-    font-family: var(--mono);
-    font-size: var(--fs-sm);
-    color: var(--down);
-    word-break: break-word;
-  }
-  .alarm-what {
-    margin: var(--s4) 0 0;
-    font-size: var(--fs-sm);
-    line-height: var(--lh-base);
-    color: var(--ink-2);
-  }
-
-  .lbl {
-    display: block;
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-  }
-
-  /* ---- key/value ---- */
-  .kv {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: var(--s2) var(--s5);
-    margin: 0;
-    padding: var(--s5);
-  }
-  .kv dt {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    align-self: center;
-  }
-  .kv dd {
-    margin: 0;
-    font-size: var(--fs-base);
-    color: var(--ink);
-    font-variant-numeric: tabular-nums;
-  }
-
-  /* ---- progress within the current month ---- */
-  .track {
-    height: 4px;
-    margin: 0 var(--s5) var(--s5);
-    border-radius: var(--r-full);
-    background: var(--well);
-    overflow: hidden;
-  }
-  .track i {
-    display: block;
-    height: 100%;
-    background: var(--acc);
-  }
-
-  /* ---- the per-month coverage bar ---- */
-  .bar {
-    display: block;
-    width: 100%;
-    min-width: 80px;
-    height: 6px;
-    border-radius: var(--r-full);
-    background: var(--well);
-    overflow: hidden;
-  }
-  .bar i {
-    display: block;
-    height: 100%;
-    background: var(--acc);
-  }
-  .bar i.done {
-    background: var(--up);
-  }
-  tr.cursor td {
-    background: var(--acc-soft);
-  }
-  td.why {
-    white-space: normal;
-    max-width: 40ch;
-    color: var(--down);
-  }
-
-  .note {
-    margin: 0;
-    padding: var(--s4) var(--s5);
-    font-size: var(--fs-sm);
-    line-height: var(--lh-base);
-    color: var(--dim);
-    border-top: 1px solid var(--line-soft);
-  }
-  .note.warn {
-    color: var(--warn);
-  }
-  .note b {
-    color: var(--ink);
-  }
-
-  /* ---- the control ---- */
-  .ctl {
-    display: flex;
-    align-items: center;
     flex-wrap: wrap;
-    gap: var(--s4);
-    padding: var(--s5);
+  }
+  .bay-t {
+    font-size: var(--fs-xs);
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-heavy);
+  }
+  .bay-h .sp {
+    margin-left: auto;
+  }
+  .bay-note {
+    padding: var(--s4) var(--s6);
+    font-size: var(--fs-sm);
+    color: var(--faint);
+    line-height: var(--lh-base);
     border-top: 1px solid var(--line-soft);
   }
-  .ctl-why {
-    flex: 1;
-    min-width: 16rem;
-    font-size: var(--fs-sm);
-    line-height: var(--lh-base);
-    color: var(--faint);
+  .bay-note.top {
+    border-top: 0;
   }
-  .ctl-note {
+  .bay-note b {
+    color: var(--dim);
     font-family: var(--mono);
+  }
+  .void {
+    padding: var(--s6);
     font-size: var(--fs-sm);
-    color: var(--up);
+    color: var(--dim);
+    line-height: 1.55;
   }
-  .ctl-note.bad {
-    color: var(--down);
+  .void b {
+    color: var(--ink);
   }
-
   code {
     font-family: var(--mono);
-    font-size: 0.92em;
-    padding: 0 3px;
+    font-size: 0.93em;
+    padding: 0 var(--s2);
     border-radius: var(--r1);
     background: var(--well);
-    color: var(--ink-2);
+    color: var(--dim);
   }
 
-  .empty.down {
+  /* ---- THE WATCH — the cell in flight ---- */
+  .flight {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s6);
+    padding: var(--s5) var(--s6) var(--s2);
+    flex-wrap: wrap;
+  }
+  .fclock {
+    font-size: var(--fs-2xl);
+    font-weight: var(--w-heavy);
+    letter-spacing: -0.035em;
+    line-height: 1;
+    color: var(--ink);
+  }
+  .fwho {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+  .fwho b {
+    font-family: var(--mono);
+    font-size: var(--fs-md);
+    font-weight: var(--w-bold);
+  }
+  .fwho span {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+
+  /* ---- THE METER — a partition that owns pixels for every unit --------
+     Outstanding work is a SEGMENT, not the absence of one. A meter cannot read
+     full while anything is outstanding, because the outstanding units are drawn
+     and counted in the sum line under it. */
+  .meter {
+    display: flex;
+    height: 9px;
+    border-radius: var(--r-full);
+    overflow: hidden;
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+    margin: var(--s5) var(--s6) 0;
+  }
+  .seg {
+    height: 100%;
+    min-width: 0;
+  }
+  .seg.done {
+    background: var(--up);
+  }
+  .seg.now {
+    background: var(--acc);
+  }
+  .seg.out {
+    background-image: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 8px);
+  }
+  .mkey {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s6);
+    padding: var(--s4) var(--s6) 0;
+    font-size: var(--fs-xs);
+  }
+  .mk {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--faint);
+  }
+  .mk i {
+    width: 9px;
+    height: 9px;
+    border-radius: 3px;
+    flex: none;
+  }
+  .mk i.done {
+    background: var(--up);
+  }
+  .mk i.now {
+    background: var(--acc);
+  }
+  .mk i.out {
+    background-image: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 8px);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .mk b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    font-weight: var(--w-bold);
+  }
+  .msum {
+    padding: var(--s4) var(--s6) var(--s5);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    line-height: var(--lh-base);
+  }
+  .msum b {
+    font-family: var(--mono);
+    color: var(--dim);
+  }
+  .msum.bad {
+    color: var(--down);
+    font-weight: var(--w-bold);
+  }
+  .msum.bad b {
     color: var(--down);
   }
-  .stat .v.up {
-    color: var(--up);
+
+  /* ---- THE TAPE — the month ladder, oldest at the top ---- */
+  .tape {
+    max-height: 520px;
+    overflow: auto;
   }
-  .stat .v.down {
+  .rung {
+    display: grid;
+    grid-template-columns: 104px minmax(80px, 1fr) 124px 96px 16px;
+    gap: var(--s5);
+    align-items: center;
+    padding: 7px var(--s6);
+    border-bottom: 1px solid var(--line-soft);
+    cursor: pointer;
+    border-left: 2px solid transparent;
+  }
+  .rung:hover {
+    background: var(--panel-2);
+  }
+  .rung.here {
+    border-left-color: var(--acc);
+    background: linear-gradient(90deg, var(--acc-soft), transparent 70%);
+  }
+  .rung.void .rung-n {
+    color: var(--line-hard);
+  }
+  .rung-m {
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-bold);
+    white-space: nowrap;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .rung.void .rung-m {
+    color: var(--dim);
+    font-weight: var(--w-mid);
+  }
+  .rung-bar {
+    position: relative;
+    height: 9px;
+    border-radius: var(--r-full);
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .rung-bar i {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    border-radius: var(--r-full);
+    background: var(--acc);
+  }
+  .rung-bar i.full {
+    background: var(--up);
+  }
+  .rung-bar i.short {
+    background: var(--warn);
+  }
+  .rung-bar.nod {
+    background-image: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 8px);
+  }
+  /* THE SECOND AXIS. Bars held is a different measurement from instrument-months
+     held, and a month can be 774/774 on the first while the second is at 62%.
+     The fill is the axis with a denominator; this tick is where the other one
+     sits, so when they disagree the disagreement is on screen. */
+  .rung-tick {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 2px;
+    background: var(--ink);
+    border-radius: 2px;
+    box-shadow: 0 0 0 1px var(--panel);
+  }
+  .rung-n {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-xs);
+    text-align: right;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .rung-x {
+    color: var(--line-hard);
+    font-size: var(--fs-xs);
+    text-align: center;
+  }
+  .rung.open .rung-x {
+    color: var(--acc);
+  }
+  .rung-why {
+    grid-column: 1 / -1;
+    font-size: var(--fs-sm);
+    color: var(--faint);
+    line-height: var(--lh-base);
+    padding: 3px 0 var(--s2);
+    cursor: default;
+  }
+  .rung-why b {
+    color: var(--ink);
+    font-family: var(--mono);
+  }
+  .tape-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s4) var(--s5);
+    padding: var(--s5) var(--s6);
+    border-top: 1px solid var(--line);
+    background: var(--panel-2);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .tape-foot .tot {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    color: var(--dim);
+  }
+  .tape-foot .tot.bad {
     color: var(--down);
   }
-  .stat .v.warn {
-    color: var(--warn);
+  .bkt {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
   }
-  .stat .v.acc {
+  .bkt i {
+    width: 9px;
+    height: 9px;
+    border-radius: 3px;
+    flex: none;
+  }
+  .bkt b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+    font-weight: var(--w-bold);
+  }
+  .bkt i.full {
+    background: var(--up);
+  }
+  .bkt i.short {
+    background: var(--warn);
+  }
+  .bkt i.part {
+    background: var(--acc);
+  }
+  .bkt i.none {
+    background: var(--line-hard);
+  }
+  .bkt i.nod {
+    background-image: repeating-linear-gradient(135deg, var(--line) 0 3px, transparent 3px 8px);
+    box-shadow: inset 0 0 0 1px var(--line-soft);
+  }
+  .refuse {
+    margin: 0;
+    padding: var(--s6);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+    color: var(--down);
+    background: var(--down-soft);
+    border-left: 3px solid var(--down);
+  }
+  .refuse b {
+    display: block;
+    color: var(--ink);
+    font-size: var(--fs-md);
+    margin-bottom: var(--s2);
+  }
+  .refuse code {
+    background: var(--panel);
+    color: var(--down);
+  }
+  .refuse .pad {
+    margin-top: 7px;
+  }
+
+  /* ---- SNAGS — what is stuck, and it is never only counted ---- */
+  .snag {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 3px var(--s5);
+    padding: var(--s5) var(--s6);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .snag-who {
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-bold);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .snag-when {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    text-align: right;
+    white-space: nowrap;
+  }
+  .snag-why {
+    grid-column: 1 / -1;
+    font-size: var(--fs-sm);
+    color: var(--down);
+    line-height: 1.45;
+  }
+  .grp {
+    padding: var(--s4) var(--s6) var(--s3);
+    font-size: 9px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--line-hard);
+    font-weight: var(--w-heavy);
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  /* ---- THE TRAIL — what this page itself saw while nobody watched ---- */
+  .trail {
+    max-height: 270px;
+    overflow: auto;
+  }
+  .tr {
+    display: grid;
+    grid-template-columns: 78px minmax(0, 1fr);
+    gap: var(--s5);
+    padding: 7px var(--s6);
+    font-size: var(--fs-sm);
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .tr-t {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .tr-x {
+    color: var(--dim);
+    line-height: 1.45;
+  }
+
+  /* ---- THE DIAL — this page's one control primitive -------------------
+     A dial shows its CURRENT VALUE on its face. It is not a row of links and it
+     is not a segmented bar: there are three to fourteen answers behind each one
+     and the face has to survive all of them. The menu wears the same tokens
+     /db's menus wear, so the four pages read as one product. */
+  .dial {
+    position: relative;
+    display: inline-flex;
+  }
+  .dial-face {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    color: var(--ink);
+    font: inherit;
+    padding: var(--s3) var(--s5);
+    cursor: pointer;
+    max-width: 100%;
+  }
+  .dial-face:hover {
+    border-color: var(--line-hard);
+  }
+  .dial-face .dl {
+    font-size: 9px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-heavy);
+    white-space: nowrap;
+  }
+  .dial-face .dv {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    font-size: var(--fs-base);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dial-face .dc {
+    width: 0;
+    height: 0;
+    flex: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid var(--acc);
+  }
+  /* RIGHT-ANCHORED, because both dials sit at the right edge of their bay
+     header: a left-anchored menu there runs past the panel and clips its own
+     rows. */
+  .dial-list {
+    position: absolute;
+    top: calc(100% + var(--s3));
+    right: 0;
+    z-index: 40;
+    min-width: 290px;
+    max-width: min(92vw, 420px);
+    max-height: 360px;
+    overflow: auto;
+    background: var(--raise);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    padding: var(--s2);
+    box-shadow: var(--e3);
+  }
+  .dial-opt {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    color: var(--ink);
+    font: inherit;
+    padding: var(--s4) var(--s5);
+    border-radius: var(--r2);
+    cursor: pointer;
+    min-height: 34px;
+  }
+  .dial-opt:hover:not(:disabled) {
+    background: var(--panel-2);
+  }
+  .dial-opt[aria-selected='true'] {
+    background: var(--acc-soft);
+    color: var(--acc);
+  }
+  /* A DEAD ROW STAYS IN PLACE AND CARRIES ITS REASON. Omitting it would say the
+     question cannot be asked; this says it cannot be answered, and why. */
+  .dial-opt:disabled {
+    cursor: not-allowed;
+    color: var(--faint);
+  }
+  .dial-opt .on {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    font-size: var(--fs-base);
+    flex: none;
+  }
+  .dial-opt .oy {
+    color: var(--faint);
+    font-size: var(--fs-xs);
+    flex: 1;
+    min-width: 0;
+  }
+  .dial-opt[aria-selected='true'] .oy {
     color: var(--acc);
   }
 </style>

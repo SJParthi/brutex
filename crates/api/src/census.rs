@@ -285,18 +285,43 @@ pub fn read_vendor(root: &Path, vendor: Vendor) -> VendorCensus {
     // disagrees with its own counter, which `crate::ingest`'s header calls the
     // one outcome worse than refusing outright.
     //
-    // `Warn` for unreadable, `Info` otherwise. One event per vendor at startup,
-    // so four lines per process — bounded by `Vendor::ALL` and by nothing else.
+    // `Warn` for unreadable, `Debug` otherwise.
+    //
+    // THE OLD COMMENT HERE WAS FALSE, and the falsehood was the defect. It said
+    // "one event per vendor at startup, so four lines per process — bounded by
+    // `Vendor::ALL` and by nothing else". `read_all` calls this for all four
+    // vendors and is reached from `server::census_now`, which runs on EVERY
+    // `/store.json`, `/instruments.json` and `/audit.json` request. The true
+    // bound is four lines per REQUEST, and a monitoring page polling once a
+    // second rolls the whole 64 MiB window in under two days — evicting the
+    // `pull.member did not land` and `pull.run refused` events an operator came
+    // back to read. A log that destroys its own evidence is D-0072's stated
+    // failure mode.
+    //
+    // That this is a mistake rather than a choice is settled inside the
+    // repository: `pull::manifest::note_census_absent` reports the same fact on
+    // the same call path and says "Debug rather than info: `/store.json` opens a
+    // census on **every request**". Two sites, one path, one answer.
+    //
+    // The fault arm stays loud. An unreadable manifest is per-vendor and does
+    // not recur per request once it is fixed.
     let (level, said) = match state {
-        Census::Held { .. } => (telemetry::Level::Info, "held"),
-        Census::Absent => (telemetry::Level::Info, "absent"),
+        Census::Held { .. } => (telemetry::Level::Debug, "held"),
+        Census::Absent => (telemetry::Level::Debug, "absent"),
         Census::Unreadable { .. } => (telemetry::Level::Warn, "unreadable"),
     };
-    let _dropped_when_filtered = telemetry::emit(
-        &telemetry::Event::new(level, "api.census", "read")
-            .with("vendor", telemetry::Value::Str(vendor.as_str()))
-            .with("state", telemetry::Value::Str(said))
-            .with("path", telemetry::Value::Str(&path.display().to_string())),
+    // `emit_if!` AND NOT `emit`: the gate runs before the arguments do, so the
+    // `path.display().to_string()` below is not allocated on the two arms that
+    // now sit under the default floor. `emit` would have built the whole event
+    // and thrown it away — the cost D-0086 measured and the ledger wrongly
+    // recorded as already closed.
+    let _dropped_when_filtered = telemetry::emit_if!(
+        level,
+        "api.census",
+        "read",
+        "vendor" => telemetry::Value::Str(vendor.as_str()),
+        "state" => telemetry::Value::Str(said),
+        "path" => telemetry::Value::Str(&path.display().to_string()),
     );
     VendorCensus {
         vendor,

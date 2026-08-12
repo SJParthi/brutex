@@ -47,14 +47,24 @@ const ROUTES = [
 	// here, the Rust page still answers `/audit` on the API's own port, and
 	// nothing renders differently depending on how the operator arrived.
 	'/pull',
-	// THE AUTOPILOT. Three entries and NOT the `/autopilot` prefix, deliberately:
+	// THE AUTOPILOT. Four entries and NOT the `/autopilot` prefix, deliberately:
 	// `/autopilot` is a PAGE this app renders, and proxying that prefix would
 	// hand the page itself to Rust and the route would 404 in development only.
-	// `/autopilot/` (with the slash) covers the two controls without covering
+	// `/autopilot/` (with the slash) covers the three controls without covering
 	// the page.
+	//
+	// `/autopilot/control` IS THE ONE THE PAGE PRESSES, and it was the entry that
+	// was missing. It is the only control route that answers
+	// `{action, accepted, why, status}` for BOTH words, and that `why` is the
+	// sentence /autopilot prints on its receipt verbatim — including "started,
+	// and it is NOT a full recovery". Without this entry the POST is answered by
+	// the dev server's own HTML fallback with a 200; the page catches that on the
+	// content type and prints it as a refusal, which is loud and still wrong. The
+	// control has to reach Rust.
 	'/autopilot.json',
 	'/autopilot/pause',
-	'/autopilot/resume'
+	'/autopilot/resume',
+	'/autopilot/control'
 ];
 
 export default {

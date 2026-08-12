@@ -490,6 +490,11 @@ while `CLAUDE.md` §9 was violated.
 | U-05 | An index is its own universe and a live derivative is in none | `core::universe::an_index_is_its_own_universe_and_a_live_derivative_is_in_none` | ✓ |
 | U-06 | The four published NIFTY tiers nest — every 50 name is in the 100, every 100 in the 200, every 200 in the 500, every 500 in the Total Market — and the converse does not hold, so the bits carry information | `core::universe::the_published_tiers_nest_one_inside_the_next` | ✓ |
 | U-07 | `INDEX`, `FNO` and `TOTAL_MARKET` are still bits 0, 1 and 2, and the four tiers appended at 3–6 are pinned as numbers (`CLAUDE.md` §3.8) | `core::universe::the_three_original_bits_never_moved` | ✓ |
+| U-08 | **Six ISIN arrays sit beside the six name arrays, the same length, aligned index for index.** They were transcribed from FIVE different published files, so every symbol appearing in more than one carries the same ISIN in all of them, and no ISIN appears twice within one array — a row that slipped by one anywhere disagrees at the first shared symbol. The overlap is pinned as a number, 1,807 positions naming 749 distinct symbols, so the cross-check cannot go vacuous | `core::universe::the_isin_arrays_are_positionally_aligned_with_the_names` | ✓ |
+| U-09 | **Every transcribed ISIN is `INE` + nine, twelve characters, and passes the ISO 6166 check digit** — computed by `Isin::new`, so no second copy of that arithmetic exists to disagree. A mistyped character is a build failure rather than an identifier that looks right and points at nothing | `core::universe::every_transcribed_isin_is_well_formed` | ✓ |
+| U-10 | **The six positions with no ISIN are NAMED, not counted.** Five indices — `NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTYNXT50` — which no numbering agency issues one for, and `AGL`, which the exchange's own file has no row for and which stays UNVERIFIED (§11). "Six are absent" would still pass if a different six went absent | `core::universe::the_absent_isins_are_exactly_these_six_names` | ✓ |
+| U-11 | **The two placeholder scrips are malformed by construction and reached nothing.** `DUM510W01014` and `DUM256C01024` are shown to fail the ISO 6166 check digit by running the parser on them, and neither `DUMMYINXGN` nor `DUMMYTRVN` nor either pseudo-ISIN appears in any array or ever resolves | `core::universe::the_placeholder_scrips_are_malformed_and_are_not_here` | ✓ |
+| U-12 | **A membership probe returns the index the table was built from, for all 1,813 members of all six tables.** `contains` is `position(..).is_some()`, so there is one probe loop and not two; a table that found a member but pointed at another slot would hand a caller a different company's ISIN, and the ordinal is asserted symbol by symbol rather than sampled | `core::universe::a_position_probe_finds_the_index_the_table_was_built_from` · `core::universe::nse_isin_answers_from_the_exchanges_own_column` | ✓ |
 
 **U-06 is what lets `of_equity` set five bits for one symbol.** Added by
 D-0089. A NIFTY 50 name is also a NIFTY 100, 200, 500 and Total Market name, and
@@ -512,6 +517,35 @@ break nesting for exactly one symbol, and this row fails naming that symbol
 rather than letting `of_equity` answer confidently and wrongly. That is the
 `CLAUDE.md` §4 "degrade loudly and name the reason" row, applied to data that
 arrives from outside.
+
+**U-08 through U-12 are D-0122, and they are the reason `of_equity`'s answer
+can now be joined on.** D-0089 transcribed the exchange's constituent files and
+kept only the `Symbol` column, so no NSE-issued ISIN existed in this build and a
+constituent's identity resolved through the merged vendor universe by symbol
+first — the hop `docs/06-limits.md` §62 recorded. D-0122 carries the `ISIN Code`
+column those same files have always had, positionally aligned beside the names,
+and `core::universe::nse_isin` answers from it in constant time. **D-0125 wired
+the consumer**: `api::constituents` calls it, the symbol step is deleted rather
+than demoted, and CJ-02 and CJ-05 now state what the join keys on rather than
+what it had to hop through to get there.
+
+**U-08 is the row that carries the weight, and it checks what can actually be
+checked.** "Index *i* names the same instrument in both arrays" is a claim about
+a file that is not in this repository — `CLAUDE.md` §2 allows no tracked `.csv`
+— so it cannot be re-derived here. What can be, and is stronger than a length
+equality: the six arrays came from five separately published files, they overlap
+heavily because the tiers nest (U-06), and every shared symbol must carry the
+same ISIN in all of them. 1,058 of the 1,807 filled positions are a second,
+third, fourth or fifth opinion on a symbol another file already named. Measured:
+zero disagreements.
+
+**U-10 is a measurement written as a set rather than as a total.** Five of the
+six absences are correct answers — an index is not a security and is issued no
+ISIN. The sixth is `AGL`, which is a real gap, and the row names it rather than
+letting it hide inside a count. Filling that position from a broker master would
+have been the `CLAUDE.md` §3 rule 1 invention this whole transcription exists to
+remove, and filling it with `GRINDWELL`'s ISIN — the name the exchange's file
+holds where this array holds `AGL` — would have made the wrong row *join*.
 
 **U-07 is `CLAUDE.md` §3 rule 8 written as an assertion rather than a promise.**
 `Universe::bits()` is stamped onto merged rows and rendered on the page. Had
@@ -1976,3 +2010,184 @@ records it rather than taking it in passing. Separately, `pull::fetch::wire_end`
 tests, and the second carries a blanket `+1` with no vendor in its signature; HF-08
 and HF-09 hold for the path that actually reaches a socket and say nothing about
 those two.
+
+## The granularity floor is a fact about a VENDOR, and a tick is a rung nobody serves — D-0118
+
+The rows are prefixed `GF-` for the reason the `HF-` block gives: two sessions
+share this tree and a collided identifier is worse than a new prefix.
+
+Every row below is proved with no socket, no credential, no vendor and no bar.
+`HF-*` above answers **how far back** a rung reaches; these answer **how fine**
+a vendor goes, and GF-04 is the row that keeps the two from being read as one
+refusal.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| GF-01 | **No feed in this build serves a tick stream, and the refusal is permanent.** It is not a floor some feed clears — the finest rung of the ladder is refused by all four feeds, and no row's floor claims to be a print stream. `FinestKind::Tick` exists so the negative can be stated and is constructed by no descriptor; a `const` block under `DESCRIPTORS` makes a row that claims one a build failure rather than a review comment. The variant's own behaviour is exercised directly, because a variant no test constructs is one nobody has checked | `pull::vendor::no_feed_in_this_build_serves_a_tick_and_the_refusal_is_permanent` | ✓ |
+| GF-02 | **A conflated one-second snapshot is never labelled a tick.** Both archives bottom out at one second and both were MEASURED to be snapshots — whole-second timestamps, no sub-second field, several rows per second with no tiebreaker (`docs/08-vendor-samples.md`). Both brokers bottom out at one minute and both are candles. The kind travels with the floor rather than being inferred from the rung, because one second of an archive and one second of a broker would be two different objects; `is_conflated` and `is_tick_stream` are asserted on both shapes, and the three labels are asserted to differ so two of them cannot read the same on a page | `pull::vendor::a_conflated_second_is_never_labelled_a_tick` | ✓ |
+| GF-03 | **Every feed answers every rung, with one of two verdicts, in O(1).** The whole 4 × 11 matrix: a rung is refused exactly when it is finer than the vendor's floor, exactly one rung per feed answers `Finest`, the three arms sum to the ladder's length, and every refusal names the rung asked for, the rung served instead, what a record at it is, a non-blank reason and a non-blank source. A rung ABOVE the floor answers `None` for its record shape rather than guessing one — nothing here measured it | `pull::vendor::every_feed_answers_every_rung_with_one_of_two_verdicts` | ✓ |
+| GF-04 | **The granularity floor and the history floor refuse different things, and only one of them could ever move.** Groww at one second is the vendor having no such rung at any date; Groww at one minute in 2019 is the vendor having the rung and not that far back. The first is asserted refused with `HistoryFloor::Unstated` beside it — no source states a depth for a rung the vendor does not have — and the second is asserted NOT refused with a `RollingMonths { months: 3 }` depth. The archives are the mirror image: their granularity floor is measured and their history floor is stated by nobody | `pull::vendor::the_granularity_floor_and_the_history_floor_refuse_different_things` | ✓ |
+| GF-05 | **A build never fetches a rung its vendor cannot serve.** `granularities` may be NARROWER than the floor allows — Dhan's minute rung is exactly that, and the reason is this build's single `bars_path` rather than anything Dhan does — and it may never be wider. Checked as one mask per row by the compiler and driven from outside here, including the ladder's edge where nothing is finer than the first rung. The two refusals are asserted to differ: Dhan does not fetch the minute rung and Dhan's vendor does not refuse it, which is a refusal a code change fixes | `pull::vendor::a_build_never_fetches_a_rung_its_vendor_cannot_serve` | ✓ |
+| GF-06 | **Every granularity floor names a reason and a source, in the vendor's own terms.** `CLAUDE.md` §3 rule 1 — a refusal an operator cannot go and check is one they have to take on faith. All four reasons are asserted non-blank and pairwise distinct, and so are all four citations, so no row can wear another vendor's words | `pull::vendor::every_granularity_floor_names_a_reason_and_a_source` | ✓ |
+| GF-07 | **The ladder ascends, which is what makes the single comparison sound.** `Granularity::is_finer_than` compares two `u8` discriminants; that is an answer only if the discriminants are ordered the way the grids are. The `const` block beside the function pins the ten adjacent pairs for the compiler; the test walks all 121 ordered pairs, because a ladder can ascend between neighbours and still not be a total order three steps away. Irreflexivity is asserted too | `pull::vendor::the_ladder_ascends_so_one_comparison_decides_which_rung_is_finer` | ✓ |
+
+**What is NOT invariant here, and is a limit rather than a bug.** The front end
+is untouched by this change. `web/src/routes/ingest/+page.svelte` still renders
+a rung the vendor can never serve with the same *no directory* annotation it
+gives a rung nobody has pulled yet — the store-shaped refusal and the
+vendor-shaped one still read identically on the page. Nothing above claims
+otherwise: these rows are about `crates/pull`, and the fact now exists in one
+place where before it existed in none. Carrying it over the HTTP surface is the
+next phase and is recorded in D-0118 rather than implied here. Separately,
+`docs/00-charter.md` §4 has **no vendor rows at all** for TrueData and GDFL, so
+GF-02's sources are `docs/08-vendor-samples.md`'s measurements and the owner's
+rule of 2026-08-12 rather than a charter row; that gap is named in D-0118.
+
+## An NSE tier resolves to vendor ids on `(exchange, ISIN)`, and the four buckets sum — D-0117
+
+`brutex_core::universe` held six published constituent lists and `api::master`
+parsed both vendor masters, and **nothing joined them**: there was no code
+anywhere that turned "the NIFTY 200" into the instrument ids a pull must name.
+`api::constituents` is that join. The rows are prefixed `CJ-` rather than
+continuing an existing block: two sessions share this tree and a collided
+identifier is worse than a new prefix.
+
+Every row below is proved with no socket, no credential, no master file and no
+bar — the fixtures are `merge::merge` over hand-written listings, and the ISINs
+in them are real ones read off the two masters on 2026-08-12, because
+`Isin::new` verifies the check digit and a fixture that could not exist proves
+nothing about a join that will meet the real file.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| CJ-01 | **The partition sums, for every vendor and every tier.** `matched + lacks + ambiguous + malformed + no_nse_isin == Tier::published()` — five buckets since D-0125 — and not only as a total: they are asserted DISJOINT and their union asserted equal to the published list *name for name*, so a join that dropped one constituent and double-counted another cannot pass. The five addends and the total are PRINTED for all twenty-four `(vendor, tier)` rows, so the arithmetic is readable and not merely asserted. Held for all four vendors — including the two archives, which publish no master and legitimately lack everything | `api::constituents::every_constituent_lands_in_exactly_one_bucket` · `api::constituents::a_vendor_with_no_master_lacks_every_name_and_the_sum_still_holds` | ✓ |
+| CJ-02 | **The join key is NSE's OWN ISIN, at both ends, and never a symbol.** Since D-0125 a constituent's identity is `core::universe::nse_isin(symbol)` — the ISIN the exchange prints beside that name in its own file (U-08) — matched against the ISIN column of the vendor's master. Every matched, lacked and ambiguous row of every tier is asserted to carry exactly that value. One ISIN resolves to a different id per vendor — `2885` at Dhan, `NSE-RELIANCE` at Groww — and the tier's answer carries that vendor's own id, never the other's. A vendor that lists no row for the ISIN yields `None` rather than a substitute, because filing one broker's bars under another's id is what D-0019 exists to prevent | `api::constituents::every_matched_row_joined_on_the_isin_the_exchange_itself_prints` · `api::constituents::a_constituent_both_masters_list_resolves_to_that_vendors_own_id` · `api::constituents::a_constituent_one_master_lacks_is_reported_and_never_dropped` | ✓ |
+| CJ-03 | **Two rows of one master claiming one NSE ISIN is `ambiguous`, and no id is chosen.** Every claimant is listed; the tier's id list gains none of them; `Join::id` answers `None`. The same ISIN stays unambiguous for the other vendor, so ambiguity is a fact about ONE master and never about the ISIN | `api::constituents::two_rows_of_one_master_claiming_one_isin_are_ambiguous_and_no_id_is_chosen` | ✓ |
+| CJ-04 | **Every "no ISIN to join on" is a named reason on the row, in the bucket that names whose gap it is.** D-0125 split them. `malformed` is a published name this build cannot make a key of — `NotASymbol`, `PlaceholderScrip` — and is empty on all six lists. `no_nse_isin` is **the exchange's own file naming no ISIN**: `NoRowInTheExchangesFile` (the five F&O index underlyings, which are not shares) and `TheExchangesRowNamesNoIsin` (`AGL`, one Total Market row with an empty cell, §11). The second bucket is asserted IDENTICAL for all four feeds, because it is a fact about NSE's file and about no master. Every reason prints a sentence and is asserted to answer the right side of the split | `api::constituents::the_exchanges_own_gap_is_its_own_bucket_and_the_same_for_every_feed` · `api::constituents::a_name_that_cannot_be_a_key_is_malformed_and_never_probed` · `api::constituents::every_reason_prints_a_sentence_and_says_which_bucket_it_belongs_to` | ✓ |
+| CJ-05 | **There is no symbol step left to say out loud, and a vendor row spelled correctly still lacks.** D-0125 deleted it rather than demoting it: a constituent whose NSE ISIN no master carries is `lacks`, never retried by name. The proof is a master row whose SYMBOL is a constituent's and whose ISIN is another company's — the old join matched it by name; the new one lacks it, and that vendor's id is reachable only under the ISIN its own master gave. What survives is a different measurement: `Matched::corroboration` names which mastered vendors' files carry NSE's ISIN, `TierJoin::uncorroborated` lists the matched rows exactly one file agrees with, and the note carries that count — on the line it affected and on no other, asserted against a universe where nothing is uncorroborated | `api::constituents::the_symbol_step_is_gone_and_a_vendor_row_spelled_right_still_lacks` · `api::constituents::the_notes_name_the_five_buckets_their_sum_and_every_unresolved_row` | ✓ |
+| CJ-06 | **A tier's count is checked against the list it borrows, and no list holds a placeholder scrip.** `Tier::published()` is a literal — 50 / 100 / 200 / 500 / 750 / 213 — asserted equal to `members().len()`, so a truncated transcription fails rather than answering for fewer names than the index has; and `DUMMYINXGN` / `DUMMYTRVN` appear in no list this build carries, which asserts D-0089's drop instead of trusting it. `Tier::ALL` is pinned in position order, because `Join::tier` indexes a flat array by it | `api::constituents::every_tiers_published_count_matches_the_list_it_borrows` · `api::constituents::no_tier_this_build_carries_holds_a_placeholder_scrip` | ✓ |
+| CJ-07 | **The join and `core::universe::of_equity` cannot drift.** Every matched row of every tier carries that tier's own `Universe` bit — the two are built from the same six lists by different routes, and if they disagree one of them is reading a list the other is not | `api::constituents::every_matched_row_also_carries_the_tiers_universe_bit` | ✓ |
+| CJ-08 | **Both lookups are O(1) and neither notices the universe behind it.** `(vendor, tier) -> ids` is one index into a flat array and `(vendor, exchange, ISIN) -> id` is one hash probe on a `Copy` key; measured against universes 40× apart in indexed ISINs (100 against 4,000), both are flat within a 4.0× ceiling. Re-measured after D-0125 re-keyed the join on NSE's own ISIN, release profile, best of 9 × 200,000: **302 → 302 ps** and **1,515 → 1,212 ps** — the array index is unchanged and the hash probe is FASTER on the larger universe, which is the noise floor rather than a speed-up, and is the shape a constant-time operation makes. D-0125 added two constant probes per constituent at BUILD time (`NTM_INDEX::position` and `nse_isin`) and removed one merged-universe probe; nothing moved onto a request path. The whole-universe pass happens once, in `Read::new`, beside `Catalog::build` — D-0039 and D-0042 | `api::constituents::the_two_lookups_do_not_grow_with_the_universe` | ✓ |
+
+**Measured against the real masters, 2026-08-12** — 2,795 merged instruments,
+2,760 distinct `(exchange, ISIN)` pairs indexed, `Join::build` **441 µs**. Both
+vendors resolve **50/50, 100/100, 200/200, 500/500 and 750/750** with zero
+lacking, zero ambiguous, zero malformed and **zero rows resting on a single
+master's spelling**. The F&O list resolves 208 of 213, and the five that do not
+are `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTY` and `NIFTYNXT50` — index
+underlyings, which have no ISIN because no numbering agency issues one for a
+computed level.
+
+## Per-feed coverage — `api::coverage` (D-0120)
+
+What a *universe* holds and what a *feed* can be asked for are two numbers, and
+the form showed only the first. These rows hold the second.
+
+| # | Invariant | Proof | |
+|---|---|---|---|
+| CV-01 | **A target has a tier exactly when it has a published list, and it is that list.** `SpotTarget::tier()` and `SpotTarget::members()` are pinned against each other for all seven targets, and the tier's `members()` and `universe()` are asserted equal to the target's — so a target cannot join through a neighbour's list, which is precisely what a positional mapping gets wrong | `api::ingest::every_target_with_a_published_list_joins_through_that_lists_tier` | ✓ |
+| CV-02 | **A target resolves to ONE feed's ids, and `None` is not an empty list.** `Join::ids_for(vendor, target)` hands back exactly `Join::tier(vendor, target.tier()?).ids()`; `Swept` and `Indices` answer `None` because no published list defines them, which is a different claim from "this feed reaches nothing in it". One feed's ids never appear in another's answer | `api::constituents::a_spot_target_resolves_to_one_feeds_ids_and_the_two_that_cannot_say_so` | ✓ |
+| CV-03 | **The count on the control is the length of the id array a request is built from.** `Covered::matched` is `ids_for(..).len()`, not a second tally kept beside the matched rows — two counts of one fact drift the first time one of them is edited, and the visible half is the one nobody edits | `api::coverage::the_matched_count_is_the_length_of_the_ids_a_pull_would_name` | ✓ |
+| CV-04 | **Every unreachable name is named with its bucket and its reason.** `lacks` is "some master knows this ISIN and THIS feed has no row for it"; `ambiguous` is two of the feed's own rows claiming one ISIN; `malformed` is a published name with no usable ISIN at all — including `no vendor master names it`, which is not the same fact as `lacks` and must not be collapsed into it. The list is emitted whole and never truncated | `api::coverage::the_wire_carries_the_slug_the_count_and_every_reason` · `api::server::universes_json_says_what_each_target_resolves_to_for_the_named_feed` | ✓ |
+| CV-05 | **A feed with no instrument master answers `None`, never zero.** The two archive vendors publish no master — a folder of CSVs is its own listing — so every count is null and the wire says `"counted_from":"no master"`. `0 matched, 35 lacks` would be a measurement of a file that does not exist, and it reads as "this feed has nothing" | `api::coverage::a_feed_that_publishes_no_master_is_not_reported_as_empty` | ✓ |
+| CV-06 | **The two targets no published list defines carry no denominator.** `Swept` is the engine surface and `Indices` is whatever a master calls an index series; `published` is `None` for both and `counted_from` says `master`. Inventing a denominator for them would be `CLAUDE.md` §3 rule 1. For the other five, `matched + lacks + ambiguous + malformed == Tier::published()` | `api::coverage::the_five_list_defined_targets_read_the_join_and_the_two_others_do_not` | ✓ |
+| CV-07 | **A per-feed answer differs per feed, and the fixture proves it rather than the prose.** Three index series, Groww listing two and Dhan two, only one shared: the universe count is 3 and neither feed reaches 3. The swept pair is counted the same way, because "the engine surface is two instruments" does not mean a given broker lists both | `api::coverage::the_two_feeds_reach_different_index_sets_and_the_counts_say_so` · `api::coverage::the_swept_pair_is_counted_per_feed_like_everything_else` | ✓ |
+| CV-08 | **A shortfall produces a startup note; a whole build produces silence — and the note does not claim a filter the pull path lacks.** Only `(feed, target)` pairs that are short are named, with the names on the line; and the sentence says the run STILL ATTEMPTS the universe's number and refuses the difference by name, which is `docs/06-limits.md` §63 written where it is true | `api::coverage::the_notes_name_only_the_targets_a_feed_is_short_of` | ✓ |
+| CV-09 | **The receipt prints both numbers with different labels, and neither is a bare count.** *Instruments covered* says `N in the merged universe`; *This feed can name* is the reach, as a whole set, as a fraction with the first five missing names and a remainder, or as "publishes no instrument master" — and it points at `/universes.json?feed=…` for the rest. All seven targets are driven end to end through a real server | `api::server::each_spot_target_reports_its_own_population_and_not_a_neighbours` · `api::server::the_receipt_reports_reach_for_the_feed_and_never_a_number_it_did_not_measure` | ✓ |
+| CV-10 | **An unknown feed is refused by name on `/universes.json`, and a compound bitset gets no single token.** 400 naming what was asked and what is known, rather than `/instruments.json`'s default-to-Dhan — which there would enable four controls against the other broker's reach. `universe_token_of` answers `""` for the empty set and for two bits at once, because a set's name is the array field | `api::server::universes_json_says_what_each_target_resolves_to_for_the_named_feed` · `api::server::a_compound_bitset_has_no_single_token` | ✓ |
+| CV-11 | **The lookup is one array index and does not grow with the universe.** `Coverage::of(vendor, target)` measured against universes 40× apart in merged rows, flat within a 4.0× ceiling. `Coverage::build` is one fold over the merged universe per `(mastered vendor, master-counted target)` — four folds — and it runs in `Read::new` beside `Catalog::build`, once per process. D-0039, D-0042 | `api::coverage::the_lookup_does_not_grow_with_the_universe` · `api::coverage::every_target_indexes_its_own_slot` | ✓ |
+
+**Measured against the real masters, 2026-08-12.** Every NIFTY tier is whole for
+both feeds — `n50` 50/50, `n100` 100/100, `n200` 200/200, `n500` 500/500,
+`equities` 750/750, zero lacking, zero ambiguous, zero malformed. `swept` is
+2/2 for both. The one target the universe over-promises is `indices`: **35**
+merged index keys, of which Groww lists **24** and Dhan **15**, with only four
+carrying both — a spelling disagreement no ISIN can reconcile, because an index
+has none. `docs/06-limits.md` §64.
+
+**What is NOT invariant here, and is a limit rather than a bug.** The ISIN a
+constituent joins on is **not** the exchange's own: this repository holds the
+symbol column of the NSE constituent files and nothing else (`docs/00-charter.md`
+§4c), so the ISIN comes from the merged vendor universe and is corroborated by
+both masters rather than published. That is recorded in `docs/06-limits.md` §62
+and in D-0117. Separately, **the four NIFTY tiers are now requestable from the
+API and still disabled in the browser**: D-0120 wired `SpotTarget::tier` →
+`Join::ids_for` → `Coverage` → `GET /universes.json?feed=<vendor>`, so the slug,
+the per-feed count and every unreachable name with its reason are on the wire —
+but `web/src/routes/ingest/+page.svelte` carries `target: null` on those four
+rows of its own `UNIVERSES` table, and that is a change in `web/` and not in any
+crate. And a run of a short target still ATTEMPTS the universe's number rather
+than the feed's, which is `docs/06-limits.md` §63.
+
+## A source is REST or a folder, and a folder's reach is the files — D-0123
+
+The operator's rule of 12 Aug 2026 — TrueData and GDFL are read entirely from
+bought CSV files in a folder, every other feed is always REST — is a two-valued
+property of the vendor, and it decides five separate behaviours that were
+previously decided one at a time by matching on a transport's payload. These
+rows hold the two kinds apart at the places where treating them alike produced a
+precise and wrong answer.
+
+The one that matters most is the third: **a folder that is missing and a folder
+that is there and empty are not the same event.** Both used to produce no bars
+and no reason, so both got read as "no data yet" — and an operator spent the
+next hour on tokens and entitlements when the answer was a path.
+
+| # | Invariant | Proof | |
+|---|---|---|---|
+| SK-01 | **Every feed is REST or a folder, and exactly the two named vendors are folders.** The membership is checked by a `const` block under `DESCRIPTORS` rather than asserted in a doc comment, so a fifth row that contradicts the operator's rule is a build failure. `store_vendor` is `TrueData`/`Gdfl` on exactly the two rows whose transport is a folder, which is the same statement seen from the store-prefix side | `pull::folder::every_feed_is_rest_or_folder_and_the_two_named_vendors_are_the_folders` · `pull::vendor` `const` block | ✓ |
+| SK-02 | **The kind decides the credential, the quota, the floor and the finest rung — as behaviour, not as a label.** `needs_credential` is false for a folder and `crate::config` asks that rather than naming vendors, so `CLAUDE.md` §8's machinery does not run and a missing token cannot block a source with nothing to authenticate against. `has_history_floor` is false, and `Descriptor::history` is EMPTY for both folder rows so there is nothing to fall back to. `finest_possible` is one second for a folder and one minute for REST, cross-checked against every row's own measured floor by a `const` block | `pull::folder::the_kind_decides_credential_quota_floor_and_finest_rung` · `pull::folder::a_folder_feed_needs_no_credential_and_a_rest_feed_does` | ✓ |
+| SK-03 | **The verb for a folder is `read`, everywhere it appears.** Nothing is asked of anybody, no quota moves, nothing can rate-limit it and there is no remote party to be unavailable. `verb_past` is spelled out rather than suffixed, because `read` does not take an `-ed` and a helper that appended one would have written `readed` on the arm the type exists for. `/feeds.json` carries the word so the browser cannot coin its own | `pull::folder::the_verb_for_a_folder_is_read_and_never_pull` · `api::server::feeds_json_carries_a_floor_per_rung_with_the_source_that_made_it` | ✓ |
+| SK-04 | **A folder feed's reach is READ off the disk and never declared.** There is no vendor constant, no history floor and no fallback: `Reach` is computed by walking the folder, and the three answers stay three — `Empty` (there and holding nothing), `Blank` (files delivered, no rows) and `Days` (the real span). There is deliberately no fourth arm meaning *unknown*, because a caller would have to treat it as unbounded | `pull::folder::a_folder_feeds_reach_comes_from_the_folder_and_never_from_a_floor` · `pull::folder::an_empty_folder_has_an_empty_reach_and_says_so` · `pull::folder::a_folder_of_blank_files_is_not_the_same_as_an_empty_folder` | ✓ |
+| SK-05 | **A missing or unreadable folder HALTS LOUDLY and names the path — never an empty reach.** `CLAUDE.md` §4 bans the fallback that hides a failure, and this is the one it was hiding. Over the wire the distinction is the status code: an empty folder is **200** with `"state":"empty"`, and a folder that cannot be walked is **409** carrying `path`. A member that will not decode, and a row whose timestamp is not a moment on this calendar, refuse the WHOLE reach rather than skipping — a reach computed from the rows that happened to parse is a narrower answer wearing a complete one's words | `pull::folder::a_missing_folder_halts_loudly_and_names_the_path` · `pull::folder::an_unreadable_folder_halts_loudly_and_names_the_path` · `pull::folder::a_member_that_will_not_decode_refuses_the_reach_by_name` · `pull::folder::a_row_whose_timestamp_is_not_a_moment_refuses_the_whole_reach` · `api::folder::a_missing_folder_halts_loudly_and_names_the_path` · `api::folder::an_empty_folder_answers_empty_with_the_path_and_never_a_halt` | ✓ |
+| SK-06 | **There is no default folder, and the root resolves exactly as the store and masters roots do.** `BRUTEX_ARCHIVES`, else `$HOME/.brutex/vendor-data`, read in ONE place, with no literal path in any tracked file. With neither set it REFUSES where the two siblings fall back to `.` — and the deviation is deliberate: a missing master renders `UNAVAILABLE` and a missing store is created on write, but a folder feed's whole reach IS its folder, so the working directory would report an honest, precise and completely wrong reach, most often `Empty`, which is indistinguishable from "not bought yet" | `pull::folder::the_root_is_the_variable_then_the_home_directory` · `pull::folder::with_no_variable_and_no_home_there_is_no_default_folder` · `pull::folder::the_environment_reader_and_the_pure_resolver_agree` | ✓ |
+| SK-07 | **A REST feed has no folder and is refused BY NAME, never given one.** A path invented for a broker would come back as "that folder is missing" — the same words as a real missing folder, for a completely different reason. The refusal names the kind and the verb the feed's bars actually arrive under | `pull::folder::a_rest_feed_cannot_be_asked_to_read_a_folder` · `api::folder::a_rest_feed_is_refused_by_name_and_never_given_a_path` | ✓ |
+| SK-08 | **Timestamps are keyed to the SECOND, so two rows sharing a second is expected input — and LAST WINS for the price.** Measured in `docs/08-vendor-samples.md`: three rows in one second at TrueData, four at GDFL, no sub-second field and no tiebreaker at either. Refusing them would refuse every file the operator bought. Folded at `Bucket::SECOND` the second's rows become one record — first in file order is the open, the extremes are the high and low, the volumes sum, and the **last in file order is the close**. Nothing is dropped and nothing is sorted: rows sharing a second carry no tiebreaker, so a sort would invent one and quietly change which price became the open. This is what makes the read idempotent under §3 rule 5 — the same folder yields the same bars, byte for byte | `pull::folder::a_shared_second_folds_last_price_wins` | ✓ |
+| SK-09 | **The column shape a decoder is handed comes from the descriptor, and its two spellings cannot drift.** `ColumnLayout::shape` is the `Columns` variant for that `(feed, segment)`; a `const` block holds it against the layout's own column list on all three things that silently mis-read a row — the count, the header row and the date format. A layout whose two spellings disagree fails the build. An unmeasured segment refuses by name rather than borrowing the other vendor's shape | `api::folder::the_shape_is_the_descriptors_and_a_single_layout_needs_no_segment` · `api::folder::an_unmeasured_segment_refuses_by_name_and_lists_what_was_measured` · `pull::vendor` `shape_agrees` `const` block | ✓ |
+
+**What is NOT held here, and is named rather than implied.** `api::server::run_local`
+still hardcodes `Columns::Gdfl` and `Segment::Fno` for every archive feed, so a
+TrueData folder driven through the ingest form is decoded against GDFL's ten
+columns. The measured shape now exists to read (SK-09) and `/folder.json` reads
+it, but that call site cannot take it without also deciding the segment — and
+the segment decides where bars are FILED, which append-only history makes
+unrenameable. Recorded in `docs/06-limits.md`; it is a `crates/api` change these
+rows do not own.
+
+## Five silent answers, and what now separates them — D-0124
+
+Each of these was a degradation that reached the browser wearing a success's
+clothes: an empty array, a zero, an idle phase, a green badge. In every case the
+information that would have separated the failure from the ordinary state was
+present in the process and discarded at the last step before the wire —
+`Census::Unreadable`'s reason, `Read::notes`, `Read::status()`, the work list's
+own length. `CLAUDE.md` §4: degrade loudly and name the reason, or refuse.
+
+**The body shape did not move.** `/store.json` and `/instruments.json` answer a
+JSON array in every state, before and after, because a consumer expecting an
+array must not start receiving an object — that would be the very failure being
+fixed, re-introduced by the fix. The reason travels beside the payload, in
+headers, and the two states where every number in the body is absent rather than
+measured also move the status code.
+
+| # | Invariant | Proof | |
+|---|---|---|---|
+| SF-01 | **A damaged counter and an empty store are not the same response.** They used to be equal byte for byte — `200`, `content-type: application/json`, body `[]` — so `/db` called a store that may hold millions of bars empty and Markets asserted "holds no bars". `/store.json` now answers `503` when `census::read_vendor` refused the manifest, and carries `x-brutex-census-state` (`held`·`absent`·`unreadable`, `Census::name`'s own words, which are `/audit.json`'s), `x-brutex-census-note` (the refusal verbatim, naming the file) and `x-brutex-census-degraded`. **The body is still `[]`, and a fresh install with no manifest is still `200`** — `absent` and `unreadable` are two states, not one | `api::server::a_corrupt_census_is_not_answered_as_an_empty_store` · `api::server::a_missing_census_row_is_absent_and_says_so` | ✓ |
+| SF-02 | **`/instruments.json` says when its zeroes are not measurements.** An unreadable census makes `rows_for` answer `None` for every key, so every row read `"bars":0` — the same em dash an un-pulled instrument shows — at `200` with no status. It now answers `503` with the same three census headers, and the body is unchanged | `api::server::instruments_json_says_when_its_zeroes_are_not_measurements` | ✓ |
+| SF-03 | **A feed's master is answered for PER FEED, in three states, because a whole-read boolean cannot.** `Read::unread` records which vendor was never read and why; `unavailable` is derived from it rather than set beside it, so the boolean and the list cannot disagree. `Read::master` answers `read`, `UNAVAILABLE` (this build expects the file and could not read it — the list is absent, not empty) or `not-mastered` (an archive feed publishes no scrip file, so `[]` is the **true** answer and the status stays `200`). The failing feed answers `503` with `x-brutex-master-state`, `x-brutex-master-note` and `x-brutex-universe-status`; **the other feed on the same site answers `200` and complete** | `api::server::instruments_json_says_when_its_zeroes_are_not_measurements` · `api::server::an_archive_feed_names_itself_unmastered_rather_than_empty` | ✓ |
+| SF-04 | **A routine disagreement does not refuse the route.** `Read::status()` is `DEGRADED` for any ISIN or eligibility conflict, and the list and the counts are both real in that state. Only an unreadable census or an unread master moves the status — refusing the type-ahead for a conflict would take the console down for a fact the header already carries | `api::server::instruments_json_says_when_its_zeroes_are_not_measurements` (the `?feed=dhan` half) | ✓ |
+| SF-05 | **A note can never be lost to the alphabet a header admits, and can never open a second header.** The note carries a filesystem path — arbitrary bytes on this platform — and a vendor's own refusal text, already observed to hold `·` and `—`. `note_alphabet` maps everything outside `0x20..=0x7E` to `?` and bounds the value, so the conversion has no failure arm to be a coverage hole; a `unwrap_or(<empty>)` would have answered a corrupt census with a BLANK reason, which is this whole change arriving one layer down | `api::server::a_hostile_note_is_still_a_header` | ✓ |
+| SF-06 | **The completeness claim cannot be built without the universe that justifies it.** `Settled::Complete` holds a `NonZeroUsize` and `Settled::over` is the only constructor, so there is **no code path** from an empty work list to the words "the store is complete" — which is what was published, at phase `idle`, once a minute, over a store holding nothing, whenever the masters failed to load. `NoUniverse` publishes `Phase::Halted` (the masters are read once at startup, so idling is a countdown to an event that cannot occur) and carries `Read::status()` and the read's own `UNAVAILABLE` notes, which name the file. A guard beside the `format!` was rejected: it fixes today's path and leaves the shape, and the next arm added gets the defect back | `api::autopilot::the_completeness_claim_cannot_be_built_without_the_universe_behind_it` · `api::autopilot::an_empty_universe_is_published_as_halted_and_never_as_complete` | ✓ |
+| SF-07 | **A stalled month is still reconsidered whatever the universe looks like now.** A stall is a month that WAS asked for and did not land, so it is real work; gating it on `Settled` would trade one silent state for another, and `carry_on` outranks the halt because a task about to ask for a month is not halted | `api::autopilot::a_round_with_nothing_missing_reconsiders_a_stalled_month_and_says_which_attempt` | ✓ |
+| SF-08 | **A relative fallback for the store root is a REFUSAL, not a default.** `store_dir_from(None, None)` returned `PathBuf::from(".")` beside a test that asserted it under the words *"no HOME is a broken environment, not a supported one"* — the sentence and the value said opposite things. `.` is the working directory, which for this launcher is the repository checkout, so the first append built `bars/`, `manifest/` and `audit/` inside the git tree, invisible to CI gate 1 because it walks `git ls-files`. Both resolvers now refuse, naming both variables, the directory the old fallback would have used and what it would have created; the serve path refuses **before the listener is served** and exits `FAILED`. An **explicit** `BRUTEX_STORE` is still honoured as given, relative included — that is a stated choice, and refusing a choice is not the same act as inventing one | `api::server::the_store_root_comes_from_the_environment_or_defaults_under_home` · `api::server::the_masters_directory_comes_from_the_environment_or_defaults_under_home` · `api::server::a_serve_with_no_store_root_refuses_instead_of_serving_the_checkout` | ✓ |
+| SF-09 | **Every `/pull/spot` answer names itself a receipt, and no other route does.** The page parses any `200` HTML for a `.badge` and falls open to `verdict: 'OK', good: true` when there is none, so a request that never reached this process rendered a green OK with a blank reason. A content type cannot separate them — a receipt legitimately is `text/html` — so `x-brutex-receipt: pull-spot` is stamped on **all three arms**: the seat-conflict `409`, the malformed-form refusal and the completed run. `/dashboard`, another `200` carrying HTML, does not carry it, which is what makes requiring it a discriminator | `api::server::every_spot_answer_names_itself_a_receipt_and_no_other_route_does` | ✓ |
+
+**What is NOT held here, and is a `web/` change rather than a crate one.** The
+receipt marker is on the wire and nothing reads it yet:
+`web/src/routes/ingest/+page.svelte` still calls `readReceipt(await r.text(),
+r.ok, r.status)` with no header test, so the fail-open parse stands until that
+page requires `x-brutex-receipt === 'pull-spot'` before parsing. The same is
+true of the four census and master headers — `/db` and Markets can now see why
+an array is empty and do not look. `web/src` was held by another session while
+these landed. Three of the five also reach those pages as a status code they
+already branch on, which is the floor rather than the fix.

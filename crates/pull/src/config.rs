@@ -861,16 +861,18 @@ impl CredentialConfig {
             // at 24-29 edit sites. Narrowed here, it is the hinge the rest of
             // that change hangs on.
             //
-            // The transport is the authority, not a list of names: a feed
-            // declaring `Transport::Http` needs a credential and a feed
-            // declaring `Transport::LocalArchive` does not, so a fifth feed
-            // lands on the right side by declaring which kind it is.
+            // THE SOURCE KIND IS THE AUTHORITY, not a list of names and no
+            // longer a `matches!` on the transport's payload. `SourceKind::Rest`
+            // needs a credential and `SourceKind::Folder` does not — the
+            // operator's rule of 12 Aug 2026 — so a fifth feed lands on the
+            // right side by declaring its transport and nothing else.
+            //
+            // Asking `Transport::Http(_)` here worked and was the wrong
+            // question: it is one of four sites that each independently decided
+            // what "is an API" meant, and four independent decisions are four
+            // chances to disagree. `Transport::kind` is now the only one.
             let authenticates = crate::vendor::Feed::ALL.into_iter().any(|feed| {
-                feed.store_vendor() == Some(vendor)
-                    && matches!(
-                        feed.descriptor().transport,
-                        crate::vendor::Transport::Http(_)
-                    )
+                feed.store_vendor() == Some(vendor) && feed.source_kind().needs_credential()
             });
             if seen == 0 && authenticates {
                 return Err(ConfigError::MissingVendor {

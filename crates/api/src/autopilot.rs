@@ -2402,6 +2402,110 @@ fn probe_store_halts(site: &Loaded, feeds: &mut [FeedState]) -> String {
     said
 }
 
+/// A "nothing is missing" verdict and the universe it was measured over, bound
+/// into one value.
+///
+/// # The lie this type makes unrepresentable
+///
+/// With the masters absent, `tracked_series` derives its work list from
+/// `site.read.merged.by_key`, which is empty; `next_window` then answers `None`
+/// for every feed because it has no series to accumulate a window from; `survey`
+/// chooses nothing; and the no-work branch below published
+///
+/// > nothing is missing that any feed can still be asked for. The store is
+/// > complete through the newest finished day
+///
+/// over a store holding nothing, at phase `idle`, once a minute for the life of
+/// the process. Every step was individually correct. **"Nothing is missing" is
+/// vacuously true over an empty work list**, and the sentence a human reads from
+/// it is not.
+///
+/// A guard — `if series.is_empty() { … }` beside the `format!` — would have
+/// fixed today's path and left the shape intact: the claim and the evidence
+/// would still be two separate things, and the next writer to add an arm gets
+/// the same defect back. So the completeness sentence is not reachable from a
+/// count at all. It is reachable only from [`Self::Complete`], which holds a
+/// [`std::num::NonZeroUsize`] and therefore **cannot be constructed over an
+/// empty universe**. There is no code path from zero instruments to the word
+/// "complete". D-0124.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settled {
+    /// Nothing is missing, across this many tracked instruments. The number is
+    /// the evidence and it travels with the claim into the sentence.
+    Complete {
+        /// How many instruments the verdict was measured over. Never zero — the
+        /// type says so.
+        instruments: std::num::NonZeroUsize,
+    },
+    /// There is no universe for anything to be missing from.
+    ///
+    /// Not "complete", not "idle", not "up to date": the masters produced no
+    /// instrument, so no month was ever a candidate and no feed was ever asked.
+    NoUniverse,
+}
+
+impl Settled {
+    /// The verdict the work list itself supports.
+    ///
+    /// The ONLY constructor. `Complete` is private to this impl in effect,
+    /// because every caller reaches it through here and here refuses zero.
+    fn over(series: &[Series]) -> Self {
+        std::num::NonZeroUsize::new(series.len()).map_or(Self::NoUniverse, |instruments| {
+            Self::Complete { instruments }
+        })
+    }
+
+    /// Whether this verdict stops the backfill rather than idling it.
+    ///
+    /// An empty universe cannot change while the process runs — the masters are
+    /// read once, at startup — so idling on it would be a countdown to an event
+    /// that cannot occur. `Halted` is the honest phase and the page already
+    /// draws it loudly.
+    const fn halts(self) -> bool {
+        matches!(self, Self::NoUniverse)
+    }
+
+    /// The sentence, which cannot be assembled without the evidence.
+    fn say(self, read: &crate::server::Read, note: &str, probed: &str) -> String {
+        match self {
+            Self::Complete { instruments } => format!(
+                "nothing is missing that any feed can still be asked for, across \
+                 {instruments} tracked instrument(s). The store is complete through the \
+                 newest finished day; this re-checks once a minute so a new day is \
+                 picked up on its own.{note}{probed}"
+            ),
+            // THE READ'S OWN WORDS, NOT A GUESS AT WHY. `Read::notes` already
+            // holds `"groww: UNAVAILABLE — <path>: No such file or directory"`,
+            // which names the file and the directory an operator has to fix.
+            // The autopilot touched `site.read` at exactly one line before this
+            // — inside `tracked_series` — and never asked it anything.
+            Self::NoUniverse => {
+                let why = read
+                    .notes
+                    .iter()
+                    .filter(|n| n.contains("UNAVAILABLE"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                let why = if why.is_empty() {
+                    String::from("no vendor named a reason")
+                } else {
+                    why
+                };
+                format!(
+                    "NOT COMPLETE — NOTHING IS TRACKED. No instrument reached the work \
+                     list, so no month was ever a candidate and no feed was ever asked. \
+                     This is NOT an up-to-date store: the universe is empty because the \
+                     masters did not load. Universe status: {}. {why}. The masters are \
+                     read once, at startup, so this cannot resolve itself — fix the \
+                     masters directory and restart.{probed}",
+                    read.status()
+                )
+            }
+        }
+    }
+}
+
 /// One pass over every drivable feed: pick the oldest month anything owes, do
 /// it, and record what happened.
 ///
@@ -2448,10 +2552,17 @@ async fn round(
 
     let Some((slot, unit)) = chosen else {
         let terminal = feeds.iter().all(|f| f.halted.is_some());
+        // WHAT "NOTHING WAS CHOSEN" ACTUALLY MEANS, decided from the work list
+        // rather than assumed. See `Settled`.
+        let settled = Settled::over(series);
         // ONLY WHEN NOTHING IS MISSING. A reconsideration cannot delay forward
         // progress because it is only ever reached from the branch that means
         // there is none to delay, and it is bounded per month per process by
         // `STALL_RETRIES`. See `reconsider`.
+        //
+        // NOT gated on `settled` — a stall is a month that WAS asked for and
+        // did not land, so it is real work whatever the universe looks like
+        // now, and swallowing it would trade one silent state for another.
         let retrying = if terminal {
             None
         } else {
@@ -2473,20 +2584,31 @@ async fn round(
                 report.stalls.clone_from(&state.stalls);
             }
         }
+        // BUILT BEFORE THE LOCK IS TAKEN, and built from `site.read`, which the
+        // publish closure must not borrow.
+        let detail = match retrying {
+            Some(saying) => saying,
+            None if terminal => format!(
+                "every feed is halted. The reasons are below and nothing further is \
+                 attempted until they are dealt with.{probed}"
+            ),
+            None => settled.say(&site.read, &note, &probed),
+        };
         site.autopilot.publish(move |status| {
-            status.phase = if terminal { Phase::Halted } else { Phase::Idle };
-            status.detail = match retrying {
-                Some(saying) => saying,
-                None if terminal => format!(
-                    "every feed is halted. The reasons are below and nothing further is \
-                     attempted until they are dealt with.{probed}"
-                ),
-                None => format!(
-                    "nothing is missing that any feed can still be asked for. The store is \
-                     complete through the newest finished day; this re-checks once a minute \
-                     so a new day is picked up on its own.{note}{probed}"
-                ),
+            // AN EMPTY UNIVERSE IS HALTED, NOT IDLE. `idle` beside a countdown
+            // is what an operator reads as "it is working"; the masters cannot
+            // load without a restart, so there is nothing to wait for.
+            //
+            // `carry_on` outranks both: a reconsidered month is about to be
+            // asked for on the next pass, and a task that is about to do work
+            // is not halted. With nothing to carry on to, `!carry_on &&
+            // terminal` is exactly the condition this line carried before.
+            status.phase = if !carry_on && (terminal || settled.halts()) {
+                Phase::Halted
+            } else {
+                Phase::Idle
             };
+            status.detail = detail;
             status.since_unix = ingest::epoch_secs(std::time::SystemTime::now());
             status.feeds = reports;
         });
@@ -5239,6 +5361,101 @@ mod tests {
         assert!(note.contains("2 stalled month(s)"), "{note}");
         assert!(note.contains("1 still to be reconsidered"), "{note}");
         assert!(note.contains("1 whose allowance is SPENT"), "{note}");
+    }
+
+    /// **THE COMPLETENESS CLAIM CANNOT BE BUILT WITHOUT THE UNIVERSE THAT
+    /// JUSTIFIES IT.**
+    ///
+    /// The whole of the fix is that [`Settled::Complete`] holds a
+    /// `NonZeroUsize` and [`Settled::over`] is the only way in, so there is no
+    /// value of `series` that produces the word "complete" over an empty work
+    /// list. Asserted three ways: the mapping refuses zero, the sentence for
+    /// zero contains none of the old claim, and the sentence for one carries
+    /// the count that justifies it.
+    #[test]
+    fn the_completeness_claim_cannot_be_built_without_the_universe_behind_it() {
+        assert_eq!(Settled::over(&[]), Settled::NoUniverse);
+        assert!(
+            Settled::over(&[]).halts(),
+            "an empty universe cannot change while the process runs, so idling \
+             on it is a countdown to an event that cannot occur"
+        );
+
+        let one = [series("NIFTY")];
+        let Settled::Complete { instruments } = Settled::over(&one) else {
+            panic!("one tracked instrument is a universe");
+        };
+        assert_eq!(instruments.get(), 1);
+        assert!(!Settled::over(&one).halts());
+
+        // AND THE SENTENCES. The evidence travels into the claim, and the
+        // claim is absent where the evidence is.
+        let site = empty_site("settled-say");
+        let complete = Settled::over(&one).say(&site.read, "", "");
+        assert!(complete.contains("The store is complete"), "{complete}");
+        assert!(
+            complete.contains("1 tracked instrument(s)"),
+            "the count that justifies it travels with it: {complete}"
+        );
+
+        let empty = Settled::over(&[]).say(&site.read, "", "");
+        assert!(
+            !empty.contains("The store is complete"),
+            "an empty universe is never complete: {empty}"
+        );
+        assert!(empty.contains("NOTHING IS TRACKED"), "{empty}");
+        assert!(
+            empty.contains("UNAVAILABLE"),
+            "and it carries the read's own reason: {empty}"
+        );
+    }
+
+    /// **The same claim, through a whole round, which is where it was
+    /// published.**
+    ///
+    /// With the masters absent, `tracked_series` is empty, `next_window` owes
+    /// nothing for any feed, `survey` chooses nothing, no feed is halted, and
+    /// the no-work branch published *"nothing is missing … The store is
+    /// complete through the newest finished day"* at phase `idle`, once a
+    /// minute, over a store holding nothing. Every step was correct and the
+    /// sentence was a lie.
+    ///
+    /// Nothing is fetched and nothing is contacted: `empty_site` is
+    /// `Site::load`, so the broker is `Refused`, and no month is ever chosen.
+    #[tokio::test]
+    async fn an_empty_universe_is_published_as_halted_and_never_as_complete() {
+        let site = empty_site("no-universe");
+        let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
+        let mut feeds = drivable(yesterday);
+
+        let waited = round(&site, &mut feeds, &[], pull::vendor::Granularity::Minute1).await;
+        assert_eq!(waited, IDLE_POLL_SECS, "nothing to carry on to");
+
+        let (phase, detail) = site
+            .autopilot
+            .inspect(|status| (status.phase, status.detail.clone()))
+            .expect("the status lock");
+        assert_eq!(
+            phase,
+            Phase::Halted,
+            "an empty universe is halted, not idle: {detail}"
+        );
+        assert!(
+            !detail.contains("The store is complete"),
+            "this is the sentence that was published over an empty store: {detail}"
+        );
+        assert!(
+            detail.contains("NOT COMPLETE") && detail.contains("NOTHING IS TRACKED"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("masters"),
+            "and it names what to fix: {detail}"
+        );
+        assert!(
+            detail.contains("UNAVAILABLE"),
+            "in the read's own words, which name the file: {detail}"
+        );
     }
 
     /// **A whole round reconsiders a stalled month end to end**, from the idle

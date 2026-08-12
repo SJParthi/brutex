@@ -334,7 +334,7 @@ fn page_of(
 
     body.push_str(&health_banner(health));
 
-    let notes = walk_notes(tail);
+    let notes = walk_notes(tail, health);
     if !notes.is_empty() {
         body.push_str("<ul class=\"notes\">");
         for note in &notes {
@@ -344,12 +344,55 @@ fn page_of(
     }
 
     if tail.records.is_empty() {
-        body.push_str(
-            "<p class=\"lead\">Nothing matched. A quiet log is the ordinary \
-             state: members are written at <code>debug</code>, and the default \
-             floor is <code>info</code> — set <code>BRUTEX_LOG_LEVEL=debug</code> \
-             and re-run to see them.</p>",
-        );
+        // NAME THE FILTER THAT ACTUALLY EMPTIED THE PAGE.
+        //
+        // This used to point at `BRUTEX_LOG_LEVEL` unconditionally. Under
+        // `?target=pull.http` matching nothing, that sends the reader to change
+        // the WRITE floor and re-run a job, when the cause is a read filter they
+        // can clear in one click. Worse, under `?level=warn` the suggested
+        // remedy provably cannot change the answer: a `debug` line written to
+        // the file is still excluded by the reader's own floor. `CLAUDE.md` §4
+        // asks for the reason to be named, not for a remedy that cannot work.
+        let filtered = asked.level.is_some() || !asked.target.is_empty() || asked.run != 0;
+        if filtered {
+            let mut said =
+                String::from("<p class=\"lead\">Nothing matched <b>the filters in force</b>:");
+            if let Some(level) = asked.level {
+                let _ = write!(said, " level at or above <code>{}</code>;", level.label());
+            }
+            if !asked.target.is_empty() {
+                let _ = write!(
+                    said,
+                    " target <code>{}</code>;",
+                    render::escape(&asked.target)
+                );
+            }
+            if asked.run != 0 {
+                let _ = write!(said, " run <code>{}</code>;", asked.run);
+            }
+            said.push_str(" widening or clearing them is the first thing to try.");
+            // ONLY WHEN IT COULD HELP. With a read floor above `debug`, raising
+            // the WRITE floor changes nothing the reader would then admit.
+            if asked
+                .level
+                .is_none_or(|l| telemetry::Level::Debug.at_least(l))
+            {
+                said.push_str(
+                    " Members are also written at <code>debug</code>, below the \
+                     default <code>info</code> write floor — set \
+                     <code>BRUTEX_LOG_LEVEL=debug</code> and re-run to record them.",
+                );
+            }
+            said.push_str("</p>");
+            body.push_str(&said);
+        } else {
+            body.push_str(
+                "<p class=\"lead\">Nothing matched. A quiet log is the ordinary \
+                 state: members are written at <code>debug</code>, and the default \
+                 floor is <code>info</code> — set <code>BRUTEX_LOG_LEVEL=debug</code> \
+                 and re-run to see them.</p>",
+            );
+        }
         return page_shell(asked, &body);
     }
 
@@ -364,7 +407,7 @@ fn page_of(
 /// truth if they also know the walk stopped early. `hit_scan_cap` is the
 /// difference between "no errors in the log" and "no errors in the four
 /// megabytes I happened to read".
-fn walk_notes(tail: &telemetry::Tail) -> Vec<String> {
+fn walk_notes(tail: &telemetry::Tail, health: Option<&telemetry::Health>) -> Vec<String> {
     let mut notes: Vec<String> = Vec::new();
     // FIRST, BECAUSE IT IS THE FIRST QUESTION. Every other note here reports a
     // limit of the READER — how far it walked, what it could not decode. This
@@ -372,11 +415,27 @@ fn walk_notes(tail: &telemetry::Tail) -> Vec<String> {
     // can be trusted. A log handed to somebody who did not run the job is
     // evidence, and evidence with silent holes is worse than none.
     if let Some(missing) = tail.missing.filter(|n| *n > 0) {
+        // WHERE TO LOOK DEPENDS ON WHETHER THE BANNER CAN ANSWER.
+        //
+        // `tail.missing` is DURABLE: it is computed from the sequence hole in
+        // the FILE, so it survives a restart. `Health::dropped` is PER-PROCESS —
+        // `Sink::open` resumes `seq` from the file but starts `dropped` at zero.
+        // After the restart that follows a failed run, which is the routine
+        // action, the two disagree, and this note used to send the reader to a
+        // banner reading "0 dropped" for a count it did not hold. The page
+        // contradicted itself and pointed at the half that was wrong.
+        let whither = if health.is_some_and(telemetry::Health::is_loud) {
+            "see the sink banner above for the count and the reason."
+        } else {
+            "the banner above counts only THIS process's losses and counts none, \
+             so these were lost by an earlier run and no counter on this page \
+             holds the reason."
+        };
         notes.push(format!(
             "{missing} event(s) are MISSING from this range. The sink numbered \
              them and the file does not hold them, so they were dropped rather \
-             than filtered — see the sink banner above for the count and the \
-             reason. Nothing below is a complete picture of what happened."
+             than filtered — {whither} Nothing below is a complete picture of \
+             what happened."
         ));
     }
     if tail.hit_scan_cap {
@@ -885,12 +944,140 @@ mod tests {
         );
     }
 
+    /// **An empty page blames the filter that emptied it, not always the writer.**
+    ///
+    /// The message used to name `BRUTEX_LOG_LEVEL` whatever the query was. Under
+    /// `?target=` that sends the reader to change the WRITE floor and re-run a
+    /// job when the cause is a read filter they can clear in one click; under
+    /// `?level=warn` it is worse than unhelpful, because a `debug` line written
+    /// to the file would still be excluded by the reader's own floor — a remedy
+    /// that provably cannot change the answer.
+    #[test]
+    fn an_empty_page_names_the_filter_in_force_rather_than_always_the_write_floor() {
+        let (dir, _sink) = sink_in("empty-filtered");
+
+        // A TARGET FILTER. The write floor is not the cause and is not the cure,
+        // but debug lines could still be admitted by the reader, so the write
+        // hint is allowed to stay beside the real reason.
+        let by_target = page_over(&dir, &asked("limit=10&target=pull.http"), None);
+        assert!(
+            by_target.contains("the filters in force"),
+            "the page must say the filters are why it is empty: {by_target}"
+        );
+        assert!(
+            by_target.contains("pull.http"),
+            "and name the target it actually filtered on: {by_target}"
+        );
+
+        // A LEVEL FILTER ABOVE DEBUG. Raising the write floor cannot help, so the
+        // suggestion must not appear at all.
+        let by_level = page_over(&dir, &asked("limit=10&level=warn"), None);
+        assert!(
+            by_level.contains("the filters in force"),
+            "the level filter is named as the cause: {by_level}"
+        );
+        assert!(
+            !by_level.contains("BRUTEX_LOG_LEVEL"),
+            "a `debug` line would STILL be excluded by the reader's own floor, so \
+             offering the write floor as the remedy is advice that cannot work: {by_level}"
+        );
+
+        // A RUN FILTER.
+        let by_run = page_over(&dir, &asked("limit=10&run=42"), None);
+        assert!(
+            by_run.contains("42"),
+            "the run narrowed to is named: {by_run}"
+        );
+
+        // AND THE UNFILTERED CASE IS UNCHANGED — the original wording still
+        // applies when nothing the reader chose is responsible.
+        let plain = page_over(&dir, &asked("limit=10"), None);
+        assert!(
+            plain.contains("BRUTEX_LOG_LEVEL=debug") && !plain.contains("the filters in force"),
+            "with no filter the write floor IS the thing to change: {plain}"
+        );
+    }
+
     /// A `Health` this test owns, so it can describe a sink no test can cause.
     ///
     /// A dropped event needs a full disk or a failing write; a failed roll needs
     /// a rename to fail. Neither is reachable from a unit test, and a branch
     /// that is only reachable in production is a branch nobody has ever seen
     /// render. The fields are `pub`, so the state can be stated directly.
+    /// The one note, without indexing — `clippy::indexing_slicing` is denied
+    /// workspace-wide and a test is not exempt from it.
+    fn note_of(notes: &[String]) -> &str {
+        notes.first().map_or("<no note at all>", String::as_str)
+    }
+
+    /// **The MISSING note must not send a reader to a banner that cannot answer.**
+    ///
+    /// `Tail::missing` is computed from the sequence hole in the FILE and so
+    /// survives a restart. `Health::dropped` is per-process and starts at zero.
+    /// The routine action after a failed run is a restart, so the pair
+    /// "5 missing / 0 dropped" is the NORMAL state, not an exotic one — and the
+    /// note used to point at the banner for a count the banner did not hold.
+    ///
+    /// Both branches are pinned. A fix that only ever produced one of them would
+    /// pass a test that checked the other.
+    #[test]
+    fn the_missing_note_points_at_the_banner_only_when_the_banner_knows() {
+        let mut lost = walk(Vec::new());
+        lost.missing = Some(5);
+
+        // THE RESTART CASE. The file remembers the hole; this process does not.
+        let after_restart = walk_notes(&lost, Some(&health(0, 0, None)));
+        assert_eq!(
+            after_restart.len(),
+            1,
+            "one flag, one note: {after_restart:?}"
+        );
+        assert!(
+            note_of(&after_restart).contains("counts only THIS process's losses"),
+            "a banner reading 0 dropped must not be offered as the source of a \
+             count it does not have: {}",
+            note_of(&after_restart)
+        );
+        assert!(
+            !note_of(&after_restart).contains("see the sink banner above"),
+            "and it must not ALSO say the opposite: {}",
+            note_of(&after_restart)
+        );
+
+        // THE SAME-PROCESS CASE. The banner really does hold the count.
+        let same_process = walk_notes(&lost, Some(&health(5, 0, None)));
+        assert_eq!(same_process.len(), 1, "one flag, one note");
+        assert!(
+            note_of(&same_process).contains("see the sink banner above"),
+            "when the banner is loud it IS the place to look: {}",
+            note_of(&same_process)
+        );
+
+        // A ROTATION FAILURE ALSO MAKES THE BANNER LOUD, so it can answer too —
+        // `is_loud` is an OR, and pinning only `dropped` would let a mutant
+        // turn it into `dropped > 0` and survive.
+        let rolled = walk_notes(&lost, Some(&health(0, 3, None)));
+        assert!(
+            note_of(&rolled).contains("see the sink banner above"),
+            "rotation_failures makes the banner loud as well: {}",
+            note_of(&rolled)
+        );
+
+        // NO SINK AT ALL. There is no banner to consult, so it must not be cited.
+        let none = walk_notes(&lost, None);
+        assert!(
+            note_of(&none).contains("counts only THIS process's losses"),
+            "with no sink there is nothing to point at: {}",
+            note_of(&none)
+        );
+
+        // And zero missing is still not a note at all.
+        assert!(
+            walk_notes(&walk(Vec::new()), Some(&health(9, 9, None))).is_empty(),
+            "a loud banner does not invent a MISSING note"
+        );
+    }
+
     fn health(dropped: u64, rotation_failures: u64, last_error: Option<&str>) -> telemetry::Health {
         telemetry::Health {
             path: std::path::PathBuf::from("events.ndjson"),
@@ -1080,7 +1267,7 @@ mod tests {
     #[test]
     fn each_walk_flag_produces_its_own_note_and_reaches_the_page() {
         assert!(
-            walk_notes(&walk(Vec::new())).is_empty(),
+            walk_notes(&walk(Vec::new()), None).is_empty(),
             "a clean walk says nothing — otherwise every page cries wolf"
         );
 
@@ -1088,7 +1275,7 @@ mod tests {
         // two notes — or raises one belonging to a different flag — fails here
         // rather than passing on a `contains` that happened to match.
         let only = |tail: &telemetry::Tail| -> String {
-            let notes = walk_notes(tail);
+            let notes = walk_notes(tail, None);
             assert_eq!(notes.len(), 1, "one flag, one note: {notes:?}");
             notes.into_iter().next().unwrap_or_default()
         };
@@ -1111,7 +1298,7 @@ mod tests {
         bad.malformed = 3;
         assert!(only(&bad).contains("3 line(s)"));
         assert!(
-            walk_notes(&walk(Vec::new())).is_empty(),
+            walk_notes(&walk(Vec::new()), None).is_empty(),
             "zero malformed lines is not a note"
         );
 
@@ -1127,7 +1314,7 @@ mod tests {
         every.partial_tail = true;
         every.malformed = 3;
         every.errors = vec!["events.ndjson.2: Permission denied".to_owned()];
-        assert_eq!(walk_notes(&every).len(), 5, "five flags, five notes");
+        assert_eq!(walk_notes(&every, None).len(), 5, "five flags, five notes");
         let page = page_of(
             &every,
             &asked("limit=10"),

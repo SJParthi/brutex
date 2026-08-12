@@ -483,7 +483,12 @@
           {/if}
         </span>
         {#if active}
-          <span class="sub">{active.transport}</span>
+          <!-- `pull::vendor::SourceKind::label`, off `/feeds.json`. This read
+               `transport`, whose two words (`broker`, `archive`) were minted in
+               the API handler by a second `match` on the same split `kind`
+               already carried — one fact, emitted twice, in two vocabularies.
+               The field is gone; the label is the type's own. -->
+          <span class="sub">{active.kind_label ?? 'kind not stated'}</span>
         {/if}
         <span class="caret"></span>
       </div>
@@ -507,7 +512,9 @@
             >
               <span class="tick" aria-hidden="true">{f.wire === feeds.active ? '✓' : ''}</span>
               <span class="name">{f.display}</span>
-              <span class="side">{f.transport}{usable(f) ? '' : ' · unavailable'}</span>
+              <span class="side"
+                >{f.kind_label ?? 'kind not stated'}{usable(f) ? '' : ' · unavailable'}</span
+              >
               {#if f.why}
                 <span class="why">{f.why}</span>
               {/if}

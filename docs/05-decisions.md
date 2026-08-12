@@ -10617,3 +10617,1446 @@ sites (see the correction appended to the `emit_if!` entry). All three live in
 `crates/api/src`, where a second session is active, which is why they are
 recorded rather than half-done. A further 18 findings fell past the
 verification cap and are **unverified, not absent**.
+
+## D-0115 · 2026-08-11 · stderr was a second, unrecorded log, and every logging gate had a crate list that a new crate falls outside of
+
+**Number taken as max+1 and asserted free before writing** (`D-0114` was the
+highest in the tree; two sessions share it). The gate number was taken the same
+way: 22 was claimed by another session between this being written and being
+numbered, so this is **gate 23**.
+
+The question that produced it was whether logging is enforced "across the entire
+workspace, current and future". It was not, for two reasons, and both are now
+closed.
+
+### Every logging gate named the crates it walked
+
+Gate 19 walked `crates/pull/src` and `crates/api/src`. Gate 17 named engine,
+indicators, pull and vocab. Gates 20 and 21 are telemetry only. **A crate added
+tomorrow starts outside all of them** — not because anyone decided it should,
+but because a hardcoded list is a decision made once and never revisited.
+
+Gate 23 walks `crates/*/src` **by glob**. It has no list to fall out of date,
+and an undeclared file with any print fails it — which is how a new crate is
+covered on the day it appears rather than on the day someone remembers.
+
+### stderr was a second log, and nothing said it could not be
+
+No gate banned a print macro, so a diagnostic could be written with
+`eprintln!` and never reach a file. That was not hypothetical. Four sites did
+exactly that:
+
+* `api/src/server.rs` — **a refused bind**. Port taken, address wrong,
+  permission missing: the failure an operator most often has to explain later.
+* `api/src/server.rs` — **the server stopped on an error**. The single most
+  important line in any post-mortem.
+* `pull/src/http.rs` ×2 — bars carrying a null price and skipped.
+
+Every one printed to a terminal and vanished. Handed the log folder after a
+failed run — the stated purpose of the whole logging effort — a reader saw none
+of them. All four now emit an event **as well as** printing: stderr reaches
+whoever is watching, the file reaches whoever is diagnosing afterwards.
+
+### The accounting test caught the change, which is what it is for
+
+`api::emitted` counts emit sites from the source and refuses to let the number
+move without somebody classifying the new ones. Adding two `api.server` sites
+turned it red immediately. Both were then **driven rather than declared
+unreachable**: `stopped(Err(..))` was already exercised directly, and the
+refused bind is now driven by `a_refused_bind_is_logged_and_not_only_printed`,
+which holds a `:0` port and asks the server for the same one — the refusal is
+the kernel's, and it needs no vendor, no credential and no bar.
+
+That choice follows the lesson written into `UNREACHABLE`'s own struck-through
+table: three sites were once listed as unreachable and **all three turned out
+reachable**, each naming a dependency it did not have. A fourth entry would
+most likely have been the fourth mistake. The list stays at zero.
+
+### Two things the gate got wrong first, recorded because they were instructive
+
+**The test-region window was unsound.** The first draft scanned only the region
+before the first `#[cfg(test)]`, which is true in `crates/telemetry` and false
+across the workspace — `server.rs` has three such blocks, `ingest.rs` three,
+`render.rs` three. The gate REFUSED rather than guessing, which is how this was
+found. The fix is not a cleverer window but not needing one: it counts whole
+files, so there is no brace matching, no string-literal handling, and no region
+to get wrong. The cost is that a print added to a test also needs declaring,
+which is bookkeeping rather than a failure mode.
+
+**`\b` is not portable and `println` is a substring of `eprintln`.** BSD and
+GNU disagree about `\b`, and without a `(^|[^A-Za-z_])` guard the counter
+matched `println!` inside `eprintln!`. Measured: 17 real sites counted as 20.
+A gate whose arithmetic is wrong in the permissive direction is worse than none.
+
+### What it does not prove
+
+Said plainly, so a green gate is not read as more than it earned. Gate 23 fixes
+the SET of prints and forces a human to write down what each one is. It does
+**not** itself decide whether a print sits on a production path or in a test,
+and it does not verify that a particular diagnostic has a matching event. The
+declaration carries that and a reviewer keeps it honest — the same division of
+labour gate 1d uses for path-shaped literals. Clause B is the part that is
+structural: a crate that writes to stderr must declare a `telemetry`
+dependency, so stderr can never be a crate's ONLY channel.
+
+**Proved to bite three ways.** A brand-new crate under `crates/` containing one
+`eprintln!` fails both clauses. A new undeclared print in an existing file fails
+on the count. Removing a declared print and leaving its line fails as a stale
+declaration. Each fixture was reverted and verified byte-identical by md5.
+
+## D-0116 · 2026-08-11 · A per-request event at Info, a page that contradicted itself, and an accounting that could not see the macro meant to fix them
+
+**Number taken as max+1 and asserted free before writing** (`D-0115` was the
+highest; two sessions share this tree.)
+
+Three of the audit's surviving findings, closed. The third was found only by
+fixing the first.
+
+### `api.census read` was Info on a per-request path, and said otherwise
+
+The site's own comment claimed "one event per vendor at startup, so four lines
+per process — bounded by `Vendor::ALL` and by nothing else". False.
+`census::read_all` calls it for all four vendors and is reached from
+`server::census_now`, which runs on **every** `/store.json`,
+`/instruments.json` and `/audit.json` request. The true bound is four lines per
+REQUEST. A monitoring page polling once a second rolls the whole 64 MiB window
+in under two days, evicting the `pull.member did not land` and
+`pull.run refused` events an operator came back to read — a log destroying its
+own evidence, which is D-0072's stated failure mode.
+
+That this was a mistake rather than a choice is settled inside the repository:
+`pull::manifest::note_census_absent` reports the same fact on the same call
+path and says *"Debug rather than info: `/store.json` opens a census on **every
+request**"*. Two sites, one path, one answer.
+
+The two non-fault arms drop to `Debug`; `Unreadable` stays `Warn`, because a
+manifest that cannot be read is per-vendor and does not recur once fixed. The
+false bound in the comment is replaced with the true one.
+
+### The MISSING note pointed at a banner that could not answer
+
+`Tail::missing` is computed from the sequence hole in the FILE, so it survives
+a restart. `Health::dropped` is per-process: `Sink::open` resumes `seq` from
+the file but starts `dropped` at zero. After the restart that follows a failed
+run — the routine action — `/logs` rendered "Sink healthy · 0 dropped"
+immediately above a note reading "5 event(s) are MISSING … see the sink banner
+above for the count and the reason". **The page contradicted itself and pointed
+the reader at the half that was wrong.**
+
+The note now branches on whether the banner can answer, and says so plainly when
+it cannot. Both branches are pinned by
+`the_missing_note_points_at_the_banner_only_when_the_banner_knows`, including
+the `rotation_failures` half of `is_loud` — mutating `is_loud` to
+`dropped > 0` fails it, and so does forcing the old unconditional text.
+
+### The emit-site accounting was blind to `emit_if!`
+
+Converting the census site to `emit_if!` — so the gate runs before the
+`path.display().to_string()` does — dropped `api::emitted`'s count from 27 to
+26 and turned the accounting test red. The needle was `telemetry::emit(`, and
+`telemetry::emit_if!(` does not contain it.
+
+**That is a hole, not a detail.** Had the conversion been done in bulk, every
+converted site would have silently left the accounting, and the test whose job
+is to notice a new emit site would have quietly stopped seeing a whole spelling.
+It now counts both needles. Found only because one conversion was made first and
+the test was believed.
+
+### The size of the remaining `emit_if!` work was overstated, and here is the measurement
+
+The correction appended to the `emit_if!` entry said 15 allocating emit sites
+were paying for events that might be filtered. Measured properly, by the LEVEL
+of each site rather than by the presence of an allocation:
+
+* **None of the remaining 17 is Debug or Trace.** They are Info, Warn or Error,
+  so at the default `Info` floor every one of them actually emits. The
+  allocation is paid for an event that is written — not waste.
+* The single site that genuinely paid for nothing was `api.census read`, which
+  was Debug-eligible and on a per-request path. It is the one converted.
+* Converting a Warn or Error site would **add** an `admits` call before an event
+  that always passes. That is a cost, not a saving.
+* `api.serve listening` (`server.rs`) **must not** be converted at all. Its
+  return value is deliberately checked — `if !first.is_written()` — to catch an
+  unwritable first event. `emit_if!` returns `Filtered` at a raised floor, which
+  would silently defeat that check.
+
+So the honest status is not "15 sites to convert". It is: the one site where it
+mattered is done, two bounded once-per-process sites would gain only under a
+raised floor, and one site must be left alone for a stated reason.
+
+---
+
+## D-0117 · 2026-08-12 · Nothing joined an NSE tier to a vendor's ids, so a tier could be named, counted and never requested — the join is keyed on `(exchange, ISIN)` and its four buckets sum to the published count
+
+**Number taken as max+1 and asserted free before writing.** `D-0114` was the
+highest committed heading and `D-0115`/`D-0116` are another session's entries in
+this shared working tree; `D-0118` is already written by that session and its own
+paragraph records that `D-0117` was left for the work in
+`crates/api/src/server.rs`. This is that work. Two sessions share this tree and a
+collided number is worse than a gap.
+
+### The complaint, and the measurement behind it
+
+The operator opened `/ingest`, chose Dhan, and every NIFTY tier read `no target`.
+Only *NIFTY Total Market* and *NSE indices* could be selected. His words: this is
+why the matching between the downloaded NSE indices and each individual vendor
+was asked for — to fetch the precise indices and their data.
+
+Measured, 2026-08-12:
+
+* `core::universe` holds `NIFTY_50[50]`, `NIFTY_100[100]`, `NIFTY_200[200]`,
+  `NIFTY_500[500]`, `NIFTY_TOTAL_MARKET[750]`, `FNO_UNDERLYINGS[213]` and the
+  `Universe` bits for all of them.
+* `~/.brutex/masters/` holds `dhan_scrip.csv` (34 MB) and
+  `groww_instruments.csv` (19 MB), and `api::master` parses both.
+* **Nothing joined them.** No function in any crate turned a tier into vendor
+  instrument ids. `merge::universe_census` counts, in the other direction, how
+  many *merged rows* carry a universe bit — which can never see a constituent
+  the vendor does not list, because such a name never becomes a key at all.
+
+So the disabled control was correct. It was disabled over a set nothing could
+turn into a request.
+
+### What was built
+
+`crates/api/src/constituents.rs`, beside the two modules that already hold the
+halves — `master` (vendor rows) and `merge` (one map, cross-checked).
+`api::constituents::Join::build` runs once, from the merged universe, in
+`Read::new` where `Catalog::build` already runs (D-0039, D-0042), and answers two
+questions afterwards:
+
+| Question | Cost | Measured, release |
+|---|---|---|
+| `(vendor, tier) -> ids` | one index into a flat `Vendor::ALL.len() * Tier::ALL.len()` array | 302 ps at 100 indexed ISINs, 303 ps at 4,000 |
+| `(vendor, exchange, ISIN) -> id` | one hash probe on a `Copy` key | 1,212 ps at 100, 1,212 ps at 4,000 |
+
+`api::constituents::the_two_lookups_do_not_grow_with_the_universe` is the gate,
+at a 4.0× ceiling over universes 40× apart. Building the index over the real
+masters costs **441 µs** for 2,795 instruments and 2,760 distinct
+`(exchange, ISIN)` pairs — once, at startup. A per-request scan of a 34 MB master
+is what this refuses.
+
+### Why the key is `(exchange, ISIN)`
+
+A symbol is a vendor's own spelling and it moves: the two masters already
+disagree about `MIDCPNIFTY`/`NIFTYMIDSELECT` and `NIFTYNXT50`/`NIFTYJR`, and
+Groww leaks `internal_trading_symbol` into `trading_symbol` on 209 shared ISINs.
+An ISIN is issued by a national numbering agency, so the same paper carries the
+same twelve characters in every master — D-0015 and `core::isin` already argue
+this at length for the merge's cross-check, and the same argument makes it the
+right join key.
+
+**And there is one symbol step, which is stated rather than hidden.** The
+exchange publishes an ISIN per constituent; this repository holds only the symbol
+column, because §2 allows no `.csv` in the tree and D-0089 transcribed names
+only. There is therefore no NSE-issued ISIN here to start a join from, so the
+constituent's identity is resolved through the merged universe first — by symbol
+— and only then joined on ISIN. That step is reported on the row it affects:
+every matched row carries the set of vendors that asserted the identity,
+`TierJoin::unwitnessed` lists the rows resting on one master's spelling, and the
+startup note carries the count. `docs/06-limits.md` §62 states what remains
+UNVERIFIED and exactly what would close it. Nothing is guessed and no ISIN is
+ever synthesised.
+
+### The partition, which is the requirement
+
+For one `(vendor, tier)`, every published constituent lands in exactly one bucket:
+
+| Bucket | Meaning |
+|---|---|
+| `matched` | joined to a vendor row by `(exchange, ISIN)` |
+| `lacks` | the ISIN is known and this vendor's master has no row for it |
+| `ambiguous` | more than one row of **this** vendor's master claims that ISIN |
+| `malformed` | the constituent has no usable ISIN, with the reason named |
+
+`matched + lacks + ambiguous + malformed == Tier::published()`, asserted for
+every vendor and every tier — and not by the total alone: the buckets are
+asserted disjoint and their union asserted equal to the published list name for
+name, so a join that dropped one name and double-counted another cannot pass.
+Invariant `CJ-01`. A join that silently drops a name is the §4 "fallback that
+hides a failure" in its most expensive form: the operator asks for 500
+instruments, 486 arrive, and nothing says which fourteen went missing.
+
+The five `malformed` reasons are all results, never failures: `PlaceholderScrip`
+(NSE's `DUMMYINXGN`/`DUMMYTRVN`, which wear `DUM`-prefixed pseudo-ISINs and are
+not constituents — dropped at transcription by D-0089, so the check fires on
+nothing today and the assertion of that is a test), `NotASymbol`,
+`NoListingNamesIt`, `IndexHasNoIsin`, and `DisputedIsin` — where two vendors give
+one identity two ISINs, the constituent is refused rather than arbitrated,
+because picking a winner without evidence is the shape D-0020 rejects.
+
+### What the join says about the real masters, 2026-08-12
+
+| Vendor | NIFTY 50 | 100 | 200 | 500 | Total Market | F&O |
+|---|---|---|---|---|---|---|
+| groww | 50/50 | 100/100 | 200/200 | 500/500 | 750/750 | 208/213 |
+| dhan | 50/50 | 100/100 | 200/200 | 500/500 | 750/750 | 208/213 |
+
+Zero lacking, zero ambiguous, zero malformed on all five NSE tiers for both
+vendors, and **zero rows resting on a single master's spelling**. The five F&O
+names that do not resolve are `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY`, `NIFTY` and
+`NIFTYNXT50` — index underlyings, and no numbering agency issues an ISIN for a
+computed level. That is the malformed bucket doing its job on real data rather
+than on a fixture.
+
+Every one of those lines is now a startup note, so the answer reaches `/health`
+and the dashboard instead of existing only inside a type.
+
+### What this does NOT do, said plainly
+
+* **It does not make a tier requestable from the page.** `/ingest` still shows
+  `no target` for the four NIFTY tiers, because `web/src/routes/ingest/+page.svelte`
+  carries `target: null` on those four rows while `api::ingest::SpotTarget` has
+  spelled `n50`, `n100`, `n200` and `n500` since D-0105. That is four literals in
+  a file another session is editing right now, and it is not taken here.
+* **It adds no HTTP surface.** The join is on `Read`, reachable by any handler in
+  one probe; no route emits it yet.
+* **It does not widen §1.** Every tier is stored and never swept. `InstrumentKey::SWEPT`
+  is untouched and still holds two entries.
+* **It does not give the F&O list a target.** That list is derived rather than
+  published and five of its members are indices; a target for it is a separate
+  decision.
+
+---
+
+## D-0118 · 2026-08-12 · A vendor has a floor on how FINE it goes, and it lived nowhere — so a permanent refusal and an empty directory rendered identically
+
+**Number taken as max+1 and asserted free before writing.** `D-0116` is the
+highest in this file; `D-0117` is already referenced by uncommitted work in
+`crates/api/src/server.rs`, so it is taken and this entry is **D-0118**. Two
+sessions share this tree and a collided number is worse than a gap.
+
+### The owner's rule, verbatim, 2026-08-12
+
+> "nowhere we will have the seconds or ticks always for groww or dhan or even
+> in the future if we include zerodha also, especially for historical data.
+> nowhere we will get the data for ticks or seconds — everything is started
+> minimum only starting from 1 min. one and only for truedata and gdfl alone we
+> will [get] one second conflated best bid best ask best ltp snapshot data. so
+> even here also ticks should not be enabled."
+
+The model that follows from it, and the model this commit encodes:
+
+| Feed | Kind | Finest rung | Print stream? |
+|---|---|---|---|
+| Dhan | broker | 1 minute | never |
+| Groww | broker | 1 minute | never |
+| Zerodha | broker, future | 1 minute | never |
+| TrueData | data | 1 **second**, CONFLATED SNAPSHOT | never |
+| GDFL | data | 1 **second**, CONFLATED SNAPSHOT | never |
+
+**A tick is not a floor that some feed clears.** No feed in this system serves
+one, and the `const` block under `DESCRIPTORS` makes a row that claims one a
+build failure.
+
+### The charter was read against him and does not contradict him
+
+`CLAUDE.md` §3 rule 1 requires a vendor claim to be traceable to a source in
+`docs/00-charter.md`, so each of the four rows was checked against it before it
+was written, and where a document is silent the row's own `source` string says
+so instead of borrowing the owner's sentence as if a page had printed it.
+
+* **Groww** — §4: *"Granularity fetched | `1minute` only"*, and the daily
+  interval row citing the vendor's own Candle Interval annexure, whose finest
+  entry is that same one-minute word and which runs upward from there. No
+  second-level and no print-level word appears in it. **Agrees.**
+* **Dhan** — §4: *"Endpoint | intraday charts, 1/5/15/25/60 min"*, verified from
+  the SDK. Nothing sub-minute. **Agrees.**
+* **TrueData and GDFL** — §4 has **no rows for these two vendors at all**, and
+  that absence is stated here rather than papered over. The evidence is in
+  `docs/08-vendor-samples.md`, which measured it: *"Both feeds marketed as tick
+  are one-second snapshots"* — timestamp resolution second, sub-second field
+  none, 22,426 rows across 22,500 seconds of a session, up to three (TrueData)
+  and four (GDFL) rows sharing one second with no tiebreaker. **Agrees, and by
+  measurement rather than by documentation.**
+* **Zerodha** — §4z records the vendor as carried in no descriptor. Nothing was
+  added for it here. The rule above is recorded for the row that does not exist
+  yet, and it is one source with no vendor page read against it.
+
+Nothing in the charter states a granularity floor for TrueData or GDFL. That is
+a **gap in `docs/00-charter.md`, not a conflict**, and it is named here so it is
+not discovered a third time.
+
+### The bug this closes
+
+With Groww selected, the timeframe control offered `tick`, `1s` and `5s` as
+ordinary selectable rungs annotated *no directory*. That annotation is about the
+**store** — "nothing saved here yet" — and it is fixable by pulling. The fact
+that mattered is "Groww can never serve this", which is fixable by nothing. Two
+refusals of opposite kinds rendered identically is the failure `CLAUDE.md` §4
+bans.
+
+It happened because the fact lived nowhere. `Descriptor::granularities` says
+what **this build** fetches, which is a third thing again — Dhan's minute rung
+is absent from it because this build's single `bars_path` is the daily
+endpoint, and that refusal a code change fixes. Three different refusals, one
+of them unrepresentable, so the browser was left to infer it and inferred
+nothing.
+
+### What was decided
+
+**The granularity floor is a capability on `pull::vendor::Descriptor`, beside
+the date floor, in Rust.** `docs/04-invariants.md` GF-01…GF-06.
+
+* `GranularityFloor { finest, kind, because, source }` — one row per feed.
+* `FinestKind::{Tick, ConflatedSnapshot, Bar}` — **the conflated-versus-tick
+  distinction is a variant, not a comment**, so it survives to whatever renders
+  it. A conflated one-second record is not a tick and must never be labelled
+  one; every print between two snapshots was discarded before the file was
+  written and no reader can recover it.
+* `RungVerdict::{Finest(kind), Coarser, Refused(FloorRefusal)}` — three arms,
+  **two verdicts**. The refusal carries the rung asked for, the finest rung
+  served, what a record at it is, the reason in the vendor's terms and the
+  place it was read, so a caller cannot reduce it to "unavailable".
+* `Descriptor::granularity_verdict(rung)` — **O(1): one field read and at most
+  two `u8` comparisons**, because the ladder's discriminants ascend with
+  coarseness and a `const` block pins every adjacent pair. There is no table to
+  walk and no rung count in the cost.
+
+**`FinestKind::Tick` exists and no row constructs it.** A type that cannot spell
+"tick stream" cannot say "this is not one" either, and the sentence that has to
+survive is the negative.
+
+### Why the floor is per FEED while the date floor is per RUNG
+
+They are opposite shapes because the vendors state them in opposite shapes.
+D-0113 made the history floor per rung because Groww's own interval table gives
+its `1 day` row "Full history" and its `1 min` row "Last 3 months" — one vendor,
+two rungs, two answers. A granularity floor is one number per vendor by
+construction: it is the bottom of the ladder, and every rung's verdict is
+*derived* from it rather than restated per row where eleven rows could disagree
+with each other.
+
+### Four compile-time cross-checks, not one field taken on trust
+
+1. No row's floor kind is a tick stream.
+2. `granularities` is never **wider** than the floor allows — a build cannot
+   fetch what a vendor does not have. It may be narrower, and Dhan's minute rung
+   is exactly that.
+3. Every floor carries a non-blank reason and a non-blank source.
+4. The floor's `kind` and the row's `RecordShape` say the same thing, so a
+   conflated second cannot be labelled a candle at the boundary that renders it.
+
+### What is NOT done here, and is deliberately out of scope
+
+**The front end is untouched.** `web/src/routes/ingest/+page.svelte` still holds
+its own `FLOOR_OPERATOR` / `FLOOR_DOC` / `pairFloor` table for the DATE floor
+and still renders the granularity refusal as *no directory*. This phase put the
+fact in Rust where one vendor fact is not split across two languages; carrying
+it over the HTTP surface and onto the page is the next phase, and `crates/api`
+is being edited by another session as this lands. Until then the page's
+granularity annotation remains wrong in the way described above — recorded, not
+hidden.
+
+**No vendor fact was invented.** Where a document is silent the row says so.
+Where the owner is the only source, the row names him and this entry's date.
+
+## D-0119 · 2026-08-12 · Eighteen remaining logging claims, twelve of them wrong, and the six that were not
+
+**Number taken as max+1 and asserted free before writing** (`D-0118` was the
+highest; two sessions share this tree.)
+
+The eighteen findings that fell past the earlier verification cap were recovered
+from the workflow journal and each handed to a skeptic told to default to
+*refuted*. **Twelve were refuted, six survived.** Fixing all eighteen on sight
+would have been two-thirds waste and would have "fixed" behaviour that was
+already correct.
+
+### `reached_oldest` was false on ordinary full pages
+
+`walk_back` returned a bare `bool` meaning "the query is finished", collapsing
+two different states: *stopped with bytes still unread* and *consumed the file to
+byte 0 and the limit happened to bind on its last line*. `walked` treated both
+as "did not reach the oldest", so an unfiltered page that filled exactly on the
+oldest file's first line reported that older events existed **when the set held
+none** — and `/logs` rendered "Older events exist beyond what was read. Narrow
+by target or level to reach them." on a page where narrowing could reach nothing.
+
+Closed by giving the walk a vocabulary: `enum Stop { Unfinished, Stopped,
+Exhausted }`. `Exhausted` is returned only from the post-loop arm, which can
+run only once `pos == 0`. `walked` then **peeks** for an older non-empty file
+rather than assuming one — and the peek reads nothing: the file is opened and
+stat'd, and neither `files_read` nor `bytes_read` moves, so the cost bound in
+`the_last_events_are_read_without_touching_the_rest_of_the_file` is untouched.
+
+Three mutations are caught: restoring the old unconditional `reached_oldest =
+false`; the over-correction that drops the peek and always claims the oldest was
+reached; and mislabelling the mid-file stop as `Exhausted` (three tests die).
+**The second matters as much as the first** — a fix that trades one wrong answer
+for its opposite passes any test that only pins one direction.
+
+The related finding about the `/logs` note needed no separate change: with the
+flag now accurate, the note is true whenever it fires.
+
+### An integer past `u64` was silently altered, and a test certified it
+
+`99999999999999999999` fitted neither `i64` nor `u64`, fell through to the
+float parse, and decoded as `Float(1e20)` — **100000000000000000000, a different
+number** — which `logs::value_text` then rendered as an ordinary count. Refused
+by name now, so `tail` counts the line in `malformed` where it is visible.
+
+**The existing test asserted the defect.** Its comment said "As is one past u64"
+— i.e. refused — while the assertion below pinned `Float(1e20)` with the message
+"which is lossy and stated". The comment and the code contradicted each other and
+the code won, because the code is what the compiler reads. Both sides of the
+boundary are pinned now.
+
+### `push_float` allocated inside the critical section
+
+`value.to_string()` was one heap allocation and one free per float field, and it
+ran while `Sink::emit` held its mutex — so every other logging thread paid for
+it. It was the ONLY allocation left in the encoder, which hand-rolls digit
+formatting everywhere else for exactly this reason. Now formatted straight into
+the caller's buffer through a small `core::fmt::Write` adapter; the bytes are
+identical, held by `one_ordinary_event_renders_to_exactly_these_bytes`. The
+`Result` is asserted rather than dropped, and `debug_assert!` takes the value
+the `write!` already produced, so formatting still happens in release.
+
+### The empty `/logs` page blamed the writer whatever the reader asked
+
+The message named `BRUTEX_LOG_LEVEL` unconditionally. Under `?target=` that
+sends the reader to change the WRITE floor and re-run a job when the cause is a
+read filter they can clear in one click. Under `?level=warn` it is worse: a
+`debug` line written to the file would still be excluded by the reader's own
+floor, so the remedy **provably cannot change the answer**. It now names the
+filters actually in force, and offers the write floor only when the read floor
+would admit what it would produce.
+
+### `ArchiveFolderMissing` was the one refusal shape with no event
+
+Built inline in the handler rather than inside `parse_spot_inner`, it never
+passed through `note_refused` — so it was invisible in `/logs` while every
+sibling refusal was visible, which makes the log imply it never happens. The
+journal entry beside it is the AUDIT record; the two surfaces are separate.
+`note_refused` is now `pub(crate)` and the handler calls it. "One event per
+submission" still holds by construction: `parse_spot` returned `Ok` for that
+body, so no earlier refusal event exists for it.
+
+### One finding was real, fixed, and then refuted by its own skeptic
+
+`Config::refusal` did not bound `target_levels`, whose field is `pub` — so a
+struct literal or a direct `push` walked around `with_target_level`'s ceiling
+and left `level_for` walking an unbounded table on every emit. It was fixed
+before the verification run finished, and the skeptic assigned to it refuted the
+claim **because it found the fix in the working tree** — while stating plainly
+that "the finding was accurate against the last commit" and that the refutation
+holds only once that change is committed. Recorded because a refutation that
+depends on an uncommitted change is a refutation with a deadline.
+
+### Gate 23 caught a file that did not exist when it was written
+
+`api/src/constituents.rs` arrived from the other session carrying a `println!`,
+and gate 23 refused it the same day — the first time the glob-over-`crates/*/src`
+design was tested by something nobody anticipated. The print is a cost-benchmark
+line past that file's `#[cfg(test)]`, so it is declared in the test-diagnostic
+category beside `greeks` and `core`.
+
+## D-0120 · 2026-08-12 · The count beside a universe was the union of both masters, so a form promised 35 instruments the chosen feed lists 24 of — coverage is per feed, and `/universes.json` is the route that says so
+
+**Number taken as max+1 and asserted free before writing** (`D-0119` was the
+highest in this file; two sessions share this tree, so the maximum was re-read
+immediately before this entry was appended rather than assumed from an earlier
+read.)
+
+D-0117 built the join: an NSE tier resolves, through `(exchange, ISIN)`, to one
+vendor's instrument ids. Nothing consumed it. `/ingest` still drew its four
+NIFTY rows as `no target`, `Site::targets` still counted the merged universe,
+and the receipt for a pull still printed that union as **Instruments covered**
+whatever feed the request named.
+
+### What was actually broken, measured rather than assumed
+
+Three things were suspected. Only one of them was real.
+
+1. **`/instruments.json` does not emit the tiers.** *False.* The `universes`
+   array has carried `n500`, `n200`, `n100` and `n50` since D-0089/D-0090, it is
+   filtered to the selected feed, and on the masters read on 2026-08-12 it
+   carries `n50` on exactly 50 rows for both brokers. Verified against
+   `~/.brutex/masters/`, not against the source. Nothing here needed fixing.
+2. **The page cannot express the tiers.** *False.* `api::ingest::SpotTarget` has
+   spelled `n50/n100/n200/n500` since D-0105 and `parse_spot` accepts all four.
+3. **Nothing turns `(feed, universe)` into a count or a request.** *True, and it
+   was the whole defect.* `SpotTarget::names` decides membership from a
+   universe bit and never consults the feed; `Site::targets` folds the merged
+   map with it; and `constituents::Join` — which does know the feed — had no
+   caller. The four disabled rows in `web/src/routes/ingest/+page.svelte` are
+   therefore four literals reading `target: null`, and they are a correct
+   rendering of a set the API could count but not describe per feed.
+
+### The decision
+
+**A universe's count is a fact about a feed, and it is served as one.**
+
+* `SpotTarget::tier() -> Option<constituents::Tier>` names the published list a
+  target joins through. `None` for `Swept` (the engine surface, `CLAUDE.md` §1)
+  and `Indices` (whatever a master calls an index series, which NSE publishes no
+  file for) — a stated absence, not an empty list.
+* `Join::ids_for(vendor, target) -> Option<&[VendorId]>` composes that with
+  `Join::tier`, so a caller holds one call and cannot pair a target with a
+  neighbour's tier.
+* `api::coverage::Coverage`, built in `Read::new` beside the join, answers
+  `(vendor, target)` with `matched / lacks / ambiguous / malformed`, the
+  published denominator when one exists, and **every unresolved name with its
+  reason**. `matched` is `ids_for(..).len()` — the length of the array a request
+  is built from, not a tally kept beside it.
+* `GET /universes.json?feed=<vendor>` serves the whole of that for one feed.
+* The spot receipt gained **This feed can name** beside **Instruments covered**,
+  and the first line now says `N in the merged universe` so the two cannot be
+  read as one number.
+
+### Why a new route rather than widening `/instruments.json`
+
+`/instruments.json` returns instruments. The question here is about **sets**,
+and answering it by folding instrument rows in the browser is how the count
+becomes a function of which filter the page happens to apply: a tier's rows are
+`tracked && feed-lists-it && bit-set`, the join's matched bucket is
+`published-name → exactly one vendor id`, and those two agree today and are not
+the same predicate. One of them predicts what a pull will fetch. It is served
+directly.
+
+### Why `Site::targets` was kept
+
+It is the union, and "how big is this set" is a real question — the legacy
+`/pull` form is server-rendered before a feed is picked and has nothing else to
+show. Its doc comment now says feed-agnostic in capitals and points at
+`Read::coverage`, and the receipt prints both with different labels. Deleting it
+would have replaced a misread number with a missing one.
+
+### An archive feed answers `null`, not zero
+
+`TrueData` and `GDFL` publish no instrument master — a folder of CSVs is its own
+listing. Counting them against a file they do not have would report `0 matched,
+35 lacks`, which reads as "this feed has nothing". `Coverage::of` returns `None`
+and the wire says `"counted_from":"no master"` with every count null.
+
+### An unknown feed is refused, and that differs from `/instruments.json`
+
+`/instruments.json` answers an unrecognised `feed=` as Dhan. `/universes.json`
+returns 400 naming what was asked and what is known, because a mistyped feed
+there would enable four controls against the other broker's reach. The older
+route's behaviour is shipped and is not changed by this entry.
+
+### Measured, on `~/.brutex/masters/`, 2026-08-12
+
+| feed | swept | indices | equities | n500 | n200 | n100 | n50 |
+|---|---|---|---|---|---|---|---|
+| groww | 2 of 2 | **24 of 35** | 750 of 750 | 500 of 500 | 200 of 200 | 100 of 100 | 50 of 50 |
+| dhan | 2 of 2 | **15 of 35** | 750 of 750 | 500 of 500 | 200 of 200 | 100 of 100 | 50 of 50 |
+
+Every NIFTY tier is whole for both feeds — zero lacking, zero ambiguous, zero
+malformed. **The number the form was wrong about is `indices`**, and by more
+than half: the merged universe holds 35 NSE index keys, only four of which carry
+both vendors' ids. That is not absence, it is spelling — Dhan writes
+`NIFTY 100` and `INDIA VIX`, Groww writes `NIFTY100` and `INDIAVIX`, and an
+index has no ISIN for D-0117's join to reconcile them on. Recorded as
+`docs/06-limits.md` §64.
+
+### What this does NOT do
+
+`server::broker_run` still builds its instrument list from `tracked && names` —
+the universe — so a `target=indices` run on Groww attempts 35 and refuses 11 one
+at a time, by name, inside the run. That refusal is loud and correct and is not
+a fallback; what is wrong is only that `attempted` is the union's number.
+Changing it moves the reasons from the run's output to its input and is a change
+to the pull path, which this entry deliberately does not make. `docs/06-limits.md`
+§63.
+
+`web/src/**` is untouched. The four `target: null` literals are held by another
+workflow; what the page must read to close them is stated in §63 and in the
+route's own doc comment.
+
+## D-0121 · 2026-08-12 · The granularity floor reached the browser: `tick` is drawn dead for every feed, sub-minute is dead for a broker, and one second is offered as the conflated snapshot it is
+
+**Number taken as max+1 and asserted free before writing.** `D-0120` is the
+highest in this file and `D-0121` appears nowhere in the tree — checked across
+`*.md`, `*.rs`, `*.svelte` and `*.yml`. Two sessions share this tree and a
+collided number is worse than a gap.
+
+**This is the phase D-0118 named and deferred.** That entry put
+`pull::vendor::GranularityFloor` on `Descriptor` and closed by recording, in the
+open, that `web/src/routes/ingest/+page.svelte` still rendered the granularity
+refusal as *no directory*. This is that page.
+
+### What the operator saw, and why it was a lie in both directions
+
+With Groww selected, the Timeframe menu offered `Tick`, `1 second` and
+`5 seconds` as ordinary selectable checkboxes annotated **`no directory`**. That
+annotation is about the STORE — "nothing filed here yet", which a pull fixes.
+The fact that mattered was "Groww can never serve this", which nothing fixes.
+Two refusals of opposite kinds rendered identically is the failure `CLAUDE.md`
+§4 bans, and it read as an invitation: tick the box, start a pull, wait.
+
+There were in fact **four** refusals wearing one word, and they are fixed by
+four different things:
+
+| the rung is | fixed by | seen where |
+|---|---|---|
+| below the vendor's finest | **nothing** | `pull::vendor::GranularityFloor` |
+| a tick | **nothing, for any feed** | `Granularity::is_requestable` |
+| undeclared by this build | a code change — record the endpoint | `Descriptor::granularities`, gated by `api::server::served` |
+| unfilable by the store | a store-format version | `Granularity::store_timeframe` |
+
+Dhan's minute rung is the third of those and is live proof the columns are not
+one column: the vendor serves it, this build's `bars_path` is pinned to the
+daily endpoint, and the page said nothing at all.
+
+### What the page does now
+
+* **`tick` is DRAWN, DEAD, on every feed, and never offered.** Its detail reads
+  `never served`, never `no directory`.
+* **Sub-minute rungs are dead under a broker**, with the vendor's sentence on
+  the row: *"Groww is a broker feed; it serves 1 minute and coarser."*
+* **One second is LIVE under TrueData and GDFL** and labelled what it is: a
+  CONFLATED SNAPSHOT — best bid, best ask, best last price. The word *tick*
+  appears in that sentence exactly once, in the denial that ends it.
+* **A row is disabled only where nothing could ever make it live.** The other
+  two refusals stay selectable and state themselves, because each names work
+  somebody could do, and a control that hides them hides the work.
+* **A feed change re-gates every rung and drops what the new feed can never
+  serve — loudly.** Named, with the reason, and the notice outlives the change
+  that caused it. Keeping the tick would build a request the new vendor's wire
+  cannot spell; clearing it silently is the rewrite §4 bans.
+
+### Why `tick` is drawn rather than omitted
+
+The same argument `pull::vendor` already makes for keeping the variant on the
+ladder. `tick` is a word both archive vendors print on an invoice and the
+operator's own directories are named for it; a list that omits the row answers
+him with silence exactly where he needs the sentence, and silence reads as *this
+does not exist* rather than *this is not what you bought*. A row that can never
+be ticked — struck through, greyed, with its refusal beside it — teaches the
+opposite of a falsehood: the word exists and the thing does not. It is also the
+shape this page already uses twice, for the four universes it cannot spell a
+`SpotTarget` for and for the delete button no route backs.
+
+### Where the fact lives, and the copy that will go stale
+
+**`/feeds.json` does not carry the granularity floor**, so the four rows are a
+TRANSCRIPTION of the four `const`s in `crates/pull/src/vendor.rs`, with
+`because` and `source` copied word for word rather than paraphrased so the two
+copies diff cleanly. The page says so in its own header. The fix is one field on
+`/feeds.json` and a delete here; `crates/api` was held by another session as this
+landed.
+
+**What is NOT transcribed:** whether this build fetches a rung is READ from the
+server — `/feeds.json` `history[].served`, the same bit `api::server::served`
+gates the POST on. Absent array means the running binary predates the field, and
+the page reports that it cannot say rather than assuming every rung is fetched.
+A feed with no floor transcribed refuses nothing and says it is refusing nothing.
+
+### Honest limits
+
+There is **no automated gate on this behaviour.** CI has no web test job and the
+front end has no test runner; the decision table was verified by running the
+page's own source text over the full 4 feeds × 11 rungs matrix and all 121
+ordered ladder pairs, but that harness is not checked in and nothing re-runs it.
+`npm run check` reports 231 errors for this file against 205 before, every one of
+them in the implicit-`any` and `$state(null)`-narrowing classes the file already
+carried 205 times; it is not a gate and has never been green. `npm run build` is
+green.
+
+---
+
+## D-0122 · 2026-08-12 · Uniqueness comes from the NSE file itself: the ISIN column those constituent lists have always carried is transcribed beside the names, so `core` no longer joins an index member's identity through a broker's spelling
+
+**Number taken as max+1 and asserted free before writing.** `D-0121` is the
+highest in this file and `D-0122` appears nowhere in the tree — checked across
+`*.md`, `*.rs`, `*.yml`, `*.toml` and `*.svelte`. Two sessions share this tree
+and a collided number is worse than a gap.
+
+### What was wrong
+
+`api::constituents` keys its join on `(exchange, ISIN)`, which is right and was
+never in question. What was wrong is where that ISIN came from. D-0089
+transcribed the exchange's constituent files and took **only the `Symbol`
+column**, using the `ISIN Code` column for the checks recorded in
+`docs/00-charter.md` §4c and then discarding it. So no NSE-issued ISIN existed
+anywhere in the build, and a constituent's identity resolved through the merged
+vendor universe **by symbol first** and only then joined on the ISIN it found
+there.
+
+`docs/06-limits.md` §62 has recorded that hop since D-0117, and invariant CJ-05
+states it on every affected row. It is a real exposure and a narrow one: a name
+both masters spell the same wrong way is invisible to a two-vendor cross-check.
+It is closed here at the source — the exchange's own column — rather than
+patched at the join.
+
+### What is transcribed, and from exactly which file
+
+Six arrays of `&'static str`, positionally aligned with the six name arrays
+`core::universe` already held. Each names its source file, that file's byte
+size and its SHA-256, so the transcription is auditable against a re-download
+rather than trusted:
+
+| array | source file | bytes | sha256 | data rows | with an ISIN |
+|---|---|---|---|---|---|
+| `NIFTY_50_ISIN` | `ind_nifty50list.csv` | 3,352 | `9fb8832853c279448d2bc05f0e7dd5f460ed2ff35332fea8c40fc1250362ad28` | 50 | **50 / 50** |
+| `NIFTY_100_ISIN` | `ind_nifty100list.csv` | 6,611 | `1a40e33a0febf458986a178bc76f7b0051f163718f2a8bc11a726ba70a39c0a9` | 100 | **100 / 100** |
+| `NIFTY_200_ISIN` | `ind_nifty200list.csv` | 13,081 | `76b8b127931953ce7e5e5511c99c3b73775140eeb83b6b293085b4a9483dce1a` | 200 | **200 / 200** |
+| `NIFTY_500_ISIN` | `ind_nifty500list.csv` | 32,766 | `637b99dc20a36a994b8dd43ae8449781258a9c94fab20ca3b87741fb39bd67db` | 500 | **500 / 500** |
+| `NIFTY_TOTAL_MARKET_ISIN` | `ind_niftytotalmarket_list.csv` | 49,178 | `e67c8d99d10b541c56a9b10fd0b9de15ae9b6eae34347a6531c78104b5924c1e` | 752 | **749 / 750** |
+| `FNO_UNDERLYINGS_ISIN` | `ind_niftytotalmarket_list.csv` | 49,178 | *(as above)* | 752 | **208 / 213** |
+
+**1,807 of 1,813 positions carry an NSE-issued ISIN.** The files stay in the
+session scratchpad and are never copied into the tree: `CLAUDE.md` §2 allows no
+tracked `.csv`, the data is fine and the format is not, and this is the same
+route D-0089 took for the names.
+
+### The six that do not, named rather than counted
+
+Five are `NIFTY`, `BANKNIFTY`, `FINNIFTY`, `MIDCPNIFTY` and `NIFTYNXT50` —
+**indices**, which are not securities, which no numbering agency issues an ISIN
+for, and which the existing `FNO_UNDERLYINGS` note already records as having no
+cross-vendor ISIN check for exactly this reason. Absence is the correct answer
+there, not a gap.
+
+The sixth is **`AGL`**, and it is the gap. The exchange's Total Market file has
+no row for it; `docs/06-limits.md` §11 has recorded since D-0089 that the
+published file holds `GRINDWELL` where this array holds `AGL`, and that `AGL` is
+**UNVERIFIED** — this build does not know what instrument it is. Writing
+`GRINDWELL`'s `INE536A01023` into `AGL`'s position would have made the counts
+agree and the wrong row *join*, which is worse than absence. The position
+carries `ISIN_ABSENT` and `nse_isin("AGL")` answers `None`.
+
+### What was refused
+
+**`DUMMYINXGN` and `DUMMYTRVN`.** The published Total Market file has 752 rows;
+two are placeholder scrips carrying `DUM510W01014` and `DUM256C01024`. Those are
+malformed **by construction** and on two counts — not the `INE` prefix every NSE
+equity ISIN carries, and both fail the ISO 6166 check digit, which
+`core::universe::the_placeholder_scrips_are_malformed_and_are_not_here` proves
+by running `Isin::new` on them rather than asserting it in prose. Neither symbol
+nor either pseudo-ISIN is in any array.
+
+**A broker master, for any value.** `~/.brutex/masters/groww_instruments.csv`
+carries `isin` at column 9 and `dhan_scrip.csv` carries `ISIN` at column 4, and
+neither was opened for this. Every value written here is a value NSE printed, on
+a row NSE published, beside that symbol — `CLAUDE.md` §3 rule 1. Taking a
+missing ISIN from a broker would have reintroduced, inside the data, exactly the
+vendor hop this entry removes from the join.
+
+### Where the alignment claim is checked
+
+Index *i* naming the same instrument in both arrays is a claim about a file that
+is not in this repository, so it cannot be re-derived here. Two things are done
+about that instead of one.
+
+* **By eye.** Every row carries a trailing `// SYMBOL` comment. A reviewer
+  diffing against a fresh download reads both columns on one line.
+* **By machine, and this is the stronger half.** The six arrays came from
+  **five different published files** and overlap heavily — the tiers nest, which
+  `the_published_tiers_nest_one_inside_the_next` already proved for the names.
+  `the_isin_arrays_are_positionally_aligned_with_the_names` asserts that every
+  symbol appearing in more than one array carries the **same** ISIN in all of
+  them, and pins the overlap as a number: **1,807 positions, of which 1,058 are a
+  second, third, fourth or fifth opinion on a symbol another file already
+  named.** A row that slipped by one anywhere — a header counted as data, an
+  off-by-one in any single transcription — shifts everything below it and
+  disagrees with the other files at the first shared symbol. It also asserts no
+  ISIN appears twice within one array, which is the other shape a shifted row
+  takes.
+
+**Measured: zero disagreements across all five files, and every one of the 1,807
+values passes the ISO 6166 check digit** — computed by `Isin::new`, not by a
+second copy of that arithmetic living in a test.
+
+### `MemberIndex` gained the ordinal it was already computing
+
+The tables answered *whether* a symbol is a member. An aligned array needs
+*where*. `MemberIndex::position` returns the index the table was built from, and
+`contains` is now `self.position(symbol).is_some()` — **one probe loop in the
+file, not two**, because a second copy is free to drift and a `contains` that
+agreed while `position` pointed at a different slot would hand a caller another
+company's ISIN.
+
+`build` already knew the index at the moment it inserted; it now keeps it. That
+costs one `usize` per slot — 8 bytes a slot on a 64-bit target, 6,912 slots
+across the six tables, 54 KiB, constant — and no time. Recovering the index by searching the source list instead would have been
+the O(n) scan `CLAUDE.md` §3 rule 4 forbids. The probe bound is unchanged and
+still asserted as a number by
+`the_probe_length_is_bounded_which_is_what_makes_it_o1`, and
+`a_position_probe_finds_the_index_the_table_was_built_from` walks **all 1,813
+members of all six tables** and asserts the index is the right one — a table
+that found a member but returned the wrong ordinal is the single worst failure
+this file can produce.
+
+`core::universe::nse_isin` is that probe plus one index plus one 12-byte parse.
+Constant, and it needs no `LazyLock` and no allocation in a crate that declares
+no dependency at all.
+
+### Why the type lives in `core`
+
+`Isin` is already `core`'s — `crates/core/src/isin.rs`, with the check digit
+verified rather than trusted. `CLAUDE.md` §5 makes `core` the crate with no
+dependencies, so a newtype `core` needs cannot be borrowed from `api`; `api`
+uses `core`'s, which it already did. Nothing moved and nothing was duplicated.
+
+### What this does NOT close
+
+**The join in `api::constituents` still resolves by symbol.** The data it needs
+now exists and nothing consumes it yet: `crates/api` was held by another session
+while this landed, and writing into a file another session owns is how work is
+lost. `docs/06-limits.md` §62 is amended rather than deleted — its "what it
+would take to close it" is now one step shorter and says so, and invariant CJ-05
+keeps stating the hop on every row it affects for as long as the hop is real.
+
+Closing it is one change: `nse_isin(symbol)` in place of the universe lookup,
+with the `(exchange, ISIN)` key untouched. A row where NSE's ISIN and the
+vendors' disagree must then be a **loud refusal that names both**, exactly as
+D-0020 requires of every other vendor disagreement — never a silent preference
+for either.
+
+**And these are still snapshots.** NSE rebalances these indices semi-annually.
+The ISINs are pinned to the five files named above by size and digest; a
+rebalance changes membership, not identity, and `docs/06-limits.md` §11 already
+carries that limit for the names.
+
+### Verified, not assumed
+
+`cargo fmt` clean, `cargo clippy -p core --all-targets -- -D warnings` clean,
+`cargo test -p core --locked` green — 146 tests, of which 6 are new. Coverage on
+`crates/core/src/universe.rs`, measured with `cargo llvm-cov -p core` in an
+isolated target directory: **99.71% of regions, 100% of functions, 99.81% of
+lines.** The single uncovered line is `u.bits()` inside an `assert!` failure
+message in a pre-existing test, which evaluates only when that assertion fails;
+it predates this change. Every line of `position`, of `nse_isin` and of both
+their branches is executed — `nse_isin` is entered 822 times by the suite, 803
+of those reach the parse, and `AGL` is what exercises the absent path.
+
+## D-0123 · 2026-08-12 · A source is REST or a FOLDER, and the folder's reach is the files present — no floor, no token, no pull, and a missing path halts instead of reading as "no data yet"
+
+**Number taken as max+1 and asserted free before writing.** `D-0122` is the
+highest in this file and `D-0123` appears nowhere in the tree — checked across
+`*.md`, `*.rs`, `*.svelte` and `*.yml`. Two sessions share this tree; `D-0122`
+was taken by the other session *while this work was in progress*, so the number
+was re-derived immediately before writing rather than reserved at the start.
+
+### The operator's rule, 12 Aug 2026, verbatim
+
+> "for truedata and gdfl alone, one and only, we will pull the data entirely
+> from csv files from the precise folder — because we will buy those data from
+> them as csv files and we will put that into the specified folder, only from
+> there it should be read."
+>
+> "except these two alone only, for all other vendors or brokers feeds it should
+> be always REST."
+
+That is a two-valued property of the vendor. It was being re-derived at four
+separate call sites by matching on `Transport::Http(_)` with the payload
+discarded, and each of the four was free to disagree with the others.
+
+### The five behaviours it decides, and each is a behaviour rather than a label
+
+`pull::vendor::SourceKind` is the rule as a type, beside the granularity
+capability rather than duplicating it — `Transport::kind` is the single `match`
+that answers it, so a fifth transport lands on the right side of all five rows
+by declaring itself and nothing else.
+
+| | `Rest` | `Folder` |
+|---|---|---|
+| credential | required — §8 | **none, and §8 must not run** |
+| quota | a published budget | **none — no request is made** |
+| reach | a `HistoryFloor`, a vendor constant | **the files present** |
+| finest rung | one minute | one **second** |
+| the verb | pull | **read** |
+
+**1 · No history floor.** `Descriptor::history` is EMPTY for both folder rows,
+*precisely so there is nothing to fall back to*. `folder::read_reach` walks the
+folder and answers `Reach`, which has three arms and deliberately no fourth
+meaning *unknown* — the folder is on this machine, whatever it holds is knowable
+by looking, and an `unknown` arm is one a caller would have to treat as
+unbounded. `Empty`, `Blank` and `Days` are three different things an operator
+does three different things about: buy the month, re-download the files, or
+nothing at all.
+
+**2 · No token.** `crate::config` requires a credential table only of feeds
+whose kind is `Rest`, and it asks the KIND rather than naming vendors. A missing
+credential must not block a source that has nothing to authenticate against.
+
+**3 · The verb is `read`.** Calling it a pull put every failure in the wrong
+diagnostic frame: the first questions asked were about tokens, entitlements and
+outages, and the answer was always a path. `verb_past` is spelled out rather
+than suffixed — `read` takes no `-ed`, and a helper that appended one would have
+written `readed` on the arm the whole type exists for.
+
+**4 · A missing or unreadable folder HALTS, naming the path.** This is the
+defect the rest of it is scaffolding for. A folder that is not there and a
+folder that is there and empty both produced no bars and no reason, so both read
+as *no data yet* — §4's banned fallback, and an hour spent on entitlements when
+the answer was a path. They are now different events with different status
+codes.
+
+**5 · Timestamps are keyed to the SECOND, and LAST WINS.** Locked, tested, and
+recorded here because §3 rule 5 requires the same input to give the same output
+byte for byte. Measured in `docs/08-vendor-samples.md`: three rows in one second
+at TrueData, four at GDFL, no sub-second field and no tiebreaker at either — so
+a shared second is EXPECTED INPUT, and refusing it would refuse every file the
+operator bought. Folded at `Bucket::SECOND`, the second's rows become one
+record: first in file order is the open, the extremes are the high and low, the
+volumes sum, and **the last in file order is the close**.
+
+*Why last-wins and not first-wins or refuse.* The close is the single value a
+consumer reads as "what it was at that second", so it takes the newest
+information; first-wins would discard exactly that. Nothing is thrown away
+either way — the earlier rows are still the second's open, its extremes and its
+volume. Refusing would throw away the file. **Nothing is sorted**: rows sharing a
+second carry no tiebreaker, so a sort would invent one and quietly change which
+price became the open. `archive::read_dir` orders MEMBERS and never the rows
+inside one, for exactly this reason. Prices stay paisa `i64` (§7) and
+`i64::MIN` remains the open-interest null — zero means zero.
+
+### The path is resolved the way the store and masters roots are
+
+`folder::root` reads `BRUTEX_ARCHIVES`, else `$HOME/.brutex/vendor-data`, in ONE
+place — the same two-step `api::server::store_dir_from` performs for
+`BRUTEX_STORE`, split from its environment read for the same reason: every
+outcome has to be testable and `set_var` is `unsafe` under edition 2024. No
+literal path appears in any tracked file.
+
+**With neither set it REFUSES, where the two siblings fall back to `.`** — and
+the deviation is deliberate rather than an oversight. A missing master renders
+`UNAVAILABLE` and a missing store is created on write, so the working directory
+is a wrong answer that announces itself. A folder feed's whole reach IS the
+folder: pointed at the process's working directory it would report an honest,
+precise and completely wrong reach — most often `Empty`, which is
+indistinguishable from "the operator has not bought that month yet".
+
+### `/folder.json`, and why the reach is not on `/feeds.json`
+
+`/feeds.json` renders on every page load and its own body already records that
+an `O(files)` probe there would be the cost `/store` exists to avoid. A folder's
+reach cannot be answered without walking the folder. So `/feeds.json` gained
+only what is free — `kind` and `verb`, both `const fn` — and the walk lives
+behind `GET /folder.json?feed=<wire>`, which the page asks once, when a folder
+feed is actually chosen.
+
+| | HTTP | body |
+|---|---|---|
+| read, no members | **200** | `"state":"empty"` — an ANSWER |
+| read, blank members | **200** | `"state":"blank"`, with the file count |
+| read, rows found | **200** | `"state":"days"`, both ends inclusive |
+| the question is wrong | **400** | unknown feed, or a REST feed, by name |
+| this machine cannot answer | **409** | **and it names the PATH** |
+
+409 rather than 404: the folder is not a resource this server owns and could
+create, it is a place the operator puts files. The request was well formed and
+the machine's state is what refuses it.
+
+### What changed on `/ingest`
+
+* **The verb.** The submit control read `Start archive pull` for a folder feed
+  and now reads `Start folder read`, from `/feeds.json`'s `verb` rather than
+  from a word chosen in the browser.
+* **The rolling-floor prose is gone for these two, because it is a REST fact
+  and false for them.** The page printed *"No history depth is stated for
+  TrueData … the vendor will answer for how far back it actually goes."* Every
+  clause of that is about an endpoint somebody else operates. There is no vendor
+  to answer, no claim to be absent, and the reach is not unknown — it was read.
+* **The range comes from the files found**, with the path beside it, and the
+  three answers stay three. A window reaching outside the files says so and says
+  why: *"not because a vendor refused it, but because those files are not in the
+  folder."* Days outside the range are still PICKABLE — striking them would
+  claim a refusal nobody made.
+* **One second is offered and labelled second-keyed**: two rows sharing a second
+  is stated as expected input, with the fold and the last-wins rule named on the
+  page rather than left in a crate.
+* **The resolved folder is shown** beside the box that still carries the request,
+  as a control that fills it. The two are shown together rather than assumed
+  equal — a reach read from one folder beside a run against another is exactly
+  the silent disagreement the page exists to surface.
+
+### The column shape stopped being a literal — at the route, and NOT yet at the ingest
+
+`ColumnLayout` gained `shape: Columns`, the variant the decoder is actually
+handed, cross-checked against the layout's own column list by a `const` block on
+the count, the header row and the date format. A layout whose two spellings
+disagree is a build failure; this was verified by making one disagree and
+watching the build fail, not by reading the assertion.
+
+**`api::server::run_local` still hardcodes `Columns::Gdfl` and `Segment::Fno`
+for every archive feed, and that is left standing and named rather than
+half-fixed.** GDFL's rows carry ten columns and TrueData's index rows carry
+five, so that constant decodes one vendor against the other's shape. Deriving
+the shape there without also deciding the segment turns a wrong decode into a
+refusal for the one feed the path is exercised with — and the segment decides
+where bars are FILED, which §3 rule 8's append-only history makes unrenameable.
+It is recorded in `docs/06-limits.md` and in `docs/04-invariants.md` SK-09's
+closing note. A store-path decision is not a side effect of a labelling fix.
+
+---
+
+## D-0124 · 2026-08-12 · Five silent answers on the API surface: a damaged counter answered as an empty store, a failed master answered as an empty universe, a completeness claim with no universe behind it, a store root invented out of a broken environment, and a receipt that never said it was one
+
+**Number taken as max+1 and asserted free before writing.** The highest heading
+in this file was `D-0123` when this work began; the session sharing this tree
+then took `D-0125`, explicitly recording that `D-0124` was already claimed in
+`crates/api/src/server.rs` by this work. `D-0124` appears nowhere else —
+re-checked by grep over `crates/`, `docs/`, `web/` and `CLAUDE.md` immediately
+before appending, not by counting the headings here.
+
+All five were **reproduced**, not reasoned about: each has a test that fails on
+the tree as it stood and passes after, and the four that can be driven over a
+socket were run against the pre-change files to record what they answered. What
+follows quotes those runs.
+
+### The shape all five share
+
+`CLAUDE.md` §4 bans "a fallback that hides a failure — degrade loudly and name
+the reason, or refuse. Never both silently." Every one of these degraded and
+then said nothing, and in four of the five the silence was **indistinguishable
+from a success**: an empty array, a zero, an idle phase, a green badge. The
+information that would have separated them existed in the process at the time —
+`Census::Unreadable`'s reason, `Read::notes`, `Read::status()`, the work list's
+own length — and was discarded at the last step before the wire.
+
+### 1 · `/store.json` — a corrupt manifest was byte-identical to an empty store
+
+`held_row` folds `Census::Absent` and `Census::Unreadable` into one `None`, so
+`store_body` skipped every entry in both states and the handler returned `[]`
+with `200` and no other field. Measured against the pre-change binary, the two
+responses were equal **including their headers**:
+
+```
+HTTP/1.1 200 OK\r\ncontent-type: application/json; charset=utf-8\r\ncontent-length: 2\r\nconnection: close\r\n\r\n[]
+```
+
+`web/src/routes/db/+page.svelte` takes that as success (`rows = Array.isArray(j)
+? j : []`, `error` left null) and the Markets page renders "`<feed>` holds no
+bars for `<key>`" — an assertion about the store, made from a fact about its
+counter, over a store that may hold every bar it ever pulled. The `/store` HTML
+page and `/audit.json` both already carried the state; the JSON route the whole
+console runs on did not.
+
+**What changed.** The body is untouched — a JSON array in every state, so a
+consumer that only reads rows sees exactly what it saw before. Two things are
+added beside it:
+
+* the status is `503` when the counter will not load, for the reason `health`
+  already gives in its own doc comment: *a monitor reads the status code and
+  nothing else*;
+* three response headers carry `/audit.json`'s own three words, so no second
+  vocabulary is invented for one fact.
+
+| Header | Value |
+|---|---|
+| `x-brutex-census-state` | `held` · `absent` · `unreadable` — `census::Census::name`, which is what `audit_json::store_block` writes |
+| `x-brutex-census-note` | `census::VendorCensus::note` — the refusal in the refusal's own words, naming the file |
+| `x-brutex-census-degraded` | what loading stepped over, empty when it stepped over nothing |
+
+**What a page must read.** `r.headers.get('x-brutex-census-state')`. `unreadable`
+means *the array is empty because the counter is damaged, not because the store
+is*, and the sentence to show the operator is `x-brutex-census-note`. A reader
+that only tests `r.ok` now also leaves the success path, which is the floor
+rather than the fix.
+
+*Why headers and not a field in the body.* The requirement was that the change
+be additive: a consumer expecting an array must not start receiving an object.
+Wrapping the rows to make room for a status would turn every existing reader
+into a reader of `[]` — the exact outcome being fixed, re-introduced by the fix.
+
+### 2 · `/instruments.json` — two different failures, both answered `200` with no status
+
+*   **The counter would not load.** `rows_for` answers `None` for an unreadable
+    census, so `bars_of` summed to `0` for every instrument and the page drew
+    the same em dash a genuinely un-pulled instrument shows.
+*   **The selected feed's master would not decode.** No row then carries that
+    feed's id, the filter admits nothing, and the body is `[]` —
+    indistinguishable from a feed that lists nothing.
+
+`Read::notes` and `Read::status()` were one field away and are what `/health`
+answers `503` from. This route discarded both.
+
+**What changed.** `Read` now records **which** vendor was never read and why
+(`unread: Vec<(Vendor, String)>`), and `unavailable` is derived from it rather
+than set beside it — one source, two shapes, so the boolean and the list cannot
+disagree. `Read::master(vendor)` answers the per-feed question a whole-read
+boolean structurally cannot, in three states rather than two:
+
+| `x-brutex-master-state` | meaning |
+|---|---|
+| `read` | the file was found and decoded; the list is real |
+| `UNAVAILABLE` | this build expects the file and could not read it — the list is absent, not empty |
+| `not-mastered` | an archive feed, which publishes no scrip file; `[]` is the **true** answer and the status stays `200` |
+
+Both failing states answer `503` and carry `x-brutex-master-note` and
+`x-brutex-universe-status` (`Read::status()` — `ok` or `DEGRADED`, the same word
+`/health` uses) beside the three census headers. A merge disagreement does
+**not** move the status: `status()` says `DEGRADED` for a routine ISIN conflict
+while the list and the counts are both real, and refusing the type-ahead for
+that would take the console down for a fact the header already carries.
+
+**What a page must read.** `x-brutex-master-state` — `UNAVAILABLE` means the
+list is missing rather than empty, and `x-brutex-master-note` names the file.
+`x-brutex-census-state` = `unreadable` means every `bars` in the body is absent
+rather than measured. The same site answers `?feed=dhan` at `200` and complete,
+which is the point of making it per feed.
+
+### 3 · The autopilot published "The store is complete" over an empty store
+
+With the masters absent, `tracked_series` derives its work list from
+`site.read.merged.by_key` — empty. `next_window` then answers `None` for every
+feed because it has no series to accumulate a window from, `survey` chooses
+nothing, no feed is halted, and the no-work branch published, at phase `idle`,
+once a minute, for the life of the process:
+
+> nothing is missing that any feed can still be asked for. The store is complete
+> through the newest finished day; this re-checks once a minute so a new day is
+> picked up on its own.
+
+Every step was individually correct. "Nothing is missing" is **vacuously true**
+over an empty work list, and the sentence a human reads off it is not. The page
+made it worse: `target.instruments` was `0`, and `0` is falsy in JavaScript, so
+the one number that would have betrayed the empty universe rendered as a missing
+field rather than as zero.
+
+**What changed, and why it is not a guard.** An `if series.is_empty()` beside
+the `format!` would have fixed today's path and left the shape intact — the
+claim and its evidence would still be two separate things, and the next arm
+added gets the defect back. So the completeness sentence is not reachable from a
+count at all:
+
+```rust
+enum Settled {
+    Complete { instruments: std::num::NonZeroUsize },
+    NoUniverse,
+}
+```
+
+`Settled::over(series)` is the only constructor and it refuses zero, so **there
+is no code path from an empty universe to the word "complete"**. `NoUniverse`
+publishes `Phase::Halted` — not `idle`, because the masters are read once at
+startup and cannot load without a restart, so idling on it is a countdown to an
+event that cannot occur — and its sentence carries `Read::status()` and the
+read's own `UNAVAILABLE` notes, which name the file and the directory.
+
+A stalled month is still reconsidered whatever `Settled` says: a stall is a
+month that **was** asked for and did not land, so it is real work, and
+swallowing it would trade one silent state for another. `carry_on` outranks the
+halt for the same reason.
+
+### 4 · `HOME` unset made the store root and the masters directory `.`
+
+`store_dir_from(None, None)` returned `PathBuf::from(".")`, and the test beside
+it asserted that value under the words *"no HOME is a broken environment, not a
+supported one"*. The sentence was right and the return value contradicted it,
+and the return value is what ran. `.` is the process working directory, which
+for the run configuration this is launched from is the **repository checkout** —
+so the first append builds `bars/`, `manifest/` and `audit/` inside the git
+tree, under extensions CI gate 1 never sees, because gate 1 walks `git ls-files`
+and these are untracked. The banner printed `store:   .`, which reads as a
+deliberate relative path rather than as a broken environment.
+
+**What changed.** `CLAUDE.md` §8's rule is about configuration and not only
+about credentials: *a missing or malformed configuration halts loudly — there is
+no default and no fallback.* Both resolvers now return `Result<PathBuf, String>`
+and refuse, naming both variables an operator can set, the working directory the
+old fallback would have written into, and what it would have created there.
+`run` refuses before parsing arguments; the serve path refuses **before the
+listener is served**, so nothing is opened and nothing is created. The exit code
+is `FAILED` and not `DEGRADED`: nothing was read, so there is no output whose
+trust is in question.
+
+An **explicit** `BRUTEX_STORE` is still honoured exactly as given, relative
+included. That is an operator's stated choice, and refusing a choice is a
+different act from inventing one.
+
+Two new splits make both refusal arms drivable — `run_from` takes the masters
+`Result`, `run_in_over` takes the store `Result` — for the reason `run_in` and
+`masters_dir_from` were already split: a branch only a machine with no `HOME`
+can enter is a branch no test can hold, and `set_var` is `unsafe` under edition
+2024.
+
+### 5 · `POST /pull/spot` answers HTML, and any 200 HTML parsed as a receipt
+
+`web/src/routes/ingest/+page.svelte` calls `readReceipt(await r.text(), r.ok,
+r.status)` with no shape check, and the parser falls open on a body with no
+`.badge`: `verdict: badge?.textContent?.trim() || (ok ? 'OK' : …)` yields `OK`
+and `good: badge ? … : ok` yields `true`. A `200` that never came from this
+process — an authenticating proxy, a captive portal, a misdirected origin, or
+this build's own markup after a rename — renders a **green dot reading OK** with
+a blank reason, and every instrument is then classified "already held" or "no
+bars landed" rather than "the request never arrived". The two sibling fetches in
+`+layout.svelte` and `autopilot/+page.svelte` both guard exactly this case and
+say so in comments; this one call does not.
+
+A content-type test cannot separate them, because a receipt legitimately **is**
+`text/html`. A marker the handler writes can: nothing between the browser and
+the handler has any reason to invent it.
+
+**What changed, on the API side.** Every answer `pull_spot` gives carries
+`x-brutex-receipt: pull-spot` — the seat-conflict refusal, the malformed-form
+refusal and the completed run alike, because a marker is only worth requiring if
+it is unconditional. All three arms are asserted, and the test also asserts that
+`/dashboard` — another `200` carrying HTML — does **not** carry it, which is
+what makes requiring it a discriminator rather than a decoration.
+
+**What a page must read**, and this half is NOT done here: before `readReceipt`
+is called at all,
+
+```js
+if (r.headers.get('x-brutex-receipt') !== 'pull-spot') { /* not a receipt */ }
+```
+
+and render "this answer did not come from the API" rather than a verdict.
+`web/src` was held by another session while this landed, so the parser still
+falls open until that guard is added. The marker it needs is on the wire.
+
+### What this deliberately does not do
+
+* **No page was changed.** All five fixes are in `crates/api`. `/db`, Markets,
+  `/ingest` and `/autopilot` still read what they read; they now *can* see the
+  reason, and three of the five also reach them as a status code they already
+  branch on.
+* **No body shape moved.** `/store.json` and `/instruments.json` answer a JSON
+  array in every state, before and after.
+* **A degraded merge is still `200`.** Only the two states where every number in
+  the body is absent rather than measured refuse.
+
+## D-0125 · 2026-08-12 · The constituent join is keyed on NSE's OWN ISIN at both ends — the symbol step is deleted, not demoted, and the partition gains a fifth bucket
+
+**Free-number check.** `D-0124` was already claimed in `crates/api/src/server.rs`
+by the session holding that file when this was written, so the next free number
+is this one. Asserted by grep over `crates/`, `docs/`, `web/src/` and
+`CLAUDE.md` before the entry was appended, not by counting the headings here.
+
+### What changed
+
+`api::constituents::Join` resolved a published constituent's identity by
+looking the SYMBOL up in the merged vendor universe on `(exchange, segment,
+symbol, kind)` and joining on whatever ISIN the vendors had filed there. It now
+calls `core::universe::nse_isin(symbol)` — the ISIN **the exchange itself prints
+beside that symbol in its own constituent file**, carried into `core` by D-0122
+— and matches that against the ISIN column of the vendor's master. Both ends of
+the join are ISINs. The symbol is the argument to one constant-time probe and a
+key to nothing.
+
+The symbol lookup is **removed**, not kept behind the ISIN one. A constituent
+whose NSE ISIN no master carries is `lacks`, by name, with the ISIN on the row;
+it is never retried by name. `CLAUDE.md` §4 bans a fallback that hides a
+failure, and a fallback that fires loudly is still a second answer to a question
+that already has one.
+
+### Why the previous key was wrong even though it resolved everything
+
+It resolved 850 of 850 names across the four NIFTY tiers, with both masters
+agreeing on every ISIN. That is real evidence and it was the wrong evidence: it
+answered *what do the two brokers think this ticker is*, not *what does the
+exchange say this constituent is*. A name both masters spelled the same way and
+got wrong the same way was invisible to the check, which is exactly what
+`docs/06-limits.md` §62 said in the present tense for as long as it stood.
+
+### Three `NoIsin` variants are gone, and one is the D-0020 case
+
+* `NoListingNamesIt` — "no vendor master names this symbol" was the symbol step
+  reporting its own miss. Under NSE's key that is `TierJoin::lacks`, per vendor,
+  with the ISIN the master does not carry printed beside the name.
+* `IndexHasNoIsin` — an inference from a merged row's missing ISIN. Now read off
+  the exchange's file directly.
+* `DisputedIsin` — **the interesting one.** Two masters giving one key two
+  different ISINs used to be refused outright, on the D-0020 ground that picking
+  a winner without evidence is not a decision. The evidence exists now: NSE's own
+  column says which of the two belongs to that symbol. The vendor whose master
+  carries it matches; the vendor whose master carries the other one **lacks** it,
+  by name. **No vendor is preferred and no id is substituted** — the one
+  authority that outranks both is simply read, which is what D-0020 asked for
+  rather than a departure from it. The disagreeing vendor's id is still
+  reachable, filed under the ISIN its own master gave it, which is the only
+  honest place for it.
+
+`api::constituents::index_by_isin` changed with it: each id is now filed under
+the ISIN **its own vendor spelled**. The old index filed every vendor's id under
+the entry's first ISIN, which was harmless while the join started from that same
+entry and is not harmless under NSE's key — it would have handed back the id of a
+master that spells that paper with a different ISIN entirely.
+
+### The partition gained a fifth bucket, and it sums
+
+```text
+matched + lacks + ambiguous + malformed + no_nse_isin == Tier::published()
+```
+
+asserted per `(vendor, tier)`, buckets DISJOINT, union equal to the published
+list name for name. The new bucket separates two complaints the old `malformed`
+ran together:
+
+* `malformed` — this repository holds a published name it cannot make a key of:
+  not a legal `Symbol`, or an NSE placeholder scrip. **A transcription to fix
+  here.** Zero on all six lists this build carries.
+* `no_nse_isin` — the name is fine and **the exchange's own file names no ISIN
+  beside it.** Nothing in this repository may fill that cell. Six of 1,813
+  positions, and it is the same six for every feed because it is a fact about
+  NSE's file: five F&O index underlyings, which are not shares
+  (`NoRowInTheExchangesFile`), and `AGL`, whose Total Market row has an empty
+  ISIN cell (`TheExchangesRowNamesNoIsin`, `docs/06-limits.md` §11).
+
+Drawing the second as the first would tell an operator to go and fix a
+transcription that is correct. `/universes.json?feed=` carries the count and the
+word `no_nse_isin` per target, beside the four it already carried.
+
+### `AGL` now resolves to nothing, deliberately, and that is a loss of one name
+
+Both masters carry `INE1YPB01014` for a row spelled `AGL`, so the old symbol
+step matched it. NSE's own Total Market column names no ISIN at that position,
+so the new join refuses it and reports it by name with the reason. Total Market
+reach goes 750 → 749 per feed. That is the trade this decision makes on purpose:
+one name that resolved on the brokers' say-so no longer resolves at all, because
+the exchange has not said what it is. §11 records `AGL` as `UNVERIFIED` and
+nothing here changes that.
+
+### `TierJoin::unwitnessed` is gone; `uncorroborated` measures something else
+
+`Matched::witness` counted *the vendors that asserted the identity*, because the
+identity came from the vendors. Under NSE's key every identity has exactly one
+source and it is not a vendor, so the measurement is meaningless and was removed
+rather than left to be read as though it still meant something.
+`Matched::corroboration` replaces it: **which mastered vendors' files carry a row
+for NSE's ISIN**, and `TierJoin::uncorroborated()` lists the matched rows exactly
+one file agrees with. It is not evidence for the join, which needs none; it is
+the only cross-check available ON NSE's transcribed column, and the startup note
+carries its count on the line it affected and on no other.
+
+### Measured, on the two masters on disk on 2026-08-12
+
+Counted offline against `~/.brutex/masters/{groww_instruments.csv,
+dhan_scrip.csv}` — the same two files the server reads — by matching each tier's
+NSE ISIN against each master's ISIN column restricted to
+`core::vendor::EQUITY_BOARD_SERIES`. Identical for both feeds:
+
+| tier | published | matched | lacks | ambiguous | malformed | no NSE ISIN |
+|---|---|---|---|---|---|---|
+| NIFTY 50 | 50 | 50 | 0 | 0 | 0 | 0 |
+| NIFTY 100 | 100 | 100 | 0 | 0 | 0 | 0 |
+| NIFTY 200 | 200 | 200 | 0 | 0 | 0 | 0 |
+| NIFTY 500 | 500 | 500 | 0 | 0 | 0 | 0 |
+| Total Market | 750 | 749 | 0 | 0 | 0 | 1 (`AGL`) |
+| F&O underlyings | 213 | 208 | 0 | 0 | 0 | 5 (the indices) |
+
+No ISIN is claimed by two rows of either master within those series, so
+`ambiguous` is empty on the real files; the fixture exercises it. The four NIFTY
+tiers resolve exactly as they did under the symbol key — the reach did not
+change, the reason it is believed did.
+
+### Cost, and it is measured rather than claimed
+
+Both lookups stay O(1). `(vendor, tier) -> ids` is one index into a flat
+`Vendor::ALL.len() * Tier::ALL.len()` array; `(vendor, exchange, ISIN) -> id` is
+one hash probe on a `Copy` key. Resolution gained two constant probes per
+constituent at BUILD time — `NTM_INDEX::position` and `nse_isin` — and lost one
+`HashMap` probe into the merged universe. `nse_identity_of` asks twice on
+purpose: `nse_isin` alone cannot tell "the file has no row" from "the row's cell
+is empty", and reading the aligned array with `.get()` would buy one probe at the
+price of a `None` arm no test could enter — the uncoverable region `CLAUDE.md`
+§9's floor forbids, and the same trade `core` states in `nse_isin`'s own
+attribute.
+
+Re-measured by `the_two_lookups_do_not_grow_with_the_universe` against universes
+40× apart in indexed ISINs, release profile, 9 trials × 200,000 reps, minimum
+taken. Numbers in `docs/04-invariants.md` CJ-08.
+
+### What was NOT done
+
+`web/src/routes/ingest/+page.svelte` reads no bucket field — it draws counts
+generically — so the new word needs no front-end change, and that tree is held
+by another session. `crates/api/src/server.rs` needed two test assertions
+updated, and nothing else: `universe_reach_json` hands the whole body to
+`coverage::Coverage::json`.

@@ -876,7 +876,7 @@ fn a_run_that_cannot_take_the_census_lock_writes_no_bars_at_all() {
             )
         });
     assert!(
-        refusal.why.contains("another pull holds the census lock"),
+        refusal.why.contains("another ingest holds the census lock"),
         "the refusal must say what is wrong in words an operator can act on: {}",
         refusal.why
     );

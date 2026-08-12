@@ -253,6 +253,24 @@ fn number(scan: &mut Scan<'_>) -> Result<OwnedValue, LineFault> {
         if let Ok(v) = text.parse::<u64>() {
             return Ok(OwnedValue::Uint(v));
         }
+        // AN INTEGER LITERAL THAT FITS NEITHER WIDTH IS REFUSED, NOT ROUNDED.
+        //
+        // Without this the block simply ended and control fell into the `f64`
+        // parse below, which SUCCEEDS finitely: `99999999999999999999` decoded
+        // to `Float(1e20)` — 100000000000000000000, a different number — and
+        // nothing marked it. `tail::take_line` counts a line in `malformed`
+        // only on `Err`, so the record went onto the page, and `logs::value_text`
+        // rendered it as an ordinary count indistinguishable from a real one.
+        //
+        // That is the exact harm the comment below already forbids for a decimal
+        // past f64's range: "would put a value on the page that is not the value
+        // in the file". The same sentence has to bind here, and `unsigned` and
+        // `signed` in this very file are both titled "refused rather than
+        // rounded". Silently altering a value is what `CLAUDE.md` §4 calls a
+        // fallback that hides a failure.
+        return Err(LineFault::BadNumber {
+            text: text.to_owned(),
+        });
     }
     // A DECIMAL PAST THE RANGE OF AN f64 PARSES AS `inf`, WITHOUT AN ERROR.
     // Taking that would put a value on the page that is not the value in the
@@ -576,15 +594,36 @@ mod tests {
                 text: "1e999999".to_owned()
             })
         );
-        // As is one past u64.
-        let line = format!("{head}{{\"a\":99999999999999999999}}}}");
-        assert!(
-            matches!(
-                Record::decode(line.as_bytes()),
-                Ok(record) if record.fields.first().map(|f| f.1.clone())
-                    == Some(OwnedValue::Float(1e20))
-            ),
-            "a decimal integer past u64 falls back to a float, which is lossy and stated"
+        // AS IS ONE PAST u64 — and this block used to assert the OPPOSITE of
+        // the sentence above it. It pinned `Float(1e20)` with the message "a
+        // decimal integer past u64 falls back to a float, which is lossy and
+        // stated", so the suite certified a value being silently ALTERED:
+        // 99999999999999999999 was rendered on the page as
+        // 100000000000000000000, a different number, with nothing marking it.
+        // The comment said "refused", the assertion said "rounded", and the
+        // assertion won because it was the one the compiler read.
+        //
+        // Both sides of the boundary are pinned now, so neither an off-by-one in
+        // the width test nor a return to the fall-through can pass.
+        let exact = format!("{head}{{\"a\":18446744073709551615}}}}");
+        assert_eq!(
+            Record::decode(exact.as_bytes())
+                .expect("u64::MAX itself is representable")
+                .fields
+                .first()
+                .map(|f| f.1.clone()),
+            Some(OwnedValue::Uint(u64::MAX)),
+            "the largest integer that fits is still decoded exactly"
+        );
+        let past = format!("{head}{{\"a\":18446744073709551616}}}}");
+        assert_eq!(
+            Record::decode(past.as_bytes()),
+            Err(LineFault::BadNumber {
+                text: "18446744073709551616".to_owned()
+            }),
+            "the first integer past u64 is REFUSED BY NAME rather than rounded \
+             into a float — `tail` then counts the line in `malformed`, which is \
+             visible, instead of putting a wrong number on the page"
         );
     }
 

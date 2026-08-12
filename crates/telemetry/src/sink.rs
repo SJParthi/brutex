@@ -382,6 +382,28 @@ impl Config {
                     .to_owned(),
             );
         }
+        // THE BOUND THAT MAKES `level_for` O(1), CHECKED WHERE IT CANNOT BE
+        // BYPASSED.
+        //
+        // `with_target_level` already refuses to push past the ceiling — but
+        // `target_levels` is a PUBLIC field, so `Config { target_levels: v, .. }`
+        // and `config.target_levels.push(..)` both walk straight around the
+        // builder. `level_for` walks this table on every emit that clears the
+        // fast floor, and `CLAUDE.md` §3 rule 4 wants that walk bounded by a
+        // constant rather than by whatever a caller happened to assemble.
+        //
+        // A builder that enforces an invariant and a public field that does not
+        // is an invariant enforced by politeness. This is the same check, at the
+        // one place every construction path has to pass through.
+        if self.target_levels.len() > MAX_TARGET_LEVELS {
+            return Some(format!(
+                "{} per-target overrides is past the {MAX_TARGET_LEVELS}-override \
+                 ceiling: `Sink::level_for` walks this table on every event that \
+                 clears the fast floor, and the walk is only constant-time \
+                 because the table is bounded",
+                self.target_levels.len()
+            ));
+        }
         None
     }
 }
@@ -1202,8 +1224,9 @@ fn resume_seq(path: &Path) -> u64 {
 )]
 mod tests {
     use super::{
-        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, Health, Inner, MIN_FILE_BYTES,
-        Sink, Target, current_path, dir_beneath_store, paths_newest_first, rotated_path,
+        Config, DEFAULT_KEEP_FILES, DEFAULT_MAX_FILE_BYTES, Emitted, Health, Inner,
+        MAX_TARGET_LEVELS, MIN_FILE_BYTES, Sink, Target, current_path, dir_beneath_store,
+        paths_newest_first, rotated_path,
     };
     use crate::event::{Event, MAX_MESSAGE_BYTES, MAX_STR_VALUE_BYTES};
     use crate::level::{LEVELS, Level};
@@ -1445,6 +1468,58 @@ mod tests {
             free,
             "the emit mutex was still held while `report` was parked: a stderr \
              that blocks would freeze every thread that logs"
+        );
+    }
+
+    /// **The override ceiling is enforced where the public field cannot dodge it.**
+    ///
+    /// `with_target_level` refuses to push past `MAX_TARGET_LEVELS`, but
+    /// `Config::target_levels` is `pub`: a struct literal and a direct `push`
+    /// both walk around the builder. `Sink::level_for` walks that table on every
+    /// event clearing the fast floor, so an unbounded table is an unbounded
+    /// per-event cost — the thing `CLAUDE.md` §3 rule 4 forbids.
+    ///
+    /// The refusal names the ceiling and the reason, rather than clamping
+    /// silently: §4 bans a fallback that hides a failure.
+    #[test]
+    fn a_config_past_the_override_ceiling_is_refused_by_name() {
+        let dir = scratch("too-many-overrides");
+
+        // EXACTLY at the ceiling is fine — the boundary is `>`, not `>=`, and a
+        // test that only used a huge number could not tell the two apart.
+        let mut at = Config::new(&dir);
+        at.target_levels = (0..MAX_TARGET_LEVELS)
+            .map(|i| (format!("sub{i}"), Level::Debug))
+            .collect();
+        assert!(
+            at.refusal().is_none(),
+            "the ceiling itself is allowed, not refused"
+        );
+        assert!(
+            Sink::open(&at).is_ok(),
+            "and a sink at the ceiling opens normally"
+        );
+
+        // One past it is refused, by name.
+        let mut past = Config::new(&dir);
+        past.target_levels = (0..=MAX_TARGET_LEVELS)
+            .map(|i| (format!("sub{i}"), Level::Debug))
+            .collect();
+        let said = past
+            .refusal()
+            .expect("one past the ceiling cannot be accepted");
+        assert!(
+            said.contains(&(MAX_TARGET_LEVELS + 1).to_string()),
+            "the refusal names how many were offered: {said}"
+        );
+        assert!(
+            said.contains("level_for"),
+            "and names the walk that is only constant-time while bounded: {said}"
+        );
+        let refused = Sink::open(&past).expect_err("and `open` refuses it too");
+        assert!(
+            refused.contains("ceiling"),
+            "the same reason reaches the caller: {refused}"
         );
     }
 

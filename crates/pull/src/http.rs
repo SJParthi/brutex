@@ -529,6 +529,20 @@ fn decode_objects(
     // a full answer either. Emitted once per window rather than once per bar,
     // because 375 lines of "skipped" is noise and one count is information.
     if null_bars > 0 {
+        // BOTH, and the event is the load-bearing one. `eprintln!` reaches the
+        // operator watching a terminal; the event reaches the log FILE, which is
+        // the thing handed to somebody diagnosing a run that already finished.
+        // A diagnostic that exists only on a terminal nobody kept is a fact this
+        // repository did not record. See gate 22.
+        let _noted = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "pull.decode",
+                "bars carried a null price and were skipped",
+            )
+            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with("bars", u64::try_from(items.len()).unwrap_or(u64::MAX)),
+        );
         eprintln!(
             "brutex: {null_bars} of {} bars carried a null price and were \
              skipped — the vendor reported no trade in those minutes",
@@ -1009,6 +1023,17 @@ fn decode_positional(
     // either. Once per window rather than once per bar — 375 lines of "skipped"
     // is noise and one count is information.
     if null_bars > 0 {
+        // The event carries the fact to the FILE; the print carries it to a
+        // terminal. See the sibling site above, and gate 22.
+        let _noted = telemetry::emit(
+            &telemetry::Event::new(
+                telemetry::Level::Warn,
+                "pull.decode",
+                "bars carried a null price and were skipped",
+            )
+            .with("skipped", u64::try_from(null_bars).unwrap_or(u64::MAX))
+            .with("bars", u64::try_from(rows.len()).unwrap_or(u64::MAX)),
+        );
         eprintln!(
             // "in those intervals", not "in those minutes": this decoder is
             // rung-blind by design and a daily pull comes through it too.

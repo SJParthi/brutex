@@ -398,6 +398,24 @@ never been through the D-0025 gate would trade a measured claim for an
 unmeasured one. **`AGL` is UNVERIFIED — this repository does not know what
 instrument it is.** Resolving it needs a vendor master, which needs a pull.
 
+**D-0122 did not change this and could not.** When the exchange's ISIN column was
+transcribed beside the names, `AGL` was the one position of 750 with no row to
+take one from, so `NIFTY_TOTAL_MARKET_ISIN` carries `ISIN_ABSENT` there and
+`nse_isin("AGL")` answers `None`. Writing `GRINDWELL`'s `INE536A01023` into that
+slot would have made the counts agree and the wrong row *join*, which is worse
+than the gap. It is named rather than counted by
+`core::universe::the_absent_isins_are_exactly_these_six_names`.
+
+**D-0125 gave that gap a consequence an operator can see.** Now that
+`api::constituents` joins on NSE's own column (§62), `AGL` no longer resolves at
+all: it lands in the `no_nse_isin` bucket for every feed, by name, with the
+reason beside it, and `/universes.json?feed=` reports NIFTY Total Market as **749
+of 750** rather than 750. It used to resolve — both masters carry
+`INE1YPB01014` for a row spelled `AGL`, and the old symbol step took it. What was
+a silent inheritance from the vendors is now a stated gap in the exchange's file,
+which is the only claim this repository can actually support. Named by
+`api::constituents::the_exchanges_own_gap_is_its_own_bucket_and_the_same_for_every_feed`.
+
 The disagreement cannot reach the four tiers: the published Total Market file
 is exactly the union of the NIFTY 500 file and the NIFTY Microcap 250 file, and
 `GRINDWELL` sits in the Microcap 250 half, which this repository does not carry
@@ -3644,3 +3662,225 @@ This is the third time today the answer was "remove the second copy" rather than
 the two copies agree": `hits`'s operator count against `WORDS`, `Calendar::charter`'s const
 assertion against `CHARTER_NON_REGULAR_IST_DAYS`, and this. Two things that must agree are a
 defect waiting for the moment nobody checks.
+
+---
+
+## 62. ~~The ISIN an NSE constituent joins on is corroborated, not published~~ — CLOSED by D-0125, with one named remainder
+
+**This section recorded a hop that no longer exists.** It is kept rather than
+deleted, because it also records what closed it and what did not close with it.
+
+It said: `api::constituents` keyed its join on `(exchange, ISIN)`, which was the
+right key, and **the constituent's ISIN came from the vendors** — the published
+name was looked up in the merged vendor universe on `(exchange, segment, symbol,
+kind)` and whatever ISIN the two masters had filed there became the thing joined
+on. What was UNVERIFIED was that any of those ISINs is the one NSE prints beside
+that symbol in its own file, and a name both vendors got wrong the same way was
+invisible to the check.
+
+**Both halves are closed.** D-0122 carried the exchange's `ISIN Code` column into
+`crates/core/src/universe.rs` — six arrays positionally aligned with the six name
+arrays, 1,807 of 1,813 positions carrying an NSE-issued ISIN, each naming its
+source file by byte size and SHA-256 (invariants U-08 … U-12). **D-0125 wired the
+consumer**: `api::constituents` calls `core::universe::nse_isin(symbol)` and
+matches that ISIN against the ISIN column of the vendor's master. Both ends of
+the join are ISINs; the symbol is the argument to one constant-time probe and a
+key to nothing.
+
+The symbol step was **deleted, not demoted.** There is no symbol lookup behind
+the ISIN one on any path, for any bucket: a constituent whose NSE ISIN no master
+carries is `lacks`, by name, and is never retried. The proof is a test rather
+than a claim — a master row whose SYMBOL is a constituent's and whose ISIN is
+another company's is matched by the old join and **lacked** by the new one
+(`api::constituents::the_symbol_step_is_gone_and_a_vendor_row_spelled_right_still_lacks`,
+invariant CJ-05).
+
+The D-0020 requirement this section stated in advance — *a row where NSE's ISIN
+and the two vendors' disagree must be a loud refusal naming both, never a silent
+preference* — is met, and by a better route than refusal. NSE's own column says
+which of the two ISINs belongs to that symbol, so the vendor carrying it matches
+and the vendor carrying the other one **lacks** the name with NSE's ISIN printed
+on the row. No vendor is preferred; the authority that outranks both is read.
+The disagreeing vendor's id stays reachable under the ISIN its own master gave
+it, which is the only honest place for it. The `DisputedIsin` bucket is gone
+because the evidence it was waiting for arrived.
+
+**What it cost, stated rather than buried.** Six names resolve to no NSE ISIN
+and are refused: five F&O index underlyings, which are not shares and never
+could resolve, and **`AGL`, which used to resolve and now does not.** Both
+masters carry `INE1YPB01014` for a row spelled `AGL`, so the symbol step matched
+it; NSE's own Total Market column names no ISIN at that position (§11), so the
+ISIN-keyed join has nothing to join on and says so by name. Total Market reach is
+749 of 750 per feed, where it was 750. That is a deliberate trade: a name that
+resolved on the brokers' say-so no longer resolves at all, because the exchange
+has not said what it is.
+
+### The one remainder, measured
+
+`crates/api/src/merge.rs` keeps ONE ISIN per instrument key plus the different
+one a second vendor gave for that key (`Entry::conflict`). D-0125 fixed the half
+of this that mattered — each id is now filed under the ISIN **its own vendor
+spelled**, so a disputing vendor's id can never be handed back for an ISIN its
+master does not carry. What `Merged` still cannot distinguish is a vendor that
+**agreed silently** from a vendor that **stated no ISIN at all**: both take the
+`_ => {}` arm of the same match. So a vendor row with an EMPTY ISIN cell, sharing
+an instrument key with a row that has one, would have its id filed under the
+other row's ISIN.
+
+* **Measured on the two masters on disk on 2026-08-12**, counted offline over
+  `~/.brutex/masters/{groww_instruments.csv,dhan_scrip.csv}`: **zero** NSE cash
+  equity rows in either master have an empty ISIN cell — 4,094 Groww rows and
+  9,696 Dhan rows, none blank. The residual is therefore not reachable on
+  today's files. Index rows do have no ISIN, and an index has no NSE ISIN
+  either, so no tier can join one.
+* **It is not currently countable in code**, which is the honest part of this
+  entry: `Merged` does not carry a per-vendor ISIN, so nothing in
+  `api::constituents` can report the residual on the row it affected. Closing
+  that means adding one to `merge::Entry` — a change to a type three modules
+  construct, held by another session when this was written.
+* **Bounded by construction:** it can only misattribute an id inside one
+  instrument key, i.e. between rows the merge already considers the same
+  instrument, and only when a master leaves an ISIN cell blank on a cash equity
+  row.
+
+## 63. A run's `attempted` is the universe's number, not the chosen feed's
+
+D-0120 put a per-feed count on the receipt and on `/universes.json`. It did
+**not** change what a run attempts.
+
+`server::broker_run` builds its instrument list from
+`catalog::tracked(entry.universe) && asked.target.names(key, entry.universe)`.
+Neither predicate knows which feed was asked for. So a `target=indices` run on
+Groww builds 35 instruments, of which Groww's master gives an id for 24, and the
+other eleven reach `broker_window`, fail its id probe and are refused **by
+name**, one at a time, inside the run.
+
+* **What is NOT wrong.** The refusal itself. It names the vendor and the
+  instrument, it is recorded per instrument, and it does not abort the other
+  799. That is `CLAUDE.md` §4 working: it degrades loudly and says the reason.
+* **What IS wrong.** `BrokerRun::attempted` and the in-flight `of` counter are
+  the union's number, so the progress display counts down against a total that
+  eleven instruments can never reach, and the receipt's *attempted* is not
+  *attemptable*.
+* **What it would take to close it.** One filter — `entry.ids[vendor].is_some()`
+  beside the two predicates — plus pushing the excluded names into
+  `BrokerRun::refused` before the loop starts, so the reasons move from the
+  run's output to its input rather than disappearing. That is a change to the
+  pull path, and this session may not run a pull to verify it end to end.
+* **Why it is written here rather than left implied.** The startup note for a
+  short `(feed, target)` says so in capitals — `A run of target=indices STILL
+  ATTEMPTS ALL 35` — and `api::coverage::the_notes_name_only_the_targets_a_feed_is_short_of`
+  asserts that sentence is present. A note that claimed a filter nobody wrote
+  would be worse than no note.
+
+Bounded: it costs one wasted request per unreachable instrument per run, and it
+misstates one counter. It cannot put a wrong bar in the store, because the
+refusal happens before any window is fetched.
+
+---
+
+## 64. `indices` is the one target the two masters barely agree about, and an index has no ISIN to reconcile them on
+
+Measured on `~/.brutex/masters/`, 2026-08-12. The merged universe holds **35**
+NSE index keys carrying `Universe::INDEX`. Groww's master supplies an id for
+**24** of them and Dhan's for **15** — 39 against a total of 35, so exactly
+**four** keys carry both.
+
+Every NIFTY tier, by contrast, is 50/50, 100/100, 200/200, 500/500 and 750/750
+for both feeds. The difference is not that the brokers list different indices.
+It is that they spell them differently and `merge` keys on
+`(exchange, segment, symbol, kind)`:
+
+| Groww | Dhan |
+|---|---|
+| `INDIAVIX` | `INDIA VIX` |
+| `NIFTY100` | `NIFTY 100` |
+| `NIFTYJR` | `NIFTYNXT50` |
+| `NIFTYMIDSELECT` | `MIDCPNIFTY` |
+
+D-0117 solved exactly this problem for equities by keying the cross-vendor join
+on `(exchange, ISIN)` — a national numbering agency issues one identifier and
+every master carries it. **That fix is unavailable here: no agency issues an
+ISIN for a computed index level**, which is why `SpotTarget::Indices` is counted
+off the master rather than through the join. D-0125 renamed the constituent-side
+half of this: an index underlying is no longer inferred from a merged row's
+missing ISIN (`NoIsin::IndexHasNoIsin`, deleted) but read off the exchange's own
+file, which lists no index among its share constituents at all —
+`NoIsin::NoRowInTheExchangesFile`, in the `no_nse_isin` bucket. The fact is the
+same and the evidence for it is now NSE's rather than a vendor's.
+
+* **What is measured.** The 35 keys, the 24 and the 15, and every unresolved
+  name — `/universes.json?feed=<vendor>` lists them with their reason, and the
+  startup note carries them.
+* **What is UNVERIFIED.** Whether any two of the 31 single-vendor keys are the
+  same index under two names. Believing so needs evidence this build does not
+  hold; asserting it from string similarity would be the invention `CLAUDE.md`
+  §3 rule 1 forbids — `NIFTY100` and `NIFTY 100` look obvious, `NIFTYJR` and
+  `NIFTYNXT50` do not, and a rule that gets the first right gets the second
+  wrong in silence.
+* **What it would take to close it.** An exchange-published index roster with a
+  stable identifier per series, carried as Rust data the way the constituent
+  lists are. Until then the honest answer is two numbers and the names behind
+  them, which is what is served.
+
+This is a limit on `indices` alone. `NSE-INDIAVIX` is reference-only under
+`CLAUDE.md` §1 and the two swept series are named identically by both masters —
+`swept` is 2 of 2 for both feeds.
+
+## 65. Reading a folder feed's reach is O(members), and it is a route rather than a page field for exactly that reason
+
+`pull::folder::read_reach` walks the folder and decodes every member. That is
+**O(members × rows)** and nothing here claims better: a bulk import genuinely
+visits every file, `crate::archive` says so plainly, and the walk's own bound is
+`archive::MAX_MEMBERS`. Resolving the folder is string joining and no filesystem
+call at all; the cost is entirely the walk.
+
+**What is bounded.** `reach_of` is ONE pass over an already-decoded walk,
+comparing two `Day`s and keeping the extremes. Nothing is sorted and nothing is
+collected — the rows stay in file order, which for a one-second feed is the only
+order there is. Proven by
+`pull::folder::the_reach_of_a_walk_is_one_pass_over_its_rows`.
+
+**What this cost me in design.** It is why the reach is NOT a field on
+`/feeds.json`. That route renders on every page load, and its own body already
+records that an O(files) probe there would be the cost `/store` exists to avoid.
+`/feeds.json` carries only `kind` and `verb`, both `const fn`; the walk lives
+behind `GET /folder.json?feed=<wire>`, which `/ingest` asks once when a folder
+feed is chosen. A page that opened on a folder vendor with a large archive will
+wait for that one request, and the page says `Reading …'s folder…` while it
+does rather than rendering an empty range it has not measured.
+
+**What is unmeasured.** No timing has been taken against a real purchased
+archive — the operator's folders are not on this machine. The bound above is
+structural, not measured, and is labelled as such under `CLAUDE.md` §3 rule 6.
+
+## 66. `run_local` decodes every archive feed with GDFL's ten columns, and fixing it is a store-path decision
+
+`api::server::run_local` builds its `pull::ingest::Plan` with
+`columns: pull::csv::Columns::Gdfl` and `segment: Segment::Fno` — both literals,
+for every archive feed. GDFL's rows carry ten columns; TrueData's index rows
+carry five (`docs/08-vendor-samples.md`). A shape read at the wrong width takes
+every field after the mismatch from the wrong offset, which is the defect
+`Columns::offsets` records having already shipped once against real bars.
+
+**Why it is not simply fixed.** The measured shape now exists to read —
+`ColumnLayout::shape`, keyed on `(feed, segment)` and cross-checked against the
+layout's own column list by a `const` block in `pull::vendor` (D-0123, SK-09) —
+and `api::folder` reads it. This call site cannot take it alone, because the
+SEGMENT beside it is also a literal: `run_local` files every archive bar under
+`FNO`, and TrueData declares a layout for `INDEX` only. Deriving the shape
+without deciding the segment converts a wrong decode into a refusal for the one
+feed whose files this path is exercised with — five shipped tests cover exactly
+that case.
+
+**What it would take to close it.** A decision about which segment each archive
+feed's files are filed under, made once and carried on the descriptor beside the
+layout. That decides a STORE PATH, and `CLAUDE.md` §3 rule 8 makes store history
+append-only — a directory written under the wrong segment cannot be renamed. It
+is a `crates/api` change with a store consequence, not a labelling fix, and it
+is left standing and named rather than half-made.
+
+**What is safe today.** GDFL through this path is correct — its own shape is the
+literal. TrueData through this path decodes five columns against ten and fails
+at the decode's own count check rather than filing wrong bars, so the failure is
+loud; it is the *message* that is misleading, not the data.

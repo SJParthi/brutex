@@ -239,7 +239,18 @@ pub struct Tail {
     /// When this is true the answer is "what I found in the bytes I read", not
     /// "everything there is".
     pub hit_scan_cap: bool,
-    /// Whether the walk reached the start of the oldest file it could find.
+    /// Whether every event older than the ones returned was actually looked at.
+    ///
+    /// False means a non-empty file older than the last one read still holds
+    /// bytes the walk never opened — so events older than these exist and are
+    /// not on the page.
+    ///
+    /// **It used to be false on ordinary full pages too**, because the walk
+    /// reported "the query is satisfied" and "I gave up early" with the same
+    /// `bool`. A page that filled exactly on the oldest file's first line said
+    /// older events existed when the set held none. See [`Stop`]: a satisfied
+    /// walk that consumed its file to byte 0 now looks for an older file rather
+    /// than assuming one is there.
     pub reached_oldest: bool,
     /// Files that exist and could not be read, in the failure's own words.
     ///
@@ -359,6 +370,15 @@ fn walked(dir: &Path, keep_files: u8, query: &Query) -> Tail {
     // per file rather than once per record — see `FileId` and
     // `a_roll_landing_mid_walk_never_returns_the_same_event_twice`.
     let mut read_already: Vec<FileId> = Vec::new();
+    // THE QUERY IS SATISFIED AND THE LAST FILE WAS READ TO ITS FIRST BYTE.
+    //
+    // The loop then keeps going, but only far enough to answer one question:
+    // does a file OLDER than everything read still hold bytes? That is what
+    // `reached_oldest` claims to report, and it used to be answered by assuming
+    // the answer was yes on every satisfied query — so an unfiltered page that
+    // filled exactly on the oldest file's first line said "older events exist"
+    // when nothing older existed at all.
+    let mut finished = false;
     for path in paths_newest_first(dir, keep_files) {
         // OPENED FIRST, AND EVERY FACT ABOUT IT TAKEN FROM THAT ONE HANDLE.
         // This was a `metadata` of the path followed by an `open` of the path:
@@ -395,18 +415,57 @@ fn walked(dir: &Path, keep_files: u8, query: &Query) -> Tail {
         if read_already.contains(&id) {
             continue;
         }
-        read_already.push(id);
-        out.files_read = out.files_read.saturating_add(1);
-        let newest_file = core::mem::take(&mut first_file);
-        if walk_back(&mut file, &path, len, newest_file, limit, query, &mut out) {
+        // THE PEEK, AND IT READS NOTHING. Reaching here with `finished` means a
+        // non-empty file older than every file read still exists, so the answer
+        // is no. `files_read` and `bytes_read` are deliberately NOT touched: this
+        // file was opened and stat'd, never read, and the cost bound
+        // `the_last_events_are_read_without_touching_the_rest_of_the_file` holds
+        // because no block is fetched.
+        if finished {
             out.reached_oldest = false;
             return out;
         }
+        read_already.push(id);
+        out.files_read = out.files_read.saturating_add(1);
+        let newest_file = core::mem::take(&mut first_file);
+        match walk_back(&mut file, &path, len, newest_file, limit, query, &mut out) {
+            // Gave up with bytes still unread in THIS file, so something older
+            // is unread by construction and no peek is needed.
+            Stop::Stopped => {
+                out.reached_oldest = false;
+                return out;
+            }
+            // Satisfied, and this file is spent. Look for an older one.
+            Stop::Exhausted => finished = true,
+            // Still hungry; carry on normally.
+            Stop::Unfinished => {}
+        }
     }
+    // Falling out of the loop means no older non-empty file was found, so
+    // `reached_oldest` keeps the `true` it was initialised with.
     out
 }
 
-/// Walks one file from its end. Returns whether the whole query is finished.
+/// Why [`walk_back`] stopped, which a bare `bool` could not say.
+///
+/// The three states used to be one `true`, and collapsing them is what made
+/// `Tail::reached_oldest` wrong on an ordinary full page: a walk that filled its
+/// limit on the last line of a file it had read to byte 0 was reported
+/// identically to one that gave up with bytes still unread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stop {
+    /// The file was consumed and the query still wants more.
+    Unfinished,
+    /// The query is satisfied, but this file still holds unread bytes.
+    Stopped,
+    /// The query is satisfied AND this file was read to its first byte.
+    ///
+    /// Whether anything older exists is then a question about the NEXT file, not
+    /// about this one — so the caller peeks rather than assuming.
+    Exhausted,
+}
+
+/// Walks one file from its end. Returns why it stopped.
 fn walk_back(
     file: &mut std::fs::File,
     path: &Path,
@@ -415,7 +474,7 @@ fn walk_back(
     limit: usize,
     query: &Query,
     out: &mut Tail,
-) -> bool {
+) -> Stop {
     let mut pos = len;
     let mut carry: Vec<u8> = Vec::new();
     // The bytes after the final newline of the newest file are a line that is
@@ -426,7 +485,7 @@ fn walk_back(
     while pos > 0 {
         if out.bytes_read >= query.max_scan_bytes {
             out.hit_scan_cap = true;
-            return true;
+            return Stop::Stopped;
         }
         let take = READ_BLOCK.min(pos);
         pos = pos.saturating_sub(take);
@@ -434,7 +493,7 @@ fn walk_back(
             Ok(block) => block,
             Err(e) => {
                 out.errors.push(format!("{}: {e}", path.display()));
-                return false;
+                return Stop::Unfinished;
             }
         };
         out.bytes_read = out.bytes_read.saturating_add(take);
@@ -459,7 +518,9 @@ fn walk_back(
                 continue;
             }
             if take_line(line, limit, query, out) {
-                return true;
+                // STOPPED, not exhausted: `end` is still above zero, so this
+                // file holds lines the walk never looked at.
+                return Stop::Stopped;
             }
         }
         carry = work.get(..end).unwrap_or(&[]).to_vec();
@@ -473,10 +534,15 @@ fn walk_back(
         }
     }
     // The first line of the file has no newline before it.
+    //
+    // EXHAUSTED, not merely stopped. This runs only after `while pos > 0` ended,
+    // so every byte of this file has been read. Whether anything OLDER exists is
+    // a question about the NEXT file, and `walked` answers it by looking rather
+    // than by assuming the worst.
     if !drop_fragment && take_line(&carry, limit, query, out) {
-        return true;
+        return Stop::Exhausted;
     }
-    false
+    Stop::Unfinished
 }
 
 /// One block, by seeking rather than by re-opening.
@@ -1502,6 +1568,59 @@ mod tests {
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 
+    /// **The peek must still say `false` when an older file really does hold
+    /// bytes** — otherwise the fix trades one wrong answer for its opposite.
+    ///
+    /// The page fills exactly on the NEWEST file's first line while a rolled file
+    /// sits behind it. `reached_oldest` must be false, and the walk must not have
+    /// paid to learn it: the older file is opened and stat'd, never read.
+    #[test]
+    fn a_page_that_fills_at_a_file_boundary_still_sees_the_rolled_file_behind_it() {
+        let dir = scratch("boundary-with-roll");
+        std::fs::create_dir_all(&dir).expect("a scratch directory");
+        let sink = crate::Sink::open(
+            &crate::Config::new(&dir)
+                .with_max_file_bytes(crate::MIN_FILE_BYTES)
+                .with_keep_files(4),
+        )
+        .expect("opens");
+        for n in 0..60u32 {
+            let _written = sink.emit(&crate::Event::info("t", "m").with("n", n));
+        }
+        assert!(
+            crate::rotated_path(&dir, 1).exists(),
+            "the premise: the set actually rolled"
+        );
+
+        // How many records the CURRENT file alone holds.
+        let current_only = tail(&dir, 1, &Query::last(MAX_LIMIT));
+        let n = current_only.records.len();
+        assert!(n > 0, "the current file holds something");
+        assert!(
+            current_only.reached_oldest,
+            "restricted to one file, that file was read to its start"
+        );
+
+        // Now ask for exactly that many across the whole set: the limit fills on
+        // the current file's first line, and a rolled file remains behind it.
+        let found = tail(&dir, sink.keep_files(), &Query::last(n));
+        assert_eq!(found.records.len(), n);
+        assert!(
+            !found.reached_oldest,
+            "a rolled file behind it still holds events, so the walk did NOT \
+             reach the oldest: {found:?}"
+        );
+        assert_eq!(
+            found.files_read, 1,
+            "and it learned that by LOOKING, not by reading: the older file was \
+             opened and stat'd, never walked"
+        );
+        assert_eq!(
+            found.bytes_read, current_only.bytes_read,
+            "not one extra byte was fetched to answer the question"
+        );
+    }
+
     /// **THE LIMIT REACHED ON THE FILE'S VERY FIRST LINE.**
     ///
     /// `walk_back` scans backwards for newlines, so the first line of the file
@@ -1541,11 +1660,30 @@ mod tests {
             "the oldest returned is the file's first line: {exact:?}"
         );
         assert_eq!(exact.missing, Some(0), "and nothing is missing from them");
+        // THE FLAG THIS FIXTURE ALWAYS COULD HAVE PINNED AND DID NOT.
+        //
+        // The page filled on the file's first line, every byte of every existing
+        // file was read, and nothing older exists — so the walk DID reach the
+        // oldest. This asserted nothing before, and the value was `false`:
+        // `api::logs` rendered "Older events exist beyond what was read" on a
+        // page where nothing older was there to read.
+        assert!(
+            exact.reached_oldest,
+            "the page filled on the file's FIRST line and no older file exists, \
+             so the walk reached the oldest: {exact:?}"
+        );
 
         // One fewer: the walk stops before the first line, which is the other
         // side of the same decision.
         let short = tail(&dir, 1, &Query::last(2));
         assert_eq!(short.records.len(), 2);
+        // AND THE OTHER DIRECTION, so a fix that simply always says `true`
+        // cannot pass: this one stopped with a line still unread.
+        assert!(
+            !short.reached_oldest,
+            "it stopped with the file's first line unread, so it did NOT reach \
+             the oldest: {short:?}"
+        );
         assert_eq!(
             short.records.last().map(|r| r.seq),
             Some(2),

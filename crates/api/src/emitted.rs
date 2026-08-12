@@ -231,9 +231,12 @@ fn cases() -> Vec<Case> {
             site: "census.rs api.census read",
             target: "api.census",
             message: "read",
-            // ABSENT, so `Info`. The site picks `Warn` only for a manifest it
-            // cannot read, and the ternary is the thing being pinned.
-            level: telemetry::Level::Info,
+            // ABSENT, so `Debug` — lowered from `Info` because `read_all` runs
+            // on every `/store.json`, `/instruments.json` and `/audit.json`
+            // request, not once at startup as the site used to claim. The site
+            // picks `Warn` only for a manifest it cannot read, and the ternary
+            // is the thing being pinned.
+            level: telemetry::Level::Debug,
             drive: {
                 let root = root.clone();
                 Box::new(move || {
@@ -987,7 +990,16 @@ fn lib_emit_sites() -> usize {
     // contiguous text never appears in the source being scanned. The original
     // version of this test hand-counted for exactly this reason and said so;
     // this is that observation, mechanised instead of trusted.
+    //
+    // TWO NEEDLES, BECAUSE THERE ARE TWO SPELLINGS. `emit_if!` gates on
+    // `admits` before evaluating its arguments, so a site that must not pay for
+    // a filtered event is written that way — and `telemetry::emit_if!(` does NOT
+    // contain `telemetry::emit(`. Counting only the first made this function
+    // BLIND to every converted site: the first conversion dropped the count from
+    // 27 to 26 and the assertion below caught it. A second spelling that the
+    // accounting cannot see is a hole in the accounting, not a detail.
     const NEEDLE: &str = concat!("telemetry", "::", "emit", "(");
+    const NEEDLE_IF: &str = concat!("telemetry", "::", "emit", "_if!", "(");
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&src)
         .expect("the crate's own src is readable")
@@ -1008,7 +1020,7 @@ fn lib_emit_sites() -> usize {
             let text = std::fs::read_to_string(path).expect("a tracked source file");
             text.lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
-                .map(|line| line.matches(NEEDLE).count())
+                .map(|line| line.matches(NEEDLE).count() + line.matches(NEEDLE_IF).count())
                 .sum::<usize>()
         })
         .sum()
@@ -1051,16 +1063,24 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// `pull.chunk answered` through the shipped `fetch_chunks` against two
     /// loopback listeners, and `pull.spot instrument refused` through
     /// `broker_run` over a universe of one.
-    const REACHED_IN_SERVER_TESTS: usize = 8;
+    ///
+    /// Two more joined them when gate 23 closed the stderr-only diagnostics:
+    /// `api.server the server stopped on an error`, driven directly through
+    /// `stopped(Err(..))`, and `api.server cannot bind the listening address`,
+    /// driven by `a_refused_bind_is_logged_and_not_only_printed` — which holds a
+    /// `:0` port and asks the server for the same one, so the refusal is the
+    /// kernel's and needs no vendor, credential or bar. Neither was added to the
+    /// struck-through table below, for the reason that table itself teaches.
+    const REACHED_IN_SERVER_TESTS: usize = 10;
     /// The rows of the table above, every one of them struck through.
     const UNREACHABLE: usize = 0;
-    // COUNTED FROM THE SOURCE, not declared. A twenty-sixth emit added
+    // COUNTED FROM THE SOURCE, not declared. A twenty-EIGHTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 25,
+        lib_sites, 27,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

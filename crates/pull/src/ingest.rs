@@ -359,11 +359,20 @@ pub fn from_dir(
 /// one install after the loop, and each of the failures named along the way.
 ///
 /// Copying it for the second caller would have been two implementations of
-/// "what a pull does", and the second one would have been wrong first. So both
-/// callers build `Member`s and hand them here, and a bar fetched from a broker
-/// takes byte-for-byte the same path to disk as one read from a folder.
+/// "what an ingest does", and the second one would have been wrong first. So
+/// both callers build `Member`s and hand them here, and a bar pulled from a
+/// broker takes byte-for-byte the same path to disk as one read from a folder.
 ///
-/// See [`from_window`] for the broker's side of that.
+/// THE TWO VERBS ARE DIFFERENT AND THIS FUNCTION IS THE ONE PLACE THEY MEET.
+/// A broker's bars are PULLED — a request, a token, a quota, a floor. A folder
+/// vendor's are READ — no request, no token, no quota, and a reach that is
+/// whatever files the operator bought (`crate::folder`). Calling both a pull
+/// sent every folder failure to the wrong question first, so the word each
+/// caller uses comes from `crate::vendor::SourceKind::verb` and never from a
+/// literal. What is shared is this function, which is downstream of both.
+///
+/// See [`from_window`] for the broker's side of that, and [`from_dir`] for the
+/// folder's.
 #[must_use]
 pub fn from_members(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
     from_members_inner(members, store_root, plan)
@@ -1163,8 +1172,8 @@ impl CensusLock {
         };
         if lock.try_lock().is_err() {
             return Err(format!(
-                "another pull holds the census lock at {}. Refused rather than \
-                 queued: two runs installing at once silently discard one, and \
+                "another ingest holds the census lock at {}. Refused rather \
+                 than queued: two runs installing at once silently discard one, and \
                  the loser's receipt still reads 'every row accounted for' \
                  because its own books balanced. Wait for the other run and try \
                  again.",

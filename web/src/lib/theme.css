@@ -70,21 +70,21 @@
      accent change: if the accent were also the "info" colour then re-hueing
      the brand would silently re-hue a meaning. They are four independent
      hues — teal, red, amber, violet — and the accent is a fifth, blue. */
-  --up: #0e8f80;
-  --down: #d93a36;
+  --up: #00875a;
+  --down: #d3143f;
   --warn: #a86a06;
   --info: #6d45d9;
-  --acc: #2f6fe4;
+  --acc: #0e7f96;
   --acc-hi: #1c58c8;
   --on-acc: #ffffff;
 
-  --acc-soft: rgba(47, 111, 228, 0.1);
-  --up-soft: rgba(14, 143, 128, 0.12);
-  --down-soft: rgba(217, 58, 54, 0.11);
+  --acc-soft: rgba(14, 127, 150, 0.10);
+  --up-soft: rgba(0, 135, 90, 0.12);
+  --down-soft: rgba(211, 20, 63, 0.11);
   --warn-soft: rgba(168, 106, 6, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
 
-  --focus: #1d4ed8;
+  --focus: #0b6376;
   --scrim: rgba(16, 24, 40, 0.28);
 
   --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
@@ -115,21 +115,21 @@
     --n11: #e6ebf5;
     --n12: #fbfcff;
 
-    --up: #26a69a;
-    --down: #ef5350;
+    --up: #00e19b;
+    --down: #ff4d6a;
     --warn: #f0b429;
     --info: #9d7cf5;
-    --acc: #5b8def;
+    --acc: #22d3ee;
     --acc-hi: #7aa7ff;
-    --on-acc: #ffffff;
+    --on-acc: #04060c;
 
-    --acc-soft: rgba(91, 141, 239, 0.14);
-    --up-soft: rgba(38, 166, 154, 0.16);
-    --down-soft: rgba(239, 83, 80, 0.16);
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
     --warn-soft: rgba(240, 180, 41, 0.16);
     --info-soft: rgba(157, 124, 245, 0.16);
 
-    --focus: #8ab4ff;
+    --focus: #67e8f9;
     --scrim: rgba(0, 0, 0, 0.55);
 
     --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -158,21 +158,21 @@
   --n11: #e6ebf5;
   --n12: #fbfcff;
 
-  --up: #26a69a;
-  --down: #ef5350;
+  --up: #00e19b;
+  --down: #ff4d6a;
   --warn: #f0b429;
   --info: #9d7cf5;
-  --acc: #5b8def;
+  --acc: #22d3ee;
   --acc-hi: #7aa7ff;
-  --on-acc: #ffffff;
+  --on-acc: #04060c;
 
-  --acc-soft: rgba(91, 141, 239, 0.14);
-  --up-soft: rgba(38, 166, 154, 0.16);
-  --down-soft: rgba(239, 83, 80, 0.16);
+  --acc-soft: rgba(34, 211, 238, 0.14);
+  --up-soft: rgba(0, 225, 155, 0.16);
+  --down-soft: rgba(255, 77, 106, 0.16);
   --warn-soft: rgba(240, 180, 41, 0.16);
   --info-soft: rgba(157, 124, 245, 0.16);
 
-  --focus: #8ab4ff;
+  --focus: #67e8f9;
   --scrim: rgba(0, 0, 0, 0.55);
 
   --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
@@ -204,21 +204,21 @@
   --n11: #0d1220;
   --n12: #000814;
 
-  --up: #0e8f80;
-  --down: #d93a36;
+  --up: #00875a;
+  --down: #d3143f;
   --warn: #a86a06;
   --info: #6d45d9;
-  --acc: #2f6fe4;
+  --acc: #0e7f96;
   --acc-hi: #1c58c8;
   --on-acc: #ffffff;
 
-  --acc-soft: rgba(47, 111, 228, 0.1);
-  --up-soft: rgba(14, 143, 128, 0.12);
-  --down-soft: rgba(217, 58, 54, 0.11);
+  --acc-soft: rgba(14, 127, 150, 0.10);
+  --up-soft: rgba(0, 135, 90, 0.12);
+  --down-soft: rgba(211, 20, 63, 0.11);
   --warn-soft: rgba(168, 106, 6, 0.13);
   --info-soft: rgba(109, 69, 217, 0.11);
 
-  --focus: #1d4ed8;
+  --focus: #0b6376;
   --scrim: rgba(16, 24, 40, 0.28);
 
   --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
@@ -238,6 +238,17 @@
   --bg-2: var(--n2);
   --panel: var(--n3);
   --panel-2: var(--n4);
+
+  /* PICKER'S THREE NAMES. `$lib/Picker.svelte` reads --raise, --panel2 and
+     --accdeep, which nothing ever defined, so all four of its call sites fell
+     through to hardcoded dark hex fallbacks — its menus rendered DARK ON A
+     LIGHT PAGE on every route that uses it. Aliased, not renamed: Picker is
+     shared and its spelling is not ours to change. They sit here so they
+     resolve through the neutral ramp each theme redefines above; var()
+     substitutes at use, so one definition covers both themes. */
+  --raise: var(--bg-2);
+  --panel2: var(--panel-2);
+  --accdeep: var(--acc-soft);
   --line: var(--n6);
   --line-soft: var(--n5);
   --line-hard: var(--n7);

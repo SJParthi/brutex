@@ -59,6 +59,41 @@ use store::format::Bar;
 pub struct Bucket(u32);
 
 impl Bucket {
+    /// ONE SECOND — the width at which a bought file's duplicate timestamps
+    /// are resolved.
+    ///
+    /// # What the store does with two rows that share a second
+    ///
+    /// The operator's rule, 12 Aug 2026: *"for truedata or gdfl also we will
+    /// have multiple ticks but anyhow always the timestamp will be mapped as
+    /// second."* Measured in `docs/08-vendor-samples.md`: three rows in one
+    /// second at `TrueData`, four at GDFL, no sub-second field at either. So a
+    /// shared second is EXPECTED INPUT, and refusing it would refuse every
+    /// file the operator bought.
+    ///
+    /// Folded at this width, the second's rows become one record:
+    ///
+    /// | Field | From the rows sharing the second |
+    /// |---|---|
+    /// | open | the **first** in file order |
+    /// | high / low | the extremes across all of them |
+    /// | close | the **last** in file order — LAST WINS |
+    /// | volume | the **sum** |
+    /// | open interest | the **last** that carried one |
+    ///
+    /// **Last wins for the price**, which is the single value a consumer reads
+    /// as "what it was at that second", and the earlier rows are not discarded
+    /// — they are the second's open, its extremes and its volume. Nothing is
+    /// dropped and nothing is refused. First-wins would throw away the newest
+    /// information in the second; refusing would throw away the file.
+    ///
+    /// File order is the only order there is: rows sharing a second carry no
+    /// tiebreaker, so a sort would invent one and quietly change which price
+    /// became the open. `crate::archive::read_dir` orders MEMBERS and never
+    /// the rows inside one, for exactly this reason.
+    ///
+    /// Proven by `pull::folder::a_shared_second_folds_last_price_wins`.
+    pub const SECOND: Self = Self(1);
     /// One minute.
     pub const MINUTE: Self = Self(60);
     /// One trading day. Wide enough that a whole session lands in one bucket.

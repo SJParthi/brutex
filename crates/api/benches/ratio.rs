@@ -181,7 +181,8 @@ fn read_of(n: usize) -> Read {
             eligibility: Vec::new(),
         },
         Vec::new(),
-        false,
+        // unread: every vendor's master was read, by construction.
+        Vec::new(),
         0,
         // unreadable: a synthetic bench universe decodes cleanly by construction.
         0,

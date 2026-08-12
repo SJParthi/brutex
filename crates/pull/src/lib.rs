@@ -83,6 +83,7 @@ pub mod config;
 pub mod csv;
 pub mod fetch;
 pub mod fold;
+pub mod folder;
 pub mod http;
 pub mod ingest;
 pub mod manifest;

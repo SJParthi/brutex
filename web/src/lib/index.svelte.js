@@ -17,10 +17,23 @@
  */
 const MAX_PREFIX = 4;
 
-export const catalogue = $state({ rows: [], ready: false, error: null });
+// `feed` IS NOT BOOKKEEPING — IT IS THE GATE. /ingest:1449 and /db:1013 both
+// derive `catalogueIsThisFeed = catalogue.ready && catalogue.feed === feeds.active`
+// and refuse to count a single name unless it holds, because counting one
+// broker's master under another broker's name is exactly the §4 failure they
+// exist to prevent. The field was never DECLARED and never WRITTEN, so that
+// comparison was `undefined === 'dhan'` — false forever — and every instrument
+// picker on both pages rendered "0 shown of 0" behind a refusal that could not
+// be satisfied by any action the operator took.
+export const catalogue = $state({ rows: [], ready: false, feed: null, error: null });
 let byPrefix = new Map();
+// The feed whose answer is IN FLIGHT. Switching feed twice quickly can land the
+// responses out of order; without this the last to RETURN wins instead of the
+// last one ASKED, and the page answers confidently for the wrong broker.
+let inFlight = null;
 
 export async function loadCatalogue(feed) {
+  inFlight = feed;
   try {
     // THE FEED IS PART OF THE QUESTION. The two brokers do not list the same
     // instruments, so "every instrument" is a different set per feed and the
@@ -39,11 +52,21 @@ export async function loadCatalogue(feed) {
         bucket.push(row);
       }
     }
+    // A response for a feed the operator has already left is DISCARDED, never
+    // stamped.
+    if (inFlight !== feed) return;
     byPrefix = next;
     catalogue.rows = rows;
+    catalogue.feed = feed;
     catalogue.ready = true;
     catalogue.error = null;
   } catch (why) {
+    if (inFlight !== feed) return;
+    // The stamp is CLEARED on failure. Leaving the previous feed's name on a
+    // failed read is the stale-value shape §4 bans — the page would go on
+    // counting the old master and say nothing was wrong.
+    catalogue.feed = null;
+    catalogue.ready = false;
     catalogue.error = String(why);
   }
 }

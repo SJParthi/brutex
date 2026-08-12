@@ -33,6 +33,7 @@ use crate::event::{
 };
 use crate::json::{push_escaped, push_quoted};
 use crate::value::Value;
+use core::fmt::Write as _;
 
 /// Appends one whole line, terminating newline included.
 ///
@@ -147,13 +148,48 @@ fn push_float(out: &mut Vec<u8>, value: f64) {
         push_quoted(out, word);
         return;
     }
-    let text = value.to_string();
-    out.extend_from_slice(text.as_bytes());
-    if !text
-        .bytes()
+    // FORMATTED STRAIGHT INTO THE CALLER'S BUFFER, NOT THROUGH A `String`.
+    //
+    // `value.to_string()` was one heap allocation and one free PER FLOAT FIELD,
+    // and it ran inside `Sink::emit`'s critical section — so it was also the one
+    // thing every other thread waiting on that mutex paid for. It was the ONLY
+    // allocation left in the encoder: `clock::push_padded` hand-rolls its digits
+    // into a stack array, and `push_escaped`/`push_quoted` only extend the
+    // caller's `Vec`. The crate went out of its way to be allocation-free for
+    // integers and text and then called `to_string()` on the float arm, which
+    // made "zero allocations in steady state" false wherever a float appeared.
+    //
+    // `core::fmt`'s `Display` for `f64` is the same shortest-round-trip
+    // formatter `to_string` used, so the bytes are unchanged — held by
+    // `one_ordinary_event_renders_to_exactly_these_bytes`.
+    let start = out.len();
+    let wrote = write!(Utf8Sink(&mut *out), "{value}");
+    // NOT DISCARDED SILENTLY. `Utf8Sink::write_str` returns `Ok` unconditionally,
+    // so this cannot fail — but `CLAUDE.md` §4 objects to a swallowed error, and
+    // an assertion says which it is. `debug_assert!` takes the value the `write!`
+    // ALREADY produced, so the formatting happens in release builds too.
+    debug_assert!(wrote.is_ok(), "Utf8Sink::write_str never returns Err");
+    if !out
+        .get(start..)
+        .unwrap_or_default()
+        .iter()
         .any(|b| matches!(b, b'.' | b'e' | b'E' | b'i' | b'N'))
     {
         out.extend_from_slice(b".0");
+    }
+}
+
+/// A `core::fmt::Write` that appends UTF-8 to a byte buffer.
+///
+/// Exists so [`push_float`] can use the standard float formatter without the
+/// `String` that `ToString` forces. Writing is infallible: a `Vec` push cannot
+/// fail, so `write_str` has no error to report and says so.
+struct Utf8Sink<'a>(&'a mut Vec<u8>);
+
+impl core::fmt::Write for Utf8Sink<'_> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.0.extend_from_slice(s.as_bytes());
+        Ok(())
     }
 }
 

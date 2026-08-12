@@ -11,6 +11,9 @@
 //! | [`autopilot`] | the backfill driving itself: what is missing, fetched oldest first |
 //! | [`master`] | reading one vendor's instrument master off disk |
 //! | [`merge`] | one map from every vendor, and the ISIN cross-check on it |
+//! | [`constituents`] | an NSE tier joined to one vendor's ids on `(exchange, ISIN)` |
+//! | [`coverage`] | what ONE feed reaches in each spot target, and every name it cannot |
+//! | [`folder`] | how far a folder feed reaches, READ off the disk, and the path when it cannot |
 //! | [`ingest`] | what the operator asked a pull to do, and every named refusal |
 //! | [`census`] | what the store holds, read from the counter file, never from a directory |
 //! | [`catalog`] | every ordering and every filter a page offers, decided once at load |
@@ -38,6 +41,9 @@ pub mod bars;
 pub mod calendar;
 pub mod catalog;
 pub mod census;
+pub mod constituents;
+pub mod coverage;
+pub mod folder;
 pub mod ingest;
 pub mod logs;
 pub mod master;

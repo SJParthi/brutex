@@ -662,6 +662,7 @@ jobs:
             exit 1
           fi
           echo "OK — every segment-shaped literal under crates/pull is declared."
+
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
@@ -1152,6 +1153,7 @@ jobs:
             exit 1
           fi
           echo "OK — no foreign runtime is declared, resolved, or built for."
+
       - name: Gate 15 — the forbidden word appears in no tracked file
         run: |
           set -euo pipefail
@@ -1323,6 +1325,7 @@ jobs:
             exit 1
           fi
           echo "OK — the banned token appears in no tracked file."
+
       - name: Gate 16 — every crate root forbids unsafe outright
         run: |
           set -euo pipefail
@@ -1548,6 +1551,255 @@ jobs:
   # ==========================================================================
   # GATES 3-6 — the toolchain gates.
   # ==========================================================================
+      - name: Gate 23 — stderr is not a log, and a new crate is covered the day it appears
+        run: |
+          set -euo pipefail
+          # WHY. Every other logging gate names the crates it walks, so a crate
+          # added tomorrow starts outside all of them. And nothing stopped a
+          # diagnostic being written with `eprintln!` instead of an event, which
+          # was not hypothetical: a refused bind, a server that stopped on an
+          # error, and two null-price bar notices all went to a terminal and
+          # never reached a log file. Handed the log folder after a failed run,
+          # nobody could see any of them — the exact purpose the logging work
+          # exists to serve.
+          #
+          # This walks `crates/*/src` BY GLOB. There is no crate list to fall out
+          # of date.
+          fail=0
+
+          # WHOLE FILES, TEST CODE INCLUDED, AND DELIBERATELY SO.
+          #
+          # The first draft of this gate scanned only the region before the first
+          # `#[cfg(test)]`. That assumption holds in `crates/telemetry` and is
+          # FALSE across the workspace — `api/src/server.rs` has three such
+          # blocks, `api/src/ingest.rs` three, `render.rs` three — so the gate
+          # would have scanned the wrong region. It refused rather than guessing,
+          # which is how this was found, but the fix is not a cleverer window: it
+          # is not needing one. Counting whole files needs no brace matching, no
+          # string-literal handling, and has no region to get wrong. The cost is
+          # that a `println!` added to a TEST also has to be declared, which is a
+          # line of bookkeeping rather than a failure mode.
+          : > /tmp/prints.txt
+          for f in $(git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' | sort -u); do
+            grep -vE '^[[:space:]]*(//|\*)' "$f" > /tmp/code.txt || true
+            # `(^|[^A-Za-z_])` and not `\b`: BSD and GNU disagree about `\b`, and
+            # without the guard `println!` also matches INSIDE `eprintln!`.
+            # Measured: it counted 17 sites as 20.
+            for m in println eprintln print eprint dbg; do
+              c=$(grep -cE "(^|[^A-Za-z_])${m}!" /tmp/code.txt || true)
+              if [ "$c" -gt 0 ]; then
+                printf '%s:%s!:%s\n' "$(echo "$f" | sed 's|crates/||')" "$m" "$c" >> /tmp/prints.txt
+              fi
+            done
+          done
+
+          # CLAUSE A — the print surface is exactly this, and every line says
+          # which kind it is.
+          #
+          #   api/src/server.rs  println! 19, print! 1
+          #       The startup banner on STDOUT for the operator who just typed the
+          #       command, plus test output. Deliberately not events: the banner
+          #       is printed before a sink is guaranteed to exist, and a banner in
+          #       a log file is noise rather than a record.
+          #   api/src/server.rs  eprintln! 3
+          #       A refused bind and a server that stopped — both ALSO emit
+          #       `api.server` events — and the usage text on misuse, which is a
+          #       CLI contract rather than a diagnostic.
+          #   pull/src/http.rs   eprintln! 2
+          #       Null-price bar notices, which ALSO emit `pull.decode` events.
+          #   telemetry/src/sink.rs  eprintln! 1
+          #       The sink's own last-resort notice. It is the thing that failed,
+          #       so it is the one place stderr is the only channel left.
+          #   telemetry/src/record.rs eprintln! 1
+          #   api/src/constituents.rs println! 1
+          #       A cost-benchmark line printed by a TEST for a human reading
+          #       `--nocapture`, past that file's `#[cfg(test)]`. Declared the
+          #       day the file appeared, because this gate refused it — which
+          #       is the whole point of walking `crates/*/src` by glob.
+          #   core/src/universe.rs, core/src/vendor.rs, greeks/src/{bsm,normal,solver}.rs
+          #       Test diagnostic output, printed by tests for a human reading
+          #       `--nocapture`. Not on any production path.
+          #
+          # An UNDECLARED file with any print fails. That is how a crate added
+          # tomorrow is covered on its first day, and it is the whole point of the
+          # glob above.
+          declared='api/src/constituents.rs:println!:1
+          api/src/server.rs:println!:19
+          api/src/server.rs:eprintln!:3
+          api/src/server.rs:print!:1
+          core/src/universe.rs:println!:1
+          core/src/vendor.rs:println!:1
+          greeks/src/bsm.rs:println!:4
+          greeks/src/normal.rs:println!:3
+          greeks/src/solver.rs:println!:5
+          pull/src/http.rs:eprintln!:2
+          telemetry/src/record.rs:eprintln!:1
+          telemetry/src/sink.rs:eprintln!:1'
+
+          want=$(printf '%s\n' $declared | sort)
+          got=$(sort /tmp/prints.txt)
+          echo "  declared:"; printf '%s\n' "$want" | sed 's/^/    /'
+          echo "  measured:"; printf '%s\n' "$got"  | sed 's/^/    /'
+          if [ "$want" != "$got" ]; then
+            echo
+            echo "  REFUSED  the print surface is not the declared one."
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            echo
+            echo "           A NEW print: if it is a DIAGNOSTIC on a production"
+            echo "           path, emit an event too — stderr is seen by whoever"
+            echo "           is watching, the FILE is what gets handed to a"
+            echo "           diagnosis afterwards. Then declare it above saying"
+            echo "           which kind it is. A print that is GONE: delete its"
+            echo "           line, because a declaration nobody can trace to code"
+            echo "           is the stale lie gate 1d refuses."
+            fail=1
+          fi
+
+          # CLAUSE B — a crate that writes to stderr must be ABLE to log.
+          #
+          # Structural rather than a proximity heuristic. Proximity was tried and
+          # gives false positives: the usage text sits a few lines from the bind
+          # error's event and was scored as covered by it. This instead refuses
+          # the state that makes a silent diagnostic INEVITABLE rather than
+          # merely possible — a crate whose only channel is stderr.
+          for f in $(grep 'eprint' /tmp/prints.txt | cut -d: -f1 | sort -u); do
+            crate=$(echo "$f" | cut -d/ -f1)
+            [ "$crate" = "telemetry" ] && continue   # it IS the logger
+            if grep -qE '^telemetry' "crates/$crate/Cargo.toml"; then
+              echo "  ok       $crate writes to stderr and can also emit"
+            else
+              echo "  REFUSED  crate '$crate' writes to stderr but declares no"
+              echo "           telemetry dependency, so stderr is the ONLY channel"
+              echo "           it has. Add the dependency and emit the event."
+              fail=1
+            fi
+          done
+
+          # WHAT THIS DOES NOT PROVE, said plainly so nobody reads more into a
+          # green gate than it earned: it fixes the SET of prints and forces a
+          # human to write down what each one is. It does not itself decide
+          # whether a given print sits on a production path or in a test, and it
+          # does not verify that a particular diagnostic has a matching event.
+          # The declaration above carries that, and a reviewer keeps it honest —
+          # the same division of labour gate 1d uses for path-shaped literals.
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "GATE 23 FAILED."
+            echo "A diagnostic that exists only on a terminal nobody kept is a"
+            echo "fact this repository did not record. CLAUDE.md section 4."
+            exit 1
+          fi
+          echo "OK - every print is declared, and stderr is never a crate's only channel."
+
+      - name: Gate 21 — the logger opens nothing but its own files
+        run: |
+          set -euo pipefail
+          # WHY. The owner's constraint, in their words: no real bars, no pull,
+          # and "even suppose if the data or bars pulled by mistake also, then
+          # nowhere the issue of this should happen". That is a requirement
+          # about STRUCTURE, not about discipline: whether or not real data is
+          # sitting on the disk, the logger must be INCAPABLE of reading it.
+          #
+          # Two clauses, because either alone is weak.
+          fail=0
+
+          # CLAUSE A — crates/telemetry declares NO dependencies.
+          #
+          # The load-bearing one. A crate that does not depend on `store`,
+          # `core`, `pull` or any vendor client cannot call them, so it cannot
+          # read a bar, a manifest or a census however it is later edited. It is
+          # std-only by construction, and the manifest is where that is
+          # enforced rather than a comment nobody re-reads.
+          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f' crates/telemetry/Cargo.toml \
+                 | grep -vE '^[[:space:]]*(#|$)' || true)
+          if [ -n "$deps" ]; then
+            echo "  REFUSED  crates/telemetry declares dependencies:"
+            printf '%s\n' "$deps" | sed 's/^/             /'
+            echo "           A logger that can reach the store can read a bar."
+            fail=1
+          else
+            echo "  ok       crates/telemetry declares no dependencies - std only"
+          fi
+
+          # CLAUSE B — the production file-opening sites are exactly these.
+          #
+          # Declared by CONSTRUCT and COUNT, never by line number: a line number
+          # is invalidated by editing a comment above it, and a declaration that
+          # rots on reformatting is one nobody keeps honest. Same rule as gates
+          # 1d and 20.
+          #
+          #   sink.rs  OpenOptions::new  x2  the sink's own append target
+          #   sink.rs  fs::remove_file   x1  dropping the oldest rolled file
+          #   sink.rs  fs::rename        x1  rolling within its own directory
+          #   tail.rs  File::open        x2  reading back its own file set
+          #
+          # Every one takes a path built from the sink's own dir plus BASENAME
+          # and EXTENSION. A NEW site is not necessarily wrong, but it is never
+          # invisible: declare it here with the path it opens and why.
+          declared='sink.rs:OpenOptions::new:2
+          sink.rs:fs::remove_file:1
+          sink.rs:fs::rename:1
+          tail.rs:File::open:2'
+
+          : > /tmp/io-sites.txt
+          for f in crates/telemetry/src/*.rs; do
+            base=$(basename "$f")
+            # THE TEST BOUNDARY, asserted rather than assumed. This gate scans
+            # everything BEFORE the first `#[cfg(test)]`. If a second one
+            # appears, "before the first" stops meaning "production" and the
+            # gate would quietly scan the wrong region while still printing a
+            # verdict. An unsound window that reports PASS is worse than no gate.
+            n=$(grep -c '^#\[cfg(test)\]' "$f" || true)
+            if [ "$n" -gt 1 ]; then
+              echo "  REFUSED  $base has $n cfg(test) blocks; this gate assumes one."
+              echo "           Fix the gate before trusting it again, not the file."
+              fail=1
+              continue
+            fi
+            if [ "$n" -eq 1 ]; then
+              cut=$(grep -n '^#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
+              awk -v c="$cut" 'NR<c' "$f" > /tmp/body.txt
+            else
+              cp "$f" /tmp/body.txt
+            fi
+            # Drop comment lines, so a construct merely NAMED in prose above is
+            # not counted as a call to it.
+            grep -vE '^[[:space:]]*(//|\*|/\*)' /tmp/body.txt > /tmp/code.txt || true
+            for probe in OpenOptions::new fs::remove_file fs::rename File::open fs::read_dir fs::read_to_string; do
+              c=$(grep -cF "$probe" /tmp/code.txt || true)
+              if [ "$c" -gt 0 ]; then
+                printf '%s:%s:%s\n' "$base" "$probe" "$c" >> /tmp/io-sites.txt
+              fi
+            done
+          done
+
+          want=$(printf '%s\n' $declared | sort)
+          got=$(sort /tmp/io-sites.txt)
+
+          echo "  declared:"; printf '%s\n' "$want" | sed 's/^/    /'
+          echo "  measured:"; printf '%s\n' "$got"  | sed 's/^/    /'
+
+          if [ "$want" != "$got" ]; then
+            echo
+            echo "  REFUSED  the logger's file-opening surface is not the declared one."
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") || true
+            echo
+            echo "           A NEW site: say which path it opens and why, and add"
+            echo "           it above in the same commit. A site that is GONE:"
+            echo "           delete its line, because a declaration nobody can"
+            echo "           trace to code is the stale lie gate 1d refuses."
+            fail=1
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo
+            echo "GATE 21 FAILED."
+            echo "CLAUDE.md section 4: no fallback that hides a failure. A logger"
+            echo "that can reach real bars can be silently wrong about them."
+            exit 1
+          fi
+          echo "OK - the logger depends on nothing and opens only its own files."
+
       - name: Gate 22 — the sweep crates cannot read a bar
         run: |
           set -euo pipefail
@@ -2634,6 +2886,7 @@ jobs:
             exit 1
           fi
           echo "OK — no banned construct outside the allowlist."
+
       - name: Gate 12 — every O(1) claim names the test that proves it
         run: |
           set -euo pipefail
@@ -3304,14 +3557,6 @@ jobs:
     needs: language-purity
     steps:
       - uses: actions/checkout@v4
-        # Full history, because two tests in `crates/core/tests/findings.rs` read it:
-        # `every_named_commit_exists` and
-        # `every_named_commit_is_in_this_branchs_history` resolve the sha each FIXED
-        # row names. At the `actions/checkout` default depth of one they can see NO
-        # commit, so both refused shas that plainly exist and failed this job on a
-        # green tree. The `mutants` job below already does the same thing, which is
-        # where the shape of this fix came from.
-        with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -3434,11 +3679,6 @@ jobs:
     needs: build
     steps:
       - uses: actions/checkout@v4
-        # Full history, for the same reason the `build` job needs it: this job runs
-        # `cargo llvm-cov ... --workspace`, which runs the tests, and two in
-        # `crates/core/tests/findings.rs` resolve the sha each FIXED ledger row names.
-        # At the default depth of one they refuse commits that exist.
-        with: { fetch-depth: 0 }
       - uses: dtolnay/rust-toolchain@stable
         with: { components: llvm-tools-preview }
       - uses: Swatinem/rust-cache@v2
@@ -3467,6 +3707,103 @@ jobs:
           cargo llvm-cov --workspace --locked \
             --fail-under-lines 100 --fail-under-regions 100 \
             --summary-only
+
+      - name: Gate 20 — every uncovered line in the logger is declared, with its reason
+        # ALWAYS, even when the step above failed. That step enforces the
+        # workspace ideal and currently cannot pass; this one enforces something
+        # that CAN, and a gate that only runs when everything is already green
+        # is a gate that never runs.
+        if: always()
+        run: |
+          set -euo pipefail
+          # WHY THIS EXISTS BESIDE `--fail-under 100`.
+          #
+          # `CLAUDE.md` §9 asks for 100%. `cargo llvm-cov` offers no way to say
+          # "this line is unreachable and declared" — no line-level exclusion, no
+          # ignore mechanism finer than a whole file. So §9 and §3 rule 6 pull
+          # against each other: the honest thing (a backstop for a condition the
+          # process cannot create) is indistinguishable from the dishonest thing
+          # (a line nobody bothered to test).
+          #
+          # This is the same answer gate 1d gives for path-shaped literals:
+          # DECLARE each one, with a reason, and let the gate refuse anything
+          # undeclared. `docs/06-limits.md` §54 carries the reasons in prose;
+          # this carries the counts, and the two must agree.
+          #
+          # A COUNT PER FILE, not a line number, because line numbers move every
+          # time somebody edits a comment and a declaration that rots is worse
+          # than none.
+          #
+          # AN EXACT MATCH, not a ceiling. A file that drops BELOW its declared
+          # count fails too — the reason is gone and the declaration is now a
+          # lie, which is precisely what gate 1d says about a stale native-crate
+          # entry. Covering a line is a success the declaration has to record.
+          declared='
+          clock.rs 1
+          level.rs 1
+          lib.rs 6
+          sink.rs 8
+          tail.rs 3
+          '
+          cargo llvm-cov report --locked --text > /tmp/cov.txt
+
+          # IS THERE A PROFILE AT ALL? The step above runs `--fail-under`, so it
+          # exits non-zero on a real shortfall AND on a build failure, and this
+          # step runs `if: always()` either way. Reading a missing or half-written
+          # profile yields a plausible-looking report full of zero-count lines,
+          # and comparing counts against it would report "coverage regressed"
+          # when the truth is "the tests never ran". Refuse to render a verdict
+          # on data that is not there. Measured: a stale profile read 13.96%
+          # where a real one read 96.80%.
+          # A FILE COUNT IS NOT ENOUGH. A half-written profile still lists all
+          # five files; it just marks most of their lines uncovered. So measure
+          # the fraction: a real profile leaves ~1% of this crate uncovered, a
+          # degraded one leaves most of it. Anything past 50% is not a
+          # regression somebody introduced, it is a profile nobody can read.
+          read -r total zero <<EOF
+          $(awk '
+            /telemetry\/src\/[a-z_]+\.rs:/ { f=1; next }
+            f && /^ *[0-9]+\| *[0-9]+\|/ { t++; if ($0 ~ /^ *[0-9]+\| *0\|/) z++ }
+            END { printf "%d %d\n", t+0, z+0 }
+          ' /tmp/cov.txt)
+          EOF
+          if [ "$total" -lt 500 ] || [ $(( zero * 2 )) -gt "$total" ]; then
+            echo "NO USABLE COVERAGE PROFILE — $zero of $total telemetry lines"
+            echo "read as uncovered. A real profile leaves about 19. The measure"
+            echo "step did not produce usable data, which usually means the"
+            echo "workspace failed to BUILD or the target directory was cleared"
+            echo "underneath it. This gate is reporting THAT, not a coverage"
+            echo "regression. Measured: a stale profile read 13.96% where a"
+            echo "real one read 96.80%."
+            exit 1
+          fi
+
+          actual=$(awk '
+            /telemetry\/src\/[a-z_]+\.rs:/ { f=$0; sub(".*/crates/telemetry/src/","",f); sub(":","",f); next }
+            f && /^ *[0-9]+\| *0\|/ { n[f]++ }
+            END { for (k in n) printf "%s %d\n", k, n[k] }
+          ' /tmp/cov.txt | sort)
+          # `paste` joins with a TAB and awk prints a SPACE; normalise, or the
+          # gate fails on whitespace while every count agrees.
+          want=$(printf '%s\n' $declared | paste - - | tr '\t' ' ' | sort)
+
+          echo "declared:"; printf '%s\n' "$want"   | sed 's/^/  /'
+          echo "measured:"; printf '%s\n' "$actual" | sed 's/^/  /'
+
+          if [ "$want" != "$actual" ]; then
+            echo
+            echo "THE LOGGER'S UNCOVERED SET IS NOT THE DECLARED ONE."
+            echo
+            diff <(printf '%s\n' "$want") <(printf '%s\n' "$actual") || true
+            echo
+            echo "A file with MORE uncovered lines than declared has a new gap:"
+            echo "cover it, or add it to docs/06-limits.md section 54 with the"
+            echo "reason it cannot run and raise the count here in the same"
+            echo "commit. A file with FEWER has a declaration that is now false:"
+            echo "lower the count and delete the prose that justified it."
+            exit 1
+          fi
+          echo "OK — every uncovered line in crates/telemetry is declared."
 
   # ==========================================================================
   # GATE 18 — no surviving mutant on what this change touched.

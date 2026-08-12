@@ -33,15 +33,47 @@
    * per dataset, exactly as `web/typeahead.js` does it. Never a scan of the
    * universe, and never a request per character.
    *
-   * **Two columns are present and REFUSED.** `Δ %` and `Prev Δ %` are the
-   * operator's stated ask. They cannot be computed from what the server serves,
-   * and computing them from raw stored prices would print fabricated crashes
-   * across corporate actions. They are rendered as columns that NAME their own
-   * blockage rather than quietly omitted — see `BLOCKED` below and the notice
-   * the header opens. `CLAUDE.md` §4: degrade loudly and name the reason.
+   * **The two percentage columns are LIVE, and most of their cells are still a
+   * dash.** They used to be refused outright, because `/store.json` carried no
+   * price at all; D-0067 put the month's first and last close in the census and
+   * D-0069 made the server compute the ratio. What arrives now is INTEGER BASIS
+   * POINTS — `125` is +1.25% — or `null` and one of five reason codes.
+   *
+   * A dash is therefore never "nothing happened" and never a zero: it is one
+   * named fact out of five, and hovering it says which. The commonest by far is
+   * `corporate_action_unverified` — no split-and-bonus threshold is sourced
+   * anywhere in this repository, so `docs/05-decisions.md` D-0018 refuses every
+   * equity rather than printing an unadjusted 1:5 split as an 80% crash.
+   * Indices never split and do show a number. `CLAUDE.md` §4: degrade loudly
+   * and name the reason.
    */
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
+  import Picker from '$lib/Picker.svelte';
+  /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
+     `loadCatalogue(feeds.active)` on every feed change, so the universe rung
+     costs this page NO request — it is a join against a list the layout has
+     already paid for. It also arrives stamped with the feed it answers for,
+     which is the only thing that makes a count under this feed's name
+     checkable. See `universeRefusal`. */
+  import { catalogue } from '$lib/index.svelte.js';
+  /* Display only. `month` stays the raw `YYYY-MM` because it is the filter
+     itself — `r.month === month`, `r.month.startsWith(typed)`, the `{#each}`
+     keys and the sort comparator all read the key, never the label. See the
+     rule at the top of `$lib/dates.js`.
+
+     `stampLabel` renders the one instant this page shows a human — when
+     `/store.json` was last read. It names Asia/Kolkata rather than inheriting
+     the host's zone, so "as of 15:29" is the same minute for every operator
+     reading the same store.
+
+     `dayLabel` renders the DAY WINDOW each stored month actually covers.
+     `/store.json` has carried `first_ts` / `last_ts` per row — in MICROseconds
+     — since the census gained them, and no page has ever read them. A month
+     row that says "2020-03" and nothing else cannot distinguish a month held
+     from the 2nd to the 31st from one held on the 2nd alone; the window says
+     which, in the `02 Sep 2024` form this product uses everywhere. */
+  import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
 
   /* ======================================================================
      DATA
@@ -59,6 +91,122 @@
   let sortKey = $state('instrument');
   let desc = $state(false);
 
+  /* ---- THE CASCADE'S NEW RUNGS ---------------------------------------
+     Feed → universe → instruments, and a month WINDOW across the top of the
+     table. Every one of them is stored in its KEY form and never in its label:
+     `universe` is a slug out of `UNIVERSES`, and `fromMonth` / `toMonth` are
+     raw `YYYY-MM` — the same string `r.month` carries, so `>=` and `<=` are
+     chronological string comparisons and never alphabetical ones over
+     `Apr 2020`. The rule is stated at the top of `$lib/dates.js`; this is the
+     page where breaking it would be invisible, because the table would render
+     perfectly and return nothing.
+
+     `''` MEANS "NO BOUND" IN ALL THREE, never "the empty month". A range with
+     one end open is the ordinary case — "everything since March 2020" — and it
+     has to be expressible without inventing a sentinel date the store has
+     never heard of. */
+  let universe = $state(''); /* '' = Everything: no membership join at all */
+  let fromMonth = $state(''); /* '' = no lower bound */
+  let toMonth = $state(''); /* '' = no upper bound */
+
+  /* ---- THE BAR-LENGTH RUNG, WHICH THIS PAGE PRINTED AND COULD NOT CHOOSE
+     The rung has been a COLUMN since the server stopped stamping `"1m"` on
+     every row, and it has never been a CONTROL: an operator could see that a
+     row was `1day` and had no way to ask for only those. It is the axis
+     `/ingest` and `/markets` both call "Timeframe", so it is called that here.
+
+     `''` MEANS EVERY RUNG THE STORE HOLDS, and it is the opening value on
+     purpose. Defaulting to one rung would silently narrow the table on load
+     and move every counted figure on this page — bars, sessions, coverage,
+     months — while the control read like an untouched default. The same rule
+     `month`, `kind` and `universe` already follow.
+
+     THE VALUE IS THE STORE'S OWN SPELLING — `1min`, `1day`, the exact string
+     `store::path::Timeframe::as_str` writes onto `/store.json`'s `timeframe`
+     field and the exact directory the bars are filed under. It is compared
+     with `===` against `r.timeframe`, so it can never be a label. */
+  let timeframe = $state(''); /* '' = every rung the store holds */
+
+  /* ---- THE CONTRACT RUNG'S TWO SELECTIONS -----------------------------
+     AN EMPTY SET MEANS NO JOIN AT ALL, exactly as `universe = ''` does, and it
+     is NOT "every strike". The two are different and the difference is the
+     whole of this page: selecting every strike keeps only rows that HAVE one,
+     so every index, every equity and every future in the store drops out of
+     the table. An empty set is the ordinary case here — a census whose rows
+     are overwhelmingly not options — and it has to be expressible without
+     inventing a strike the store has never held.
+
+     THEY ARE REPLACED, NEVER MUTATED. `$state` proxies plain objects and
+     arrays; a `Set` is neither, so `strikePick.add(x)` would change the value
+     and notify nothing, and the table would stay on the previous selection
+     while the panel showed the new one. Every writer below builds a new Set
+     and assigns it.
+
+     THE KEYS ARE STRINGS ON BOTH. `Picker` filters by `r.key.toUpperCase()`,
+     so a numeric key would throw inside a shared component the moment the
+     filter box was typed into. The strike's own paisa integer stays the
+     integer on the row; only the selection key is its decimal spelling.
+     @type {Set<string>} */
+  /**
+   * WHICH MENU IN THE PANEL IS OPEN — one value for the whole page, so "two are
+   * open at once" is not a state this component can reach.
+   *
+   * The same rule `$lib/Picker.svelte` holds for itself, and for the same
+   * reason: a per-menu `open` flag plus an outside-click close never shuts the
+   * first menu, because a click on the SECOND menu's button is not outside the
+   * first one's `.dd` — it is inside that one. Picker's own module-level id
+   * closes its menus when anything else on the page is pressed, and
+   * `onWindowDown` below closes this one for the same press, so the two never
+   * overlap in either direction.
+   *
+   * THE SET IS DECLARED TO THE CHECKER AND NOT ONLY TO THE READER. Without
+   * the `@type` below, `$state(null)` infers `null` and every assignment in
+   * this file — `drop = 'feed'`, `drop = 'month'` — is an error `svelte-check`
+   * reports and nobody reads. Six of them stood here before the three new
+   * rungs were added; one annotation answers all nine.
+   *
+   * @type {'feed' | 'uni' | 'tf' | 'month' | 'exp' | 'side' | null}
+   */
+  let drop = $state(null);
+
+  let strikePick = $state(new Set());
+  /** @type {Set<string>} */
+  let mnyPick = $state(new Set());
+
+  /**
+   * THE EXPIRY, AND IT IS A GATE RATHER THAN A FILTER.
+   *
+   * The owner's rule, in his words: *for futures and options without the
+   * current selected expiry don't display anything.* So `''` here does NOT
+   * mean "every expiry" the way `universe = ''` means "no membership join".
+   * It means NO CONTRACT HAS BEEN CHOSEN, and every row that carries one is
+   * held back until one is — because a futures bar belongs to ONE contract,
+   * and putting two expiries under one heading would show a series no contract
+   * ever traded.
+   *
+   * A row with NO expiry — every index and every equity — is untouched by it.
+   * Gating those on a contract they do not have would be this page inventing
+   * one for them.
+   *
+   * RAW ISO DAY, ALWAYS: `2026-10-29`, the exact string `Display for Expiry`
+   * writes into the instrument name. It is the `{#each}` key, the `===` in the
+   * gate and the sort key; `dayLabel` is applied at the render site only.
+   * `YYYY-MM-DD` is fixed-width and most-significant-first, so `<` on the
+   * string IS chronological order and `29 Oct 2026` is not.
+   */
+  let expiry = $state(''); /* '' = no contract chosen; contract rows are held */
+
+  /**
+   * WHICH SIDE OF THE CONTRACT — `''` (both), `'CE'` or `'PE'`.
+   *
+   * `''` is the ordinary "no join at all", the same meaning `strikePick`'s
+   * empty Set carries: it narrows nothing and it is NOT "every option", so an
+   * index does not drop out of the table for having no side. `'CE'` and `'PE'`
+   * are the two strings `OptionSide::as_str` emits and the two `contractOf`
+   * reads back off a name — never a label, never lower case.
+   */
+  let side = $state('');
+
   /**
    * A session is 375 one-minute bars, 09:15–15:29 inclusive.
    *
@@ -67,6 +215,110 @@
    * an unstated denominator is a number nobody can check.
    */
   const BARS_PER_SESSION = 375;
+
+  /**
+   * Bars one session holds **at the rung the row is stored at**.
+   *
+   * # The defect this removes
+   *
+   * `BARS_PER_SESSION` is 375 because that is how many ONE-MINUTE bars a
+   * session holds. It was applied to every row regardless of rung, and the
+   * server compounded it by stamping `"timeframe":"1m"` on every census row —
+   * so a complete 1-day month, 21 bars for 21 trading days, was divided by 375
+   * and reported as `0.06 sessions observed`, i.e. ~99.7% missing. The store
+   * was right; both readers were wrong in the same direction.
+   *
+   * A DAILY session is ONE bar by definition. That is not an approximation:
+   * the rung IS the session for `1day`.
+   *
+   * A rung this function has no number for returns `null`, and every caller
+   * renders a dash rather than a figure — an unknown denominator produces no
+   * percentage at all, never a plausible one. The same rule the % change
+   * columns already follow.
+   */
+  const barsPerSession = (tf) => {
+    if (tf === '1min' || tf === '1m') return BARS_PER_SESSION;
+    if (tf === '1day') return 1;
+    return null;
+  };
+
+  /**
+   * THE BAR-LENGTH LADDER — a rung's own length in SECONDS.
+   *
+   * # Why a number and not a list position
+   *
+   * `store::path::Timeframe` is `{ secs: u32, name: &'static str }`, and the
+   * seconds are the field that MEANS something: `1min` is 60 and `1day` is
+   * 86,400 because those are the numbers in `crates/store/src/path.rs`, not
+   * because of where they sit in an array here. Every value below is copied
+   * from a `Timeframe` constant in that file and nothing is interpolated
+   * between them — a rung this table has no second count for is not given a
+   * guessed one.
+   *
+   * `1m` and `1hr` are ALIASES AND ARE MARKED AS SUCH. `1m` is what the server
+   * stamped on every census row before it learned to write the real rung, and
+   * it may still be in a cached response; `1hr` is `pull::vendor::Granularity`'s
+   * spelling of the rung the store files under `60min`. Both name a length this
+   * table already knows, so both get that length rather than falling off the
+   * end of the ladder.
+   *
+   * # Why this exists at all
+   *
+   * Sorted as TEXT, the rungs read `15min`, `1day`, `1min`, `30min`, `3min`,
+   * `5min`, `60min` — ordered by first character. That is the same defect as a
+   * month column ordered by `Apr`, and it is why `$lib/dates.js` opens with the
+   * rule it does. A bar-length axis has ONE order and it is the length.
+   *
+   * @type {ReadonlyMap<string, number>}
+   */
+  const TF_SECS = new Map([
+    ['1min', 60],
+    ['1m', 60],
+    ['3min', 180],
+    ['5min', 300],
+    ['15min', 900],
+    ['30min', 1800],
+    ['60min', 3600],
+    ['1hr', 3600],
+    ['1day', 86400]
+  ]);
+
+  /**
+   * A rung's position on that ladder.
+   *
+   * A rung the table has no length for sorts LAST — `Infinity`, which is past
+   * every real length — and is never folded into the middle, because a string
+   * nobody measured has no measured relation to the rungs either side of it.
+   * The control draws it, says `length not recorded`, and lets it be chosen:
+   * the store holds those rows and hiding the only way to reach them would be
+   * worse than admitting the ladder does not reach that far.
+   *
+   * @param {string} tf
+   */
+  const tfSecs = (tf) => TF_SECS.get(tf) ?? Number.POSITIVE_INFINITY;
+
+  /**
+   * THREE-WAY, and it is not a formality.
+   *
+   * `a < b ? -1 : 1` answers "greater" for two EQUAL inputs, in both
+   * directions at once, and a comparator that contradicts itself leaves the
+   * order of those elements unspecified — the same store could render its
+   * rungs in a different order on the next pass. Equal lengths fall through to
+   * `txt`, which is itself three-way, so `1hr` beside `60min` is ordered and
+   * stays ordered.
+   *
+   * @param {string} a
+   * @param {string} b
+   */
+  const tfCmp = (a, b) => {
+    const sa = tfSecs(a);
+    const sb = tfSecs(b);
+    return sa < sb ? -1 : sa > sb ? 1 : txt(a, b);
+  };
+
+  /* `tfNote` — the third of these — is NOT here, and its absence is the rule
+     the FORMATTING block below states: it calls `fmt`, so it is declared after
+     `fmt` and not before it. The two above call nothing. */
 
   /* ======================================================================
      FORMATTING
@@ -78,19 +330,192 @@
      what it is: a temporal-dead-zone reference that works by scheduling
      accident. One reordering of the evaluation and it throws.
      ====================================================================== */
-  const nf = new Intl.NumberFormat();
+  /* PINNED TO en-IN, LIKE EVERY OTHER PAGE. An unqualified `Intl.NumberFormat()`
+     inherits whatever locale the host happens to run, so the same store renders
+     8,78,28,617 on one machine and 878,286,617 on another. That makes a
+     screenshot unreproducible and a bug report unfalsifiable — and this one
+     formatter feeds `fmt`, which is called 36 times across the headline
+     counters, the month cards, the receipt prose and every table cell.
+     `audit/+page.svelte:145` pins the same way. */
+  const nf = new Intl.NumberFormat('en-IN');
   const fmt = (n) => nf.format(n);
   /* FIXED TWO DECIMALS, ALWAYS. Adaptive precision made the digit count change
      from row to row, so the column's decimal point moved and the eye had to
      re-find it on every line. A column of numbers is a column or it is not. */
-  const pctText = (p) => `${(p * 100).toFixed(2)}%`;
-  const dayText = (d) => (Number.isInteger(d) ? String(d) : d.toFixed(2));
-  const clock = (t) => (t ? new Date(t).toLocaleTimeString() : '—');
+  /* `null` IS A LEGAL ARGUMENT AND IT RENDERS A DASH. A ratio whose
+     denominator is zero is not 100% and not 0% — it does not exist, and
+     `(null * 100).toFixed(2)` would print `0.00%`, a measurement, over an
+     absence. Every caller that can reach an empty denominator passes `null`
+     and gets the dash; the REASON belongs beside it at the call site, which is
+     the only place that knows which absence it is. */
+  const pctText = (p) => (p === null || p === undefined ? '—' : `${(p * 100).toFixed(2)}%`);
+  /**
+   * A session count, or a dash when the rung has no recorded session size.
+   *
+   * `null` reaches here from `sessions()` for a rung `barsPerSession` has no
+   * number for. A dash is the honest render: `0.00` would be a measurement and
+   * this is an absence. Same rule the % change columns follow.
+   */
+  const dayText = (d) =>
+    d === null || d === undefined ? '—' : Number.isInteger(d) ? String(d) : d.toFixed(2);
+  /**
+   * When `/store.json` was last read, as a date and an IST minute.
+   *
+   * A bare `toLocaleTimeString()` printed `15:29:04` in whatever zone the
+   * machine happens to sit in and named neither the zone nor the day — so a
+   * stamp from yesterday's session was indistinguishable from one taken a
+   * minute ago, which is the single fact this line exists to report.
+   *
+   * `0` means the store has NOT been read, and that is an absence: passing it
+   * through would render the epoch, `01 Jan 1970, 05:30`, which is a stamp
+   * nobody took.
+   */
+  const clock = (t) => (t ? stampLabel(t) : '—');
+
+  /**
+   * The DAYS one stored month actually covers. `02 Sep 2024 → 30 Sep 2024`.
+   *
+   * `null` when the row carries no stamps — an older `/store.json` payload, or
+   * an entry written before the census recorded them. The caller prints the
+   * absence and names it; inventing the month's first and last calendar day
+   * would be this page asserting a trading calendar it does not have, and the
+   * first and last day of a month are very often not trading days at all.
+   *
+   * Both ends go through `dayLabel`, so the month is `Sep` and never `Sept`
+   * and the zone is IST whatever the reading machine is set to.
+   */
+  const heldWindow = (it) =>
+    it && it.firstAt !== null && it.lastAt !== null
+      ? `${dayLabel(it.firstAt)} → ${dayLabel(it.lastAt)}`
+      : null;
+
+  /* ---- THE PERCENTAGE COLUMNS ----------------------------------------
+     `/store.json` sends INTEGER BASIS POINTS. 125 is +1.25%. It is never a
+     float on the wire, because `CLAUDE.md` §7 bans the float for money and a
+     ratio derived from money is the same arithmetic — see the handler's own
+     comment, which promised this shape for a long time before D-0069 made it
+     true. The decimal point is inserted HERE, for display, exactly as it is
+     for prices.
+     ==================================================================== */
+
+  /**
+   * Basis points as a signed percentage with a fixed two decimals.
+   *
+   * THE DIVISION IS EXACT AND IT IS NOT `bps / 100`. The remainder is taken
+   * with `%` — an integer operation — and the quotient is a multiple of 100
+   * divided by 100, which IEEE returns exactly for every value inside 2^53.
+   * A naive `(bps / 100).toFixed(2)` is a float rounding of a value that has an
+   * exact decimal expansion, and it would be the one place on this page where a
+   * price-derived number went through a float for no reason at all.
+   *
+   * TWO DECIMALS ALWAYS, AND THE SIGN IS PART OF THE NUMBER. Adaptive precision
+   * moves the decimal point from row to row; a `+` that only appears on losses'
+   * mirror image makes a column of gains read as a column of magnitudes. Zero
+   * carries no sign because it has no direction — the cell is neutral-coloured
+   * and says `0.00%`, which is a real answer and not an unknown.
+   */
+  function bpsText(bps) {
+    const sign = bps > 0 ? '+' : bps < 0 ? '-' : '';
+    const mag = Math.abs(bps);
+    const frac = mag % 100;
+    return `${sign}${(mag - frac) / 100}.${String(frac).padStart(2, '0')}%`;
+  }
+
+  /** up / down / flat / none — the direction green and red are reserved for.
+      `none` is its own word rather than `flat`, because a cell nobody can
+      compute and a month that did not move are different facts and must not
+      share a colour. */
+  const dirOf = (bps) => (bps === null ? 'none' : bps > 0 ? 'up' : bps < 0 ? 'down' : 'flat');
+
+  /**
+   * WHY a percentage is a dash. One sentence per server reason code.
+   *
+   * `CLAUDE.md` §4 — degrade loudly and NAME THE REASON. A single "n/a" over
+   * five distinct facts is the fallback that hides a failure: "this equity can
+   * never be shown until a threshold is sourced" and "re-ingest this month and
+   * it will appear" are opposite instructions, and one dash cannot say both.
+   *
+   * An unrecognised code is reported as an unrecognised code, WITH the code.
+   * Guessing a sentence for it would be this page inventing a fact about the
+   * server, which is the exact failure the map exists to prevent.
+   */
+  const WHY = {
+    corporate_action_unverified:
+      'REFUSED, not missing. This instrument can split, bonus or consolidate, and no corporate-action threshold is sourced anywhere in this repository — docs/00-charter.md names no verified split-and-bonus feed. An unadjusted 1:5 split reads as an 80% overnight crash that is indistinguishable from a real move, so docs/05-decisions.md D-0018 refuses the window loudly rather than printing it. Indices never split and do show a number. This cell stays a dash until an operator supplies a threshold with a source.',
+    not_recorded:
+      'The census holds this month and no close was ever read for it — a manifest version-1 entry, or a version-2 one written before its bar file was priced (D-0067). Not zero, and not a price of zero: nobody has looked. Re-ingesting the month records both closes and this fills in.',
+    no_earlier_month:
+      'This feed holds no bars for the month immediately before this one, so there is no previous change to show. The first month an instrument holds is the ordinary case; a hole in the middle is the other one. It is unknown, never 0.00%.',
+    base_not_positive:
+      "The month's first close is zero paisa, so the ratio has no base and is undefined. Zero means zero here (CLAUDE.md §7), so this is a real stored price and not a missing one — but nothing can be divided by it.",
+    overflow:
+      'The move times 10,000 leaves a 64-bit integer, so the server refused it rather than wrapping it into a plausible small number.'
+  };
+
+  const whyText = (code) =>
+    WHY[code] ??
+    `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
+
+  /**
+   * What one bar-length rung says about itself under the Timeframe control —
+   * its length, and the session size the completeness column divides by.
+   *
+   * DECLARED HERE AND NOT BESIDE `TF_SECS`, because it calls `fmt` and `fmt`
+   * is declared in the block above this line. That is the whole rule the
+   * FORMATTING block states, applied rather than quoted.
+   *
+   * Never a figure this page does not hold: a rung with no recorded
+   * bars-per-session says so rather than printing a denominator nobody chose —
+   * the same rule `sessions` and the two percentage columns already follow.
+   *
+   * @param {string} tf
+   */
+  const tfNote = (tf) => {
+    const per = barsPerSession(tf);
+    const secs = TF_SECS.get(tf);
+    const len = secs === undefined ? 'length not recorded' : `${fmt(secs)}s bars`;
+    return per === null ? `${len} · no recorded session size` : `${len} · ${fmt(per)}/session`;
+  };
+
+  /**
+   * WHICH FEED THE ROWS ON SCREEN BELONG TO.
+   *
+   * Deliberately a plain `let` and not `$state`: it is compared, never
+   * rendered and never derived from, so making it reactive would only add a
+   * dependency the fetch effect would then have to `untrack`.
+   *
+   * # The defect it removes
+   *
+   * `rows` was left standing while the new feed's request was in flight, so a
+   * feed switch put the PREVIOUS feed's counts under the NEW feed's name: the
+   * title read `DB · Groww`, every tile still held Dhan's totals, and `as of`
+   * still held the minute Dhan was read. Every one of those numbers was
+   * counted — from the wrong store. A count that survives the query that
+   * produced it is exactly the stale value `CLAUDE.md` §4 bans, and it is
+   * worse than a blank because it is plausible.
+   *
+   * Refresh is the deliberate exception: `nonce` re-runs this effect with the
+   * SAME feed, `rows` is kept, and the table stays readable under the
+   * "refreshing…" indicator while the same store is re-read.
+   */
+  let loadedFeed = null;
 
   $effect(() => {
     const f = feeds.active;
     void nonce; /* read, so Refresh re-runs this effect */
     if (!f) return;
+    if (loadedFeed !== f) {
+      loadedFeed = f;
+      rows = [];
+      fetchedAt = 0;
+      // A FUNCTION DECLARATION, CALLED FROM ABOVE ITSELF ON PURPOSE. The state
+      // it clears is declared further down beside the code that owns it, and a
+      // `const` arrow there would be a temporal-dead-zone reference from here —
+      // the exact thing the FORMATTING block above says was already found and
+      // fixed once on this file. A `function` hoists whole, so this call is
+      // valid wherever it appears in the script.
+      forgetPreviousFeed();
+    }
     let dead = false;
     loading = true;
     error = null;
@@ -120,6 +545,13 @@
   // the operator hunt. This names the feeds that have rows in this store — a
   // fact about the store, and a place to go. It renders no other feed's
   // numbers: one feed is selected and only that one's data is shown.
+  //
+  // IT IS DROPPED ON A FEED CHANGE, in `forgetPreviousFeed`, for the same
+  // reason the counts are. The list excludes whichever feed was active WHEN IT
+  // RESOLVED, so carrying it across a switch renders "Rows exist under Groww"
+  // while Groww is the selected feed and the panel above it says Groww holds
+  // nothing — a live control offering a move the page has already made. It is
+  // a small stale value, but it is one produced by a query nobody re-ran.
   let elsewhere = $state([]);
   $effect(() => {
     if (loading || error || rows.length || !feeds.all.length) return;
@@ -158,13 +590,24 @@
    * kind must not quietly lower the bar the remaining rows are judged against.
    */
   const monthFull = $derived.by(() => {
+    // KEYED ON (MONTH, RUNG), NOT ON MONTH.
+    //
+    // "The fullest instrument in this month" is only a denominator among rows
+    // of the SAME bar length. Keyed on the month alone, one 1min row (~8,250
+    // bars) beside a 1day row (19) judges every daily row ~8,231 short — 0.23%
+    // complete for a month that is actually full. Correct today only because
+    // the store happens to hold one rung; that is not a property to rely on.
     const most = new Map();
     for (const r of rows) {
-      const seen = most.get(r.month);
-      if (seen === undefined || r.rows > seen) most.set(r.month, r.rows);
+      const at = `${r.month}\u0000${r.timeframe}`;
+      const seen = most.get(at);
+      if (seen === undefined || r.rows > seen) most.set(at, r.rows);
     }
     return most;
   });
+
+  /** The denominator key for one row: its month AND its rung. */
+  const fullestKey = (r) => `${r.month}\u0000${r.timeframe}`;
 
   /**
    * Bars this instrument-month is short of the fullest one in the same month.
@@ -194,12 +637,123 @@
    * expression over a single row that can know how many sessions a month had.
    */
   function shortBy(r) {
-    return Math.max(0, (monthFull.get(r.month) ?? r.rows) - r.rows);
+    return Math.max(0, (monthFull.get(fullestKey(r)) ?? r.rows) - r.rows);
   }
 
-  /** Whole sessions held, from the bar count. Fractional means a partial day. */
+  /**
+   * Whole sessions held, from the bar count AT THIS ROW'S RUNG.
+   *
+   * Fractional means a partial day. `null` when the rung has no recorded
+   * bars-per-session — the caller draws a dash, never a figure computed
+   * against a denominator nobody chose.
+   */
   function sessions(r) {
-    return r.rows / BARS_PER_SESSION;
+    const per = barsPerSession(r.timeframe);
+    return per === null ? null : r.rows / per;
+  }
+
+  /* ======================================================================
+     THE CONTRACT TAIL — the ONE place a stored option names its strike
+     ----------------------------------------------------------------------
+     `/store.json` sends ten fields per row and NOT ONE OF THEM IS A STRIKE, a
+     side, an expiry or a price: `instrument`, `month`, `timeframe`, `rows`,
+     `first_ts`, `last_ts`, `chg_bps`, `chg_why`, `prev_chg_bps`,
+     `prev_chg_why`. That list is the row writer in `crates/api/src/server.rs`
+     and the table in the doc comment above `store_json`, and it is exhaustive.
+
+     So the only place a strike can be read from is the instrument NAME, and
+     that is readable only because this repository writes the name in exactly
+     one place: `Display for InstrumentKey` in `crates/core/src/instrument.rs`
+     ends an option `-{strike.raw()}-{CE|PE}` — the strike in PAISA, then the
+     two-letter side every Indian vendor uses.
+
+     THE PARSE IS A SUFFIX TEST AND IT REFUSES EVERYTHING ELSE. It is not a
+     guess at a spelling: it recognises exactly the tail this repository emits
+     and answers `null` for every other name — which today is every name in the
+     store, because indices, equities and futures carry no strike at all. A
+     name that is an option under some other spelling is reported as NO
+     CONTRACT rather than as a strike this page decoded by pattern-matching.
+     `CLAUDE.md` §3 rule 1: no invention.
+     ====================================================================== */
+  const OPTION_TAIL = /-(\d+)-(CE|PE)$/;
+
+  /**
+   * The strike in paisa and the side one census instrument name carries, or
+   * `null` when the name does not end the way this repository ends an option's.
+   *
+   * @param {string} name
+   * @returns {{ strike: number, side: 'CE' | 'PE' } | null}
+   */
+  function contractOf(name) {
+    const m = name.match(OPTION_TAIL);
+    return m === null
+      ? null
+      : { strike: Number(m[1]), side: /** @type {'CE' | 'PE'} */ (m[2]) };
+  }
+
+  /* ---- THE SAME TAIL, ONE FIELD EARLIER — the expiry -------------------
+     SAME SOURCE AND SAME RULE AS THE STRIKE ABOVE IT. `Display for
+     InstrumentKey` in `crates/core/src/instrument.rs` writes exactly two
+     contract shapes and no others:
+
+         Kind::Future  ->  …-{expiry}-FUT
+         Kind::Option  ->  …-{expiry}-{strike.raw()}-{CE|PE}
+
+     and `Display for Expiry`, in the same file, renders that expiry
+     `{:04}-{:02}-{:02}` — an ISO calendar day, fixed width, zero padded. The
+     two patterns below are those two lines and nothing else.
+
+     IT IS A SUFFIX TEST AND IT REFUSES EVERYTHING ELSE, exactly as
+     `OPTION_TAIL` does. `/store.json` sends ten fields per row and not one of
+     them is an expiry — the exhaustive list is in the block above
+     `OPTION_TAIL` — so the NAME is the only source there is, and a name that
+     does not end one of these two ways answers `null`, meaning NO CONTRACT.
+     It never answers an expiry decoded out of a spelling this page guessed at.
+     `CLAUDE.md` §3 rule 1: no invention.
+
+     THE OPTION PATTERN IS TRIED FIRST AND THAT ORDER MATTERS. `-FUT` cannot
+     end an option's name, so the two are disjoint and either order returns the
+     same answer today; the option is tried first anyway so that the day a
+     third shape is added, the more specific tail is already the one that
+     wins. */
+  const FUTURE_TAIL = /-(\d{4}-\d{2}-\d{2})-FUT$/;
+  const OPTION_EXPIRY_TAIL = /-(\d{4}-\d{2}-\d{2})-\d+-(?:CE|PE)$/;
+
+  /**
+   * The expiry one census instrument name carries, as the RAW ISO day, or
+   * `null` when the name is not a contract this repository wrote.
+   *
+   * The returned string is a key and stays one: it is the `{#each}` key, the
+   * Set member, the `===` in the gate and the sort key. `dayLabel` is applied
+   * at the render site and nowhere near any of those.
+   *
+   * @param {string} name
+   * @returns {string | null}
+   */
+  function expiryOf(name) {
+    const m = name.match(OPTION_EXPIRY_TAIL) ?? name.match(FUTURE_TAIL);
+    return m === null ? null : m[1];
+  }
+
+  /**
+   * A strike in paisa, rendered as rupees, EXACTLY.
+   *
+   * The same integer arithmetic `bpsText` uses and for the same reason:
+   * `CLAUDE.md` §7 bans the float for money, and `p / 100` is a float division
+   * of a value that has an exact decimal expansion. The remainder is taken with
+   * `%` — an integer operation — and the quotient is a multiple of 100 divided
+   * by 100, which IEEE returns exactly inside 2^53.
+   *
+   * The paisa are dropped only when they are ZERO, which is the ordinary case
+   * on an exchange-listed strike. A strike that is not a whole rupee prints its
+   * two decimals rather than being rounded into one that was never listed.
+   *
+   * @param {number} p
+   */
+  function strikeText(p) {
+    const frac = p % 100;
+    const whole = (p - frac) / 100;
+    return frac === 0 ? fmt(whole) : `${fmt(whole)}.${String(frac).padStart(2, '0')}`;
   }
 
   /* ======================================================================
@@ -213,7 +767,17 @@
   const deco = $derived.by(() =>
     rows.map((r) => {
       const short = shortBy(r);
-      const denom = monthFull.get(r.month) ?? r.rows;
+      // THE CONTRACT IS PARSED ONCE PER ROW PER DATASET, here, beside every
+      // other derived per-row number — never inside the chain, the counts, the
+      // ladder or the row filter. Those run per paint and per keystroke; this
+      // runs when the store is re-read. Same rule `short` and `days` follow.
+      const ct = contractOf(r.instrument);
+      // THE EXPIRY IS PARSED IN THE SAME PASS AND FOR THE SAME REASON. It is
+      // read by the gate, which runs on every keystroke, every scroll frame
+      // and every click; parsing it there would put a regex match on the hot
+      // path for a value that changes only when the store is re-read.
+      const ex = expiryOf(r.instrument);
+      const denom = monthFull.get(fullestKey(r)) ?? r.rows;
       const cut = r.instrument.lastIndexOf('-');
       const parts = r.instrument.split('-');
       return {
@@ -230,15 +794,819 @@
         kind: parts.length > 1 ? parts[1] : '—',
         short,
         days: sessions(r),
-        lost: short / BARS_PER_SESSION,
+        lost: barsPerSession(r.timeframe) === null ? null : short / barsPerSession(r.timeframe),
         pct: denom > 0 ? r.rows / denom : 1,
         denom,
+        // THE WIRE IS TOTAL, AND SO IS THIS. `chg_bps` is an integer or it is
+        // null, and `chg_why` is the reason for the null — exactly one of the
+        // pair on every row. `Number.isInteger` rather than a truthiness test,
+        // because 0 basis points is a real answer: a month that closed where it
+        // opened, which `!r.chg_bps` would turn into an unknown.
+        // THE STRIKE IN PAISA AND THE SIDE, or `null` on both when the name
+        // carries no contract. `null` is NOT "strike zero": a zero strike is a
+        // price and this is the absence of one, and every reader below tests
+        // for `null` rather than for falsity so a hypothetical 0-paisa strike
+        // could never be silently dropped the way `!r.strike` would drop it.
+        strike: ct === null ? null : ct.strike,
+        side: ct === null ? null : ct.side,
+        // THE RAW ISO DAY, OR `null` FOR "THIS ROW IS NOT A CONTRACT". `null`
+        // is not "expires never" and it is not the empty string: an index and
+        // an equity HAVE no expiry, and the gate below reads this field for
+        // exactly that distinction — a row with `null` is passed through
+        // untouched, a row with a day must match the chosen one.
+        expiry: ex,
+        chg: Number.isInteger(r.chg_bps) ? r.chg_bps : null,
+        chgWhy: r.chg_why ?? null,
+        prevChg: Number.isInteger(r.prev_chg_bps) ? r.prev_chg_bps : null,
+        prevChgWhy: r.prev_chg_why ?? null,
+        // MICROSECONDS ON THE WIRE, MILLISECONDS AT THE CALL SITE. The server
+        // sends `first_ts` / `last_ts` unconverted and says so; `$lib/dates.js`
+        // takes epoch MILLISECONDS and refuses to sniff the unit, because this
+        // repository carries bar times in seconds and response times in
+        // milliseconds and a formatter that guessed would render 1970 for half
+        // its callers. The `/1000` happens HERE, where the unit is known.
+        //
+        // `> 0` AND NOT `Number.isFinite`. A zero stamp is not an instant this
+        // store ever recorded — it would render `01 Jan 1970, 05:30`, a date
+        // nobody took, in a column whose whole job is to say which days are
+        // actually held. `null` reaches the renderer and it draws the absence.
+        firstAt: typeof r.first_ts === 'number' && r.first_ts > 0 ? r.first_ts / 1000 : null,
+        lastAt: typeof r.last_ts === 'number' && r.last_ts > 0 ? r.last_ts / 1000 : null,
         // THREE STATES, NOT TWO. "not full" hides the difference between a
         // late start on one day and two whole trading days that never landed,
         // and the second is the one that needs a re-pull.
-        state: short === 0 ? 'full' : short < BARS_PER_SESSION ? 'near' : 'gap'
+        // THE THRESHOLD IS ONE SESSION AT THIS ROW'S RUNG. Against a fixed
+        // 375 a daily row could never reach 'gap' — every shortfall is under
+        // 375 bars — so two missing trading days read as 'near', the state
+        // that means "a late start on one day".
+        state:
+          short === 0
+            ? 'full'
+            // NO 375 FALLBACK. A rung with no recorded session size has no
+              // threshold either, and `?? BARS_PER_SESSION` quietly restored the
+              // minute yardstick this function exists to remove. An unknown rung
+              // is 'gap' — the state that asks for a re-pull — because a
+              // shortfall nobody can size is not a near miss.
+              : barsPerSession(r.timeframe) === null
+                ? 'gap'
+                : short < barsPerSession(r.timeframe)
+                  ? 'near'
+                  : 'gap'
       };
     })
+  );
+
+  /* ======================================================================
+     THE UNIVERSE RUNG — feed → UNIVERSE → instruments
+     ----------------------------------------------------------------------
+     THIS PAGE IS BACKWARD-LOOKING AND EVERY WORD HERE OBEYS THAT. `/ingest`
+     asks what a vendor can be asked for, so a name it cannot serve reads "not
+     on this feed". `/db` asks what is on disk, so the same name reads "not
+     stored", and a count reads "N of M held". The two are not synonyms: the
+     gap between "the vendor lacks it" and "you never pulled it" is the entire
+     reason this page exists, and `/store.json` can only ever answer the second
+     — it knows what a pull wrote, never what a pull could have written.
+
+     FOUR OF THE EIGHT NAMES ONCE COULD NOT BE COMPUTED. THEY CAN NOW, AND
+     THIS PARAGRAPH IS THE RECORD OF WHY THOSE ROWS CHANGED STATE WITH NO EDIT
+     TO THIS FILE. `crates/core/src/universe.rs` carries the ranked constituent
+     lists — `NIFTY_50` at 50 names, `NIFTY_100` at 100, `NIFTY_200` at 200,
+     `NIFTY_500` at 500 — each behind its own bit, and
+     `crates/api/src/server.rs` appends those bits to `UNIVERSE_TOKENS` as
+     `n50`, `n100`, `n200`, `n500`. It puts them in the `universes` ARRAY, beside
+     the `universe` STRING it deliberately froze at three tokens so an older
+     reader keeps working (D-0089 / D-0090). `tokensOf` below reads the array
+     first and splits the string only when there is no array, so the membership
+     this rung needs arrives on the wire and the four rows enable themselves
+     the moment a master carrying the field answers for the selected feed.
+
+     WHAT HAS NOT CHANGED IS THE PROHIBITION, and it is why nothing here counts
+     a tier for itself. `NIFTY_TOTAL_MARKET` arrives in ALPHABETICAL order, so
+     slicing its first fifty names would put `360ONE` in the NIFTY 50 and print
+     it as a fact; `CLAUDE.md` §3 rule 1 forbids exactly that. A tier this page
+     cannot read off the wire stays DISABLED and names the field that is
+     missing — `tierRefusal` is that sentence — and the row is never dropped:
+     the list is what exposes the gap, and a list with the gap removed looks
+     complete.
+     ====================================================================== */
+
+  /**
+   * A feed's own name for itself, never the wire string.
+   *
+   * A FUNCTION DECLARATION, so it hoists above every reader. `feedName` below
+   * is the same lookup and now defers to this one — two spellings of "what is
+   * this feed called" is how one of them goes stale, and this file has already
+   * paid for that lesson twice (see the FORMATTING block at the top).
+   */
+  function feedDisplay(wire) {
+    return feeds.all.find((f) => f.wire === wire)?.display ?? '—';
+  }
+
+  /**
+   * THE FEED, WRITTEN FROM THE PANEL'S SCOPE RUNG UNDER THE TOP BAR'S OWN RULE.
+   *
+   * `feeds.active` is the one selection the whole app reads and this page's own
+   * fetch effect already re-reads `/store.json` from it, so this needs no reload
+   * of its own — it is the same write the empty-store panel's "Rows exist under"
+   * buttons have always made. A feed the list marks not ready is REFUSED rather
+   * than hidden: the row is drawn, disabled, and its `title` quotes the server's
+   * reason, which is the same test the top bar applies rather than a second
+   * opinion about the same feed.
+   */
+
+  /**
+   * The eight names, in the owner's order, with NO COUNT IN ANY LABEL.
+   *
+   * `token` is the three-state field the whole rung turns on:
+   *   · `null` — no membership source exists. The row is shown and disabled.
+   *   · `''`   — Everything: NO JOIN AT ALL, which is not the same as a join
+   *              that matches everything. A stored instrument this feed's
+   *              master no longer lists — BSE history the charter keeps, a
+   *              symbol delisted since the pull — is absent from
+   *              `/instruments.json` and would silently vanish under any
+   *              membership test. Under Everything it cannot, because nothing
+   *              is tested.
+   *   · a word — one token out of `universe_label`, matched against the `+`
+   *              joined set on the catalogue row.
+   */
+  /* THE FLOOR IS NAMED, not indexed off the end of the list. `chosenUniverse`
+     falls back to it for an unrecognised slug, and a fallback expressed as
+     `UNIVERSES.at(-1)` is one that can be `undefined` — every reader would then
+     need a guard, and a missing guard on the row that decides whether the
+     table is filtered at all is a blank page. A concrete object cannot be
+     absent. */
+  const EVERYTHING = { key: '', label: 'Everything', token: '' };
+
+  const UNIVERSES = [
+    { key: 'n50', label: 'NIFTY 50', token: 'n50' },
+    { key: 'n100', label: 'NIFTY 100', token: 'n100' },
+    { key: 'n200', label: 'NIFTY 200', token: 'n200' },
+    { key: 'n500', label: 'NIFTY 500', token: 'n500' },
+    { key: 'ntm', label: 'NIFTY Total Market', token: 'ntm' },
+    { key: 'fno', label: 'F&O underlyings', token: 'fno' },
+    { key: 'index', label: 'NSE indices', token: 'index' },
+    EVERYTHING
+  ];
+
+  /**
+   * THE TOKENS ONE CATALOGUE ROW CARRIES, out of the field that carries them.
+   *
+   * `/instruments.json` sends TWO membership fields, and they are not the same
+   * fact. `crates/api/src/server.rs:813` emits both on every row:
+   *
+   *   · `universe`  — a `+`-joined STRING, deliberately frozen at the first
+   *                   `LEGACY_UNIVERSE_TOKENS` = 3 entries of `UNIVERSE_TOKENS`
+   *                   (`index`, `fno`, `ntm`). It is a compatibility field and
+   *                   it will never name a NIFTY tier.
+   *   · `universes` — the full ARRAY, `["index","fno","ntm","n500","n200",
+   *                   "n100","n50"]` in that declared order. D-0089 / D-0090.
+   *
+   * So the array is read when the row has one and the legacy string is split
+   * when it does not. THAT IS NOT A FALLBACK THAT HIDES A FAILURE: the legacy
+   * string is a complete, correct answer for the three tokens it names, and the
+   * four tokens it cannot name are REFUSED BY NAME in `tokensHere` below rather
+   * than guessed at. Nothing here ever synthesises a tier.
+   *
+   * The consequence worth stating: this page needs no edit at all on the day
+   * the API binary carrying `universes` is running. The four NIFTY rows light
+   * up because the field arrived, which is the only evidence that would justify
+   * lighting them.
+   *
+   * @param {any} row
+   * @returns {string[]}
+   */
+  const tokensOf = (row) =>
+    Array.isArray(row?.universes)
+      ? row.universes.map(String)
+      : String(row?.universe ?? '')
+          .split('+')
+          .filter(Boolean);
+
+  /**
+   * The census spells an instrument `EXCHANGE-SEGMENT-SYMBOL`, and that is the
+   * ONLY key this join may use.
+   *
+   * `/instruments.json` also sends a `key`, and it is `EXCHANGE-SYMBOL` — one
+   * segment short. Joining on it matches nothing at all, and a join that
+   * matches nothing produces a universe holding zero instruments rather than
+   * an error: the rung would look like it worked and report "0 of 750 held"
+   * over a full store. BUILT FROM THE THREE PARTS, never parsed out of a
+   * string, because a symbol may legally contain `-` (`NIFTY-50`, `M&M`).
+   * `/markets` proves the same key the same way.
+   */
+  const censusKeyOf = (row) => `${row.exchange}-${row.segment}-${row.symbol}`;
+
+  /**
+   * Whether the instrument list on hand answers for the feed on screen.
+   *
+   * `$lib/index.svelte.js` stamps every answer with the feed it was asked for.
+   * Between a feed change and its reload — and forever after a reload that
+   * failed — those rows belong to a DIFFERENT feed, and a membership count
+   * printed under this feed's name would be a number produced by a query
+   * nobody re-ran. Same guard `/ingest` uses, and for the same reason.
+   */
+  const catalogueIsThisFeed = $derived(catalogue.ready && catalogue.feed === feeds.active);
+
+  /**
+   * This feed's master, read as a plain array of rows.
+   *
+   * `$lib/index.svelte.js` declares `rows: []` with no element type, so
+   * `svelte-check` infers `never[]` and every field read off a row becomes an
+   * error that says nothing about this page. The annotation lives HERE because
+   * that file is shared and not this pass's to touch. It changes no behaviour
+   * and asserts no shape beyond "these are objects", which is all this join
+   * reads: `exchange`, `segment`, `symbol`, `universe`.
+   *
+   * A FUNCTION, called inside each derived, so the read of `catalogue.rows`
+   * happens during that derived's evaluation and is tracked. Hoisting it into
+   * a `$derived` of its own would be one more thing to keep in step for no
+   * gain.
+   *
+   * @returns {any[]}
+   */
+  function masterRows() {
+    return catalogue.rows ?? [];
+  }
+
+  const chosenUniverse = $derived(UNIVERSES.find((u) => u.key === universe) ?? EVERYTHING);
+
+  /**
+   * EVERY MEMBERSHIP TOKEN THIS FEED'S MASTER ACTUALLY CARRIES — counted from
+   * the rows on hand, never a list this file asserts about a server.
+   *
+   * This replaced a hardcoded `token: null` on the four NIFTY rows. That field
+   * was the front end stating, as a constant, what a binary it cannot see does
+   * and does not send — the kind of claim `CLAUDE.md` §6 calls a measurement
+   * nobody took. It was also wrong in the safe direction only by luck: the day
+   * the API is rebuilt it would keep the tiers dark with a sentence saying they
+   * are impossible.
+   *
+   * EMPTY WHEN THE CATALOGUE IS NOT THIS FEED'S, and every reader treats that
+   * as NOT MEASURED rather than as absent — `membershipWhy` is the sentence for
+   * that state, and it is checked first everywhere this set is consulted. A
+   * tier is refused only when a master that DOES answer for this feed has been
+   * read and does not carry the token.
+   *
+   * ONE PASS over a list bounded at ~800 rows by decision, recomputed only when
+   * the catalogue changes.
+   */
+  const tokensHere = $derived.by(() => {
+    const s = new Set();
+    if (!catalogueIsThisFeed) return s;
+    for (const r of masterRows()) for (const t of tokensOf(r)) s.add(t);
+    return s;
+  });
+
+  /**
+   * Whether a universe row can be joined at all right now.
+   *
+   * Three states, and they are not two: `'ready'` — the token is in the master
+   * on hand. `'unmeasured'` — no master answers for this feed yet, so nothing
+   * is known either way. `'absent'` — a master for this feed WAS read and does
+   * not carry the token. Only `'absent'` disables a row, because only `'absent'`
+   * is a finding.
+   *
+   * @param {{ token: string | null }} u
+   */
+  const tierState = (u) => {
+    if (!u.token) return 'ready'; /* Everything joins nothing, and always can */
+    if (!catalogueIsThisFeed) return 'unmeasured';
+    return tokensHere.has(u.token) ? 'ready' : 'absent';
+  };
+
+  /**
+   * The four tokens the LEGACY `universe` string is structurally unable to
+   * name, whatever the data holds. `LEGACY_UNIVERSE_TOKENS = 3` in
+   * `crates/api/src/server.rs` cuts `UNIVERSE_TOKENS` after `index`, `fno` and
+   * `ntm`, so a row without a `universes` array cannot report these four even
+   * when the instrument is in all of them.
+   */
+  const LEGACY_BLIND = new Set(['n50', 'n100', 'n200', 'n500']);
+
+  /**
+   * Whether the master on hand carries the ARRAY field at all — one probe, not
+   * an assumption about a version.
+   *
+   * This is the fact that tells a MISSING FIELD from an EMPTY SET, and the two
+   * are different findings with different fixes. Without it the page would
+   * answer "rebuild the API" for a feed whose master simply lists nothing in
+   * F&O, which is a diagnosis pointing at the wrong system.
+   */
+  const carriesArray = $derived.by(() => {
+    if (!catalogueIsThisFeed) return false;
+    for (const r of masterRows()) if (Array.isArray(r?.universes)) return true;
+    return false;
+  });
+
+  /**
+   * WHY A TIER IS NOT ON THE WIRE — and WHICH of the two reasons it is.
+   *
+   * Every clause is checkable against a file in this repository or against a
+   * count taken here, which is the point: the next person does not have to
+   * re-derive any of it, and nobody has to guess whether the gap is a
+   * front-end bug, a server build, or an empty set.
+   *
+   * @param {string} label
+   * @param {string} token
+   */
+  const tierRefusal = (label, token) =>
+    !carriesArray && LEGACY_BLIND.has(token)
+      ? `/instruments.json?feed=${feeds.active ?? ''} cannot express ${label} on the API this page is talking to. Its rows answer with the legacy "universe" string only, and crates/api/src/server.rs freezes that string at three tokens — index, fno and ntm — through LEGACY_UNIVERSE_TOKENS. The full "universes" array, which names n500, n200, n100 and n50, is emitted beside it by that same file (D-0089/D-0090): the source has this tier and the running binary predates it. Rebuild and restart the API and this row lights up with no change to this page. What will not happen is a tier synthesised here — NIFTY Total Market arrives in alphabetical order, and slicing its first fifty names would print 360ONE as a NIFTY 50 constituent.`
+      : `${feedDisplay(feeds.active)}'s master lists no instrument in ${label}. Counted over all ${fmt(masterRows().length)} row(s) /instruments.json returned for this feed: the field that would name this set is present on them and not one carries it. That is an EMPTY SET, not a missing endpoint — nothing needs rebuilding, and there is simply nothing here to hold the store against.`;
+
+  /**
+   * WHY the universe narrowing is not in force, or `null` when it is.
+   *
+   * A selected filter that quietly does not apply is the fallback that hides a
+   * failure `CLAUDE.md` §4 bans, and it is the exact failure this rung invites:
+   * the join needs a list this page does not fetch, so the list can be absent,
+   * stale, or for another feed entirely. When it is, the rows are NOT narrowed
+   * — every stored row keeps rendering, which is the honest answer for a page
+   * whose subject is what you hold — and this sentence says so on screen.
+   */
+  /**
+   * Why NO membership can be counted at all, or `null` when it can.
+   *
+   * DELIBERATELY INDEPENDENT OF WHICH UNIVERSE IS SELECTED. The catalogue is
+   * either on hand for this feed or it is not, and that is one fact about the
+   * page rather than eight facts about eight chips — so the tooltip on a chip
+   * nobody has clicked names the same reason the line under the row does, and
+   * the two cannot come apart.
+   */
+  const membershipWhy = $derived.by(() => {
+    if (catalogueIsThisFeed) return null;
+    if (catalogue.error) return `/instruments.json could not be read: ${catalogue.error}`;
+    if (!catalogue.ready) return 'reading /instruments.json…';
+    return `the instrument list on hand answers for ${feedDisplay(catalogue.feed)}, not for ${feedDisplay(feeds.active)} — no count on this page is built from another feed's master`;
+  });
+
+  /* MEMBERSHIP IS CHECKED BEFORE THE TOKEN IS, and the order is the whole
+     correctness of this expression. `tokensHere` is empty while no master
+     answers for this feed, so asking it first would report every tier as
+     "absent from the master" when the truth is that no master has been read —
+     a finding invented out of a loading state. */
+  const universeRefusal = $derived.by(() => {
+    if (chosenUniverse.token === '') return null; /* Everything joins nothing */
+    if (membershipWhy !== null)
+      return `${membershipWhy}. Every stored row is still shown — nothing was hidden by a join that did not run.`;
+    if (tierState(chosenUniverse) === 'absent')
+      return tierRefusal(chosenUniverse.label, chosenUniverse.token);
+    return null;
+  });
+
+  /**
+   * The chosen universe's members as census keys, or `null` for NO JOIN.
+   *
+   * `null` is returned both for Everything and for every state the refusal
+   * above names, so there is ONE expression deciding whether rows are narrowed
+   * and one sentence explaining it. Two would drift.
+   */
+  const universeKeys = $derived.by(() => {
+    const token = chosenUniverse.token;
+    if (!token || tierState(chosenUniverse) !== 'ready') return null;
+    const s = new Set();
+    for (const r of masterRows()) {
+      if (tokensOf(r).includes(token)) s.add(censusKeyOf(r));
+    }
+    return s;
+  });
+
+  const universed = $derived(
+    universeKeys === null ? deco : deco.filter((r) => universeKeys.has(r.instrument))
+  );
+
+  /**
+   * `N of M held`, per universe — the backward-looking count, and the only
+   * shape a count may take on this page.
+   *
+   * M is membership, out of this feed's master. N is how many of those the
+   * store actually holds at least one month of. `M − N` is "not stored", never
+   * "not on this feed" — this page cannot see a vendor's catalogue of what it
+   * could serve, only the master's list of names and the store's list of files.
+   *
+   * ONE PASS PER UNIVERSE over a list bounded at ~800 rows by decision, and it
+   * recomputes only when the store or the catalogue changes — never per
+   * keystroke and never per scroll frame.
+   */
+  const universeCount = $derived.by(() => {
+    const out = new Map();
+    if (!catalogueIsThisFeed) return out;
+    const stored = new Set();
+    for (const r of deco) stored.add(r.instrument);
+    for (const u of UNIVERSES) {
+      if (!u.token || !tokensHere.has(u.token)) continue;
+      let members = 0;
+      let held = 0;
+      for (const r of masterRows()) {
+        if (!tokensOf(r).includes(u.token)) continue;
+        members += 1;
+        if (stored.has(censusKeyOf(r))) held += 1;
+      }
+      out.set(u.key, { members, held });
+    }
+    return out;
+  });
+
+  /**
+   * STORED DATA THIS FEED'S MASTER DOES NOT LIST — counted, named, never hidden.
+   *
+   * `CLAUDE.md` §1 keeps BSE history on disk although the engine no longer
+   * sweeps it; `/instruments.json` filters to what the feed's master gave an id
+   * AND to the tracked surface. So a real, held instrument-month can be absent
+   * from every membership universe through no fault of the pull. On a page
+   * whose entire subject is what you hold, letting those rows disappear behind
+   * a membership chip would be the worst outcome available — so the residue is
+   * counted here and printed beside the rung, and `Everything` reaches it by
+   * doing no join at all.
+   *
+   * `null` means NOT MEASURED, which is not zero: without a catalogue for this
+   * feed there is no list to be absent from.
+   */
+  const outsideMaster = $derived.by(() => {
+    if (!catalogueIsThisFeed) return null;
+    const listed = new Set();
+    for (const r of masterRows()) listed.add(censusKeyOf(r));
+    const names = new Set();
+    let months = 0;
+    for (const r of deco) {
+      if (listed.has(r.instrument)) continue;
+      months += 1;
+      names.add(r.instrument);
+    }
+    return { months, instruments: names.size };
+  });
+
+  /* ======================================================================
+     THE MONTH WINDOW — a range over the row's own unit
+     ----------------------------------------------------------------------
+     A ROW HERE IS AN INSTRUMENT-MONTH, so the honest range control is a month
+     range and not a day picker: a from-day and a to-day would have to be
+     rounded to months to be applied, and a control whose value is silently
+     coarsened is a control that lies about what it did.
+
+     THERE IS NO `<input type="date">` ON THIS PAGE AND THERE MUST NOT BE. It
+     renders in the OS locale — `02/09/2024`, which is two different days
+     depending on the reader — and it cannot be restyled. The endpoints are
+     chosen from the months the store ACTUALLY HOLDS, through the same one
+     dropdown every other control on this page uses, so the label is
+     `Sep 2024` (never `Sept`, per `$lib/dates.js`), the value stays raw
+     `YYYY-MM`, and the control cannot offer a month that would match nothing.
+     ====================================================================== */
+
+  /* ======================================================================
+     THE BAR-LENGTH RUNG — feed → universe → TIMEFRAME → months
+     ----------------------------------------------------------------------
+     IT SITS HERE, ABOVE THE MONTH WINDOW, AND THAT PLACEMENT IS THE POINT. A
+     row is one instrument-MONTH AT ONE RUNG: `fullestKey` is `(month, rung)`,
+     `barsPerSession` is a function of the rung, and `monthCards` gives up and
+     prints a dash the moment one month holds two rungs at once ("A month
+     holding both 1min and 1day rows has no single session size"). Every month
+     figure below this line is therefore cleaner when the rung is already
+     chosen, and none of them is wrong when it is not — they say which.
+
+     Placed BELOW the window instead, the window would offer months the chosen
+     rung does not hold, and picking one would empty the table for a reason no
+     control on screen was pointing at.
+
+     THE COUNT BESIDE EACH RUNG IS TAKEN WITH THIS RUNG'S OWN SELECTION LEFT
+     OUT and every coarser one applied — the facet rule stated further down,
+     and the reason the number on a row is the number clicking it returns.
+     ====================================================================== */
+
+  /** Every rung the chosen universe holds, in LENGTH order, with its row count. */
+  const tfAll = $derived.by(() => {
+    const c = new Map();
+    for (const it of universed) c.set(it.timeframe, (c.get(it.timeframe) ?? 0) + 1);
+    /* BY LENGTH, NEVER BY TEXT — see `tfCmp`. As text these read `15min`,
+       `1day`, `1min`, which is an ordering by first character and not by
+       anything a bar length has. */
+    return [...c.entries()].sort((a, b) => tfCmp(a[0], b[0]));
+  });
+
+  /**
+   * The universe, narrowed to one rung — the base every finer control reads.
+   *
+   * `timeframe === ''` falls through to `universed` UNCHANGED rather than
+   * filtering on a sentinel, so "every rung" costs no pass at all and cannot
+   * accidentally drop a row whose rung string this page has never heard of.
+   */
+  const timeframed = $derived(
+    timeframe ? universed.filter((r) => r.timeframe === timeframe) : universed
+  );
+
+  /**
+   * WHY THE RUNG CANNOT BE CHOSEN, or `null` when it can.
+   *
+   * `CLAUDE.md` §4: a control that cannot be used says so on its own face.
+   * "Nothing has been read yet" and "this universe holds nothing" are opposite
+   * instructions — one is a wait, the other is a finding about the selection
+   * above this one — and one greyed control cannot say both.
+   */
+  const tfRefusal = $derived.by(() => {
+    if (tfAll.length > 0) return null;
+    if (deco.length === 0)
+      return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no row has named a rung — this is an unread store, not a store without bar lengths`;
+    return `${feedDisplay(feeds.active)} holds ${fmt(deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}, so there is no row here to read a rung off. Widen the universe above and the rungs come back.`;
+  });
+
+  /** Every month in the chosen universe AT THE CHOSEN RUNG, newest first. */
+  const monthsAll = $derived.by(() => {
+    const c = new Map();
+    for (const it of timeframed) c.set(it.month, (c.get(it.month) ?? 0) + 1);
+    return [...c.entries()].sort((a, b) => txt(b[0], a[0]));
+  });
+
+  /**
+   * A range whose ends are the wrong way round matches nothing, and it is
+   * NAMED rather than quietly swapped. Swapping would silently answer a
+   * question the operator did not ask; refusing to and saying which two months
+   * are in the wrong order is the same rule every other empty state here
+   * follows.
+   */
+  const rangeInverted = $derived(Boolean(fromMonth && toMonth && fromMonth > toMonth));
+
+  /* ======================================================================
+     THE MONTH CALENDAR — the product's own, at the unit a row actually has
+     ----------------------------------------------------------------------
+     A YEAR SELECT AND A GRID OF TWELVE MONTHS. Not a day grid, and the
+     difference is not decoration: a row on this page IS an instrument-month,
+     so a from-DAY would have to be rounded to a month before it could be
+     applied, and a control whose value is silently coarsened is a control that
+     lies about what it did. `/markets` is where a day is the unit, and that is
+     where a day grid belongs.
+
+     THE VALUE NEVER STOPS BEING `YYYY-MM`. `fromMonth` and `toMonth` are the
+     same raw keys they were — the label `Sep 2024` is produced by
+     `monthLabel()` at the render site and nowhere else, exactly as the rule at
+     the top of `$lib/dates.js` requires. The window comparison, the `{#each}`
+     keys and the tooltips all still read the key.
+
+     A MONTH THE STORE HOLDS NOTHING FOR IS SHOWN AND REFUSED, not omitted. An
+     omitted month and a month nobody thought of look identical, and the gap in
+     a backfill is the single most useful thing this control can show while the
+     operator is choosing a bound. It is struck through, it refuses the click,
+     and its `title` says which set it is empty in.
+     ====================================================================== */
+  /**
+   * Which end's calendar is open — `'from'`, `'to'`, or nothing.
+   * @type {'from' | 'to' | null}
+   */
+  let calOpen = $state(null);
+  /** The year on show in the open calendar. A number, never a label. */
+  let calYear = $state(0);
+  /** @type {HTMLElement | null} */
+  let calEl = $state(null);
+  /**
+   * The control that opened it, so Escape can put the focus back.
+   * @type {HTMLElement | null}
+   */
+  let calBtn = null;
+
+  /** The twelve slots, fixed. Indices, so `MON[i]` is the only naming. */
+  const MONTH_SLOTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+
+  /** `YYYY-MM` -> rows held, for the grid's enabled test and its tooltip. */
+  const monthRows = $derived(new Map(monthsAll));
+
+  /**
+   * The YEARS the store actually holds a month in, ascending.
+   *
+   * COUNTED FROM THE ROWS, never a range between two endpoints: a backfill with
+   * a year-long hole in the middle would otherwise offer a year whose every
+   * month refuses the click, which is a page of dead ends rather than a fact.
+   */
+  const heldYears = $derived.by(() => {
+    const s = new Set();
+    for (const [m] of monthsAll) s.add(Number(m.slice(0, 4)));
+    return [...s].sort((a, b) => a - b);
+  });
+
+  /* THE KEY IS BUILT, never parsed back out of a label. Zero-padded because
+     `2020-3` is not a key this store has ever written and would compare wrong
+     against `2020-11` in the very string comparison the window depends on.
+
+     DECLARED ABOVE ITS READER, like every other helper in this file — see the
+     FORMATTING block at the top for the reordering this rule already cost. */
+  /**
+   * @param {number} y
+   * @param {number} i zero-based month slot
+   * @returns {string}
+   */
+  const monthKey = (y, i) => `${y}-${String(i + 1).padStart(2, '0')}`;
+
+  /**
+   * How many of the twelve slots in `y` the store holds — counted, per year.
+   * @param {number} y
+   */
+  const monthsHeldIn = (y) => {
+    let n = 0;
+    for (const i of MONTH_SLOTS) if (monthRows.has(monthKey(y, i))) n += 1;
+    return n;
+  };
+
+  /**
+   * @param {'from' | 'to'} which
+   * @param {HTMLElement | null} [btn]
+   */
+  function openCal(which, btn) {
+    const cur = which === 'from' ? fromMonth : toMonth;
+    /* NO BOUND YET: open at the end of the store this bound is about — the
+       earliest year for `from`, the latest for `to` — because that is the year
+       the operator setting that bound is nearly always reaching for. */
+    const fallback = which === 'from' ? heldYears[0] : heldYears[heldYears.length - 1];
+    /* THE PANEL ONLY EVER OPENS ON A YEAR THE STORE HOLDS, and the bound's own
+       year is not always one of them: narrowing the universe can leave a
+       standing `fromMonth` whose year has no row left in it. Opening there
+       would put a year on the select that is not among its options — the
+       browser would draw the first option while `calYear` still said the
+       other, so the twelve months on screen would not be the twelve months the
+       header named. */
+    const y = cur ? Number(cur.slice(0, 4)) : Number.NaN;
+    calYear = heldYears.includes(y) ? y : (fallback ?? 0);
+    calBtn = btn ?? null;
+    calOpen = which;
+  }
+
+  function closeCal(refocus = true) {
+    calOpen = null;
+    if (refocus) calBtn?.focus();
+    calBtn = null;
+  }
+
+  /**
+   * Commit one end of the window. `''` clears that bound; it is not a month.
+   * @param {'from' | 'to'} which
+   * @param {string} key raw `YYYY-MM`, or `''` for no bound
+   */
+  function setCal(which, key) {
+    if (which === 'from') fromMonth = key;
+    else toMonth = key;
+    closeCal();
+  }
+
+  /* STEPS THROUGH THE YEARS THE STORE HOLDS, not through the integers. A year
+     the store holds nothing in is not between two years it does — it is not on
+     the list at all, so it cannot be stepped onto. */
+  /** @param {number} d */
+  function stepYear(d) {
+    const i = heldYears.indexOf(calYear);
+    const next = heldYears[(i < 0 ? 0 : i) + d];
+    if (next !== undefined) calYear = next;
+  }
+
+  /**
+   * Arrow keys across the twelve, PageUp/PageDown across the years, Escape out.
+   *
+   * A DISABLED BUTTON CANNOT HOLD FOCUS, so the walk keeps going in the
+   * direction it was asked for until it finds one that can. Landing on a month
+   * the store is empty in would silently drop the focus to the document, and a
+   * keyboard operator would have no way back into the grid.
+   */
+  /** @param {KeyboardEvent} e */
+  function calKey(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeCal();
+      return;
+    }
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.key === 'PageUp' || e.key === 'PageDown') {
+      e.preventDefault();
+      stepYear(e.key === 'PageUp' ? -1 : 1);
+      return;
+    }
+    /* CAST, NOT A GUESS. The selector is `button.cmon` and every node it can
+       return is one of the twelve month buttons; `querySelectorAll` types its
+       answer as `Element` because it cannot read a selector at compile time. */
+    const cells = /** @type {HTMLButtonElement[]} */ (
+      calEl ? [...calEl.querySelectorAll('button.cmon')] : []
+    );
+    if (cells.length === 0) return;
+    const at = document.activeElement
+      ? cells.indexOf(/** @type {HTMLButtonElement} */ (document.activeElement))
+      : -1;
+    let want;
+    let dir;
+    switch (e.key) {
+      case 'ArrowRight':
+        want = at + 1;
+        dir = 1;
+        break;
+      case 'ArrowLeft':
+        want = at - 1;
+        dir = -1;
+        break;
+      case 'ArrowDown':
+        want = at + 3;
+        dir = 1;
+        break;
+      case 'ArrowUp':
+        want = at - 3;
+        dir = -1;
+        break;
+      case 'Home':
+        want = 0;
+        dir = 1;
+        break;
+      case 'End':
+        want = cells.length - 1;
+        dir = -1;
+        break;
+      default:
+        return;
+    }
+    e.preventDefault();
+    if (at < 0) want = dir > 0 ? 0 : cells.length - 1;
+    let i = want;
+    while (i >= 0 && i < cells.length && cells[i].disabled) i += dir;
+    if (i < 0 || i >= cells.length) return;
+    cells[i].focus();
+  }
+
+  /* THE POINTER CLOSES IT TOO, and the button that opened it is excluded so
+     the two do not fight: without that, pointerdown closes the panel and the
+     click that follows reopens it, and the control never shuts. */
+  /** @param {PointerEvent} e */
+  function onWindowDown(e) {
+    const t = e.target;
+    if (!(t instanceof Node)) return;
+    /* THE SAME PRESS CLOSES THE PANEL'S OWN MENU. `.picker[data-drop]` is the
+       whole control — the button and the panel it opens — so a press inside the
+       open one is not away, and a press on any other control is.
+
+       THE ATTRIBUTE IS WHAT MAKES THE TEST EXACT, and it is not decoration.
+       `$lib/Picker.svelte`'s own root element is ALSO `.picker`, so a bare
+       `.closest('.picker')` would report a press inside a Picker's menu as a
+       press inside this control and leave both open at once — two menus over
+       one strip, one of them unreachable underneath the other. `data-drop` is
+       carried only by the three menus `drop` actually governs. One value, so
+       two of THOSE can never be open together either. */
+    const inDrop =
+      t instanceof Element
+        ? t.closest('.picker[data-drop]')
+        : t.parentElement?.closest('.picker[data-drop]');
+    if (drop !== null && !inDrop) drop = null;
+    if (!calOpen) return;
+    if (calEl?.contains(t)) return;
+    if (calBtn?.contains(t)) return;
+    closeCal(false);
+  }
+
+  /* FOCUS GOES INTO THE GRID ON OPEN — on the chosen month when there is one,
+     on the first month the store can offer otherwise. It reads `calOpen` and
+     `calEl` and nothing else, so changing the year or arrowing about does not
+     re-run it and snatch the focus back. */
+  $effect(() => {
+    if (!calOpen || !calEl) return;
+    const sel = calEl.querySelector('button.cmon[aria-pressed="true"]:not(:disabled)');
+    const first = calEl.querySelector('button.cmon:not(:disabled)');
+    /* THE YEAR SELECT IS THE LAST RESORT, and it is reachable: a universe can
+       leave a year with no month the store holds, and a panel that focuses
+       nothing is a dialog a keyboard cannot get out of except by Tab. */
+    const land = /** @type {HTMLElement | null} */ (sel ?? first ?? calEl.querySelector('select'));
+    land?.focus();
+  });
+
+  /* THE YEAR ON SHOW IS ALWAYS A YEAR THE STORE HOLDS, even after the set
+     under it changes. The pointer cannot do this — an outside press closes the
+     panel — but the KEYBOARD can: tab out to a universe chip, press Enter, and
+     `heldYears` is rebuilt while the panel is still open. The select would then
+     draw whichever option the browser fell back to while `calYear` still named
+     the old one, so the header and the twelve months below it would disagree
+     about which year is on screen. Snapped rather than closed, because closing
+     would also throw away the focus the operator is holding.
+
+     `calYear` IS READ THROUGH `untrack`. Reading it normally would make this
+     effect depend on the value it writes, which is a loop expressed as a
+     coincidence that it terminates. Its real dependencies are the two things
+     that can invalidate the year: whether the panel is open, and the list. */
+  $effect(() => {
+    if (!calOpen || heldYears.length === 0) return;
+    if (!heldYears.includes(untrack(() => calYear))) calYear = heldYears[0];
+  });
+
+  /* RAW KEY COMPARISON, BOTH ENDS. `YYYY-MM` is fixed-width and
+     most-significant-first, so `<=` on the string IS chronological order. The
+     labels never enter this function. */
+  const inWindow = (m) => (!fromMonth || m >= fromMonth) && (!toMonth || m <= toMonth);
+
+  /**
+   * The universe, narrowed to the month window — the base every finer control
+   * reads.
+   *
+   * IT SITS ABOVE THE PREFIX INDEX ON PURPOSE. The index is rebuilt when this
+   * set changes, which is a click and not a keystroke, and every keystroke
+   * afterwards is still ONE Map probe into a bucket that already respects both
+   * of the coarser rungs. Filtering after the probe instead would make the
+   * text box the coarsest control on the page rather than the finest.
+   */
+  /* `timeframed`, NOT `universed`. The rung is the cascade step directly above
+     this one — see the block on `tfAll` — so reading the set from before it
+     would make the window, the prefix index, the instrument list and every
+     count under them describe rows the chosen rung excludes. */
+  const windowed = $derived(
+    !fromMonth && !toMonth ? timeframed : timeframed.filter((r) => inWindow(r.month))
   );
 
   /* ======================================================================
@@ -253,11 +1621,28 @@
      ====================================================================== */
   const MAX_PREFIX = 4;
 
+  /* THE BUCKET KEY AND THE PROBE KEY ARE ONE FORM, AND THEY WERE NOT.
+     `typed` below is `filter.trim().toUpperCase()`, and these buckets were cut
+     from the token EXACTLY AS THE STORE SPELLS IT. Two spellings of one key is
+     the silent failure this whole file is written against: the day a store
+     writes one instrument, one symbol or one month key in anything but upper
+     case, its bucket is filed under a prefix no probe can ever ask for — the
+     row is in `windowed`, the table below counts it, and the text box simply
+     never finds it. Nothing errors and nothing looks wrong. Normalised on BOTH
+     sides here, once per token rather than once per prefix, so the index and
+     the box cannot spell the same key two ways.
+
+     `it.sym` is the tail the row DISPLAYS, and it stays in the index on
+     purpose: it is a substring of `it.instrument`, so typing `NIFTY` at
+     `NSE-INDEX-NIFTY` is a real question. What it is not allowed to be is the
+     key anything is COMPARED by — `picked` below resolves back to the store's
+     own `instrument` spelling, never to what was typed. */
   const index = $derived.by(() => {
     const by = new Map();
-    for (const it of deco) {
+    for (const it of windowed) {
       const seen = new Set();
-      for (const token of [it.instrument, it.sym, it.month]) {
+      for (const raw of [it.instrument, it.sym, it.month]) {
+        const token = raw.toUpperCase();
         for (let n = 1; n <= Math.min(MAX_PREFIX, token.length); n += 1) {
           const k = token.slice(0, n);
           if (seen.has(k)) continue;
@@ -274,13 +1659,68 @@
   const typed = $derived(filter.trim().toUpperCase());
 
   const textMatched = $derived.by(() => {
-    if (!typed) return deco;
+    /* `windowed`, NOT `deco`. The two coarser rungs above are already applied
+       to the index this probes, so an empty text box has to fall through to
+       the same set the index was built from — falling back to the whole store
+       would make typing WIDEN the selection. */
+    if (!typed) return windowed;
     if (typed.length <= MAX_PREFIX) return index.get(typed) ?? [];
     const seed = index.get(typed.slice(0, MAX_PREFIX)) ?? [];
+    /* THE SAME NORMALISATION AS THE INDEX ABOVE, for the same reason: past four
+       characters this is the probe, and a bucket cut one way cannot be filtered
+       the other. */
     return seed.filter(
-      (r) => r.instrument.startsWith(typed) || r.sym.startsWith(typed) || r.month.startsWith(typed)
+      (r) =>
+        r.instrument.toUpperCase().startsWith(typed) ||
+        r.sym.toUpperCase().startsWith(typed) ||
+        r.month.toUpperCase().startsWith(typed)
     );
   });
+
+  /* ---- THE INSTRUMENT RUNG, WHICH IS THE TEXT BOX -----------------------
+     ONE STATE, TWO ENTRY POINTS. The page has had an instrument filter since
+     it was written, and it answers this rung's question faster than a list
+     can: a Map probe against a typed prefix. A second, independent "chosen
+     instrument" beside it would be two answers to one question, and the table
+     would look correct while returning nothing the moment they disagreed.
+
+     So the picker does not own a selection at all. It WRITES the text box, and
+     it shows a row as ticked exactly when the text box currently holds that
+     row's key. Typing anything else unticks it with no bookkeeping, because
+     there is nothing to keep. The Picker is an enumeration of what the coarser
+     rungs left; the text box is the state.
+     ====================================================================== */
+  const instrumentRows = $derived.by(() => {
+    const by = new Map();
+    for (const it of windowed) {
+      let a = by.get(it.instrument);
+      if (!a) by.set(it.instrument, (a = { key: it.instrument, months: 0, bars: 0, short: 0 }));
+      a.months += 1;
+      a.bars += it.rows;
+      a.short += it.short;
+    }
+    return [...by.values()].sort((a, b) => txt(a.key, b.key));
+  });
+
+  /**
+   * O(1): the STORE'S OWN SPELLING of the instrument the text box currently
+   * names, or `''`.
+   *
+   * A Map and not a Set, and the value is the raw key rather than the typed
+   * text. `typed` is upper-cased — it has to be, because it is a probe against
+   * the prefix index — so returning it would put a DISPLAY-cased string into
+   * `picked`, and `picked` is not a label: it is the `selected` key the
+   * instrument `Picker` matches its rows against, the key `narrowing` reports,
+   * and the name the anchor prints. One character of case drift there and the
+   * ticked row silently stops being ticked while the table filters correctly,
+   * which is the same class of failure as an ISO date used as a label.
+   */
+  const instrumentKeys = $derived.by(() => {
+    const s = new Map();
+    for (const r of instrumentRows) s.set(r.key.toUpperCase(), r.key);
+    return s;
+  });
+  const picked = $derived(instrumentKeys.get(typed) ?? '');
 
   /* ---- facets ---------------------------------------------------------
      A FACET'S OWN SELECTION IS EXCLUDED FROM ITS OWN COUNT, and every other
@@ -297,7 +1737,12 @@
   const kinds = $derived.by(() => {
     const c = new Map();
     for (const it of byMonth) c.set(it.kind, (c.get(it.kind) ?? 0) + 1);
-    return [...c.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+    // THE TIE-BREAK IS THREE-WAY, and `txt` is what makes it so. `a < b ? -1 :
+    // 1` answers "greater" for two EQUAL keys, in both directions at once, and
+    // a comparator that contradicts itself leaves the order of those elements
+    // unspecified — the same counts could render in a different order on the
+    // next pass. Same inputs, same order, everywhere.
+    return [...c.entries()].sort((a, b) => b[1] - a[1] || txt(a[0], b[0]));
   });
 
   /** Text and kind: the base the month cards roll up. */
@@ -307,15 +1752,626 @@
   const scoped = $derived(month ? pool.filter((r) => r.month === month) : pool);
   const holed = $derived(scoped.reduce((a, r) => a + (r.short > 0 ? 1 : 0), 0));
 
-  const matched = $derived(holesOnly ? scoped.filter((r) => r.short > 0) : scoped);
+  /**
+   * EVERYTHING ABOVE THE CONTRACT RUNG.
+   *
+   * This is what the two contract panels count against and what their
+   * narrowings are applied to. It is deliberately the set with BOTH of them
+   * excluded rather than one each: a strike and a rung are two views of the
+   * same axis — a rung IS a strike, seen from one side of the money — so a
+   * count of one taken with the other applied would be a count of rows the
+   * click cannot produce, which is exactly the rule the facet block above
+   * states. The counted line under the rung says which set it is.
+   */
+  const matchedPreContract = $derived(holesOnly ? scoped.filter((r) => r.short > 0) : scoped);
 
   /* ======================================================================
-     THE TWO COLUMNS THAT ARE PRESENT AND REFUSED
+     THE EXPIRY GATE — the one control on this page that REFUSES BY DEFAULT
      ----------------------------------------------------------------------
-     Everything asserted here was measured against the live server on the day
-     it was written, and the measurement is quoted so the next reader can
-     repeat it rather than trust it.
+     THE OWNER'S RULE, IN HIS WORDS: *for futures and options without the
+     current selected expiry don't display anything.*
+
+     So this is not a filter with an "all" setting. Every other control here
+     opens at "no join at all" and narrows when it is touched; this one opens
+     HOLDING BACK every row that carries a contract, and releases them one
+     expiry at a time. The reason is the data, not the UI: a bar belongs to ONE
+     contract, and a table that put October's and November's NIFTY futures
+     under one heading would show a series no contract ever traded — the same
+     class of invention `CLAUDE.md` §3 rule 1 forbids.
+
+     IT IS NOT A HIDE. §4 bans the fallback that hides a failure, so the rows
+     that are held back are COUNTED, the count is on the control's own clause,
+     it is named in `narrowing`, it has its own branch in `blocked`, and the
+     empty-table panel says in one sentence that clearing the filters will not
+     release them and choosing an expiry will. A reader is never left to work
+     out why the table is short.
+
+     A ROW WITH NO EXPIRY IS NOT GATED. `r.expiry === null` is every index and
+     every equity in the store, and gating those would be this page inventing a
+     contract for an instrument that has none. The test is written against
+     `null` and never against falsity, for the same reason `strike` is.
+
+     THE LIST IS BUILT FROM `deco` AND THE COUNTS FROM `matchedPreContract`,
+     which is the split the strike chain already uses: what contracts EXIST is
+     a property of the disk and must not shrink when the table narrows; how
+     many rows each one would return is a property of the selection.
      ====================================================================== */
+
+  /** Every expiry the store names, ascending. Raw ISO days, so `txt` IS chronological. */
+  const expiriesAll = $derived.by(() => {
+    const s = new Set();
+    for (const r of deco) if (r.expiry !== null) s.add(r.expiry);
+    return [...s].sort(txt);
+  });
+
+  /** Rows per expiry, over everything above this rung — what clicking returns. */
+  const expiryCount = $derived.by(() => {
+    const c = new Map();
+    for (const r of matchedPreContract) {
+      if (r.expiry !== null) c.set(r.expiry, (c.get(r.expiry) ?? 0) + 1);
+    }
+    return c;
+  });
+
+  /** How many rows above this rung carry a contract at all — the gate's denominator. */
+  const contractHere = $derived(
+    matchedPreContract.reduce(
+      (/** @type {number} */ a, /** @type {any} */ r) => a + (r.expiry === null ? 0 : 1),
+      0
+    )
+  );
+
+  /**
+   * THE GATE, APPLIED. Everything above the strike rung, with contract rows
+   * held to the chosen expiry.
+   *
+   * With `expiry === ''` no contract row can match — there is nothing to match
+   * — so every one of them drops and every non-contract row passes. That is
+   * the owner's rule expressed as one comparison rather than as a special
+   * case, which is why there is no branch here to get wrong.
+   */
+  const expiryGated = $derived(
+    /* NO PASS AT ALL WHEN THE STORE NAMES NO CONTRACT, and that is a proof
+       rather than an optimisation: `matchedPreContract` is a subset of `deco`,
+       and `expiriesAll` is empty exactly when no row in `deco` carries an
+       expiry — so no row in the subset can carry one either, and the filter
+       below would keep every one of them. Falling through UNCHANGED is the
+       same shape `windowed` and `matchedPreContract` already use, and it keeps
+       today's store — indices and equities, no contract anywhere — off a
+       20,516-row pass on every recompute. `expiryHeld` is a length difference,
+       so it reads 0 here without a branch of its own. */
+    expiriesAll.length === 0
+      ? matchedPreContract
+      : matchedPreContract.filter(
+          (/** @type {any} */ r) => r.expiry === null || r.expiry === expiry
+        )
+  );
+
+  /** How many rows the gate is holding back right now. Counted, never assumed. */
+  const expiryHeld = $derived(matchedPreContract.length - expiryGated.length);
+
+  /**
+   * WHY THE EXPIRY PANEL CANNOT BE OPENED, or `null` when it can.
+   *
+   * Two reasons and they are opposites — an unread store is a wait, a store
+   * with no contract in it is a fact about the pull — so one greyed control
+   * spells whichever it is rather than going dim and silent.
+   */
+  const expiryRefusal = $derived.by(() => {
+    if (expiriesAll.length > 0) return null;
+    if (deco.length === 0)
+      return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without contracts`;
+    return `not one of the ${fmt(deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is named the way this repository names a contract. crates/core/src/instrument.rs ends a future “-<YYYY-MM-DD>-FUT” and an option “-<YYYY-MM-DD>-<strike in paisa>-CE|PE”, and nothing in this store ends either way: it holds indices and equities, whose names carry no expiry at all. /store.json sends no expiry field, so an expiry here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at. Nothing is being held back, because there is nothing to hold.`;
+  });
+
+  /* ---- THE SIDE — the finest rung on the page --------------------------
+     TWO STRINGS AND NOT THREE. `OptionSide::as_str` emits `CE` and `PE`; the
+     third row on this control is `''`, which is NO JOIN AT ALL and is not a
+     value the store has ever held. Picking `Both` narrows nothing and leaves
+     every index in the table; picking `CE` keeps only rows whose name ends
+     that way, which drops every instrument that is not an option — the same
+     honest reading "at these strikes" already has on the strike panel. */
+
+  /** Which sides the store names at all. Empty when it holds no option. */
+  const sidesAll = $derived.by(() => {
+    const s = new Set();
+    for (const r of deco) if (r.side !== null) s.add(r.side);
+    return [...s].sort(txt);
+  });
+
+  /** Rows per side, with the gate above it applied — the facet rule, again. */
+  const sideCount = $derived.by(() => {
+    const c = new Map();
+    for (const r of expiryGated) {
+      if (r.side !== null) c.set(r.side, (c.get(r.side) ?? 0) + 1);
+    }
+    return c;
+  });
+
+  /** How many rows the side rung can reach at all, under the gate. */
+  const sidedHere = $derived(
+    expiryGated.reduce(
+      (/** @type {number} */ a, /** @type {any} */ r) => a + (r.side === null ? 0 : 1),
+      0
+    )
+  );
+
+  /**
+   * WHY THE SIDE CANNOT BE CHOSEN AT ALL, or `null`.
+   *
+   * IT IS A FACT ABOUT THE STORE AND NEVER ABOUT THE SELECTION, exactly as
+   * `strikeRefusal` is: `sidesAll` is counted from `deco`, the whole store for
+   * this feed, so this cannot flip while the reader narrows. That matters
+   * because this value DISABLES the control, and a disabled control that is
+   * still holding a live narrowing is a filter with no way back — pick `CE`,
+   * narrow to a month with no calls in it, and a selection-dependent refusal
+   * would grey the only control that could undo it.
+   *
+   * "This selection reaches no option" is a real and useful thing to say, and
+   * it is said — by `sideEmpty` below, on the clause, with the control left
+   * open.
+   */
+  const sideRefusal = $derived.by(() => {
+    if (sidesAll.length > 0) return null;
+    if (deco.length === 0)
+      return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
+    return `${feedDisplay(feeds.active)} holds no option. A side is the last two characters of an option's name — crates/core/src/instrument.rs ends one “-CE” or “-PE” — and not one of the ${fmt(deco.length)} instrument-month(s) here ends either way. /store.json sends no side field, so a side can only ever be READ OFF A NAME.`;
+  });
+
+  /**
+   * WHY THERE IS NO OPTION IN THIS SELECTION, or `null` when there is one.
+   *
+   * A SENTENCE, NOT A DISABLE. The store holds options — `sideRefusal` is
+   * `null` — and the rungs above have simply left none here. The commonest
+   * cause by far is the expiry gate one cell to the left, and naming that is
+   * the difference between a control that looks broken and one that points at
+   * the control which would fix it.
+   */
+  const sideEmpty = $derived.by(() => {
+    if (sideRefusal !== null || sidedHere > 0) return null;
+    if (!expiry && expiryHeld > 0)
+      return `the ${fmt(expiryHeld)} contract row(s) this selection reaches are held back until an expiry is chosen, so there is no option here to take a side of yet — choose an expiry beside this and it fills`;
+    return `this selection reaches no option: ${fmt(expiryGated.length)} row(s) are here and none of them carries a side`;
+  });
+
+  /* ======================================================================
+     THE CONTRACT RUNG — THE STRIKE CHAIN, AND THE MONEYNESS LADDER OVER IT
+     ----------------------------------------------------------------------
+     MONEYNESS IS A POSITION ON A LADDER, NOT ONE OF THREE WORDS. A strike is
+     in or out of the money BY A DISTANCE: for a call every strike below spot
+     is in the money and gets further in as you descend — ITM-1, ITM-2, ITM-3 …
+     — and every strike above it gets further out — OTM+1, OTM+2, OTM+3. ATM is
+     the single strike nearest spot. Collapsing that to three buckets throws
+     away the axis a reader trades on: one word cannot answer for a strike one
+     step in and a strike six steps in, which are different instruments.
+
+     THE SIGN IS PART OF THE NAME, and it is what makes the order an order.
+     `ITM-10` is DEEPER than `ITM-2` because −10 < −2; compared as text `ITM-10`
+     lands before `ITM-2` and `ITM-100` lands between them. `ladderPos` reads
+     the offset back off the name as a signed NUMBER, so a two-, three- or
+     four-digit offset needs no new rule and no new branch.
+
+     NOTHING HERE CARRIES A DEPTH. There is no `CHAIN = 6`, no cap, no band and
+     no bound between the chain and the panel: the rungs are counted off the
+     strikes the STORE actually names, so a store holding one strike has one
+     rung and says so, and a store holding five hundred has five hundred. A
+     rung the current selection holds no bar for stays on the ladder and
+     reports `no bars`, which is a finding about the window rather than a
+     shorter ladder.
+
+     ONE RENDERER, TWO DATA SOURCES. Both panels are `$lib/Picker.svelte` — the
+     same control `/markets` and `/ingest` use and the same one this page
+     already uses for Segment and Instrument. Everything that differs between
+     strike and moneyness is DATA: what the rows are, what the counts are read
+     from, what the button says, what the refusal says. A second lookalike
+     control is how two panels start the same and end up two pixels and one
+     wording apart, and there is not one here.
+
+     THEY STAY TWO CONTROLS. A rung is a distance and a strike is an absolute
+     price, and a reader who wants `52,000` and a reader who wants `ITM-2` are
+     asking different questions — one of them survives a move in spot and the
+     other does not.
+     ====================================================================== */
+
+  /**
+   * EVERY STRIKE THE STORE NAMES, ascending, with the sides it holds at it.
+   *
+   * Built from `deco` — the WHOLE store for this feed — and not from the
+   * filtered view, for the same reason `monthFull` is: the chain is what exists
+   * on disk, and narrowing the table to one month must not quietly shorten the
+   * ladder the remaining rows are placed on. What the narrowing changes is the
+   * COUNT beside each rung, which is counted separately and against
+   * `matchedPreContract`.
+   *
+   * One pass over the rows, then O(1) per lookup. Recomputed when the store is
+   * re-read, never per keystroke and never per scroll frame.
+   */
+  const chainAll = $derived.by(() => {
+    const by = new Map();
+    for (const r of deco) {
+      if (r.strike === null) continue;
+      let e = by.get(r.strike);
+      if (!e) by.set(r.strike, (e = { strike: r.strike, sides: new Set(), months: 0 }));
+      e.sides.add(r.side);
+      e.months += 1;
+    }
+    return [...by.values()].sort((a, b) => a.strike - b.strike);
+  });
+
+  /** Strike -> its position in the chain. The rung lookup is a probe, not a scan. */
+  const chainAt = $derived.by(() => {
+    const m = new Map();
+    for (let i = 0; i < chainAll.length; i += 1) m.set(chainAll[i].strike, i);
+    return m;
+  });
+
+  /**
+   * THE CHAIN'S OWN GRID, in paisa — counted, never `sym === 'BANKNIFTY' ? 500
+   * : 50`. The smallest positive gap between two adjacent listed strikes is a
+   * fact about what is on disk; a table of step sizes per symbol would be this
+   * page asserting an exchange's contract specification, which
+   * `docs/00-charter.md` sources for nothing.
+   *
+   * `null` under two strikes: one strike has no gap, and a step invented for it
+   * would be a number nobody measured.
+   */
+  const chainStep = $derived.by(() => {
+    let step = null;
+    for (let i = 1; i < chainAll.length; i += 1) {
+      const gap = chainAll[i].strike - chainAll[i - 1].strike;
+      if (gap > 0 && (step === null || gap < step)) step = gap;
+    }
+    return step;
+  });
+
+  /**
+   * SPOT, IN PAISA — the price the ladder is drawn around.
+   *
+   * IT IS `null`, ON EVERY STORE THIS PAGE CAN READ, AND THAT IS A FINDING
+   * RATHER THAN A STUB. `/store.json` carries ten fields and none is a price:
+   * `chg_bps` is a RATIO — this month's first close over its last, in integer
+   * basis points — and a ratio has no scale, so no absolute price can be
+   * recovered from it. `/instruments.json`, the other endpoint this page holds,
+   * carries `symbol`, `key`, `kind`, `exchange`, `segment`, `universe`,
+   * `universes`, `bars` and `href`, and none of those is a price either.
+   * `/bars.json` does carry prices — and reading one would be a request per
+   * contract and about 81 bytes per bar (see the note panel's last line, where
+   * that number is measured) to recover a single figure, which is the exact
+   * trade D-0067 refused when it put the two closes in the census instead.
+   *
+   * A DERIVED AND NOT A LITERAL `null`, on purpose. The day a price reaches
+   * this page the anchor is a computation over the rows on hand, not an edit to
+   * a constant — and `moneyRefusal` beside it has to be able to say "not
+   * measured" rather than "impossible".
+   *
+   * @type {number | null}
+   */
+  const spotPaisa = $derived.by(() => {
+    /* Nothing to read it from. Every field of every endpoint this page calls
+       is enumerated above; when one of them becomes a price, it is read here
+       and the ladder below lights up with no other change to this file. */
+    return null;
+  });
+
+  /**
+   * WHICH CHAIN ENTRY IS THE MONEY — the index of the strike nearest spot, or
+   * `null` when spot is not on hand.
+   *
+   * Nearest by absolute distance, and the FIRST of two equidistant strikes, so
+   * the answer is the same on every read of the same chain. A ladder whose
+   * centre moved between two paints would renumber every rung under the
+   * reader's selection.
+   */
+  const atmIndex = $derived.by(() => {
+    if (spotPaisa === null || chainAll.length === 0) return null;
+    let at = 0;
+    for (let i = 1; i < chainAll.length; i += 1) {
+      if (Math.abs(chainAll[i].strike - spotPaisa) < Math.abs(chainAll[at].strike - spotPaisa)) {
+        at = i;
+      }
+    }
+    return at;
+  });
+
+  /**
+   * The rung a chain offset sits on FOR ONE SIDE, and the sign is in the name.
+   *
+   * A call is in the money BELOW spot; a put is in the money ABOVE it. So one
+   * strike is `ITM-2` for the CE and `OTM+2` for the PE, and the rung is a
+   * function of both — which is exactly why moneyness cannot be a property of
+   * the strike control alone, and why these stay two controls.
+   *
+   * @param {number} k offset from the money, negative below it
+   * @param {'CE' | 'PE'} side
+   */
+  const rungOf = (k, side) =>
+    k === 0 ? 'ATM' : ((side === 'CE') === (k < 0) ? 'ITM-' : 'OTM+') + Math.abs(k);
+
+  /* READ BACK OFF THE NAME, so the string on screen, the key in the selection,
+     the key in the filter box and the key in the sort are ONE string and cannot
+     drift into two. */
+  const RUNG = /^(ITM|ATM|OTM)([+-]\d+)?$/;
+  /** @param {string} m */
+  const famOf = (m) => (m.match(RUNG) ?? [null, m])[1];
+  /** The signed offset. `ATM` is 0; `ITM-10` is −10, which is DEEPER than −2. */
+  /** @param {string} m */
+  const ladderPos = (m) => {
+    const p = m.match(RUNG);
+    return p && p[2] ? Number(p[2]) : 0;
+  };
+
+  /**
+   * EVERY RUNG THE CHAIN REACHES, in ladder order: deepest ITM … ITM-1, ATM,
+   * OTM+1 … deepest OTM.
+   *
+   * The union across the sides each strike actually holds, not one rung per
+   * strike. A strike is ITM for one side and OTM for the other, so on a chain
+   * that runs out of room at one end the union is the wider of the two sides —
+   * stating it as the union is true in both cases and "one per strike" is true
+   * only on a chain centred exactly on the money.
+   *
+   * Empty when there is no anchor, which is what disables the control. A rung
+   * NAMED without a money to measure from would be this page inventing a
+   * distance, and every name on the ladder would be wrong by however far the
+   * guess sat from spot.
+   */
+  const ladderRungs = $derived.by(() => {
+    if (atmIndex === null) return [];
+    const seen = new Set();
+    for (let i = 0; i < chainAll.length; i += 1) {
+      for (const side of chainAll[i].sides) seen.add(rungOf(i - atmIndex, side));
+    }
+    /* SORTED BY SIGNED POSITION, NEVER BY TEXT — see the block header. `txt` is
+       the tie-break only, and it can only fire between two names with the same
+       offset, which is `ATM` against itself and therefore never. */
+    return [...seen].sort((a, b) => ladderPos(a) - ladderPos(b) || txt(a, b));
+  });
+
+  /**
+   * The rung one stored row sits on, or `null` — no anchor, no contract, or a
+   * strike the chain does not list.
+   *
+   * @param {{ strike: number | null, side: 'CE' | 'PE' | null }} r
+   */
+  function rungKeyOf(r) {
+    if (atmIndex === null || r.strike === null || r.side === null) return null;
+    const i = chainAt.get(r.strike);
+    return i === undefined ? null : rungOf(i - atmIndex, r.side);
+  }
+
+  /* `expiryGated` AND NOT `matchedPreContract`, on both of these. The expiry
+     is the rung directly above the strike, so counting a strike over rows the
+     gate is holding back would print a bar count the click cannot produce —
+     the exact rule the facet block states. With no expiry chosen every strike
+     honestly reads `no bars`, because that is what selecting it returns. */
+
+  /** Bars at each strike, over everything the rungs above this one reached. */
+  const strikeBars = $derived.by(() => {
+    const c = new Map();
+    for (const r of expiryGated) {
+      if (r.strike !== null) c.set(r.strike, (c.get(r.strike) ?? 0) + r.rows);
+    }
+    return c;
+  });
+
+  /** The same count one level up, per rung. Empty while there is no anchor. */
+  const mnyBars = $derived.by(() => {
+    const c = new Map();
+    if (atmIndex === null) return c;
+    for (const r of expiryGated) {
+      const k = rungKeyOf(r);
+      if (k !== null) c.set(k, (c.get(k) ?? 0) + r.rows);
+    }
+    return c;
+  });
+
+  /**
+   * THE COUNT, COUNTED — and the three states are not two.
+   *
+   * `—` when nothing has been read, because a store nobody read counted
+   * nothing. `no bars` when it HAS been read and this row is empty, because
+   * that is a finding about the window and not about the control. A number
+   * otherwise. `0 bars` would be the third spelling of the second state and
+   * reads as a measurement of the first.
+   *
+   * @param {number} n
+   */
+  const barsDetail = (n) => (deco.length === 0 ? '—' : n ? `${fmt(n)} bars` : 'no bars');
+
+  /** One row per strike the store names, ascending, priced in rupees. */
+  const strikeRows = $derived(
+    chainAll.map((c) => ({
+      key: String(c.strike),
+      name: strikeText(c.strike),
+      detail: barsDetail(strikeBars.get(c.strike) ?? 0)
+    }))
+  );
+
+  /**
+   * The ladder as rows, with the FAMILY rows interleaved so that "all of ITM"
+   * and "exactly ITM-2" are the same gesture.
+   *
+   * A FAMILY OF ONE IS ITS RUNG and is drawn once. Printing both would be the
+   * page repeating a control it already drew, one row apart — and ATM is always
+   * a family of one, by definition.
+   *
+   * The family key is prefixed `fam:` so it can never collide with a rung name:
+   * `ATM` is both a family and a rung, and one string standing for two rows is
+   * how a tick lands on the wrong one.
+   */
+  const mnyRows = $derived.by(() => {
+    const out = [];
+    for (const f of ['ITM', 'ATM', 'OTM']) {
+      const run = ladderRungs.filter((m) => famOf(m) === f);
+      if (run.length === 0) continue;
+      if (run.length > 1) {
+        out.push({
+          key: `fam:${f}`,
+          name: f,
+          detail: `${fmt(run.length)} rungs · ${barsDetail(
+            run.reduce((a, m) => a + (mnyBars.get(m) ?? 0), 0)
+          )}`
+        });
+      }
+      for (const m of run) out.push({ key: m, name: m, detail: barsDetail(mnyBars.get(m) ?? 0) });
+    }
+    return out;
+  });
+
+  /**
+   * The selection as the PANEL sees it: the rungs, plus a family key for every
+   * run that is wholly taken.
+   *
+   * A ROW IS TICKED WHEN EVERY KEY UNDER IT IS, so half a family reads as
+   * unticked and ticking it takes the rest — never the other way round.
+   */
+  const mnySelected = $derived.by(() => {
+    const s = new Set(mnyPick);
+    for (const f of ['ITM', 'OTM']) {
+      const run = ladderRungs.filter((m) => famOf(m) === f);
+      if (run.length > 1 && run.every((m) => mnyPick.has(m))) s.add(`fam:${f}`);
+    }
+    return s;
+  });
+
+  /**
+   * A family tick, expanded into its whole run — in BOTH directions.
+   *
+   * The panel hands back a Set; the family keys in it are not selection, they
+   * are a gesture. Comparing what the run WAS against what the family key now
+   * says is what distinguishes "the reader ticked ITM" from "the reader ticked
+   * the last remaining ITM rung, which happens to complete the family", and the
+   * second must not then re-add rungs the first would have.
+   *
+   * @param {Set<string>} next
+   */
+  function onMnyPick(next) {
+    const out = new Set();
+    for (const k of next) if (!k.startsWith('fam:')) out.add(k);
+    for (const f of ['ITM', 'OTM']) {
+      const run = ladderRungs.filter((m) => famOf(m) === f);
+      if (run.length < 2) continue;
+      const was = run.every((m) => mnyPick.has(m));
+      const now = next.has(`fam:${f}`);
+      if (now && !was) for (const m of run) out.add(m);
+      else if (!now && was) for (const m of run) out.delete(m);
+    }
+    mnyPick = out;
+  }
+
+  /* WHAT EACH BUTTON SAYS. The count is the reader's own selection against what
+     this chain supports — never a label and never a constant. An empty
+     selection says what it MEANS rather than what it holds: no join at all, the
+     same sentence the `Everything` universe row carries. */
+  const strikeSummary = $derived(
+    chainAll.length === 0
+      ? 'No strike stored'
+      : strikePick.size === 0
+        ? `Any strike · ${fmt(chainAll.length)} listed`
+        : strikePick.size === 1
+          ? `${strikeText(Number([...strikePick][0]))} only`
+          : `${fmt(strikePick.size)} of ${fmt(chainAll.length)} strikes`
+  );
+
+  const mnySummary = $derived(
+    ladderRungs.length === 0
+      ? 'No ladder'
+      : mnyPick.size === 0
+        ? `Any rung · ${fmt(ladderRungs.length)} on the ladder`
+        : mnyPick.size === 1
+          ? `${[...mnyPick][0]} only`
+          : `${fmt(mnyPick.size)} of ${fmt(ladderRungs.length)} rungs`
+  );
+
+  /**
+   * WHY THE STRIKE PANEL CANNOT BE OPENED, or `null` when it can.
+   *
+   * `CLAUDE.md` §4: degrade loudly and NAME THE REASON. "Not yet read" and "the
+   * store holds no option" are opposite instructions — one is a wait and the
+   * other is a fact about the pull — and one greyed control cannot say both.
+   */
+  const strikeRefusal = $derived.by(() => {
+    if (chainAll.length > 0) return null;
+    if (deco.length === 0)
+      return `nothing has been read for ${feedDisplay(feeds.active)} yet, so no instrument name has been looked at — this is an unread store, not a store without options`;
+    return `not one of the ${fmt(deco.length)} instrument-month(s) ${feedDisplay(feeds.active)} holds is named the way this repository names an option. crates/core/src/instrument.rs ends one “-<strike in paisa>-CE” or “-<strike in paisa>-PE”, and nothing in this store ends either way: it holds indices, equities and futures, whose names carry no strike at all. /store.json sends no strike field, so a strike here can only ever be READ OFF A NAME — never decoded from a spelling this page guessed at.`;
+  });
+
+  /**
+   * WHY THE LADDER CANNOT BE OPENED, or `null` when it can — and WHICH of the
+   * two reasons it is.
+   *
+   * The second one is permanent on today's wire and it is the more important
+   * of the two, because it is the one an operator would otherwise assume away:
+   * a chain is not a ladder. Rungs are distances FROM THE MONEY, and nothing
+   * this page reads says where the money is.
+   */
+  /* THE PRICE CLAUSE, WRITTEN ONCE. It is the reason on the control's own
+     tooltip AND the reason on the counted line under the row, and two spellings
+     of one refusal is how one of them goes stale. */
+  const NO_SPOT =
+    'a rung is a DISTANCE FROM SPOT, and no endpoint this page reads carries a price. /store.json’s chg_bps is a RATIO and a ratio has no scale, so no absolute price can be recovered from it; /instruments.json carries no price at all; /bars.json does, and reading it would be one request and about 81 bytes per bar per contract to recover a single figure — the exact trade D-0067 refused when it put the two closes in the census instead. Nothing here guesses one: every name on a ladder anchored to a guess would be wrong by however far the guess sat from the money.';
+
+  const moneyRefusal = $derived.by(() => {
+    if (ladderRungs.length > 0) return null;
+    if (chainAll.length === 0)
+      return `there is no chain to place a rung on — ${strikeRefusal ?? 'no strike is stored'}. And there would be no ladder even with one, because ${NO_SPOT}`;
+    return `${fmt(chainAll.length)} strike(s) are stored and not one of them can be named ITM or OTM, because ${NO_SPOT} The ladder is derived from this chain and nothing else, so it fills itself in the day a spot price reaches this page — no list of rung names is written down anywhere to be edited.`;
+  });
+
+  /**
+   * The selection, applied. `matched` is what every panel, tile, card and
+   * column on this page below here already reads, so the contract rung reaches
+   * all of them through one expression and none of them changed.
+   *
+   * An EMPTY selection narrows nothing, per the block on `strikePick`. A
+   * non-empty one keeps only rows that carry the chosen strike or sit on the
+   * chosen rung, which drops every row with no contract at all — that is the
+   * honest reading of "at these strikes" and it is why the counted line under
+   * the rung says how many rows carry a contract in the first place.
+   */
+  const matched = $derived.by(() => {
+    /* THE GATE IS ALREADY IN `expiryGated` AND IT IS NOT OPTIONAL. Starting
+       from `matchedPreContract` here and re-applying it would be two spellings
+       of one rule, which is how one of them goes stale. */
+    let out = expiryGated;
+    /* AN EMPTY SIDE NARROWS NOTHING, per the block on `side`. `CE` keeps only
+       rows whose name ends `CE`, which drops every index and every future —
+       the honest reading of "calls only". */
+    if (side) out = out.filter((/** @type {any} */ r) => r.side === side);
+    if (strikePick.size > 0) {
+      out = out.filter(
+        (/** @type {any} */ r) => r.strike !== null && strikePick.has(String(r.strike))
+      );
+    }
+    if (mnyPick.size > 0) {
+      out = out.filter((/** @type {any} */ r) => {
+        const k = rungKeyOf(r);
+        return k !== null && mnyPick.has(k);
+      });
+    }
+    return out;
+  });
+
+  /** How many rows carry a strike at all — the denominator of the strike rung. */
+  const contractRows = $derived(
+    expiryGated.reduce(
+      (/** @type {number} */ a, /** @type {any} */ r) => a + (r.strike === null ? 0 : 1),
+      0
+    )
+  );
+
+  /* ======================================================================
+     THE TWO PERCENTAGE COLUMNS — WHAT THEY ARE, AND WHY MOST CELLS ARE A DASH
+     ----------------------------------------------------------------------
+     Every number in this panel is COUNTED FROM THE ROWS ON SCREEN'S OWN
+     DATASET, never typed in. The previous version of this block asserted that
+     `/store.json` carries no price, which was true when it was written and
+     false the day D-0069 landed — a hardcoded claim about the server outliving
+     the server. Counting means the panel cannot say "0 refused" over a table
+     full of dashes, or the reverse.
+     ====================================================================== */
+
   /** Bytes per bar on `/bars.json`, MEASURED: 668,251 bytes for 8,250 bars.
       A constant because it is a property of the wire format, not of the store;
       everything multiplied by it below is counted from the live data instead
@@ -330,22 +2386,71 @@
     return c;
   });
 
-  const BLOCKED = $derived([
+  /** How many of the whole dataset carry each reason code, per column. */
+  const whyCount = $derived.by(() => {
+    const chg = new Map();
+    const prev = new Map();
+    for (const r of deco) {
+      if (r.chg === null) chg.set(r.chgWhy, (chg.get(r.chgWhy) ?? 0) + 1);
+      if (r.prevChg === null) prev.set(r.prevChgWhy, (prev.get(r.prevChgWhy) ?? 0) + 1);
+    }
+    return { chg, prev };
+  });
+
+  const numbered = $derived(deco.reduce((a, r) => a + (r.chg === null ? 0 : 1), 0));
+  const refusedForSplits = $derived(whyCount.chg.get('corporate_action_unverified') ?? 0);
+
+  /**
+   * Every reason code present, counted in both columns, most common first.
+   *
+   * ENUMERATED, NEVER LISTED BY HAND. The version of this panel that named
+   * `base_not_positive` and `overflow` and then said "neither appears in this
+   * dataset" was rendered over a dataset containing a `base_not_positive` row.
+   * A panel about honesty cannot afford a sentence that is not counted, so the
+   * sentence became a count.
+   */
+  const reasonRoll = $derived.by(() => {
+    const codes = new Set([...whyCount.chg.keys(), ...whyCount.prev.keys()]);
+    return [...codes]
+      .map((code) => ({
+        code,
+        chg: whyCount.chg.get(code) ?? 0,
+        prev: whyCount.prev.get(code) ?? 0
+      }))
+      .sort((a, b) => b.chg + b.prev - (a.chg + a.prev) || txt(a.code, b.code));
+  });
+
+  /** Bytes, at the magnitude that reads as a quantity rather than as `0.0`. */
+  function bytesText(n) {
+    if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
+    if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
+    if (n >= 1e3) return `${(n / 1e3).toFixed(1)} kB`;
+    return `${Math.round(n)} B`;
+  }
+
+  const NOTES = $derived([
     {
-      k: 'The endpoint carries no price.',
-      v: `/store.json returns exactly four fields per row — instrument, month, timeframe, rows. Checked against the union of keys over all ${fmt(deco.length)} rows currently served, not against one sample. There is no close, no open, no basis point, so no percentage exists to render and none can be derived in the browser.`
+      k: 'What the two columns are.',
+      v: `% change is the month's OWN first close to its OWN last close. Prev % change is the previous calendar month's same statistic for the same instrument — not the previous bar, because a row here is an instrument-month. Both arrive as integer basis points and the decimal point is inserted for display: 125 on the wire is +1.25% on screen. CLAUDE.md §7 bans the float for money and a ratio derived from money gets the same treatment, so no percentage on this page has ever been a float, at either end.`
     },
     {
-      k: 'The affordable alternative is not affordable.',
-      v: `/bars.json serves one whole instrument-month per request and takes no batch parameter — measured at 668,251 bytes for 8,250 bars, ${BYTES_PER_BAR.toFixed(1)} bytes per bar. Filling these two columns once means ${fmt(deco.length)} requests and about ${((storeBars * BYTES_PER_BAR) / 1e9).toFixed(1)} GB moved to extract roughly ${fmt(Math.round((deco.length * 16) / 1024))} KB of signal. That is a scan per view, and it breaks the O(1)-per-interaction rule the rest of this page is built on.`
+      k: 'No corporate-action threshold is sourced. That is why most cells are a dash.',
+      v: `${fmt(refusedForSplits)} of ${fmt(deco.length)} rows are refused for this reason, and it is the only one of the five that is PERMANENT — no pull fixes it. docs/00-charter.md names no verified split-and-bonus feed, and docs/05-decisions.md D-0018 both requires a suspected corporate action to be refused loudly and rejects back-adjusting from an unverified source. An unadjusted 1:5 split is a fake 80% overnight crash that no stored price can be told apart from a real move. So every instrument that can be re-based — cash equities, and the F&O contracts NSE adjusts alongside them — is marked rather than numbered, in BOTH columns, whether or not its neighbour is held. Indices never split, and the ${fmt(kindCount.get('INDEX') ?? 0)} INDEX row(s) are the only ones eligible for a number at all.`
     },
     {
-      k: 'A guard is already decided and not yet built.',
-      v: 'docs/05-decisions.md D-0018 requires a suspected corporate action to be REFUSED LOUDLY with its date named, never computed. crates/ contains no corporate-action handling and docs/00-charter.md records no verified adjustment source, so an overnight percentage taken across a split would print a fabricated crash — a 10:1 split reads as −89.9% and is indistinguishable from a real move in stored prices.'
+      k: 'A month-level field can flag a month. It cannot name the day.',
+      v: `D-0018's stated detector is an unexplained OVERNIGHT gap, which is a bar-to-bar test over a month's ~8,250 bars — O(bars) work that cannot live in a census row (D-0067). Even with a threshold in hand, this column could only ever say "a corporate action may fall in this month", never "split on 2024-06-14". Anything stronger would have to be measured somewhere else and is not being claimed here.`
     },
     {
-      k: 'What would unblock it.',
-      v: `store_json emitting first and last close per instrument-month as INTEGER BASIS POINTS (CLAUDE.md §7 — never a float for money), alongside a split-suspicion flag so a refused row can be marked instead of numbered. Indices never split, so the ${fmt(kindCount.get('INDEX') ?? 0)} INDEX rows are safe the day the field exists; the ${fmt(kindCount.get('CASH') ?? 0)} CASH rows stay refused until the guard is real.`
+      k: 'Every reason on this dataset, counted.',
+      v:
+        reasonRoll.length === 0
+          ? 'Nothing is refused: every row in this dataset carries a number in both columns.'
+          : `${reasonRoll.map((r) => `${r.code}: ${fmt(r.chg)} in % change, ${fmt(r.prev)} in prev`).join(' · ')}. Counted from the rows themselves rather than listed here, so this line cannot claim a code is absent while the table below shows one.`
+    },
+    {
+      k: 'What it cost to make this affordable.',
+      v: `Reading the two closes from /bars.json instead would be ${fmt(deco.length)} request(s) and about ${bytesText(storeBars * BYTES_PER_BAR)} moved — measured at ${BYTES_PER_BAR.toFixed(1)} bytes per bar, from 668,251 bytes for 8,250 bars — to extract ${bytesText(deco.length * 16)} of signal. D-0067 put the two closes in the census entry instead, so a row and its neighbour are two hash probes and no file is opened. This page pays one request for the whole table, as it always did.`
     }
   ]);
 
@@ -366,11 +2471,23 @@
     { key: 'days', label: 'Sessions', num: true },
     { key: 'short', label: 'Short by', num: true },
     { key: 'pct', label: 'Completeness', num: true },
-    // NO `key`: THESE DO NOT SORT, BECAUSE THEY HOLD NOTHING TO SORT BY. A
+    // THESE TWO SORT NOW. They used to carry `key: null` with the comment "a
     // control that reorders 20,516 identical blanks is a control that lies
-    // about having data. The header opens the reason instead.
-    { key: null, label: 'Δ %', num: true, blocked: true },
-    { key: null, label: 'Prev Δ %', num: true, blocked: true }
+    // about having data" — which was right while they were blank and is wrong
+    // now that they hold basis points. The rule the old comment states is
+    // unchanged: EVERY COLUMN THAT HOLDS DATA SORTS. These hold data.
+    {
+      key: 'chg',
+      label: '% Change',
+      num: true,
+      why: "this month's first close to its last close, in basis points"
+    },
+    {
+      key: 'prevChg',
+      label: 'Prev % Change',
+      num: true,
+      why: "the previous month's % change for the same instrument"
+    }
   ];
 
   function txt(a, b) {
@@ -382,12 +2499,33 @@
     const dir = desc ? -1 : 1;
     return [...matched].sort((a, b) => {
       let d = 0;
-      if (k === 'rows' || k === 'days') d = a.rows - b.rows;
+      // `days` IS ITS OWN FIELD. Both keys used to sort on `a.rows`, so clicking
+      // the Sessions header ordered the table by Bars — two different numbers,
+      // and a column that sorts by a neighbour is worse than one that does not
+      // sort at all, because the arrow says it worked.
+      if (k === 'rows') d = a.rows - b.rows;
+      else if (k === 'days') d = a.days - b.days;
       else if (k === 'short') d = a.short - b.short;
       else if (k === 'pct') d = a.pct - b.pct;
       else if (k === 'month') d = txt(a.month, b.month);
-      else if (k === 'timeframe') d = txt(a.timeframe, b.timeframe);
-      else d = txt(a.instrument, b.instrument);
+      // BY LENGTH, NOT BY SPELLING. `txt` stood here, which ordered the rungs
+      // `15min`, `1day`, `1min`, `30min` — by first character, which is the
+      // same defect as a month column ordered by `Apr`. `tfCmp` is the ladder
+      // the new Timeframe control is drawn from, so the column and the control
+      // cannot disagree about what "next rung" means.
+      else if (k === 'timeframe') d = tfCmp(a.timeframe, b.timeframe);
+      else if (k === 'chg' || k === 'prevChg') {
+        // AN UNKNOWN SORTS LAST IN BOTH DIRECTIONS, and the `return` rather
+        // than a `d` is what makes that true: folding it into `dir * d` would
+        // put every dash at the TOP on one click and the bottom on the next,
+        // so "biggest fall first" would open on a screen of dashes. A dash is
+        // not a very small number; it is not a number, and it has no place on
+        // either end of an ordering of numbers.
+        if (a[k] === null && b[k] === null) d = 0;
+        else if (a[k] === null) return 1;
+        else if (b[k] === null) return -1;
+        else d = a[k] - b[k];
+      } else d = txt(a.instrument, b.instrument);
       if (d !== 0) return dir * d;
       // Deterministic tie-break, NOT inverted with the direction: two runs of
       // the same sort produce byte-identical order, so equal values never
@@ -397,23 +2535,625 @@
   });
 
   function head(key) {
-    if (!key) {
-      noteOpen = true;
-      return;
-    }
     if (sortKey === key) desc = !desc;
     else {
       sortKey = key;
       // Open a numeric column on its interesting end: most bars first, biggest
-      // hole first — but completeness ascending, because the WORST row is the
-      // one being looked for.
-      desc = key === 'rows' || key === 'days' || key === 'short';
+      // hole first, biggest gain first — but completeness ascending, because
+      // the WORST row is the one being looked for.
+      desc = key === 'rows' || key === 'days' || key === 'short' || key === 'chg' || key === 'prevChg';
     }
   }
 
   function ariaSort(key) {
-    if (!key) return undefined;
     return sortKey === key ? (desc ? 'descending' : 'ascending') : 'none';
+  }
+
+  /* ======================================================================
+     TWO GRIDS OVER ONE STORE - the CENSUS, and the BARS THEMSELVES
+     ----------------------------------------------------------------------
+     THE CENSUS GRID ANSWERS "WHAT IS HELD" AND CANNOT ANSWER "WHAT IS IN
+     IT". One row per instrument-month, counted off `/store.json`, no bar
+     file opened: it is the only view that can survey 20,516 rows for a
+     hole. It has no open, no close, no volume and no open interest, because
+     the census carries none.
+
+     So a SECOND grid is added rather than the first being replaced. One row
+     per BAR, read from `/bars.json` - the endpoint `/markets` already
+     reads, one request per instrument-month, the path being the index.
+     Which grid is showing is a choice the reader makes and the page states
+     in words; neither is a default that hides the other.
+
+     WHAT THE BAR GRID WILL NOT DO. Ten of its twenty-four columns have no
+     source on this wire, and every one of them says so on its own face
+     rather than printing a number. `CLAUDE.md` section 3 rule 1: a Greek
+     this page invented would be indistinguishable, on screen, from one a
+     vendor sent.
+     ====================================================================== */
+  const VIEWS = [
+    {
+      key: 'census',
+      label: 'Census',
+      sub: 'one row per instrument-month',
+      showing: 'one row per INSTRUMENT-MONTH, counted from /store.json',
+      title:
+        'What the store HOLDS. One row per instrument-month, off /store.json - bars, sessions, completeness, % change. No bar file is opened, so this is the only view that can survey the whole store for a hole.'
+    },
+    {
+      key: 'bars',
+      label: 'Bars',
+      sub: 'one row per bar',
+      showing: 'one row per BAR, read from /bars.json',
+      title:
+        'What the store CONTAINS. One row per stored bar, off /bars.json - one request per instrument-month, so the read budget decides how many files are opened. Prices are the store’s own paisa integers.'
+    }
+  ];
+  let view = $state('census');
+  const viewNow = $derived(VIEWS.find((v) => v.key === view) ?? VIEWS[0]);
+
+  /* ---------------------------------------------------------------------
+     THE PAGER'S STATE, and it governs BOTH grids.
+
+     `page` is a 1-based ordinal and it is CLAMPED AT EVERY READ (`pageNow`)
+     rather than written back: a narrowing that shortens the run must not
+     leave the reader on page 40 of 3 looking at a blank grid, and a clamp
+     that writes state from inside a derived is a loop.
+     --------------------------------------------------------------------- */
+  const PAGE_SIZES = [25, 50, 100, 250, 1000];
+  let pageSize = $state(50);
+  let page = $state(1);
+
+  /* ---------------------------------------------------------------------
+     WHAT HAS NO SOURCE, SAID ONCE EACH.
+
+     Every sentence below reaches the screen twice - on the disabled sort
+     button's title and on every cell in that column - so the reason cannot
+     be on one and missing from the other.
+     --------------------------------------------------------------------- */
+  const NO_PREMKT =
+    'a pre-market percentage needs a pre-open session price, and the store’s bar record carries none: docs/02-store-format.md fixes the record at timestamp, open, high, low, close, volume and open interest, and /bars.json returns exactly those seven fields. There is nothing on this wire to divide.';
+  const NO_INTRINSIC =
+    'intrinsic value is the distance from SPOT to the strike, clipped at zero, and this page has no spot. /bars.json returns THIS contract’s own prices - the premium - never the underlying’s. Subtracting a strike from a premium is not intrinsic value, it is a wrong number.';
+  const NO_EXTRINSIC =
+    'extrinsic value is premium minus intrinsic, so it is unknown for exactly as long as intrinsic is, and for the same reason.';
+  const NO_GREEK =
+    'no endpoint this page reads carries a Greek, and none is computed here. Black-Scholes needs a measured risk-free rate and a measured time to expiry; neither is sourced in this repository, and CLAUDE.md section 3 rule 1 forbids inventing one. A number printed in this column would be indistinguishable, on screen, from one a vendor sent.';
+
+  /* ---------------------------------------------------------------------
+     THE BAR GRID'S COLUMNS - all twenty-four, in the approved order.
+
+     `none` is the reason a column has no source. A column with `none` set
+     renders a NAMED dash in every cell and its sort button is DISABLED
+     wearing that same sentence: a sort control over a column of unknowns
+     reorders nothing while claiming to have worked.
+     --------------------------------------------------------------------- */
+  const BAR_COLS = [
+    {
+      key: 'ts',
+      label: 'Date / time',
+      w: 172,
+      why: 'the bar’s own opening instant, IST - the store holds it in microseconds'
+    },
+    {
+      key: 'tf',
+      label: 'TF',
+      w: 68,
+      why: 'the bar length, sorted by DURATION and never by spelling'
+    },
+    { key: 'o', label: 'Open', w: 104, num: true, why: 'paisa integer, straight from the store' },
+    { key: 'h', label: 'High', w: 104, num: true, why: 'paisa integer, straight from the store' },
+    { key: 'l', label: 'Low', w: 104, num: true, why: 'paisa integer, straight from the store' },
+    { key: 'c', label: 'Close', w: 108, num: true, why: 'paisa integer, straight from the store' },
+    {
+      key: 'vol',
+      label: 'Volume',
+      w: 116,
+      num: true,
+      why: 'contracts or shares traded inside this bar'
+    },
+    { key: 'premkt', label: 'Pre-mkt %', w: 102, num: true, none: NO_PREMKT },
+    {
+      key: 'chg',
+      label: 'Change %',
+      w: 102,
+      num: true,
+      why: 'this bar’s close against the PREVIOUS BAR’s close in the same month file, in integer basis points'
+    },
+    {
+      key: 'oi',
+      label: 'Open interest',
+      w: 124,
+      num: true,
+      why: 'the stored open interest. i64::MIN is the null sentinel and renders as unknown; a zero is a real zero'
+    },
+    {
+      key: 'oichg',
+      label: 'OI chg %',
+      w: 100,
+      num: true,
+      why: 'this bar’s open interest against the previous bar’s, in integer basis points'
+    },
+    {
+      key: 'exp',
+      label: 'Expiry',
+      w: 116,
+      why: 'the contract’s expiry day, parsed from the stored name'
+    },
+    {
+      key: 'dte',
+      label: 'Days to exp',
+      w: 106,
+      num: true,
+      why: 'whole calendar days from this bar’s IST day to the expiry day - negative after it'
+    },
+    { key: 'side', label: 'Type', w: 72, why: 'CE or PE, from the stored name' },
+    { key: 'strike', label: 'Strike', w: 96, num: true, why: 'paisa integer, from the stored name' },
+    { key: 'mny', label: 'Moneyness', w: 106, none: NO_SPOT },
+    { key: 'intr', label: 'Intrinsic', w: 100, num: true, none: NO_INTRINSIC },
+    { key: 'extr', label: 'Extrinsic', w: 100, num: true, none: NO_EXTRINSIC },
+    { key: 'iv', label: 'IV %', w: 86, num: true, none: NO_GREEK },
+    { key: 'delta', label: 'Delta', w: 86, num: true, none: NO_GREEK },
+    { key: 'gamma', label: 'Gamma', w: 90, num: true, none: NO_GREEK },
+    { key: 'theta', label: 'Theta', w: 88, num: true, none: NO_GREEK },
+    { key: 'vega', label: 'Vega', w: 86, num: true, none: NO_GREEK },
+    { key: 'rho', label: 'Rho', w: 84, num: true, none: NO_GREEK }
+  ];
+  /** By key, so a cell reaches its own column's reason without an index. */
+  const BAR_META = (() => {
+    /** @type {Record<string, any>} */
+    const m = {};
+    for (const c of BAR_COLS) m[c.key] = c;
+    return m;
+  })();
+  /** The natural width of the bar grid - SUMMED from the columns, never typed. */
+  const BAR_WIDTH = BAR_COLS.reduce((a, c) => a + c.w, 0);
+  /** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
+  const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
+  const BAR_UNSOURCED = BAR_COLS.length - BAR_SOURCED;
+
+  /* ---------------------------------------------------------------------
+     THE READ BUDGET - a CHOICE, not a count the page took for the reader.
+
+     `/bars.json` is one month per request and about 81 bytes per bar on the
+     wire, so "read everything that matched" is a request storm on a 206-row
+     census. The budget is a control with its cost on its face; `0` means
+     every matched instrument-month and the option says so.
+     --------------------------------------------------------------------- */
+  const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
+  /** @param {number} n */
+  const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
+  let readBudget = $state(6);
+
+  /**
+   * The instrument-months the bar grid would read, NEWEST MONTH FIRST.
+   *
+   * Newest first because a store is read forward: the question an operator
+   * opens this grid with is "what landed", and the newest month is where it
+   * landed. "Backfill runs oldest-first" is a rule about WRITING and has no
+   * bearing on which file a reader opens first.
+   */
+  const barPlan = $derived.by(() => {
+    const all = [...matched].sort(
+      (/** @type {any} */ a, /** @type {any} */ b) =>
+        txt(b.month, a.month) || txt(a.instrument, b.instrument) || tfCmp(a.timeframe, b.timeframe)
+    );
+    const take = readBudget === 0 ? all.length : Math.min(readBudget, all.length);
+    return { all, read: all.slice(0, take), held: all.length - take };
+  });
+  /** A PRIMITIVE, so the fetch effect re-runs when the SET changes and not
+      on every keystroke that leaves the same set standing. */
+  const barPlanKeys = $derived(barPlan.read.map((/** @type {any} */ r) => r.key).join('\n'));
+
+  /* ---------------------------------------------------------------------
+     THE READ. One request per instrument-month, cached for as long as the
+     feed and the Refresh nonce hold still, so narrowing the query does not
+     re-ask for a file already in memory.
+     --------------------------------------------------------------------- */
+  /** @type {Map<string, any>} */
+  const barCache = new Map();
+  let barCacheStamp = '';
+  /** @type {{ loading: boolean, error: string | null, files: any[] }} */
+  let barState = $state({ loading: false, error: null, files: [] });
+  let barToken = 0;
+
+  /**
+   * One month file, for one series.
+   *
+   * A FAILURE IS A VALUE HERE, NOT A REJECTION: one unreadable file must not
+   * blank the twelve that read, so the grid lists each refusal under its own
+   * instrument-month. Only successes are cached - a retry has to be able to
+   * succeed.
+   *
+   * @param {string} feed
+   * @param {any} r
+   */
+  async function readBarFile(feed, r) {
+    const hit = barCache.get(r.key);
+    if (hit) return hit;
+    /* EXCHANGE-SEGMENT-SYMBOL, AND THE SYMBOL KEEPS ITS OWN HYPHENS. The
+       store's series name is `Exchange-Segment-Symbol`, and a symbol is
+       legally `ABB-III` or `NIFTY-2026-08-27-2500000-CE`. Only the FIRST
+       TWO separators are structural; everything after them is the symbol.
+       Splitting on the last one instead is how `-CE` becomes a segment. */
+    const parts = String(r.instrument).split('-');
+    const q = new URLSearchParams({
+      feed,
+      exchange: parts[0] ?? '',
+      segment: parts[1] ?? '',
+      symbol: parts.slice(2).join('-'),
+      /* THE RUNG THE ROW ITSELF CARRIES. Omitted, the server defaults to
+         `1min`, and a daily file is then asked for at a rung that has no
+         file - the exact refusal /markets already paid for once. */
+      timeframe: r.timeframe,
+      month: r.month
+    });
+    try {
+      const res = await fetch(`/bars.json?${q}`);
+      let body = null;
+      try {
+        body = await res.json();
+      } catch {
+        return {
+          key: r.key,
+          row: r,
+          bars: [],
+          faults: null,
+          error: `HTTP ${res.status}, and the body was not JSON`
+        };
+      }
+      /* THE SERVER'S OWN SENTENCE, not a status code. `/bars.json` refuses
+         with `{"error":"...2026-08.bin does not exist, opening it"}`, which
+         names the file; "HTTP 400" names nothing and sends the operator to
+         the logs. */
+      if (body && typeof body === 'object' && !Array.isArray(body) && body.error) {
+        return { key: r.key, row: r, bars: [], faults: null, error: String(body.error) };
+      }
+      if (!res.ok && res.status !== 206) {
+        return { key: r.key, row: r, bars: [], faults: null, error: `HTTP ${res.status}` };
+      }
+      /* A PARTIAL read answers 206 with `{bars, faults}`. Both shapes are
+         handled and a faulty record is surfaced, never silently dropped - a
+         grid with an unexplained hole is worse than one with a warning. */
+      const out = {
+        key: r.key,
+        row: r,
+        bars: Array.isArray(body) ? body : (body?.bars ?? []),
+        faults: Array.isArray(body) ? null : (body?.faults ?? null),
+        error: null
+      };
+      barCache.set(r.key, out);
+      return out;
+    } catch (why) {
+      const w = /** @type {any} */ (why);
+      return {
+        key: r.key,
+        row: r,
+        bars: [],
+        faults: null,
+        error: String(w && w.message ? w.message : w)
+      };
+    }
+  }
+
+  $effect(() => {
+    const active = view === 'bars';
+    const feed = feeds.active;
+    const keys = barPlanKeys;
+    void nonce;
+    /* THE CACHE IS KEYED ON THE FEED AND THE NONCE. Refresh means "read the
+       store again", and a cache that survived it would answer the re-read
+       out of the copy the re-read was asked to replace. */
+    const stampNow = `${feed ?? ''} ${nonce}`;
+    if (barCacheStamp !== stampNow) {
+      barCache.clear();
+      barCacheStamp = stampNow;
+    }
+    if (!active || !feed || keys === '') {
+      barState = { loading: false, error: null, files: [] };
+      return;
+    }
+    const want = untrack(() => barPlan.read);
+    const mine = ++barToken;
+    let dead = false;
+    barState = { loading: true, error: null, files: untrack(() => barState.files) };
+    Promise.all(want.map((/** @type {any} */ r) => readBarFile(feed, r)))
+      .then((files) => {
+        if (dead || mine !== barToken) return;
+        barState = { loading: false, error: null, files };
+      })
+      .catch((why) => {
+        if (dead || mine !== barToken) return;
+        /* NAMED, NOT SHRUGGED. `readBarFile` returns its failures as values,
+           so reaching here at all is this page failing rather than a file. */
+        barState = {
+          loading: false,
+          error: String(why && why.message ? why.message : why),
+          files: []
+        };
+      });
+    return () => (dead = true);
+  });
+
+  /** Files that answered with a refusal rather than with bars. */
+  const barFails = $derived(barState.files.filter((/** @type {any} */ f) => f.error !== null));
+  /** Files that answered 206 - read in part, with the part that failed named. */
+  const barFaults = $derived(barState.files.filter((/** @type {any} */ f) => f.faults));
+  /** Files whose bar count disagrees with the census row that named them. */
+  const barDisagree = $derived(
+    barState.files.filter(
+      (/** @type {any} */ f) => f.error === null && f.bars.length !== f.row.rows
+    )
+  );
+
+  /* ---------------------------------------------------------------------
+     THE BAR ROWS. Built once per read - never per paint and never per
+     keystroke: the comparator below runs O(n log n) times and must compare
+     plain fields, exactly as the census comparator does.
+     --------------------------------------------------------------------- */
+  const IST_OFFSET_MS = 19800000; /* +05:30, and India keeps no DST */
+
+  /**
+   * The IST calendar day an epoch-millisecond instant falls on, as the
+   * `YYYY-MM-DD` KEY form and never a label. It is subtracted from an
+   * expiry, so it has to stay comparable.
+   * @param {number} ms
+   */
+  function istDayKey(ms) {
+    const d = new Date(ms + IST_OFFSET_MS);
+    return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(
+      d.getUTCDate()
+    ).padStart(2, '0')}`;
+  }
+
+  /**
+   * Whole calendar days between two ISO days, or `null` if either will not
+   * parse. Both ends are read at UTC midnight, so no zone offset can round a
+   * day off the difference.
+   * @param {string} fromIso
+   * @param {string} toIso
+   */
+  function daysBetween(fromIso, toIso) {
+    const a = Date.parse(`${fromIso}T00:00:00Z`);
+    const b = Date.parse(`${toIso}T00:00:00Z`);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    return Math.round((b - a) / 86400000);
+  }
+
+  /**
+   * A price in paisa, with its two decimals and Indian digit grouping.
+   *
+   * INTEGER ARITHMETIC THROUGHOUT, exactly as `strikeText` does it: a `%`
+   * and a subtraction, never a divide by 100 on the way to the screen.
+   * Prices are `i64` paisa (`CLAUDE.md` section 7) and a float would round
+   * one of them. Unlike `strikeText` the two decimals are ALWAYS printed -
+   * an OHLC column holding 24,150 beside 24,150.25 has to align.
+   *
+   * @param {number | null | undefined} p
+   */
+  function paisaText(p) {
+    if (p === null || p === undefined) return '-';
+    const neg = p < 0;
+    const a = neg ? -p : p;
+    const frac = a % 100;
+    const whole = (a - frac) / 100;
+    return `${neg ? '−' : ''}${fmt(whole)}.${String(frac).padStart(2, '0')}`;
+  }
+
+  /** Why one bar's percentage is not a number. One code, one sentence. */
+  const BAR_WHY = {
+    first_bar_in_file:
+      'this is the first bar in its month file, so the close it would be measured against is in the previous month - and this request read one month. It is not a zero.',
+    previous_close_zero:
+      'the previous close is zero paisa, and a ratio against zero is not a number.',
+    oi_null:
+      'open interest on this bar is the store’s null sentinel, i64::MIN - this feed stamps none for this segment. It is NOT zero; a zero here would be a real zero.',
+    oi_null_before:
+      'the previous bar carries no open interest, so there is nothing to measure this one against.',
+    previous_oi_zero: 'the previous open interest is zero, and a ratio against zero is not a number.'
+  };
+  /** @param {string | null} code */
+  const barWhyText = (code) =>
+    (code === null ? null : /** @type {any} */ (BAR_WHY)[code]) ??
+    'unknown, and this page did not record why - which is a defect here, not a fact about the store.';
+
+  const barRows = $derived.by(() => {
+    /** @type {any[]} */
+    const out = [];
+    for (const f of barState.files) {
+      if (f.error !== null) continue;
+      const r = f.row;
+      const bars = f.bars;
+      for (let i = 0; i < bars.length; i++) {
+        const b = bars[i];
+        const before = i > 0 ? bars[i - 1] : null;
+        /* `typeof ... === 'number'` AND NEVER A TRUTHINESS TEST. The server
+           writes `null` for `i64::MIN` and the integer for everything else,
+           so `0` is a STORED ZERO and `b.oi || null` would erase it. */
+        const oi = typeof b.oi === 'number' ? b.oi : null;
+        const prevOi = before && typeof before.oi === 'number' ? before.oi : null;
+        const ts = b.t * 1000;
+        const day = istDayKey(ts);
+        const chgWhy =
+          before === null ? 'first_bar_in_file' : before.c === 0 ? 'previous_close_zero' : null;
+        const oiWhy =
+          oi === null
+            ? 'oi_null'
+            : before === null
+              ? 'first_bar_in_file'
+              : prevOi === null
+                ? 'oi_null_before'
+                : prevOi === 0
+                  ? 'previous_oi_zero'
+                  : null;
+        out.push({
+          /* THE KEY IS THE SERIES, THE MONTH, THE RUNG AND THE BAR'S OWN
+             SECOND. An `{#each}` key: unique across every file on screen and
+             stable across a re-sort. */
+          rk: `${r.key} ${b.t} ${i}`,
+          instrument: r.instrument,
+          head: r.head,
+          sym: r.sym,
+          month: r.month,
+          ts,
+          day,
+          tf: r.timeframe,
+          o: b.o,
+          h: b.h,
+          l: b.l,
+          c: b.c,
+          vol: b.v,
+          chg: chgWhy === null ? Math.round(((b.c - before.c) * 10000) / before.c) : null,
+          chgWhy,
+          oi,
+          oichg: oiWhy === null ? Math.round(((oi - prevOi) * 10000) / prevOi) : null,
+          oichgWhy: oiWhy,
+          /* THE RAW ISO DAY, which is what the sort compares and what the
+             expiry arithmetic reads. `dayLabel` is applied at the text node
+             and nowhere else. */
+          exp: r.expiry,
+          dte: r.expiry === null ? null : daysBetween(day, r.expiry),
+          side: r.side,
+          strike: r.strike
+        });
+      }
+    }
+    return out;
+  });
+
+  /** Bars actually read, and what the census claimed for the same files.
+      A PARTITION, and both halves are printed under the grid. */
+  const barsRead = $derived(barRows.length);
+  const barsClaimed = $derived(
+    barState.files.reduce(
+      (/** @type {number} */ a, /** @type {any} */ f) => a + (f.error === null ? f.row.rows : 0),
+      0
+    )
+  );
+
+  /* ---------------------------------------------------------------------
+     THE BAR GRID'S SORT. Three-way on the KEY, never on the formatted text,
+     and an unknown sorts LAST IN BOTH DIRECTIONS - a dash is not a very
+     small number, it is not a number.
+     --------------------------------------------------------------------- */
+  let barSortKey = $state('ts');
+  let barDesc = $state(true);
+
+  const barSorted = $derived.by(() => {
+    const k = barSortKey;
+    const dir = barDesc ? -1 : 1;
+    return [...barRows].sort((a, b) => {
+      const A = a[k];
+      const B = b[k];
+      let d = 0;
+      if (A === null || A === undefined) {
+        if (B === null || B === undefined) d = 0;
+        else return 1;
+      } else if (B === null || B === undefined) {
+        return -1;
+      } else if (k === 'tf') {
+        /* BY DURATION, NOT BY SPELLING. `txt` here would order the rungs
+           15min, 1day, 1min, 30min - the same defect as a month column
+           ordered by `Apr`. */
+        d = tfCmp(A, B);
+      } else if (typeof A === 'string' || typeof B === 'string') {
+        /* `exp` IS THE RAW ISO DAY, so this comparison is chronological. On
+           `29 Oct 2026` it would be alphabetical, and wrong. */
+        d = txt(String(A), String(B));
+      } else {
+        /* THREE-WAY, AND NEVER `A - B`. A subtraction hands a comparator a
+           magnitude where it asked for a sign, and it is the shape that
+           returns a non-zero for two equal values the moment either end
+           stops being a small integer. */
+        d = A < B ? -1 : A > B ? 1 : 0;
+      }
+      if (d !== 0) return dir * d;
+      /* Deterministic tie-break, NOT inverted with the direction, so two
+         runs of one sort produce byte-identical order. */
+      return (
+        txt(a.instrument, b.instrument) ||
+        (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0) ||
+        txt(a.rk, b.rk)
+      );
+    });
+  });
+
+  /** @param {string} key */
+  function barHead(key) {
+    const col = BAR_COLS.find((c) => c.key === key);
+    if (!col || col.none) return; /* a column with no source has nothing to order */
+    if (barSortKey === key) barDesc = !barDesc;
+    else {
+      barSortKey = key;
+      /* A new column opens on the end that is useful first: newest and
+         largest at the top, text A-Z. */
+      barDesc = Boolean(col.num) || key === 'ts';
+    }
+  }
+  /** @param {string} key */
+  const barAriaSort = (key) => (barSortKey === key ? (barDesc ? 'descending' : 'ascending') : 'none');
+
+  /* ---------------------------------------------------------------------
+     PAGING - the same arithmetic for both grids, so the readout under one
+     cannot mean something different under the other.
+     --------------------------------------------------------------------- */
+  const pageTotal = $derived(view === 'bars' ? barSorted.length : sorted.length);
+  const pageCount = $derived(Math.max(1, Math.ceil(pageTotal / pageSize)));
+  const pageNow = $derived(Math.min(Math.max(1, page), pageCount));
+  const pageFrom = $derived(pageTotal === 0 ? 0 : (pageNow - 1) * pageSize + 1);
+  const pageTo = $derived(Math.min(pageNow * pageSize, pageTotal));
+  const censusPage = $derived(sorted.slice((pageNow - 1) * pageSize, pageNow * pageSize));
+  const barPage = $derived(barSorted.slice((pageNow - 1) * pageSize, pageNow * pageSize));
+
+  /** @param {number} n */
+  function goPage(n) {
+    const want = Number(n);
+    page = Math.min(pageCount, Math.max(1, Number.isFinite(want) ? Math.trunc(want) : 1));
+  }
+  /** Keep the reader's PLACE across a page-size change, not their ordinal:
+      the row they were standing on stays on screen.
+      @param {number} n */
+  function setPageSize(n) {
+    const firstRow = (pageNow - 1) * pageSize;
+    pageSize = Number(n);
+    page = Math.floor(firstRow / pageSize) + 1;
+  }
+
+  /**
+   * Which page buttons to draw. Always first, last, current and its
+   * neighbours; the rest elided - a 1,840-page run must not render 1,840
+   * buttons, which is the constant-per-paint rule applied to a control.
+   *
+   * @param {number} cur
+   * @param {number} total
+   */
+  function pageList(cur, total) {
+    /* ONE SHAPE FROM BOTH BRANCHES. The short branch returned bare numbers
+       and the long one returned records, so the `{#each}` key expression was
+       reading `.k` off a number for every run of seven pages or fewer. */
+    if (total <= 7) {
+      return Array.from({ length: total }, (_, i) => ({ k: `p${i + 1}`, p: i + 1, gap: false }));
+    }
+    const want = new Set([1, total, cur, cur - 1, cur + 1]);
+    if (cur <= 3) {
+      want.add(2);
+      want.add(3);
+      want.add(4);
+    }
+    if (cur >= total - 2) {
+      want.add(total - 1);
+      want.add(total - 2);
+      want.add(total - 3);
+    }
+    const list = [...want]
+      .filter((p) => p >= 1 && p <= total)
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    /** @type {{ k: string, p: number, gap: boolean }[]} */
+    const out = [];
+    list.forEach((p, i) => {
+      if (i && p - list[i - 1] > 1) out.push({ k: `gap${p}`, p, gap: true });
+      out.push({ k: `p${p}`, p, gap: false });
+    });
+    return out;
   }
 
   /* ======================================================================
@@ -422,14 +3162,301 @@
   const total = $derived(matched.reduce((a, r) => a + r.rows, 0));
   const full = $derived(matched.reduce((a, r) => a + (r.short === 0 ? 1 : 0), 0));
   const gaps = $derived(matched.reduce((a, r) => a + r.short, 0));
+
+  /**
+   * Session-equivalents across the selection, each row converted AT ITS OWN
+   * RUNG before summing.
+   *
+   * A single `total / 375` cannot be right for a store holding two rungs: 403
+   * daily bars are 403 sessions, not 1.07. Rows at a rung with no recorded
+   * session size contribute nothing rather than a guess, which is why this can
+   * read lower than the bar count implies — and why the label beside it says
+   * "session-equivalents" rather than "sessions".
+   */
+  const sessionEquivalents = $derived(
+    matched.reduce((a, r) => {
+      const per = barsPerSession(r.timeframe);
+      return per === null ? a : a + r.rows / per;
+    }, 0)
+  );
+
+  /** Whole sessions missing, each row at its own rung. Same rule as above. */
+  const gapSessions = $derived(
+    matched.reduce((a, r) => {
+      const per = barsPerSession(r.timeframe);
+      return per === null ? a : a + r.short / per;
+    }, 0)
+  );
+
+  /**
+   * How many matched rows sit at a rung with a recorded session size — the
+   * denominator BEHIND the two session figures above, counted rather than
+   * assumed.
+   *
+   * Both of those sums skip a row whose rung `barsPerSession` has no number
+   * for. When every row on screen is at such a rung the sums are `0`, and `0`
+   * is a measurement: it says the selection holds no sessions, when the truth
+   * is that nobody can convert the bars it does hold. Counting the convertible
+   * rows lets the sub-lines print a dash and name that, which is the same rule
+   * `dayText` already enforces one row at a time.
+   */
+  const ranged = $derived(
+    matched.reduce((a, r) => a + (barsPerSession(r.timeframe) === null ? 0 : 1), 0)
+  );
+
   const owed = $derived(total + gaps); /* what the matched set would hold if full */
-  const coverage = $derived(owed > 0 ? total / owed : 1);
+
+  /**
+   * Bars held over bars owed — or `null`, which is a THIRD answer and not a
+   * bad hundred percent.
+   *
+   * `owed > 0 ? total / owed : 1` said 100.00% over a selection holding no
+   * bars at all, and the meter beside it filled to the end. Every filter that
+   * matches nothing reaches that branch, so the one tile an operator uses to
+   * judge the store reported perfect coverage of nothing, in the confident
+   * shape of a measurement. 0/0 is not one; it is undefined, `pctText` draws
+   * the dash, and the tile names which absence it is.
+   */
+  const coverage = $derived(owed > 0 ? total / owed : null);
   const monthsIn = $derived.by(() => {
     const s = new Set();
     for (const r of matched) s.add(r.month);
     return [...s].sort();
   });
-  const filtered = $derived(Boolean(typed || month || kind || holesOnly));
+  /* EVERY RUNG COUNTS, INCLUDING THE TWO SILENT ONES. `filtered` drives both
+     "of N stored" on the first tile and whether "Reset all filters" is offered
+     at all, so a universe or a month window left out here would leave a live
+     narrowing with no way back and the tile claiming the whole store. */
+  /* THE EXPIRY GATE IS DELIBERATELY NOT IN HERE, AND THAT IS THE ONE
+     EXCEPTION. Everything in this list is a narrowing `reset` can undo; the
+     gate is not — it is in force at `expiry === ''`, which is the value reset
+     restores. Listing it would make the button offer to clear something
+     pressing it cannot clear, which is the exact failure the comment above
+     warns about, pointed the other way. A CHOSEN expiry IS resettable and is
+     in the list; the gate is reported instead, on the rung's own clause, in
+     `narrowing`, in `blocked` and in the empty-table panel. */
+  const filtered = $derived(
+    Boolean(
+      typed ||
+        month ||
+        kind ||
+        holesOnly ||
+        universe ||
+        timeframe ||
+        fromMonth ||
+        toMonth ||
+        expiry ||
+        side ||
+        strikePick.size ||
+        mnyPick.size
+    )
+  );
+
+  /**
+   * THE NEWEST BAR IN THE SELECTION — counted, and it is the one fact the
+   * mockup's removed "newest bar" notice carried that nothing else on this page
+   * stated.
+   *
+   * `/store.json` has sent `last_ts` per row since the census gained it, and
+   * until now this page read it only per row (the month cell's tooltip) and per
+   * instrument (the drawer's "Days held"). Nothing said how fresh the SET on
+   * screen is, which is the question a banner over a table is actually asked.
+   * It is in the count line at the foot instead of in a band of its own: a
+   * standing notice is a row of chrome, and the same figure beside the row
+   * count is read by the same glance.
+   *
+   * `null` is an absence and not an epoch — a row with no stamp, or no row at
+   * all, and the foot names which. Milliseconds, because `deco` already divided
+   * the wire's microseconds where the unit was known.
+   *
+   * @type {number | null}
+   */
+  const newestBar = $derived(
+    matched.reduce(
+      (/** @type {number | null} */ a, /** @type {any} */ r) =>
+        r.lastAt !== null && (a === null || r.lastAt > a) ? r.lastAt : a,
+      /** @type {number | null} */ (null)
+    )
+  );
+
+  /* MOVED UP FROM THE BOTTOM OF THE SCRIPT, above its first reader. `blocked`
+     names the feed in a sentence, and a `$derived` closing over a `const`
+     declared below it is the temporal-dead-zone reference the FORMATTING block
+     at the top of this file describes: it happens to run because a derived is
+     lazy, and it throws the day the evaluation order changes. Same value, same
+     expression, declared before it is read. */
+  const feedName = $derived(feedDisplay(feeds.active));
+
+  /* ======================================================================
+     ONE ANSWER TO "WAS ANYTHING READ, AND IF NOT, WHY NOT"
+     ----------------------------------------------------------------------
+     Every panel used to decide this for itself, and panels that decide
+     separately disagree: the blank state said "this feed has never landed a
+     bar" while no feed had been chosen at all, and the summary strip printed a
+     coverage of 100.00% over the same empty selection the table below it was
+     calling empty.
+
+     `blocked` is `null` when the store was read AND the selection on screen
+     holds rows. Otherwise it carries the reason, in two lengths — `tsub` fits
+     under a tile, `why` is the sentence. Order matters: the FIRST condition
+     that makes the rest unanswerable wins, so the message always names the
+     narrowing that actually did it rather than the last one checked.
+     ====================================================================== */
+
+  /**
+   * The narrowings currently in force, named once for every panel that has to
+   * explain an empty result.
+   *
+   * `text` is the phrase; `key` is the raw store key behind it, for the
+   * `title` attribute, and it is absent where there is no key. The month is
+   * LABELLED in the phrase and RAW in the key — the display form never becomes
+   * the thing compared, per the rule at the top of `$lib/dates.js`.
+   */
+  /* THE LIST READS IN CASCADE ORDER, coarsest first, because the sentence it
+     builds is read as a chain: universe, then the month window, then the text,
+     then the segment, then the one month, then the holes toggle. A blocker
+     named out of order sends the operator to the wrong control.
+
+     THE MONTH KEYS ARE LABELLED IN `text` AND RAW IN `key`. `key` is what the
+     `title` attribute carries, so the store's own spelling is always one hover
+     away and the display form never becomes the thing compared. */
+  /* AND EVERY ROW CARRIES `k`, WHICH IS THE ONLY THING KEYED ON. The `{#each}`
+     that renders this list used to key on `n.text` — a DISPLAY string built out
+     of `monthLabel`, a universe's label and the operator's own typed text. Two
+     narrowings that happen to render the same phrase would collide and Svelte
+     would drop one; a phrase that changes with the label re-creates a node that
+     did not change. `k` names the RUNG, is one of eight fixed strings, and can
+     never be either. */
+  const narrowing = $derived(
+    [
+      universe
+        ? { k: 'universe', text: `universe ${chosenUniverse.label}`, key: chosenUniverse.token ?? '' }
+        : null,
+      /* THE RUNG IS ITS OWN KEY — `1min` is what the store spells and what the
+         control writes, so there is no display form to carry separately. */
+      timeframe ? { k: 'timeframe', text: `timeframe ${timeframe}`, key: timeframe } : null,
+      fromMonth || toMonth
+        ? {
+            k: 'window',
+            text: `months ${fromMonth ? monthLabel(fromMonth) : 'any'} → ${toMonth ? monthLabel(toMonth) : 'any'}`,
+            key: `${fromMonth || '*'} … ${toMonth || '*'}`
+          }
+        : null,
+      typed ? { k: 'text', text: `the text “${filter.trim()}”` } : null,
+      /* "segment", matching the control's own label. The state is still called
+         `kind` because that is the field `deco` parses out of the instrument
+         string and renaming it would touch the sort, the facet counts and the
+         drawer for no gain — only the word an operator reads changed. */
+      kind ? { k: 'segment', text: `segment ${kind}` } : null,
+      month ? { k: 'month', text: `month ${monthLabel(month)}`, key: month } : null,
+      /* THE EXPIRY IS NAMED WHETHER IT IS A CHOICE OR A GATE, and they are two
+         different sentences because they are two different facts. A chosen
+         expiry is a filter like any other and reads like one. The GATE is
+         reported only while it is actually holding rows back — `expiryHeld`
+         is counted, so on a store with no contract in it this line is silent
+         rather than announcing a refusal that refuses nothing.
+
+         `k` is a different fixed string for each, so the two can never collide
+         in the `{#each}` and one can never be dropped for looking like the
+         other. The day is LABELLED in `text` and RAW in `key`, exactly as the
+         month is. */
+      expiry
+        ? { k: 'expiry', text: `expiry ${dayLabel(expiry)}`, key: expiry }
+        : expiryHeld > 0
+          ? {
+              k: 'expiry-gate',
+              text: `every future and option, which is held back until an expiry is chosen`
+            }
+          : null,
+      /* THE CONTRACT RUNG IS FINER THAN THE MONTH AND COARSER THAN THE HOLES
+         TOGGLE, and it is named in the same shape as every other narrowing —
+         the label the panel shows, and the store's own key one hover away. A
+         strike is named in rupees because that is what the panel shows; the
+         paisa integer behind it is the key. */
+      strikePick.size
+        ? {
+            k: 'strike',
+            text:
+              strikePick.size === 1
+                ? `strike ${strikeText(Number([...strikePick][0]))}`
+                : `${fmt(strikePick.size)} strikes`,
+            key: [...strikePick].join(' · ')
+          }
+        : null,
+      mnyPick.size
+        ? {
+            k: 'moneyness',
+            text:
+              mnyPick.size === 1 ? `moneyness ${[...mnyPick][0]}` : `${fmt(mnyPick.size)} rungs`
+          }
+        : null,
+      side ? { k: 'side', text: `option type ${side}`, key: side } : null,
+      holesOnly ? { k: 'holes', text: 'holes only' } : null
+    ].filter((n) => n !== null)
+  );
+
+  const blocked = $derived.by(() => {
+    if (feeds.error)
+      return {
+        tsub: 'the feed list failed',
+        why: `/feeds.json could not be read — ${feeds.error}. Until it answers there is no feed to read a store for, so nothing on this page has been counted.`
+      };
+    if (!feeds.active)
+      return {
+        tsub: 'no feed chosen',
+        why: 'A bar belongs to the vendor that supplied it, so with no feed selected there is no store to read. Nothing below has been counted — this is an unmade choice, not an empty store.'
+      };
+    if (error)
+      return {
+        tsub: 'the manifest failed',
+        why: `/store.json could not be read — ${error}. Nothing was counted, including the zeroes.`
+      };
+    if (loading && rows.length === 0)
+      return { tsub: 'not read yet', why: 'The store manifest is still being read.' };
+    if (rows.length === 0)
+      return {
+        tsub: 'this feed holds nothing',
+        why: `${feedName} has never landed a bar in this store, so there is nothing to count.`
+      };
+    /* THE UNIVERSE GETS ITS OWN BRANCH, ABOVE THE GENERIC ONE, because "none of
+       them match universe NIFTY Total Market" is true and useless: the number
+       an operator needs is how many of that universe's members the store holds
+       AT ALL, and that is a different count from the one the table is showing.
+       First blocker wins, so this only fires when the universe alone emptied
+       the set — a finer control that empties it is named by the branch below. */
+    if (universe && universed.length === 0)
+      return {
+        tsub: 'nothing stored in this universe',
+        why: `${feedName} holds ${fmt(deco.length)} instrument-month(s) and none of them is in ${chosenUniverse.label}. ${
+          universeCount.get(universe)
+            ? `${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) are held.`
+            : 'Membership was not counted — see the note beside the universe row.'
+        } Not stored is not the same as not offered: this page reads the store, and what a vendor could have served is not a question /store.json can answer.`
+      };
+    /* THE GATE GETS ITS OWN BRANCH, ABOVE THE GENERIC ONE, for the same
+       reason the universe does: "none of them match the current selection" is
+       true here and useless. Nothing was filtered out by a choice — the rows
+       are being HELD BACK for want of one, the way out is a control the
+       operator has not touched yet, and "Clear the filters" is the one thing
+       that will NOT open it. First blocker wins, so this fires only when the
+       gate alone emptied the set; a finer control that empties it afterwards
+       is named by the branch below. */
+    if (matched.length === 0 && !expiry && expiryHeld > 0)
+      return {
+        tsub: 'no expiry chosen',
+        why: `Every one of the ${fmt(expiryHeld)} instrument-month(s) this selection reaches is a future or an option, and a contract row is not shown until an expiry is chosen for it. This is a refusal, not an empty store: a bar belongs to ONE contract, so blending ${fmt(expiriesAll.length)} expiries into a single table would show a series no contract ever traded. Choose an expiry on the Contract strip and they appear. Clearing the filters will not release them — the gate is not a filter.`
+      };
+    if (matched.length === 0)
+      return {
+        tsub: 'nothing matches the filter',
+        // `narrowing` cannot be empty here — with no filter in force `matched`
+        // IS `deco`, and `rows.length === 0` returned two branches up — but the
+        // fallback is written anyway, because the one sentence that must never
+        // come out malformed is the one explaining why a screen is blank.
+        why: `The store was read and holds ${fmt(deco.length)} instrument-month(s); none of them match ${narrowing.length ? narrowing.map((n) => n.text).join(', ') : 'the current selection'}. The store is not empty — this selection is.`
+      };
+    return null;
+  });
 
   /* ---- the month roll-up ---------------------------------------------
      WHICH MONTHS ARE COMPLETE, WHICH HAVE HOLES, HOW BIG. A hole is almost
@@ -450,12 +3477,17 @@
             bars: 0,
             full: 0,
             missing: 0,
-            fullest: monthFull.get(it.month) ?? 0,
+            fullest: monthFull.get(fullestKey(it)) ?? 0,
             worst: null
           })
         );
       }
       m.n += 1;
+      // THE RUNG THIS MONTH IS STORED AT, or `false` once two disagree. A month
+      // holding both 1min and 1day rows has no single session size, and
+      // inventing one is how `0.05 sessions observed` appeared beside a
+      // complete daily month.
+      m.tf = m.tf === undefined ? it.timeframe : m.tf === it.timeframe ? m.tf : false;
       m.bars += it.rows;
       m.missing += it.short;
       if (it.short === 0) m.full += 1;
@@ -464,7 +3496,10 @@
     return [...by.values()]
       .map((m) => ({
         ...m,
-        sessions: m.fullest / BARS_PER_SESSION,
+        // NULL RATHER THAN A NUMBER when the rung is unknown or mixed; the
+        // renderer draws a dash. `dayText` owns that rule for every caller.
+        sessions:
+          m.tf && barsPerSession(m.tf) !== null ? m.fullest / barsPerSession(m.tf) : null,
         pct: m.n > 0 && m.fullest > 0 ? m.bars / (m.n * m.fullest) : 1,
         // THE BAND IS THE MONTH'S COVERAGE, NOT A BAR COUNT. Comparing an
         // aggregate over hundreds of rows against the 375-bar single-row
@@ -498,7 +3533,13 @@
   function mark(name, v) {
     const p = prev.get(name);
     prev.set(name, v);
-    if (p === undefined || p === v) return;
+    // AN UNKNOWN IS NOT A DIRECTION, IN EITHER POSITION. Coverage reports
+    // `null` when the selection has no denominator, and `null > 0.9` is false
+    // — so without this guard a figure becoming unknown would tint red and a
+    // figure ceasing to be unknown would tint red as well, both stating a
+    // movement nobody measured. `null` still lands in `prev` above, so the
+    // baseline is current the moment a real number returns.
+    if (p === undefined || p === v || p === null || v === null) return;
     const n = (flash[name]?.n ?? 0) + 1;
     flash[name] = { n, dir: v > p ? 'up' : 'down' };
     // DROP THE CLASS ONCE THE ANIMATION IS OVER. `n` is unchanged, so the node
@@ -526,6 +3567,54 @@
   let movedTimer = 0;
 
   /**
+   * Drop every baseline the flash compares against, and the open drawer.
+   *
+   * Called from the fetch effect when — and only when — the ACTIVE FEED
+   * changed. "This figure moved" is a claim about one store read twice; Dhan's
+   * totals against Groww's baseline would tint six tiles and a screenful of
+   * rows for a movement that never happened, because the two are not the same
+   * instrument universe, the same session handling or the same price scale.
+   *
+   * Un-seeding rather than clearing-and-comparing is deliberate: the first
+   * response from the new feed re-seeds and flashes nothing, which is the same
+   * rule the initial page load already follows and for the same reason.
+   *
+   * The drawer goes too. It describes one instrument's every stored month, and
+   * the new feed may not carry that instrument at all — `openRowData` would
+   * fall to `null` on its own, but only after the response lands, leaving the
+   * other feed's months on screen in between.
+   *
+   * And `elsewhere` goes, for the reason stated where it is declared: it names
+   * the OTHER feeds that hold rows, computed against whichever feed was active
+   * when it resolved, so across a switch it can offer the feed already chosen.
+   * Its own effect re-runs and re-answers the moment the new store comes back
+   * empty; until then the honest render is no list at all.
+   *
+   * THE CASCADE STATE DELIBERATELY SURVIVES, and that is not an oversight.
+   * `filter`, `kind` and `month` have always survived a feed switch — they are
+   * the operator's QUESTION, not the answer, and re-asking it by hand on every
+   * switch is what makes a comparison impossible. `universe`, `fromMonth` and
+   * `toMonth` join them for the same reason, and they cannot go stale
+   * unnoticed the way a count can: the universe rung re-counts against the new
+   * feed's master and REFUSES to count at all until that master arrives
+   * (`universeRefusal`), and a month window is a plain string comparison that
+   * is as true of one store as of another.
+   */
+  function forgetPreviousFeed() {
+    seeded = false;
+    barsSeeded = false;
+    prev.clear();
+    barsBefore.clear();
+    for (const t of timers.values()) clearTimeout(t);
+    timers.clear();
+    clearTimeout(movedTimer);
+    flash = {};
+    moved = new Map();
+    openKey = null;
+    elsewhere = [];
+  }
+
+  /**
    * THE FLASH MEANS "THE STORE MOVED", NOT "YOU TYPED".
    *
    * The effect depends on `fetchedAt` and NOTHING else — every figure is read
@@ -547,7 +3636,11 @@
         ['bars', total],
         ['full', full],
         ['gaps', gaps],
-        ['cov', Math.round(coverage * 10000)],
+        /* `null` PASSES THROUGH AS `null`, never as a rounded zero.
+           `Math.round(null * 10000)` is 0, which would enter the baseline as a
+           coverage of 0.00% and flash red the instant a real ratio returned.
+           `mark` refuses to give an unknown a direction. */
+        ['cov', coverage === null ? null : Math.round(coverage * 10000)],
         ['months', monthsIn.length]
       ];
       if (!seeded) {
@@ -586,7 +3679,12 @@
 
   const first = $derived(Math.max(0, Math.floor(scrollTop / ROW) - OVER));
   const count = $derived(Math.ceil(viewportH / ROW) + OVER * 2);
-  const slice = $derived(sorted.slice(first, first + count));
+  /* WINDOWED INSIDE THE PAGE, NOT INSTEAD OF IT. The pager decides WHICH
+     rows are reachable; the window decides which of those are in the DOM.
+     Dropping the window when the pager landed would have put 1,000 rows of
+     nine cells into the document on the largest page size, which is the
+     layout cost the window exists to refuse. */
+  const slice = $derived(censusPage.slice(first, first + count));
 
   /* THE SEAM APPEARS ONLY ONCE THERE IS SOMETHING BEHIND IT. A permanent rule
      down the pinned column is a border pretending to be a shadow; the hairline
@@ -619,8 +3717,309 @@
   let searchEl = $state(null);
   let drawerEl = $state(null);
 
+  /* ======================================================================
+     THE FIND BOX IS A COMBOBOX, AND IT NOW SAYS SO IN THE DOCUMENT
+     ----------------------------------------------------------------------
+     The box has always offered a list — that is what a prefix index is for —
+     and the document said it was a bare text field. `role="combobox"` with
+     `aria-autocomplete="list"`, `aria-expanded` and `aria-controls` is the
+     WAI-ARIA pattern for exactly this control, and every one of those
+     attributes is a PROMISE: `aria-controls` names a listbox, so a listbox has
+     to exist and has to be the thing that opens.
+
+     SO THE LISTBOX IS REAL. It is not a decoration bolted on to justify an
+     attribute — it is the same enumeration the instrument `Picker` beside it
+     shows, cut to what has been typed, and it reaches something the Picker
+     cannot: a MONTH. The box has always matched instrument OR month (that is
+     what `index` is built over) and only the instruments were ever listed.
+
+     IT COSTS NO SCAN OF THE STORE. Both lists it reads are already built and
+     are bounded by the UNIVERSE rather than by the row count —
+     `instrumentRows` is one entry per instrument the window holds and
+     `monthsAll` is one per month — so a keystroke walks hundreds of entries,
+     never 20,516 rows, and never 93,776. The page's O(1)-per-keystroke
+     property is about the ROW probe and is untouched: `textMatched` is still
+     one Map probe.
+
+     THE KEYBOARD BELONGS TO THE INPUT, which is the pattern's whole point: the
+     options are not tab stops, `aria-activedescendant` names the highlighted
+     one, and ↑ ↓ Enter are handled on the field. Escape is handled in
+     `onWindowKey` beside the menu's, so ONE place decides what Escape shuts
+     first and the two cannot fight over it.
+     ====================================================================== */
+
+  /** Is the suggestion listbox showing? Never true with an empty box. */
+  let findOpen = $state(false);
+  /** Which suggestion is highlighted, or −1 for none. An INDEX, not a key. */
+  let findCursor = $state(-1);
+
+  /** A rendering budget, not an authority on what matches. See `findMore`. */
+  const FIND_ROWS = 10;
+
+  /** Instrument keys starting with what is typed — bounded by the universe. */
+  const findInstruments = $derived(
+    typed ? instrumentRows.filter((r) => r.key.toUpperCase().startsWith(typed)) : []
+  );
+  /** Month keys starting with what is typed. RAW `YYYY-MM` on both sides. */
+  const findMonths = $derived(
+    typed ? monthsAll.filter(([m]) => m.toUpperCase().startsWith(typed)) : []
+  );
+
+  /**
+   * The rows the listbox draws — instruments first, then months.
+   *
+   * `key` is the store's own spelling and it is what a click writes into the
+   * box; `name` is the display form and it is written nowhere else. The month
+   * rows are the case that makes this matter: `Sep 2024` is not a key the
+   * store has ever heard of, so committing the label would filter to nothing
+   * while the screen looked right.
+   */
+  const findRows = $derived.by(() => {
+    /** @type {{ key: string, kind: 'instrument' | 'month', name: string, detail: string }[]} */
+    const out = [];
+    for (const r of findInstruments) {
+      if (out.length >= FIND_ROWS) break;
+      out.push({
+        key: r.key,
+        kind: 'instrument',
+        name: r.key,
+        detail:
+          r.short > 0
+            ? `${fmt(r.months)} month(s) held · −${fmt(r.short)}`
+            : `${fmt(r.months)} month(s) held`
+      });
+    }
+    for (const [m, n] of findMonths) {
+      if (out.length >= FIND_ROWS) break;
+      out.push({
+        key: m,
+        kind: 'month',
+        /* `?? m` IS THE FALLBACK `monthLabel` ALREADY PROMISES, written where
+           the checker can see it: it returns its input verbatim for a key it
+           cannot parse, and its signature says `string | null | undefined`
+           because it accepts those. `m` is a store key and is always a string,
+           so this is a no-op at runtime — and on the day the store writes a
+           month key nothing can parse, the raw key is what shows, which is the
+           value worth seeing. */
+        name: monthLabel(m) ?? m,
+        detail: `${fmt(n)} row(s) held`
+      });
+    }
+    return out;
+  });
+
+  /* HOW MANY MATCH THAT THE BUDGET DID NOT DRAW. Counted from the full
+     filtered lists, so the foot of the menu never claims the ten it drew are
+     all there are — a list silently truncated is a list that lies. */
+  const findMore = $derived(findInstruments.length + findMonths.length - findRows.length);
+
+  /** The listbox is open only when there is something typed to be a list ABOUT. */
+  const findShown = $derived(findOpen && typed !== '');
+
+  /**
+   * Commit one suggestion. THE KEY, never the name.
+   *
+   * The box stays the single piece of state — writing `filter` is the whole
+   * commit, exactly as typing it by hand would be — so there is nothing here
+   * to keep in step with the instrument `Picker` beside it, which ticks a row
+   * precisely when the box holds that row's key.
+   *
+   * @param {{ key: string }} row
+   */
+  function commitFind(row) {
+    filter = row.key;
+    findOpen = false;
+    findCursor = -1;
+    searchEl?.focus();
+  }
+
+  /**
+   * ↑ ↓ move the highlight, Enter commits it. Nothing else is intercepted, so
+   * every ordinary editing key still edits.
+   *
+   * ESCAPE IS NOT HERE. `onWindowKey` owns it, above the row drawer and below
+   * the calendar, so the order in which the three things on this page close is
+   * decided in ONE place instead of racing between a field handler and a
+   * window handler that both fire for the same press.
+   *
+   * @param {KeyboardEvent} e
+   */
+  function onFindKey(e) {
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    const n = findRows.length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      if (!findShown) {
+        findOpen = true;
+        return;
+      }
+      if (n === 0) return;
+      const d = e.key === 'ArrowDown' ? 1 : -1;
+      /* WRAPS, and the `+ n` is what makes it wrap in BOTH directions: `-1 %
+         n` is `-1` in JavaScript, not `n - 1`, so ↑ from the first row would
+         land on nothing and the highlight would vanish rather than move. */
+      findCursor = findCursor < 0 ? (d > 0 ? 0 : n - 1) : (findCursor + d + n) % n;
+      e.preventDefault();
+      return;
+    }
+    if (e.key === 'Enter' && findShown && findCursor >= 0 && findCursor < n) {
+      commitFind(findRows[findCursor]);
+      e.preventDefault();
+    }
+  }
+
+  /* ======================================================================
+     EXPORT — the matched set, written by the browser, out of memory
+     ----------------------------------------------------------------------
+     NO REQUEST, AND NO FILE IN THIS REPOSITORY.
+
+     It writes exactly the rows `sorted` already holds — the same set the count
+     above the button reports, in the order on screen rather than in the
+     window's own slice — so it costs one pass over an array that is already
+     built. It adds no endpoint, no round trip and nothing to the wire: every
+     field it emits was decoded from `/store.json` when the store was read.
+
+     THE BYTES GO TO THE BROWSER'S DOWNLOAD AND NOWHERE ELSE. `CLAUDE.md` §2
+     lists the tracked extensions and `.csv` is not one of them, so a `.csv`
+     written into this tree would be CI gate 1 failing the build. A `Blob` and
+     an object URL never touch the filesystem this repository is checked out
+     on, and the URL is revoked in the same statement pair it is created in.
+
+     EVERY CELL IS THE WIRE FORM. `month` goes out `2024-09` and not `Sep
+     2024`, `expiry` goes out `2026-10-29`, `strike` goes out in PAISA and
+     `timeframe` goes out `1min` — the store's own spellings, which is what
+     makes the file joinable against the store. Only the HEADER row is words.
+     That is the rule at the top of `$lib/dates.js` applied to a file instead of
+     to a screen: a display form that becomes a key is a key that matches
+     nothing.
+
+     A PERCENTAGE GOES OUT AS THE INTEGER BASIS POINTS IT ARRIVED AS, beside
+     its reason code. Inserting the decimal point would make it a float, which
+     `CLAUDE.md` §7 bans for money and this page has never done at either end;
+     and an unknown goes out EMPTY beside its `chg_why`, never as `0`, because
+     zero is a real month that closed where it opened.
+     ====================================================================== */
+
+  /**
+   * The columns, in the store's own order, with the wire value for each.
+   *
+   * `null` becomes the empty field and never `null`, `—`, or a zero: an
+   * absence in a data file is an empty cell, and any of the other three would
+   * be read back as a value.
+   *
+   * @type {{ label: string, v: (r: any) => string }[]}
+   */
+  const CSV_COLS = [
+    { label: 'instrument', v: (r) => r.instrument },
+    { label: 'month', v: (r) => r.month },
+    { label: 'timeframe', v: (r) => r.timeframe },
+    { label: 'rows', v: (r) => String(r.rows) },
+    { label: 'fullest_in_month', v: (r) => String(r.denom) },
+    { label: 'short_by', v: (r) => String(r.short) },
+    { label: 'first_ts_micros', v: (r) => (r.firstAt === null ? '' : String(r.firstAt * 1000)) },
+    { label: 'last_ts_micros', v: (r) => (r.lastAt === null ? '' : String(r.lastAt * 1000)) },
+    { label: 'chg_bps', v: (r) => (r.chg === null ? '' : String(r.chg)) },
+    { label: 'chg_why', v: (r) => r.chgWhy ?? '' },
+    { label: 'prev_chg_bps', v: (r) => (r.prevChg === null ? '' : String(r.prevChg)) },
+    { label: 'prev_chg_why', v: (r) => r.prevChgWhy ?? '' },
+    { label: 'expiry', v: (r) => r.expiry ?? '' },
+    { label: 'strike_paisa', v: (r) => (r.strike === null ? '' : String(r.strike)) },
+    { label: 'side', v: (r) => r.side ?? '' }
+  ];
+
+  /* THE BAR GRID EXPORTS BARS, NOT THE CENSUS. Writing instrument-months out
+     of a screen showing bars would be a file that does not match the grid it
+     was taken from, which is worse than no button. Every value is the store's
+     own wire form: paisa integers, raw ISO expiries, integer basis points,
+     an EMPTY FIELD for an unknown and never a zero.
+
+     THE TEN UNSOURCED COLUMNS ARE NOT IN THIS FILE. A column of empty fields
+     under a `delta` heading is a promise that the number could arrive; the
+     reason it cannot is on the grid, where it can be read. */
+  const BAR_CSV_COLS = [
+    { label: 'instrument', v: (/** @type {any} */ r) => r.instrument },
+    { label: 'month', v: (/** @type {any} */ r) => r.month },
+    { label: 'timeframe', v: (/** @type {any} */ r) => r.tf },
+    { label: 'ts_micros', v: (/** @type {any} */ r) => String(r.ts * 1000) },
+    { label: 'ist_day', v: (/** @type {any} */ r) => r.day },
+    { label: 'open_paisa', v: (/** @type {any} */ r) => String(r.o) },
+    { label: 'high_paisa', v: (/** @type {any} */ r) => String(r.h) },
+    { label: 'low_paisa', v: (/** @type {any} */ r) => String(r.l) },
+    { label: 'close_paisa', v: (/** @type {any} */ r) => String(r.c) },
+    { label: 'volume', v: (/** @type {any} */ r) => String(r.vol) },
+    { label: 'chg_bps', v: (/** @type {any} */ r) => (r.chg === null ? '' : String(r.chg)) },
+    { label: 'chg_why', v: (/** @type {any} */ r) => r.chgWhy ?? '' },
+    { label: 'open_interest', v: (/** @type {any} */ r) => (r.oi === null ? '' : String(r.oi)) },
+    { label: 'oi_chg_bps', v: (/** @type {any} */ r) => (r.oichg === null ? '' : String(r.oichg)) },
+    { label: 'oi_chg_why', v: (/** @type {any} */ r) => r.oichgWhy ?? '' },
+    { label: 'expiry', v: (/** @type {any} */ r) => r.exp ?? '' },
+    { label: 'days_to_expiry', v: (/** @type {any} */ r) => (r.dte === null ? '' : String(r.dte)) },
+    { label: 'side', v: (/** @type {any} */ r) => r.side ?? '' },
+    { label: 'strike_paisa', v: (/** @type {any} */ r) => (r.strike === null ? '' : String(r.strike)) }
+  ];
+
+  /**
+   * RFC 4180 quoting, and the test is on the four characters that break a
+   * field rather than on a guess about which ones might. A quote inside a
+   * quoted field is doubled — that is the standard's own escape and not a
+   * backslash, which spreadsheets read as a literal backslash.
+   *
+   * @param {string} s
+   */
+  function csvQuote(s) {
+    return /["\r\n,]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  }
+
+  /**
+   * @param {any[]} out
+   * @returns {string}
+   */
+  function csvText(out) {
+    /* THE COLUMN SET FOLLOWS THE GRID ON SCREEN, from one read of `view`, so
+       the header row and the records under it cannot come from two different
+       questions. */
+    const cols = view === 'bars' ? BAR_CSV_COLS : CSV_COLS;
+    const lines = [cols.map((c) => csvQuote(c.label)).join(',')];
+    for (const r of out) lines.push(cols.map((c) => csvQuote(c.v(r))).join(','));
+    /* CRLF, AND A TRAILING ONE. RFC 4180 §2: records end with CRLF, and the
+       last record may. Excel on Windows is the reader that cares. */
+    return `${lines.join('\r\n')}\r\n`;
+  }
+
+  /**
+   * The file name, built only from KEYS.
+   *
+   * The feed's WIRE string, the rung's own spelling and the raw first and last
+   * `YYYY-MM` in the selection — never a display label, so two exports of the
+   * same selection are the same name on every machine whatever locale it runs.
+   */
+  const csvName = $derived(
+    `brutex-db-${view}_${feeds.active ?? 'no-feed'}_${timeframe || 'all-rungs'}_${
+      monthsIn[0] ?? 'none'
+    }_${monthsIn[monthsIn.length - 1] ?? 'none'}.csv`
+  );
+
+  /** What Export writes: the WHOLE matched set of the grid on screen, in the
+      order that grid is sorted in — never the page, and never the window. */
+  const csvRows = $derived(view === 'bars' ? barSorted : sorted);
+
+  function exportCsv() {
+    /* THE BUTTON IS DISABLED IN THIS STATE AND SAYS WHY ON ITS OWN FACE; this
+       is the second guard, for the keyboard path and for the day the disabled
+       test and this one drift. Writing a header row with no records under it
+       would be a file that looks like an answer. */
+    if (csvRows.length === 0) return;
+    const url = URL.createObjectURL(
+      new Blob([csvText(csvRows)], { type: 'text/csv;charset=utf-8' })
+    );
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = csvName;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function moveTo(next) {
-    const n = sorted.length;
+    const n = censusPage.length;
     if (n === 0) return;
     cursor = Math.max(0, Math.min(n - 1, next));
     // Written straight to the DOM, never back into `scrollTop` state, so the
@@ -633,7 +4032,7 @@
   }
 
   function step(d) {
-    moveTo(cursor < 0 ? (d > 0 ? 0 : sorted.length - 1) : cursor + d);
+    moveTo(cursor < 0 ? (d > 0 ? 0 : censusPage.length - 1) : cursor + d);
   }
 
   function openRow(it) {
@@ -660,11 +4059,11 @@
         moveTo(0);
         break;
       case 'End':
-        moveTo(sorted.length - 1);
+        moveTo(censusPage.length - 1);
         break;
       case 'Enter':
       case ' ':
-        if (cursor >= 0) openRow(sorted[cursor]);
+        if (cursor >= 0) openRow(censusPage[cursor]);
         else return;
         break;
       case 'Escape':
@@ -685,6 +4084,31 @@
     const typing =
       t instanceof HTMLElement &&
       (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+    /* THE CALENDAR OWNS THE KEYBOARD WHILE IT IS OPEN. `/` inside an open
+       popup would throw the focus to the filter box and leave a dialog on
+       screen that nothing has focus in — the popup's own handler closes it
+       first, and this shortcut stays out of the way until it has. */
+    if (calOpen) return;
+    /* AN OPEN MENU OWNS ESCAPE, for the same reason the calendar owns the
+       keyboard above it: a menu left on screen after the key that dismisses
+       things has been pressed is a control the reader has to click to be rid
+       of. It is tested before `/` so a menu cannot be left standing while the
+       focus is thrown to the filter box. */
+    if (drop !== null && e.key === 'Escape') {
+      drop = null;
+      return;
+    }
+    /* AND THE FIND BOX'S OWN LISTBOX SHUTS BEFORE THE ROW DRAWER DOES, for the
+       same reason: Escape dismisses the NEAREST thing, and the nearest thing
+       to a reader typing in the box is the list under it. Handled here rather
+       than on the field so that one function decides the order — a field
+       handler and this one both fire for the same press, and two of them
+       deciding would close both at once. */
+    if (findOpen && e.key === 'Escape') {
+      findOpen = false;
+      findCursor = -1;
+      return;
+    }
     if (e.key === '/' && !typing && !e.metaKey && !e.ctrlKey && !e.altKey) {
       e.preventDefault();
       searchEl?.focus();
@@ -731,14 +4155,65 @@
   /* A NEW VIEW STARTS AT THE TOP. Keeping the old offset after a filter
      change lands the operator in the middle of a list they have not seen. */
   let stamp = $state(0);
+  /* ONE PLACE THAT PUTS THE GRID BACK AT ITS TOP, called by both effects
+     below. It was written out twice for one edit and that is exactly how the
+     two copies drift — one of them gaining a reset the other never got. */
+  function restartAtTop() {
+    stamp += 1;
+    if (scroller) scroller.scrollTop = 0;
+    scrollTop = 0;
+    cursor = -1;
+  }
   $effect(() => {
-    void [typed, month, kind, holesOnly, sortKey, desc];
+    /* THE TWO NEW RUNGS ARE IN HERE FOR THE SAME REASON THE OTHERS ARE. A
+       universe or a month window changes WHICH rows exist, not merely their
+       order, so an offset kept across the change lands the operator halfway
+       down a list they have never seen — and the row under the cursor is a
+       different row than the one they left. */
+    void [
+      typed,
+      month,
+      kind,
+      holesOnly,
+      universe,
+      fromMonth,
+      toMonth,
+      /* THE CONTRACT RUNG IS IN HERE FOR THE SAME REASON THE OTHERS ARE: a
+         strike or a rung changes WHICH rows exist, not merely their order. */
+      strikePick,
+      mnyPick,
+      sortKey,
+      desc,
+      /* THE BAR GRID'S OWN SORT IS IN HERE FOR THE SAME REASON THE CENSUS
+         GRID'S IS: a re-order changes which rows the FIRST page holds, and
+         a reader left on page 12 of a re-sorted run is standing somewhere
+         they never chose. */
+      barSortKey,
+      barDesc,
+      /* AND THE READ BUDGET, because it changes which FILES were opened and
+         therefore which bars exist at all. */
+      readBudget
+    ];
     untrack(() => {
-      stamp += 1;
-      if (scroller) scroller.scrollTop = 0;
-      scrollTop = 0;
-      cursor = -1;
+      restartAtTop();
+      /* A NARROWING RETURNS THE READER TO PAGE ONE. Keeping the ordinal
+         across a change of WHICH ROWS EXIST is the same defect as keeping
+         the scroll offset, one altitude up: page 12 of the old run is a
+         different twelve rows in the new one, and very often none at all.
+         `pageNow` already clamps, so this is not a correctness fix - it is
+         the difference between landing at the top of the answer and landing
+         at the end of it. */
+      page = 1;
     });
+  });
+
+  /* MOVING BETWEEN PAGES, BETWEEN PAGE SIZES OR BETWEEN THE TWO GRIDS
+     STARTS AT THE TOP TOO - and it is a SEPARATE effect, because this one
+     must not write `page`. An effect that both reads `page` and resets it
+     to 1 is a control that cannot leave its first page. */
+  $effect(() => {
+    void [page, pageSize, view];
+    untrack(restartAtTop);
   });
   $effect(() => {
     void rows;
@@ -755,45 +4230,78 @@
     return () => clearTimeout(t);
   });
 
-  const feedName = $derived(feeds.all.find((f) => f.wire === feeds.active)?.display ?? '—');
-
+  /* EVERY RUNG, OR THE BUTTON LIES. "Reset all filters" that leaves a universe
+     or a month window standing puts the operator back on a screen that is
+     still narrowed, with the control that says so now reading "unfiltered".
+     `filtered` above and this function have to name the same seven pieces of
+     state; they are written next to each other so a new rung cannot be added
+     to one and forgotten in the other. */
   function reset() {
     filter = '';
     month = '';
     kind = '';
     holesOnly = false;
+    universe = '';
+    timeframe = '';
+    fromMonth = '';
+    toMonth = '';
+    clearContract();
+  }
+
+  /* THE CONTRACT RUNG'S OWN CLEAR, called by `reset` and by the link in the
+     rung. A `new Set()` and never `.clear()`: see the block on `strikePick`.
+
+     IT PUTS `expiry` BACK TO `''`, WHICH CLOSES THE GATE RATHER THAN OPENING
+     IT, and that is correct and is the reason the gate is reported separately
+     everywhere else. Reset means "every control back to its opening value";
+     the expiry's opening value is "none chosen", and none chosen means the
+     contract rows are held. A reset that instead left the last expiry standing
+     would be a control claiming to be untouched while still narrowing. */
+  function clearContract() {
+    expiry = '';
+    side = '';
+    strikePick = new Set();
+    mnyPick = new Set();
   }
 
   const SKELETON = Array.from({ length: 24 }, (_, i) => i);
 </script>
 
-<svelte:window onkeydown={onWindowKey} />
+<svelte:window onkeydown={onWindowKey} onpointerdown={onWindowDown} />
 
 <div class="pane db">
   <div class="pane-head">
     <span class="pane-title">DB · {feedName}</span>
 
-    <input
-      class="search dbsearch"
-      type="search"
-      placeholder="Filter instrument or month"
-      aria-label="Filter by instrument or month"
-      autocomplete="off"
-      spellcheck="false"
-      bind:this={searchEl}
-      bind:value={filter}
-    />
-    <kbd class="kbd slash" aria-hidden="true">/</kbd>
-
-    {#if typed}
-      <button class="link" onclick={() => (filter = '')}>clear</button>
-    {/if}
-
     <span class="spacer"></span>
 
-    <span class="asof" title="When /store.json was last read for this feed">
+    <!-- FRESHNESS IS A CLAIM, AND A FAILED READ CANNOT MAKE IT.
+         This line sits ABOVE the error panel and outside it, so it renders on
+         every state including the failed one. `fetchedAt` is cleared on a FEED
+         CHANGE and nowhere else — the `catch` deliberately leaves it, because
+         "when did this feed's store last answer" is the one fact a failed
+         refresh must not destroy. What it must NOT do is state that fact as
+         CURRENT: `as of 15:29` over `The store manifest could not be read` is
+         the page reporting a freshness it does not have, which is exactly the
+         fallback that hides a failure `CLAUDE.md` §4 bans — and it is worse
+         than a blank because the minute is real, just not this read's.
+
+         So the stamp survives and the WORD changes. `last good` names it as
+         the previous SUCCESSFUL read; when there has never been one there is
+         no minute to name and the line says that instead of printing the
+         epoch. `clock` already refuses `0`. -->
+    <span
+      class="asof"
+      title={error
+        ? 'The last SUCCESSFUL read of /store.json for this feed. The read below it failed — nothing on this page was counted from it.'
+        : 'When /store.json was last read for this feed'}
+    >
       {#if loading && rows.length}
         <span class="dot acc live"></span> refreshing…
+      {:else if error}
+        <span class="stale"
+          >{#if fetchedAt}last good: {clock(fetchedAt)}{:else}— never read successfully{/if}</span
+        >
       {:else}
         as of {clock(fetchedAt)}
       {/if}
@@ -820,29 +4328,74 @@
       </p>
       <button class="btn primary" onclick={() => (nonce += 1)}>Try again</button>
     </div>
+  {:else if !feeds.active}
+    <!-- AN UNMADE CHOICE IS NOT AN EMPTY STORE, and this branch exists because
+         the page could not tell them apart. With no feed selected the fetch
+         effect returns before it asks for anything, so `rows` stays empty and
+         the next branch down said "Nothing stored for —" and "this feed has
+         never landed a bar" — a definite claim about a feed nobody had picked,
+         over a store nobody had read. The sentence comes from `blocked`, so it
+         cannot drift from what the tiles would say. -->
+    <div class="blank fade-in">
+      <h2>No feed chosen</h2>
+      <p>{blocked?.why ?? 'No feed is selected, so no store has been read.'}</p>
+      {#if elsewhere.length}
+        <div class="alt">
+          <span class="lbl">Rows exist under</span>
+          {#each elsewhere as e (e.feed.wire)}
+            <button class="utab" onclick={() => (feeds.active = e.feed.wire)}>
+              {e.feed.display}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
   {:else if loading && rows.length === 0}
     <!-- SKELETONS, SHAPED LIKE WHAT IS COMING. A spinner claims "something is
          happening"; a skeleton claims "a summary, a month band and a table go
-         here", which is the useful half of the claim. -->
-    <section class="stats" aria-hidden="true">
+         here", which is the useful half of the claim.
+
+         IT IS ON THE SAME BOARD AS THE CONTENT. A skeleton laid out to
+         different metrics than the thing it stands in for is a placeholder
+         that has to be re-read once the data lands, and the reflow when it
+         does is the exact jolt the skeleton existed to prevent. -->
+    <div class="board">
+    <!-- THE SKELETON IS THE PANEL, TRACK FOR TRACK. It stands in for the two
+         control STRIPS and the anchor beneath them, which is what actually
+         lands — a placeholder laid out to different metrics than the thing it
+         replaces has to be re-read once the data arrives, and the reflow when
+         it does is the exact jolt the skeleton existed to prevent. Same
+         `.segs`, same `.strip` of `.cell` rungs, same `.anchor` at the foot. -->
+    <div class="segs" aria-hidden="true">
+      {#each [0, 1, 2] as i (i)}
+        <span class="seg"><span class="skel line" style="width:{54 + i * 9}px"></span></span>
+      {/each}
+    </div>
+    <section class="strip" aria-hidden="true">
+      <span class="lead">Query</span>
       {#each [0, 1, 2, 3, 4, 5] as i (i)}
-        <div class="stat">
-          <span class="k"><span class="skel line" style="width:70%"></span></span>
-          <span class="skel" style="width:60%;height:19px"></span>
+        <div class="cell">
+          <span class="skel line" style="width:{44 + ((i * 11) % 26)}px"></span>
+          <span class="skel" style="width:{96 + ((i * 17) % 40)}px;height:18px;border-radius:5px"
+          ></span>
+          <span class="skel line" style="width:{56 + ((i * 9) % 24)}px"></span>
         </div>
       {/each}
     </section>
-    <div class="months" aria-hidden="true">
-      {#each [0, 1, 2, 3, 4] as i (i)}
-        <!-- `skelcard` neutralises the card's state spine. A placeholder that
-             inherits the "complete" colour is a placeholder making a claim. -->
-        <div class="mcard skelcard">
-          <span class="skel line" style="width:52%"></span>
-          <span class="skel line" style="width:74%"></span>
-          <span class="skel" style="width:100%;height:6px;margin:6px 0"></span>
-          <span class="skel line" style="width:64%"></span>
+    <section class="strip sub" aria-hidden="true">
+      <span class="lead">Contract</span>
+      {#each [0, 1] as i (i)}
+        <div class="cell mcell">
+          <span class="skel line" style="width:{40 + i * 14}px"></span>
+          <span class="skel" style="width:{110 + i * 20}px;height:18px;border-radius:5px"></span>
+          <span class="skel line" style="width:{64 + i * 10}px"></span>
         </div>
       {/each}
+    </section>
+    <div class="anchor" aria-hidden="true">
+      <span class="skel line" style="width:150px;height:19px"></span>
+      <span class="px"><span class="skel line" style="width:78px;height:19px"></span></span>
+      <p class="count"><span class="skel line" style="width:64%"></span></p>
     </div>
     <div class="tbl">
       <div class="tbl-scroll">
@@ -871,6 +4424,7 @@
       </div>
     </div>
     <p class="loadnote" role="status">Reading <code>/store.json?feed={feeds.active ?? ''}</code>…</p>
+    </div>
   {:else if rows.length === 0}
     <div class="blank fade-in">
       <h2>Nothing stored for {feedName}</h2>
@@ -889,190 +4443,1123 @@
     </div>
   {:else}
     <!-- ==================================================================
-         SUMMARY BEFORE DETAIL
+         THE BOARD. Every band below is a PANEL on a dark field rather than a
+         full-bleed row against a hairline, which is the whole difference
+         between this and a settings page: the eye finds a group by its edge,
+         and the gaps between the groups are what make a dense row inside one
+         readable. It is a flex column with `min-height: 0` for exactly one
+         reason — the table below is `flex: 1` and windows itself against the
+         height it is given, and a column that will not shrink hands it the
+         whole document instead.
          ================================================================== -->
-    <section class="stats" aria-label="Store summary">
-      <div class="stat">
-        <span class="k">Instrument-months</span>
-        {#key flash.n?.n}
-          <span
-            class="v"
-            class:flash-up={flash.n?.dir === 'up'}
-            class:flash-down={flash.n?.dir === 'down'}>{fmt(matched.length)}</span
-          >
-        {/key}
-        <span class="n">{filtered ? `of ${fmt(deco.length)} stored` : 'every row in the store'}</span
+    <div class="board">
+    <!-- ==================================================================
+         THE SEGMENT TABLIST — `.segs`, AND IT IS ABOVE WHAT IT FILTERS.
+
+         A tablist belongs over the set it narrows, which is where the approved
+         design puts it, so it is the first thing under the pane head and ahead
+         of the query strip. The FEED still outranks it: this whole branch only
+         renders once a store has answered, so there is never a tab here
+         counting a feed nobody chose.
+
+         IT WAS A `Picker`, AND WHAT IT LOST IS ITS OWN RESTATEMENT. The clause
+         under it read "INDEX · CASH · FNO — showing INDEX" and "3 segment(s)
+         held": the enumeration and the count of an enumeration that is now
+         drawn, one tab per segment, with each tab's own counted total on its
+         face. A line naming what the row beside it already draws is the page
+         repeating a control it has already drawn.
+
+         "SEGMENT" IS THE STORE'S OWN SECOND FIELD — INDEX, CASH, FNO — and NOT
+         the mockup's spot/futures/options taxonomy. Relabelling it would rename
+         three sets into three other sets that do not have the same members.
+         ================================================================== -->
+    <div
+      class="segs"
+      role="tablist"
+      aria-label="Segment — the store's own second field of EXCHANGE-SEGMENT-SYMBOL"
+    >
+      <button
+        class="seg"
+        type="button"
+        role="tab"
+        aria-selected={kind === ''}
+        title="Every segment the rungs below reach, counted together. The store's own second field, not a universe."
+        onclick={() => (kind = '')}
+      >
+        All segments<span class="c">{fmt(byMonth.length)}</span>
+      </button>
+      {#each kinds as [k, n] (k)}
+        <button
+          class="seg"
+          type="button"
+          role="tab"
+          aria-selected={kind === k}
+          title={`${k} — ${fmt(n)} instrument-month(s) here. Counted with every other rung applied and this one not, so the number is what clicking it returns.`}
+          onclick={() => (kind = kind === k ? '' : k)}
         >
-      </div>
+          {k}<span class="c">{fmt(n)}</span>
+        </button>
+      {/each}
+    </div>
 
-      <div class="stat">
-        <span class="k">Bars</span>
-        {#key flash.bars?.n}
-          <span
-            class="v"
-            class:flash-up={flash.bars?.dir === 'up'}
-            class:flash-down={flash.bars?.dir === 'down'}>{fmt(total)}</span
-          >
-        {/key}
-        <span class="n">{fmt(Math.round(total / BARS_PER_SESSION))} session-equivalents</span>
-      </div>
+    <!-- ==================================================================
+         THE QUERY STRIP.
 
-      <div class="stat">
-        <span class="k">Complete</span>
-        {#key flash.full?.n}
-          <span
-            class="v"
-            class:flash-up={flash.full?.dir === 'up'}
-            class:flash-down={flash.full?.dir === 'down'}>{fmt(full)}</span
-          >
-        {/key}
-        <span class="n">of {fmt(matched.length)} · {fmt(matched.length - full)} short</span>
-      </div>
+         WHAT STOOD HERE AND DOES NOT ANY MORE: a row of six summary tiles, a
+         universe chip rail with a prose paragraph under it, a band of month
+         cards, and — most recently — a `.sel` panel of `.pk` rungs copied out
+         of /ingest. That copy was the mistake being undone: the owner asked for
+         /ingest to have its OWN design, and two pages wearing one vocabulary is
+         how a change to either becomes a change to both.
 
-      <div class="stat">
-        <span class="k">Bars missing</span>
-        {#key flash.gaps?.n}
-          <span
-            class="v"
-            class:risk={gaps > 0}
-            class:flash-up={flash.gaps?.dir === 'down'}
-            class:flash-down={flash.gaps?.dir === 'up'}>{fmt(gaps)}</span
-          >
-        {/key}
-        <span class="n"
-          >{fmt(Math.floor(gaps / BARS_PER_SESSION))} whole sessions, vs the fullest instrument each
-          month</span
-        >
-      </div>
+         EVERY RUNG IS NOW A `.cell` IN A `.strip`, which is the vocabulary the
+         approved /db design speaks: a `.lead` naming the strip, a caption, the
+         control, and one clipped `.count` clause under it carrying what the
+         control cannot fit. Nothing the deleted blocks stated is lost — every
+         figure the tiles carried is in the anchor's counted line, every
+         sentence the paragraphs carried is the clause under the control it is
+         about, with the whole of it on that control's `title`.
 
-      <div class="stat">
-        <span class="k">Coverage</span>
-        {#key flash.cov?.n}
-          <span
-            class="v"
-            class:flash-up={flash.cov?.dir === 'up'}
-            class:flash-down={flash.cov?.dir === 'down'}>{pctText(coverage)}</span
-          >
-        {/key}
+         READING ORDER IS THE CASCADE: feed → universe → month window → month →
+         instrument → text → holes, then the contract strip below. Every control
+         is authored after the one that narrows it, so tab order follows the
+         markup for free.
+         ================================================================== -->
+    <section class="strip" aria-label="Query">
+      <span class="lead">Query</span>
+
+      <!-- THE FEED IS THE PAGE'S SCOPE, AND IT IS CHOSEN IN ONE PLACE ONLY.
+           A second picker stood here writing the same `feeds.active` the top bar
+           writes. Two controls for one value teach the reader they are
+           independent when they are not, and the owner counted the feed section
+           twice on this page and once on /markets — which was doing it right.
+           The CONTROL is gone; the FACT it carried is not, because "every count
+           below is this feed's store" is what tells a reader the whole page is
+           scoped to one vendor. It is now a scope line, and the long sentence
+           that lived on the button's title lives on the line it describes. -->
+      <div class="cell scopeline">
+        <span>Broker feed <i>the page's whole scope — chosen in the top bar</i></span>
         <span
-          class="meter wide"
-          data-state={coverage >= 1 ? 'full' : coverage >= 0.99 ? 'near' : 'gap'}
-          aria-hidden="true"><span class="fill" style="width:{coverage * 100}%"></span></span
+          class="feedname mono"
+          title={`${feedName}. Every count on this page is this feed's store: every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — no page in this product puts one feed's numbers beside another's. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one. Change it in the top bar.`}
+          >{feedName}</span
+        >
+        <span class="count"
+          >every count below is this feed's store · {fmt(deco.length)} instrument-month(s) held ·
+          read {clock(fetchedAt)}</span
         >
       </div>
 
-      <div class="stat">
-        <span class="k">Months</span>
-        {#key flash.months?.n}
-          <span
-            class="v"
-            class:flash-up={flash.months?.dir === 'up'}
-            class:flash-down={flash.months?.dir === 'down'}>{fmt(monthsIn.length)}</span
+      <!-- THE UNIVERSE RUNG — the cascade's second step. `tierRefusal` is
+           unchanged and still whole on the row it belongs to, and a refusal is
+           DRAWN AND DISABLED rather than hidden. -->
+      <div class="cell">
+        <span>Universe <i>which membership to hold this store against</i></span>
+        <div class="picker" data-drop="uni">
+          <button
+            class="mnyb"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={drop === 'uni'}
+            title={universeRefusal
+              ? `${chosenUniverse.label} is not narrowing this table — ${universeRefusal}`
+              : universe && universeCount.get(universe)
+                ? `${chosenUniverse.label} — ${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) held in this store, so ${fmt(universeCount.get(universe).members - universeCount.get(universe).held)} are not stored, and ${fmt(universed.length)} instrument-month(s) are stored in it. Membership counted from /instruments.json?feed=${feeds.active ?? ''}; held counted from /store.json. "Not stored" is not "not offered" — this page reads the disk.`
+                : `Everything — ${fmt(deco.length)} instrument-month(s), joined to no membership list at all. This is the only setting that reaches stored data whose instrument this feed's master no longer lists.`}
+            onclick={(e) => {
+              e.stopPropagation();
+              drop = drop === 'uni' ? null : 'uni';
+            }}>{chosenUniverse.label}</button
           >
-        {/key}
-        <span class="n">
-          {#if monthsIn.length}
-            {monthsIn[0]} → {monthsIn[monthsIn.length - 1]} ·
-            <span class:risk={holeMonths > 0}>{holeMonths} with holes</span>
+          {#if drop === 'uni'}
+            <div
+              class="menu"
+              role="group"
+              aria-label="Universe — which membership to hold this store against"
+            >
+              {#each UNIVERSES as u (u.key)}
+                {@const c = universeCount.get(u.key)}
+                {@const st = tierState(u)}
+                <button
+                  class="opt"
+                  type="button"
+                  class:off={st === 'absent'}
+                  disabled={st === 'absent'}
+                  aria-pressed={universe === u.key}
+                  onclick={() => {
+                    universe = u.key;
+                    drop = null;
+                  }}
+                  title={st === 'absent'
+                    ? tierRefusal(u.label, u.token)
+                    : u.token === ''
+                      ? `Every instrument-month in this store, joined to nothing. This is the only row that reaches stored data whose instrument this feed's master no longer lists — ${outsideMaster ? `${fmt(outsideMaster.months)} such row(s), ${fmt(outsideMaster.instruments)} instrument(s)` : 'a count that needs this feed’s master to be measured'}.`
+                      : c
+                        ? `${u.label} — ${fmt(c.held)} of ${fmt(c.members)} member(s) held in this store, so ${fmt(c.members - c.held)} are not stored. Membership counted from /instruments.json?feed=${feeds.active ?? ''}; held counted from /store.json. "Not stored" is not "not offered" — this page reads the disk.`
+                        : `${u.label} — membership not counted: ${membershipWhy ?? 'the instrument list for this feed is not on hand'}`}
+                >
+                  <span class="tk">{universe === u.key ? '✓' : ''}</span>
+                  <span class="nm">{u.label}</span>
+                  <span class="ct" class:warn={st === 'absent'}
+                    >{#if st === 'absent'}no source{:else if u.token === ''}{fmt(
+                        deco.length
+                      )} stored{:else if c}{fmt(c.held)} of {fmt(c.members)} held{:else}not
+                      counted{/if}</span
+                  >
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        <!-- THE COUNTED CLAUSE THAT WAS A PARAGRAPH. Every figure comes from the
+             rows and the master on hand, and the one sentence that is not a
+             figure is a refusal naming why a figure is absent. It clips to one
+             line; the whole of it is on the button's `title` above and in this
+             node for anything that reads the document rather than looks at it.
+             `CLAUDE.md` §4: degrade loudly and name the reason. -->
+        <span class="count" class:warn={Boolean(universeRefusal)}>
+          {#if universeRefusal}
+            {chosenUniverse.label} is not narrowing this table — {universeRefusal}
+          {:else if universe && universeCount.get(universe)}
+            {fmt(universeCount.get(universe).held)} of {fmt(
+              universeCount.get(universe).members
+            )} member(s) held · {fmt(
+              universeCount.get(universe).members - universeCount.get(universe).held
+            )} not stored · {fmt(universed.length)} instrument-month(s) stored in it
           {:else}
-            nothing matches
+            {fmt(deco.length)} instrument-month(s), joined to no membership list
+          {/if}
+          {#if outsideMaster && outsideMaster.months > 0}
+            · {fmt(outsideMaster.months)} stored instrument-month(s) across {fmt(
+              outsideMaster.instruments
+            )} instrument(s) are not listed by {feedName}'s master — they are held, no membership
+            universe can reach them, and Everything is where they show.
+          {/if}
+        </span>
+      </div>
+
+      <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
+           approved design draws as `<select id="tf">` beside the others.
+
+           IT IS A `.picker` AND NOT A `<select>`, like every other rung in
+           this strip. The design's `<select>` is shorthand for "a dropdown
+           goes here"; a native one cannot carry a per-row count, cannot carry
+           a per-row `title`, and cannot be searched — and the counted row is
+           the whole reason this page's menus exist.
+
+           EVERY RUNG THE STORE HOLDS IS OFFERED AND NO OTHER. The bar-length
+           ladder in `TF_SECS` is an ORDERING, not a list of choices: offering
+           `5min` because the ladder names it, on a store that holds no
+           five-minute bar, would be a control promising a set that does not
+           exist. The rows are counted off the rows. -->
+      <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
+        <span>Timeframe <i>bar length — the rung each row is stored at</i></span>
+        <div class="picker" data-drop="tf">
+          <button
+            class="mnyb"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={drop === 'tf'}
+            disabled={Boolean(tfRefusal)}
+            title={tfRefusal
+              ? `No bar length can be chosen — ${tfRefusal}`
+              : timeframe
+                ? `Only rows stored at ${timeframe} — ${tfNote(timeframe)}. A row here is one instrument-month AT ONE RUNG: the completeness column divides by this rung's session size and the month roll-up refuses a figure entirely when one month holds two rungs at once, so choosing one is what makes every session and coverage figure below single-valued.`
+                : `Every rung this selection holds: ${fmt(tfAll.length)} of them. Nothing is narrowed and nothing is hidden — but a month holding two rungs has no single session size, so the roll-up prints a dash rather than averaging them. Choose one and the dashes become numbers.`}
+            onclick={(e) => {
+              e.stopPropagation();
+              drop = drop === 'tf' ? null : 'tf';
+            }}
+            >{tfRefusal
+              ? 'No rung held'
+              : timeframe
+                ? timeframe
+                : `All · ${fmt(tfAll.length)}`}</button
+          >
+          {#if drop === 'tf'}
+            <div class="menu" role="group" aria-label="Timeframe — bar length">
+              <button
+                class="opt"
+                type="button"
+                aria-pressed={timeframe === ''}
+                title="Every rung this selection holds, with no bar-length filter in force. The TF column shows which is which."
+                onclick={() => {
+                  timeframe = '';
+                  drop = null;
+                }}
+              >
+                <span class="tk">{timeframe === '' ? '✓' : ''}</span>
+                <span class="nm">All rungs</span>
+                <!-- `universed`, NOT `timeframed`. Every row in this menu says
+                     what CLICKING IT returns, and clicking this one drops the
+                     rung filter — so with `1day` in force, `timeframed.length`
+                     here would advertise the daily count on the row that
+                     restores every rung. That is the facet rule stated further
+                     up, and it is the number the other rows already obey. -->
+                <span class="ct">{fmt(universed.length)} held</span>
+              </button>
+              {#if tfAll.length === 0}
+                <hr />
+                <p class="none">No rung is held here.</p>
+              {:else}
+                <hr />
+                <!-- KEYED ON THE WIRE STRING, which is also what is compared
+                     and what is assigned. There is no display form of a rung
+                     on this page: the TF column prints `1day` and so does
+                     this, so the control and the column cannot drift. -->
+                {#each tfAll as [tf, n] (tf)}
+                  <button
+                    class="opt"
+                    type="button"
+                    aria-pressed={timeframe === tf}
+                    title={`${tf} — ${tfNote(tf)}. ${fmt(n)} instrument-month(s) are stored at this rung under the rungs above. ${
+                      barsPerSession(tf) === null
+                        ? 'No session size is recorded for it, so every session and coverage figure for these rows is a dash rather than a figure computed against a denominator nobody chose.'
+                        : `One session is ${fmt(barsPerSession(tf))} bar(s) at this rung, which is the denominator the completeness column uses.`
+                    }`}
+                    onclick={() => {
+                      timeframe = timeframe === tf ? '' : tf;
+                      drop = null;
+                    }}
+                  >
+                    <span class="tk">{timeframe === tf ? '✓' : ''}</span>
+                    <span class="nm">{tf}</span>
+                    <span class="ct" class:warn={barsPerSession(tf) === null}
+                      >{fmt(n)} held · {tfNote(tf)}</span
+                    >
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <span class="count" class:warn={Boolean(tfRefusal)}>
+          {#if tfRefusal}
+            No bar length — {tfRefusal}
+          {:else if timeframe}
+            {fmt(timeframed.length)} of {fmt(universed.length)} instrument-month(s) at {timeframe} · {tfNote(
+              timeframe
+            )}
+          {:else}
+            {fmt(tfAll.length)} rung(s) held · {tfAll.map(([tf, n]) => `${tf} ${fmt(n)}`).join(' · ')}
+          {/if}
+        </span>
+      </div>
+
+      <!-- THE MONTH WINDOW — two ends, so it is TWO `.cell`s, exactly as the
+           design draws a From and a To. The product's OWN calendar, never the
+           platform's: `<input type="date">` renders in the OS locale, so
+           `02/09/2024` is two different days depending on who is reading it,
+           and no rule in this file can reach either its text or its popup.
+           There is not one on this page and there must never be.
+
+           IT WORKS IN WHOLE MONTHS, and that is the unit of the data rather
+           than a simplification — a row here IS an instrument-month.
+
+           IT RENDERS ONLY WHEN THERE IS A WINDOW TO CHOOSE. One month is not a
+           range, and a control whose every setting produces the same table is a
+           control that has nothing to say. -->
+      {#if monthsAll.length > 1}
+        {@render monthField('from', fromMonth, 'From month', 'Any earlier')}
+        {@render monthField('to', toMonth, 'To month', 'Any later')}
+      {/if}
+
+      <!-- THE MONTH ROLL-UP, WHICH WAS A BAND OF CARDS AND IS NOW A MENU. The
+           band was the widest block on the page and said, per month, what one
+           row of a dropdown says. Every one of those facts is on the row below —
+           the coverage on its face, the rest on its `title`, which is the card's
+           own tooltip moved across unchanged — and the click still writes the
+           same `month`.
+
+           SHOWN AND REFUSED, NEVER DROPPED: the "no month matches the filter"
+           case is the menu's own empty row rather than a card band that
+           silently collapses to nothing. -->
+      <div class="cell">
+        <span>Month <i>one month file, or all of them</i></span>
+        <div class="picker" data-drop="month">
+          <button
+            class="mnyb"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={drop === 'month'}
+            title={month
+              ? `Month ${monthLabel(month)} — the store's own key for it is ${month}. ${fmt(monthCards.length)} month(s) are on offer under the rungs above; ${fmt(holeMonths)} of them have holes.`
+              : `Every month the rungs above reach: ${fmt(monthCards.length)} of them, ${fmt(holeMonths)} with holes. A month's denominator is the fullest instrument stored for it, so a session NSE never held is never counted as missing.`}
+            onclick={(e) => {
+              e.stopPropagation();
+              drop = drop === 'month' ? null : 'month';
+            }}>{month ? monthLabel(month) : `All · ${fmt(monthCards.length)}`}</button
+          >
+          {#if drop === 'month'}
+            <div class="menu" role="group" aria-label="Months in the store">
+              <button
+                class="opt"
+                type="button"
+                aria-pressed={month === ''}
+                title="Every month the rungs above reach, with no month filter in force."
+                onclick={() => {
+                  month = '';
+                  drop = null;
+                }}
+              >
+                <span class="tk">{month === '' ? '✓' : ''}</span>
+                <span class="nm">All months</span>
+                <span class="ct">{fmt(monthCards.length)} held</span>
+              </button>
+              {#if monthCards.length === 0}
+                <hr />
+                <p class="none">No month matches the filter.</p>
+              {:else}
+                <hr />
+                {#each monthCards as m (m.month)}
+                  <button
+                    class="opt"
+                    type="button"
+                    data-state={m.state}
+                    aria-pressed={month === m.month}
+                    onclick={() => {
+                      month = month === m.month ? '' : m.month;
+                      drop = null;
+                    }}
+                    title={m.missing === 0
+                      ? `${monthLabel(m.month)}: every one of the ${fmt(m.n)} instruments holds all ${fmt(m.fullest)} bars of the ${dayText(m.sessions)} sessions observed.`
+                      : `${monthLabel(m.month)}: ${fmt(m.n - m.full)} of ${fmt(m.n)} instruments short, ${fmt(m.missing)} bars missing — ${m.tf && barsPerSession(m.tf) !== null ? `${fmt(Math.floor(m.missing / barsPerSession(m.tf)))} session-equivalents` : 'session count unavailable at this rung'}. Worst: ${m.worst?.instrument} holds ${fmt(m.worst?.rows ?? 0)} of ${fmt(m.fullest)}. The store's own key for this month is ${m.month}.`}
+                  >
+                    <span class="tk">{month === m.month ? '✓' : ''}</span>
+                    <!-- RELABELLED ON THE WAY TO THE SCREEN, NEVER ON THE WAY
+                         TO A COMPARISON. The `{#each}` keys on the raw
+                         `YYYY-MM`, `aria-pressed` compares it and the click
+                         assigns it; only this text node is the display form. -->
+                    <span class="nm">{monthLabel(m.month)}</span>
+                    <span class="ct" class:warn={m.state !== 'full'}>
+                      <span class="pip" aria-hidden="true"></span>
+                      {pctText(m.pct)}{#if m.missing === 0}
+                        · complete{:else}
+                        · {fmt(m.n - m.full)} short{/if}
+                    </span>
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <span class="count" class:warn={holeMonths > 0}>
+          {#if monthCards.length === 0}
+            {blocked?.tsub ?? 'no month matches'}
+          {:else if month}
+            {dayText(monthCards.find((m) => m.month === month)?.sessions)} session(s) observed · {fmt(
+              monthCards.find((m) => m.month === month)?.n ?? 0
+            )} row(s) · {pctText(monthCards.find((m) => m.month === month)?.pct ?? null)} covered
+          {:else}
+            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} with holes
+          {/if}
+        </span>
+      </div>
+
+      <!-- THE INSTRUMENT RUNG. It WRITES THE TEXT BOX beside it and owns no
+           state of its own — a row is ticked exactly when the box holds that
+           row's key, so typing over a pick unticks it with nothing to
+           synchronise and the two can never disagree.
+
+           HIDDEN, NOT DISABLED, WHEN THERE IS NOTHING TO ENUMERATE. Its parent
+           rungs can leave it with no members at all; an empty dropdown is a
+           control offering a choice that does not exist. The text box stays
+           either way — it is the `/` target and it can reach a month as well as
+           an instrument.
+
+           ONE `Picker`, THE SHARED COMPONENT, unchanged: it draws its own
+           `.picker` root, its own filter box and its own tick per row, so this
+           rung cannot drift from the same control on /markets and /ingest. -->
+      {#if instrumentRows.length > 0}
+        <div class="cell">
+          <span>Instrument <i>held, not offered</i></span>
+          <Picker
+            single
+            filter
+            label="instruments"
+            summary={picked
+              ? picked
+              : typed
+                ? `Typed · ${fmt(instrumentRows.length)} held`
+                : `All · ${fmt(instrumentRows.length)} held`}
+            rows={[
+              { key: '', name: 'All instruments', detail: `${fmt(instrumentRows.length)} held` },
+              ...instrumentRows.map((r) => ({
+                key: r.key,
+                name: r.key,
+                /* BACKWARD-LOOKING, ALWAYS. "held" is what /store.json can
+                   prove; what the vendor could serve is /ingest's question and
+                   no endpoint this page calls can answer it. */
+                detail:
+                  r.short > 0
+                    ? `${fmt(r.months)} month(s) held · −${fmt(r.short)}`
+                    : `${fmt(r.months)} month(s) held`
+              }))
+            ]}
+            selected={new Set([picked])}
+            onchange={(sel) => (filter = [...sel][0] ?? '')}
+          />
+          <span class="count">
+            {picked
+              ? `${picked} — one instrument of ${fmt(instrumentRows.length)} held`
+              : `${fmt(instrumentRows.length)} instrument(s) held here`}
+          </span>
+        </div>
+      {/if}
+
+      <!-- THE TEXT BOX. It reaches an instrument OR a month, which is why it is
+           not folded into the picker above it, and it is the `/` target. -->
+      <div class="cell combo">
+        <span>Find <i>instrument or month</i></span>
+        <!-- A `.picker` FOR THE POSITIONING CONTEXT AND NOTHING ELSE, and
+             deliberately WITHOUT `data-drop`: `onWindowDown` closes the one
+             menu `drop` governs by testing `.picker[data-drop]`, and this
+             listbox is not one of those — it is closed by the field's own blur
+             and by Escape in `onWindowKey`. Without the attribute a press in
+             here reads as a press AWAY from the feed/universe/month menu,
+             which is exactly right: opening this one shuts that one. -->
+        <div class="picker find">
+          <span class="dwrap">
+            <!-- THE COMBOBOX ATTRIBUTES ARE PROMISES, AND EACH IS KEPT.
+                 `aria-controls` names the listbox below, which is in the
+                 document at all times; `aria-expanded` is the listbox's real
+                 state and not a constant; `aria-activedescendant` names a row
+                 that exists exactly when one is highlighted, and is absent
+                 rather than empty when none is. `aria-autocomplete="list"` is
+                 the truth about what typing does here — it filters a list and
+                 never completes the text in the field. -->
+            <input
+              class="din mono search"
+              type="search"
+              role="combobox"
+              placeholder="Instrument or month"
+              aria-label="Filter by instrument or month"
+              aria-expanded={findShown}
+              aria-controls="db-findlist"
+              aria-autocomplete="list"
+              aria-activedescendant={findShown && findCursor >= 0 && findCursor < findRows.length
+                ? `db-find-${findCursor}`
+                : undefined}
+              autocomplete="off"
+              spellcheck="false"
+              bind:this={searchEl}
+              bind:value={filter}
+              oninput={() => {
+                findOpen = true;
+                /* THE HIGHLIGHT IS DROPPED WHENEVER THE LIST CHANGES. Keeping
+                   the index would leave it pointing at whatever row happens to
+                   land at that position next, and Enter would commit a key the
+                   reader never looked at. */
+                findCursor = -1;
+              }}
+              onfocus={() => (findOpen = true)}
+              onblur={() => {
+                findOpen = false;
+                findCursor = -1;
+              }}
+              onkeydown={onFindKey}
+            />
+            <kbd class="kbd slash" aria-hidden="true">/</kbd>
+          </span>
+          <!-- ALWAYS IN THE DOCUMENT, and that is the difference between this
+               popup and `.derr` above, which is gated by an `{#if}`. An
+               `aria-controls` IDREF that resolves to nothing is a promise the
+               document does not keep: the attribute would name an element that
+               is not there for every second the list is shut, which is most of
+               them. The node stays and its ROWS are what come and go. -->
+          <div
+            class="menu list"
+            class:shown={findShown}
+            id="db-findlist"
+            role="listbox"
+            aria-label="Instruments and months starting with what you typed"
+          >
+            {#if findShown}
+              <!-- KEYED ON KIND AND KEY TOGETHER, with the same ESCAPED
+                   separator `deco` uses for its compound key, and written
+                   as an escape for the same reason: a literal NUL byte in
+                   this source makes grep and ripgrep classify the whole
+                   file as binary and return nothing for every pattern. The
+                   runtime key is byte-identical; the source stays
+                   searchable. An instrument row and a month row are two
+                   different nodes, and a key that was only the string could
+                   collide between them. -->
+              {#each findRows as f, i (f.kind + '\u0000' + f.key)}
+                <!-- svelte-ignore a11y_click_events_have_key_events -->
+                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+                <!-- A ROW IS NOT A TAB STOP AND MUST NOT BE. In this pattern
+                     the field keeps the focus and `aria-activedescendant`
+                     points at the row — ↑ ↓ Enter are handled on the input, so
+                     the keyboard is served there and not here. `mousedown` is
+                     prevented so the press does not blur the field and close
+                     the list out from under the click that follows. -->
+                <div
+                  class="opt"
+                  role="option"
+                  id="db-find-{i}"
+                  tabindex="-1"
+                  aria-selected={i === findCursor}
+                  class:cur={i === findCursor}
+                  title={f.kind === 'month'
+                    ? `Filter to ${f.name} — the store's own key for it is ${f.key}, and that raw key is what the box is set to.`
+                    : `Filter to ${f.key} — the store's own spelling of this instrument.`}
+                  onmousedown={(e) => e.preventDefault()}
+                  onclick={() => commitFind(f)}
+                >
+                  <span class="tk">{filter.trim() === f.key ? '✓' : ''}</span>
+                  <span class="nm">{f.name}</span>
+                  <span class="ct">{f.detail}</span>
+                </div>
+              {:else}
+                <!-- SHOWN AND REFUSED, NEVER SILENT — the same rule the month
+                     menu follows. A list that vanishes when it empties reads as
+                     a control that broke. -->
+                <p class="none">Nothing held starts with “{filter.trim()}”.</p>
+              {/each}
+              {#if findMore > 0}
+                <p class="none">
+                  {fmt(findMore)} more match — the list draws {FIND_ROWS}. Keep typing to narrow it.
+                </p>
+              {/if}
+            {/if}
+          </div>
+        </div>
+        <span class="count">
+          {#if typed}
+            “{filter.trim()}” · {fmt(textMatched.length)} row(s) match
+          {:else}
+            a prefix of up to {MAX_PREFIX} characters, one Map probe per keystroke
+          {/if}
+        </span>
+      </div>
+
+      <!-- HOLES ONLY — a filter, so it is a rung with a face like every other
+           rung rather than a toggle hiding in a tail. The button states the
+           CURRENT VALUE, which is what a `.mnyb` face is for. -->
+      <div class="cell">
+        <span>Rows <i>everything held, or only what is short</i></span>
+        <button
+          class="mnyb toggle"
+          type="button"
+          aria-pressed={holesOnly}
+          title="Show only rows short of the fullest instrument in their month. A month's denominator is the fullest instrument stored for it, so a session NSE never held is never counted as missing — and a whole trading day that never landed always is."
+          onclick={() => (holesOnly = !holesOnly)}
+        >
+          {holesOnly ? `Holes only · ${fmt(holed)}` : `Every row · ${fmt(scoped.length)}`}
+        </button>
+        <span class="count" class:warn={holed > 0}>
+          {fmt(holed)} of {fmt(scoped.length)} row(s) here are short
+        </span>
+      </div>
+    </section>
+
+    <!-- ==================================================================
+         THE CONTRACT STRIP. Authored after the query strip because a strike is
+         finer than a segment and a rung is finer than a strike.
+
+         IT IS ALWAYS OPEN AND ITS CELLS GO `.off` INSTEAD. A strip that
+         collapsed when there is no chain would take the REFUSAL with it, and
+         "why is there no strike control" is exactly the question `CLAUDE.md` §4
+         says must be answered out loud rather than by an absence.
+
+         BOTH PANELS ARE `Picker` — one renderer, two data sources. The filter
+         box, the checkbox on every row, Select-all-shown and the right-aligned
+         detail column all come from it and cannot drift away from the other
+         pages.
+
+         THE REASON IS ON THE CELL AND ALSO UNDER IT, and the second is the one
+         that matters: `Picker` takes no `title`, and a refusal that lives only
+         on a tooltip is loud to a pointer and silent to everything else.
+         `undefined` rather than `''` so a rung with nothing to explain carries
+         no attribute at all.
+         ================================================================== -->
+    <section class="strip sub" aria-label="Contract">
+      <span class="lead">Contract</span>
+
+      <!-- THE EXPIRY, AND IT IS THE STRIP'S FIRST CELL BECAUSE IT IS ITS
+           COARSEST RUNG: a strike belongs to a contract, and a contract is an
+           expiry. The approved design draws it first for the same reason.
+
+           IT IS THE ONE CONTROL HERE THAT REFUSES BEFORE IT IS TOUCHED. The
+           owner's rule is that a future or an option without the chosen expiry
+           shows nothing, so `''` holds every contract row back rather than
+           passing them all. The clause under it is therefore never decoration:
+           it is the count of what is being withheld and the reason, which is
+           the whole of `CLAUDE.md` §4 on one line.
+
+           DISABLED ONLY WHEN THERE IS NOTHING TO CHOOSE, and it says which of
+           two things that is on its own face — an unread store, or a store
+           that holds no contract. A dead control with no reason on it is the
+           thing §4 forbids.
+
+           THE REASON IS SAID THREE TIMES AND THAT IS NOT REDUNDANCY. A
+           DISABLED button does not fire pointer events in every browser, so
+           its own `title` is the one tooltip that may never appear — the cell
+           carries it too, and the clause under the control carries it in the
+           document where anything that reads rather than looks will find it.
+           `undefined` rather than `''` so a rung with nothing to explain
+           carries no attribute at all. -->
+      <div class="cell" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
+        <span>Expiry <i>which contract — futures and options show nothing without one</i></span>
+        <div class="picker" data-drop="exp">
+          <button
+            class="mnyb"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={drop === 'exp'}
+            disabled={Boolean(expiryRefusal)}
+            title={expiryRefusal
+              ? `No expiry can be chosen — ${expiryRefusal}`
+              : expiry
+                ? `Contracts expiring ${dayLabel(expiry)} — the store's own key for it is ${expiry}. ${fmt(expiryCount.get(expiry) ?? 0)} instrument-month(s) here are on it. Every future and option on another expiry is not shown: a bar belongs to one contract, and two expiries under one heading would be a series no contract ever traded.`
+                : `NOTHING IS CHOSEN, so all ${fmt(contractHere)} contract row(s) this selection reaches are held back — this is a refusal and not an empty store. ${fmt(expiriesAll.length)} expiry/expiries are stored. Indices and equities carry no expiry and are unaffected: they are in the table below already.`}
+            onclick={(e) => {
+              e.stopPropagation();
+              drop = drop === 'exp' ? null : 'exp';
+            }}
+            >{expiryRefusal
+              ? 'No contract stored'
+              : expiry
+                ? dayLabel(expiry)
+                : `None chosen · ${fmt(expiriesAll.length)} stored`}</button
+          >
+          {#if drop === 'exp'}
+            <div class="menu" role="group" aria-label="Expiry — which contract">
+              <!-- THE UNCHOSEN ROW IS DRAWN AND IT DOES NOT SAY "ALL". It is
+                   the state that HOLDS CONTRACTS BACK, and labelling it the way
+                   every other rung labels its empty state would make it read as
+                   "no narrowing", which is the opposite of what it does. -->
+              <button
+                class="opt"
+                type="button"
+                aria-pressed={expiry === ''}
+                title="Choose no contract. Every future and option stays out of the table — this is the gate, not an 'all expiries' setting, and there is no setting that blends two contracts into one series."
+                onclick={() => {
+                  expiry = '';
+                  drop = null;
+                }}
+              >
+                <span class="tk">{expiry === '' ? '✓' : ''}</span>
+                <span class="nm">None</span>
+                <span class="ct" class:warn={contractHere > 0}
+                  >{contractHere > 0 ? `${fmt(contractHere)} row(s) held back` : 'no contract here'}</span
+                >
+              </button>
+              {#if expiriesAll.length === 0}
+                <hr />
+                <p class="none">This store names no contract.</p>
+              {:else}
+                <hr />
+                <!-- KEYED, COMPARED AND ASSIGNED ON THE RAW ISO DAY. Only the
+                     `.nm` text node is `dayLabel`, exactly as the month menu
+                     relabels only its own text node. -->
+                {#each expiriesAll as e (e)}
+                  {@const n = expiryCount.get(e) ?? 0}
+                  <button
+                    class="opt"
+                    type="button"
+                    aria-pressed={expiry === e}
+                    title={n > 0
+                      ? `${dayLabel(e)} — the store's own key for it is ${e}. ${fmt(n)} instrument-month(s) under the rungs above are on this contract, which is what choosing it returns.`
+                      : `${dayLabel(e)} — the store's own key for it is ${e}. This contract is stored, but no row under the rungs above is on it, so choosing it returns nothing and the table will say so. That is a finding about the selection, not about the store.`}
+                    onclick={() => {
+                      expiry = expiry === e ? '' : e;
+                      drop = null;
+                    }}
+                  >
+                    <span class="tk">{expiry === e ? '✓' : ''}</span>
+                    <span class="nm">{dayLabel(e)}</span>
+                    <span class="ct" class:warn={n === 0}
+                      >{n > 0 ? `${fmt(n)} row(s)` : 'no rows here'}</span
+                    >
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <span class="count" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
+          {#if expiryRefusal}
+            No contract — {expiryRefusal}
+          {:else if expiry}
+            {fmt(expiryCount.get(expiry) ?? 0)} row(s) on this contract{#if expiryHeld > 0}
+              · {fmt(expiryHeld)} on another expiry are not shown{/if}
+          {:else if expiryHeld > 0}
+            {fmt(expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
+            belongs to one contract, so nothing here blends two
+          {:else}
+            {fmt(expiriesAll.length)} expiry/expiries stored · no contract row is in this selection,
+            so nothing is being held back
+          {/if}
+        </span>
+      </div>
+
+      <div class="cell mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
+        <span>Strike <i>an absolute price on the chain</i></span>
+        <Picker
+          filter
+          label="strikes"
+          disabled={chainAll.length === 0}
+          summary={strikeSummary}
+          rows={strikeRows}
+          selected={strikePick}
+          onchange={(/** @type {Set<string>} */ sel) => (strikePick = new Set(sel))}
+        />
+        <span class="count" class:warn={Boolean(strikeRefusal)}>
+          {#if strikeRefusal}
+            No strike chain — {strikeRefusal}
+          {:else}
+            {fmt(chainAll.length)} strike(s) · {strikeText(chainAll[0].strike)} to {strikeText(
+              chainAll[chainAll.length - 1].strike
+            )}{#if chainStep !== null}
+              · grid {strikeText(chainStep)} apart{/if}<!--
+              WHY EVERY ROW IN THE PANEL READS `no bars` WHILE THE GATE IS
+              SHUT. The counts here are taken over `expiryGated`, so with no
+              expiry chosen they are all zero — correctly, because that is what
+              clicking one returns. Left unsaid, a panel of zeroes over a chain
+              the store demonstrably holds reads as a broken count.
+              -->{#if !expiry && expiryHeld > 0}
+              · every count here is zero until an expiry is chosen — {fmt(expiryHeld)} contract
+              row(s) are held back{/if}
+          {/if}
+        </span>
+      </div>
+
+      <!-- MONEYNESS IS A SEPARATE CONTROL AND STAYS ONE. A strike is an
+           absolute price and a rung is a distance from spot; the same tick
+           means two different queries and neither is a view of the other. -->
+      <div class="cell mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
+        <span>Moneyness <i>a distance measured along that chain</i></span>
+        <Picker
+          filter
+          label="rungs"
+          disabled={moneyRefusal !== null}
+          summary={mnySummary}
+          rows={mnyRows}
+          selected={mnySelected}
+          onchange={onMnyPick}
+        />
+        <!-- THE REFUSAL IS SAID ONCE. When there is no chain the ladder's
+             reason STARTS with the chain's, so the clause narrows to the part
+             that is still true after a chain arrives. -->
+        <span class="count" class:warn={Boolean(strikeRefusal || moneyRefusal)}>
+          {#if strikeRefusal}
+            No ladder — a rung is a distance measured along a chain, so there is nothing to place
+            one on. There would be none with a chain either: {NO_SPOT}
+          {:else if moneyRefusal}
+            The ladder is not drawn — {moneyRefusal}
+          {:else}
+            {fmt(ladderRungs.length)} rung(s), {ladderRungs[0]} to {ladderRungs[
+              ladderRungs.length - 1
+            ]} — every position this chain reaches on both sides of the money
+          {/if}
+        </span>
+      </div>
+
+      <!-- OPTION TYPE — the strip's last and finest cell, where the approved
+           design draws it. Two values the store can hold and one that means no
+           join: `CE`, `PE`, and `Both`, which is `''`.
+
+           `Both` IS NOT "EVERY OPTION". It is the absence of a side filter, so
+           it leaves every index, equity and future in the table — the same
+           distinction the strike panel's empty Set carries, and the reason
+           picking `CE` legitimately drops everything that is not a call.
+
+           DISABLED ONLY ON A FACT ABOUT THE STORE — no option in it at all —
+           and NEVER on a fact about the selection. Greying it because the
+           current rungs left no option would be a filter with no way back: pick
+           `CE`, narrow to a month with no calls, and the one control that could
+           undo it is the one that just went dead. "This selection reaches no
+           option" is said instead, on the clause, with the control still open
+           and the expiry gate named as the usual cause. -->
+      <div
+        class="cell"
+        class:off={Boolean(sideRefusal || sideEmpty)}
+        title={sideRefusal ?? sideEmpty ?? undefined}
+      >
+        <span>Option type <i>which side of the contract</i></span>
+        <div class="picker" data-drop="side">
+          <button
+            class="mnyb"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded={drop === 'side'}
+            disabled={Boolean(sideRefusal)}
+            title={sideRefusal
+              ? `No side can be chosen — ${sideRefusal}`
+              : side
+                ? `${side} only — ${fmt(sideCount.get(side) ?? 0)} instrument-month(s) here are on this side. Everything that is not an option drops out with the rest: a side is a property of an option, so asking for one is asking only for options.`
+                : sideEmpty
+                  ? `Both sides, which narrows nothing — and there is nothing here to narrow: ${sideEmpty}.`
+                  : `Both sides, which is NO side filter at all — ${fmt(sidedHere)} option row(s) are in this selection alongside every index, equity and future. This is not "every option": it is the absence of a narrowing, which is why nothing without a side is dropped.`}
+            onclick={(e) => {
+              e.stopPropagation();
+              drop = drop === 'side' ? null : 'side';
+            }}>{sideRefusal ? 'No option stored' : side ? `${side} only` : 'Both'}</button
+          >
+          {#if drop === 'side'}
+            <div class="menu" role="group" aria-label="Option type — which side of the contract">
+              <button
+                class="opt"
+                type="button"
+                aria-pressed={side === ''}
+                title="No side filter. Every row the rungs above leave stays, including every instrument that has no side at all."
+                onclick={() => {
+                  side = '';
+                  drop = null;
+                }}
+              >
+                <span class="tk">{side === '' ? '✓' : ''}</span>
+                <span class="nm">Both</span>
+                <span class="ct">{fmt(expiryGated.length)} row(s), no side filter</span>
+              </button>
+              {#if sidesAll.length === 0}
+                <hr />
+                <p class="none">This store names no option side.</p>
+              {:else}
+                <hr />
+                <!-- KEYED, COMPARED AND ASSIGNED ON THE WIRE STRING. `CE` and
+                     `PE` are `OptionSide::as_str`'s own two words and there is
+                     no display form of them anywhere on this page. -->
+                {#each sidesAll as s (s)}
+                  {@const n = sideCount.get(s) ?? 0}
+                  <button
+                    class="opt"
+                    type="button"
+                    aria-pressed={side === s}
+                    title={n > 0
+                      ? `${s === 'CE' ? 'Calls' : 'Puts'} only — ${fmt(n)} instrument-month(s) under the rungs above carry this side, which is what choosing it returns. Every row without a side leaves the table with it.`
+                      : `${s === 'CE' ? 'Calls' : 'Puts'} — this store holds this side, and no row under the rungs above carries it${!expiry && expiryHeld > 0 ? ', because the expiry gate above is holding every contract row back' : ''}. Choosing it returns nothing and the table will say so.`}
+                    onclick={() => {
+                      side = side === s ? '' : s;
+                      drop = null;
+                    }}
+                  >
+                    <span class="tk">{side === s ? '✓' : ''}</span>
+                    <span class="nm">{s}</span>
+                    <span class="ct" class:warn={n === 0}
+                      >{n > 0 ? `${fmt(n)} row(s)` : 'no rows here'}</span
+                    >
+                  </button>
+                {/each}
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <span class="count" class:warn={Boolean(sideRefusal || sideEmpty)}>
+          {#if sideRefusal}
+            No side — {sideRefusal}
+          {:else if sideEmpty}
+            No option here — {sideEmpty}
+          {:else if side}
+            {fmt(sideCount.get(side) ?? 0)} of {fmt(sidedHere)} option row(s) here are {side} — every
+            row without a side is out of the table too
+          {:else}
+            {fmt(sidedHere)} option row(s) here · both sides, which narrows nothing
           {/if}
         </span>
       </div>
     </section>
 
     <!-- ==================================================================
-         THE MONTH ROLL-UP. Complete / holed / how big, at a glance, and the
-         card is the filter.
+         THE ANCHOR. What this query is looking at, the one headline figure,
+         the two presses that are actions rather than filters, and the counted
+         line under all three.
+
+         THERE IS NO PRICE HERE AND NO SPARKLINE, and neither is an omission:
+         `/store.json` serves this page no price at all — `chg_bps` is a RATIO
+         and a ratio has no scale — so a `.px` carrying a traded number would be
+         a figure this page invented. What `.px` carries instead is the one
+         number the whole strip above exists to move: how many instrument-months
+         the selection matched, with its own measured up/down flash, and how
+         many the store holds behind it. It is lifted OUT of the counted line
+         rather than repeated in it.
          ================================================================== -->
-    <div class="months" role="group" aria-label="Months in the store — select one to filter">
-      {#each monthCards as m (m.month)}
-        <button
-          class="mcard"
-          type="button"
-          data-state={m.state}
-          aria-pressed={month === m.month}
-          onclick={() => (month = month === m.month ? '' : m.month)}
-          title={m.missing === 0
-            ? `${m.month}: every one of the ${fmt(m.n)} instruments holds all ${fmt(m.fullest)} bars of the ${dayText(m.sessions)} sessions observed.`
-            : `${m.month}: ${fmt(m.n - m.full)} of ${fmt(m.n)} instruments short, ${fmt(m.missing)} bars missing — ${fmt(Math.floor(m.missing / BARS_PER_SESSION))} session-equivalents. Worst: ${m.worst?.instrument} holds ${fmt(m.worst?.rows ?? 0)} of ${fmt(m.fullest)}.`}
+    <div class="anchor">
+      <h1
+        class="sym"
+        title={picked
+          ? `${picked} — one instrument of the ${fmt(instrumentRows.length)} the rungs above leave, in the store's own spelling.`
+          : `${feedName}'s whole store at this selection. No single instrument is named: the Find box holds ${typed ? `“${filter.trim()}”, which is not one of the ${fmt(instrumentRows.length)} instrument keys on offer` : 'nothing'}.`}
+      >
+        {picked || feedName}
+      </h1>
+
+      <span
+        class="px"
+        title="Instrument-months matched by every rung above — the row count of the table below, before the sort. It flashes only when the STORE moves between two reads, never when you type."
+      >
+        <span class="k">Instrument-months</span>
+        {#key flash.n?.n}
+          <b
+            class="p mono"
+            class:flash-up={flash.n?.dir === 'up'}
+            class:flash-down={flash.n?.dir === 'down'}>{fmt(matched.length)}</b
+          >
+        {/key}
+        <span class="d">{filtered ? `of ${fmt(deco.length)} stored` : 'every row in the store'}</span
         >
-          <span class="mtop">
-            <span class="mname">{m.month}</span>
-            <span class="pip" aria-hidden="true"></span>
-          </span>
-          <span class="msub"
-            >{dayText(m.sessions)} session{m.sessions === 1 ? '' : 's'} observed · {fmt(m.n)} row{m.n ===
-            1
-              ? ''
-              : 's'}</span
+      </span>
+
+      <!-- THE TWO PRESSES THAT ARE ACTIONS RATHER THAN FILTERS. The count is ON
+           the button: "% change — what these are" invites a click nobody makes,
+           and "2,206 refused" is the fact an operator wants explained the moment
+           they see a column of dashes. -->
+      <span class="actions">
+        {#if filtered}
+          <button class="btn ghost sm" type="button" onclick={reset}>Reset all filters</button>
+        {/if}
+        <button
+          class="btn ghost sm"
+          type="button"
+          aria-pressed={noteOpen}
+          aria-controls="db-blocked"
+          onclick={() => (noteOpen = !noteOpen)}
+        >
+          {#if refusedForSplits > 0}
+            % change · {fmt(refusedForSplits)} refused — why
+          {:else}
+            % change — what these are
+          {/if}
+        </button>
+        <!-- EXPORT WRITES THE MATCHED SET, NOT THE WINDOW. Only ~30 rows exist
+             in the DOM at any moment; the file is every row the selection
+             matched, in the order the table is sorted in.
+
+             DISABLED WITH THE REASON ON ITS FACE rather than sitting inert: a
+             primary press that does nothing and says nothing is the silent
+             failure `CLAUDE.md` §4 names, and "nothing matched" and "no feed
+             chosen" are different sentences that a grey button cannot tell
+             apart on its own. -->
+        <button
+          class="btn ghost sm"
+          type="button"
+          disabled={csvRows.length === 0}
+          title={csvRows.length === 0
+            ? view === 'bars'
+              ? 'Nothing to export — no bar has been read into this grid, so there are no records to write.'
+              : `Nothing to export — ${blocked?.why ?? 'no instrument-month matches this selection'}`
+            : view === 'bars'
+              ? `Write the ${fmt(csvRows.length)} bar(s) on this grid as CSV, named ${csvName} — the whole matched set, not the page. Built in the browser from rows already in memory: no request is made, and nothing is written into this repository. Every cell is the store's own wire form — microsecond stamps, prices and strikes in paisa, percentages as integer basis points, an EMPTY field for an unknown and never a zero.`
+              : `Write the ${fmt(csvRows.length)} matched instrument-month(s) as CSV, named ${csvName}. Built in the browser from rows already in memory: no request is made, and nothing is written into this repository — the bytes go to your downloads. Every cell is the store's own wire form — raw YYYY-MM months, raw ISO expiries, strikes in paisa, percentages as the integer basis points they arrived as — so the file joins against the store. Only the header row is words.`}
+          onclick={exportCsv}>Export CSV</button
+        >
+      </span>
+
+      <!-- ==============================================================
+           THE COUNTED LINE, AND IT IS WHAT THE SIX TILES WERE. Bars,
+           complete, bars missing, coverage and months — the same figures, the
+           same sub-clauses, the same `{#key}`-driven flash on each of them, in
+           one line under the anchor instead of six boxes above the fold. The
+           sixth, instrument-months, is the `.px` above: promoted, not dropped.
+
+           A COUNTED ZERO STAYS A ZERO. The store WAS read, so "0
+           instrument-months match this filter" is a measurement and printing a
+           dash for it would hide a fact the page holds. What may never be
+           printed is a figure nothing produced — a ratio with no denominator,
+           or a session count at a rung nobody has a session size for. Those
+           render the em dash and `blocked.tsub` names which absence it is.
+           ============================================================== -->
+      <p class="count">
+        <span class="k">Bars</span>
+        {#key flash.bars?.n}
+          <b
+            class="mono"
+            class:flash-up={flash.bars?.dir === 'up'}
+            class:flash-down={flash.bars?.dir === 'down'}>{fmt(total)}</b
           >
-          <span class="meter" aria-hidden="true"
-            ><span class="fill" style="width:{m.pct * 100}%"></span></span
+        {/key}
+        <!-- A SESSION COUNT NEEDS A SESSION SIZE. Rows at a rung
+             `barsPerSession` has no number for are skipped by the sum, so with
+             no convertible row on screen the sum is 0 — and "0
+             session-equivalents" beside a six-figure bar count is a measurement
+             claimed over an absence. `matched.length === 0` takes the NUMBER,
+             not the dash: no rows is no bars is no sessions, which is counted
+             all the way down. -->
+        <span class="u"
+          >{#if ranged > 0 || matched.length === 0}· {fmt(Math.round(sessionEquivalents))}
+            session-equivalents{:else}· — session-equivalents, no row here is at a rung with a
+            recorded session size{/if}</span
+        >
+
+        <span class="k">Complete</span>
+        {#key flash.full?.n}
+          <b
+            class="mono"
+            class:flash-up={flash.full?.dir === 'up'}
+            class:flash-down={flash.full?.dir === 'down'}>{fmt(full)}</b
           >
-          <span class="mfoot">
-            <span class="mpct">{pctText(m.pct)}</span>
-            {#if m.missing === 0}
-              <span class="tag">complete</span>
-            {:else}
-              <span class="mmiss">−{fmt(m.missing)}</span>
-              <span class="tag warn">{fmt(m.n - m.full)} short</span>
-            {/if}
-          </span>
-        </button>
-      {/each}
-      {#if monthCards.length === 0}
-        <p class="mnone">No month matches the filter.</p>
-      {/if}
-    </div>
+        {/key}
+        <span class="u">of {fmt(matched.length)} · {fmt(matched.length - full)} short</span>
 
-    <!-- ==================================================================
-         FACETS. Derived from the data — a new kind appears the day a row
-         carries it, and nothing here is edited.
-         ================================================================== -->
-    <div class="dbbar">
-      <span class="lbl">Kind</span>
-      <button class="utab" aria-pressed={kind === ''} onclick={() => (kind = '')}>
-        All<span class="n">{fmt(byMonth.length)}</span>
-      </button>
-      {#each kinds as [k, n] (k)}
-        <button class="utab" aria-pressed={kind === k} onclick={() => (kind = kind === k ? '' : k)}>
-          {k}<span class="n">{fmt(n)}</span>
-        </button>
-      {/each}
+        <span class="k">Bars missing</span>
+        {#key flash.gaps?.n}
+          <b
+            class="mono"
+            class:risk={gaps > 0}
+            class:flash-up={flash.gaps?.dir === 'down'}
+            class:flash-down={flash.gaps?.dir === 'up'}>{fmt(gaps)}</b
+          >
+        {/key}
+        <span class="u"
+          >{#if ranged > 0 || matched.length === 0}· {fmt(Math.floor(gapSessions))} whole
+            sessions{:else}· — whole sessions{/if}, vs the fullest instrument each month</span
+        >
 
-      <span class="sep" aria-hidden="true"></span>
+        <span class="k">Coverage</span>
+        {#key flash.cov?.n}
+          <b
+            class="mono"
+            class:flash-up={flash.cov?.dir === 'up'}
+            class:flash-down={flash.cov?.dir === 'down'}>{pctText(coverage)}</b
+          >
+        {/key}
+        <!-- NO METER FOR A RATIO THAT DOES NOT EXIST. A bar is a length, and a
+             length is a claim: at `coverage === null` an empty track reads as
+             0% coverage, which is the opposite lie to the 100.00% the value
+             used to print. The reason takes the meter's place. -->
+        {#if coverage === null}
+          <span class="u">{blocked?.tsub ?? 'no bars in this selection, so there is no ratio'}</span>
+        {:else}
+          <span
+            class="meter"
+            data-state={coverage >= 1 ? 'full' : coverage >= 0.99 ? 'near' : 'gap'}
+            aria-hidden="true"><span class="fill" style="width:{coverage * 100}%"></span></span
+          >
+        {/if}
 
-      <button
-        class="utab holes"
-        aria-pressed={holesOnly}
-        onclick={() => (holesOnly = !holesOnly)}
-        title="Show only rows short of the fullest instrument in their month"
+        <span class="k">Months</span>
+        {#key flash.months?.n}
+          <b
+            class="mono"
+            class:flash-up={flash.months?.dir === 'up'}
+            class:flash-down={flash.months?.dir === 'down'}>{fmt(monthsIn.length)}</b
+          >
+        {/key}
+        <span class="u">
+          {#if monthsIn.length}
+            <!-- `monthsIn` is built and SORTED as raw `YYYY-MM` and stays that
+                 way: the sort is what makes `[0]` the earliest and `[len-1]`
+                 the latest. Only these two reads are relabelled, on the way to
+                 the screen, and the raw keys stay in the title. -->
+            <span
+              title="{monthLabel(monthsIn[0])} → {monthLabel(
+                monthsIn[monthsIn.length - 1]
+              )} — the store's own keys for them are {monthsIn[0]} and {monthsIn[
+                monthsIn.length - 1
+              ]}"
+              >{monthLabel(monthsIn[0])} → {monthLabel(monthsIn[monthsIn.length - 1])}</span
+            > · <span class:risk={holeMonths > 0}>{holeMonths} with holes</span>
+          {:else}
+            {blocked?.tsub ?? 'nothing matches'}
+          {/if}
+        </span>
+      </p>
+      <span class="sr-only" aria-live="polite"
+        >{viewNow.showing}. {fmt(pageTotal)} row(s) matched, showing {fmt(pageFrom)} to {fmt(
+          pageTo
+        )} on page {fmt(pageNow)} of {fmt(pageCount)}.</span
       >
-        Holes only<span class="n">{fmt(holed)}</span>
-      </button>
-
-      {#if month}
-        <button class="utab pick" aria-pressed="true" onclick={() => (month = '')}>
-          {month} <span class="x" aria-hidden="true">×</span>
-        </button>
-      {/if}
-
-      <span class="spacer"></span>
-
-      <button
-        class="utab whyblocked"
-        aria-pressed={noteOpen}
-        aria-controls="db-blocked"
-        onclick={() => (noteOpen = !noteOpen)}
-      >
-        Δ % unavailable — why
-      </button>
-
-      {#if filtered}
-        <button class="link" onclick={reset}>Reset all filters</button>
-      {/if}
-      <span class="sr-only" aria-live="polite">{fmt(sorted.length)} rows shown</span>
     </div>
 
     {#if noteOpen}
@@ -1083,30 +5570,96 @@
            one server change that would unblock it reads as blocked — and the
            next person does not have to re-derive any of it.
            ================================================================ -->
-      <section class="why panel-in" id="db-blocked" aria-label="Why the percentage columns are empty">
+      <section
+        class="why panel-in"
+        id="db-blocked"
+        aria-label="What the percentage columns are, and why most cells are a dash"
+      >
         <div class="whyhead">
-          <span class="tag info">refused, not forgotten</span>
+          <span class="tag info">{fmt(numbered)} of {fmt(deco.length)} rows show a number</span>
           <h3>
-            <b>Δ %</b> and <b>Prev Δ %</b> cannot be computed from what this store serves today.
+            <b>% Change</b> and <b>Prev % Change</b> — integer basis points, or a dash that says
+            which of five things it is.
           </h3>
           <button class="link" onclick={() => (noteOpen = false)}>close</button>
         </div>
         <ol class="whylist">
-          {#each BLOCKED as b (b.k)}
+          {#each NOTES as b (b.k)}
             <li><b>{b.k}</b> <span>{b.v}</span></li>
           {/each}
         </ol>
         <p class="whyfoot">
-          Until then this page prints no percentage rather than a plausible one, and green and red
-          stay reserved for direction — they appear on a figure that moved between two reads of the
-          store, and nowhere else. A missing bar is a severity, not a direction, and wears amber.
+          A dash is never a zero and never "nothing happened" — hover any one of them for the reason
+          that cell in particular is unknown. Green and red mean DIRECTION and nothing else: they
+          appear on a percentage and on a figure that moved between two reads of the store. A missing
+          bar is a severity, not a direction, and wears amber.
         </p>
       </section>
     {/if}
 
     <!-- ==================================================================
-         THE TABLE. Windowed: only the visible slice exists in the DOM.
+         WHICH GRID IS SHOWING, AND IT SAYS SO IN WORDS.
+         Two different questions over one store. Neither replaces the other,
+         and the page never leaves the reader guessing which one answered:
+         the pressed tab, the sentence beside it and the grid's own caption
+         are one derived value read three times.
          ================================================================== -->
+    <div class="viewbar">
+      <div class="views" role="tablist" aria-label="What one row of the grid is">
+        {#each VIEWS as v (v.key)}
+          <button
+            class="vtab"
+            type="button"
+            role="tab"
+            aria-selected={view === v.key}
+            title={v.title}
+            onclick={() => (view = v.key)}
+          >
+            {v.label}<i>{v.sub}</i>
+          </button>
+        {/each}
+      </div>
+
+      <span class="vsay">Showing <b>{viewNow.showing}</b></span>
+
+      {#if view === 'bars'}
+        <!-- THE READ BUDGET. A CONTROL, NOT A COUNT: `/bars.json` is one
+             month per request, so the reader decides how many files this
+             grid opens and the cost is on the control's own face. -->
+        <label class="vbudget">
+          <span>Instrument-months to read</span>
+          <select
+            bind:value={readBudget}
+            title="Each one is a separate /bars.json request and about 81 bytes per bar on the wire — measured, from 668,251 bytes for 8,250 bars. The newest months are read first."
+          >
+            {#each READ_BUDGETS as n (n)}
+              <option
+                value={n}
+                title={n === 0
+                  ? `Read every instrument-month the query matched — ${fmt(barPlan.all.length)} request(s) right now.`
+                  : `Read the ${fmt(n)} newest matched instrument-month(s).`}>{budgetLabel(n)}</option
+              >
+            {/each}
+          </select>
+        </label>
+
+        <!-- A PARTITION, AND IT SUMS ON SCREEN. read + held back = matched. -->
+        <span class="vsum">
+          <b>{fmt(barPlan.read.length)}</b> read
+          {#if barPlan.held > 0}
+            + <b>{fmt(barPlan.held)}</b> over budget
+          {:else}
+            + <b>0</b> over budget
+          {/if}
+          = <b>{fmt(barPlan.all.length)}</b> instrument-month(s) matched
+        </span>
+      {/if}
+    </div>
+
+    <!-- ==================================================================
+         THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
+         ================================================================== -->
+    {#if view === 'census'}
     <div class="tbl">
       <!-- The scroll region is FOCUSABLE ON PURPOSE and carries the row
            cursor. A keyboard operator has no other way to reach 20,516 rows —
@@ -1125,9 +5678,11 @@
         onkeydown={onKey}
         tabindex="0"
         role="grid"
-        aria-rowcount={sorted.length}
+        aria-rowcount={censusPage.length}
         aria-activedescendant={cursor >= 0 ? `dbrow-${cursor}` : undefined}
-        aria-label="Stored instrument-months, {fmt(sorted.length)} rows. Arrow keys move, Enter opens."
+        aria-label="Stored instrument-months, {fmt(censusPage.length)} row(s) on page {fmt(
+          pageNow
+        )} of {fmt(pageCount)}. Arrow keys move, Enter opens."
       >
         <!-- `presentation` because this div exists for `min-width` and for the
              spacer's positioning context, and for nothing an assistive reader
@@ -1140,7 +5695,6 @@
                 class="th"
                 class:numh={c.num}
                 class:inst={ci === 0}
-                class:blocked={c.blocked}
                 role="columnheader"
                 aria-sort={ariaSort(c.key)}
               >
@@ -1148,17 +5702,11 @@
                   class="sortbtn"
                   type="button"
                   onclick={() => head(c.key)}
-                  title={c.blocked
-                    ? 'This column holds no data. Click for the endpoint, the cost and the decision that block it.'
-                    : `Sort by ${c.label}`}
+                  title={c.why ? `${c.label} — ${c.why}. Click to sort.` : `Sort by ${c.label}`}
                 >
                   <span>{c.label}</span>
-                  {#if c.blocked}
-                    <span class="nomark" aria-label="unavailable">n/a</span>
-                  {:else}
-                    <span class="caret" class:on={sortKey === c.key} class:desc aria-hidden="true"
-                    ></span>
-                  {/if}
+                  <span class="caret" class:on={sortKey === c.key} class:desc aria-hidden="true"
+                  ></span>
                 </button>
               </div>
             {/each}
@@ -1167,20 +5715,50 @@
           {#if sorted.length === 0}
             <div class="tnone">
               <h3>No row matches</h3>
+              <!-- THE NARROWINGS ARE LISTED FROM `narrowing`, THE SAME DERIVED
+                   THE TILES CONSULT. This used to be a hand-glued chain of
+                   `{#if}`s inserting its own commas, so the panel that explains
+                   an empty table and the strip that reports it were two
+                   independent spellings of one fact and could drift apart on
+                   any edit. The emphasis and the raw-key tooltip both survive;
+                   only the glue is gone. -->
               <p>
                 {feedName} holds {fmt(deco.length)} instrument-months, and none of them match
-                {#if typed}the text “{filter}”{/if}{#if typed && (kind || month || holesOnly)} with {/if}{#if kind}kind
-                  <b>{kind}</b>{/if}{#if kind && month}, {/if}{#if month}month <b>{month}</b>{/if}{#if (kind || month) && holesOnly},
-                {/if}{#if holesOnly}holes only{/if}.
+                {#each narrowing as n, i (n.k)}{i > 0 ? ', ' : ''}<b
+                    title={n.key ? `the store's own key for it is ${n.key}` : undefined}
+                    >{n.text}</b
+                  >{/each}.
               </p>
+              <!-- THE GATE IS NOT A FILTER AND THE BUTTON BELOW WILL NOT OPEN
+                   IT, so it is said here in full rather than left to be
+                   discovered by pressing the button and watching nothing
+                   change. `CLAUDE.md` §4: degrade loudly and name the reason —
+                   and name the way out, which is a control, not this button. -->
+              {#if expiryHeld > 0}
+                <p class="tgate">
+                  {fmt(expiryHeld)} of them are futures or options and are being <b>held back</b>,
+                  not filtered:
+                  {#if expiry}
+                    they are on a contract other than {dayLabel(expiry)}. Choose theirs on the
+                    Contract strip above.
+                  {:else}
+                    no expiry is chosen. A bar belongs to <b>one contract</b>, so this page will not
+                    put two expiries under one heading — choose an expiry on the Contract strip and
+                    they appear.
+                  {/if}
+                  Clearing the filters does not release them; only choosing an expiry does.
+                </p>
+              {/if}
               <button class="btn" onclick={reset}>Clear the filters</button>
             </div>
           {:else}
-            <!-- The spacer is the FULL height of the sorted set, so the
-                 scrollbar tells the truth about 93,776 rows while 30 of them
-                 exist. Rows are absolutely positioned at their own offset —
-                 no accumulated rounding down a long list. -->
-            <div class="tspace" role="rowgroup" style="height:{sorted.length * ROW}px">
+            <!-- The spacer is the FULL height of THE PAGE, so the scrollbar
+                 tells the truth about 1,000 rows while 30 of them exist. Rows
+                 are absolutely positioned at their own offset — no accumulated
+                 rounding down a long list. It was the full height of the whole
+                 sorted set before the pager landed; leaving it there would have
+                 drawn a scrollbar for 20,516 rows over a page holding 50. -->
+            <div class="tspace" role="rowgroup" style="height:{censusPage.length * ROW}px">
               {#key stamp}
                 {#each slice as it, i (it.key)}
                   {@const n = first + i}
@@ -1207,7 +5785,21 @@
                       <span class="pip" aria-hidden="true"></span>
                       <span class="ihead">{it.head}</span><span class="isym">{it.sym}</span>
                     </span>
-                    <span class="cell mono" role="gridcell">{it.month}</span>
+                    <!-- THE RAW KEY LEADS THE TOOLTIP AND THE DAY WINDOW
+                         FOLLOWS IT. `2020-03` is the store's own spelling and
+                         has to stay one hover away and copyable; the window
+                         after it is the fact `first_ts` / `last_ts` have been
+                         on the wire for and no page has read — it tells a month
+                         held from the 2nd to the 31st from one held on the 2nd
+                         alone, which no bar count can. -->
+                    <span
+                      class="cell mono"
+                      role="gridcell"
+                      title={heldWindow(it)
+                        ? `${monthLabel(it.month)} · held ${heldWindow(it)} — the store's own key for it is ${it.month}`
+                        : `${monthLabel(it.month)} — the store's own key for it is ${it.month}`}
+                      >{monthLabel(it.month)}</span
+                    >
                     <span class="cell tf" role="gridcell">{it.timeframe}</span>
                     <span
                       class="cell num"
@@ -1232,11 +5824,32 @@
                       >
                       <span class="cpct">{pctText(it.pct)}</span>
                     </span>
-                    <!-- NOT A DASH AND NOT A ZERO. A dash reads as "nothing
-                         happened"; a zero is a lie. The hatched band says the
-                         column is dead ground, and the header says why. -->
-                    <span class="cell num dead" role="gridcell" aria-label="unavailable">—</span>
-                    <span class="cell num dead" role="gridcell" aria-label="unavailable">—</span>
+                    <!-- THE TWO PERCENTAGES. A number carries its sign, two
+                         decimals and its direction's colour; an unknown is a
+                         dash that NAMES ITSELF on hover and never a 0.00%.
+                         `title` for the pointer, `aria-label` for everything
+                         else — the reason has to reach both or the loud
+                         degradation is only loud to one of them. -->
+                    <span class="cell num pc" role="gridcell" data-dir={dirOf(it.chg)}>
+                      {#if it.chg === null}
+                        <span class="unk" title={whyText(it.chgWhy)} aria-label={whyText(it.chgWhy)}
+                          >—</span
+                        >
+                      {:else}
+                        {bpsText(it.chg)}
+                      {/if}
+                    </span>
+                    <span class="cell num pc" role="gridcell" data-dir={dirOf(it.prevChg)}>
+                      {#if it.prevChg === null}
+                        <span
+                          class="unk"
+                          title={whyText(it.prevChgWhy)}
+                          aria-label={whyText(it.prevChgWhy)}>—</span
+                        >
+                      {:else}
+                        {bpsText(it.prevChg)}
+                      {/if}
+                    </span>
                   </div>
                 {/each}
               {/key}
@@ -1288,10 +5901,48 @@
             </div>
           </div>
 
+          <!-- WHICH DAYS THE OPENED MONTH ACTUALLY COVERS. This is the one
+               place `/store.json`'s `first_ts` / `last_ts` are shown at full
+               size, and this drawer is the right place for them: the owner
+               named ONE instrument, and the per-instrument detail this page
+               already has is the surface that answers about it. A second OHLC
+               table would be `/markets` written twice, and `/store.json` serves
+               no price to build one from.
+
+               DEGRADES LOUDLY. A row without stamps says so and names the
+               payload as the reason; it does not print the month's first and
+               last calendar day, which are very often not trading days. -->
+          <p class="dspan">
+            <span class="k">Days held</span>
+            {#if heldWindow(openRowData)}
+              <span class="v" title="first_ts → last_ts from /store.json, microseconds, rendered IST"
+                >{heldWindow(openRowData)}</span
+              >
+              <span class="n"
+                >in <span
+                  title={`${monthLabel(openRowData.month)} — the store's own key for it is ${openRowData.month}`}
+                  >{monthLabel(openRowData.month)}</span
+                ></span
+              >
+            {:else}
+              <span class="v">—</span>
+              <span class="n"
+                >/store.json carried no first/last stamp for this row, so the days it covers are
+                unknown — not the whole month, and not one day</span
+              >
+            {/if}
+          </p>
+
           <div class="dlist">
             {#each openMonths as m (m.key)}
               <div class="drow" data-state={m.state} class:this={m.key === openKey}>
-                <span class="dm">{m.month}</span>
+                <span
+                  class="dm"
+                  title={heldWindow(m)
+                    ? `${monthLabel(m.month)} · held ${heldWindow(m)} — the store's own key for it is ${m.month}`
+                    : `${monthLabel(m.month)} — the store's own key for it is ${m.month}`}
+                  >{monthLabel(m.month)}</span
+                >
                 <span class="meter" aria-hidden="true"
                   ><span class="fill" style="width:{m.pct * 100}%"></span></span
                 >
@@ -1305,23 +5956,698 @@
 
           <p class="dfoot">
             Each month is measured against the fullest instrument stored for that month —
-            {openRowData.month} held {fmt(openRowData.denom)} bars at its fullest, so this row's {fmt(
+            <span
+              title={`${monthLabel(openRowData.month)} — the store's own key for it is ${openRowData.month}`}
+              >{monthLabel(openRowData.month)}</span
+            >
+            held {fmt(openRowData.denom)} bars at its fullest, so this row's {fmt(
               openRowData.rows
             )} is {pctText(openRowData.pct)} of the month.
           </p>
         </div>
       {/if}
     </div>
+    {:else}
+      <!-- ==================================================================
+           THE BAR GRID — ONE ROW PER BAR, twenty-four columns, read from
+           `/bars.json`.
 
-    <p class="foot">
-      <b>{fmt(sorted.length)}</b> rows shown · <b>{slice.length}</b> in the DOM ·
-      <kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> move,
-      <kbd class="kbd">Enter</kbd> opens, <kbd class="kbd">/</kbd> filters · a month's denominator is
-      the fullest instrument stored for it, so a session NSE never held is never counted as missing —
-      and a whole trading day that never landed always is.
+           A REAL `<table>`, and the census grid beside it is still a grid of
+           divs. The two are not inconsistent by accident: the census grid is
+           WINDOWED — rows absolutely positioned inside a spacer — and a
+           `<tbody>` cannot be windowed that way without lying to the row
+           model. This grid is PAGED instead, so the whole page is in the
+           document and the browser's own column algorithm can do the work
+           that the census grid has to do with `grid-template-columns`.
+
+           TEN OF THE TWENTY-FOUR COLUMNS HAVE NO SOURCE ON THIS WIRE and
+           every one of them says so, on the header and in every cell.
+           `CLAUDE.md` §4: degrade loudly and name the reason.
+           ================================================================== -->
+      <div class="tbl">
+        <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+        <div
+          class="tbl-scroll bscroll"
+          tabindex="0"
+          role="region"
+          aria-label="Stored bars, {fmt(barPage.length)} on this page of {fmt(
+            pageTotal
+          )}. Sorted by {BAR_META[barSortKey]?.label ?? barSortKey}."
+        >
+          <table class="bgrid" style="min-width:{BAR_WIDTH}px">
+            <colgroup>
+              {#each BAR_COLS as c (c.key)}
+                <col style="width:{c.w}px" />
+              {/each}
+            </colgroup>
+            <thead>
+              <tr>
+                {#each BAR_COLS as c (c.key)}
+                  <th
+                    scope="col"
+                    class:numh={c.num}
+                    class:deadh={Boolean(c.none)}
+                    aria-sort={c.none ? undefined : barAriaSort(c.key)}
+                  >
+                    <!-- A COLUMN WITH NO SOURCE DOES NOT PRETEND TO SORT. The
+                         button is still here, still reachable and still
+                         labelled — it is DISABLED and it carries the reason on
+                         its own title, which is the difference between a
+                         control that is missing and one that is refused. -->
+                    <button
+                      class="sortbtn"
+                      type="button"
+                      disabled={Boolean(c.none)}
+                      title={c.none
+                        ? `${c.label} — no source, so there is nothing to order: ${c.none}`
+                        : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
+                      onclick={() => barHead(c.key)}
+                    >
+                      <span>{c.label}</span>
+                      <span
+                        class="caret"
+                        class:on={barSortKey === c.key && !c.none}
+                        class:desc={barDesc}
+                        aria-hidden="true"
+                      ></span>
+                    </button>
+                  </th>
+                {/each}
+              </tr>
+            </thead>
+
+            <tbody>
+              {#if barState.error}
+                <tr class="bstate">
+                  <td colspan={BAR_COLS.length}>
+                    <div class="bnone" role="alert">
+                      <h3>The bar files could not be read</h3>
+                      <p class="err">{barState.error}</p>
+                      <p>
+                        Nothing is drawn rather than a plausible blank: a grid with no rows and no
+                        reason reads as an empty store, and this is a failed read.
+                      </p>
+                      <button class="btn" onclick={() => (nonce += 1)}>Try again</button>
+                    </div>
+                  </td>
+                </tr>
+              {:else if barPlan.all.length === 0}
+                <tr class="bstate">
+                  <td colspan={BAR_COLS.length}>
+                    <div class="bnone">
+                      <h3>No instrument-month matches this query</h3>
+                      <p>
+                        A bar lives in an instrument-month file, so with none matched there is no
+                        file to open — this grid has made no request. {feedName} holds {fmt(
+                          deco.length
+                        )} instrument-month(s) in total.
+                      </p>
+                      <button class="btn" onclick={reset}>Clear the filters</button>
+                    </div>
+                  </td>
+                </tr>
+              {:else if barState.loading && barPage.length === 0}
+                {#each SKELETON.slice(0, 12) as i (i)}
+                  <tr class="brow skelrow">
+                    {#each BAR_COLS as c, ci (c.key)}
+                      <td class:bn={c.num}
+                        ><span
+                          class="skel line"
+                          style="width:{46 + ((i * 13 + ci * 7) % 44)}%;animation-delay:{i * 60}ms"
+                        ></span></td
+                      >
+                    {/each}
+                  </tr>
+                {/each}
+              {:else if barPage.length === 0}
+                <tr class="bstate">
+                  <td colspan={BAR_COLS.length}>
+                    <div class="bnone">
+                      <h3>No bar came back</h3>
+                      <p>
+                        {fmt(barPlan.read.length)} instrument-month(s) were read and
+                        <b>{fmt(barsRead)}</b> bar(s) arrived.
+                        {#if barFails.length}
+                          {fmt(barFails.length)} of those file(s) refused — each refusal is named
+                          under the grid.
+                        {:else}
+                          The file(s) opened and held no record. The census says they hold {fmt(
+                            barsClaimed
+                          )}, so this is a disagreement between the manifest and the file, not an
+                          empty query.
+                        {/if}
+                      </p>
+                      <button class="btn" onclick={() => (nonce += 1)}>Read again</button>
+                    </div>
+                  </td>
+                </tr>
+              {:else}
+                {#key stamp}
+                  {#each barPage as b, i (b.rk)}
+                    <tr class="brow" class:odd={i % 2 === 1} class:row-in={entering}>
+                      <!-- DATE / TIME. The stamp is IST and says so; the rung
+                           and the instrument that produced the bar are on the
+                           title, because a grid that mixes two files must be
+                           able to say which row came from which. -->
+                      <td
+                        class="bt"
+                        title="{stampLabel(b.ts)} IST · {b.tf} bar · {b.instrument} · month file {b.month}"
+                        >{stampLabel(b.ts)}</td
+                      >
+                      <td class="bt">{b.tf}</td>
+                      <td class="bn" title="{fmt(b.o)} paisa, as stored">{paisaText(b.o)}</td>
+                      <td class="bn" title="{fmt(b.h)} paisa, as stored">{paisaText(b.h)}</td>
+                      <td class="bn" title="{fmt(b.l)} paisa, as stored">{paisaText(b.l)}</td>
+                      <td class="bn" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
+                      <td class="bn">{fmt(b.vol)}</td>
+
+                      <!-- PRE-MARKET %: no source on this wire. -->
+                      <td class="bn na"
+                        ><span
+                          class="unk"
+                          title={BAR_META.premkt.none}
+                          aria-label="Pre-mkt %: no source — {BAR_META.premkt.none}">no source</span
+                        ></td
+                      >
+
+                      <td class="bn bpc" data-dir={dirOf(b.chg)}>
+                        {#if b.chg === null}
+                          <span
+                            class="unk"
+                            title={barWhyText(b.chgWhy)}
+                            aria-label={barWhyText(b.chgWhy)}>—</span
+                          >
+                        {:else}
+                          {bpsText(b.chg)}
+                        {/if}
+                      </td>
+
+                      <!-- OPEN INTEREST. `i64::MIN` is the null sentinel and it
+                           renders as an unknown that names itself. A ZERO IS A
+                           ZERO and renders as one — the two are different facts
+                           and this column has to keep them apart. -->
+                      <td class="bn">
+                        {#if b.oi === null}
+                          <span
+                            class="unk"
+                            title={barWhyText('oi_null')}
+                            aria-label={barWhyText('oi_null')}>unknown</span
+                          >
+                        {:else}
+                          <span
+                            title={b.oi === 0
+                              ? 'zero, and stored as zero — not the null sentinel'
+                              : 'open interest, as stored'}>{fmt(b.oi)}</span
+                          >
+                        {/if}
+                      </td>
+
+                      <td class="bn bpc" data-dir={dirOf(b.oichg)}>
+                        {#if b.oichg === null}
+                          <span
+                            class="unk"
+                            title={barWhyText(b.oichgWhy)}
+                            aria-label={barWhyText(b.oichgWhy)}>—</span
+                          >
+                        {:else}
+                          {bpsText(b.oichg)}
+                        {/if}
+                      </td>
+
+                      <!-- EXPIRY. The row keeps the raw ISO day — that is what
+                           the sort compares and what the day arithmetic reads —
+                           and it becomes `29 Oct 2026` here and only here. -->
+                      <td class="bt">
+                        {#if b.exp === null}
+                          <span
+                            class="unk"
+                            title="this instrument is not a contract — an index and an equity have no expiry. It is not an unknown date."
+                            >—</span
+                          >
+                        {:else}
+                          <span title="the store's own key for it is {b.exp}">{dayLabel(b.exp)}</span
+                          >
+                        {/if}
+                      </td>
+                      <td class="bn">
+                        {#if b.dte === null}
+                          <span
+                            class="unk"
+                            title="no expiry on this instrument, so there is no distance to one."
+                            >—</span
+                          >
+                        {:else}
+                          <span
+                            title={b.dte < 0
+                              ? `${fmt(-b.dte)} day(s) AFTER expiry — this bar is from the contract's life, read out of a month file that outlives it`
+                              : 'whole calendar days from this bar to expiry'}>{fmt(b.dte)}d</span
+                          >
+                        {/if}
+                      </td>
+                      <td class="bt">
+                        {#if b.side === null}
+                          <span class="unk" title="not an option — this instrument has no side.">—</span>
+                        {:else}
+                          <span class="chip {b.side === 'CE' ? 'ce' : 'pe'}">{b.side}</span>
+                        {/if}
+                      </td>
+                      <td class="bn">
+                        {#if b.strike === null}
+                          <span class="unk" title="not an option — this instrument carries no strike."
+                            >—</span
+                          >
+                        {:else}
+                          <span title="{fmt(b.strike)} paisa, as stored">{strikeText(b.strike)}</span>
+                        {/if}
+                      </td>
+
+                      <!-- MONEYNESS, INTRINSIC, EXTRINSIC and the five Greeks
+                           plus IV: no source on this wire, and each says which
+                           source it would need. -->
+                      <td class="na"
+                        ><span
+                          class="unk"
+                          title={BAR_META.mny.none}
+                          aria-label="Moneyness: no source — {BAR_META.mny.none}">no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span
+                          class="unk"
+                          title={BAR_META.intr.none}
+                          aria-label="Intrinsic: no source — {BAR_META.intr.none}">no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span
+                          class="unk"
+                          title={BAR_META.extr.none}
+                          aria-label="Extrinsic: no source — {BAR_META.extr.none}">no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="IV %: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="Delta: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="Gamma: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="Theta: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="Vega: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                      <td class="bn na"
+                        ><span class="unk" title={NO_GREEK} aria-label="Rho: no source — {NO_GREEK}"
+                          >no source</span
+                        ></td
+                      >
+                    </tr>
+                  {/each}
+                {/key}
+              {/if}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- EVERY REFUSAL, EVERY PARTIAL READ AND EVERY DISAGREEMENT, NAMED.
+             None of these is allowed to be a shorter grid. -->
+        {#if barFails.length || barFaults.length || barDisagree.length || barsRead > 0}
+          <div class="bnotes">
+            {#if barsRead > 0}
+              <p class="bnote ok">
+                <b>{fmt(barsRead)}</b> bar(s) read from <b>{fmt(barPlan.read.length)}</b>
+                instrument-month file(s); the census claims <b>{fmt(barsClaimed)}</b> for the same
+                files. <b>{fmt(BAR_SOURCED)}</b> of {BAR_COLS.length} columns carry data and
+                <b>{fmt(BAR_UNSOURCED)}</b> say why they cannot — that is every column drawn.
+              </p>
+            {/if}
+            {#each barDisagree as f (f.key)}
+              <p class="bnote warn">
+                <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — the file returned {fmt(
+                  f.bars.length
+                )} bar(s) and the census manifest claims {fmt(f.row.rows)}. The grid shows what the
+                FILE returned; the difference is a fact about the store, not a rendering choice.
+              </p>
+            {/each}
+            {#each barFaults as f (f.key)}
+              <p class="bnote warn">
+                <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — read in part: {f.faults}
+              </p>
+            {/each}
+            {#each barFails as f (f.key)}
+              <p class="bnote err">
+                <b>{f.row.instrument} {f.row.month} {f.row.timeframe}</b> — {f.error}
+              </p>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- ==================================================================
+         THE PAGER — how you reach the rows that are not on screen.
+
+         IT GOVERNS BOTH GRIDS, so `1–50 of 8,250 rows` means the same thing
+         under either one and the arithmetic is written once. `pageNow` is a
+         CLAMP and not a write-back: a narrowing that shortens the run
+         cannot strand the reader on a page that no longer exists.
+
+         EVERY DISABLED BUTTON SAYS WHY, on its own title. A greyed control
+         with no reason is the silent degradation §4 bans; "already on the
+         first page" is one word longer and answers the question.
+         ================================================================== -->
+    <div class="pgbar" role="group" aria-label="Paging">
+      <span class="pgof">
+        {#if pageTotal === 0}
+          <b>0</b> rows — {view === 'bars'
+            ? 'no bar was read, so there is no page to turn'
+            : 'nothing matched, so there is no page to turn'}
+        {:else}
+          <b>{fmt(pageFrom)}–{fmt(pageTo)}</b> of <b>{fmt(pageTotal)}</b> rows · page
+          <b>{fmt(pageNow)}</b> of <b>{fmt(pageCount)}</b>
+        {/if}
+      </span>
+
+      <label class="pgsize">
+        <span>Rows per page</span>
+        <select
+          value={pageSize}
+          onchange={(e) => setPageSize(Number(e.currentTarget.value))}
+          title="How many rows this page holds. The reader's place is kept across a change: the row you were standing on stays on screen."
+        >
+          {#each PAGE_SIZES as n (n)}
+            <option
+              value={n}
+              title={n >= 1000
+                ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
+                : `${fmt(n)} rows per page`}>{fmt(n)}</option
+            >
+          {/each}
+        </select>
+      </label>
+
+      <label class="pgjump">
+        <span>Go to page</span>
+        <input
+          type="number"
+          min="1"
+          max={pageCount}
+          value={pageNow}
+          disabled={pageTotal === 0}
+          title={pageTotal === 0
+            ? 'There is no page to go to: nothing is on this grid.'
+            : `Any page from 1 to ${fmt(pageCount)}. Out-of-range is clamped, never refused.`}
+          onchange={(e) => goPage(Number(e.currentTarget.value))}
+        />
+        <span class="pgof2">of {fmt(pageCount)}</span>
+      </label>
+
+      <span class="pgnav">
+        <button
+          class="pg"
+          type="button"
+          disabled={pageNow === 1}
+          title={pageNow === 1 ? 'Already on the first page' : 'First page'}
+          aria-label="First page"
+          onclick={() => goPage(1)}>«</button
+        >
+        <button
+          class="pg"
+          type="button"
+          disabled={pageNow === 1}
+          title={pageNow === 1 ? 'Already on the first page' : `Page ${fmt(pageNow - 1)}`}
+          aria-label="Previous page"
+          onclick={() => goPage(pageNow - 1)}>‹</button
+        >
+        {#each pageList(pageNow, pageCount) as item (item.k)}
+          {#if item.gap}
+            <!-- ELIDED, AND IT IS NOT A CONTROL. A 1,840-page run must not
+                 render 1,840 buttons; the jump box above reaches the pages
+                 this row does not draw, which is why the elision is honest. -->
+            <span class="pg gap" aria-hidden="true">…</span>
+          {:else}
+            <button
+              class="pg"
+              type="button"
+              aria-current={item.p === pageNow ? 'page' : undefined}
+              title="Page {fmt(item.p)} of {fmt(pageCount)}"
+              onclick={() => goPage(item.p)}>{fmt(item.p)}</button
+            >
+          {/if}
+        {/each}
+        <button
+          class="pg"
+          type="button"
+          disabled={pageNow === pageCount}
+          title={pageNow === pageCount
+            ? pageCount === 1
+              ? 'There is only one page'
+              : 'Already on the last page'
+            : `Page ${fmt(pageNow + 1)}`}
+          aria-label="Next page"
+          onclick={() => goPage(pageNow + 1)}>›</button
+        >
+        <button
+          class="pg"
+          type="button"
+          disabled={pageNow === pageCount}
+          title={pageNow === pageCount
+            ? pageCount === 1
+              ? 'There is only one page'
+              : 'Already on the last page'
+            : `Last page, ${fmt(pageCount)}`}
+          aria-label="Last page"
+          onclick={() => goPage(pageCount)}>»</button
+        >
+      </span>
+    </div>
+
+    <!-- THE STANDING BAR UNDER THE PAGER. It is not a second pager and it
+         draws no page buttons: the pager above owns the ordinals. What this
+         carries is what the pager cannot — how much of the page is actually
+         in the document, the newest instant in the whole matched set, and
+         the keys that move a reader through it.
+
+         IT GAINED THE NEWEST BAR, which is the one fact the standing "newest
+         bar" notice carried that nothing else on this page stated: `last_ts`
+         was read per row (the month cell's tooltip) and per instrument (the
+         drawer's "Days held") and never for the SET on screen, which is the
+         question a banner over a table is actually asked. Counted from the
+         rows, so it narrows with them; an absence is named and never rendered
+         as an epoch. -->
+    <p class="pager">
+      <span class="of"
+        ><b>{fmt(pageTotal)}</b> row(s) matched · <b>{fmt(
+          view === 'bars' ? barPage.length : censusPage.length
+        )}</b>
+        on this page · <b>{view === 'bars' ? barPage.length : slice.length}</b> in the DOM</span
+      >
+      <span class="of"
+        >newest bar {#if newestBar === null}<b>—</b>, because no row in this selection carries a
+          last-bar stamp{:else}<b title="last_ts from /store.json, microseconds, rendered IST"
+            >{stampLabel(newestBar)}</b
+          >{/if}</span
+      >
+      <span class="of"
+        ><kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> move, <kbd class="kbd">Enter</kbd> opens,
+        <kbd class="kbd">/</kbd> filters</span
+      >
+      <span class="of"
+        >a month's denominator is the fullest instrument stored for it, so a session NSE never held
+        is never counted as missing — and a whole trading day that never landed always is.</span
+      >
     </p>
+    </div>
   {/if}
 </div>
+
+<!-- ======================================================================
+     ONE END OF THE MONTH WINDOW — the field, the ▦, and the calendar.
+     ----------------------------------------------------------------------
+     ONE SNIPPET, RENDERED TWICE. From and To differ in three things and only
+     three: which state they write, which side the panel hangs off, and which
+     end of the store they open at when they have no bound yet. Writing the
+     panel out twice is how the two ends drift into two controls.
+
+     `value` is the raw `YYYY-MM` and it is never anything else. `monthLabel`
+     is applied at the three places text reaches a screen — the closed field,
+     the grid's own `title`, and the footer — and nowhere near the `{#each}`
+     key, the `aria-selected` comparison or the assignment.
+     ====================================================================== -->
+{#snippet monthField(
+  /** @type {'from' | 'to'} */ which,
+  /** @type {string} */ value,
+  /** @type {string} */ caption,
+  /** @type {string} */ none
+)}
+  <div class="cell dcell" class:dright={which === 'to'}>
+    <span
+      title="Both ends are inclusive, and both are raw YYYY-MM keys — the store's own spelling, which is what makes a string comparison chronological order. An inverted range is NAMED, never swapped: saying which two months are the wrong way round is the only version an operator can act on."
+      >{caption} <i>the span of month files to read</i></span
+    >
+    <span class="dwrap">
+      <!-- THE FIELD IS A BUTTON, NOT A TEXT BOX, and that is the difference
+           between this page and the day pickers elsewhere. A typed month would
+           need a parser, and a parser needs a rule for what `Sept 24` means —
+           the store holds a bounded, countable list of months, so choosing
+           from it is exact and typing at it could only ever be a guess that
+           sometimes lands. That is also why this cell has a `.din`-shaped
+           face and no `.din`: there is no text to accept. -->
+      <button
+        class="dval"
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={calOpen === which}
+        class:unset={!value}
+        onclick={(e) => (calOpen === which ? closeCal() : openCal(which, e.currentTarget))}
+        title={value
+          ? `${caption} ${monthLabel(value)} — the store's own key for it is ${value}`
+          : `${caption} is unset, so this end of the window has no bound at all`}
+      >
+        {value ? monthLabel(value) : none}
+      </button>
+      <button
+        class="dbtn"
+        type="button"
+        aria-label="Open the {caption.toLowerCase()} calendar"
+        aria-haspopup="dialog"
+        aria-expanded={calOpen === which}
+        onclick={(e) => (calOpen === which ? closeCal() : openCal(which, e.currentTarget))}>▦</button
+      >
+    </span>
+
+    <!-- THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, and it
+         POINTS UP. It is out of the flow because a two-line sentence inside the
+         cell would widen it and reflow the whole strip the moment the two ends
+         cross; it hangs ABOVE the field rather than below because below is
+         where the calendar opens, and a message the popup covers is a message
+         that was not delivered. It is anchored to the FROM end because that is
+         the bound that is too late, and it is rendered text with `role=status`
+         rather than a tooltip — a refusal loud only to a pointer is not loud.
+         `CLAUDE.md` §4: degrade loudly and name the reason. -->
+    {#if which === 'from' && rangeInverted}
+      <i class="derr" role="status"
+        >{monthLabel(fromMonth)} is after {monthLabel(toMonth)}, so this window holds no month at
+        all — nothing was reordered for you. The store's own keys are {fromMonth} and {toMonth}.</i
+      >
+    {/if}
+
+    {#if calOpen === which}
+      <!-- `tabindex="-1"` BECAUSE A DIALOG IS FOCUSABLE BUT NOT TABBABLE. The
+           grid inside is where the focus actually lands, and the panel needs a
+           tab stop of its own only so that a browser has somewhere to put the
+           focus if the grid is momentarily empty. Adding it to the tab ORDER
+           would put a stop in front of the twelve months for no gain. -->
+      <div
+        class="cal panel-in"
+        bind:this={calEl}
+        role="dialog"
+        tabindex="-1"
+        aria-label="Choose the {caption.toLowerCase()}"
+        onkeydown={calKey}
+      >
+        <div class="calhd">
+          <button
+            class="calnav"
+            type="button"
+            onclick={() => stepYear(-1)}
+            disabled={heldYears.indexOf(calYear) <= 0}
+            aria-label="The previous year the store holds">◂</button
+          >
+          <!-- THE YEARS ARE THE YEARS THE STORE HOLDS. `bind:value` keeps the
+               NUMBER Svelte put on the option rather than the string the DOM
+               would hand back, so `heldYears.indexOf(calYear)` above is an
+               identity match and not a coincidence of coercion. -->
+          <select class="calsel" aria-label="Year" bind:value={calYear}>
+            {#each heldYears as y (y)}
+              <option value={y}>{y}</option>
+            {/each}
+          </select>
+          <button
+            class="calnav"
+            type="button"
+            onclick={() => stepYear(1)}
+            disabled={heldYears.indexOf(calYear) >= heldYears.length - 1}
+            aria-label="The next year the store holds">▸</button
+          >
+        </div>
+
+        <div class="calgrid" role="group" aria-label="Months in {calYear}">
+          {#each MONTH_SLOTS as mi (mi)}
+            {@const key = monthKey(calYear, mi)}
+            {@const n = monthRows.get(key)}
+            <button
+              class="cmon"
+              type="button"
+              disabled={!n}
+              aria-pressed={value === key}
+              onclick={() => setCal(which, key)}
+              title={n
+                ? `${monthLabel(key)} — ${fmt(n)} instrument-month(s) held. The store's own key is ${key}.`
+                : `${monthLabel(key)} — the store holds nothing for it${universe ? ` in ${chosenUniverse.label}` : ''}, so it cannot bound this window. Shown and refused rather than dropped: a month that is missing and a month nobody thought of look identical once it is gone.`}
+            >
+              {MON[mi]}
+            </button>
+          {/each}
+        </div>
+
+        <!-- THE BOUND READS AS A MONTH, NOT AS A KEY. This printed the raw
+             `2024-09` — the one text node on this page where the store's
+             spelling was shown as if it were the date, in a product whose month
+             is `Sep 2024` everywhere else and whose September is never `Sept`.
+             THE FACT IS NOT LOST: the field this panel writes carries the raw
+             key in its own `title` ("the store's own key for it is …"), as does
+             every one of the twelve month buttons above, so the spelling is
+             still one hover away — from the control that owns it rather than
+             from a footnote under it. -->
+        <p class="calft">
+          <b>{value ? monthLabel(value) : 'no bound'}</b> · {fmt(monthsHeldIn(calYear))} of 12 months
+          held in {calYear}
+          {#if value}
+            <button class="link" onclick={() => setCal(which, '')}>clear this end</button>
+          {/if}
+        </p>
+      </div>
+    {/if}
+
+    <!-- THE WINDOW, COUNTED. Split across the two cells so both stand the same
+         height: the FROM end states the span it opens, the TO end states what
+         the span actually reaches. Every figure is counted from the rows on
+         hand and every month in it is `monthLabel`ed on the way to the screen
+         only — `windowed` and `monthsAll` are keyed on the raw `YYYY-MM`. -->
+    {#if which === 'from'}
+      <span class="count" class:warn={rangeInverted}>
+        {fromMonth ? monthLabel(fromMonth) : 'any earlier'} → {toMonth
+          ? monthLabel(toMonth)
+          : 'any later'}
+      </span>
+    {:else}
+      <span class="count" class:warn={rangeInverted}>
+        {#if rangeInverted}
+          no month at all — the two ends are the wrong way round
+        {:else if fromMonth || toMonth}
+          {fmt(windowed.length)} instrument-month(s) in the window
+        {:else}
+          every month the store holds · {fmt(monthsAll.length)} of them
+        {/if}
+      </span>
+    {/if}
+  </div>
+{/snippet}
 
 <style>
   /* Everything here is expressed through `theme.css` tokens. No literal colour,
@@ -1330,29 +6656,666 @@
      theme file holds itself to. */
 
   .db {
+    /* 32px, AND IT IS THE SAME 32 THE WINDOWING ARITHMETIC USES. `ROW = 32` in
+       the script places row N at `N * 32px`; if these two ever disagree the
+       rows drift away from the scrollbar a pixel per row and the list is
+       unusable by the thousandth. Neither number moves without the other. */
     --dbrow: 32px;
   }
 
-  .dbsearch {
-    max-width: 20rem;
+  /* ---- THE BOARD ------------------------------------------------------
+     The dark field the panels sit on. The wash is two very wide radial tints
+     mixed OUT OF THE THEME'S OWN ACCENTS rather than typed in — a literal
+     colour here would be a second theme the toggle cannot reach, which is what
+     `theme.css` lines 20-27 forbid, and it would be the wrong colour in one of
+     the two modes by construction. At 5% and 4% it is a gradient the eye reads
+     as depth and never as a hue. */
+  .board {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    padding: var(--s5);
+    background-color: var(--bg);
+    background-image:
+      radial-gradient(
+        1100px 620px at 6% 0%,
+        color-mix(in srgb, var(--acc) 5%, transparent),
+        transparent 60%
+      ),
+      radial-gradient(
+        900px 520px at 96% 0%,
+        color-mix(in srgb, var(--info) 4%, transparent),
+        transparent 58%
+      );
   }
 
-  /* SIX TILES, NEVER FIVE AND AN ORPHAN. `theme.css` lays the strip out with
-     `auto-fit` + `minmax(150px, 1fr)`, which at a ~820px pane fits five and
-     drops the sixth onto a row of its own beside four columns of empty. Six
-     divides by three and by two, so the count is stated at the widths where
-     `auto-fit` would guess wrong. The token vocabulary is unchanged and
-     `theme.css` is untouched. */
-  @media (max-width: 1180px) {
-    .stats {
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
+  /* ====================================================================
+     THE CONTROL VOCABULARY — `.segs`, `.strip`, `.lead`, `.cell`, `.picker`,
+     `.mnyb`, `.menu`, `.opt`, `.anchor`, `.sym`, `.px`, `.count`, `.pager`.
+
+     WHAT THIS BLOCK REPLACES: `.sel`, `.pickers`, `.pk`, `.plbl`, `.pknote`,
+     `.dd`, `.ddb`, `.ddm`, `.ddr`, `.ddnone`, `.dates`, `.dlbl`, `.ask` and
+     `.foot` — /ingest's control panel, copied wholesale into /db. That copy is
+     the mistake being undone. The two pages ask the same SHAPE of question and
+     were told to answer it in their own voices; one vocabulary across both is
+     how an edit to either silently becomes an edit to both, and it is why a
+     grid of 248px boxes ended up standing in for a row of strip cells.
+
+     NOTHING BELOW IS A LITERAL. Every colour, size, radius and space is a
+     `theme.css` token, so both themes are one definition and the page has no
+     second theme system the toggle cannot reach. The three tokens the old
+     panel used to alias locally — `--raise`, `--panel2`, `--accdeep` — are
+     still NOT aliased here: `theme.css` defines them, which is what lets
+     `$lib/Picker.svelte` theme its own menus, and a local copy is the copy
+     that goes stale.
+     ==================================================================== */
+
+  /* ---- THE SEGMENT TABLIST -------------------------------------------
+     A tablist, sized to its own content, above what it filters. It scrolls
+     rather than wraps: three tabs never need it, and a fourth segment landing
+     in the store must not push the strip below it down a row. */
+  .segs {
+    flex: none;
+    display: flex;
+    gap: var(--s2);
+    width: max-content;
+    max-width: 100%;
+    padding: var(--s1);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    overflow-x: auto;
   }
-  @media (max-width: 640px) {
-    .stats {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
+  .seg {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
+    padding: var(--s3) var(--s6);
+    border-radius: var(--r2);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    white-space: nowrap;
   }
+  .seg:hover {
+    color: var(--ink);
+  }
+  .seg:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .seg[aria-selected='true'] {
+    color: var(--on-acc);
+    background: var(--acc);
+  }
+  /* COUNTED, PER SEGMENT, AND IT IS THE WHOLE REASON THIS IS A TABLIST AND NOT
+     A ROW OF WORDS. The clause that used to sit under the control said how many
+     segments were held; the tabs are that enumeration, and each one carries its
+     own total. */
+  .seg .c {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    font-variant-numeric: tabular-nums;
+    color: var(--faint);
+    background: var(--panel-2);
+    padding: 1px var(--s4);
+    border-radius: var(--r-full);
+  }
+  .seg[aria-selected='true'] .c {
+    background: color-mix(in srgb, var(--ink-hi) 22%, transparent);
+    color: var(--on-acc);
+  }
+
+  /* ---- THE STRIPS ----------------------------------------------------
+     One row of controls on one raised board. `overflow: visible` is
+     load-bearing and not an oversight: every menu and every calendar in the
+     strip hangs BELOW its own cell, and a clipped popup is a control that opens
+     into nothing. */
+  .strip {
+    flex: none;
+    display: flex;
+    align-items: stretch;
+    flex-wrap: wrap;
+    min-width: 0;
+    overflow: visible;
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: linear-gradient(180deg, var(--panel-2), var(--panel));
+    box-shadow: var(--e1);
+  }
+  /* THE CONTRACT STRIP IS THE QUIETER OF THE TWO, and it is ALWAYS DRAWN. The
+     approved design collapses it when the segment carries no contract; here it
+     may not, because on today's wire there is never a chain — `/store.json`
+     names no strike and carries no price — and a strip that collapsed would
+     take the two REFUSALS with it. "Why is there no strike control" is exactly
+     the question `CLAUDE.md` §4 says must be answered out loud rather than by
+     an absence, so the strip stays and its cells go `.off`. */
+  .strip.sub {
+    background: var(--panel);
+  }
+  .lead {
+    flex: none;
+    display: flex;
+    align-items: center;
+    padding: 0 var(--s6);
+    border-right: 1px solid var(--line-soft);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* ---- A RUNG ---------------------------------------------------------
+     Caption, control, and one clipped clause. The clause CLIPS RATHER THAN
+     WRAPS: this is where a fact that used to be a paragraph now lives, and a
+     clause that can grow to three lines would reflow the whole strip the moment
+     a universe answered with a longer refusal. The text is WHOLE in the
+     document, so anything reading rather than looking gets all of it, and the
+     full sentence is also on the control's own `title`. */
+  .strip .cell {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    padding: var(--s4) var(--s5);
+    border-right: 1px solid var(--line-soft);
+    min-width: 0;
+    flex: 1 1 232px;
+    max-width: 420px;
+  }
+  /* NO HAIRLINE ON THE LAST CELL. Every cell draws a divider on its right, and
+     with the strip left-packed the last one would hang in the middle of an
+     otherwise empty bar, reading as the edge of a control that is not there. */
+  .strip > *:last-child {
+    border-right: 0;
+  }
+  /* THE FOCUS SIGNAL IS ON THE CELL, not on each control inside it: a cell holds
+     a button, a field and sometimes a popup, and one underline under the group
+     says "you are here" once instead of three times. */
+  .strip .cell::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 2px;
+    background: var(--acc);
+    transform: scaleX(0);
+  }
+  .strip .cell:focus-within::after {
+    transform: scaleX(1);
+  }
+  /* A RUNG THAT CANNOT BE USED SAYS SO ON ITS CAPTION AND ITS CONTROL, NEVER ON
+     ITS CLAUSE. The clause is the refusal; dimming it would be the page
+     whispering the one sentence that has to be read. */
+  .strip .cell.off > span:first-of-type {
+    opacity: 0.55;
+  }
+  .strip .cell > span:first-of-type {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .strip .cell > span:first-of-type i {
+    font-style: normal;
+    font-weight: var(--w-mid);
+    letter-spacing: 0;
+    text-transform: none;
+    color: var(--faint);
+    margin-left: var(--s3);
+  }
+  .strip .cell > .count {
+    margin: 0;
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .strip .cell > .count.warn {
+    color: var(--warn);
+  }
+  /* THE FIND BOX AND THE TWO CONTRACT RUNGS ASK FOR MORE OF THE ROW, and they
+     are the only three that do: the box holds a typed instrument key and the
+     two `Picker`s hold a summary like "412 of 1,204 strikes". Every other cell
+     is a label and a short face. */
+  .strip .cell.combo {
+    flex: 1.4 1 264px;
+  }
+  .strip .cell.mcell {
+    flex: 1 1 264px;
+  }
+
+  /* THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, AND IT POINTS
+     UP. Both halves of that are deliberate. It is taken out of the flow because
+     a two-line sentence inside a 232px cell would widen the cell and reflow the
+     whole strip the moment the two ends cross. It hangs ABOVE the field rather
+     than below because below is where the calendar opens, and a message the
+     popup covers is a message that was not delivered. */
+  /* NO `.derr.on` PAIR HERE. The approved design toggles this node with a
+     class because it is always in its DOM; this one is gated by an `{#if}` on
+     `rangeInverted`, so a hidden state it can never be in would be a
+     declaration for a node nothing builds — and the class beside it would be an
+     attribute that says nothing. It exists exactly when it has something to
+     say. */
+  .derr {
+    position: absolute;
+    left: var(--s5);
+    bottom: calc(100% - var(--s2));
+    z-index: 25;
+    width: 246px;
+    font-style: normal;
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    line-height: 1.4;
+    white-space: normal;
+    color: var(--down);
+    background: var(--panel);
+    border: 1px solid color-mix(in srgb, var(--down) 55%, var(--line));
+    border-radius: var(--r2);
+    padding: var(--s3) var(--s4);
+    box-shadow: var(--e2);
+  }
+  /* THERE IS NO `.dright .derr` RULE, AND THAT IS NOT AN OMISSION. Only the FROM
+     end ever draws this complaint — it is the bound that is too late — so a rule
+     anchoring it to the To cell's right edge would be a rule for a node nothing
+     builds, which is how a control comes back without anyone deciding to bring
+     it back. If the message ever has to be said at both ends, the rule belongs
+     here beside the one above it. */
+
+  /* ---- THE CONTROL FACE ----------------------------------------------
+     `.mnyb` is the strip's own select-lookalike: a button drawn to the exact
+     metrics of the fields beside it, with the caret painted on rather than
+     inherited from a native `<select>`. Feed, Universe, Month and the holes
+     toggle wear it; Strike, Moneyness and Instrument are `$lib/Picker.svelte`,
+     whose own face is brought to the same metrics below.
+
+     WHY THOSE FOUR ARE NOT `Picker`S: a `Picker` row is a checkbox, and these
+     four need a row that is DRAWN, DISABLED and carries its own refusal — the
+     feed that is not ready, the universe tier with no source on the wire. A
+     tick cannot say why it is unavailable. */
+  /* THE SCOPE LINE READS LIKE THE CONTROL IT REPLACED, MINUS THE AFFORDANCE.
+     Same face as `.mnyb` — same size, weight and mono family — so the strip's
+     rhythm is unbroken, but no caret, no hover, no pointer: nothing here
+     invites a click, because the feed is chosen in the top bar. `default`
+     rather than `text` keeps it from reading as an editable field. */
+  .scopeline .feedname {
+    color: var(--ink);
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
+    font-family: var(--mono);
+    cursor: default;
+    align-self: start;
+  }
+  .mnyb {
+    appearance: none;
+    background-color: transparent;
+    border: 0;
+    margin: 0;
+    padding: 0 20px 0 0;
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.015em;
+    height: 19px;
+    line-height: 19px;
+    text-align: left;
+    cursor: pointer;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
+      linear-gradient(135deg, var(--acc) 50%, transparent 50%);
+    background-position: calc(100% - 6px) 58%, calc(100% - 1px) 58%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+  .mnyb:hover:not(:disabled) {
+    color: var(--acc);
+  }
+  .mnyb:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  .mnyb:disabled {
+    color: var(--faint);
+    cursor: not-allowed;
+  }
+  /* THE TOGGLE WEARS THE SAME FACE AND OPENS NOTHING, so it drops the caret
+     rather than drawing one that points at a menu that does not exist. Pressed
+     is a STATE and is drawn as one — the holes filter being on is the single
+     most consequential thing this strip can be doing to the table under it. */
+  .mnyb.toggle {
+    background-image: none;
+    padding-right: 0;
+  }
+  .mnyb.toggle[aria-pressed='true'] {
+    color: var(--acc);
+  }
+
+  /* THE SHARED `Picker`'S FACE, BROUGHT TO THE STRIP'S METRICS FROM OUTSIDE IT.
+     `$lib/Picker.svelte` is shared with /markets and /ingest and its spelling is
+     not ours to change, so its `.pbtn` is reached with `:global()` from a
+     selector this component owns — the rule can only ever apply inside a `.cell`
+     this file wrote. Without it the three `Picker` rungs would wear a 15px
+     bordered box in a row of 13px borderless faces, and one strip would read as
+     two controls beside five. Only the FACE is touched; the menu, the filter
+     box and every row inside it are Picker's own and stay identical across the
+     three pages. */
+  .strip .cell :global(.pbtn) {
+    width: auto;
+    max-width: 100%;
+    background-color: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0 20px 0 0;
+    font-size: var(--fs-base);
+    height: 19px;
+    line-height: 19px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background-position: calc(100% - 6px) 58%, calc(100% - 1px) 58%;
+  }
+  .strip .cell :global(.pbtn:hover:not(:disabled)) {
+    color: var(--acc);
+  }
+
+  /* ---- THE MENU -------------------------------------------------------
+     Drawn to `Picker`'s own popup metrics, so a menu opened from a `.mnyb` and
+     a menu opened from a `.pbtn` are the same object two cells apart. */
+  .picker {
+    position: relative;
+    min-width: 0;
+  }
+  .menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + var(--s3));
+    z-index: 40;
+    width: max-content;
+    min-width: 100%;
+    max-width: min(92vw, 560px);
+    max-height: 380px;
+    overflow-y: auto;
+    background: var(--raise);
+    border: 1px solid var(--line);
+    border-radius: var(--r3);
+    padding: var(--s2);
+    box-shadow: var(--e3);
+  }
+  .opt {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    width: 100%;
+    appearance: none;
+    border: 0;
+    background: none;
+    text-align: left;
+    color: var(--ink);
+    font: inherit;
+    font-size: var(--fs-sm);
+    padding: var(--s3) var(--s5);
+    min-height: 34px;
+    border-radius: var(--r2);
+    cursor: pointer;
+  }
+  .opt:hover:not(:disabled) {
+    background: var(--panel-2);
+  }
+  .opt:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -2px;
+  }
+  /* Drawn and refused, never absent: a row missing from the list reads as a set
+     that does not exist rather than one this page cannot count. The whole reason
+     is on the row's own `title`. */
+  .opt.off {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .opt .tk {
+    flex: 0 0 12px;
+    color: var(--acc);
+    font-weight: var(--w-bold);
+  }
+  .opt .nm {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .opt .ct {
+    flex: 0 0 auto;
+    max-width: 220px;
+    text-align: right;
+    color: var(--dim);
+    font-size: var(--fs-xs);
+    font-family: var(--mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .opt .ct.warn {
+    color: var(--warn);
+  }
+  /* THE MONTH'S STATE SPINE, on the row where the card's used to be. The pip is
+     the only colour a month row carries, and it carries the same three states
+     the card band did — the rules for it are further down and are shared with
+     the table, so a month that reads "gap" here reads "gap" there. */
+  .opt .ct .pip {
+    margin-right: var(--s2);
+  }
+  .menu hr {
+    border: 0;
+    border-top: 1px solid var(--line);
+    margin: var(--s2) var(--s4);
+  }
+  /* ---- THE FIND BOX'S LISTBOX ----------------------------------------
+     THE SAME `.menu` AS EVERY OTHER POPUP IN THE STRIP, so the combobox's
+     suggestions and the month menu are one object two cells apart — which is
+     the whole reason `.menu` and `.opt` are written once above.
+
+     WHAT IT ADDS IS ONE THING: it is in the DOM at all times, because
+     `aria-controls` on the field names it and an IDREF that resolves to
+     nothing is a broken promise. So it is HIDDEN rather than absent, and
+     `display: none` is the right hiding — it takes the node out of the a11y
+     tree and out of the layout while `aria-expanded="false"` on the field says
+     the same thing in the same breath. `visibility` or an opacity would leave
+     a 380px-tall invisible box over the table. */
+  .menu.list {
+    display: none;
+  }
+  .menu.list.shown {
+    display: block;
+  }
+  /* THE HIGHLIGHT IS NOT `:hover`. In this pattern the FIELD holds the focus
+     and `aria-activedescendant` names the row, so the row has no focus ring of
+     its own to inherit — without this the arrow keys would move a highlight
+     nothing on screen shows. It is drawn the same way `.opt:hover` is, plus
+     the accent rule, so pointer and keyboard land on one appearance. */
+  .opt.cur {
+    background: var(--panel-2);
+    box-shadow: inset 2px 0 0 var(--acc);
+  }
+  /* SHOWN AND REFUSED, NEVER SILENT. A menu that collapses to one row when a
+     filter empties it is a menu that looks broken; this says which it is. */
+  .none {
+    margin: 0;
+    padding: var(--s5) var(--s4);
+    text-align: center;
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+
+  /* ---- THE TEXT FIELD AND THE TWO MONTH FIELDS ------------------------
+     `.din` is the strip's own text face. `theme.css`'s `.search` gives it a
+     bordered box, which is right on a page that has one search and wrong in a
+     row of borderless faces, so the box is taken off HERE — three class names
+     deep, which is what beats a single-class theme rule without touching it. */
+  .strip .cell .din {
+    width: 100%;
+    max-width: none;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    height: 19px;
+    line-height: 19px;
+    font-size: var(--fs-base);
+    font-weight: var(--w-semi);
+    color: var(--ink);
+  }
+  .strip .cell .din:focus,
+  .strip .cell .din:focus-visible {
+    outline: none;
+    border-color: transparent;
+    box-shadow: none;
+  }
+  /* The month field is the same face at the same height — it is a button rather
+     than a text box, for the reason stated at the snippet, but nothing about
+     that should be visible in the row. */
+  .strip .cell .dval {
+    font-size: var(--fs-base);
+    height: 19px;
+    line-height: 19px;
+    min-width: 4.6rem;
+  }
+
+  /* ---- THE ANCHOR -----------------------------------------------------
+     What the query is looking at, the one headline figure, the two presses that
+     are actions rather than filters, and the counted line under all three.
+
+     `.px` CARRIES NO PRICE, AND THAT IS A FINDING RATHER THAN A GAP.
+     `/store.json` serves this page no price at all — `chg_bps` is a RATIO, and a
+     ratio has no scale — so a traded number here would be one this page
+     invented. What it carries instead is the number the whole strip exists to
+     move, with its own measured up/down flash. */
+  .anchor {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s5);
+    padding: 0 var(--s2);
+  }
+  .sym {
+    margin: 0;
+    min-width: 0;
+    font-family: var(--mono);
+    font-size: var(--fs-xl);
+    font-weight: var(--w-heavy);
+    letter-spacing: -0.03em;
+    color: var(--ink-hi);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .px {
+    margin-left: auto;
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    min-width: 0;
+  }
+  .px .k {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--acc);
+  }
+  .px .p {
+    font-size: var(--fs-2xl);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.03em;
+    line-height: 1;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+  /* NEUTRAL, AND DELIBERATELY. On the approved design this chip is the signed
+     change and wears green or red; here it is a denominator, and green and red
+     on this page mean DIRECTION and nothing else. A denominator has none. */
+  .px .d {
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    padding: 2px var(--s4);
+    border-radius: var(--r1);
+    background: var(--panel-2);
+    color: var(--dim);
+    white-space: nowrap;
+  }
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    flex-wrap: wrap;
+  }
+
+  /* ---- THE COUNTED LINE, AND IT IS WHAT THE SIX TILES WERE ------------
+     Bars, complete, bars missing, coverage and months — the same figures with
+     the same sub-clauses and the same flash, on one rule under the anchor
+     instead of in six boxes above the fold. The sixth is the `.px` above. */
+  .anchor .count {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s2) var(--s4);
+    margin: 0;
+    padding-top: var(--s4);
+    border-top: 1px solid var(--line);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .anchor .count .k {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--acc);
+  }
+  .anchor .count b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-bold);
+    color: var(--ink);
+  }
+  /* The meter keeps its length and loses its band: at this size a full-width
+     track would be the widest thing on the line and would read as the answer
+     rather than as one term of it. */
+  .anchor .count .meter {
+    width: 84px;
+    flex: none;
+  }
+
+  /* The hint sits INSIDE the input's right padding, and the pull has to absorb
+     the gap of the row it is in to land there. `.dwrap` is that row now, and
+     its gap is `--s3`. */
   .slash {
     margin-left: calc(-1 * var(--s6));
     opacity: 0.55;
@@ -1369,14 +7332,23 @@
     white-space: nowrap;
   }
 
+  /* A STAMP THAT IS NOT CURRENT WEARS THE SEVERITY HUE, not the faint one.
+     `--faint` is the colour of an incidental fact; `last good:` is a warning
+     that the newest read failed, and at a glance the two must not look the
+     same. Amber and not `--down`, for the reason stated under `.risk`: red on
+     this page means a price fell, and a stale read is a severity, not a
+     direction. */
+  .asof .stale {
+    color: var(--warn);
+  }
+
   .btn.sm {
     padding: var(--s2) var(--s4);
     font-size: var(--fs-xs);
   }
 
   .loadnote {
-    padding: var(--s4) var(--s5);
-    border-top: 1px solid var(--line);
+    padding: 0 var(--s2);
     color: var(--faint);
     font-size: var(--fs-xs);
     flex: none;
@@ -1403,10 +7375,16 @@
   /* ---- SEMANTIC COLOUR, STATED ONCE ----------------------------------
      `--up` and `--down` appear on this page in exactly two places: the tick
      flash, which marks a figure that MOVED between two reads, and the two
-     refused percentage columns they are reserved for. Everything about DATA
-     QUALITY — short, near, gap — is a severity and uses `--warn` at two
-     intensities. `.risk` is that hue with a name, so the intent is legible at
-     the call site and cannot be mistaken for a direction. */
+     percentage columns — which were RESERVING them and now use them.
+     Everything about DATA QUALITY — short, near, gap — is a severity and uses
+     `--warn` at two intensities. `.risk` is that hue with a name, so the
+     intent is legible at the call site and cannot be mistaken for a direction.
+
+     GREEN IS UP AND RED IS DOWN, which is the NSE convention every Indian
+     broker and TradingView's India locale use — not the Japanese or mainland
+     Chinese inversion. Stated because it is a convention and not a fact, and
+     because a page that silently picked the other one would be unreadable to
+     the only operator this is built for. */
   .risk {
     color: var(--warn);
   }
@@ -1430,9 +7408,6 @@
     );
     overflow: hidden;
     flex: none;
-  }
-  .meter.wide {
-    margin-top: var(--s2);
   }
   .meter .fill {
     position: absolute;
@@ -1472,148 +7447,258 @@
     background: transparent;
   }
 
-  /* ---- the month roll-up --------------------------------------------- */
-  .months {
-    display: flex;
-    gap: var(--s4);
-    padding: var(--s5);
-    overflow-x: auto;
-    border-bottom: 1px solid var(--line);
-    background: var(--bg);
-    flex: none;
+  /* ---- the contract rung ----------------------------------------------
+     THE SAME BOX AS THE FACET BAR AND THE UNIVERSE RUNG, declared with the same
+     tokens and no second spacing vocabulary — `.strip` already carries the
+     frame, the gradient and the `overflow: visible` the panels hang out of, and
+     this adds only the one thing that differs.
+
+     ------------------------------------------------------------------------
+     THE CHECKBOX PAINT BUG THE MOCKUP CARRIED CANNOT OCCUR HERE, and this is
+     the record of the check rather than an assumption.
+
+     In the mockup the ladder lived inside `<div class="cell mcell">`, so the
+     stylesheet's own `.cell select,.cell input` reached every input in the
+     panel and set `appearance:none`, `background:transparent` and `border:0`.
+     The rule below it re-declared `accent-color`, `width`, `height` and
+     `cursor` at the same specificity and won — so every rung carried a real,
+     correctly sized, fully clickable checkbox made of transparent pixels with
+     no border and no tick. Present, placed, unpainted.
+
+     Three facts make that impossible on this page, and all three were checked
+     rather than assumed:
+
+       1. NO RULE IN THIS FILE MATCHES A FORM CONTROL BY ELEMENT. Every
+          `appearance: none` here is on a class — `.dval`, `.dbtn`, `.calnav`,
+          `.calsel`, `.cmon` — and none of them is ever put on an input.
+       2. `.cell` HERE IS A TABLE CELL, not a control cell. The controls live in
+          `.qcell`, and neither selector has an `input` or `select` descendant
+          rule at all.
+       3. THE CHECKBOX IS NOT IN THIS FILE'S SCOPE. It is drawn by
+          `$lib/Picker.svelte`, whose `.plist input` sets `accent-color`,
+          `width`, `height` and `cursor` and never touches `appearance`,
+          `background` or `border`. Svelte scopes styles per component, so no
+          rule written here can reach it — which is the structural reason, not
+          a lucky ordering.
+
+     The one GLOBAL rule that does reach it is `theme.css`'s `* { box-sizing;
+     margin: 0; padding: 0 }`. It changes a checkbox's box and not its paint:
+     `appearance` is untouched, so the UA still draws the control. Nothing is
+     re-declared here to "fix" that, because a rule written against a bug this
+     page does not have is a rule nobody can later tell from one that matters.
+     ---------------------------------------------------------------------- */
+  /* ---- THE MONTH WINDOW'S OWN CONTROL ---------------------------------
+     A value that reads as a value and a button that opens the calendar. The
+     value is monospace and tabular for the same reason every figure on this
+     page is: `Sep 2024` and `Mar 2020` are the same width, so the two ends of
+     the window line up and the arrow between them stays centred. */
+  .dcell {
+    position: relative;
   }
-  .mcard {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    flex: none;
-    width: 13.5rem;
-    text-align: left;
-    padding: var(--s4) var(--s5);
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--n7);
-    border-radius: var(--r3);
-    background: var(--panel);
-    color: var(--ink);
-    font: inherit;
-    cursor: pointer;
-  }
-  .mcard.skelcard {
-    border-left-color: var(--line);
-    cursor: default;
-  }
-  .mcard[data-state='near'] {
-    border-left-color: color-mix(in srgb, var(--warn) 55%, var(--n7));
-  }
-  .mcard[data-state='gap'] {
-    border-left-color: var(--warn);
-  }
-  .mcard:hover {
-    border-color: var(--line-hard);
-    background: var(--panel-2);
-  }
-  .mcard[aria-pressed='true'] {
-    background: var(--acc-soft);
-    border-color: var(--acc);
-    box-shadow: var(--e1);
-  }
-  .mcard .mtop {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s4);
-  }
-  .mcard .mname {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-md);
-    font-weight: var(--w-bold);
-    letter-spacing: -0.2px;
-  }
-  .mcard .msub {
-    font-size: var(--fs-mini);
-    color: var(--faint);
-    white-space: nowrap;
-  }
-  .mcard .meter {
-    margin: var(--s2) 0 3px;
-  }
-  .mcard .mfoot {
+  .dwrap {
     display: flex;
     align-items: center;
     gap: var(--s3);
-    font-size: var(--fs-xs);
   }
-  .mcard .mpct {
+  .dval {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    padding: 0;
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
-    font-weight: var(--w-bold);
-  }
-  .mcard .mmiss {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    color: var(--warn);
-  }
-  .mnone {
-    color: var(--faint);
     font-size: var(--fs-sm);
-    padding: var(--s4);
+    font-weight: 650;
+    letter-spacing: -0.015em;
+    color: var(--ink);
+    cursor: pointer;
+    white-space: nowrap;
+    text-align: left;
+    min-width: 5.4rem;
+  }
+  /* AN UNSET BOUND LOOKS UNSET. `Any earlier` at the ink weight reads as a
+     month called "Any earlier"; at the faint weight it reads as the absence it
+     is, which is the whole distinction `''` carries in the state. */
+  .dval.unset {
+    color: var(--faint);
+    font-weight: var(--w-mid);
+  }
+  .dval:hover {
+    color: var(--acc);
+  }
+  .dval:focus-visible,
+  .dbtn:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  .dbtn {
+    appearance: none;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--faint);
+    font: inherit;
+    font-size: var(--fs-xs);
+    line-height: 1;
+    cursor: pointer;
+    padding: 3px 5px;
+    border-radius: var(--r2);
+    flex: none;
+  }
+  .dbtn:hover {
+    color: var(--acc);
+    border-color: var(--acc);
   }
 
-  /* ---- the facet bar -------------------------------------------------- */
-  .dbbar {
+  /* THE CALENDAR. Anchored to the CELL rather than to the field, so nothing
+     between them can push it out of line; the To end drops to the LEFT because
+     it is the last cell before the tail and a panel hanging off its right edge
+     would leave the pane at the widths this strip wraps at. */
+  .cal {
+    position: absolute;
+    left: var(--s4);
+    top: calc(100% + var(--s3));
+    z-index: 24;
+    width: 244px;
+    background: var(--panel);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r4);
+    padding: var(--s4);
+    box-shadow: var(--e3);
+  }
+  .dright .cal {
+    left: auto;
+    right: var(--s4);
+  }
+  .calhd {
     display: flex;
     align-items: center;
     gap: var(--s2);
-    flex-wrap: wrap;
-    padding: var(--s3) var(--s5);
-    border-bottom: 1px solid var(--line);
+    margin-bottom: var(--s4);
+  }
+  .calnav {
+    appearance: none;
+    border: 1px solid var(--line);
     background: var(--bg-2);
+    color: var(--faint);
+    font: inherit;
+    font-size: var(--fs-sm);
+    line-height: 1;
+    width: 24px;
+    height: 24px;
     flex: none;
+    border-radius: var(--r2);
+    cursor: pointer;
   }
-  .dbbar .lbl {
-    margin-right: var(--s2);
-  }
-  .dbbar .sep {
-    width: 1px;
-    height: 16px;
-    background: var(--line);
-    margin: 0 var(--s3);
-  }
-  .dbbar .spacer {
-    flex: 1;
-  }
-  .holes[aria-pressed='true'] {
-    background: var(--warn-soft);
-    border-color: var(--warn);
-    color: var(--warn);
-  }
-  .pick[aria-pressed='true'] {
-    background: var(--acc-soft);
+  .calnav:hover:not(:disabled) {
+    color: var(--acc);
     border-color: var(--acc);
   }
-  .pick .x {
-    opacity: 0.7;
-    margin-left: var(--s2);
+  .calnav:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
   }
-  /* THE BLOCKED COLUMNS GET A PERMANENT DOOR, not a tooltip. `--info` because
-     this is neither an error nor a warning about the data: it is a statement
-     about the SURFACE, and it must not be mistaken for either. */
-  .whyblocked {
-    border-color: var(--info);
-    color: var(--info);
+  .calsel {
+    appearance: none;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    color: var(--ink);
+    font: inherit;
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    padding: 0 var(--s3);
+    height: 24px;
+    cursor: pointer;
+    flex: 1;
+    min-width: 0;
+    text-align: center;
   }
-  .whyblocked[aria-pressed='true'] {
-    background: var(--info-soft);
+  .calnav:focus-visible,
+  .calsel:focus-visible,
+  .cmon:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: -1px;
+  }
+  .calgrid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--s2);
+  }
+  .cmon {
+    appearance: none;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    height: 26px;
+    border-radius: var(--r2);
+    cursor: pointer;
+  }
+  .cmon:hover:not(:disabled) {
+    background: var(--panel-2);
+    color: var(--acc);
+  }
+  /* A MONTH THE STORE HOLDS NOTHING FOR IS STRUCK THROUGH AND REFUSES THE
+     CLICK. It keeps its slot: the shape of a backfill's hole is the most
+     useful thing this panel can show while a bound is being chosen, and it is
+     invisible the moment the empty months are simply left out. Amber, not red
+     — a month nobody pulled is a severity and not a direction. */
+  .cmon:disabled {
+    color: var(--faint);
+    opacity: 0.5;
+    cursor: not-allowed;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+    text-decoration-color: color-mix(in srgb, var(--warn) 70%, transparent);
+  }
+  .cmon[aria-pressed='true']:not(:disabled) {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--on-acc);
+    font-weight: var(--w-bold);
+  }
+  /* THE BOUND IS ON SCREEN — as the month, in this product's own form. It used
+     to be the RAW key here, on the argument that the panel writing the string
+     is the right place to read it back; the string it printed was `2024-09`,
+     which is the store's spelling standing in for a date on a page where every
+     other month reads `Sep 2024`. The key did not go anywhere: the field above
+     and each of the twelve month buttons name it in their own `title`, so it is
+     still readable from the control that owns it. */
+  .calft {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--s3);
+    margin-top: var(--s4);
+    padding-top: var(--s3);
+    border-top: 1px solid var(--line-soft);
+    font-size: var(--fs-mini);
+    color: var(--faint);
+    line-height: 1.5;
+  }
+  .calft b {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-2);
+    font-weight: var(--w-semi);
   }
 
   /* ---- the refusal notice --------------------------------------------- */
   .why {
     flex: none;
     padding: var(--s5) var(--s6);
-    border-bottom: 1px solid var(--line);
+    border: 1px solid color-mix(in srgb, var(--info) 32%, var(--line));
+    border-radius: var(--r4);
     background: var(--panel);
-    box-shadow: inset 3px 0 0 var(--info);
+    box-shadow:
+      inset 3px 0 0 var(--info),
+      var(--e1);
   }
   .whyhead {
     display: flex;
@@ -1677,12 +7762,21 @@
      `var(--dbrow)`, stated once, and the arithmetic that places row N at
      `N * 32px` cannot drift from what the browser draws. ARIA carries the
      grid semantics that the markup no longer states. */
+  /* THE TABLE IS THE LAST AND LARGEST PANEL. `overflow: hidden` is what keeps
+     the sticky header and the drawer inside the rounded corners; the scrolling
+     happens one level in, on `.tbl-scroll`, so nothing about the windowing
+     changes. */
   .tbl {
     flex: 1;
     min-height: 0;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    overflow: hidden;
+    background: var(--panel);
+    box-shadow: var(--e2);
   }
   .tbl-scroll {
     flex: 1;
@@ -1694,8 +7788,14 @@
     outline: 2px solid var(--focus);
     outline-offset: -2px;
   }
+  /* 1044px WAS THE OLD SUM AND IT IS RE-DERIVED, NOT NUDGED. The two
+     percentage columns went from 96px of dead ground each to 116px of signed
+     six-to-nine-character numbers under a `Prev % Change` heading, so the
+     table's natural width is 224 + 92 + 48 + 104 + 86 + 128 + 150 + 116 + 116
+     = 1064. Below that the table scrolls horizontally and the instrument
+     column pins, exactly as before. */
   .tbl-inner {
-    min-width: 1044px;
+    min-width: 1064px;
     position: relative;
   }
 
@@ -1709,28 +7809,32 @@
     display: grid;
     grid-template-columns:
       minmax(224px, 2.2fr) 92px 48px 104px 86px 128px
-      minmax(150px, 1fr) 96px 96px;
+      minmax(150px, 1fr) 116px 116px;
     align-items: center;
   }
   .th,
-  .cell {
+  .trow .cell {
     padding-right: var(--s5);
   }
   .th.inst,
-  .cell.inst {
+  .trow .cell.inst {
     padding-left: var(--s5);
   }
 
+  /* 30px, AND IT IS THE `HEAD` THE CURSOR ARITHMETIC USES. `moveTo` subtracts
+     this height to keep the focused row clear of the sticky header; the two
+     numbers are one measurement written in two languages and neither moves
+     alone. */
   .thead {
     position: sticky;
     top: 0;
     z-index: 3;
     height: 30px;
-    background: var(--bg-2);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
     border-bottom: 1px solid var(--line);
   }
   .th {
-    font-size: var(--fs-mini);
+    font-size: var(--fs-micro);
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
@@ -1745,14 +7849,19 @@
      instrument name is the first thing to go, leaving nine columns of numbers
      belonging to nothing. */
   .th.inst,
-  .cell.inst {
+  .trow .cell.inst {
     position: sticky;
     left: 0;
     z-index: 2;
     background: inherit;
   }
+  /* THE PINNED HEADER CELL REPAINTS THE HEAD'S OWN GRADIENT, not a flat
+     approximation of it. Both boxes are 30px tall and the gradient runs top to
+     bottom, so a 224px slice and a 1064px one are the same pixels — a flat
+     colour here would show as a seam down the pinned column the moment the
+     table scrolls sideways. */
   .th.inst {
-    background: var(--bg-2);
+    background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
   }
   /* THE SEAM IS AN INHERITED CUSTOM PROPERTY, NOT A DESCENDANT OVERRIDE.
      Driving `opacity` from `.tbl-scroll.xscrolled .cell.inst::after` put the
@@ -1768,7 +7877,7 @@
     --seam: var(--line-hard);
   }
   .th.inst::after,
-  .cell.inst::after {
+  .trow .cell.inst::after {
     content: '';
     position: absolute;
     top: 0;
@@ -1832,22 +7941,6 @@
   .caret.on.desc {
     transform: rotate(180deg);
   }
-  /* A BLOCKED HEADER DOES NOT WEAR A SORT CARET. Offering the affordance and
-     then not sorting is worse than not offering it. */
-  .th.blocked {
-    color: var(--info);
-  }
-  .nomark {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: 0;
-    text-transform: none;
-    padding: 0 3px;
-    border: 1px solid currentColor;
-    border-radius: 3px;
-    opacity: 0.85;
-    flex: none;
-  }
 
   .tspace {
     position: relative;
@@ -1887,17 +7980,17 @@
      COLUMN. Rows with a partial-day gap get a lighter one: the marker has to
      rank, or it means nothing. Amber at two intensities — never red, which on
      this page means a number went down. */
-  .cell.inst {
+  .trow .cell.inst {
     box-shadow: inset 3px 0 0 transparent;
   }
-  [data-state='near'] .cell.inst {
+  .trow[data-state='near'] .cell.inst {
     box-shadow: inset 3px 0 0 color-mix(in srgb, var(--warn) 45%, transparent);
   }
-  [data-state='gap'] .cell.inst {
+  .trow[data-state='gap'] .cell.inst {
     box-shadow: inset 3px 0 0 var(--warn);
   }
 
-  .cell {
+  .trow .cell {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1905,33 +7998,51 @@
   }
   /* EVERY NUMERIC COLUMN IS TABULAR AND RIGHT-ALIGNED — no exceptions, so a
      digit in one row sits over the same digit in the next. */
-  .cell.num,
+  .trow .cell.num,
   .th.numh {
     font-variant-numeric: tabular-nums;
   }
-  .cell.num {
+  .trow .cell.num {
     font-family: var(--mono);
     text-align: right;
   }
-  .cell.mono,
-  .cell.tf {
+  .trow .cell.mono,
+  .trow .cell.tf {
     font-family: var(--mono);
     color: var(--dim);
   }
-  .cell.dimnum {
+  .trow .cell.dimnum {
     color: var(--dim);
   }
-  /* DEAD GROUND, DRAWN AS DEAD GROUND. A hatched band over the whole column
-     is legible at a glance in a way thirty em-dashes are not: it reads as
-     "there is nothing here", which is exactly the claim being made. */
-  .cell.dead {
+
+  /* ---- THE TWO PERCENTAGE COLUMNS ------------------------------------
+     Right-aligned and monospaced through `.cell.num`, so every glyph — the
+     sign included — occupies one cell of the same grid and the decimal point
+     of `+1.25%` lands on the decimal point of `-12.50%` in the row below.
+     Two decimals always, from `bpsText`; nothing here is adaptive. */
+  .trow .cell.pc[data-dir='up'] {
+    color: var(--up);
+  }
+  .trow .cell.pc[data-dir='down'] {
+    color: var(--down);
+  }
+  /* A FLAT MONTH IS NOT A DIRECTION. It is a real 0.00% and it reads as one:
+     dimmed, so a screen of them does not compete with the moves. */
+  .trow .cell.pc[data-dir='flat'] {
+    color: var(--dim);
+  }
+  /* THE DASH IS AN INVITATION, NOT A SHRUG. The dotted underline and the help
+     cursor say there is a reason behind it — a bare em-dash in a numeric
+     column reads as "zero, rendered lazily", which is the one thing it must
+     never be mistaken for. The reason itself is on `title` and `aria-label`.
+     COLOUR IS NOT THE ONLY SIGNAL: the dash's shape and its underline carry
+     the state with no hue at all, which is what makes the column legible in
+     greyscale and under every form of colour blindness. */
+  .unk {
     color: var(--faint);
-    opacity: 0.65;
-    background-image: repeating-linear-gradient(
-      135deg,
-      transparent 0 5px,
-      color-mix(in srgb, var(--info) 22%, transparent) 5px 6px
-    );
+    cursor: help;
+    border-bottom: 1px dotted currentColor;
+    padding-bottom: 1px;
   }
   .inst {
     display: flex;
@@ -2018,6 +8129,25 @@
     margin-bottom: var(--s5);
     line-height: 1.6;
   }
+  /* THE GATE'S OWN LINE, AND IT IS THE ONE MESSAGE ON THIS PANEL THAT IS NOT
+     GREY. Everything else here explains a filter the button below undoes; this
+     explains rows the button CANNOT release, so it is drawn as the warning it
+     is rather than as another line of the same paragraph. Boxed and bounded so
+     a long sentence cannot run the width of a 1560px table. */
+  .tnone .tgate {
+    max-width: 46rem;
+    margin: 0 auto var(--s5);
+    padding: var(--s4) var(--s5);
+    border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+    border-radius: var(--r2);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    color: var(--warn);
+    font-size: var(--fs-sm);
+    line-height: 1.6;
+  }
+  .tnone .tgate b {
+    font-weight: var(--w-bold);
+  }
 
   /* ---- the row drill-through ------------------------------------------ */
   .drawer {
@@ -2084,6 +8214,39 @@
     font-size: var(--fs-md);
     font-weight: var(--w-bold);
   }
+  /* ---- the day window, under the four counters ------------------------
+     ONE LINE, NOT A FIFTH TILE. `.dstats` is a four-column grid and a fifth
+     counter would leave three columns of empty beside it; and the window is a
+     RANGE rather than a count, so it does not read as one of them anyway. */
+  .dspan {
+    flex: none;
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--s3);
+    padding: var(--s3) var(--s5);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .dspan .k {
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .dspan .v {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    font-size: var(--fs-xs);
+    color: var(--ink);
+  }
+  .dspan .n {
+    font-size: var(--fs-mini);
+    color: var(--faint);
+    line-height: 1.5;
+  }
+
   .dlist {
     flex: 1;
     min-height: 0;
@@ -2128,19 +8291,39 @@
     line-height: 1.55;
   }
 
-  .foot {
+  /* ---- THE PAGER ------------------------------------------------------
+     A BAR UNDER THE TABLE AND NOT A LINE ON THE BOARD, which is the one place
+     this page follows the approved design rather than the rule it used to hold:
+     the design puts the pager inside the grid's own frame, and a footer that
+     belongs to the table has to look like it does. It carries no page buttons —
+     there are no pages: the table is WINDOWED, the scrollbar is the full height
+     of the sorted set, and a row of numbered buttons would be a control with
+     nothing to point at. Everything a pager's `.of` says is here: where you are
+     standing in the run, how much of it is real right now, how fresh it is, and
+     the keys that move you through it. */
+  .pager {
     flex: none;
-    padding: var(--s3) var(--s5);
-    border-top: 1px solid var(--line);
-    background: var(--bg-2);
-    color: var(--faint);
-    font-size: var(--fs-xs);
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s5);
+    margin: 0;
+    padding: var(--s4) var(--s5);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel-2);
   }
-  .foot b {
+  .pager .of {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .pager .of b {
     color: var(--ink-2);
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
     font-variant-numeric: tabular-nums;
   }
-  .foot .kbd,
+  .pager .kbd,
   .dclose .kbd {
     margin: 0 1px;
   }
@@ -2156,14 +8339,23 @@
        column while `aria-sort` had already moved. The page then said one
        thing to a screen reader and the opposite to an eye. A state indicator
        has to be right on the frame it changes, so it changes on that frame. */
-    .mcard,
-    .sortbtn {
+    .sortbtn,
+    .dval,
+    .dbtn,
+    .calnav,
+    .cmon {
       transition:
         background-color var(--d-hover) var(--ease-out),
         border-color var(--d-hover) var(--ease-out),
         color var(--d-hover) var(--ease-out),
         opacity var(--d-hover) var(--ease-out),
         box-shadow var(--d-state) var(--ease-out);
+    }
+    /* THE CELL'S UNDERLINE WIPES IN FROM NOTHING. It is a focus signal, so it
+       is a transition on a transform and never on the outline itself — the
+       ring the control inside owns has to be right on the frame it lands. */
+    .strip .cell::after {
+      transition: transform var(--d-state) var(--ease-out);
     }
     /* A ROW ANIMATES ITS HOVER TINT AND NOTHING ELSE. Its `box-shadow` is the
        severity spine — a state, by the same argument as the caret — so it is
@@ -2180,7 +8372,7 @@
       animation: db-row-in var(--d-enter) var(--ease-out) backwards;
     }
     .th.inst::after,
-    .cell.inst::after {
+    .trow .cell.inst::after {
       transition: background-color var(--d-state) var(--ease-out);
     }
     /* The bar GROWS to its new value. A pull that lands 375 bars moves every
@@ -2201,4 +8393,380 @@
       opacity: 1;
     }
   }
+
+  /* ====================================================================
+     THE VIEW SWITCH, THE BAR GRID AND THE PAGER
+     ==================================================================== */
+
+  /* WHICH GRID IS SHOWING, AND THE SENTENCE THAT SAYS SO, ON ONE ROW. The
+     tab and the sentence are one derived value read twice, so a pressed tab
+     with a contradicting caption is not a state this page can reach. */
+  .viewbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s5);
+  }
+  .views {
+    display: inline-flex;
+    gap: var(--s2);
+    padding: 3px;
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel-2);
+  }
+  .vtab {
+    appearance: none;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+    border: 0;
+    border-radius: var(--r2);
+    background: none;
+    color: var(--dim);
+    font: inherit;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    padding: var(--s3) var(--s5);
+    cursor: pointer;
+    text-align: left;
+  }
+  .vtab i {
+    font-style: normal;
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .vtab:hover {
+    color: var(--ink);
+  }
+  .vtab[aria-selected='true'] {
+    background: var(--acc);
+    color: var(--on-acc);
+  }
+  .vtab[aria-selected='true'] i {
+    color: var(--on-acc);
+    opacity: 0.72;
+  }
+  .vtab:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .vsay {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .vsay b {
+    color: var(--ink-2);
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
+  }
+  .vbudget {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .vbudget select,
+  .pgsize select {
+    appearance: none;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    color: var(--ink);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    padding: var(--s3) var(--s6) var(--s3) var(--s4);
+    cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
+      linear-gradient(135deg, var(--acc) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+  }
+  .vbudget select:focus-visible,
+  .pgsize select:focus-visible,
+  .pgjump input:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  /* THE PARTITION THAT SUMS. read + over budget = matched, on screen. */
+  .vsum {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .vsum b {
+    color: var(--ink-2);
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
+  }
+
+  /* ---- THE BAR GRID. A real table: paged, not windowed, so the browser's
+     own column algorithm can do the work. */
+  .bscroll {
+    overflow: auto;
+  }
+  .bgrid {
+    border-collapse: separate;
+    border-spacing: 0;
+    width: 100%;
+    table-layout: fixed;
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .bgrid thead th {
+    position: sticky;
+    top: 0;
+    z-index: 3;
+    height: 30px;
+    padding: 0 var(--s4);
+    text-align: left;
+    background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
+    border-bottom: 1px solid var(--line);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .bgrid thead th.numh {
+    text-align: right;
+  }
+  /* A COLUMN WITH NO SOURCE IS DIMMER AND ITS BUTTON IS REFUSED, not absent.
+     `not-allowed` plus the reason on `title` is the pair `CLAUDE.md` §4 asks
+     for: the control is visible, it does not work, and it says why. */
+  .bgrid thead th.deadh {
+    color: var(--faint);
+    opacity: 0.62;
+  }
+  .bgrid thead th .sortbtn:disabled {
+    cursor: not-allowed;
+  }
+  .brow > td {
+    padding: 0 var(--s4);
+    height: var(--dbrow);
+    border-bottom: 1px solid var(--line-soft);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: var(--bg-2);
+  }
+  .brow.odd > td {
+    background: var(--panel-2);
+  }
+  /* OPAQUE, AND MIXED OUT OF THE ACCENT the same way the census grid's
+     cursor row is. `--d-hover` was written here first and it is a DURATION
+     token, 110ms — a background that resolves to a time is dropped at
+     computed-value time and the row simply never lit. */
+  .brow:hover > td {
+    background: color-mix(in srgb, var(--acc) 7%, var(--bg-2));
+  }
+  .bt {
+    font-family: var(--mono);
+    color: var(--ink-2);
+  }
+  .bn {
+    text-align: right;
+    font-family: var(--mono);
+    color: var(--ink);
+  }
+  /* THE UNSOURCED CELLS ARE LEGIBLE AND UNMISTAKABLE. They read "no source",
+     never a dash that could pass for a lazy zero, and the reason is on the
+     title and the aria-label both. */
+  .na {
+    text-align: right;
+  }
+  .na .unk {
+    font-family: var(--sans);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    border-bottom-style: dotted;
+  }
+  .bpc[data-dir='up'] {
+    color: var(--up);
+  }
+  .bpc[data-dir='down'] {
+    color: var(--down);
+  }
+  .bpc[data-dir='flat'] {
+    color: var(--dim);
+  }
+  .chip {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: var(--r1);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-bold);
+  }
+  .chip.ce {
+    color: var(--up);
+    background: color-mix(in srgb, var(--up) 14%, transparent);
+  }
+  .chip.pe {
+    color: var(--down);
+    background: color-mix(in srgb, var(--down) 14%, transparent);
+  }
+  .bstate > td {
+    padding: 0;
+  }
+  .bnone {
+    padding: var(--s8) var(--s6);
+    text-align: center;
+  }
+  .bnone h3 {
+    font-size: var(--fs-md);
+    margin-bottom: var(--s3);
+  }
+  .bnone p {
+    color: var(--dim);
+    font-size: var(--fs-sm);
+    margin: 0 auto var(--s5);
+    max-width: 74ch;
+    line-height: 1.6;
+    white-space: normal;
+  }
+  .bnone p.err {
+    color: var(--down);
+    font-family: var(--mono);
+  }
+  .bnotes {
+    flex: none;
+    border-top: 1px solid var(--line);
+    background: var(--panel-2);
+    padding: var(--s4) var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    max-height: 168px;
+    overflow-y: auto;
+  }
+  .bnote {
+    margin: 0;
+    font-size: var(--fs-xs);
+    line-height: 1.55;
+    color: var(--dim);
+  }
+  .bnote b {
+    font-family: var(--mono);
+    color: var(--ink-2);
+    font-weight: var(--w-semi);
+  }
+  .bnote.warn {
+    color: var(--warn);
+  }
+  .bnote.err {
+    color: var(--down);
+  }
+
+  /* ---- THE PAGER ---- */
+  .pgbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s5);
+    padding: var(--s4) var(--s5);
+    border: 1px solid var(--line);
+    border-radius: var(--r4);
+    background: var(--panel-2);
+  }
+  .pgof,
+  .pgof2 {
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    font-variant-numeric: tabular-nums;
+  }
+  .pgof b {
+    color: var(--ink-2);
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
+  }
+  .pgsize,
+  .pgjump {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  /* BIG ENOUGH TO TYPE IN. A 46px box with 11px digits is a control that
+     technically accepts a page number; this one is legible at arm's length
+     and its own spinner is not the only way to reach page 37. */
+  .pgjump input {
+    width: 92px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    color: var(--ink);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    padding: 10px 12px;
+    text-align: right;
+  }
+  .pgjump input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .pgnav {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    margin-left: auto;
+  }
+  .pg {
+    appearance: none;
+    min-width: 34px;
+    height: 32px;
+    padding: 0 var(--s3);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--panel);
+    color: var(--dim);
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    cursor: pointer;
+  }
+  .pg:hover:not(:disabled) {
+    color: var(--ink);
+    border-color: var(--dim);
+  }
+  .pg:focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  .pg:disabled {
+    opacity: 0.34;
+    cursor: not-allowed;
+  }
+  .pg[aria-current='page'] {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--on-acc);
+  }
+  .pg.gap {
+    border: 0;
+    background: none;
+    cursor: default;
+    color: var(--faint);
+    min-width: 18px;
+    padding: 0;
+  }
+
 </style>
