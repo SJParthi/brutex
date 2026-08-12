@@ -71,9 +71,17 @@ const _: () = assert!(WINDOWS.len() == 4 && WINDOW_COUNT == 4);
 /// `div_euclid` and `rem_euclid`, never `/` and `%`: both truncate toward zero,
 /// which puts a pre-epoch stamp on the wrong day and a negative remainder in the
 /// wrong minute.
+///
+/// `saturating_add`, never `wrapping_add`, for the same reason `crate::ist_day`
+/// saturates. With the wrap, a stamp within 5h30m of `i64::MAX` came back as
+/// `Some(644)` -- a plausible in-session minute, 10:44 IST, from a timestamp that
+/// wrapped past the epoch. A saturated stamp lands in the far future and returns a
+/// minute far past the close, which `filter` and the window bounds then discard.
+/// The wrap produced an answer; saturating produces a non-answer, and that is the
+/// difference.
 #[must_use]
 pub fn minutes_since_open(ts_micros: i64) -> Option<i64> {
-    let ist = ts_micros.wrapping_add(IST_OFFSET_MICROS);
+    let ist = ts_micros.saturating_add(IST_OFFSET_MICROS);
     let minute_of_day = ist
         .div_euclid(MICROS_PER_MINUTE)
         .rem_euclid(MINUTES_PER_DAY);

@@ -81,11 +81,24 @@ const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 /// `div_euclid`, never `/`. Rust's `/` truncates toward zero, so for a pre-epoch
 /// timestamp it rounds *up* and silently merges that bar into the 1970-01-01
 /// session. `div_euclid` floors, which is what a day number means.
+/// `a_pre_epoch_timestamp_floors_into_its_own_session` pins that, one microsecond
+/// either side of the boundary.
+///
+/// `saturating_add`, never `wrapping_add`, and the difference is a SIGN. With the
+/// wrap, `ist_day(i64::MAX)` returned **`-106_751_991`** where the true day is
+/// +`106_751_991`, so a LATER timestamp produced a SMALLER day number and the
+/// rollover in `Evaluator::stepped` saw a session boundary that is not there.
+/// Saturating keeps the function monotone, which is the only property the rollover
+/// depends on: `today != self.day` must mean the day genuinely changed.
+///
+/// The saturated answer is not a real date and cannot be. A stamp within 5h30m of
+/// `i64::MAX` is the year `292_277_026_596`, so the choice is between a monotone lie
+/// and a non-monotone one, and only the monotone lie leaves the rollover sound.
 #[inline]
 #[must_use]
 pub fn ist_day(ts_micros: i64) -> i64 {
     ts_micros
-        .wrapping_add(IST_OFFSET_MICROS)
+        .saturating_add(IST_OFFSET_MICROS)
         .div_euclid(MICROS_PER_DAY)
 }
 
@@ -553,6 +566,50 @@ mod tests {
             s.leg(),
             Leg::Up,
             "a bar that genuinely made a new high must set the leg up"
+        );
+    }
+
+    /// `ist_day` is MONOTONE across the whole `i64` range, including its ends.
+    ///
+    /// The rollover in `Evaluator::stepped` fires on `today != self.day`, so the one
+    /// property it depends on is that a later timestamp never yields a smaller day. With
+    /// `wrapping_add` it did: `ist_day(i64::MAX)` returned **`-106_751_991`** where the true
+    /// day is +`106_751_991`, so a stamp within 5h30m of the type's ceiling fabricated a
+    /// session boundary. `saturating_add` keeps the order.
+    ///
+    /// The saturated answer is not a real date and cannot be -- that stamp is the year
+    /// `292_277_026_596` -- so the choice is between a monotone lie and a non-monotone one,
+    /// and only the monotone one leaves the rollover sound.
+    #[test]
+    fn the_ist_day_never_goes_backwards_as_the_timestamp_goes_forwards() {
+        let probes = [
+            i64::MIN,
+            i64::MIN + 1,
+            -MICROS_PER_DAY,
+            -19_800_000_001,
+            -19_800_000_000,
+            0,
+            MICROS_PER_DAY,
+            i64::MAX - MICROS_PER_DAY,
+            i64::MAX - IST_OFFSET_MICROS,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        let mut previous = ist_day(probes[0]);
+        for ts in probes {
+            let day = ist_day(ts);
+            assert!(
+                day >= previous,
+                "ist_day({ts}) is {day}, below {previous} from an EARLIER stamp. A later \
+                 timestamp yielding a smaller day makes the evaluator's rollover see a \
+                 session boundary that is not there."
+            );
+            previous = day;
+        }
+        assert!(
+            ist_day(i64::MAX) > 0,
+            "ist_day(i64::MAX) is {}, and a positive stamp cannot be a negative day",
+            ist_day(i64::MAX)
         );
     }
 
