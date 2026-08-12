@@ -43,6 +43,11 @@
 //! Apriori's documented shape. Both are stated in [`Ladder::walk`] rather than
 //! hidden, per §3.6.
 
+// Gate 16 requires every crate root to forbid unsafe, and this one did not --
+// the only crate of the eleven that did not. Nothing here needs it: the whole
+// module is integer arithmetic over `[u64; 6]` masks and two collections.
+#![forbid(unsafe_code)]
+
 use std::collections::HashSet;
 use vocab::ConditionMask;
 
@@ -685,39 +690,135 @@ mod tests {
     ///
     /// Checked against the manifest rather than asserted in prose, so adding the
     /// arrow fails this test rather than passing review.
+    /// Every crate this manifest declares a dependency on, however it is spelled.
+    ///
+    /// # Why this is a parser and not a substring scan
+    ///
+    /// It WAS a substring scan over the raw text between `[dependencies]` and the
+    /// next `\n[`, and that scan was wrong in both directions at once.
+    ///
+    /// False positive: comments are inside the table. A commit adding the sentence
+    /// "`crates/indicators` had always written it the other way" to a comment in
+    /// that table turned this test red while the dependency list had not moved.
+    /// That is the same defect `vocab::mask::hits_does_the_same_work_for_every_input`
+    /// was fixed for one commit earlier -- text in a comment is text.
+    ///
+    /// False negative, and far worse: cargo accepts four spellings of one
+    /// dependency and the scan could see exactly one.
+    ///
+    /// ```text
+    /// [dependencies]
+    /// store = { path = "../store" }        the only form the scan saw
+    /// store.path = "../store"              a dotted key, same meaning
+    ///
+    /// [dependencies.store]                 a table header, same meaning
+    /// path = "../store"
+    ///
+    /// [dev-dependencies]                   links into every test and bench
+    /// [target.'cfg(unix)'.dependencies]    links on that target
+    /// ```
+    ///
+    /// An audit confirmed by running it that one `[dependencies.store]` stanza
+    /// defeats this test, gate 22 clause A, gate 9, gate 9b, gate 21 clause A and
+    /// the four graph tests in `crates/core/tests/graph.rs` -- nine dependency
+    /// guarantees sharing one parser shape, and one bypass for all of them.
+    ///
+    /// The one limit, stated: a `#` inside a quoted value would be read as a
+    /// comment. No manifest in this workspace has one, and a dependency name
+    /// cannot contain one.
+    fn declared_dependencies(manifest: &str) -> Vec<String> {
+        /// Are this table's KEYS dependency names?
+        fn keys_are_dependencies(table: &str) -> bool {
+            matches!(
+                table.rsplit('.').next().unwrap_or(""),
+                "dependencies" | "dev-dependencies" | "build-dependencies"
+            )
+        }
+        /// Does this table's HEADER name a dependency, as `[dependencies.store]` does?
+        fn named_by_header(table: &str) -> Option<&str> {
+            let mut segments = table.rsplit('.');
+            let leaf = segments.next()?;
+            let parent = segments.next()?;
+            matches!(
+                parent,
+                "dependencies" | "dev-dependencies" | "build-dependencies"
+            )
+            .then_some(leaf)
+        }
+
+        let mut found: Vec<String> = Vec::new();
+        let mut table = String::new();
+        for raw in manifest.lines() {
+            let line = raw.split_once('#').map_or(raw, |(code, _)| code).trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(inner) = line.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+                table = inner
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .trim()
+                    .to_owned();
+                if let Some(name) = named_by_header(&table) {
+                    found.push(name.to_owned());
+                }
+                continue;
+            }
+            if !keys_are_dependencies(&table) {
+                continue;
+            }
+            let key = line.split('=').next().unwrap_or("").trim();
+            let name = key.split('.').next().unwrap_or("").trim();
+            if !name.is_empty() {
+                found.push(name.to_owned());
+            }
+        }
+        found.sort();
+        found.dedup();
+        found
+    }
+
     #[test]
     fn the_sweep_cannot_compute_a_condition_bit() {
-        let manifest = include_str!("../Cargo.toml");
-        // `unwrap_or("")` and not an `unreachable!`. A missing table is not
-        // impossible -- somebody can delete it -- and an `unreachable!` here was a
-        // panic arm inside this crate that no test could ever execute. The empty
-        // string is refused on the next line by name, which is a failure a reader
-        // can act on rather than a branch nothing can reach.
-        let deps = manifest
-            .split("[dependencies]")
-            .nth(1)
-            .and_then(|rest| rest.split("\n[").next())
-            .unwrap_or("");
-        assert!(
-            !deps.is_empty(),
-            "crates/engine/Cargo.toml has no [dependencies] table, so every check \
-             below would pass by reading an empty string"
+        // Exact, not "contains no forbidden name". A list of things that must be
+        // absent is only as good as the list; an equality says what IS there, so a
+        // dependency nobody thought to forbid fails it too.
+        assert_eq!(
+            declared_dependencies(include_str!("../Cargo.toml")),
+            ["vocab"],
+            "`crates/engine` must declare `vocab` and nothing else. V-06's whole \
+             argument is that the sweep cannot recompute a condition bit because it \
+             cannot reach the code that computes one -- `crates/indicators` is the \
+             only crate that turns a bar into a bit. A new arrow here needs a \
+             decisions entry AND a different proof of V-06."
         );
 
-        for forbidden in ["indicators", "store", "pull", "api", "lake"] {
-            assert!(
-                !deps.contains(forbidden),
-                "`crates/engine` now depends on `{forbidden}`. If that arrow is \
-                 wanted it needs a decisions entry, and V-06 needs a different \
-                 proof: this test's whole argument is that the sweep cannot \
-                 recompute a bit because it cannot reach the code that computes \
-                 one. Dependencies found: {deps}"
-            );
-        }
-        assert!(
-            deps.contains("vocab"),
-            "the argument also requires that `vocab` IS the dependency -- if it \
-             were gone this test would pass by measuring an empty table: {deps}"
+        // The parser is checked against the four spellings it exists for, because a
+        // parser nothing tests is the previous version of this test.
+        assert_eq!(
+            declared_dependencies("[dependencies]\nstore = { path = \"../store\" }"),
+            ["store"],
+            "the inline-table spelling"
+        );
+        assert_eq!(
+            declared_dependencies("[dependencies]\nstore.path = \"../store\""),
+            ["store"],
+            "the dotted-key spelling"
+        );
+        assert_eq!(
+            declared_dependencies("[dependencies.store]\npath = \"../store\""),
+            ["store"],
+            "the table-header spelling — the bypass that defeated nine guarantees"
+        );
+        assert_eq!(
+            declared_dependencies("[target.'cfg(unix)'.dev-dependencies]\nstore = \"1\""),
+            ["store"],
+            "a dev-dependency behind a target predicate still links into every test"
+        );
+        assert_eq!(
+            declared_dependencies("[dependencies]\n# store = { path = \"../store\" }"),
+            [] as [&str; 0],
+            "a commented-out dependency is not a dependency"
         );
 
         // And the entry point takes bits, not bars. A signature change to accept
