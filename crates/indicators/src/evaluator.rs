@@ -648,16 +648,51 @@ impl Evaluator {
             && self.trend.every_position_can_answer()
     }
 
-    /// How many completed sessions the slowest family still needs.
+    /// How many completed sessions the five-session ROLLING WINDOW still needs.
     ///
-    /// Zero once [`Self::every_family_can_answer`] is true. Reported in sessions rather than
-    /// bars because the binding constraint is the five-session ladder, and a bar count would
-    /// be a guess about how many bars a session holds — 375 on a regular day and 60 on the
-    /// 2025 Muhurat.
+    /// One family's question and nothing else. Zero here means the prev-5 ladder is full;
+    /// it does **not** mean the evaluator can answer. This is the arithmetic
+    /// [`Self::sessions_until_every_family_can_answer`] used to report under a name that
+    /// promised the stronger thing.
     #[must_use]
-    pub const fn sessions_until_every_family_can_answer(&self) -> usize {
-        let filled = self.prev5.filled();
-        5_usize.saturating_sub(filled)
+    pub const fn sessions_until_the_rolling_window_fills(&self) -> usize {
+        5_usize.saturating_sub(self.prev5.filled())
+    }
+
+    /// How many more completed sessions before every family can answer.
+    ///
+    /// **Zero if and only if [`Self::every_family_can_answer`] is true**, and the
+    /// biconditional is the whole point of this function existing separately from the one
+    /// above.
+    ///
+    /// # It used to return zero while the answer was false
+    ///
+    /// It was `5 - prev5.filled()`, which answers a different question. An audit found two
+    /// states where that reads zero and `every_family_can_answer` is false:
+    ///
+    /// * five 375-bar sessions plus the first bar of the sixth. The ORB windows re-open
+    ///   every session, so the four of them are forming again while the ladder is full.
+    /// * five sessions whose own spans leave `i64`, so the rolling window fills and
+    ///   `DailyLevels` refuses every one of them. `warmed_up` is false through
+    ///   `yesterday.is_some()` and stays false until one further USABLE session arrives.
+    ///   This crate's own test asserted `== 0` in exactly that state.
+    ///
+    /// A caller reading zero concludes it can answer. Reporting zero when it cannot is the
+    /// §4 fallback that hides a failure, in a function whose only job is to describe the
+    /// failure.
+    ///
+    /// Reported in sessions rather than bars because the binding constraint is the
+    /// five-session ladder, and a bar count would be a guess about how many bars a session
+    /// holds — 375 on a regular day and 60 on the 2025 Muhurat.
+    #[must_use]
+    pub fn sessions_until_every_family_can_answer(&self) -> usize {
+        if self.every_family_can_answer() {
+            return 0;
+        }
+        // The rolling window is the only remaining need that is COUNTABLE. When it is
+        // already full and something else is not ready, the honest answer is "at least one
+        // more" -- never zero, because zero is what a caller reads as ready.
+        self.sessions_until_the_rolling_window_fills().max(1)
     }
 
     /// Every position this evaluator can ever set.
@@ -1729,10 +1764,22 @@ mod tests {
         }
 
         assert_eq!(e.sessions_completed(), 5, "five sessions were completed");
+        // The premise is "the session COUNT is satisfied", and that is
+        // `sessions_until_the_rolling_window_fills`. This assertion used to read
+        // `sessions_until_every_family_can_answer() == 0` -- and every family demonstrably
+        // CANNOT answer here, as the two assertions below say. So this test was asserting
+        // the defect: the function reported zero remaining sessions in a state where the
+        // evaluator could not answer, and a caller reading zero starts sweeping.
         assert_eq!(
-            e.sessions_until_every_family_can_answer(),
+            e.sessions_until_the_rolling_window_fills(),
             0,
             "the session count is satisfied"
+        );
+        assert_eq!(
+            e.sessions_until_every_family_can_answer(),
+            1,
+            "and the honest remaining count is at least one, because the 200-period EMA and \
+             the 60-minute opening range are both still silent"
         );
         // `warmed_up`, NOT `every_family_can_answer`. This test passed for the wrong reason
         // until a mutation proved it: with 30-bar sessions the 60-minute opening range never
@@ -2151,9 +2198,23 @@ mod tests {
         );
         // The premise the earlier version of this test lacked: everything ELSE is warm, so a
         // false answer can only be coming from `yesterday`.
-        assert!(
-            e.sessions_until_every_family_can_answer() == 0,
-            "the session count is not satisfied, so the assertion below is ambiguous"
+        // `sessions_until_the_rolling_window_fills`, not
+        // `sessions_until_every_family_can_answer`. This assertion is a PREMISE -- it
+        // establishes that the five-session ladder is full, so the falseness below can only
+        // come from `yesterday`. The other function used to report the same arithmetic, and
+        // this test asserting `== 0` here was one of the two states that proved it was
+        // reporting the wrong thing: every family CANNOT answer in this state, which is
+        // precisely what the next assertion says.
+        assert_eq!(
+            e.sessions_until_the_rolling_window_fills(),
+            0,
+            "the rolling window did not fill, so the assertion below is ambiguous"
+        );
+        assert_eq!(
+            e.sessions_until_every_family_can_answer(),
+            1,
+            "the ladder is full but no session was USABLE, so at least one more is needed. \
+             Zero here would tell a caller it can answer."
         );
         assert!(
             !e.warmed_up(),
