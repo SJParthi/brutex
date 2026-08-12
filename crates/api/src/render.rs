@@ -712,7 +712,98 @@ pub struct View<'a> {
     /// The highest page number that has rows.
     pub last_page: usize,
     /// Every line an operator has to be told.
-    pub notes: &'a [String],
+    pub notes: &'a Notes,
+}
+
+/// Every operator line a page shows, prepared once.
+///
+/// # Why this is a type and not a `&[String]`
+///
+/// A note's LENGTH is data. `coverage::Coverage::notes` names every instrument
+/// a feed could not resolve on one line, so at 50,000 instruments two of the
+/// forty lines were 50 KB each and the note text as a whole grew by two bytes
+/// per instrument. Rendering then asked, **per request and per line**, whether
+/// the full text carried any of the five [`LOUD`] words — five substring scans
+/// of every byte, done twice over because the summary counted them and the
+/// loop retested them — and [`clamp`] counted the separators in the tail on top
+/// of that. Three passes over text that grows with the universe, to draw a list
+/// whose every entry is truncated to 160 bytes before it reaches the page.
+///
+/// Measured by `crates/api/benches/ratio.rs`: **1,444 – 2,346 ps per instrument
+/// per request** against C-15's 1,000 ps ceiling, on all thirty
+/// `instruments_html_from` gate lines. Gate 8 was red on every one of them
+/// while `server.rs` carried a comment saying the page made no whole-universe
+/// pass — true of the rows, and false of the notes beside them.
+///
+/// Both facts a line needs are therefore decided **once**, where the notes are
+/// built: the clamped display text, and whether the FULL text was loud. The
+/// loud flag is kept rather than recomputed from the clamped head because a
+/// loud word past byte 160 would silently stop being loud, and a warning that
+/// quietly downgrades itself is the failure `CLAUDE.md` §4 names.
+///
+/// The rendered bytes are unchanged — `render::the_prepared_notes_draw_what_the
+/// _raw_lines_did` holds that. D-0129.
+#[derive(Debug, Default)]
+pub struct Notes {
+    /// One prepared line per note, in the order they were given.
+    lines: Vec<Line>,
+    /// How many of them are loud. Counted once, not per render.
+    loud: usize,
+}
+
+/// One note, reduced to exactly what a page draws.
+#[derive(Debug, Clone)]
+struct Line {
+    /// The text as it appears, already shortened by [`clamp`].
+    head: String,
+    /// Whether the note it came from carried a [`LOUD`] word anywhere.
+    loud: bool,
+}
+
+/// A page with nothing to say.
+///
+/// A `static` and not an associated `const`: [`Notes`] owns a `Vec`, so it has
+/// a destructor, so `&Notes::EMPTY` would be a temporary that dies at the end
+/// of the statement and every caller would have to bind it first.
+pub static NO_NOTES: Notes = Notes {
+    lines: Vec::new(),
+    loud: 0,
+};
+
+impl Notes {
+    /// Prepares every line, once.
+    ///
+    /// This is the ONLY place a note's full text is read. Call it where the
+    /// notes are built — at load for the universe's, in the handler for a
+    /// page's own — never inside a renderer.
+    #[must_use]
+    pub fn build(notes: &[String]) -> Self {
+        let mut loud = 0;
+        let lines = notes
+            .iter()
+            .map(|note| {
+                let is_loud = LOUD.iter().any(|w| note.contains(w));
+                loud += usize::from(is_loud);
+                Line {
+                    head: clamp(note),
+                    loud: is_loud,
+                }
+            })
+            .collect();
+        Self { lines, loud }
+    }
+
+    /// Appends the lines another set has already prepared.
+    ///
+    /// A page's own notes and the universe's are built at different moments,
+    /// and only the universe's are expensive. Copying PREPARED lines copies at
+    /// most the 160 bytes each one draws; copying the raw strings — which is
+    /// what `/store` did, once per request — copies a note whose length grows
+    /// with the instrument set. D-0129.
+    pub fn extend_from(&mut self, other: &Self) {
+        self.lines.extend_from_slice(&other.lines);
+        self.loud += other.loud;
+    }
 }
 
 /// Shortens a note that has become a list.
@@ -812,7 +903,7 @@ pub struct Stat<'a> {
 /// the page costs the same whether the store holds two instruments or two
 /// hundred thousand.
 #[must_use]
-pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &[String]) -> String {
+pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &Notes) -> String {
     let mut body = String::with_capacity(2048);
     body.push_str("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">");
     body.push_str("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">");
@@ -869,25 +960,7 @@ pub fn dashboard_page(status: &str, figures: &[Stat<'_>], notes: &[String]) -> S
     }
     body.push_str("</section>");
 
-    let loud_count = notes
-        .iter()
-        .filter(|n| LOUD.iter().any(|w| n.contains(w)))
-        .count();
-    let _ = write!(
-        body,
-        "<details class=\"notes\"><summary>{} note{} · <b>{loud_count}</b> needing attention</summary><ul>",
-        notes.len(),
-        if notes.len() == 1 { "" } else { "s" },
-    );
-    for note in notes {
-        let loud = if LOUD.iter().any(|w| note.contains(w)) {
-            " class=\"loud\""
-        } else {
-            ""
-        };
-        let _ = write!(body, "<li{loud}>{}</li>", escape(&clamp(note)));
-    }
-    body.push_str("</ul></details>");
+    body.push_str(&notes_block(notes));
 
     body.push_str(
         "<footer>Rendered on the server. No JavaScript — CLAUDE.md section 2 \
@@ -1011,25 +1084,7 @@ pub fn instruments_page(view: &View<'_>) -> String {
     //
     // It opens automatically when something IS loud, because a warning nobody
     // is told about is a warning nobody reads.
-    let loud_count = notes
-        .iter()
-        .filter(|n| LOUD.iter().any(|w| n.contains(w)))
-        .count();
-    let _ = write!(
-        body,
-        "<details class=\"notes\"><summary>{} note{} · <b>{loud_count}</b> needing attention</summary><ul>",
-        notes.len(),
-        if notes.len() == 1 { "" } else { "s" },
-    );
-    for note in notes {
-        let loud = if LOUD.iter().any(|w| note.contains(w)) {
-            " class=\"loud\""
-        } else {
-            ""
-        };
-        let _ = write!(body, "<li{loud}>{}</li>", escape(&clamp(note)));
-    }
-    body.push_str("</ul></details>");
+    body.push_str(&notes_block(notes));
 
     body.push_str(&filter_pills(view));
 
@@ -1153,25 +1208,22 @@ fn halt_block(title: &str, body: &str) -> String {
 }
 
 /// The collapsible note list, identical on every page that has one.
-fn notes_block(notes: &[String]) -> String {
-    let loud_count = notes
-        .iter()
-        .filter(|n| LOUD.iter().any(|w| n.contains(w)))
-        .count();
-    let mut out = String::with_capacity(256 + notes.len() * 96);
+///
+/// Reads [`Notes`], which already knows each line's display text and whether it
+/// is loud. Nothing here looks at a note's full length, which is what makes the
+/// block constant against the instrument set. D-0129.
+fn notes_block(notes: &Notes) -> String {
+    let mut out = String::with_capacity(256 + notes.lines.len() * 96);
     let _ = write!(
         out,
-        "<details class=\"notes\"><summary>{} note{} · <b>{loud_count}</b> needing attention</summary><ul>",
-        notes.len(),
-        if notes.len() == 1 { "" } else { "s" },
+        "<details class=\"notes\"><summary>{} note{} · <b>{}</b> needing attention</summary><ul>",
+        notes.lines.len(),
+        if notes.lines.len() == 1 { "" } else { "s" },
+        notes.loud,
     );
-    for note in notes {
-        let loud = if LOUD.iter().any(|w| note.contains(w)) {
-            " class=\"loud\""
-        } else {
-            ""
-        };
-        let _ = write!(out, "<li{loud}>{}</li>", escape(&clamp(note)));
+    for line in &notes.lines {
+        let loud = if line.loud { " class=\"loud\"" } else { "" };
+        let _ = write!(out, "<li{loud}>{}</li>", escape(&line.head));
     }
     out.push_str("</ul></details>");
     out
@@ -1535,7 +1587,7 @@ pub struct PullView<'a> {
     /// whole reason this constant was rewritten.
     pub halt: Option<&'a str>,
     /// Everything an operator has to be told.
-    pub notes: &'a [String],
+    pub notes: &'a Notes,
     /// Folders holding CSVs, walked ONCE at startup by [`folder_suggestions`].
     ///
     /// Passed in rather than found here: walking them per render cost 72 ms
@@ -2070,7 +2122,7 @@ pub struct StoreView<'a> {
     /// How many rows the whole grid has.
     pub total: usize,
     /// Everything an operator has to be told.
-    pub notes: &'a [String],
+    pub notes: &'a Notes,
     /// What the operator narrowed to, so the controls render already set and a
     /// link is shareable. `None` on a page that has no filter bar.
     pub filter: Option<&'a crate::census::StoreFilter>,
@@ -2676,7 +2728,7 @@ pub struct AuditView<'a> {
     /// The highest page number that has rows.
     pub last_page: usize,
     /// Everything an operator has to be told.
-    pub notes: &'a [String],
+    pub notes: &'a Notes,
 }
 
 /// One record's row in the audit table.
@@ -3020,7 +3072,7 @@ mod tests {
             active: "",
             page: 0,
             last_page: 0,
-            notes: &[],
+            notes: &NO_NOTES,
         })
     }
 
@@ -3041,7 +3093,7 @@ mod tests {
             active: "ntm",
             page: 3,
             last_page: 9,
-            notes: &[],
+            notes: &NO_NOTES,
         };
 
         // No overrides: the current state, verbatim. The ampersand in the
@@ -3097,7 +3149,7 @@ mod tests {
             active: "ntm",
             page,
             last_page,
-            notes: &[],
+            notes: &NO_NOTES,
         };
 
         // A single page shows no pager: navigation that leads nowhere is worse
@@ -3161,7 +3213,7 @@ mod tests {
                 active,
                 page: 0,
                 last_page: 0,
-                notes: &[],
+                notes: &NO_NOTES,
             })
         };
 
@@ -3244,7 +3296,7 @@ mod tests {
                 loud: false,
             },
         ];
-        let html = dashboard_page("ok", &figures, &[]);
+        let html = dashboard_page("ok", &figures, &NO_NOTES);
         assert!(html.contains("width:100%"), "the largest fills it: {html}");
         assert!(html.contains("width:25%"), "10 of 40 is a quarter: {html}");
         assert!(
@@ -3347,7 +3399,7 @@ mod tests {
             "groww: 2 kept".to_owned(),
             "dhan UNREADABLE · malformed identifier ×104".to_owned(),
         ];
-        let html = dashboard_page("ok", &figures, &notes);
+        let html = dashboard_page("ok", &figures, &Notes::build(&notes));
 
         assert!(
             html.contains("class=\"hero\""),
@@ -3370,14 +3422,14 @@ mod tests {
 
         // A degraded read is badged differently, and the summary reports zero
         // loud notes when there are none.
-        let clean = dashboard_page("DEGRADED", &figures, &[]);
+        let clean = dashboard_page("DEGRADED", &figures, &NO_NOTES);
         assert!(clean.contains("badge bad"));
         assert!(clean.contains("0 notes · <b>0</b> needing attention"));
 
         // Exactly one note is singular. The plural arm is covered by the two-
         // note case above and the zero case here; without this the singular
         // branch is a region no test enters, and "1 notes" ships.
-        let one = dashboard_page("ok", &figures, &["only one".to_owned()]);
+        let one = dashboard_page("ok", &figures, &Notes::build(&["only one".to_owned()]));
         assert!(
             one.contains("1 note · <b>0</b> needing attention"),
             "one note is singular, not \"1 notes\""
@@ -3412,7 +3464,7 @@ mod tests {
             no_capture: "No pull has been recorded against this store root yet.",
             journal: JOURNAL,
             halt,
-            notes: &[],
+            notes: &NO_NOTES,
             // EMPTY ON PURPOSE. A render must not depend on the machine it runs
             // on; the walk that used to happen here made the page 72x slower
             // and made its own test a function of $HOME. See folder_suggestions.
@@ -3906,7 +3958,7 @@ mod tests {
         }
     }
 
-    fn audit_view<'a>(rows: &'a [AuditRow], notes: &'a [String]) -> AuditView<'a> {
+    fn audit_view<'a>(rows: &'a [AuditRow], notes: &'a Notes) -> AuditView<'a> {
         AuditView {
             today: d(2026, 8, 7),
             journal: JOURNAL,
@@ -3924,7 +3976,7 @@ mod tests {
         // cost is the page's, not the journal's. The reader half of the same
         // bound is api::audit::the_tail_reads_only_the_records_it_shows.
         let rows = [audit_row_fixture(41, false), audit_row_fixture(40, true)];
-        let html = audit_page(&audit_view(&rows, &[]));
+        let html = audit_page(&audit_view(&rows, &NO_NOTES));
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.ends_with("</html>"));
         assert_eq!(
@@ -3968,7 +4020,7 @@ mod tests {
         damaged.fault = Some("record checksum 0x00000001 != 0x00000002".to_owned());
         damaged.loud = true;
         let rows = [audit_row_fixture(8, false), damaged];
-        let html = audit_page(&audit_view(&rows, &[]));
+        let html = audit_page(&audit_view(&rows, &NO_NOTES));
         assert!(html.contains("RECORD REFUSED"), "{html}");
         assert!(
             html.contains("record checksum"),
@@ -3987,7 +4039,7 @@ mod tests {
 
     #[test]
     fn an_empty_audit_page_says_nothing_was_recorded_and_shows_no_table() {
-        let html = audit_page(&audit_view(&[], &[]));
+        let html = audit_page(&audit_view(&[], &NO_NOTES));
         assert!(html.contains("nothing recorded yet"), "{html}");
         assert!(
             html.contains("not because a figure is missing"),
@@ -4149,7 +4201,7 @@ mod tests {
             page: 0,
             last_page: 0,
             total: 2,
-            notes: &["store root: /tmp/x".to_owned()],
+            notes: &Notes::build(&["store root: /tmp/x".to_owned()]),
             // This fixture is about the TABLE, not the filter bar, so it
             // renders without one — `filter: None` is what a page with no bar
             // looks like, and the assertions below stay about the rows.
@@ -4465,6 +4517,7 @@ mod tests {
     )]
     fn every_page(text: &str) -> Vec<(&'static str, String)> {
         let notes = [text.to_owned()];
+        let prepared = Notes::build(&notes);
         let figures = [Stat {
             label: text,
             value: text,
@@ -4514,7 +4567,7 @@ mod tests {
         let facts = [("Field", text.to_owned())];
 
         vec![
-            ("dashboard", dashboard_page(text, &figures, &notes)),
+            ("dashboard", dashboard_page(text, &figures, &prepared)),
             (
                 "instruments",
                 instruments_page(&View {
@@ -4528,7 +4581,7 @@ mod tests {
                     active: "",
                     page: 1,
                     last_page: 2,
-                    notes: &notes,
+                    notes: &prepared,
                 }),
             ),
             ("pull", pull_page(&pull_view(Some(text), None))),
@@ -4553,7 +4606,7 @@ mod tests {
                     page: 0,
                     last_page: 1,
                     total: 1,
-                    notes: &notes,
+                    notes: &prepared,
                     filter: Some(&filter),
                     held: 1,
                     held_only: false,
@@ -4578,7 +4631,7 @@ mod tests {
                     store_root: text,
                 }),
             ),
-            ("audit", audit_page(&audit_view(&records, &notes))),
+            ("audit", audit_page(&audit_view(&records, &prepared))),
         ]
     }
 
@@ -4719,7 +4772,7 @@ mod tests {
             active: "",
             page: 0,
             last_page: 0,
-            notes: &notes,
+            notes: &Notes::build(&notes),
         });
         for note in &notes {
             assert!(html.contains(&escape(note)), "{note} must be on the page");
@@ -4741,7 +4794,7 @@ mod tests {
             active: "",
             page: 0,
             last_page: 0,
-            notes: &["<b>x</b>".to_owned()],
+            notes: &Notes::build(&["<b>x</b>".to_owned()]),
         });
         assert!(html.contains("&lt;b&gt;x&lt;/b&gt;"));
         assert!(!html.contains("<li><b>"));
@@ -4892,7 +4945,7 @@ mod store_links_tests {
             page: 0,
             last_page: 0,
             total: 1,
-            notes: &[],
+            notes: &NO_NOTES,
             filter: None,
             held: 1,
             held_only: false,
@@ -4951,7 +5004,7 @@ mod store_links_tests {
             page: 0,
             last_page: 0,
             total: 1,
-            notes: &[],
+            notes: &NO_NOTES,
             filter: None,
             held: 1,
             held_only: false,

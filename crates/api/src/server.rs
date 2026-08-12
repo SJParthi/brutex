@@ -262,6 +262,23 @@ pub struct Read {
     /// Everything an operator has to be told: per-vendor tallies, every
     /// decline reason, every unreadable row's reason, and every disagreement.
     pub notes: Vec<String>,
+    /// The same lines, prepared for rendering: the text each one draws and
+    /// whether it is loud, both decided here rather than on every request.
+    ///
+    /// Derived from [`Self::notes`] inside [`Self::new`] rather than set beside
+    /// it, for the reason [`Self::unavailable`] is: two fields a caller fills
+    /// separately are two fields that can disagree.
+    ///
+    /// It exists because a note's LENGTH is data. One `coverage` line names
+    /// every index a feed could not resolve, so the note text grows with the
+    /// universe, and the renderer read every byte of it — five substring
+    /// searches for the loud words, twice over, plus a separator count in the
+    /// tail — to draw a line truncated to 160 bytes. That was gate 8's C-15
+    /// breach: 1,444 - 2,346 ps per instrument per request against a 1,000 ps
+    /// ceiling, on all thirty `instruments_html_from` lines. The full text is
+    /// still here for `/health` and the startup banner; only the RENDER path
+    /// stopped rereading it. `docs/05-decisions.md` D-0129.
+    pub notes_view: render::Notes,
     /// Whether a vendor was never read at all.
     ///
     /// Distinct from a merge conflict, and tracked separately because "the two
@@ -356,9 +373,14 @@ impl Read {
         // `/health` rather than discovered mid-run. D-0120.
         let coverage = coverage::Coverage::build(&merged, &constituents);
         notes.extend(coverage.notes());
+        // LAST, because it reads the finished list. Every `extend` above must
+        // already have run: a view built before them would render a page that
+        // is missing exactly the lines the load discovered. D-0129.
+        let notes_view = render::Notes::build(&notes);
         Self {
             merged,
             notes,
+            notes_view,
             // ONE SOURCE, TWO SHAPES. `unavailable` was a separate `bool` a
             // caller set beside the notes; nothing made the two agree, and a
             // list that grows a vendor while the boolean stays false is the
@@ -814,7 +836,7 @@ pub fn instruments_html_from(
         active: universe_filter,
         page,
         last_page,
-        notes: &read.notes,
+        notes: &read.notes_view,
     })
 }
 
@@ -879,7 +901,7 @@ pub fn dashboard_html(read: &Read) -> String {
             loud: disputes > 0,
         },
     ];
-    render::dashboard_page(read.status(), &stats, &read.notes)
+    render::dashboard_page(read.status(), &stats, &read.notes_view)
 }
 
 /// The instruments page.
@@ -3035,7 +3057,7 @@ pub fn pull_html(site: &Site, today: Day) -> String {
         // told a served process — which sets `Broker::Live`, reads the token and
         // reaches Dhan — that no vendor is contacted from it.
         halt: Some(halt_for(site.broker)),
-        notes: &site.read.notes,
+        notes: &site.read.notes_view,
         folders: &site.folders,
     })
 }
@@ -5240,6 +5262,9 @@ pub fn audit_html(site: &Site, today: Day, page: usize) -> String {
         notes.push(format!("UNAVAILABLE — {trouble}"));
     }
     let rows = audit_rows(&journal, total, skip, per_page, &mut notes);
+    // Prepared here rather than inside the renderer: `Notes` is where a line's
+    // text and its loudness are decided, and deciding them once is D-0129.
+    let notes = render::Notes::build(&notes);
     render::audit_page(&render::AuditView {
         today,
         journal: journal_note(&path, &log, &trouble),
@@ -5455,9 +5480,13 @@ pub fn store_html(site: &Site, today: Day, page: usize, query: &str) -> String {
         notes.push(format!("UNAVAILABLE — audit journal {trouble}"));
     }
     notes.extend(site.censuses.iter().map(census::VendorCensus::note));
+    let mut notes = render::Notes::build(&notes);
     // The master notes ride along, because an `UNAVAILABLE` master is why the
-    // grid may be down to the two swept series.
-    notes.extend(site.read.notes.iter().cloned());
+    // grid may be down to the two swept series — but ALREADY PREPARED. Cloning
+    // them as raw strings copied a note whose length grows with the instrument
+    // set, once per request; the prepared line is what the page draws and is
+    // bounded. D-0129.
+    notes.extend_from(&site.read.notes_view);
     render::store_page(&render::StoreView {
         // ONE FEED PER VIEW. Parsed through the same function the pull form
         // uses, so "groww" means the same thing on both pages, and an unknown
