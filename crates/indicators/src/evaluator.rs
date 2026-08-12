@@ -1644,6 +1644,87 @@ mod tests {
         );
     }
 
+    /// A position's NAME and the meaning the evaluator gives it are one thing.
+    ///
+    /// # The hole this closes
+    ///
+    /// §3.8 forbids renumbering, and `crates/vocab/tests/table.rs` guards indices hard: a
+    /// moved index fails the contiguous-run test, the retired and void sets are pinned
+    /// exactly, and every position below 74 is compared character for character against
+    /// `docs/03-vocabulary.md`.
+    ///
+    /// None of it guards a NAME. An adversarial audit swapped `close_above_day_open` and
+    /// `close_below_day_open` -- in `crates/vocab/src/table.rs` and `docs/03-vocabulary.md`
+    /// together -- and the whole workspace stayed green, while the swap inverts the meaning
+    /// of every stored mask carrying bit 276 or 277. At or above position 74 the document
+    /// is DERIVED from the code, so the document test compares the code to a record of
+    /// itself; the group check requires only the marker `day_open`, which both names
+    /// carry; and uniqueness is untouched by a permutation. `git grep close_above_day_open`
+    /// returns two hits -- the table and the document -- while the test below binds the
+    /// semantics to the bare literal `276`. Nothing joined a name to a meaning.
+    ///
+    /// This resolves the index BY NAME and asserts what that index does, so a swap makes
+    /// the lookup find the other position and the assertion fail.
+    ///
+    /// The same hole is still open for `274`/`275` (wide/neutral) and `278`/`279`
+    /// (structure up/down in force) -- every pair whose members differ only in direction,
+    /// which is every pair a swap can invert. They need the same treatment; that is
+    /// recorded in `docs/11-findings.md` rather than claimed closed here.
+    #[test]
+    fn a_positions_name_and_its_meaning_cannot_be_separated() {
+        let named = |label: &str| -> u32 {
+            let found =
+                (0..vocab::table::NEXT_FREE).find(|i| vocab::table::name(*i) == Some(label));
+            assert!(
+                found.is_some(),
+                "no position is named `{label}`, so this test resolves nothing and would \
+                 pass by looking nowhere"
+            );
+            u32::from(found.unwrap_or(vocab::table::NEXT_FREE))
+        };
+        let above = named("close_above_day_open");
+        let below = named("close_below_day_open");
+        assert_ne!(above, below, "two names must resolve to two positions");
+
+        let day = 24_000_i64;
+        let at = |m: i64, open: i64, close: i64| Candle {
+            ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + m * MINUTE_MICROS,
+            open,
+            high: open.max(close) + 300,
+            low: open.min(close) - 300,
+            close,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+
+        let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
+        // The seeding bar fixes the session open at 2_500_000 and sets neither bit.
+        let _ = e.step(&at(0, 2_500_000, 2_500_000)).expect("a sane candle");
+
+        let up = e.step(&at(1, 2_500_000, 2_501_500)).expect("a sane candle");
+        assert!(
+            up.get(above),
+            "the position NAMED `close_above_day_open` is {above}, and a close 1500 paisa \
+             ABOVE the session open did not set it. Swapping the two names in the table is \
+             what fails here."
+        );
+        assert!(
+            !up.get(below),
+            "`close_below_day_open` is {below} and a close above the open must not set it"
+        );
+
+        let down = e.step(&at(2, 2_501_500, 2_499_000)).expect("a sane candle");
+        assert!(
+            down.get(below),
+            "the position NAMED `close_below_day_open` is {below}, and a close 1000 paisa \
+             BELOW the session open did not set it"
+        );
+        assert!(
+            !down.get(above),
+            "`close_above_day_open` is {above} and a close below the open must not set it"
+        );
+    }
+
     /// 276/277 compare the close to the SESSION's open, and a flat close sets neither.
     ///
     /// `running_open` was written on the first bar of every session and read nowhere in the
