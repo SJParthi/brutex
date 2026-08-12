@@ -1454,37 +1454,82 @@ jobs:
           #
           # It is not hypothetical. Two real bar files appeared under
           # ~/.brutex/store/bars/groww/NSE/INDEX/{NIFTY,BANKNIFTY}/1min/2020-01.bin
-          # during a session whose whole premise was that none existed. Nobody
-          # in that session pulled them. So the question "could the sweep have
-          # read them" must be answerable without trusting anyone's account of
-          # what they ran.
+          # during a session whose whole premise was that none existed. Nobody in
+          # that session pulled them. So "could the sweep have read them" must be
+          # answerable without trusting anyone's account of what they ran.
           #
-          # Gate 21 makes this guarantee for crates/telemetry. This makes it for
-          # the three crates that compute and search conditions, which are the
-          # ones whose output a strategy is built on.
+          # THIS GATE'S FIRST VERSION WAS DEFEATED IN ALL FOUR CLAUSES by an
+          # adversarial audit, which composed a working bypass:
           #
-          # FOUR CLAUSES. Each is weak alone and the conjunction is not.
+          #   [dependencies.store]                       clause A blind
+          #   path = "../store"
+          #   pub use store::file::BarFile as Bf;        clause C blind
+          #   Bf::open_existing(p, ..)?.read_record(n)   clause B blind
+          #
+          # and gate 22 printed OK. Everything below is the repair, and each
+          # clause names the bypass it now refuses.
           fail=0
           SWEEP='vocab indicators engine'
 
-          # CLAUSE A — the dependency closure cannot reach a filesystem.
+          # ── CLAUSE A — the dependency closure cannot reach a filesystem ────────
           #
-          # The load-bearing one, because it is transitive. `vocab` declares
-          # nothing; `indicators` and `engine` declare `vocab` and nothing else.
-          # A crate that cannot NAME `store`, `pull`, `lake` or `api` cannot call
-          # into one, whatever its own source says.
+          # The load-bearing clause, because it is transitive: a crate that cannot
+          # NAME `store` cannot call into one whatever its source says.
+          #
+          # A1 FIRST, and this is the repair. Cargo accepts four spellings of one
+          # dependency, and the extraction in A2 -- `name =` at line start inside
+          # the `[dependencies]` range -- can see exactly one of them:
+          #
+          #   store = { path = "../store" }        the only form A2 sees
+          #   store.path = "../store"              a dotted key, same meaning
+          #   [dependencies.store]                 a table header, same meaning
+          #   [dev-dependencies]                   links into every test and bench
+          #   [target.'cfg(unix)'.dependencies]    links on that target
+          #
+          # A shell cannot parse TOML and this gate is not going to pretend it can.
+          # So instead of teaching A2 four spellings, A1 refuses every spelling A2
+          # cannot read. These three manifests use none of them, so the constraint
+          # costs nothing -- and with A1 held, A2 is a COMPLETE parse rather than a
+          # hopeful one. The authoritative parser is Rust:
+          # `engine::tests::declared_dependencies`, which handles all four and is
+          # tested against all four.
           for c in $SWEEP; do
-            # `|| true` is load-bearing, not defensive noise. `vocab` declares
-            # NOTHING, so grep finds no match and exits 1; under `set -e` with
-            # `pipefail` that killed this gate before it printed a single line,
-            # and an early `exit 1` with no output is indistinguishable from a
-            # real refusal. The empty list is the CORRECT answer for `vocab` and
-            # the comparison below is what judges it.
-            deps=$(sed -n '/^\[dependencies\]/,/^\[[a-z]/p' "crates/$c/Cargo.toml" \
-                   | { grep -oE '^[a-z_]+ =' || true; } | sed 's/ =//' | tr '\n' ' ')
+            m="crates/$c/Cargo.toml"
+            # Comments stripped first. A comment mentioning `[dev-dependencies]` is
+            # not a `[dev-dependencies]` table, and three of these manifests
+            # discuss the graph at length in exactly that way. This is the defect
+            # that took `V-06` red and `hits_does_the_same_work_for_every_input`
+            # green-on-a-broken-function: text in a comment is text.
+            code=$(sed 's/#.*//' "$m")
+            for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
+                            '^\[build-dependencies' '^\[target\.'; do
+              if printf '%s\n' "$code" | grep -qE "$spelling"; then
+                echo "REFUSED  $m uses a dependency-table spelling this gate cannot parse: $spelling"
+                echo "         Use the flat [dependencies] table with `name = ...`."
+                echo "         See engine::tests::declared_dependencies for why."
+                fail=1
+              fi
+            done
+            # A dotted key inside the flat table -- `store.path = "../store"` --
+            # declares a dependency A2 would not see.
+            if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+               | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+              echo "REFUSED  $m declares a dependency with a dotted key"
+              fail=1
+            fi
+
+            # A2. With A1 held this is every dependency the manifest declares.
+            # `|| true` is load-bearing: `vocab` declares NOTHING, so grep exits 1,
+            # and under `set -euo pipefail` that killed this gate before it printed
+            # a line -- an exit 1 with no output, indistinguishable from a real
+            # refusal, and had the polarity gone the other way it would have passed
+            # forever having checked nothing.
+            deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+                   | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
+                   | sed 's/ *=//' | sort -u | tr '\n' ' ')
             case "$c" in
-              vocab)                 want='' ;;
-              indicators|engine)     want='vocab ' ;;
+              vocab)             want='' ;;
+              indicators|engine) want='vocab ' ;;
             esac
             if [ "$deps" != "$want" ]; then
               echo "REFUSED  crates/$c declares [$deps] and must declare [$want]"
@@ -1493,32 +1538,42 @@ jobs:
             fi
           done
 
-          # CLAUSE B — no filesystem call site in their own source.
+          # ── CLAUSE B — no filesystem call site in src/ or benches/ ─────────────
           #
-          # Clause A already forbids reaching one through a dependency; this
-          # forbids reaching one through `std`. `include_str!` is EXEMPT and must
-          # be: it is compile-time, it reads only paths written as literals in
-          # tracked source, and the document-guard tests depend on it. A bar file
-          # is not a literal in any of these crates, and clause D pins that.
-          BANNED='File::open|File::create|OpenOptions|fs::read|fs::write|fs::File|std::fs|MmapOptions|Mmap::|memmap'
+          # Clause A forbids reaching a filesystem through a dependency; this
+          # forbids reaching one through `std`. The first version's probe list held
+          # nine patterns and the audit walked past it with `include_bytes!`,
+          # `fs::read`, `File::create` and `std::process::Command` -- and it scanned
+          # only `src/`, so `benches/ratio.rs` could have read a bar file outright.
+          #
+          # `process::Command` and not `std::process`. The broader pattern was
+          # written first and this gate refused its own repository over it: a
+          # `harness = false` bench signals failure with `std::process::exit(1)`, and
+          # all three do. `exit` cannot read anything. Spawning a process can, which
+          # is what `Command` names.
+          BANNED='File::open|File::create|OpenOptions|fs::read|fs::write|fs::copy|fs::rename|fs::remove|fs::File|fs::metadata|fs::canonicalize|read_dir|std::fs|MmapOptions|Mmap::|memmap|include_bytes!|process::Command|Command::new|std::os::|libc::'
           for c in $SWEEP; do
-            hits=$(grep -rnE "$BANNED" "crates/$c/src" 2>/dev/null || true)
-            if [ -n "$hits" ]; then
-              echo "REFUSED  crates/$c opens a file:"
-              printf '%s\n' "$hits" | sed 's/^/           /'
-              fail=1
-            fi
+            for dir in src benches; do
+              [ -d "crates/$c/$dir" ] || continue
+              hits=$(grep -rnE "$BANNED" "crates/$c/$dir" 2>/dev/null || true)
+              if [ -n "$hits" ]; then
+                echo "REFUSED  crates/$c/$dir reaches the filesystem:"
+                printf '%s\n' "$hits" | sed 's/^/           /'
+                fail=1
+              fi
+            done
           done
 
-          # CLAUSE C — `store` is not named in their source, even in a use.
+          # ── CLAUSE C — no import of a crate that reads the store, any spelling ─
           #
           # Comments may cite `store::format::Bar` and several do, because that
           # record is what `indicators::Candle` replaced and the history is worth
-          # keeping. A `use` is a different thing, so the pattern is anchored to
-          # one.
+          # keeping. So the pattern is anchored to an import -- but the first
+          # version anchored it to a BARE `use`, and the audit walked past with
+          # `pub use store::…` and with `use store as st;`.
           for c in $SWEEP; do
-            hits=$(grep -rnE '^\s*use +(brutex_)?(store|pull|lake|api)(::|;)' \
-                   "crates/$c/src" 2>/dev/null || true)
+            hits=$(grep -rnE '^[[:space:]]*(pub[[:space:]]+)?use[[:space:]]+(brutex_)?(store|pull|lake|api|telemetry)([^A-Za-z0-9_]|$)' \
+                   "crates/$c/src" "crates/$c/benches" 2>/dev/null || true)
             if [ -n "$hits" ]; then
               echo "REFUSED  crates/$c imports a crate that reads the store:"
               printf '%s\n' "$hits" | sed 's/^/           /'
@@ -1526,35 +1581,70 @@ jobs:
             fi
           done
 
-          # CLAUSE D — every `include_str!` path is a document or a source file.
+          # ── CLAUSE D — every compile-time include is a document, by a literal ──
           #
-          # The one exemption clause B grants, bounded so it cannot become the
-          # hole. A `.bin`, a `.parquet`, a `.csv` or anything under a `bars`
-          # directory is refused outright: those are the shapes a bar arrives in.
+          # Clause B exempts `include_str!` and must: it is compile-time, it reads
+          # only paths written as literals in tracked source, and the document
+          # guards depend on it. This bounds the exemption so it cannot become the
+          # hole -- and the first version's regex only matched a PLAIN literal, so
+          # the audit walked past it with
+          # `include_str!(concat!(env!("HOME"), "/.brutex/store/bars/…/2020-01.bin"))`,
+          # which is not a literal at all and matched nothing.
           for c in $SWEEP; do
-            for p in $(grep -rhoE 'include_str!\("[^"]+"\)' "crates/$c/src" "crates/$c/tests" 2>/dev/null \
-                       | sed 's/include_str!("//; s/")//' || true); do
-              case "$p" in
-                *.md|*.rs|*.toml|*.lock) : ;;
-                *) echo "REFUSED  crates/$c includes '$p', which is not a document or a source file"
-                   fail=1 ;;
-              esac
-              case "$p" in
-                *bars*|*.bin|*.parquet|*.csv)
-                   echo "REFUSED  crates/$c includes '$p', which is bar-shaped"
-                   fail=1 ;;
-                *) : ;;
-              esac
+            for dir in src benches tests; do
+              [ -d "crates/$c/$dir" ] || continue
+              # A computed include path is refused outright. There is no legitimate
+              # one here, and a gate that cannot evaluate the expression must not
+              # guess at what it evaluates to.
+              computed=$(grep -rnE 'include_str!\([^")]' "crates/$c/$dir" 2>/dev/null || true)
+              if [ -n "$computed" ]; then
+                echo "REFUSED  crates/$c/$dir computes an include path instead of writing one:"
+                printf '%s\n' "$computed" | sed 's/^/           /'
+                fail=1
+              fi
+              for p in $(grep -rhoE 'include_str!\("[^"]+"\)' "crates/$c/$dir" 2>/dev/null \
+                         | sed 's/include_str!("//; s/")//' || true); do
+                case "$p" in
+                  *.md|*.rs|*.toml|*.lock) : ;;
+                  *) echo "REFUSED  crates/$c/$dir includes '$p', not a document or a source file"
+                     fail=1 ;;
+                esac
+                case "$p" in
+                  *bars*|*.bin|*.parquet|*.csv)
+                     echo "REFUSED  crates/$c/$dir includes '$p', which is bar-shaped"
+                     fail=1 ;;
+                  *) : ;;
+                esac
+              done
             done
           done
 
-          # WHAT THIS GATE CANNOT SEE, said rather than implied. A caller can
-          # still read bars itself and hand them to `Evaluator::step` -- that is
-          # the whole point of the API and cannot be forbidden. What it
-          # guarantees is narrower and is the half that was in question: these
-          # three crates cannot go and find data on their own. `crates/api` and
-          # `crates/pull` are the ones that may touch the store, deliberately,
-          # and gate 9 and gate 13 govern them.
+          # ── CLAUSE E — tests/ may read the disk, bounded ───────────────────────
+          #
+          # Clause B deliberately does not cover `tests/`, because one test there
+          # legitimately reads the filesystem: `vocab/tests/workspace_is_rust.rs`
+          # walks tracked files to enforce §2. The audit pointed out the obvious
+          # consequence -- repointing that literal at a bar file keeps every other
+          # clause green. So the exemption is bounded the same way clause D bounds
+          # its own: a path may be built from `CARGO_MANIFEST_DIR`, and may never
+          # be bar-shaped or reach into a home directory.
+          for c in $SWEEP; do
+            [ -d "crates/$c/tests" ] || continue
+            hits=$(grep -rnE 'env!\("HOME"\)|var\("HOME"\)|\.brutex|store/bars|\.bin"|\.parquet"' \
+                   "crates/$c/tests" 2>/dev/null || true)
+            if [ -n "$hits" ]; then
+              echo "REFUSED  crates/$c/tests names a path outside the repository:"
+              printf '%s\n' "$hits" | sed 's/^/           /'
+              fail=1
+            fi
+          done
+
+          # WHAT THIS GATE CANNOT SEE, said rather than implied. A caller can still
+          # read bars itself and hand them to `Evaluator::step` -- that is the API
+          # and cannot be forbidden. What is guaranteed is the half that was in
+          # question: these three crates cannot go and find data on their own.
+          # `crates/api` and `crates/pull` may touch the store, deliberately, and
+          # gates 9 and 13 govern them.
           if [ "$fail" -ne 0 ]; then
             echo
             echo "GATE 22 FAILED."
@@ -1565,7 +1655,6 @@ jobs:
             exit 1
           fi
           echo "OK — vocab, indicators and engine cannot reach a bar."
-
       - name: Gate 19 — a failure an operator can see is a failure the log records
         run: |
           set -euo pipefail
