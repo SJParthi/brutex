@@ -96,14 +96,43 @@ fn the_guard_does_not_change_any_answer() {
         "a string too long to be a Symbol has no member it could equal"
     );
 
-    // At the boundary exactly, the guard must NOT fire — an argument of
-    // exactly SYMBOL_CAPACITY bytes is a legal symbol shape and has to be
-    // probed properly. An off-by-one here would silently stop finding the
-    // longest real symbols.
+    // At the boundary exactly, an argument of SYMBOL_CAPACITY bytes is a legal symbol
+    // shape and has to be probed rather than short-circuited.
     let at_cap = "A".repeat(brutex_core::symbol::SYMBOL_CAPACITY);
     assert_eq!(
         brutex_core::universe::of_equity(&at_cap),
         brutex_core::universe::Universe::NONE,
         "not a member, but it must have been probed rather than short-circuited"
+    );
+
+    // THE COMMENT ABOVE USED TO CLAIM MORE THAN IT COULD SHOW, and an audit was right to
+    // flag it: it said "an off-by-one here would silently stop finding the longest real
+    // symbols". Measured, that is false. `SYMBOL_CAPACITY` is 24 and the longest member of
+    // the NIFTY Total Market is **10 bytes** — `AARTIDRUGS`, `ABBOTINDIA` and three more.
+    // So `>` becoming `>=` rejects only a 24-byte argument, and no 24-byte argument is
+    // ever a member: the assertion above expects `NONE`, which is also exactly what a
+    // fired guard returns. The off-by-one is invisible through `of_equity`, and no
+    // contortion of this test can make it visible.
+    //
+    // What IS worth asserting is the property that makes the off-by-one harmless, because
+    // that property is not a law of nature. If `SYMBOL_CAPACITY` were ever lowered toward
+    // the real maximum, a `>=` would begin losing members — and this is the assertion that
+    // would notice.
+    let longest = brutex_core::universe::NIFTY_TOTAL_MARKET
+        .iter()
+        .map(|s| s.len())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        longest > 0,
+        "no member was measured, so the bound below is compared against nothing"
+    );
+    assert!(
+        longest < brutex_core::symbol::SYMBOL_CAPACITY,
+        "the longest member is {longest} bytes and SYMBOL_CAPACITY is {}. Once a real \
+         symbol reaches the cap, an off-by-one in the length guard starts losing members \
+         instead of being harmless — and the boundary case above cannot see that, because \
+         a fired guard and a genuine miss both answer NONE.",
+        brutex_core::symbol::SYMBOL_CAPACITY
     );
 }

@@ -1055,9 +1055,53 @@ mod tests {
     fn extreme_but_representable_prices_do_not_overflow() {
         let mut p = Patterns::default();
         let wide = i64::MAX / 4;
-        let _ = ok(&mut p, &at(0, 0, wide, -wide, wide / 2));
-        let _ = ok(&mut p, &at(1, wide / 2, wide, -wide, -wide / 2));
-        let _ = p.bits();
+        let first = ok(&mut p, &at(0, 0, wide, -wide, wide / 2));
+        let second = ok(&mut p, &at(1, wide / 2, wide, -wide, -wide / 2));
+        let after = p.bits();
+
+        // The three results used to be `let _ =`, which asserted nothing. An audit was
+        // right that `bits() -> ConditionMask::ZERO` survives that — but it is worth being
+        // precise about what the old form DID enforce, because it was not nothing: this
+        // workspace sets `overflow-checks = true` in the release profile as well as debug
+        // (verified by reading `cargo build --release -v`), so an overflowing multiply here
+        // panics and fails the test. "No panic" is a real assertion about overflow.
+        //
+        // What was missing is any statement about the ANSWER. These bars are accepted, so
+        // the family produces a mask, and the mask is what a sweep would see. Pinned:
+        // MEASURED, not assumed. I first asserted this was empty -- "the first bar has no
+        // predecessor, so no pattern can be decided on it" -- and the test refused it:
+        // `[0, 0, 8796093022208, 0, 0, 0]`, which is position 171, `pat_spinning_top`. A
+        // spinning top is a SINGLE-BAR pattern and needs no predecessor, so the family is
+        // right and my expectation was wrong. That is the whole reason this assertion is
+        // here rather than a `let _ =`: it makes the family state which patterns it can
+        // decide on a bar with no history.
+        let spinning_top = u32::from(
+            (0..vocab::table::NEXT_FREE)
+                .find(|i| vocab::table::name(*i) == Some("pat_spinning_top"))
+                .unwrap_or(vocab::table::NEXT_FREE),
+        );
+        assert!(
+            first.get(spinning_top),
+            "at these extremes the first bar is a spinning top -- a single-bar pattern -- \
+             and the family must say so even with no predecessor: {first:?}"
+        );
+        assert_eq!(
+            second, after,
+            "`bits()` must return what `step` just returned; a second call is not a second \
+             answer"
+        );
+        // Every bit set must belong to this family. A free function, not a method --
+        // `positions()` is module-level here.
+        let owned: std::collections::BTreeSet<u16> = positions().into_iter().collect();
+        for bit in 0..vocab::ConditionMask::BITS {
+            if after.get(bit) {
+                let index = u16::try_from(bit).unwrap_or(u16::MAX);
+                assert!(
+                    owned.contains(&index),
+                    "position {index} is set and is not one of this family's 62"
+                );
+            }
+        }
     }
 
     /// Same bars, same bits, byte for byte.
