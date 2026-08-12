@@ -12272,3 +12272,332 @@ before the request leaves, the stamp and feed cleared on failure with `lastOk`
 surviving, retry after failure without a bump, the survey's single pass and its
 feed-list stamp, and the shared poll starting and stopping with its holder.
 `npm run build` is clean with no Svelte warnings.
+
+## D-0128 · 2026-08-12 · Starting the server pulled data nobody asked for, so the autopilot default is now PAUSED
+
+**Number taken as max+1 and asserted free before writing** (`D-0127` was the
+highest; two sessions share this tree.) **This reverses D-0108's default and
+says so plainly** — the reasoning there was sound for the problem it was given,
+and the problem changed.
+
+### What happened
+
+`flies_on_startup` read `BRUTEX_AUTOPILOT` and flew unless it said `pause`
+exactly. An absent variable flew. The tracked Run configuration sets no
+environment, so **pressing Run in an IDE was itself enough to start fetching from
+a vendor** twenty seconds later.
+
+It was found the worst way. The owner saw `logs/` holding five rolled files and
+33 MB, and concluded data had been pulled behind their back. It had — 23,695
+`pull.run` events, 23,689 `pull.ssm` credential reads, 23,688 `pull.spot` — by
+their own server, from a Run button, with nobody having clicked anything that
+says "fetch". The logs contained no bars and were never tracked by git, but the
+volume was real and so was the fetching behind it.
+
+### The rule, in the owner's words
+
+**No data is pulled unless they click it.** Not by an assistant, not by a
+default, not by a countdown printed to a terminal.
+
+### Why the default has to be the grounded one
+
+Fetching is the **irreversible** half of this program. It spends a shared vendor
+quota another system depends on — `CLAUDE.md` §8 already says this repository
+never mints a token because "a local mint would invalidate the token another
+system shares" — and it appends to a store whose history is append-only by §3
+rule 8. A default belongs on the safe side of an irreversible action, and no
+amount of announcing it in the terminal converts a fetch nobody asked for into
+one they did.
+
+D-0108's blocker was the opposite failure: a Run button that reliably did
+**nothing**, forever, because the flag defaulted the other way. That was a real
+defect and the fix was right for it. But "does nothing visible" and "quietly
+spends a quota" are not symmetric costs, and the second is the one that cannot
+be undone. A Run button that starts a server and waits is a working Run button.
+
+### The switch is now positive
+
+Only `BRUTEX_AUTOPILOT=run` flies. **Absent, empty, a typo, a case variant, a
+value that is not UTF-8 — all stay on the ground**, because every one of them is
+"the operator did not ask". Under the old polarity the non-UTF-8 case FLEW, and
+its doc reasoned that a value which is not the byte string `pause` must take the
+same path as any other non-`pause` value. The reasoning was sound and the
+direction was wrong: the same argument now grounds it.
+
+`pause` is still understood, so a machine already exporting it keeps meaning
+what it meant.
+
+### Pinned in both directions
+
+`the_boot_default_pulls_nothing_and_only_the_exact_word_run_lets_it_fly`
+replaces the test that pinned the old default. Restoring the old polarity fails
+its first assertion. The near-miss block — `RUN`, `Run`, `runs`, ` run`,
+`run\n`, `start`, `true`, `1`, `yes`, `on`, empty — now guards the direction
+that matters: a near miss that FLIES spends money nobody authorised.
+
+## D-0129 · 2026-08-12 · Nine silent successes: an exit code, a build directory, a second server, four discarded writes and two ratios computed over the wrong population
+
+**Number taken as max+1 and asserted free before writing.** The highest heading
+in this file was `D-0128`; `grep -rn 'D-0129'` over `crates/`, `docs/`, `web/`,
+`.github/` and `CLAUDE.md` returned nothing immediately before appending.
+
+Two adversarial sweeps (27 agents and 19) returned 39 confirmed findings between
+them. Five were closed by earlier phases of this batch and are recorded in
+D-0124; two more — a pinned month that exists at another rung, and
+`monthsBetween` validating two of four parsed fields — were closed by the
+Markets and autopilot rewrites and are verified as fixed here rather than fixed
+again. This entry is the remaining nine. **Every one was reproduced first**, and
+the runs are quoted below rather than described.
+
+They are one defect wearing nine costumes. In each case a value was measured,
+discarded at the last step before somebody could act on it, and replaced by a
+default that reads as success:
+
+| what was measured | what was discarded | what the operator saw |
+|---|---|---|
+| `Read::status()` at startup | the whole verdict | `exited cleanly · everything went as asked`, exit `0` |
+| the build directory's contents | everything but "it exists" | `web: …/build (serving)`, every page `503` |
+| the store being served | nothing — no check existed | two autopilots, one token, one store |
+| `Journal::append`'s `Result` | the `Err`, at four sites | a refusal page, and `/audit` showing no refusal |
+| the census, per instrument | nothing — it was re-scanned per symbol | 2.4 s for 25 KB |
+| each row's own rung denominator | all but the first row's | `25,033.33%` or `66.76%`, by row order |
+| a denominator's support | that it was one row | `Coverage 100.00%` over one bar |
+| the request's own population | that it had one | `100.0%` with half the request outstanding |
+| `x-brutex-receipt` | the header, unread | a green `OK` over a request nothing served |
+
+### 1 · A serve over a DEGRADED universe exited 0
+
+`crates/api/src/server.rs`. The masters are read one line above the banner. The
+banner is eight `println!`s and not one of them named the read; the durable
+`api.serve listening` event carried `addr`, `store`, `masters`, `web_built` and
+`autopilot_flies`; `stopped(Ok(()))` was `OK`, and `api::main`'s `exit_note`
+maps that to *"everything went as asked"*. `/health` had been answering `503`
+for the whole session and nothing polls `/health`.
+
+D-0026 decided this for the `report` command — `reported` returns `DEGRADED`
+and `tests/binary.rs:105-118` asserts it — and left `serve` alone. `serve` is
+the path that runs.
+
+Now: `announce_universe` prints `universe: ok` or `universe: DEGRADED` followed
+by each of `Read::notes`, and the sentence that this process will exit `3`;
+`web_state` and `universe` join the event; `stopped_over(outcome, clean)` maps a
+clean stop over a degraded read to `DEGRADED`, and a stopped-on-error process to
+`FAILED` regardless — a universe verdict does not outrank a server that fell
+over.
+
+**One existing test changed and it is worth saying why.**
+`run_serves_until_the_signal_and_exits_zero` asserted `OK` from `run` over
+whatever masters directory the machine has. This developer's holds a real pair
+of vendor masters that disagree; CI's fixtures are clean. The constant was
+asserting the machine. It now computes the expectation from `report`'s own
+verdict, so it holds on both.
+
+### 2 · `built()` was true for any directory that exists
+
+`crates/api/src/assets.rs`. `Assets::new` filtered `canonicalize()` by `is_dir`
+and `built()` returned `root.is_some()`. That one bit was the banner's entire
+statement about the front end. An empty `build/` — an `npm run build` that
+failed half way, a fresh clone, `BRUTEX_WEB` pointing at last month's checkout —
+printed `serving` while every page answered `503`. The repository's own green
+test says so out loud:
+
+```
+async fn a_build_with_no_shell_says_so_rather_than_answering_blank() {
+    let dir = web("no-shell");          // create_dir_all(dir.join("build")), nothing else
+    let assets = Assets::new(&dir);
+    assert!(assets.built(), "the directory is there");
+    let (status, mime, body) = get(&assets, "/db").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+```
+
+`Build` now has four answers and the banner prints the reason with the word:
+`Missing`, `NoShell { why }`, `Stale { newer, by_secs }`, `Serving`. `built()`
+is unchanged and still means *the directory resolved*, because that is what
+`respond` branches on.
+
+**Staleness is a comparison, not a guess:** `mtime(build/index.html)` against
+the newest file under `web/src`, both measured, walk bounded by `MAX_WALK` and
+keyed on `file_type()` so a symlink is one entry rather than a descent. With no
+`web/src` — a binary shipped beside a bundle — nothing is compared and nothing
+is claimed in either direction. Sub-second differences are not staleness: a
+build writes its own output while the walk is running.
+
+### 3 · Two api instances were never detected
+
+The only guard was the bind. Measured on this machine, two processes, tokio as
+pinned (`mio` sets `SO_REUSEADDR`):
+
+```
+pid A bind 127.0.0.1:18090 -> Ok        pid B bind 0.0.0.0:18090   -> Ok
+pid A bind 0.0.0.0:18091   -> Ok        pid B bind 127.0.0.1:18091 -> Ok
+```
+
+Both print `listening`, both open a browser, both spawn `autopilot::fly` against
+the same `BRUTEX_STORE`. The file locks that exist are taken **after** the vendor
+has been paid: `pull::ingest`'s census lock is on the install path,
+`store::file`'s is per bar file. The quota is spent before either refuses.
+
+`take_serve_lock` takes an exclusive advisory lock on `<store>/serve.lock`
+before anything is opened, stamps `addr=… pid=…` into it once held, and refuses
+with the holder's own stamp quoted. **The subject is the store, not the
+address** — the store is what two processes corrupt, and "I started it on
+another port" is the mistake this is made of. The lock is the OS's, on an open
+file description, so a killed process releases it and nothing wedges the next
+start.
+
+A second serve inside ONE process is allowed, deliberately and documented:
+that is this test suite, which drives `run_in` from parallel tokio tests against
+the developer's real store root, and an advisory lock is per file description so
+a second handle in one process would refuse itself. `serving_roots()` holds the
+in-process set; the refusal path stays reachable from a test because the test
+holds the lock file on a handle of its own.
+
+### 4 · Journal append failures, discarded at four sites
+
+`let _ignored = journal.append(&record);` at three refusal paths in `server.rs`
+and at the ONE record per tick in `autopilot.rs`. The standard being broken is
+this repository's own: `recorded_fact` renders `NO — this run is NOT in the
+journal. {why}` and is called from nine accepted paths under a doc comment
+citing §4. `/autopilot` states the consequence in as many words: *"A failure
+that appears here and not there is a failure that was never written down, and
+that is a defect in the journal, not in this page."* It was a defect in those
+four lines.
+
+The trigger is reachable and this crate already drives it: `emitted.rs` puts a
+file where the `audit` directory must be and asserts the append refuses.
+
+`refused_and_recorded` appends and renders in one function, so a refusal
+recorded without the result on the page is not expressible. The autopilot's
+answer travels as `TickOutcome::journal_error` → `Status::journal_error` →
+`/autopilot.json`, and is cleared by a tick whose record lands.
+
+### 5 · `/instruments.json` cost the universe TIMES the census
+
+`bars_of` scanned the whole entry vector per symbol and was the `sort_by_key`
+key as well as the emitted field: ~22.6 scans per row at n=785 plus one per
+emitted row, about 18,565 full passes per request. Measured in an optimised
+build with zero disk I/O, universe 785:
+
+```
+750 entries 15.5 ms · 3,000 50.0 ms · 9,000 165.9 ms · 43,422 819.2 ms
+response 25.1 KB -> 25.3 KB
+```
+
+Linear in the census for a response that never grows, on a route
+`web/src/lib/index.svelte.js` fetches from every page. `docs/06-limits.md` §34
+projects a 93,776-row census.
+
+`bars_by_symbol` folds it once into a `HashMap`. The test asserts the PASS
+COUNT — the iterator counts what it yields — because a timing assertion on a
+shared machine is a flake, and because the property is "one pass", not "fast".
+
+### 6 · `/db`'s month card took its denominator from the first row it saw
+
+`monthFull` is keyed on (month, rung) and says why under a comment that forbids
+keying on the month alone. `monthCards` then keyed the card on the month alone
+and read `fullest` once, inside `if (!m)`. Running the shipped expressions over
+2021-08 holding NIFTY@1day=23, NIFTY@1min=8,625, BANKNIFTY@1min=8,625 — a month
+complete at both rungs:
+
+```
+OLD monthCards, first row 1day -> { pct: '25033.33%', fullest: 23,   state: 'full' }
+OLD monthCards, first row 1min -> { pct: '66.76%',    fullest: 8625, state: 'full' }
+```
+
+One headline figure with two values, decided by the order of a JSON array, and
+the card's title read *"every one of the 3 instruments holds all 23 bars"*.
+
+`owed` is now the sum of each row's own (month, rung) denominator. `fullest`
+survives as a display figure only where the month holds one rung — the rule
+`sessions` already followed.
+
+### 7 · A month holding one bar reported `full`, 100.00%, 0 missing
+
+Same file. The denominator is the fullest row at the same (month, rung), so a
+group of ONE row is its own denominator and `short === 0` is a tautology.
+Running the shipped expressions over a store holding 2026-07 1min = 8,250 ×2 and
+2026-08 1min = 1:
+
+```
+OLD one-bar month -> { short: 0, state: 'full', pct: '100.00%' }
+OLD tiles -> { bars: 16501, complete: '3 of 3', missing: 0, coverage: '100.00%' }
+```
+
+The file's own comment already said this class of answer "is the fallback that
+hides a failure `CLAUDE.md` section 4 bans, on the one surface built to prevent
+it". The D-0089-era rewrite fixed the many-instruments-in-one-month case and
+left this one.
+
+Such rows are now counted in **neither** direction: `sole` on the row, `pct`
+`null`, no meter drawn (the rule the Coverage tile already kept — "a bar is a
+length, and a length is a claim"), `Complete` excludes them and prints how many
+are *not comparable*, and Coverage drops them from numerator and denominator
+both. The word on the row is `unverified`, and `SOLE_WHY` says what would make
+it an answer: a second instrument for that month.
+
+**Why not "assume it is short".** Nothing in the store says the month is
+incomplete either. Printing a shortfall would be inventing the exchange fact §3
+rule 1 forbids; printing `full` was inventing the opposite. The third answer is
+the true one.
+
+### 8 · `/ingest`'s meter read 100% while half the request was outstanding
+
+`snapshot()` counted every row in the window months — month was the only
+predicate; `row.instrument` and `row.timeframe` were read and never tested —
+while `expectedUnits` counted the request's own reach. Running the shipped
+expressions with a 750-name equity backfill already in 2026-07 and a default
+two-index minute request:
+
+```
+OLD ingest meter -> { units: 750, expectedUnits: 2, share: '100.0%', unitsLeft: 0 }
+```
+
+`unitsLeft` clamping to `0` also removes the ETA line, so the page went quiet at
+the same moment it went green. The threshold is **two** pre-existing rows in the
+window, not 750.
+
+`foldMonths(months, scope)` takes the ask's own population — the census keys and
+the rungs this request reaches — and both readings go through it. What falls
+outside is counted as `outside` and named beside the meter: a row this request
+never asked for is neither credited to it nor hidden.
+
+### 9 · Any 200 HTML was parsed as a receipt
+
+D-0124 put `x-brutex-receipt: pull-spot` on all three arms of `pull_spot` and
+recorded, in this file, that the browser half was **not** done because `web/src`
+was held by another session. This is that half. `notAReceipt` refuses on the
+marker first, then the content type, then the absence of the verdict element,
+and each refusal carries its own sentence. `readReceipt` can no longer fall open
+to `{ verdict: 'OK', good: true, reason: '' }` over a request nothing served.
+
+### The test harness this batch adds, and its bounds
+
+Three of the nine are arithmetic inside `.svelte` files, and this repository has
+said twice that it has no way to test those. It now has one for the arithmetic:
+the expressions moved into `web/src/lib/completeness.js`, `web/src/lib/fold.js`
+and `web/src/lib/receipt.js` — plain modules, no runes, no DOM — and
+`web/tests/*.test.js` drives them under **node's own test runner**. `npm test`
+in `web/`. No dependency was added: `node --test` is in the runtime.
+
+**CI does not run them, and that is deliberate.** Gate 2 shadows `node`, `npm`,
+`npx`, `yarn`, `pnpm`, `bun`, `deno` and five bundlers to prove the workspace
+builds without any of them — §2's one hard rule. Adding a Node job to run these
+would be a larger change to the gate story than this batch earns, and it is
+named here rather than done quietly.
+
+**Still no harness renders a page.** Every markup change in this batch — the
+`unverified` chip, the suppressed meters, the `outside` sentence, the four
+`title` texts — is unproven by anything but the build and reading it.
+
+### What this deliberately does not do
+
+* **No page shape moved.** `/store.json`, `/instruments.json` and
+  `/autopilot.json` keep their shapes; `journal_error` is an added field and
+  every existing key is where it was.
+* **No `k`, no depth, no new dependency, no `build.rs`.** `File::try_lock` is
+  `std`.
+* **The lock does not serialise pulls.** It refuses a second SERVER. A hand-made
+  pull and the autopilot inside one process still arbitrate through the seat,
+  and `pull::ingest`'s census lock is unchanged.
+* **`.github/workflows/ci.yml` was not touched**, by choice: another session was
+  editing it in this tree.

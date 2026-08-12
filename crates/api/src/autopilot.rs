@@ -1630,15 +1630,30 @@ pub const AUTOPILOT_PAUSE: &str = "pause";
 /// to work around with a comment. This half takes the value; [`flies_on_startup`]
 /// is the one line that fetches it.
 ///
-/// `None` — the variable is absent — flies. That is the default the owner asked
-/// for.
+/// `None` — the variable is absent — **stays on the ground.**
+///
+/// **THIS DEFAULT WAS REVERSED, AND THE REVERSAL IS THE POINT.** It used to fly
+/// when the variable was absent, so starting the server was itself enough to
+/// begin fetching from a vendor. Nobody clicked anything; the operator pressed
+/// Run in an IDE and a backfill started twenty seconds later. One such session
+/// wrote 23,695 `pull.run` events before anyone looked.
+///
+/// The owner's instruction is that **no data is pulled unless they ask for it**,
+/// and a default that fetches is the opposite of that however loudly the
+/// terminal announces it. Fetching is the irreversible half of this program: it
+/// spends a shared vendor quota and writes to an append-only store. A default
+/// must be the safe side of an irreversible action.
+///
+/// So the switch is now positive: only [`AUTOPILOT_RUN`] flies. An absent
+/// variable, an empty one, a typo, a value that is not UTF-8 — all stay on the
+/// ground, because every one of them is "the operator did not ask".
 #[must_use]
 pub fn stays_paused_from(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some_and(|v| v == std::ffi::OsStr::new(AUTOPILOT_PAUSE))
+    !value.is_some_and(|v| v == std::ffi::OsStr::new(AUTOPILOT_RUN))
 }
 
-/// Whether the environment lets the autopilot fly. It does unless it says
-/// [`AUTOPILOT_PAUSE`] exactly.
+/// Whether the environment lets the autopilot fly. It does **only** when the
+/// variable says [`AUTOPILOT_RUN`] exactly.
 ///
 /// Read once, at construction. Changing the variable on a running process does
 /// nothing — the operator pauses and resumes through `/autopilot/pause` and
@@ -1646,8 +1661,9 @@ pub fn stays_paused_from(value: Option<&std::ffi::OsStr>) -> bool {
 /// second source of truth for the same switch is how the two disagree.
 ///
 /// `var_os` rather than `var`: a value that is not UTF-8 is not the byte string
-/// `pause`, so it flies, and it must not take a different path from any other
-/// value that is not `pause`.
+/// `run`, so it stays paused, which is the same answer every other unrecognised
+/// value gets. Under the old polarity that reasoning ran the other way and an
+/// unreadable value FLEW, which is the case this inversion most needed to fix.
 #[must_use]
 pub fn flies_on_startup() -> bool {
     !stays_paused_from(std::env::var_os(AUTOPILOT_ENV).as_deref())
@@ -4844,64 +4860,70 @@ mod tests {
 
     // ------------------------------------------------------- the boot default
 
-    /// **Pressing Run flies. Exactly one spelling holds it on the ground.**
+    /// **Pressing Run pulls NOTHING. Exactly one spelling lets it fly.**
     ///
-    /// This is the whole of the owner's first blocker: the tracked Run
-    /// configuration sets no environment, so under the old rule — fly only on
-    /// the exact string `run` — pressing Run reliably produced a process that
-    /// did nothing at all, for ever.
+    /// **This test was reversed, and so was the behaviour it pins.** It used to
+    /// assert that an unset variable FLIES, citing the owner's first blocker: a
+    /// Run button that reliably did nothing. That default then did something
+    /// worse than nothing — starting the server was itself enough to begin
+    /// fetching from a vendor, and one session wrote 23,695 `pull.run` events
+    /// with nobody having clicked anything.
     ///
-    /// Reverting [`stays_paused_from`] to the old polarity (`!= AUTOPILOT_RUN`
-    /// holds it) fails the first assertion, which is the one the owner cares
-    /// about. Loosening the comparison to a prefix, a case-fold or a trim fails
-    /// the near-miss block, which is what stops a machine flying when somebody
-    /// believed they had grounded it.
+    /// The owner's instruction is now explicit: **no data is pulled unless they
+    /// ask for it.** Fetching spends a shared vendor quota and appends to a
+    /// store, so it is the irreversible half of this program, and a default must
+    /// sit on the safe side of an irreversible action. A Run button that starts a
+    /// server and waits is a working Run button; a Run button that quietly
+    /// spends quota is not.
+    ///
+    /// Restoring the old polarity fails the first assertion. Loosening the
+    /// comparison to a prefix, a case-fold or a trim fails the near-miss block —
+    /// which now protects the direction that matters, because a near miss that
+    /// FLIES spends money the operator never authorised.
     #[test]
-    fn the_boot_default_flies_and_only_the_exact_word_pause_holds_it() {
+    fn the_boot_default_pulls_nothing_and_only_the_exact_word_run_lets_it_fly() {
         use std::ffi::OsStr;
 
-        // ABSENCE FLIES. This is the tracked Run configuration's own state.
+        // ABSENCE STAYS ON THE GROUND. This is the tracked Run configuration's
+        // own state: press Run, get a server, fetch nothing.
         assert!(
-            !stays_paused_from(None),
-            "an unset {AUTOPILOT_ENV} must fly — a Run button that reliably does nothing \
-             is the defect this default exists to remove"
+            stays_paused_from(None),
+            "an unset {AUTOPILOT_ENV} must NOT fly — pressing Run must never spend \
+             a vendor quota the operator did not ask to spend"
         );
 
-        // THE ONE SPELLING THAT HOLDS IT.
-        assert!(stays_paused_from(Some(OsStr::new(AUTOPILOT_PAUSE))));
-        assert_eq!(
-            AUTOPILOT_PAUSE, "pause",
-            "the opt-out is one documented word"
-        );
+        // THE ONE SPELLING THAT LETS IT FLY.
+        assert!(!stays_paused_from(Some(OsStr::new(AUTOPILOT_RUN))));
+        assert_eq!(AUTOPILOT_RUN, "run", "the opt-IN is one documented word");
 
-        // EVERY NEAR MISS FLIES, INCLUDING THE TEMPTING ONES. A control that
-        // guessed `PAUSE` meant `pause` is a control that can be set wrongly in
-        // the direction the operator cannot see.
+        // EVERY NEAR MISS STAYS GROUNDED, INCLUDING THE TEMPTING ONES. Under the
+        // old polarity these all flew; each one is now a request that was not
+        // made clearly enough to spend money on.
         for spelling in [
-            "PAUSE",
-            "Pause",
-            "paused",
-            " pause",
-            "pause ",
-            "pause\n",
-            "stop",
-            "false",
-            "0",
-            "no",
-            "off",
+            "RUN",
+            "Run",
+            "runs",
+            " run",
+            "run ",
+            "run\n",
+            "start",
+            "true",
+            "1",
+            "yes",
+            "on",
             "",
-            "run",
-            AUTOPILOT_RUN,
+            "pause",
+            AUTOPILOT_PAUSE,
         ] {
             assert!(
-                !stays_paused_from(Some(OsStr::new(spelling))),
-                "{spelling:?} is not the word `pause` and must therefore fly"
+                stays_paused_from(Some(OsStr::new(spelling))),
+                "{spelling:?} is not the word `run` and must therefore stay on the ground"
             );
         }
 
-        // `run` IS STILL ACCEPTED AS A FLYING VALUE, so an existing alias that
-        // exports it does not silently start meaning something else.
-        assert!(!stays_paused_from(Some(OsStr::new(AUTOPILOT_RUN))));
+        // `pause` IS STILL UNDERSTOOD AS A GROUNDING VALUE, so a machine that
+        // already exports it keeps meaning exactly what it meant.
+        assert!(stays_paused_from(Some(OsStr::new(AUTOPILOT_PAUSE))));
 
         // AND THE ENVIRONMENT READER AGREES WITH THE PURE HALF. Whatever this
         // machine's variable says, the two answers are one answer — the split
