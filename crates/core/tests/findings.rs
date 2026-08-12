@@ -471,6 +471,25 @@ fn every_named_commit_exists() {
         .expect("crates/core is two levels below the repository root")
         .to_owned();
 
+    // A SHALLOW clone cannot answer this, and must not be allowed to answer it wrongly.
+    // At `fetch-depth: 1` -- the `actions/checkout` default -- every sha below fails to
+    // resolve, and both of these tests then reported "cannot resolve it" for commits
+    // that plainly exist. That is the right refusal for the wrong reason, and it failed
+    // CI on a green tree. The workflow now checks out full history; this names the cause
+    // if it is ever changed back.
+    let shallow = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--is-shallow-repository"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+    assert!(
+        !shallow,
+        "this repository is a SHALLOW clone, so no commit below can be resolved and \
+         this test would refuse commits that exist. The checkout needs \
+         `fetch-depth: 0`."
+    );
+
     let mut checked = 0_u32;
     for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
         let after = row
@@ -536,6 +555,25 @@ fn every_named_commit_is_in_this_branchs_history() {
         .and_then(std::path::Path::parent)
         .expect("crates/core is two levels below the repository root")
         .to_owned();
+
+    // A SHALLOW clone cannot answer this, and must not be allowed to answer it wrongly.
+    // At `fetch-depth: 1` -- the `actions/checkout` default -- every sha below fails to
+    // resolve, and both of these tests then reported "cannot resolve it" for commits
+    // that plainly exist. That is the right refusal for the wrong reason, and it failed
+    // CI on a green tree. The workflow now checks out full history; this names the cause
+    // if it is ever changed back.
+    let shallow = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--is-shallow-repository"])
+        .output()
+        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+    assert!(
+        !shallow,
+        "this repository is a SHALLOW clone, so no commit below can be resolved and \
+         this test would refuse commits that exist. The checkout needs \
+         `fetch-depth: 0`."
+    );
 
     let mut checked = 0_u32;
     for row in rows().iter().filter(|r| r.disposition.contains("FIXED")) {
