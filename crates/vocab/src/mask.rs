@@ -233,19 +233,46 @@ mod tests {
         }
     }
 
+    /// Anti-monotonicity: `bar.hits(wider)` implies `bar.hits(base)`.
+    ///
+    /// The property EVERY pruning guarantee rests on. §6's argument is that a
+    /// k-combination cannot be frequent unless all of its (k-1)-subsets are, so if this
+    /// fails the ladder is unsound and no amount of enumeration repairs it. `hits`'s own
+    /// doc comment cites this test as the proof, and gate 12 accepts it.
+    ///
+    /// # It could not fail, and an audit demonstrated that
+    ///
+    /// The previous version asserted `bar.hits(&base)` INSIDE the loop, having already
+    /// asserted the same thing unconditionally two lines above. The consequent did not
+    /// depend on the loop variable, so the loop was incapable of failing whatever `hits`
+    /// did. An adversarial audit replaced the all-bits-present fold with an
+    /// any-bit-present one and this test stayed green.
+    ///
+    /// The repair is to assert the IMPLICATION rather than its consequent, and to state it
+    /// over several bars and several bases. One bar with a single required bit cannot
+    /// distinguish "requires every bit" from "requires any bit" -- with one bit the two
+    /// agree, which is why a single-bit base was exactly the wrong fixture.
     #[test]
     fn adding_a_required_bit_can_only_remove_hits() {
-        // Anti-monotonicity -- the property every pruning guarantee rests on.
-        let bar = ConditionMask::ZERO.with_bit(1).with_bit(2).with_bit(130);
-        let base = ConditionMask::ZERO.with_bit(1);
-        assert!(bar.hits(&base));
-        for b in 0..ConditionMask::BITS {
-            let wider = base.with_bit(b);
-            if bar.hits(&wider) {
-                assert!(
-                    bar.hits(&base),
-                    "a wider mask hit where the narrower did not"
-                );
+        /// Bars spanning word 0, the 63->64 boundary, the last live word, and empty.
+        const BARS: [&[u32]; 5] = [&[1, 2, 130], &[0, 63, 64], &[5], &[], &[63, 64, 127, 279]];
+        /// Bases of several widths, including empty -- which every bar hits.
+        const BASES: [&[u32]; 5] = [&[], &[1], &[1, 2], &[5], &[63, 64]];
+
+        let build = |bits: &[u32]| bits.iter().fold(ConditionMask::ZERO, |m, b| m.with_bit(*b));
+        for bar_bits in BARS {
+            let bar = build(bar_bits);
+            for base_bits in BASES {
+                let base = build(base_bits);
+                for added in 0..ConditionMask::BITS {
+                    let wider = base.with_bit(added);
+                    assert!(
+                        !bar.hits(&wider) || bar.hits(&base),
+                        "bar {bar_bits:?} hits base+{added} but not base {base_bits:?}. \
+                         Adding a required bit made a MISS into a HIT, so support is not \
+                         anti-monotone and every subset prune in the ladder is unsound."
+                    );
+                }
             }
         }
     }
