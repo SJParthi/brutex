@@ -994,16 +994,18 @@ fn sample_dirs(root: &std::path::Path, want: usize) -> Vec<std::path::PathBuf> {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn no_real_lake_file_triggers_either_defect() {
     let Some(home) = std::env::var_os("HOME") else {
-        println!("SKIPPING the real-lake scan: no HOME.");
-        return;
+        panic!(
+            "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the real-lake scan: no HOME.)"
+        );
     };
     let root = std::path::Path::new(&home).join(".brutex/lake/bars/NSE");
-    if !root.exists() {
-        println!("SKIPPING the real-lake scan: ~/.brutex/lake is not on this machine.");
-        return;
-    }
+    assert!(
+        root.exists(),
+        "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the real-lake scan: ~/.brutex/lake is not on this machine.)"
+    );
 
     let mut targets: Vec<(std::path::PathBuf, String)> = Vec::new();
     for contract in sample_dirs(&root.join("FNO"), 400) {
@@ -1127,10 +1129,10 @@ fn the_month_case_tolerance_is_normalisation_and_can_never_alias_two_contracts()
         return;
     };
     let root = std::path::Path::new(&home).join(".brutex/lake/bars/NSE/FNO");
-    if !root.exists() {
-        println!("SKIPPING the month-spelling census: ~/.brutex/lake is absent.");
-        return;
-    }
+    assert!(
+        root.exists(),
+        "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the month-spelling census: ~/.brutex/lake is absent.)"
+    );
     let mut checked = 0_usize;
     for entry in std::fs::read_dir(&root)
         .expect("read the F&O directory")

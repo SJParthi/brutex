@@ -58,10 +58,15 @@ fn skipped(what: &str) {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn the_real_fno_sample_decodes_to_the_values_it_holds() {
     let Some(path) = lake_path(SAMPLE_FNO) else {
-        skipped("the real F&O sample");
-        return;
+        panic!(
+            "MISSING FIXTURE {SAMPLE_FNO} for the real F&O sample: this test is #[ignore]d because \
+             the fixture cannot be tracked, so running it explicitly means you believe \
+             you have ~/.brutex/lake. Reporting `ok` here would be a test that \
+             asserted nothing."
+        );
     };
 
     let f = LakeFile::open(&path).expect("the real sample file must open");
@@ -112,10 +117,15 @@ fn the_real_fno_sample_decodes_to_the_values_it_holds() {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn the_real_cash_sample_has_the_seven_column_layout() {
     let Some(path) = lake_path(SAMPLE_CASH) else {
-        skipped("the real cash sample");
-        return;
+        panic!(
+            "MISSING FIXTURE {SAMPLE_CASH} for the real cash sample: this test is #[ignore]d because \
+             the fixture cannot be tracked, so running it explicitly means you believe \
+             you have ~/.brutex/lake. Reporting `ok` here would be a test that \
+             asserted nothing."
+        );
     };
 
     let f = LakeFile::open(&path).expect("open");
@@ -142,6 +152,7 @@ fn the_real_cash_sample_has_the_seven_column_layout() {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn a_real_contract_directory_name_parses_and_round_trips() {
     let Some(root) = lake_path(".brutex/lake/bars/NSE/FNO") else {
         skipped("the contract directory walk");
@@ -173,6 +184,7 @@ fn a_real_contract_directory_name_parses_and_round_trips() {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn a_spread_of_real_files_decodes_with_no_failures() {
     let Some(root) = lake_path(".brutex/lake/bars/NSE/FNO") else {
         skipped("the multi-file decode");

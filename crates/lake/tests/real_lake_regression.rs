@@ -156,18 +156,18 @@ fn sample_dirs(root: &Path, want: usize) -> Vec<PathBuf> {
 }
 
 #[test]
+#[ignore = "needs ~/.brutex/lake, which cannot be tracked: CI gate 1 forbids a .parquet in this repository. Run with `cargo test -p lake -- --ignored` on a machine that has the lake."]
 fn a_wide_sample_of_the_real_lake_decodes_with_no_refusal_and_a_stable_digest() {
     let Some(home) = std::env::var_os("HOME") else {
-        println!("SKIPPING the real-lake digest: no HOME.");
-        return;
+        panic!(
+            "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the real-lake digest: no HOME.)"
+        );
     };
     let root = Path::new(&home).join(".brutex/lake/bars/NSE");
-    if !root.exists() {
-        println!("SKIPPING the real-lake digest: ~/.brutex/lake is not on this machine.");
-        println!("  The fixture cannot be tracked — CI gate 1 forbids a .parquet in");
-        println!("  this repository — so this test proves nothing here.");
-        return;
-    }
+    assert!(
+        root.exists(),
+        "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the real-lake digest: ~/.brutex/lake is not on this machine.)"
+    );
 
     let mut targets: Vec<PathBuf> = Vec::new();
     for contract in sample_dirs(&root.join("FNO"), 120) {
