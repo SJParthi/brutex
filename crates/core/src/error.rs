@@ -198,5 +198,32 @@ mod tests {
         assert_error(&PriceError::NotFinite);
         assert_error(&InstrumentError::Malformed);
         assert_error(&CalendarError::NotADate);
+
+        // The three lines above are a COMPILE-TIME check and assert nothing at run time:
+        // an audit noted that any `Display` change survives them, including one that
+        // renders the empty string. Implementing `std::error::Error` is only useful
+        // because a caller can print the thing, so what the caller gets is asserted here.
+        //
+        // Non-empty AND distinct. Distinctness is the half that matters: three errors
+        // that all render "invalid input" satisfy every other test in this file and tell
+        // an operator nothing about which one fired.
+        let rendered = [
+            PriceError::NotFinite.to_string(),
+            InstrumentError::Malformed.to_string(),
+            CalendarError::NotADate.to_string(),
+        ];
+        for message in &rendered {
+            assert!(
+                !message.trim().is_empty(),
+                "an error that renders to nothing is an error an operator cannot act on"
+            );
+        }
+        let distinct: std::collections::BTreeSet<&String> = rendered.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            rendered.len(),
+            "two of these errors render identically, so the message cannot say which \
+             refusal happened: {rendered:?}"
+        );
     }
 }

@@ -536,16 +536,44 @@ mod tests {
         let e1 = Expiry::new(2025, 7, 3).expect("valid");
         let e2 = Expiry::new(2025, 7, 10).expect("valid");
 
-        let mut seen = std::collections::HashSet::new();
-        for k in [
+        let keys = [
             base(e1, 2_280_000, OptionSide::Call),
             base(e1, 2_280_000, OptionSide::Put), // side differs
             base(e1, 2_285_000, OptionSide::Call), // strike differs
             base(e2, 2_280_000, OptionSide::Call), // expiry differs
-        ] {
+        ];
+
+        let mut seen = std::collections::HashSet::new();
+        for k in keys {
             seen.insert(k);
         }
-        assert_eq!(seen.len(), 4, "every field must participate in identity");
+        assert_eq!(seen.len(), 4, "every field must participate in EQUALITY");
+
+        // And in the HASH, which the assertion above cannot see. An audit pointed out
+        // that a `Hash` skipping `kind` still yields four distinct set entries, because
+        // the derived `Eq` keeps them apart -- they simply all land in ONE BUCKET. That
+        // turns a `HashMap<InstrumentKey, _>` lookup into a linear scan of every option
+        // on the same underlying, which is exactly the §3 rule 4 defect this test's own
+        // doc comment forbids, and it is invisible to a length check.
+        //
+        // `DefaultHasher` is seeded with zeros rather than randomly, so these digests are
+        // reproducible within and across runs -- which is what makes comparing them a
+        // test rather than a coin toss.
+        let digest = |k: &InstrumentKey| -> u64 {
+            use core::hash::{Hash as _, Hasher as _};
+            let mut h = std::hash::DefaultHasher::new();
+            k.hash(&mut h);
+            h.finish()
+        };
+        let digests: std::collections::BTreeSet<u64> = keys.iter().map(digest).collect();
+        assert_eq!(
+            digests.len(),
+            4,
+            "two of these four keys hash alike, so a field is missing from `Hash` while \
+             still present in `Eq`. They stay distinct in a HashSet and collide into one \
+             bucket, which makes an instrument lookup O(n) in the options on that \
+             underlying: {digests:?}"
+        );
     }
 
     #[test]
