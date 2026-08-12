@@ -277,7 +277,7 @@ pub struct Read {
     /// breach: 1,444 - 2,346 ps per instrument per request against a 1,000 ps
     /// ceiling, on all thirty `instruments_html_from` lines. The full text is
     /// still here for `/health` and the startup banner; only the RENDER path
-    /// stopped rereading it. `docs/05-decisions.md` D-0129.
+    /// stopped rereading it. `docs/05-decisions.md` D-0130.
     pub notes_view: render::Notes,
     /// Whether a vendor was never read at all.
     ///
@@ -375,7 +375,7 @@ impl Read {
         notes.extend(coverage.notes());
         // LAST, because it reads the finished list. Every `extend` above must
         // already have run: a view built before them would render a page that
-        // is missing exactly the lines the load discovered. D-0129.
+        // is missing exactly the lines the load discovered. D-0130.
         let notes_view = render::Notes::build(&notes);
         Self {
             merged,
@@ -5263,7 +5263,7 @@ pub fn audit_html(site: &Site, today: Day, page: usize) -> String {
     }
     let rows = audit_rows(&journal, total, skip, per_page, &mut notes);
     // Prepared here rather than inside the renderer: `Notes` is where a line's
-    // text and its loudness are decided, and deciding them once is D-0129.
+    // text and its loudness are decided, and deciding them once is D-0130.
     let notes = render::Notes::build(&notes);
     render::audit_page(&render::AuditView {
         today,
@@ -5485,7 +5485,7 @@ pub fn store_html(site: &Site, today: Day, page: usize, query: &str) -> String {
     // grid may be down to the two swept series — but ALREADY PREPARED. Cloning
     // them as raw strings copied a note whose length grows with the instrument
     // set, once per request; the prepared line is what the page draws and is
-    // bounded. D-0129.
+    // bounded. D-0130.
     notes.extend_from(&site.read.notes_view);
     render::store_page(&render::StoreView {
         // ONE FEED PER VIEW. Parsed through the same function the pull form

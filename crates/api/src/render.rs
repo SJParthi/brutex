@@ -741,8 +741,9 @@ pub struct View<'a> {
 /// loud word past byte 160 would silently stop being loud, and a warning that
 /// quietly downgrades itself is the failure `CLAUDE.md` §4 names.
 ///
-/// The rendered bytes are unchanged — `render::the_prepared_notes_draw_what_the
-/// _raw_lines_did` holds that. D-0129.
+/// What a page draws is unchanged, and
+/// `render::a_prepared_note_keeps_the_loudness_of_its_whole_text_and_draws_only_its_head`
+/// is what holds that. D-0130.
 #[derive(Debug, Default)]
 pub struct Notes {
     /// One prepared line per note, in the order they were given.
@@ -799,7 +800,7 @@ impl Notes {
     /// and only the universe's are expensive. Copying PREPARED lines copies at
     /// most the 160 bytes each one draws; copying the raw strings — which is
     /// what `/store` did, once per request — copies a note whose length grows
-    /// with the instrument set. D-0129.
+    /// with the instrument set. D-0130.
     pub fn extend_from(&mut self, other: &Self) {
         self.lines.extend_from_slice(&other.lines);
         self.loud += other.loud;
@@ -1211,7 +1212,7 @@ fn halt_block(title: &str, body: &str) -> String {
 ///
 /// Reads [`Notes`], which already knows each line's display text and whether it
 /// is loud. Nothing here looks at a note's full length, which is what makes the
-/// block constant against the instrument set. D-0129.
+/// block constant against the instrument set. D-0130.
 fn notes_block(notes: &Notes) -> String {
     let mut out = String::with_capacity(256 + notes.lines.len() * 96);
     let _ = write!(
@@ -3307,6 +3308,69 @@ mod tests {
         assert!(!html.contains("width:0%"), "{html}");
         // Integer arithmetic all the way: no fraction reaches the attribute.
         assert!(!html.contains("width:25.0"), "{html}");
+    }
+
+    #[test]
+    fn a_prepared_note_keeps_the_loudness_of_its_whole_text_and_draws_only_its_head() {
+        // THE ONE THING PREPARING THE NOTES COULD HAVE SILENTLY CHANGED.
+        //
+        // `Notes::build` reads a line's full text once and keeps two answers:
+        // the clamped head, and whether the note was loud. Deriving loudness
+        // from the head instead would be cheaper still and WRONG — a loud word
+        // past the clamp point would stop being loud, and the page would
+        // quietly downgrade a warning. That is the silent-degradation shape
+        // `CLAUDE.md` §4 forbids, so it is asserted rather than assumed.
+        let names: Vec<String> = (0..40).map(|i| format!("NSE-SYMBOL{i:02}")).collect();
+        let late = format!("named by one vendor only: {} UNCHECKED", names.join(", "));
+        assert!(
+            !clamp(&late).contains("UNCHECKED"),
+            "the fixture only means something if the loud word IS past the cut"
+        );
+
+        let quiet = "groww: 2750 kept, 0 unreadable".to_owned();
+        let prepared = Notes::build(&[quiet.clone(), late]);
+        let html = notes_block(&prepared);
+        assert!(
+            html.contains("2 notes · <b>1</b> needing attention"),
+            "the loud one is counted from its FULL text: {html}"
+        );
+        assert_eq!(
+            html.matches("class=\"loud\"").count(),
+            1,
+            "and it is the long line that carries the class: {html}"
+        );
+
+        // AND THE HEAD IS WHAT IS DRAWN. The tail never reaches the page, which
+        // is why reading it per request was cost for nothing. D-0130.
+        assert!(html.contains(&escape(&quiet)), "{html}");
+        assert!(
+            !html.contains("NSE-SYMBOL39"),
+            "the tail is not on the page: {html}"
+        );
+
+        // AN EMPTY SET IS A SET, not a missing block: the summary still states
+        // both counts, so "no notes" and "notes not rendered" cannot look alike.
+        let empty = notes_block(&NO_NOTES);
+        assert!(
+            empty.contains("0 notes · <b>0</b> needing attention"),
+            "{empty}"
+        );
+
+        // TWO PREPARED SETS JOIN WITHOUT REREADING EITHER. `/store` shows its
+        // own lines and the universe's, and the loud tally must be the sum --
+        // dropping `other.loud` would leave the summary saying zero over a red
+        // line, which is the same defect as never marking it.
+        let mut joined = Notes::build(&["UNAVAILABLE — audit journal gone".to_owned()]);
+        joined.extend_from(&prepared);
+        let html = notes_block(&joined);
+        assert!(
+            html.contains("3 notes · <b>2</b> needing attention"),
+            "one loud of its own plus one of the universe's: {html}"
+        );
+        assert!(
+            html.contains(&escape(&quiet)),
+            "and every line rides along: {html}"
+        );
     }
 
     #[test]
