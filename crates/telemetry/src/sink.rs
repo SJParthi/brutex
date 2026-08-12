@@ -1240,9 +1240,19 @@ mod tests {
     ///
     /// The process id is in the name for the reason `api::scratch` gives: a
     /// fixed name in the shared temporary directory is a fixture two
-    /// concurrent test binaries both claim, and this suite deletes what it
-    /// creates.
+    /// concurrent test binaries both claim.
+    ///
+    /// **It used to end "and this suite deletes what it creates", which was not
+    /// true.** It emptied the directory it was ABOUT to use and left every
+    /// directory from every earlier run behind — and with a fresh pid each run,
+    /// nothing ever collided, so nothing was ever reclaimed. That sentence cost
+    /// 2.5 GB across 9,958 directories on one machine in a day.
+    /// [`crate::sweep_stale_scratch`] now makes it true of earlier runs.
     fn scratch(name: &str) -> PathBuf {
+        // Clears what earlier RUNS left behind — see `sweep_stale_scratch`.
+        // Emptying only the directory about to be used is what let 9,958
+        // of them accumulate.
+        crate::sweep_stale_scratch();
         let dir =
             std::env::temp_dir().join(format!("brutex-telemetry-{}-{name}", std::process::id()));
         let _ignored = std::fs::remove_dir_all(&dir);
