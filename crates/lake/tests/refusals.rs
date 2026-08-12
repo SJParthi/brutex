@@ -1128,11 +1128,24 @@ fn the_month_case_tolerance_is_normalisation_and_can_never_alias_two_contracts()
     let Some(home) = std::env::var_os("HOME") else {
         return;
     };
+
     let root = std::path::Path::new(&home).join(".brutex/lake/bars/NSE/FNO");
-    assert!(
-        root.exists(),
-        "MISSING FIXTURE: ~/.brutex/lake. This test is #[ignore]d precisely because the fixture cannot be tracked, so running it explicitly means you believe you have the lake. Reporting `ok` here would be a test that asserted nothing. (the month-spelling census: ~/.brutex/lake is absent.)"
-    );
+    // A SKIP, not a refusal, and the distinction is the whole point of this test not
+    // being `#[ignore]`d. Everything above this line asserts without the lake: that
+    // case folding stays injective across all twelve months, and that four spellings
+    // of one month round-trip to the canonical form. This census is an EXTRA -- it
+    // measures that no real directory name is affected -- so its absence must not
+    // fail a test that has already proved something.
+    //
+    // A bulk edit turned this into a hard refusal along with the six genuinely
+    // vacuous tests in this crate, and CI caught it: the commit message said this
+    // test was deliberately excluded and the edit had included it anyway.
+    if !root.exists() {
+        println!("SKIPPING the month-spelling census: ~/.brutex/lake is absent.");
+        println!("  Everything asserted above this point ran.");
+        return;
+    }
+
     let mut checked = 0_usize;
     for entry in std::fs::read_dir(&root)
         .expect("read the F&O directory")
