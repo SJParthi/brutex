@@ -13241,3 +13241,71 @@ condition (`u.target === null`) without a count the page cannot see.
 **The `/ingest` CAUTION banner is deleted, not reworded.** It rendered the
 guard's false claim in a yellow box. A caution has to name something that will
 happen, and this one named a refusal that no longer exists.
+
+---
+
+## D-0137 · 2026-08-14 · A rung the active feed's vendor does not publish is not drawn at all, because there is no work behind that row
+
+### What was on the screen
+
+Groww's timeframe control drew eleven rows. Three of them — `tick`, `1s`, `5s`
+— were struck through, permanently, on every load, behind a drawer reading
+*"3 rows this feed cannot serve"*.
+
+`rungRows`' own documentation argued for that, and the argument is a good one:
+
+> ONLY THE FIRST DISABLES … a row is drawn dead only where nothing anybody could
+> ever do makes it exist. Every other refusal is drawn LIVE and stated, because
+> each of them names work a person could do … and a control that hides them
+> hides the work along with the refusal.
+
+### Why the argument does not reach these three rows
+
+It is exactly right for the two refusals it was written about. A rung this build
+does not FETCH yet is closed by recording an endpoint in `pull::vendor`. A rung
+the STORE has no directory for is closed by widening `store::path::Timeframe`.
+Both are work, and hiding either hides the work.
+
+`v.permanent` is neither. It is `/feeds.json`'s granularity floor, and the floor
+says the vendor does not publish the rung **at all** — `pull::vendor`'s own
+words: *"not a pull, not an entitlement, not a purchase, not a code change."*
+There is no work behind the row. It is three of eleven rows, on every load,
+saying nothing that changes with anything the operator can do.
+
+**Removed at the operator's instruction, 14 Aug 2026, stated twice.**
+
+### It is a filter, not a deletion, and the distinction is the whole design
+
+The rung stays on `pull::vendor::Granularity::ALL`; the floor stays on
+`/feeds.json`; the feed's own caption still names its finest rung. What changed
+is one `.filter((row) => !row.disabled)` on a list that is already derived **per
+feed** — so TrueData and GDFL, which do serve one second, still show it.
+
+That is why this could not be done by deleting rows from a table: the answer is
+different for different feeds, and the only place that knows which is the
+server. A hardcoded list of "rows to hide" would be a third copy of a vendor
+fact, which is the failure `docs/05-decisions.md` D-0126 and D-0131 each removed
+once already.
+
+### The count line stops counting the dead
+
+It read *"N ticked · D of 11 refused for good by this feed"*. With the dead rows
+gone that sentence has nothing to point at, and `11` was a count of the ladder
+rather than of what this feed offers. It now reads *"N ticked of L this feed
+serves"*, where `L` is the length of the list actually drawn.
+
+`rungTally.dead` is kept and is now always zero. It is not dead code: a feed
+whose floor this server did not send has `permanent === false` on every row, so
+the count is how a caller asks *"were any dropped"* rather than assuming none
+were — which is the same distinction between "no floor" and "no refusals" that
+`v.state === 'unstated'` exists to keep.
+
+### What this does NOT fix
+
+`RUNGS` in `web/src/routes/ingest/+page.svelte` is still a hand-transcribed copy
+of `Granularity::ALL`, carrying each rung's label, its bars-per-session and
+whether the store can file it. It is the copy that went stale when D-0132
+corrected `store_timeframe`, and filtering rows does not remove it. The
+per-feed part of the ladder now comes from the wire; the per-rung part does not,
+and until `/feeds.json` carries a rung's label and session count the page has to
+hold them. Recorded as outstanding.

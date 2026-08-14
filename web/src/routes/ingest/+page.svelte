@@ -1313,7 +1313,30 @@
         stored: r.stored,
         label: r.label
       };
-    });
+    })
+      // A RUNG THIS FEED CAN NEVER SERVE IS NOT DRAWN AT ALL.
+      //
+      // This list used to keep them, struck through, behind a
+      // "N rows this feed cannot serve" drawer, and the reasoning above this
+      // function argued for it: hiding a refusal hides the work that would
+      // close it. That argument holds for the rungs a PERSON could make exist
+      // — one this build does not fetch yet, one the store has no directory
+      // for — and those are still drawn, live, with their sentence.
+      //
+      // It does not hold for `permanent`. `v.permanent` is `/feeds.json`'s
+      // granularity floor: the vendor does not publish this rung and no pull,
+      // entitlement, purchase or code change makes it exist. There is no work
+      // behind that row. On Groww it drew tick, 1 second and 5 seconds dead on
+      // every load — three of eleven rows, permanently, saying nothing that
+      // changes with anything the operator can do.
+      //
+      // Removed at the operator's instruction, 14 Aug 2026, stated twice. The
+      // fact is not lost: the floor is still on `/feeds.json`, the feed's own
+      // caption still names its finest rung, and a feed that DOES serve one
+      // second — TrueData, GDFL — still shows it, because `permanent` is
+      // answered per feed and not per rung. That is the whole of why this is a
+      // filter here and not a deletion from the ladder. D-0137.
+      .filter((row) => !row.disabled);
   });
 
   /**
@@ -1352,7 +1375,12 @@
       if (row.fetches === false) unfetched += 1;
       if (!row.stored) unstored += 1;
     }
-    return { dead, unfetched, unstored, live: RUNGS.length - dead };
+    // `dead` IS NOW ALWAYS ZERO and the field stays, because the two callers
+    // read it to decide whether to say anything at all — and a feed whose floor
+    // this server did not send has `permanent === false` on every row, so the
+    // count is the honest way to ask "were any dropped" rather than an
+    // assumption that none were.
+    return { dead, unfetched, unstored, live: rungRows.length };
   });
 
   /**
@@ -4745,20 +4773,24 @@
                        The ladder is `pull::vendor::Granularity::ALL`, which
                        `api::ingest::parse_granularity` matches by directory
                        name: a rung invented in the browser is refused by name
-                       at the parser. All eleven the server can spell are
-                       already on the list, so nothing is missing to add. -->
+                       at the parser. Nothing is missing to add.
+
+                       WHAT IS DRAWN IS PER FEED, not the whole ladder. A rung
+                       the active vendor does not publish is filtered out —
+                       `rungRows`, D-0137 — because no work closes it. The
+                       rungs that ARE still drawn while refused are the ones a
+                       person could close: unfetched, or unstored. -->
                   <span
                     class="pknote"
                     class:warn={rungsChosen.length === 0}
-                    title="Every rung pull::vendor::Granularity spells is drawn, including the ones that are refused — a rung missing from the list would be indistinguishable from a rung that does not exist. A rung cannot be ADDED from here: parse_granularity matches this exact directory name and refuses anything else, so a rung typed in the browser would be a request the server names as unknown."
+                    title="Every rung THIS FEED can serve is drawn. A rung its vendor does not publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. Rungs this build does not fetch yet, and rungs the store has no directory for, ARE drawn — each names work a person could do. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
                   >
                     {#if rungsChosen.length === 0}
                       no timeframe ticked — nothing below can be counted
                     {:else}
-                      {n(rungsChosen.length)} ticked · {n(rungTally.dead)} of {n(RUNGS.length)}
-                      refused for good by this feed · {n(
-                        rungsChosen.filter((r) => r.stored).length
-                      )} with a store directory · {n(rungsChosen.length)} request(s) per {verb}
+                      {n(rungsChosen.length)} ticked of {n(rungTally.live)} this feed serves ·
+                      {n(rungsChosen.filter((r) => r.stored).length)} with a store directory ·
+                      {n(rungsChosen.length)} request(s) per {verb}
                     {/if}
                   </span>
                   <!-- WHAT THE SERVER DID NOT SAY, SAID. `history[].served` is
