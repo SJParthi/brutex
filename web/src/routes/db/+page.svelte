@@ -834,6 +834,12 @@
       const sole = soleDenom(r);
       const cut = r.instrument.lastIndexOf('-');
       const parts = r.instrument.split('-');
+      // HOISTED, the way `sessions()` above already does it. `barsPerSession`
+      // was called TWICE in each of the two expressions below — once to guard
+      // and once to divide — so the guard narrowed nothing the checker could
+      // follow and the function ran twice per row per render. One call, one
+      // value, and the null-check now provably covers the use.
+      const per = barsPerSession(r.timeframe);
       return {
         ...r,
         // A SEPARATOR THAT CANNOT OCCUR IN THE DATA, WRITTEN AS AN ESCAPE.
@@ -848,7 +854,7 @@
         kind: parts.length > 1 ? parts[1] : '—',
         short,
         days: sessions(r),
-        lost: barsPerSession(r.timeframe) === null ? null : short / barsPerSession(r.timeframe),
+        lost: per === null ? null : short / per,
         // NULL, NOT 100.00%. A ratio against itself is 1 for every row that
         // ever existed; `pctText` draws the dash and every meter beside it is
         // suppressed rather than filled — the rule the Coverage tile already
@@ -908,9 +914,9 @@
               // minute yardstick this function exists to remove. An unknown rung
               // is 'gap' — the state that asks for a re-pull — because a
               // shortfall nobody can size is not a near miss.
-              : barsPerSession(r.timeframe) === null
+              : per === null
                 ? 'gap'
-                : short < barsPerSession(r.timeframe)
+                : short < per
                   ? 'near'
                   : 'gap'
       };
