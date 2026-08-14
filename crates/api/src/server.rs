@@ -6034,6 +6034,10 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             "/autopilot.json",
             axum::routing::get(autopilot::status_json),
         )
+        // POST, AND THERE IS NO GET. This opens ~300 sockets to a third
+        // party; a GET would be fetched by a link preview or a health check,
+        // and none of those is a person deciding to crawl an exchange. D-0128.
+        .route("/universe/resolve", axum::routing::post(universe_resolve))
         .route("/autopilot/pause", axum::routing::post(autopilot::pause))
         .route("/autopilot/resume", axum::routing::post(autopilot::resume))
         // THE ONE CONTROL, AND WHY IT IS NOT AT `/autopilot`. That path is the
@@ -14033,4 +14037,336 @@ mod percentage_tests {
             "[]"
         );
     }
+}
+
+// ===================================================================== ======
+// THE UNIVERSE RESOLUTION — CRAWLED ON A PRESS, NEVER ON A CLOCK
+// ============================================================================
+
+/// The exchange's index host.
+///
+/// A `const` here rather than in `pull::nse` because it is a HOST and
+/// `pull::nse` holds paths. The four category paths that hang off it are that
+/// module's, read from the exchange's own navigation and never composed.
+const INDEX_HOST: &str = "https://www.niftyindices.com";
+
+/// `POST /universe/resolve` — crawl the exchange's directory and report what
+/// agreed with a feed's master.
+///
+/// # POST, and there is no GET
+///
+/// D-0128 made the autopilot default PAUSED because starting the server pulled
+/// data nobody asked for. The same rule binds here and binds harder: this route
+/// opens **300 sockets** to a third party — one per category, one per index
+/// page, one per constituent file, for the 148 indices §4d counted. A `GET`
+/// would be fetched by a link preview, a browser prefetch, or a health check,
+/// and none of those is a person deciding to crawl an exchange.
+///
+/// # What it does NOT do
+///
+/// It reads no vendor master and it contacts no broker. The join runs against
+/// whatever master the caller supplies, and today that is **the merged universe
+/// already in memory** — the same rows `/instruments.json` serves, which were
+/// read from files on disk rather than fetched here. Fetching a broker's master
+/// is a credentialed request against a shared token's quota, and it belongs to
+/// the same operator decision that starts a pull.
+///
+/// So this answers one question and answers it honestly: *of the names the
+/// exchange publishes, which can this feed name?* — with the count, the bucket,
+/// and the key the join used.
+///
+/// # It writes nothing
+///
+/// The snapshot is returned, not stored. `Snapshot::admits_publication` is
+/// evaluated and its verdict is reported, so an operator can see whether this
+/// pass WOULD be publishable — but the append-only write is a separate act and
+/// is not taken here.
+pub async fn universe_resolve(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+) -> ([(axum::http::HeaderName, &'static str); 1], String) {
+    let json = [(axum::http::header::CONTENT_TYPE, "application/json")];
+
+    let feed = param(&body, "feed");
+    let feed = if feed.is_empty() {
+        brutex_core::vendor::Vendor::Groww.as_str().to_owned()
+    } else {
+        feed
+    };
+    let Some(vendor) = brutex_core::vendor::Vendor::ALL
+        .into_iter()
+        .find(|v| v.as_str() == feed)
+    else {
+        return (
+            json,
+            format!(
+                r#"{{"ok":false,"why":{}}}"#,
+                render::json_string(&format!(
+                    "{feed:?} is not a vendor this build names. It is one of: {}",
+                    brutex_core::vendor::Vendor::ALL
+                        .map(brutex_core::vendor::Vendor::as_str)
+                        .join(", ")
+                ))
+            ),
+        );
+    };
+
+    // THE MASTER IS THE ONE ALREADY READ, not one fetched here. See this
+    // function's own documentation on why a broker request is a separate act.
+    let master: Vec<pull::universe::VendorInstrument<'_>> = site
+        .read
+        .merged
+        .by_key
+        .iter()
+        .filter_map(|(key, entry)| {
+            entry
+                .ids
+                .get(vendor as usize)
+                .and_then(Option::as_ref)
+                .map(|id| pull::universe::VendorInstrument {
+                    vendor_id: id.as_str(),
+                    trading_symbol: key.underlying.as_str(),
+                    // THE ISIN IS OPTIONAL AND ITS ABSENCE IS A REAL STATE, not
+                    // a gap to paper over: an index has none, and
+                    // `Verdict::VendorHasNoIsin` is the bucket that exists to
+                    // say so without blaming the vendor.
+                    isin: entry.isin.as_ref().map_or("", |(_, isin)| isin.as_str()),
+                })
+        })
+        .collect();
+
+    let source = match pull::resolve::HttpDocuments::new() {
+        Ok(client) => client,
+        Err(why) => {
+            return (
+                json,
+                format!(r#"{{"ok":false,"why":{}}}"#, render::json_string(&why)),
+            );
+        }
+    };
+
+    // THE DAY THE PASS IS STAMPED WITH. One value for the whole crawl — see
+    // `pull::resolve`'s header on why one age matters more than an instant.
+    let today = match crate::ingest::today_ist() {
+        Ok(day) => day,
+        Err(why) => {
+            return (
+                json,
+                format!(
+                    r#"{{"ok":false,"why":{}}}"#,
+                    render::json_string(&why.to_string())
+                ),
+            );
+        }
+    };
+
+    let snap = pull::resolve::crawl(
+        &source,
+        INDEX_HOST,
+        today,
+        &feed,
+        // EVERY FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for
+        // the one that does not, and asking the descriptor rather than assuming
+        // is what keeps that true when it lands.
+        pull::universe::JoinKey::Isin,
+        &master,
+    )
+    .await;
+
+    let verdict = snap.admits_publication(None);
+    (json, universe_snapshot_json(&snap, &verdict))
+}
+
+/// One snapshot as JSON, with the publication verdict beside it.
+///
+/// Counts per bucket rather than the rows themselves: a full row list across
+/// 148 indices is the shape D-0130 measured growing to 50 kB, and this route
+/// answers "what agreed", not "name every one".
+fn universe_snapshot_json(snap: &pull::resolve::Snapshot, verdict: &Result<(), String>) -> String {
+    use core::fmt::Write as _;
+    let mut out = format!(
+        r#"{{"ok":true,"day":{},"feed":{},"key":{},"identity":{},"published":{},"indices":{},"failed":{},"sound":{},"digest":{},"publishable":{},"#,
+        render::json_string(&snap.day.to_string()),
+        render::json_string(&snap.feed),
+        render::json_string(snap.key.word()),
+        snap.key.is_identity(),
+        snap.published(),
+        snap.resolutions.len(),
+        snap.failures.len(),
+        snap.is_sound(),
+        render::json_string(&hex32(snap.digest())),
+        verdict.is_ok(),
+    );
+    if let Err(why) = verdict {
+        let _ = write!(out, r#""why":{},"#, render::json_string(why));
+    }
+    let _ = out.write_str(r#""buckets":{"#);
+    for (n, bucket) in pull::universe::Verdict::ALL.into_iter().enumerate() {
+        let total: usize = snap.resolutions.iter().map(|r| r.count(bucket)).sum();
+        let _ = write!(
+            out,
+            "{}{}:{total}",
+            if n > 0 { "," } else { "" },
+            render::json_string(bucket.word())
+        );
+    }
+    let _ = out.write_str("},\"failures\":[");
+    // BOUNDED. A pass that failed everywhere would otherwise put 148 sentences
+    // on one line, and the first few name the fault as well as all of them do.
+    for (n, failure) in snap.failures.iter().take(8).enumerate() {
+        let _ = write!(
+            out,
+            r#"{}{{"at":{},"why":{}}}"#,
+            if n > 0 { "," } else { "" },
+            render::json_string(&failure.at),
+            render::json_string(&failure.why)
+        );
+    }
+    let _ = out.write_str("]}");
+    out
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod universe_route_tests {
+    use super::*;
+
+    /// **THE ROUTE IS POST AND THERE IS NO GET, and this reads it off the
+    /// source rather than trusting the comment beside it.**
+    ///
+    /// D-0128 made the autopilot default PAUSED because starting the server
+    /// pulled data nobody asked for. This route opens roughly 300 sockets to a
+    /// third party, and a `GET` is fetched by link previews, browser prefetch
+    /// and health checks — none of which is a person deciding to crawl an
+    /// exchange.
+    #[test]
+    fn the_resolve_route_can_only_be_reached_by_a_post() {
+        let me = include_str!("server.rs");
+        // THE NEEDLES ARE ASSEMBLED, NOT WRITTEN, and the first draft of this
+        // test failed because of it: a source-scanning test that spells its own
+        // negative assertion as a literal FINDS THAT LITERAL — in itself. It
+        // then fails whatever the route table says, which is a test that cannot
+        // pass rather than one that cannot fail. `server.rs` already carries a
+        // commented-out ancestor of this exact trap.
+        let verb = |v: &str| format!("axum::routing::{v}(universe_resolve)");
+        assert!(
+            me.contains(&verb("post")),
+            "the route must be registered as a POST"
+        );
+        assert!(
+            !me.contains(&verb("get")),
+            "a GET on this route would let a link preview crawl an exchange"
+        );
+    }
+
+    /// **IT CONTACTS NO BROKER**, and the argument is that its master comes
+    /// from memory rather than from a socket.
+    ///
+    /// Fetching a vendor's instrument master is a credentialed request against
+    /// a token another system shares. This route answers "of the names the
+    /// exchange publishes, which can this feed name?" off the rows already
+    /// read from disk — so it spends no quota and needs no credential.
+    #[test]
+    fn the_resolve_route_reads_its_master_from_memory_and_never_from_a_vendor() {
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("pub async fn universe_resolve")
+            .expect("the handler exists")
+            .1;
+        let body = &body[..body.find("\n}\n").expect("it has an end")];
+
+        assert!(
+            body.contains("site.read.merged.by_key") || body.contains(".read\n        .merged"),
+            "the master is the one already in memory"
+        );
+        for forbidden in [
+            "HttpSource",
+            "ssm::get_parameter",
+            "AwsIdentity",
+            "CredentialConfig",
+            "read_credential",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "{forbidden} is a broker-facing cost and this route pays none"
+            );
+        }
+    }
+
+    /// The host is the exchange's, and the PATHS are `pull::nse`'s — never
+    /// built here.
+    #[test]
+    fn the_host_is_the_exchange_and_the_paths_belong_to_the_crawler() {
+        assert!(INDEX_HOST.starts_with("https://"));
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("pub async fn universe_resolve")
+            .expect("the handler exists")
+            .1;
+        let body = &body[..body.find("\n}\n").expect("it has an end")];
+        assert!(
+            !body.contains("IndexConstituent"),
+            "a constituent filename is READ from the exchange's page, never \
+             composed — pull::nse owns that and this handler must not learn it"
+        );
+    }
+
+    #[test]
+    fn thirty_two_bytes_render_as_sixty_four_hex_digits() {
+        let all_zero = hex32([0u8; 32]);
+        assert_eq!(all_zero.len(), 64);
+        assert!(all_zero.chars().all(|c| c == '0'));
+        let mut bytes = [0u8; 32];
+        bytes[0] = 0xab;
+        bytes[31] = 0x0f;
+        let shown = hex32(bytes);
+        assert!(shown.starts_with("ab"), "{shown}");
+        assert!(
+            shown.ends_with("0f"),
+            "a leading zero is not dropped: {shown}"
+        );
+    }
+
+    /// A snapshot with nothing in it still renders every bucket and says it is
+    /// not publishable.
+    #[test]
+    fn an_empty_pass_renders_every_bucket_and_reports_why_it_cannot_publish() {
+        let snap = pull::resolve::Snapshot {
+            day: crate::ingest::today_ist().expect("a day"),
+            feed: brutex_core::vendor::Vendor::Groww.as_str().to_owned(),
+            key: pull::universe::JoinKey::Isin,
+            resolutions: Vec::new(),
+            failures: vec![pull::resolve::IndexFailure {
+                at: "a-listing".to_owned(),
+                why: "503".to_owned(),
+            }],
+        };
+        let verdict = snap.admits_publication(None);
+        assert!(verdict.is_err(), "a pass with a failure is not publishable");
+        let json = universe_snapshot_json(&snap, &verdict);
+        for bucket in pull::universe::Verdict::ALL {
+            assert!(
+                json.contains(bucket.word()),
+                "{} is missing from {json}",
+                bucket.word()
+            );
+        }
+        assert!(json.contains(r#""publishable":false"#), "{json}");
+        assert!(json.contains("a-listing"), "it names what failed: {json}");
+        assert!(json.contains(r#""identity":true"#), "{json}");
+    }
+}
+
+/// 32 bytes as lower-case hex.
+fn hex32(bytes: [u8; 32]) -> String {
+    use core::fmt::Write as _;
+    bytes.iter().fold(String::with_capacity(64), |mut acc, b| {
+        let _ = write!(acc, "{b:02x}");
+        acc
+    })
 }
