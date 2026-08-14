@@ -386,6 +386,81 @@ mod tests {
         assert!(!out.sweep.levels.is_empty());
     }
 
+    /// This crate cannot read a bar, and that is checked rather than promised.
+    ///
+    /// # Why this test exists and why it is structural
+    ///
+    /// CI gate 22 pins `vocab`, `indicators` and `engine` to a `vocab`-only
+    /// dependency set and forbids any filesystem call site in their `src/` or
+    /// `benches/`. **`crates/runner` is not on that list**, and it cannot be:
+    /// gate 22 is what stops `indicators` and `engine` naming each other, so the
+    /// crate that joins them has to sit outside it. That leaves exactly one crate
+    /// in the sweep chain whose purity is not welded shut by CI.
+    ///
+    /// The operator's rule is absolute — no vendor pull, no ingest, and not the
+    /// bars already on disk either — so "I inspected it" is not a good enough
+    /// guarantee for the one unguarded link. This runs under `cargo test`, needs
+    /// no workflow change, and fails the moment a filesystem call appears here.
+    ///
+    /// The probe list is gate 22 clause B's own, plus the embedding macro and the
+    /// path and environment types a reader would need before it could name a file
+    /// at all.
+    ///
+    /// **Every needle is assembled from fragments, and the first draft was not.**
+    /// It spelled three of them literally and the test refused its own source —
+    /// which is the right failure and the fourth time this workspace has met it:
+    /// gate 17 refused a comment describing gate 17, gate 22 clause A read a
+    /// comment as a dependency table, and `core`'s float scanner read a hex digest
+    /// as a type name. A guard that reads text must never spell what it hunts.
+    #[test]
+    fn this_crate_cannot_open_a_file_and_cannot_name_the_store() {
+        let banned: [&str; 16] = [
+            concat!("Fi", "le::open"),
+            concat!("Fi", "le::create"),
+            concat!("Open", "Options"),
+            concat!("f", "s::read"),
+            concat!("f", "s::write"),
+            concat!("st", "d::fs"),
+            concat!("read", "_dir"),
+            concat!("Mmap", "Options"),
+            concat!("mem", "map"),
+            concat!("include_", "bytes!"),
+            concat!("Comm", "and::new"),
+            concat!("proce", "ss::Command"),
+            concat!("st", "d::os::"),
+            concat!("lib", "c::"),
+            concat!("Path", "Buf"),
+            concat!("en", "v::var"),
+        ];
+        let sources = [
+            ("lib.rs", include_str!("lib.rs")),
+            ("synthetic.rs", include_str!("synthetic.rs")),
+        ];
+        for (name, src) in sources {
+            for needle in banned {
+                assert!(
+                    !src.contains(needle),
+                    "crates/runner/src/{name} contains `{needle}`. This crate is the \
+                     one link in the sweep chain gate 22 does not guard, and the \
+                     operator's rule is that neither a pull nor a stored bar may \
+                     ever reach it. Every candle here comes from `synthetic::bar`, \
+                     which is arithmetic on two integers."
+                );
+            }
+        }
+
+        // And the dependency set, exactly — the same argument gate 22 clause A
+        // makes: a crate that cannot NAME a bar reader cannot call one.
+        let manifest = include_str!("../Cargo.toml");
+        for forbidden in ["store", "pull", "reqwest", "telemetry"] {
+            assert!(
+                !manifest.contains(&format!("\n{forbidden} ")),
+                "crates/runner must not depend on `{forbidden}` -- that is how a \
+                 stored bar would reach the sweep"
+            );
+        }
+    }
+
     #[test]
     fn is_complete_needs_all_three_conditions() {
         // The negative case, so the conjunction cannot rot into a constant.
