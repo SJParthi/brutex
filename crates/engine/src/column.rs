@@ -48,7 +48,11 @@ const BARS_PER_WORD: usize = 64;
 /// the lowest set bit each step, so it costs one iteration per SET bit rather than
 /// one per possible bit. It lives here rather than in `crates/vocab` because
 /// `words()` is already public and this needs no new API surface there.
-pub(crate) fn set_positions(mask: &ConditionMask) -> impl Iterator<Item = u32> {
+/// Made `pub` so `crates/runner` can walk a mask's set bits without the 384
+/// probes a `get`-loop would cost. It reads no bar and touches no filesystem, so
+/// gate 22 is unaffected: the boundary that gate defends is what this crate may
+/// DEPEND on, not what it may expose.
+pub fn set_positions(mask: &ConditionMask) -> impl Iterator<Item = u32> {
     mask.words()
         .into_iter()
         .enumerate()

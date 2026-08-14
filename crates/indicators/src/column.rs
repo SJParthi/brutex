@@ -199,6 +199,17 @@ impl Census {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Column {
     bits: Vec<ConditionMask>,
+    /// The caller-slice index each entry in `bits` came from.
+    ///
+    /// Parallel to `bits`, and the ONLY honest way to map a column position
+    /// back to a bar. `first_swept + j` is not that map: a refusal can occur
+    /// anywhere mid-stream, so the two run out of step from the first corrupt
+    /// bar onward. Anything that pairs a signal with what happened AFTER it --
+    /// a forward return, a trade outcome -- would then be reading the wrong
+    /// bar's future, silently and only on data that contains a refusal.
+    ///
+    /// Eight bytes per swept bar, which is the honest cost of that map.
+    source: Vec<usize>,
     census: Census,
     first_swept: Option<usize>,
 }
@@ -228,6 +239,7 @@ impl Column {
         let mut bits = Vec::with_capacity(bars.len());
         let mut census = Census::default();
         let mut first_swept = None;
+        let mut source: Vec<usize> = Vec::with_capacity(bars.len());
 
         for (index, bar) in bars.iter().enumerate() {
             census.offered = census.offered.saturating_add(1);
@@ -246,6 +258,7 @@ impl Column {
                             first_swept = Some(index);
                         }
                         bits.push(mask);
+                        source.push(index);
                         census.swept = census.swept.saturating_add(1);
                     } else {
                         census.warming = census.warming.saturating_add(1);
@@ -259,9 +272,23 @@ impl Column {
 
         Self {
             bits,
+            source,
             census,
             first_swept,
         }
+    }
+
+    /// The caller-slice index of each swept bar, parallel to [`Self::bits`].
+    ///
+    /// `sources()[j]` is the index, in the slice handed to [`Self::build`], of
+    /// the bar whose mask is `bits()[j]`. A caller pairing a signal with what
+    /// followed it MUST go through this rather than assuming
+    /// `first_swept() + j`: refusals are counted, not removed from the middle,
+    /// so the two diverge from the first corrupt bar and every outcome after it
+    /// would be read off the wrong bar.
+    #[must_use]
+    pub fn sources(&self) -> &[usize] {
+        &self.source
     }
 
     /// The column, as `engine::Ladder::walk` wants it.
@@ -375,6 +402,70 @@ mod tests {
     /// A run long enough that the column is non-empty.
     fn warm_run() -> Vec<Candle> {
         run(WARM_SESSIONS)
+    }
+
+    /// `sources()` is the only honest map from a column position to a bar.
+    ///
+    /// # Why `first_swept() + j` is not that map
+    ///
+    /// Refusals are COUNTED, not removed from the middle of the stream. So the
+    /// moment one bar is refused, the naive offset runs one behind and stays
+    /// there. Nothing in a sweep notices — the masks are all correct — but a
+    /// caller pairing a signal with what happened AFTER it would read every
+    /// outcome from the wrong bar, silently, and only on data that contains a
+    /// refusal. That is the shape of every defect an audit found today.
+    #[test]
+    fn sources_maps_a_column_position_to_its_bar_even_across_a_refusal() {
+        let mut bars = run(8);
+        // Corrupt one bar deep inside the swept region: high below low.
+        let victim = bars.len() - 20;
+        if let Some(b) = bars.get_mut(victim) {
+            *b = Candle::new(
+                b.ts_micros,
+                b.open,
+                b.low - 100,
+                b.high,
+                b.close,
+                1,
+                OI_NULL,
+            );
+        }
+        let column = Column::build(&bars, &mut evaluator(Availability::Absent));
+
+        assert_eq!(
+            column.census().high_below_low,
+            1,
+            "the fixture must actually contain a refusal, or this proves nothing"
+        );
+        assert_eq!(
+            column.sources().len(),
+            column.bits().len(),
+            "the map must be parallel to the column"
+        );
+
+        // Every source index is strictly increasing and points at a real bar.
+        let mut previous: Option<usize> = None;
+        for &s in column.sources() {
+            assert!(s < bars.len(), "source {s} is past the end of the input");
+            if let Some(p) = previous {
+                assert!(s > p, "sources must ascend: {p} then {s}");
+            }
+            previous = Some(s);
+        }
+
+        // AND THE NAIVE OFFSET IS WRONG, which is the whole reason this exists.
+        let first = column.first_swept().expect("the run warms up");
+        let naive_agrees = column
+            .sources()
+            .iter()
+            .enumerate()
+            .all(|(j, &s)| s == first.saturating_add(j));
+        assert!(
+            !naive_agrees,
+            "with a refusal inside the swept region, `first_swept + j` MUST \
+             diverge from the real bar index -- if it agrees here the fixture \
+             is not exercising the case this map was added for"
+        );
     }
 
     #[test]
