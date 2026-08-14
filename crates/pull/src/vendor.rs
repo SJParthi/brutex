@@ -4038,6 +4038,52 @@ const TRUEDATA_INDEX: ColumnLayout = ColumnLayout {
     shape: Columns::TrueDataIndex,
 };
 
+/// `TrueData`'s F&O layout: `20221003,09:15:01,0.95,1,518600`.
+///
+/// # The same five fields as the index, and two of them mean something here
+///
+/// [`TRUEDATA_INDEX`] maps the trailing pair to [`Column::Ignored`] because an
+/// index has neither a volume nor an open interest and the vendor writes `0,0`
+/// there. A contract has both, and the observed row above carries them:
+/// one lot traded at 0.95 against an open interest of 518,600. Reading those two
+/// as `Ignored` would silently discard the only two fields that distinguish a
+/// derivative row from an index row, and `i64::MIN` is the open-interest null —
+/// so an ignored column is not "zero", it is *never written*.
+///
+/// The physical shape is unchanged, which is why both layouts name
+/// [`Columns::TrueDataIndex`]: five fields, no header, `YYYYMMDD`. [`Columns`]
+/// is what a row LOOKS like and [`ColumnLayout`] is what its columns MEAN, and
+/// this pair is the reason those are two types.
+///
+/// # Why this one and not the nine-column one
+///
+/// The vendor sells two products and this repository can declare one layout per
+/// segment — [`Descriptor::layout`] finds by [`Segment`]. The nine-column
+/// product is `TICK_BA`, whose header the vendor states as *"YMD (YYYYMMDD),
+/// Time (HH:MM:SS), LTP, Volume, Open Interest, Bid, Bid Qty, Ask, Ask Qty"*;
+/// [`Columns::TrueDataFutures`] is that shape and it is **not** declared here,
+/// because the archive actually on this operator's disk is the plain one and a
+/// descriptor that named the wrong product would decode every row at the wrong
+/// offset while looking like it worked. A folder of `TICK_BA` files is a
+/// different `ColumnLayout` on the day one is measured, not a guess today.
+///
+/// **Source.** The row above, read off `NSE_OPT_TICK_20221003/
+/// NIFTY22100614400PE.csv` by the operator on 14 Aug 2026; and `TrueData`
+/// Support, 30 Jul 2026, stating the header of the tick product without bid and
+/// ask as *"YMD (YYYYMMDD), Time (HH:MM: SS), Close, Volume, Open Interest"*.
+/// Two independent statements of one shape — `CLAUDE.md` §3 rule 1.
+const TRUEDATA_FNO: ColumnLayout = ColumnLayout {
+    segment: Segment::Fno,
+    columns: &[
+        Column::Date,
+        Column::Time,
+        Column::LastPrice,
+        Column::Volume,
+        Column::OpenInterest,
+    ],
+    shape: Columns::TrueDataIndex,
+};
+
 const TRUE_DATA: Descriptor = Descriptor {
     // UNMEASURED, AND DECLARED AS THE SESSION BAR BECAUSE THAT IS WHAT AN
     // ARCHIVE FILE HOLDS. This feed is a local folder of vendor files, not an
@@ -4067,17 +4113,49 @@ const TRUE_DATA: Descriptor = Descriptor {
         segment_tokens: &[(Segment::Index, "IDX")],
         header: HeaderRow::Absent,
         delimiter: b',',
-        // ONLY the index layout ships. The futures archives were measured at
-        // NINE columns and their column MEANINGS were never established, so
-        // there is no row for them: an unmeasured segment refuses by name
-        // rather than being decoded against a layout somebody guessed.
-        layouts: &[TRUEDATA_INDEX],
+        // THE F&O LAYOUT NOW SHIPS, AND THE ARCHIVE NAME IS WHAT STILL DOES
+        // NOT.
+        //
+        // This read "only the index layout ships … their column MEANINGS were
+        // never established". That was true of the NINE-column `TICK_BA`
+        // product and it was never true of the plain one, which is what the
+        // operator actually bought: `20221003,09:15:01,0.95,1,518600` — the
+        // same five fields as the index, with the trailing pair carrying a real
+        // volume and a real open interest instead of the index's `0,0`. See
+        // [`TRUEDATA_FNO`] for the measurement and both sources.
+        //
+        // So the file can be DECODED. What it cannot yet be is FOUND:
+        // `segment_tokens` below carries one token per segment and this vendor
+        // names its F&O archives `NSE_FUT_TICK_` and `NSE_OPT_TICK_` — two
+        // names under one `Segment::Fno`. `segment_token` answers with the
+        // FIRST match, so a single token would look up futures in the options
+        // archive half the time. The layout is declared because it is measured;
+        // the segment stays out of `segments` below because naming the archive
+        // is a structural gap, not a guess this row may make.
+        layouts: &[TRUEDATA_INDEX, TRUEDATA_FNO],
         date_format: DateFormat::CompactYmd,
         prices: PriceScale::Rupees,
     }),
+    // ONE INPUT, THREE FOLDS — and the rung says what gets FILED, never what
+    // gets fetched.
+    //
+    // `api::ingest::SpotRequest::granularity` is documented as "which rung of
+    // the ladder to file under", and for an archive that is the whole of what it
+    // decides: the input is fixed at one second, so a coarser rung is a fold
+    // width and nothing else. `crate::ingest` takes that width straight off the
+    // store timeframe — `Bucket::of_secs(timeframe.secs())` — and
+    // `Timeframe::DAY_1.secs()` is 86,400, one bucket per IST day.
+    //
+    // `Day1` was missing while `crate::fold` has never cared about the width,
+    // so `served()` refused a daily read of a folder this build can fold to
+    // days. `Second1` stays declared even though `store_timeframe` has nowhere
+    // to file it: that refusal belongs to the WRITE boundary, which names it,
+    // and withholding the rung here would refuse it for the wrong reason.
+    // D-0141.
     granularities: GranularitySet::EMPTY
         .with(Granularity::Second1)
-        .with(Granularity::Minute1),
+        .with(Granularity::Minute1)
+        .with(Granularity::Day1),
     // EMPTY, AND THAT IS THE FACT. An archive's reach is whatever the operator
     // bought and put in the folder; no vendor page states a floor for a
     // directory on this machine, and this repository will not derive one by
@@ -4140,7 +4218,17 @@ const GDFL: Descriptor = Descriptor {
         date_format: DateFormat::SlashedDmy,
         prices: PriceScale::Rupees,
     }),
-    granularities: GranularitySet::EMPTY.with(Granularity::Second1),
+    // AS THE ARCHIVE ABOVE: one input, and the rung says what is FILED.
+    //
+    // This declared `Second1` alone, so `served()` refused both a minute and a
+    // day of a folder `crate::fold` folds to either from the same bytes. The
+    // fold width comes off the store timeframe and nothing about it is
+    // vendor-specific — a folder of one-second snapshots is a folder of
+    // one-second snapshots whichever of the two archives wrote it. D-0141.
+    granularities: GranularitySet::EMPTY
+        .with(Granularity::Second1)
+        .with(Granularity::Minute1)
+        .with(Granularity::Day1),
     // Empty for the reason the archive above is empty.
     history: &[],
     granularity_floor: GDFL_FLOOR,
@@ -5853,8 +5941,52 @@ mod tests {
             !Feed::Dhan.serves(Granularity::Minute5),
             "an unserved rung refuses by name; the wider ladder was never read live"
         );
-        assert!(Feed::Gdfl.serves(Granularity::Second1));
-        assert!(!Feed::Gdfl.serves(Granularity::Minute1));
+        // AN ARCHIVE SERVES EVERY RUNG ITS INPUT CAN BE FOLDED INTO, AND THAT
+        // IS A DIFFERENT RULE FROM THE BROKER ONE ABOVE.
+        //
+        // Dhan refuses `Minute1` because a REST row's rung is a PROPERTY OF THE
+        // REQUEST — one `bars_path`, one endpoint, and asking for another rung
+        // fetches the wrong bar length under the name you asked for. Nothing
+        // about a folder works that way. The input is fixed at one second and
+        // the rung decides only the FOLD WIDTH, which `crate::ingest` takes
+        // straight off the store timeframe: `Bucket::of_secs(timeframe.secs())`.
+        // `crate::fold` has never cared what that width is.
+        //
+        // So `!Gdfl.serves(Minute1)` was pinning an absence with no reason
+        // behind it: it made `served()` refuse a minute read of a folder this
+        // build folds to minutes from the same bytes. Both archives now declare
+        // the three rungs `store::path::Timeframe` and the fold can between
+        // them, and the rule is asserted rather than the old absence. D-0141.
+        for archive in [Feed::TrueData, Feed::Gdfl] {
+            assert_eq!(
+                archive.source_kind(),
+                SourceKind::Folder,
+                "the rule below is about folders, so this is what selects them"
+            );
+            assert!(
+                archive.serves(Granularity::Second1),
+                "{archive} reads one-second files, so it serves the rung it IS"
+            );
+            for folded in [Granularity::Minute1, Granularity::Day1] {
+                assert!(
+                    archive.serves(folded),
+                    "{archive} can fold its one-second input into {folded}, so \
+                     served() must not refuse it"
+                );
+                assert!(
+                    folded.store_timeframe().is_some(),
+                    "and a rung an archive is asked to FILE must have somewhere \
+                     to go — otherwise this declaration promises a write the \
+                     store cannot make"
+                );
+            }
+        }
+        assert!(
+            Granularity::Second1.store_timeframe().is_none(),
+            "the one rung both archives serve and NEITHER can file: that \
+             refusal belongs to the write boundary, which names it, and is why \
+             `serves` and `store_timeframe` are two questions"
+        );
     }
 
     /// The HTTP half of a transport, or [`None`] for an archive.
@@ -6104,13 +6236,41 @@ mod tests {
             5,
             "five columns, measured not documented"
         );
+        // THE F&O LAYOUT IS MEASURED NOW, AND IT ASSERTS THE RULE RATHER THAN
+        // THE ABSENCE.
+        //
+        // This asserted `None` on the ground that "the futures archives were
+        // measured at nine columns and their MEANINGS were never established".
+        // That was true of the NINE-column `TICK_BA` product and never true of
+        // the plain one: `20221003,09:15:01,0.95,1,518600` is five fields, the
+        // same shape as the index, with a real volume and a real open interest
+        // where the index writes `0,0`. Measured by the operator on his own
+        // file, 14 Aug 2026, and stated independently by the vendor.
+        //
+        // What the original test was FOR is unchanged and is asserted below on
+        // `Cash`, which nobody has measured: a segment with no layout refuses
+        // rather than being decoded against a guess.
+        let fno = truedata
+            .layout(Segment::Fno)
+            .expect("the plain F&O layout was measured");
+        assert_eq!(fno.segment, Segment::Fno);
+        assert_eq!(fno.columns.len(), 5, "five fields, as the index");
         assert_eq!(
-            truedata.layout(Segment::Fno),
-            None,
-            "the futures archives were measured at nine columns and their \
-             MEANINGS were never established — a missing layout refuses"
+            fno.shape, index.shape,
+            "one PHYSICAL shape, two MEANINGS — which is why Columns and \
+             ColumnLayout are two types"
         );
-        assert_eq!(truedata.layout(Segment::Cash), None);
+        assert!(
+            fno.columns.contains(&Column::Volume) && fno.columns.contains(&Column::OpenInterest),
+            "the trailing pair is what distinguishes a contract row from an \
+             index row, and reading it as Ignored would discard both"
+        );
+        assert_eq!(
+            truedata.layout(Segment::Cash),
+            None,
+            "nobody measured a cash archive for this vendor — a segment with \
+             no layout refuses by name rather than borrowing another's"
+        );
 
         let fno = gdfl
             .layout(Segment::Fno)

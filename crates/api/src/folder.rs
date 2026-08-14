@@ -512,14 +512,34 @@ mod tests {
     /// layout needs no segment parameter; there is nothing to disambiguate.
     #[test]
     fn the_shape_is_the_descriptors_and_a_single_layout_needs_no_segment() {
-        assert_eq!(shape_of(Feed::TrueData, ""), Ok(Columns::TrueDataIndex));
         assert_eq!(shape_of(Feed::Gdfl, ""), Ok(Columns::Gdfl));
-        // And named explicitly, the same answer.
+        assert_eq!(shape_of(Feed::Gdfl, "FNO"), Ok(Columns::Gdfl));
+        // NAMED EXPLICITLY, BOTH OF TRUEDATA'S. It had one measured layout and
+        // now has two, so the unnamed case is the assertion below and not this
+        // one — see that test for why the ambiguity must refuse.
         assert_eq!(
             shape_of(Feed::TrueData, "INDEX"),
             Ok(Columns::TrueDataIndex)
         );
-        assert_eq!(shape_of(Feed::Gdfl, "FNO"), Ok(Columns::Gdfl));
+        assert_eq!(shape_of(Feed::TrueData, "FNO"), Ok(Columns::TrueDataIndex));
+    }
+
+    /// TWO MEASURED LAYOUTS AND NO SEGMENT REFUSES, AND IT NAMES BOTH.
+    ///
+    /// `TrueData` had one layout, so an unnamed segment could only mean that
+    /// one. It has two since its plain F&O row was measured, and the two share
+    /// a physical `Columns` shape while meaning different things: five fields
+    /// where the index's trailing pair is `Ignored` and the contract's is a
+    /// real volume and open interest. Taking the first would read every
+    /// contract's volume and open interest as absent and look like it worked —
+    /// a precise and wrong answer, which is what this route refuses.
+    #[test]
+    fn two_measured_layouts_and_no_segment_refuses_and_names_both() {
+        let why = shape_of(Feed::TrueData, "")
+            .expect_err("two layouts and no segment cannot be resolved");
+        assert!(why.contains('2'), "it must say how many: {why}");
+        assert!(why.contains("INDEX"), "{why}");
+        assert!(why.contains("FNO"), "it must list what IS measured: {why}");
     }
 
     /// AN UNMEASURED SEGMENT REFUSES BY NAME rather than borrowing the other
@@ -530,8 +550,11 @@ mod tests {
         let why = shape_of(Feed::Gdfl, "INDEX").expect_err("no index layout was ever measured");
         assert!(why.contains("INDEX"), "{why}");
         assert!(why.contains("FNO"), "it must say what IS measured: {why}");
-        let why = shape_of(Feed::TrueData, "FNO").expect_err("no FNO layout was ever measured");
-        assert!(why.contains("INDEX"), "{why}");
+        // CASH IS THE ONE NOBODY MEASURED FOR EITHER VENDOR, and it is what
+        // this test is for now that TrueData's F&O layout exists.
+        let why = shape_of(Feed::TrueData, "CASH").expect_err("no cash layout was ever measured");
+        assert!(why.contains("CASH"), "{why}");
+        assert!(why.contains("INDEX"), "it must say what IS measured: {why}");
     }
 
     /// A SEGMENT THAT IS NOT ONE refuses with the three that are.

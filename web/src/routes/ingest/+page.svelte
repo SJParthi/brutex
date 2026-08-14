@@ -1093,7 +1093,25 @@
     if (untrack(() => folderReach.wire === wire && folderReach.state !== 'idle')) return;
     let live = true;
     folderReach = { wire, state: 'reading', body: null, why: null };
-    fetch(`/folder.json?feed=${encodeURIComponent(wire)}`)
+    // `&segment=INDEX`, AND THE PARAMETER IS NOT OPTIONAL ANY MORE.
+    //
+    // `/folder.json` reads the folder with ONE column layout, and it refuses to
+    // pick one when a feed declares more than one — "a reach read with the
+    // wrong shape is a precise and wrong answer". TrueData declared a single
+    // layout until its plain F&O row was measured, so an unnamed segment used
+    // to be unambiguous and now is not: both of its layouts are five fields,
+    // and the index's trailing pair is `Ignored` where a contract's is a real
+    // volume and open interest. Reading contracts against the index layout
+    // would report every one of them as having neither, and it would look like
+    // it worked.
+    //
+    // INDEX because that is the segment this engine sweeps — `CLAUDE.md` §1
+    // names NSE-NIFTY and NSE-BANKNIFTY and nothing else — so it is the folder
+    // an operator on this page is asking about. The census below says which
+    // segment it counted rather than implying it counted the folder whole; the
+    // route takes any segment the vendor has measured, so an F&O census is a
+    // control this page does not have yet rather than an answer it cannot get.
+    fetch(`/folder.json?feed=${encodeURIComponent(wire)}&segment=INDEX`)
       .then(async (r) => ({ ok: r.ok, data: await r.json() }))
       .then(({ ok, data }) => {
         if (!live) return;
@@ -4847,7 +4865,7 @@
                       >
                         {n(c.files)} file(s) · {n(c.rows)} row(s) · {dayLabel(c.earliest)} – {dayLabel(
                           c.latest
-                        )} — this feed's universe is the folder, read from it
+                        )} — the INDEX archive, read from the folder
                       </span>
                     {:else if c.state === 'blank'}
                       <span class="pknote wrap warn">
