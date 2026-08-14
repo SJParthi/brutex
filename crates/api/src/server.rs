@@ -8246,15 +8246,21 @@ mod tests {
     fn an_unreadable_row_says_why_and_where_rather_than_only_how_many() {
         // The line numbers and reasons were collected and then read only for
         // `.len()`, so `104 unreadable` was the whole of what an operator was
-        // ever told. `NIFTY 100` is a real Dhan index ticker -- a space is not
-        // a legal Symbol -- and 104 rows of the real master are exactly that.
+        // ever told.
+        // The fixture used to be `NIFTY 100` and `NIFTY 200`, chosen because a
+        // space was not a legal Symbol and 104 rows of the real master were
+        // exactly that shape. D-0147 made those rows READABLE -- an index name
+        // is normalised to the exchange's canonical ticker -- so they are no
+        // longer an example of anything unreadable. A period still is: the
+        // allowlist is `A-Z 0-9 - _ &` and nothing else, and confining the
+        // collapse to spaces is what keeps that true.
         let dir = masters(
             "unreadable",
             Some(&format!(
                 "{GROWW_HEAD}\
                  NSE,CASH,,RELIANCE,EQ,EQ,INE002A01018,,,NSE-RELIANCE\n\
-                 NSE,CASH,,NIFTY 100,IDX,,NIFTY,,\n\
-                 NSE,CASH,,NIFTY 200,IDX,,NIFTY,,\n"
+                 NSE,CASH,,NIFTY.100,IDX,,NIFTY,,\n\
+                 NSE,CASH,,NIFTY.200,IDX,,NIFTY,,\n"
             )),
             None,
         );

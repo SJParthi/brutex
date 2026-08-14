@@ -802,10 +802,15 @@ mod tests {
     #[test]
     fn unreadable_rows_are_grouped_by_reason_with_the_first_line_that_hit_it() {
         // `errors` was allocated, formatted and read only for `.len()`, so an
-        // operator was told `104 unreadable` and nothing else. `NIFTY 100` is
-        // a real Dhan index ticker; a space is not a legal Symbol, and 104
-        // rows of the real master are exactly that shape.
-        let body = "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,expiry_date,strike_price,groww_symbol\nNSE,CASH,,NIFTY 100,IDX,,NIFTY,,,NSE-X\nNSE,CASH\nNSE,CASH,,NIFTY 200,IDX,,NIFTY,,,NSE-X\n";
+        // operator was told `104 unreadable` and nothing else.
+        // The fixture used to be `NIFTY 100` and `NIFTY 200`, chosen because a
+        // space was not a legal Symbol and 104 rows of the real master were
+        // exactly that shape. D-0147 made those rows READABLE -- an index name
+        // is normalised to the exchange's canonical ticker -- so they are no
+        // longer an example of anything unreadable. A period still is: the
+        // allowlist is `A-Z 0-9 - _ &` and nothing else, and confining the
+        // collapse to spaces is what keeps that true.
+        let body = "exchange,segment,underlying_symbol,trading_symbol,instrument_type,series,isin,expiry_date,strike_price,groww_symbol\nNSE,CASH,,NIFTY.100,IDX,,NIFTY,,,NSE-X\nNSE,CASH\nNSE,CASH,,NIFTY.200,IDX,,NIFTY,,,NSE-X\n";
         let got = load(&tmp("grouped", body), Vendor::Groww).expect("loads");
         let by = got.errors_by_reason();
         assert_eq!(by.len(), 2, "two distinct reasons: {by:?}");

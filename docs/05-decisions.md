@@ -13819,11 +13819,28 @@ The two collisions were `FUTURE ENTERPRISES LTD` (`INE623B01027` and
 LIMITED` (`INE224E01028` and `INE224E01036`). Both are genuinely two securities
 sharing one company name, and both are distinct by ISIN.
 
-**So the duplicates were made here, not found here.** There is no duplicate ISIN
-anywhere in either vendor's file — the join key is sound. Every duplicate in the
-kept set came from keying an instrument by a name instead of a ticker, and the
-same mistake made this vendor's rows fail to line up with the other's on any
-join that is not the ISIN.
+**Correction, entered the same day this was written.** The paragraph here first
+said the mis-mapped column "manufactured the only duplicate symbols in the kept
+set". **That was overstated and is withdrawn.** The row decoder in
+`crates/core/src/vendor.rs` prefers `row.underlying` and falls back to
+`row.trading_symbol` only when the underlying is empty — a comment there already
+records that this vendor's `SYMBOL_NAME` is a company name and that reading it
+"refused almost the entire vendor". This vendor's `underlying` is populated on
+every equity row, so `Symbol::new` was ALREADY receiving `UNDERLYING_SYMBOL`,
+and the merged instrument view shows **zero duplicate canonical keys** across
+its 785 rows.
+
+What the mis-mapping actually cost was narrower, and the fix is still right:
+`trading_symbol` fed the `TEST_MARKERS` scan and the row-width diagnostics, so
+this vendor was having a COMPANY NAME scanned for exchange test markers. Measured
+after the change: all 41 test instruments carry the marker in both columns, so
+**nothing was lost and nothing was gained** — the detection was never relying on
+it. The change's value is that the declared column now matches what its name
+says, which removes a trap for the next reader who reaches for `trading_symbol`
+expecting a ticker.
+
+There is no duplicate ISIN anywhere in either vendor's file, and no duplicate
+symbol in the kept set after the change. The join key is sound.
 
 **On `underlying` and `trading_symbol` naming the same column.** That is correct
 rather than a copy-paste: for a cash equity the underlying IS the instrument.
@@ -13874,4 +13891,60 @@ returned on the first 5xx, and would have passed for one that never retried
 anything — and it brace-counted Rust source to find the function body, which is
 unsound because braces live in string literals. Splitting the policy out made
 every arm reachable from a test with a `u16` and no socket.
+
+## D-0147 — an index name loses its spaces, and only an index name
+
+**Decided.** In the row decoder, an `IDX` row's identifier has every ASCII space
+removed before it reaches `Symbol::new`. Every other kind of row is unchanged.
+
+**What it cost to not do this.** `Symbol::new` admits `A-Z 0-9 - _ &` and
+nothing else. The two masters spell an index two different ways:
+
+| | writes | legal today |
+|---|---|---|
+| the first vendor | `NIFTYPVTBANK`, `NIFTYMIDCAP150`, `INDIAVIX` | 24 of 24 |
+| the second vendor | `NIFTY PVT BANK`, `NIFTY MIDCAP 150`, `INDIA VIX` | **15 of 119** |
+
+So **104 index rows were `InstrumentError::Malformed`** — the entire
+`malformed instrument identifier ×104` group the instruments page reports. It is
+why that vendor reached 15 of the 35 reference indices while the other reached
+24.
+
+**Measured over the vendor's own file, collapsing the spaces:**
+
+* 119 of 119 become legal; the longest, `NIFTY100 LOW VOLATILITY 30` at 26
+  characters, becomes 23 and fits `SYMBOL_CAPACITY`;
+* **zero** collisions among those 119;
+* **zero** collisions with any of the 2,781 NSE cash equity symbols;
+* agreement with the other vendor's 24 index symbols rises from **4 to 17**,
+  including `BANKNIFTY`, `FINNIFTY`, `NIFTY` and `INDIAVIX`.
+
+The collapsed form IS what the other vendor already writes, which is the whole
+argument: the space carries nothing, and the other master is the witness.
+
+**Why it is confined to `IDX`, which is the part worth reading twice.** The
+first draft collapsed every row. It was safe by measurement — not one of the
+2,781 equity symbols contains a space — and it was still wrong.
+`a_malformed_row_errors_rather_than_being_skipped_silently` caught it: that test
+feeds `"NIF TY"` on an F&O row and requires an error, and under a blanket
+collapse it silently became `NIFTY` and was accepted. A stray space in a
+derivative ticker is CORRUPTION, and turning it into a real instrument is
+exactly the §4 fallback that hides a failure. Only an index carries a name the
+exchange itself writes with spaces, so only an index gets the normalisation.
+
+**Cost.** One comparison on an already-resolved `ty`, then a copy into a
+`[u8; SYMBOL_CAPACITY]` on the stack. No allocation, on a path that runs for
+each of ~340,000 master rows — §3 rule 4.
+
+**Refused rather than truncated.** More than `SYMBOL_CAPACITY` non-space bytes
+is `Malformed`. Truncating would silently rename one instrument into another's
+symbol.
+
+**Two test fixtures changed, and this is the honest note about that.**
+`unreadable_rows_are_grouped_by_reason_with_the_first_line_that_hit_it` and
+`an_unreadable_row_says_why_and_where_rather_than_only_how_many` both used
+`NIFTY 100` as their unreadable example, chosen precisely because it was one of
+the 104. Those rows are now readable, so the fixtures moved to `NIFTY.100` — a
+period is still outside the allowlist. The tests' subject, grouping unreadable
+rows by reason, is unchanged; only the example moved.
 

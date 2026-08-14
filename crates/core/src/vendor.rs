@@ -38,7 +38,7 @@ use crate::error::InstrumentError;
 use crate::instrument::{Exchange, Expiry, InstrumentKey, Kind, Segment};
 use crate::isin::Isin;
 use crate::price::Paisa;
-use crate::symbol::Symbol;
+use crate::symbol::{SYMBOL_CAPACITY, Symbol};
 use crate::universe::MemberIndex;
 
 /// Which vendor a row came from.
@@ -869,6 +869,58 @@ impl Decoded {
 /// instruments beside real ones, and they would be indistinguishable later.
 const TEST_MARKERS: [&str; 2] = ["NSETEST", "BSETEST"];
 
+/// `name` with every ASCII space removed, on the stack.
+///
+/// Returns the bytes in a fixed buffer rather than a `String`: this runs on
+/// every row of every master -- over 340,000 of them across the two files --
+/// and `CLAUDE.md` rule 4 makes a per-row heap allocation a cost that grows
+/// with the input. The buffer is [`SYMBOL_CAPACITY`], so an identifier that
+/// still does not fit after collapsing is refused HERE rather than being
+/// truncated into a different instrument's name.
+///
+/// # Errors
+///
+/// [`InstrumentError::Malformed`] when more than [`SYMBOL_CAPACITY`] non-space
+/// bytes arrive. Every other rule about what a symbol may contain stays with
+/// [`Symbol::new`]; this only removes spaces.
+fn collapse_spaces(name: &str) -> Result<Collapsed, InstrumentError> {
+    let mut bytes = [0u8; SYMBOL_CAPACITY];
+    let mut len = 0usize;
+    for &c in name.as_bytes() {
+        if c == b' ' {
+            continue;
+        }
+        // `get_mut` rather than an index: `indexing_slicing` is denied
+        // workspace-wide, and this is the bound that stops a long name being
+        // silently cut down to another instrument's symbol.
+        let Some(slot) = bytes.get_mut(len) else {
+            return Err(InstrumentError::Malformed);
+        };
+        *slot = c;
+        len += 1;
+    }
+    Ok(Collapsed { bytes, len })
+}
+
+/// The stack buffer [`collapse_spaces`] fills.
+struct Collapsed {
+    bytes: [u8; SYMBOL_CAPACITY],
+    len: usize,
+}
+
+impl Collapsed {
+    /// The collapsed bytes as text, or `""` if they are not UTF-8.
+    ///
+    /// Non-UTF-8 cannot survive [`Symbol::new`] either -- its allowlist is
+    /// ASCII -- so the empty string routes a mangled input to the same
+    /// `Malformed` the byte itself would have caused, one step later.
+    fn as_str(&self) -> &str {
+        self.bytes
+            .get(..self.len)
+            .map_or("", |b| core::str::from_utf8(b).unwrap_or(""))
+    }
+}
+
 /// What a vendor's segment code means to us.
 ///
 /// It carries no `Segment`: the vendor's column is a GATE only. Our segment is
@@ -1252,7 +1304,54 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     } else {
         row.underlying
     };
-    let underlying = Symbol::new(name)?;
+    // AN ASCII SPACE IS NOT INFORMATION IN AN EXCHANGE IDENTIFIER, AND KEEPING
+    // IT COST 104 INDEX ROWS.
+    //
+    // The two masters spell an index two different ways. Groww writes the
+    // exchange's canonical ticker -- `NIFTYPVTBANK`, `NIFTYMIDCAP150`,
+    // `INDIAVIX`. Dhan writes the display name -- `NIFTY PVT BANK`,
+    // `NIFTY MIDCAP 150`, `INDIA VIX`. `Symbol::new` admits `A-Z 0-9 - _ &`
+    // and nothing else, so every spaced form was `InstrumentError::Malformed`.
+    //
+    // Measured over the vendor's own file: of its 119 NSE index rows, 15 were
+    // legal and 104 were refused. Those 104 are why this vendor reached 15 of
+    // the 35 reference indices while the other reached 24.
+    //
+    // Collapsing the spaces:
+    //
+    //   * makes 119 of 119 legal, and the longest -- `NIFTY100 LOW VOLATILITY
+    //     30`, 26 characters -- becomes 23 and fits `SYMBOL_CAPACITY`;
+    //   * creates ZERO collisions among those 119;
+    //   * collides with ZERO of the 2,781 NSE cash equity symbols;
+    //   * and raises agreement with the other vendor's 24 index symbols from
+    //     4 to 17, because the collapsed form IS what the other vendor already
+    //     writes. `BANKNIFTY`, `FINNIFTY`, `NIFTY`, `INDIAVIX` are all in that
+    //     recovered set.
+    //
+    // So this is a normalisation TO the canonical ticker, not a lossy edit: the
+    // other master is the witness that the space carries nothing.
+    //
+    // CONFINED TO INDEX ROWS, AND THAT RESTRAINT IS THE POINT.
+    //
+    // The first draft collapsed every row. It was safe by measurement -- not
+    // one of the 2,781 NSE cash equity symbols contains a space -- and it was
+    // still wrong, because it silently repaired inputs nobody had claimed were
+    // repairable. `a_malformed_row_errors_rather_than_being_skipped_silently`
+    // caught it: that test feeds `"NIF TY"` on an F&O row and requires an
+    // error, and under a blanket collapse it became `NIFTY` and was accepted.
+    // A stray space in a derivative ticker is CORRUPTION, and turning it into
+    // a real instrument is the §4 fallback that hides a failure.
+    //
+    // Only an index carries a name the exchange itself writes with spaces, so
+    // only an index gets the normalisation. Everywhere else a space stays what
+    // it was: malformed, loudly.
+    //
+    // `ty` is already resolved above, so this costs a comparison and no scan.
+    let underlying = if ty == "IDX" {
+        Symbol::new(collapse_spaces(name)?.as_str())?
+    } else {
+        Symbol::new(name)?
+    };
 
     // A live instrument master lists only CURRENTLY LISTED contracts -- both
     // vendors purge on expiry, and the earliest expiry in either master is
@@ -1523,6 +1622,65 @@ mod tests {
         assert_eq!(bare(Skip::LiveContract).skip(), Some(Skip::LiveContract));
         let keep = groww(row("NSE", "CASH", "RELIANCE", "EQ", "", "")).expect("ok");
         assert_eq!(keep.skip(), None, "a kept row was not skipped");
+    }
+
+    /// An index name is normalised to the exchange's canonical ticker; a space
+    /// anywhere else is still malformed.
+    #[test]
+    fn an_index_name_loses_its_spaces_and_nothing_else_does() {
+        // THE 104 ROWS THIS RECOVERS. The second vendor writes the display
+        // name, the first writes the ticker, and the ticker is what both now
+        // produce -- so the two masters agree on one key instead of one of
+        // them having no key at all.
+        for (written, want) in [
+            ("NIFTY MIDCAP 150", "NIFTYMIDCAP150"),
+            ("NIFTY PVT BANK", "NIFTYPVTBANK"),
+            ("NIFTY100 EQUAL WEIGHT", "NIFTY100EQUALWEIGHT"),
+            ("INDIA VIX", "INDIAVIX"),
+            // 26 characters as written, 23 collapsed -- the longest in the
+            // file, and the reason the buffer is checked rather than assumed.
+            ("NIFTY100 LOW VOLATILITY 30", "NIFTY100LOWVOLATILITY30"),
+        ] {
+            let got = groww(row("NSE", "CASH", written, "IDX", "", ""))
+                .unwrap_or_else(|why| panic!("{written:?} must decode, got {why:?}"));
+            let key = kept(got).unwrap_or_else(|| panic!("{written:?} must be kept"));
+            assert_eq!(key.underlying.as_str(), want);
+            assert_eq!(key.kind, Kind::Index);
+        }
+
+        // ALREADY CANONICAL, AND UNTOUCHED. The other vendor's spelling must
+        // land on exactly the same symbol, or the normalisation has split the
+        // instrument instead of joining it.
+        let plain = kept(groww(row("NSE", "CASH", "NIFTYPVTBANK", "IDX", "", "")).expect("ok"))
+            .expect("kept");
+        assert_eq!(plain.underlying.as_str(), "NIFTYPVTBANK");
+
+        // AND THE RESTRAINT. A space on any other kind of row is corruption,
+        // not a spelling, and is still refused -- see the comment at the call
+        // site for the draft that got this wrong.
+        assert!(
+            groww(row("NSE", "FNO", "NIF TY", "FUT", "2026-08-04", "")).is_err(),
+            "a space outside an index row must stay malformed"
+        );
+        assert!(
+            groww(row("NSE", "CASH", "RELI ANCE", "EQ", "", "")).is_err(),
+            "an equity ticker with a space is corruption, not a display name"
+        );
+
+        // A name that still will not fit once collapsed is refused rather than
+        // truncated into some other instrument's symbol.
+        assert!(
+            groww(row(
+                "NSE",
+                "CASH",
+                "NIFTY VERY LONG INDEX NAME THAT OVERFLOWS",
+                "IDX",
+                "",
+                ""
+            ))
+            .is_err(),
+            "over capacity after collapsing is malformed, never truncated"
+        );
     }
 
     #[test]
