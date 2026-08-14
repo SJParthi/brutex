@@ -639,7 +639,7 @@ fn a_census_names_every_instrument_the_folder_holds_in_a_stable_order() {
         member("BANKNIFTY", 1_664_509_500),
         member("MIDCPNIFTY", 1_664_768_701),
     ];
-    let census = folder::census_of(&members).expect("all three are moments");
+    let census = folder::census_of(&members, Vec::new()).expect("all three are moments");
     assert_eq!(
         census.instruments,
         vec![
@@ -666,7 +666,7 @@ fn two_members_naming_one_instrument_are_counted_rather_than_hidden() {
         member("NIFTY", 1_664_509_500),
         member("BANKNIFTY", 1_664_768_701),
     ];
-    let census = folder::census_of(&members).expect("both are moments");
+    let census = folder::census_of(&members, Vec::new()).expect("both are moments");
     assert_eq!(
         census.instruments,
         vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()],
@@ -682,7 +682,7 @@ fn two_members_naming_one_instrument_are_counted_rather_than_hidden() {
 /// must not arrive looking like a walk that failed.
 #[test]
 fn an_empty_folder_censuses_to_an_empty_list_and_an_empty_reach() {
-    let census = folder::census_of(&[]).expect("an empty folder is an answer");
+    let census = folder::census_of(&[], Vec::new()).expect("an empty folder is an answer");
     assert_eq!(census.reach, Reach::Empty);
     assert!(census.instruments.is_empty());
     assert_eq!(census.collisions, 0);
@@ -696,7 +696,7 @@ fn an_empty_folder_censuses_to_an_empty_list_and_an_empty_reach() {
 #[test]
 fn a_census_refuses_wherever_the_reach_refuses() {
     let broken = member("BANKNIFTY", i64::MIN);
-    let why = folder::census_of(std::slice::from_ref(&broken))
+    let why = folder::census_of(std::slice::from_ref(&broken), Vec::new())
         .expect_err("i64::MIN is not a moment on any calendar");
     assert!(matches!(why, FolderError::Untimed { secs, .. } if secs == i64::MIN));
     assert!(why.to_string().contains("BANKNIFTY"), "name the member");
@@ -760,4 +760,68 @@ fn a_rest_feed_cannot_be_asked_to_census_a_folder_either() {
     let why = folder::read_census(&dir, Feed::Groww, Columns::TrueDataIndex)
         .expect_err("a broker has no folder");
     assert!(matches!(why, FolderError::NotAFolderFeed { .. }), "{why:?}");
+}
+
+/// A FILE OF A DIFFERENT PRODUCT IS A FINDING, NOT THE END OF THE FOLDER.
+///
+/// MEASURED ON THE OPERATOR'S OWN DISK, 14 Aug 2026. `vendor-data/gdfl/` holds
+/// `GFDLNFO_TICK_01072025/`, whose members decode exactly against the declared
+/// ten-field layout — `Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,
+/// LTQ,OpenInterest` — and one loose `GFDLNFO_BACKADJUSTED_01072025.csv` beside
+/// them carrying `Ticker,Date,Time,Open,High,Low,Close,Volume,Open Interest`:
+/// nine fields, and an OHLC product rather than a tick one.
+///
+/// `/folder.json` answered the WHOLE FOLDER with that one file's refusal, so a
+/// census of a folder the operator had bought correctly reported nothing at
+/// all. A census asks *what is in here*; one file of another product does not
+/// make the answer unknown, it makes it a shorter list with a named exception.
+///
+/// The exception is NAMED, never swallowed — `CLAUDE.md` §4. The good member
+/// still lands, the stray still travels with the decoder's own words, and the
+/// ingest path is unchanged: `read_dir` still refuses, because a folder read in
+/// part is a store written in part.
+#[test]
+fn one_file_of_another_product_is_reported_and_the_rest_of_the_folder_still_reads() {
+    let scratch = Scratch::new();
+    let dir = scratch.folder(
+        "mixed",
+        &[
+            ("BANKNIFTY", TWO_DAYS),
+            // Nine fields where five are declared: a different product, which
+            // is exactly the shape of the file on the operator's disk.
+            ("STRAY", "20250616,09:07:42,1526.56,0,0,0.00,0,0.00,0\n"),
+        ],
+    );
+
+    // THE INGEST PATH IS UNCHANGED AND STILL REFUSES THE WHOLE FOLDER.
+    let why = folder::read_reach(&dir, Feed::TrueData, Columns::TrueDataIndex)
+        .expect_err("the ingest walk refuses a member it cannot decode");
+    assert!(why.to_string().contains("STRAY"), "name the file: {why}");
+
+    // THE CENSUS READS THE REST AND REPORTS THE ONE.
+    let census = folder::read_census(&dir, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("one stray member does not make the folder unreadable");
+    assert_eq!(
+        census.instruments,
+        vec!["BANKNIFTY".to_owned()],
+        "the member that decodes still lands"
+    );
+    assert_eq!(
+        census.rejected.len(),
+        1,
+        "and the one that does not is kept"
+    );
+    let bad = &census.rejected[0];
+    assert!(
+        bad.path.to_string_lossy().contains("STRAY"),
+        "which file: {bad:?}"
+    );
+    assert!(
+        !bad.why.is_empty(),
+        "and why, in the decoder's own words: {bad:?}"
+    );
+    assert!(
+        !census.reach.is_empty(),
+        "the reach comes from the members that read, not from zero"
+    );
 }

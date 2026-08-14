@@ -311,10 +311,31 @@ fn body(feed: Feed, kind: SourceKind, path: &str, census: &pull::folder::Census)
         names.push_str(&render::json_string(instrument));
     }
     names.push(']');
+    // THE FILES THAT ARE A DIFFERENT PRODUCT, NAMED. A census that answered
+    // nothing because one file in the folder will not decode is the failure
+    // this route exists to end — measured on GDFL, where a loose
+    // `..._BACKADJUSTED_....csv` of nine OHLC fields sat beside a TICK archive
+    // of ten and made the whole folder unreadable. Each carries its own path
+    // and the decoder's own words, so the operator can see WHICH file and WHY
+    // rather than being told the folder is broken.
+    let mut strays = String::with_capacity(census.rejected.len() * 64);
+    strays.push('[');
+    for (at, bad) in census.rejected.iter().enumerate() {
+        if at > 0 {
+            strays.push(',');
+        }
+        let _ = write!(
+            strays,
+            r#"{{"path":{},"why":{}}}"#,
+            render::json_string(&bad.path.display().to_string()),
+            render::json_string(&bad.why),
+        );
+    }
+    strays.push(']');
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"feed":{},"kind":{},"verb":{},"path":{},"reach":{{"state":{},"earliest":{},"latest":{},"files":{},"rows":{}}},"instruments":{names},"collisions":{}}}"#,
+        r#"{{"feed":{},"kind":{},"verb":{},"path":{},"reach":{{"state":{},"earliest":{},"latest":{},"files":{},"rows":{}}},"instruments":{names},"collisions":{},"rejected":{strays}}}"#,
         render::json_string(feed.wire()),
         render::json_string(kind_wire(kind)),
         render::json_string(kind.verb()),
@@ -589,6 +610,7 @@ mod tests {
                 reach,
                 instruments: Vec::new(),
                 collisions: 0,
+                rejected: Vec::new(),
             };
             let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
             assert!(out.contains(r#""earliest":null"#), "{out}");
@@ -608,6 +630,7 @@ mod tests {
             reach: pull::folder::Reach::Empty,
             instruments: Vec::new(),
             collisions: 0,
+            rejected: Vec::new(),
         };
         let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
         assert!(out.contains(r#""instruments":[]"#), "{out}");
@@ -640,6 +663,7 @@ mod tests {
                 "ODD\"NAME".to_owned(),
             ],
             collisions: 2,
+            rejected: Vec::new(),
         };
         let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
         assert!(

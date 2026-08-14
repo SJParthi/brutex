@@ -58,7 +58,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::archive::{self, ArchiveError, Member};
+use crate::archive::{self, ArchiveError, Member, Rejected};
 use crate::csv::Columns;
 use crate::session::{Day, IstMoment, Window};
 use crate::vendor::Feed;
@@ -350,6 +350,20 @@ pub struct Census {
     /// the deduplicated list cannot tell a clean folder from a colliding one.
     /// Zero on every folder where each file names its own instrument.
     pub collisions: usize,
+    /// Members that would not decode against this vendor's layout, kept as
+    /// findings rather than ending the walk.
+    ///
+    /// A census answers *what is in here*, and answering it with nothing
+    /// because one file is a different product is the failure this route exists
+    /// to end. Measured: GDFL's `GFDLNFO_TICK_01072025` members decode exactly
+    /// against the declared ten-field layout, and one loose
+    /// `GFDLNFO_BACKADJUSTED_01072025.csv` beside them carries nine fields of
+    /// OHLC — a different product, which made the whole folder unreadable.
+    ///
+    /// **Never empty and silent at the same time.** A folder where this is
+    /// non-empty is one the operator has to look at, and the count and the
+    /// names both travel so it cannot be mistaken for a clean read.
+    pub rejected: Vec<Rejected>,
 }
 
 /// The census of an already-decoded walk.
@@ -363,7 +377,7 @@ pub struct Census {
 ///
 /// Whatever [`reach_of`] refuses, unchanged — a census of a folder whose days
 /// cannot be read is not a smaller census, it is no answer at all.
-pub fn census_of(members: &[Member]) -> Result<Census, FolderError> {
+pub fn census_of(members: &[Member], rejected: Vec<Rejected>) -> Result<Census, FolderError> {
     let reach = reach_of(members)?;
     let mut instruments: Vec<String> = members
         .iter()
@@ -376,6 +390,7 @@ pub fn census_of(members: &[Member]) -> Result<Census, FolderError> {
         collisions: before - instruments.len(),
         reach,
         instruments,
+        rejected,
     })
 }
 
@@ -505,8 +520,12 @@ pub fn read_reach(dir: &Path, feed: Feed, columns: Columns) -> Result<Reach, Fol
 /// fails names the path, and a row whose timestamp is not on this calendar
 /// refuses rather than being skipped.
 pub fn read_census(dir: &Path, feed: Feed, columns: Columns) -> Result<Census, FolderError> {
-    let members = walk(dir, feed, columns)?;
-    match census_of(&members) {
+    // THE REPORTING WALK, and it is the only difference from `read_reach`
+    // besides the names. A member that will not decode is a FINDING about what
+    // is in the folder, not the end of the question — see
+    // `archive::read_dir_reporting` for why the ingest path still refuses.
+    let (members, rejected) = walk_reporting(dir, feed, columns)?;
+    match census_of(&members, rejected) {
         Ok(census) => {
             note_read(dir, feed, census.reach);
             Ok(census)
@@ -525,19 +544,42 @@ pub fn read_census(dir: &Path, feed: Feed, columns: Columns) -> Result<Census, F
 /// folder to walk, and probing one would invent a path for a vendor that has
 /// none.
 fn walk(dir: &Path, feed: Feed, columns: Columns) -> Result<Vec<Member>, FolderError> {
-    let refuse = |why: FolderError| {
-        note_refused(dir, feed, &why);
-        why
-    };
-    if !matches!(feed.source_kind(), crate::vendor::SourceKind::Folder) {
-        return Err(refuse(FolderError::NotAFolderFeed { feed }));
+    guard(dir, feed)?;
+    archive::read_dir(dir, columns).map_err(|why| refuse_walk(dir, feed, why))
+}
+
+/// [`walk`], but a member that will not decode is collected rather than fatal.
+fn walk_reporting(
+    dir: &Path,
+    feed: Feed,
+    columns: Columns,
+) -> Result<(Vec<Member>, Vec<Rejected>), FolderError> {
+    guard(dir, feed)?;
+    archive::read_dir_reporting(dir, columns).map_err(|why| refuse_walk(dir, feed, why))
+}
+
+/// The refusal that comes before the disk is touched at all.
+///
+/// A REST feed has no folder, and probing one would invent a path for a vendor
+/// that has none. Shared so the two walks cannot drift into refusing
+/// differently for the same feed.
+fn guard(dir: &Path, feed: Feed) -> Result<(), FolderError> {
+    if matches!(feed.source_kind(), crate::vendor::SourceKind::Folder) {
+        return Ok(());
     }
-    archive::read_dir(dir, columns).map_err(|why| {
-        refuse(FolderError::Walk {
-            path: dir.to_path_buf(),
-            why,
-        })
-    })
+    let why = FolderError::NotAFolderFeed { feed };
+    note_refused(dir, feed, &why);
+    Err(why)
+}
+
+/// One walk refusal, noted and wrapped, for both readers.
+fn refuse_walk(dir: &Path, feed: Feed, why: archive::ArchiveError) -> FolderError {
+    let why = FolderError::Walk {
+        path: dir.to_path_buf(),
+        why,
+    };
+    note_refused(dir, feed, &why);
+    why
 }
 
 #[cfg(test)]

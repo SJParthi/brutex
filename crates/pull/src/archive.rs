@@ -332,10 +332,99 @@ pub fn read_dir(dir: &Path, columns: Columns) -> Result<Vec<Member>, ArchiveErro
     // THAN RETURNED so that a refusal can still say how many members had been
     // accepted when it stopped. The loop inside walks files and counts in two
     // plain integers; nothing in it logs.
-    match walk(dir, columns, &mut out, &mut passed) {
+    match walk(
+        dir,
+        columns,
+        &mut out,
+        &mut passed,
+        Malformed::Refuse,
+        &mut Vec::new(),
+    ) {
         Ok(()) => {
             note_walked(dir, &out, passed);
             Ok(out)
+        }
+        Err(why) => {
+            note_refused(dir, &out, &why);
+            Err(why)
+        }
+    }
+}
+
+/// A member that would not decode against this vendor's layout, kept as a
+/// finding instead of ending the walk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rejected {
+    /// The file, so the operator can look at the one that is different.
+    pub path: PathBuf,
+    /// Why, in the decoder's own words — the field count it found and expected.
+    pub why: String,
+}
+
+/// WHAT A MEMBER THAT WILL NOT DECODE DOES TO THE WALK.
+///
+/// The two callers want opposite things and both are right, which is why this
+/// is a parameter rather than a policy baked into [`walk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Malformed {
+    /// End the walk. The INGEST reading: a folder read in part is a store
+    /// written in part, and the operator asked for the folder.
+    Refuse,
+    /// Skip it and keep it as a finding. The CENSUS reading — see
+    /// [`read_dir_reporting`].
+    Collect,
+}
+
+/// The walk a CENSUS wants: one bad member is a finding, not the end.
+///
+/// # Why the census and the ingest disagree, and both are right
+///
+/// [`read_dir`] refuses a folder whose first undecodable member it meets,
+/// because it is the ingest path: a folder read in part is a store written in
+/// part, silently short, and nothing downstream could tell that from a folder
+/// that was genuinely small.
+///
+/// A census is the opposite question — *what is in here* — and answering it
+/// with nothing because one file is a different product is the failure this
+/// route exists to end. Measured on this operator's own folder: GDFL's
+/// `GFDLNFO_TICK_01072025` members decode exactly against the declared layout
+/// (`Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest`,
+/// ten fields), and one loose `GFDLNFO_BACKADJUSTED_01072025.csv` sits beside
+/// them carrying `Ticker,Date,Time,Open,High,Low,Close,Volume,Open Interest` —
+/// nine fields, and an OHLC product rather than a tick one. That single file
+/// made the whole folder unreadable and the page said so about the folder.
+///
+/// **ONLY [`ArchiveError::MemberMalformed`] IS COLLECTED.** Every other refusal
+/// still ends the walk, and the distinction is deliberate: a wrong field count
+/// is *a different product in the folder*, which is a fact about what was
+/// bought. A path that escapes its directory, a member that is not text, an
+/// unreadable directory and a member cap are faults, and a census that swallowed
+/// those would be the `CLAUDE.md` §4 fallback.
+///
+/// # Errors
+///
+/// Every [`read_dir`] error except [`ArchiveError::MemberMalformed`].
+pub fn read_dir_reporting(
+    dir: &Path,
+    columns: Columns,
+) -> Result<(Vec<Member>, Vec<Rejected>), ArchiveError> {
+    let mut out = Vec::new();
+    let mut rejected = Vec::new();
+    let mut passed = Passed {
+        ghosts: 0,
+        skipped: 0,
+    };
+    match walk(
+        dir,
+        columns,
+        &mut out,
+        &mut passed,
+        Malformed::Collect,
+        &mut rejected,
+    ) {
+        Ok(()) => {
+            note_walked(dir, &out, passed);
+            Ok((out, rejected))
         }
         Err(why) => {
             note_refused(dir, &out, &why);
@@ -356,6 +445,8 @@ fn walk(
     columns: Columns,
     out: &mut Vec<Member>,
     passed: &mut Passed,
+    on_malformed: Malformed,
+    rejected: &mut Vec<Rejected>,
 ) -> Result<(), ArchiveError> {
     if !dir.is_dir() {
         return Err(ArchiveError::NotADirectory {
@@ -407,10 +498,23 @@ fn walk(
         })?;
         let text = String::from_utf8(bytes)
             .map_err(|_| ArchiveError::MemberNotText { path: path.clone() })?;
-        let rows = csv::decode(&text, columns).map_err(|why| ArchiveError::MemberMalformed {
-            path: path.clone(),
-            why,
-        })?;
+        // THE ONE REFUSAL THE CENSUS TURNS INTO A FINDING. `Refuse` is
+        // byte-for-byte what this line did before the parameter existed.
+        let rows = match csv::decode(&text, columns) {
+            Ok(rows) => rows,
+            Err(why) => match on_malformed {
+                Malformed::Refuse => {
+                    return Err(ArchiveError::MemberMalformed { path, why });
+                }
+                Malformed::Collect => {
+                    rejected.push(Rejected {
+                        why: why.to_string(),
+                        path,
+                    });
+                    continue;
+                }
+            },
+        };
 
         let instrument = instrument_name(&path);
 

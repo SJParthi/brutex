@@ -1289,6 +1289,14 @@
       rows: Number(r.rows ?? 0),
       instruments: Array.isArray(named) ? named : null,
       collisions: Number(folderReach.body?.collisions ?? 0),
+      // FILES OF ANOTHER PRODUCT, which the walk now reports instead of
+      // halting on. `[]` is a clean folder; a server that predates the field
+      // sends nothing and this reads `[]` too — and that is the one place the
+      // two may be merged, because an absent list and an empty one both mean
+      // "nothing to show here" for a FINDING. A missing INSTRUMENT list is
+      // different and stays `null`: there, absent means the page cannot answer
+      // and empty means the folder names nothing.
+      rejected: Array.isArray(folderReach.body?.rejected) ? folderReach.body.rejected : [],
       // WHICH ARCHIVE THIS COUNTED. `null` for a feed that answered without a
       // segment being named — one measured layout, so the folder IS the answer
       // — and the segment's own word when one had to be discovered.
@@ -4984,6 +4992,28 @@
                            of D-0141 on the folder side, and a reader who saw
                            only the distinct list could not tell a clean folder
                            from a colliding one. -->
+                      <!-- FILES OF ANOTHER PRODUCT, NAMED. One of these used to
+                           halt the whole folder: a loose BACKADJUSTED CSV of
+                           nine OHLC fields beside a TICK archive of ten made
+                           GDFL answer nothing at all, and the page said so
+                           about the folder. The census reads past it now and
+                           the file is a finding rather than the end. Each
+                           carries the decoder's own words, so the operator sees
+                           WHICH file and WHY. -->
+                      {#if c.rejected.length > 0}
+                        <span
+                          class="pknote wrap warn"
+                          title={c.rejected
+                            .slice(0, 8)
+                            .map((r) => `${r.path} — ${r.why}`)
+                            .join('\n')}
+                        >
+                          {n(c.rejected.length)} file(s) in this folder are a DIFFERENT PRODUCT and
+                          were read past, not counted — hover for each one and the decoder's own
+                          reason. They are not a broken folder; they are files this vendor's
+                          declared layout does not describe.
+                        </span>
+                      {/if}
                       {#if c.collisions > 0}
                         <span
                           class="pknote wrap warn"
