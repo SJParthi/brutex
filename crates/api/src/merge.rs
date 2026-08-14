@@ -135,6 +135,21 @@ pub enum Verdict {
 /// The merged universe, and everything that disagreed while it was built.
 #[derive(Debug, Default)]
 pub struct Merged {
+    /// Which mastered vendors actually supplied rows to this merge.
+    ///
+    /// # Why "confirmed" cannot be asked of `Vendor::MASTERED`
+    ///
+    /// It was, and adding a third mastered vendor broke it. `MASTERED` is the
+    /// set that PUBLISHES a master; this is the set whose master was READ. A
+    /// vendor with no file on disk contributes no rows, so
+    /// `MASTERED.all(contains)` went false for every instrument the moment a
+    /// third name joined the list — flipping the entire universe from
+    /// *confirmed by every vendor* to *asserted by one*, loudly and wrongly.
+    ///
+    /// A vendor that supplied nothing can neither confirm nor deny an
+    /// instrument. Cross-checking is a claim about the masters that were
+    /// actually compared, and this is that set.
+    pub contributed: Vec<Vendor>,
     /// One entry per distinct instrument.
     pub by_key: HashMap<InstrumentKey, Entry>,
     /// One line per key two vendors gave different ISINs for, naming the key
@@ -191,13 +206,30 @@ impl Merged {
             let mut both = 0;
             for (_, e) in members {
                 present += 1;
-                if Vendor::MASTERED.iter().all(|v| e.vendors.contains(*v)) {
+                if self.confirmed_by_all(e) {
                     both += 1;
                 }
             }
             out.push((name, present, both));
         }
         out
+    }
+
+    /// Whether every master that was actually READ names this instrument.
+    ///
+    /// Asked of [`Self::contributed`] and never of `Vendor::MASTERED` — see
+    /// that field for the defect this distinction removes.
+    ///
+    /// **An empty `contributed` answers `true`**, and that is deliberate rather
+    /// than an accident of `all`: with no master read there is nothing to
+    /// cross-check, and reporting every instrument as *only one vendor named
+    /// it* would be a finding about masters that were never compared. The
+    /// merge is empty in that case anyway, so nothing is reported either way.
+    #[must_use]
+    fn confirmed_by_all(&self, entry: &Entry) -> bool {
+        self.contributed
+            .iter()
+            .all(|vendor| entry.vendors.contains(*vendor))
     }
 
     /// Universe members only one vendor named, by universe and key.
@@ -212,11 +244,10 @@ impl Merged {
         let mut out: Vec<String> = self
             .by_key
             .iter()
-            .filter(|(_, e)| {
-                !e.universe.is_none() && !Vendor::MASTERED.iter().all(|v| e.vendors.contains(*v))
-            })
+            .filter(|(_, e)| !e.universe.is_none() && !self.confirmed_by_all(e))
             .map(|(k, e)| {
-                let who: Vec<&str> = Vendor::MASTERED
+                let who: Vec<&str> = self
+                    .contributed
                     .iter()
                     .filter(|v| e.vendors.contains(**v))
                     .map(|v| v.as_str())
@@ -313,8 +344,29 @@ pub fn merge(sources: &[Source]) -> Merged {
     // common case, and the point of merging. That is bounded waste (one entry
     // per duplicate, freed when the map is dropped) traded for a bound that
     // holds in the worst case rather than on average.
+    // WHICH MASTERS WERE ACTUALLY READ — the set every cross-check is asked
+    // of. Taken from the sources handed in, never from `Vendor::MASTERED`: a
+    // vendor that publishes a master and did not supply one here can neither
+    // confirm nor deny an instrument, and asking it to would make every
+    // instrument in the tree read as single-sourced. See `Merged::contributed`.
+    // A MASTER THAT LISTS NOTHING HAS COMPARED NOTHING.
+    //
+    // Filtered on `kept`, not on the source merely being present. A file that
+    // was read and held no rows is indistinguishable, for cross-checking, from
+    // one that was never read: it confirms nothing and it denies nothing.
+    // Counting it as a comparer makes every instrument in the tree read as
+    // unconfirmed — a finding about a file with no contents, reported as a
+    // disagreement between vendors.
+    let mut contributed: Vec<Vendor> = sources
+        .iter()
+        .filter(|s| !s.kept.is_empty())
+        .map(|s| s.vendor)
+        .collect();
+    contributed.sort_unstable_by_key(|v| *v as u8);
+    contributed.dedup();
     let mut out = Merged {
         by_key: HashMap::with_capacity(capacity),
+        contributed,
         ..Merged::default()
     };
     for s in sources {

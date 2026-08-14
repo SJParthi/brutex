@@ -211,10 +211,18 @@ impl Coverage {
         let mut per = Vec::with_capacity(Vendor::ALL.len() * SpotTarget::ALL.len());
         for vendor in Vendor::ALL {
             for target in SpotTarget::ALL {
-                if !vendor.publishes_master() {
-                    // NOT A ZERO. See the module header: an archive vendor has
-                    // no master, so the master has nothing to say about it and
-                    // says nothing rather than saying "none".
+                // NOT A ZERO. See the module header: a vendor with no master
+                // read has nothing to say about coverage, and says nothing
+                // rather than saying "none".
+                //
+                // TWO REASONS TO HAVE NOTHING TO SAY, and both answer `None`.
+                // An archive publishes no master at all. A BROKER may publish
+                // one and have supplied none here — which is every broker
+                // before its file is on disk, and asking `publishes_master`
+                // alone made a newly-named vendor report itself short of every
+                // target on a healthy start. `merged.contributed` is the set
+                // whose rows were actually read; see that field.
+                if !vendor.publishes_master() || !merged.contributed.contains(&vendor) {
                     per.push(None);
                     continue;
                 }
@@ -834,10 +842,14 @@ mod tests {
         let merged = universe_with_every_shape();
         let join = Join::build(&merged);
         let coverage = Coverage::build(&merged, &join);
-        for vendor in Vendor::MASTERED {
+        // THE MASTERS THIS FIXTURE SUPPLIED, not `Vendor::MASTERED`. That
+        // constant names every vendor that PUBLISHES a master; a vendor whose
+        // file is absent here is counted by nothing and `of` answers `None` for
+        // it, correctly.
+        for vendor in merged.contributed.clone() {
             for target in SpotTarget::ALL {
                 let named = format!("{} · {}", vendor.as_str(), target.slug());
-                let absent = format!("{named}: a mastered vendor is counted");
+                let absent = format!("{named}: a master was read for this vendor");
                 let covered = coverage.of(vendor, target).expect(&absent);
                 match join.ids_for(vendor, target) {
                     Some(ids) => assert_eq!(ids.len(), covered.matched, "{named}"),
@@ -856,7 +868,7 @@ mod tests {
         // measurement of a file that does not exist, and it reads as "this
         // feed has nothing" — `CLAUDE.md` §4's fallback that hides a failure,
         // arriving as a plausible number.
-        let (_, coverage) = built();
+        let (merged, coverage) = built();
         for vendor in Vendor::ALL {
             for target in SpotTarget::ALL {
                 // Built BEFORE the assertion: a message formatted inside the
@@ -864,9 +876,17 @@ mod tests {
                 // floor this repository holds has no exemption for "it is only
                 // a failure message".
                 let at = format!("{} · {}", vendor.as_str(), target.slug());
+                // TWO CONDITIONS, AND BOTH ARE THE SAME FACT SEEN FROM TWO
+                // SIDES: a vendor has something to say about coverage when it
+                // publishes a master AND when that master was actually read
+                // here. The fixture supplies two, so a third mastered vendor
+                // whose file is absent must answer `None` exactly as an archive
+                // does — for a different reason, to the same effect.
+                let has_a_master_here =
+                    vendor.publishes_master() && merged.contributed.contains(&vendor);
                 assert_eq!(
                     coverage.of(vendor, target).is_some(),
-                    vendor.publishes_master(),
+                    has_a_master_here,
                     "{at}"
                 );
             }

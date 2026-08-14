@@ -68,11 +68,39 @@ pub enum Vendor {
     TrueData,
     /// Historical archives on disk. Never authenticates.
     Gdfl,
+    /// Third broker, HTTP. Bars are filed under its own prefix like any other.
+    ///
+    /// # The one vendor here whose master carries NO ISIN
+    ///
+    /// `docs/00-charter.md` §4d records its instrument dump: twelve columns —
+    /// `instrument_token`, `exchange_token`, `tradingsymbol`, `name`,
+    /// `last_price`, `expiry`, `strike`, `tick_size`, `lot_size`,
+    /// `instrument_type`, `segment`, `exchange` — and **not one of them is an
+    /// ISIN**. D-0117 and D-0125 key their joins on `(exchange, ISIN)`, and
+    /// neither addresses a row from this vendor.
+    ///
+    /// The vendor names the alternative itself: *"it is recommended to use a
+    /// combination of exchange and tradingsymbol as the unique key, not the
+    /// numeric instrument token."* So this feed joins on the symbol, which
+    /// `pull::universe::JoinKey::TradingSymbol` marks as the **weaker** key
+    /// wherever a count is reported — a rename looks like a missing instrument
+    /// on it, and an ISIN would have absorbed one.
+    Zerodha,
 }
 
 impl Vendor {
     /// Every vendor this engine reads, in path order.
-    pub const ALL: [Self; 4] = [Self::Groww, Self::Dhan, Self::TrueData, Self::Gdfl];
+    pub const ALL: [Self; 5] = [
+        Self::Groww,
+        Self::Dhan,
+        Self::TrueData,
+        Self::Gdfl,
+        // APPENDED, NEVER INSERTED. `VendorSet` reads a bit per position and
+        // `merge::Entry::ids` is an array indexed by `vendor as usize`, so a
+        // variant placed in the middle hands every vendor after it another
+        // one's ids — silently, because the types still line up.
+        Self::Zerodha,
+    ];
 
     /// Whether this vendor publishes an instrument master at all.
     ///
@@ -88,13 +116,13 @@ impl Vendor {
     #[must_use]
     pub const fn publishes_master(self) -> bool {
         match self {
-            Self::Groww | Self::Dhan => true,
+            Self::Groww | Self::Dhan | Self::Zerodha => true,
             Self::TrueData | Self::Gdfl => false,
         }
     }
 
     /// Every vendor that publishes an instrument master.
-    pub const MASTERED: [Self; 2] = [Self::Groww, Self::Dhan];
+    pub const MASTERED: [Self; 3] = [Self::Groww, Self::Dhan, Self::Zerodha];
 
     /// What this vendor's instrument master is called on disk.
     ///
@@ -128,6 +156,10 @@ impl Vendor {
             // merged universe and must not be expected to.
             Self::TrueData => "truedata_instruments.csv",
             Self::Gdfl => "gdfl_instruments.csv",
+            // A GZIPPED CSV ON THE WIRE, and a plain one once it is on disk.
+            // The vendor regenerates it once a day and asks that it be stored
+            // rather than re-fetched; this is the name it is stored under.
+            Self::Zerodha => "zerodha_instruments.csv",
         }
     }
 
@@ -139,6 +171,7 @@ impl Vendor {
             Self::Dhan => "dhan",
             Self::TrueData => "truedata",
             Self::Gdfl => "gdfl",
+            Self::Zerodha => "zerodha",
         }
     }
 
@@ -150,6 +183,7 @@ impl Vendor {
             // `VendorSet` is a u8 — eight feeds, and these are three and four.
             Self::TrueData => 1 << 2,
             Self::Gdfl => 1 << 3,
+            Self::Zerodha => 1 << 4,
         }
     }
 }
@@ -514,6 +548,35 @@ impl Vendor {
             // Refusing here rather than returning an `Option` because this is a
             // `const fn` on a hot path and the caller — `master_paths` — already
             // handles a master that is simply absent, which is the real state.
+            // TWELVE COLUMNS, AND THE ISIN IS THE ONE THAT IS NOT THERE.
+            //
+            // Read from the vendor's own page, 14 Aug 2026 — docs/00-charter.md
+            // §4d. `isin` is the empty string, which no header matches, so
+            // every row of this master decodes with no ISIN and the join falls
+            // to the symbol. That is a fact about the vendor stated as data,
+            // not a column left blank by oversight.
+            //
+            // `underlying` is empty too, and for a different reason: this master
+            // has no underlying column at all. `name` is the COMPANY name for an
+            // equity and blank on a derivative row, so reading it as an
+            // underlying would put "INFOSYS" where "INFY" belongs.
+            Self::Zerodha => MasterColumns {
+                vendor_id: "instrument_token",
+                exchange: "exchange",
+                segment: "segment",
+                underlying: "",
+                trading_symbol: "tradingsymbol",
+                instrument_type: "instrument_type",
+                listing_class: "",
+                isin: "",
+                expiry: "expiry",
+                strike: "strike",
+                // NO SEPARATE SIDE COLUMN. `instrument_type` is `CE` or `PE`
+                // directly, so the side is read from the type rather than from
+                // a column this master does not have — the same shape Groww
+                // uses, and the reason this field is an `Option`.
+                option_side: None,
+            },
             Self::TrueData | Self::Gdfl => MasterColumns {
                 vendor_id: "",
                 exchange: "",
@@ -985,6 +1048,20 @@ impl Vendor {
             // for one to appear in. Empty store list AND empty decline list:
             // nothing is stored, and nothing is quietly dropped either — code
             // reaching here is reading a master that should not exist.
+            // `segment` on this vendor's rows is `NSE`, `NFO-FUT`, `NFO-OPT`,
+            // `MCX` — a compound of exchange and product, not the one-letter
+            // code the other two brokers use. The two spot words are stored and
+            // the derivative ones are declined by name; anything else is
+            // unrecognised, which is refused rather than guessed at.
+            //
+            // `INDICES` is UNVERIFIED and is deliberately in NEITHER list: the
+            // vendor's published column table gives an instrument-type alphabet
+            // of `EQ FUT CE PE` with no index word among them, and its quote
+            // examples address one as `NSE:NIFTY 50`. So how an index row spells
+            // its segment has not been read, and a guess here would file the
+            // engine's own surface under an invented code. docs/00-charter.md
+            // §4d.
+            Self::Zerodha => (&["NSE"], &["NFO-FUT", "NFO-OPT", "MCX", "BSE"]),
             Self::TrueData | Self::Gdfl => (&[], &[]),
         };
         if store.contains(&code) {
@@ -1035,6 +1112,17 @@ impl Vendor {
             // master. Every code is unrecognised, which is refused by name
             // rather than mapped to a guess — an invented type here would file
             // a future as an option and nothing downstream could tell.
+            // `EQ FUT CE PE`, from the vendor's own column table. There is no
+            // index word in that alphabet and none is invented here — see the
+            // segment arm above.
+            Self::Zerodha => match code {
+                "EQ" => Ok(Some("EQ")),
+                "FUT" => Ok(Some("FUT")),
+                // The side IS the type on this vendor, so `side` is not read.
+                "CE" => Ok(Some("CE")),
+                "PE" => Ok(Some("PE")),
+                _ => Err(InstrumentError::Malformed),
+            },
             Self::TrueData | Self::Gdfl => Err(InstrumentError::Malformed),
         }
     }
@@ -1936,7 +2024,12 @@ mod tests {
             "N0", "N1", "SG", "GS", "MF", "IV", "Y1", "Z9", "AK", "D1", "W1", "TB", "GB", "RR",
             "P1", "SF", "ZZ",
         ] {
-            for vendor in Vendor::MASTERED {
+            // THE TWO MASTERS THAT CARRY A BOARD SERIES, not every mastered
+            // vendor. This alphabet is read from a `series` column, and the
+            // third broker's dump has none — twelve columns, no series and no
+            // ISIN among them. Asking it to decline a series it never publishes
+            // is asking a question its master cannot answer.
+            for vendor in [Vendor::Groww, Vendor::Dhan] {
                 let r = match vendor {
                     Vendor::Groww => groww_cash("SOMEBOND", series, REAL_ISIN),
                     _ => dhan_cash("SOMEBOND", series, REAL_ISIN),

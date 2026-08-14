@@ -3034,7 +3034,7 @@ impl Transport {
 // ---------------------------------------------------------------------------
 
 /// How many feeds this build knows.
-pub const FEED_COUNT: usize = 4;
+pub const FEED_COUNT: usize = 5;
 
 /// Which feed a request is for.
 ///
@@ -3055,11 +3055,22 @@ pub enum Feed {
     TrueData = 2,
     /// Historical archives on disk.
     Gdfl = 3,
+    /// Third broker, HTTP. The vendor `docs/07-plan.md` §5 predicted: its
+    /// request carries the instrument and the rung as PATH SEGMENTS, its header
+    /// carries a prefix and a SECOND secret, and its timestamps carry their own
+    /// zone. D-0133, D-0134, D-0135.
+    Zerodha = 4,
 }
 
 impl Feed {
     /// Every feed, in table order.
-    pub const ALL: [Self; FEED_COUNT] = [Self::Dhan, Self::Groww, Self::TrueData, Self::Gdfl];
+    pub const ALL: [Self; FEED_COUNT] = [
+        Self::Dhan,
+        Self::Groww,
+        Self::TrueData,
+        Self::Gdfl,
+        Self::Zerodha,
+    ];
 
     /// This feed's row in [`DESCRIPTORS`].
     ///
@@ -3105,6 +3116,7 @@ impl Feed {
             // `credentials.toml` edit.
             Self::TrueData => Some(Vendor::TrueData),
             Self::Gdfl => Some(Vendor::Gdfl),
+            Self::Zerodha => Some(Vendor::Zerodha),
         }
     }
 
@@ -4143,38 +4155,251 @@ const GDFL: Descriptor = Descriptor {
 /// *i* carries variant *i***. Together they make [`Feed::descriptor`]'s single
 /// array index sound at compile time, and make a feed added to the enum but
 /// not to the table a build failure rather than a runtime surprise.
-pub const DESCRIPTORS: [&Descriptor; FEED_COUNT] = [&DHAN, &GROWW, &TRUE_DATA, &GDFL];
+/// Zerodha's history claim, per rung.
+///
+/// **ONE CLAIM AND NO CONTEST, which makes this feed different from the other
+/// two brokers.** Groww's and Dhan's rows each carry a vendor table disagreeing
+/// with the operator, and `ClaimStanding` exists to say which binds. Here the
+/// vendor page states no depth at all — its closest sentence is *"spanning back
+/// several years"*, a phrase and not a figure — so there is nothing to weigh
+/// against and `contested` is `None`. That is not agreement; it is silence, and
+/// the row says so.
+const ZERODHA_HISTORY: &[FloorRow] = &[
+    FloorRow {
+        granularity: Granularity::Minute1,
+        binding: FloorClaim {
+            floor: HistoryFloor::Rolling { years: 10 },
+            source: "the operator, 11 Aug 2026, restated 14 Aug 2026: a rolling \
+                     10 years",
+            standing: ClaimStanding::OperatorObservation,
+        },
+        contested: None,
+        binds_because: "it is the only claim there is. kite.trade's historical \
+                        page states no depth for any interval — the nearest it \
+                        comes is the phrase \"spanning back several years\" — so \
+                        nothing weighs against this and nothing confirms it \
+                        either. UNVERIFIED per rung: the figure was stated \
+                        against the VENDOR, not against a rung, and is applied \
+                        to both unchanged.",
+    },
+    FloorRow {
+        granularity: Granularity::Day1,
+        binding: FloorClaim {
+            floor: HistoryFloor::Rolling { years: 10 },
+            source: "the operator, 11 Aug 2026, restated 14 Aug 2026: a rolling \
+                     10 years",
+            standing: ClaimStanding::OperatorObservation,
+        },
+        contested: None,
+        binds_because: "as the rung above, and for the same reason: one source, \
+                        uncontested, applied to both rungs because that is how \
+                        it was stated.",
+    },
+];
+
+/// Zerodha's granularity floor: one minute, and the vendor's own list proves it.
+const ZERODHA_FLOOR: GranularityFloor = GranularityFloor {
+    finest: Granularity::Minute1,
+    kind: FinestKind::Bar,
+    because: "the vendor publishes its whole interval alphabet on the \
+              historical page — minute, day, 3minute, 5minute, 10minute, \
+              15minute, 30minute, 60minute — and its finest row is one minute. \
+              There is no second-level and no print-level word in it, so a rung \
+              below a minute cannot be spelled on this vendor's wire at all.",
+    source: "docs/00-charter.md section 4z, Intervals published, read from \
+             kite.trade/docs/connect/v3/historical/ on 14 Aug 2026.",
+};
+
+/// Zerodha, and it is the vendor `docs/07-plan.md` §5 predicted.
+///
+/// Every one of the three fields §5 named as unable to express an arbitrary
+/// broker is exercised by this single row: the path carries the instrument AND
+/// the rung (D-0133), the scheme carries a prefix and a SECOND secret
+/// (D-0134), and the timestamp carries its own zone (D-0135).
+const ZERODHA: Descriptor = Descriptor {
+    // NOT MEASURED, AND THEREFORE NOT CLAIMED TO BE THE OTHER ONE.
+    //
+    // `BarConvention` has two arms and both are real: Dhan's daily bar opens at
+    // the session's first print, Groww's opens at the PREVIOUS session's close
+    // — measured on the same instrument on the same day, differing by 181
+    // points. No such measurement exists for this vendor, and no page states a
+    // convention. `SessionOpenToClose` is the ordinary reading and is what is
+    // declared; it is UNVERIFIED, and `docs/06-limits.md` is where that costs
+    // something. Declaring nothing is not an option the type offers, and
+    // guessing the OTHER one would be equally unfounded and less likely.
+    day_bar: BarConvention::SessionOpenToClose,
+    feed: Feed::Zerodha,
+    display: "Zerodha",
+    wire: "zerodha",
+    record: RecordShape::Ohlcv,
+    transport: Transport::Http(HttpSpec {
+        base_url: "https://api.kite.trade",
+        // THE ROW §5 PREDICTED. Both the instrument and the rung are PATH
+        // SEGMENTS, which is why `bars_path` is a list — D-0133. The two
+        // placeholders are the vendor's own names for them, so a refusal reads
+        // the way its documentation does.
+        bars_path: &[
+            PathSegment::Literal("instruments"),
+            PathSegment::Literal("historical"),
+            PathSegment::Value {
+                placeholder: "instrument_token",
+                value: ParamValue::InstrumentId,
+            },
+            PathSegment::Value {
+                placeholder: "interval",
+                value: ParamValue::Granularity,
+            },
+        ],
+        method: Method::Get,
+        auth: Auth {
+            header: "Authorization",
+            // `token api_key:access_token` — a prefix AND a second secret,
+            // which no two-variant scheme could describe. D-0134.
+            scheme: AuthScheme::PrefixedPair {
+                prefix: "token ",
+                separator: ":",
+            },
+            key_field: Some("api-key"),
+        },
+        // `from` / `to`, `yyyy-mm-dd hh:mm:ss` — the vendor's own words.
+        date_format: DateFormat::DashedYmdMidnight,
+        // INCLUSIVE, AND READ FROM THE VENDOR'S EXAMPLE BECAUSE THE PROSE NEVER
+        // SAYS. `from=09:15:00&to=09:20:00` is answered with six candles —
+        // 09:15 through 09:20, both endpoints present — and the OI example
+        // repeats it. Third vendor, third answer: Dhan's daily end is
+        // exclusive, Groww's is inclusive, and this one is inclusive by
+        // demonstration. docs/00-charter.md section 4z.
+        range_end: RangeEnd::Inclusive,
+        response: ResponseShape::PositionalRows {
+            envelope: Some("data"),
+            array: "candles",
+        },
+        fields: FieldNames {
+            open: "open",
+            high: "high",
+            low: "low",
+            close: "close",
+            volume: "volume",
+            timestamp: "timestamp",
+            // ONLY WITH `oi=1`, WHICH THIS REQUEST DOES NOT SEND. The vendor's
+            // six-cell row has no open interest and its seven-cell row does;
+            // the positional decoder accepts either width. Naming a field here
+            // would claim the array is always present, which is the exact row
+            // that broke both swept indices on Dhan.
+            open_interest: None,
+        },
+        // `2017-12-15T09:15:00+0530` — it carries its own zone, and applying
+        // IST again would put every bar 5h30m early and STORE it. D-0135.
+        timestamps: TimestampEncoding::IsoDateTimeOffset,
+        prices: PriceScale::Rupees,
+        budget: Budget {
+            per_second: Some(crate::rate::ZERODHA_PER_SECOND),
+            per_minute: None,
+            // NO DAILY QUOTA APPLIES. The page publishes one daily figure —
+            // 5,000 orders per user per day — and it is stated against ORDER
+            // PLACEMENT. This build places no order, so carrying it here would
+            // promote a figure past the endpoint it was measured against, which
+            // is the error the Dhan window-cap row names.
+            per_day: None,
+        },
+        history_floor: HistoryFloor::Rolling { years: 10 },
+        // ABSENT, AND THAT IS THE FACT. The historical page states no window
+        // cap for any interval. An absent row means "the vendor bounds nothing
+        // here", so the store's one-month-per-file boundary is the only bound —
+        // and inventing a number would be section 3 rule 1's invention.
+        window_caps: &[],
+        // TWO RUNGS OF EIGHT, AND THE NARROWING IS THE OPERATOR'S.
+        //
+        // The vendor publishes `minute 3minute 5minute 10minute 15minute
+        // 30minute 60minute day`. He narrowed it on 14 Aug 2026 — "one and only
+        // one day pull and one min pull" — so the other six are real, are not
+        // wired, and refuse by name like every unfetched rung. The two words
+        // here are the vendor's own spelling and are not derived from
+        // `Granularity::dir`, which spells them `1min` and `1day`.
+        granularity_tokens: &[(Granularity::Minute1, "minute"), (Granularity::Day1, "day")],
+        pooling: Pooling::PerRequestKind,
+        // THE INSTRUMENT'S CLASS IS NOT ON THIS WIRE AT ALL.
+        //
+        // The request is a token and an interval in the path, plus `from` and
+        // `to`. There is no segment field and no instrument-kind field, because
+        // the token already identifies the instrument uniquely — which is the
+        // whole reason the vendor issues one. So both classes record the empty
+        // words and no `Segment` or `Kind` param reads them.
+        listings: &[
+            ListingWords {
+                listing: Listing::Index,
+                segment: "",
+                kind: "",
+            },
+            ListingWords {
+                listing: Listing::Equity,
+                segment: "",
+                kind: "",
+            },
+        ],
+        params: &[
+            Param {
+                name: "from",
+                value: ParamValue::From,
+            },
+            Param {
+                name: "to",
+                value: ParamValue::To,
+            },
+        ],
+        // THE VERSION HEADER THE VENDOR REQUIRES ON EVERY CALL. Its own curl
+        // examples carry it beside the credential, and a request without it is
+        // a request against an unstated API version.
+        extra_headers: &[("X-Kite-Version", "3")],
+    }),
+    granularities: GranularitySet::EMPTY
+        .with(Granularity::Minute1)
+        .with(Granularity::Day1),
+    history: ZERODHA_HISTORY,
+    granularity_floor: ZERODHA_FLOOR,
+    // SPOT ONLY, and the reason is not the vendor's. `continuous=1` returns day
+    // candles for expired NFO and MCX futures, which is a real capability this
+    // build does not use: CLAUDE.md section 1 puts the swept surface on NSE
+    // spot, and an expired contract goes through a different route.
+    segments: SegmentSet::EMPTY.with(Segment::Index).with(Segment::Cash),
+    exchange: Exchange::Nse,
+};
+
+pub const DESCRIPTORS: [&Descriptor; FEED_COUNT] = [&DHAN, &GROWW, &TRUE_DATA, &GDFL, &ZERODHA];
 
 const _: () = assert!(DESCRIPTORS.len() == FEED_COUNT);
 const _: () = assert!(Feed::ALL.len() == FEED_COUNT);
 const _: () = {
     // Destructured rather than indexed: adding a fifth feed makes this pattern
     // itself a compile error, before any assertion is even evaluated.
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
     assert!(dhan.feed as u8 == Feed::Dhan as u8);
     assert!(groww.feed as u8 == Feed::Groww as u8);
     assert!(truedata.feed as u8 == Feed::TrueData as u8);
     assert!(gdfl.feed as u8 == Feed::Gdfl as u8);
-    let [first, second, third, fourth] = Feed::ALL;
+    assert!(zerodha.feed as u8 == Feed::Zerodha as u8);
+    let [first, second, third, fourth, fifth] = Feed::ALL;
     assert!(first as u8 == 0 && second as u8 == 1 && third as u8 == 2 && fourth as u8 == 3);
+    assert!(fifth as u8 == 4);
 };
 
 // No row may ship an empty capability set: a feed that serves no granularity
 // or no segment can never answer a request, and offering it on a page would be
 // a control that always refuses.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
     assert!(!dhan.granularities.is_empty() && !dhan.segments.is_empty());
     assert!(!groww.granularities.is_empty() && !groww.segments.is_empty());
     assert!(!truedata.granularities.is_empty() && !truedata.segments.is_empty());
     assert!(!gdfl.granularities.is_empty() && !gdfl.segments.is_empty());
+    assert!(!zerodha.granularities.is_empty() && !zerodha.segments.is_empty());
 };
 
 // A local archive carries no token and no budget by construction — there is no
 // field for either on `ArchiveSpec`. This says the same thing about the two
 // shipped archive rows in a form the compiler checks.
 const _: () = {
-    let [_, _, truedata, gdfl] = DESCRIPTORS;
+    let [_, _, truedata, gdfl, _] = DESCRIPTORS;
     assert!(!truedata.transport.needs_credential());
     assert!(!truedata.transport.needs_governor());
     assert!(!gdfl.transport.needs_credential());
@@ -4194,11 +4419,12 @@ const _: () = {
 // the two rows whose transport is a folder, which is the same statement seen
 // from the store-prefix side.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
     assert!(matches!(dhan.transport.kind(), SourceKind::Rest));
     assert!(matches!(groww.transport.kind(), SourceKind::Rest));
     assert!(matches!(truedata.transport.kind(), SourceKind::Folder));
     assert!(matches!(gdfl.transport.kind(), SourceKind::Folder));
+    assert!(matches!(zerodha.transport.kind(), SourceKind::Rest));
 };
 
 // AND NO FEED MAY CLAIM A RUNG ITS KIND CANNOT CARRY.
@@ -4214,9 +4440,12 @@ const _: () = {
 // coarsest-last, so "no finer than" is one integer comparison and needs no
 // table.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
     assert!(dhan.granularity_floor.finest as u8 >= dhan.transport.kind().finest_possible() as u8);
     assert!(groww.granularity_floor.finest as u8 >= groww.transport.kind().finest_possible() as u8);
+    assert!(
+        zerodha.granularity_floor.finest as u8 >= zerodha.transport.kind().finest_possible() as u8
+    );
     assert!(
         truedata.granularity_floor.finest as u8
             >= truedata.transport.kind().finest_possible() as u8
@@ -4256,7 +4485,7 @@ const _: () = {
 // `DateFormat` is fieldless, so the comparison is one `u8` cast and needs no
 // per-variant table that a sixth format could fall outside of.
 const _: () = {
-    let [_dhan, _groww, truedata, gdfl] = DESCRIPTORS;
+    let [_dhan, _groww, truedata, gdfl, _zerodha] = DESCRIPTORS;
     assert!(shape_agrees(&TRUEDATA_INDEX, truedata));
     assert!(shape_agrees(&GDFL_FNO, gdfl));
 };
@@ -4287,11 +4516,12 @@ const fn shape_agrees(layout: &ColumnLayout, row: &Descriptor) -> bool {
 // with no source, and CLAUDE.md section 3 rule 1 makes that a stop rather than
 // a review comment. Here it is a build failure.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
     assert!(!dhan.granularity_floor.kind.is_tick_stream());
     assert!(!groww.granularity_floor.kind.is_tick_stream());
     assert!(!truedata.granularity_floor.kind.is_tick_stream());
     assert!(!gdfl.granularity_floor.kind.is_tick_stream());
+    assert!(!zerodha.granularity_floor.kind.is_tick_stream());
 };
 
 // A BUILD CANNOT FETCH WHAT A VENDOR CANNOT SERVE.
@@ -4303,7 +4533,12 @@ const _: () = {
 // satisfy, and the refusal would arrive from the vendor as an empty answer,
 // which reads like a holiday. One mask per row, checked by the compiler.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
+    assert!(
+        zerodha
+            .granularities
+            .none_finer_than(zerodha.granularity_floor.finest)
+    );
     assert!(
         dhan.granularities
             .none_finer_than(dhan.granularity_floor.finest)
@@ -4331,7 +4566,9 @@ const _: () = {
 // operator cannot check is a refusal they have to take on faith, and this
 // repository does not ask for faith about a vendor.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
+    assert!(has_content(zerodha.granularity_floor.because));
+    assert!(has_content(zerodha.granularity_floor.source));
     assert!(has_content(dhan.granularity_floor.because));
     assert!(has_content(dhan.granularity_floor.source));
     assert!(has_content(groww.granularity_floor.because));
@@ -4350,7 +4587,11 @@ const _: () = {
 // row whose record shape said snapshot while its floor said bar would let a
 // conflated second be labelled a candle at the boundary that renders it.
 const _: () = {
-    let [dhan, groww, truedata, gdfl] = DESCRIPTORS;
+    let [dhan, groww, truedata, gdfl, zerodha] = DESCRIPTORS;
+    assert!(matches!(
+        (zerodha.record, zerodha.granularity_floor.kind),
+        (RecordShape::Ohlcv, FinestKind::Bar)
+    ));
     assert!(matches!(
         (dhan.record, dhan.granularity_floor.kind),
         (RecordShape::Ohlcv, FinestKind::Bar)

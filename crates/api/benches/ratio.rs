@@ -179,6 +179,11 @@ fn read_of(n: usize) -> Read {
             by_key,
             conflicts: Vec::new(),
             eligibility: Vec::new(),
+            // Both brokers' masters, matching the comment two lines below.
+            contributed: vec![
+                brutex_core::vendor::Vendor::Groww,
+                brutex_core::vendor::Vendor::Dhan,
+            ],
         },
         Vec::new(),
         // unread: every vendor's master was read, by construction.

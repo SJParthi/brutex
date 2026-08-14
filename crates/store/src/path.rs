@@ -149,11 +149,16 @@ const _: () = {
     // Destructured rather than looped, so a new vendor is a COMPILE ERROR here
     // and not a path segment that quietly exceeds the bound. `truedata` is
     // eight bytes and lifted this ceiling from five.
-    let [groww, dhan, truedata, gdfl] = Vendor::ALL;
+    let [groww, dhan, truedata, gdfl, zerodha] = Vendor::ALL;
     assert!(groww.as_str().len() <= MAX_VENDOR_LEN);
     assert!(dhan.as_str().len() <= MAX_VENDOR_LEN);
     assert!(truedata.as_str().len() <= MAX_VENDOR_LEN);
     assert!(gdfl.as_str().len() <= MAX_VENDOR_LEN);
+    // `zerodha` is seven bytes and did not move the ceiling. It is asserted
+    // here anyway, because this block's value is that EVERY vendor is checked —
+    // one left out is a path segment that quietly exceeds the bound, which is
+    // the failure the destructure exists to make impossible.
+    assert!(zerodha.as_str().len() <= MAX_VENDOR_LEN);
 };
 const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 

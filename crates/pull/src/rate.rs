@@ -204,6 +204,26 @@ pub const DHAN_PER_SECOND: u32 = 5;
 /// figures passes `None` for the minute span rather than inventing one.
 pub const DHAN_PER_DAY: u32 = 100_000;
 
+/// The third broker's per-second cap on the historical endpoint: **3**.
+///
+/// `docs/00-charter.md` §4z, evidence lane **documented**, and re-read from
+/// `kite.trade/docs/connect/v3/exceptions/` on 14 Aug 2026 rather than trusted
+/// from the earlier transcription.
+///
+/// # It is stated PER ENDPOINT GROUP, and this is the historical one
+///
+/// The vendor's own table gives quote 1/s, historical **3**/s, order placement
+/// 10/s and everything else 10/s. Taking the 10 would be promoting a figure
+/// past the endpoint it was measured against — the error the Dhan window-cap
+/// row names — and this build's only historical calls are candle requests.
+///
+/// The instrument master falls under "all other endpoints" at 10/s and is one
+/// request a day, so nothing is governed for it here.
+///
+/// **A breach answers HTTP 429**, which is the governor's business and is
+/// distinguishable from a 5xx, which is not.
+pub const ZERODHA_PER_SECOND: u32 = 3;
+
 /// The primary vendor's per-minute cap: **500**.
 ///
 /// `docs/00-charter.md` §4, evidence lane **operator-confirmed, not published**.

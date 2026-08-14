@@ -583,7 +583,7 @@ pub fn universe(dir: &Path) -> Read {
     }
     for (name, present, both) in merged.universe_census() {
         notes.push(format!(
-            "{name}: {present} resolved, {both} confirmed by both vendors"
+            "{name}: {present} resolved, {both} confirmed by every master read"
         ));
     }
     // An index carries no ISIN, so nothing cross-checks its identity. Saying
@@ -7042,10 +7042,32 @@ mod tests {
     use std::io::Write as _;
 
     /// A directory holding one or both masters, named after the test.
+    /// The third mastered vendor's file, written for every fixture.
+    ///
+    /// # Why a HEADER AND NO ROWS, and why it is written at all
+    ///
+    /// `Vendor::MASTERED` gained a third name on 14 Aug 2026, so
+    /// `master_paths` looks for three files. A fixture that writes two leaves
+    /// the third UNAVAILABLE, and a mastered vendor whose file is missing
+    /// degrades the whole report — correctly, and in every test at once, which
+    /// tells you nothing about the test.
+    ///
+    /// A header with no rows is the honest fixture: the master was READ and
+    /// listed nothing. That is a state this build must handle and it keeps the
+    /// read clean, so a test that is about something else stays about that.
+    /// The columns are `core::vendor::MasterColumns` for this vendor, in the
+    /// order the exchange publishes them — twelve, and no ISIN among them.
+    const ZERODHA_HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,\
+                                expiry,strike,tick_size,lot_size,instrument_type,segment,exchange\n";
+
     fn masters(name: &str, groww: Option<&str>, dhan: Option<&str>) -> PathBuf {
         let dir = crate::scratch::path(&format!("server-{name}"));
         std::fs::create_dir_all(&dir).expect("mkdir");
-        for (file, body) in [("groww_instruments.csv", groww), ("dhan_scrip.csv", dhan)] {
+        for (file, body) in [
+            ("groww_instruments.csv", groww),
+            ("dhan_scrip.csv", dhan),
+            ("zerodha_instruments.csv", Some(ZERODHA_HEAD)),
+        ] {
             let path = dir.join(file);
             match body {
                 Some(text) => {
@@ -7482,9 +7504,16 @@ mod tests {
     #[test]
     fn each_vendor_is_looked_for_under_its_own_file_name() {
         let paths = master_paths(Path::new("/m"));
-        assert_eq!(paths.len(), 2);
+        // THREE SINCE 14 AUG 2026. `master_paths` walks `Vendor::MASTERED`, so
+        // a broker that publishes a master is LOOKED FOR whether or not its
+        // file is on disk yet — which is the correct behaviour: a master that
+        // is absent reports as unread, and one that is never looked for reports
+        // as nothing at all. Zerodha's is the third.
+        assert_eq!(paths.len(), brutex_core::vendor::Vendor::MASTERED.len());
+        assert_eq!(paths.len(), 3);
         assert!(paths[0].1.ends_with("groww_instruments.csv"));
         assert!(paths[1].1.ends_with("dhan_scrip.csv"));
+        assert!(paths[2].1.ends_with("zerodha_instruments.csv"));
     }
 
     #[test]
@@ -7520,11 +7549,11 @@ mod tests {
         // The census is stated on every run, and it separates what two vendors
         // confirmed from what one asserted.
         assert!(
-            text.contains("F&O underlyings: 2 resolved, 2 confirmed by both vendors"),
+            text.contains("F&O underlyings: 2 resolved, 2 confirmed by every master read"),
             "{text}"
         );
         assert!(
-            text.contains("NIFTY Total Market: 1 resolved, 1 confirmed by both vendors"),
+            text.contains("NIFTY Total Market: 1 resolved, 1 confirmed by every master read"),
             "{text}"
         );
         assert!(

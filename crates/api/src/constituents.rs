@@ -397,6 +397,14 @@ pub struct Unjoinable {
 /// One `(vendor, tier)` answer: the ids, and the whole of what did not resolve.
 #[derive(Debug, Default)]
 pub struct TierJoin {
+    /// Which masters this join actually compared, so corroboration means
+    /// something checkable.
+    ///
+    /// See [`Self::uncorroborated`]: a vendor that published no file here can
+    /// neither confirm nor deny an ISIN, and asking `Vendor::MASTERED` instead
+    /// made every matched row read as unconfirmed the moment a third mastered
+    /// vendor was named.
+    pub compared: Vec<Vendor>,
     /// Constituents this vendor lists under NSE's ISIN, one row each.
     pub matched: Vec<Matched>,
     /// Constituents whose NSE ISIN this vendor's master does not carry.
@@ -422,6 +430,8 @@ pub struct TierJoin {
 /// reference without allocating, and so the eager argument of `unwrap_or` costs
 /// one pointer.
 static NOTHING: TierJoin = TierJoin {
+    // Nothing was compared, which is what makes every bucket below empty.
+    compared: Vec::new(),
     matched: Vec::new(),
     lacks: Vec::new(),
     ambiguous: Vec::new(),
@@ -459,17 +469,19 @@ impl TierJoin {
     /// published master files both carry is an ISIN two files agree the
     /// exchange got right. An empty result means every ISIN this tier joined on
     /// appears in both masters.
+    /// **ASKED OF THE MASTERS THAT WERE READ, not of `Vendor::MASTERED`.**
+    ///
+    /// It was asked of `MASTERED`, and a third mastered vendor broke it: that
+    /// constant is the set which PUBLISHES a master, and a vendor whose file is
+    /// not on disk corroborates nothing — so every matched ISIN in the tree
+    /// became uncorroborated the moment the list grew. Corroboration is a claim
+    /// about files that were actually compared. Same defect and same fix as
+    /// `merge::Merged::contributed`, which carries the argument in full.
     #[must_use]
     pub fn uncorroborated(&self) -> Vec<&Matched> {
         self.matched
             .iter()
-            .filter(|m| {
-                Vendor::MASTERED
-                    .iter()
-                    .filter(|v| m.corroboration.contains(**v))
-                    .count()
-                    < Vendor::MASTERED.len()
-            })
+            .filter(|m| self.compared.iter().any(|v| !m.corroboration.contains(*v)))
             .collect()
     }
 }
@@ -596,7 +608,7 @@ impl Join {
         // makes the flat index in `tier` correct rather than merely plausible.
         for vendor in Vendor::ALL {
             for names in &resolved {
-                tiers.push(bucket(&by_isin, vendor, names));
+                tiers.push(bucket(&by_isin, vendor, names, &merged.contributed));
             }
         }
         Self { by_isin, tiers }
@@ -846,8 +858,14 @@ fn bucket(
     by_isin: &HashMap<(Exchange, Isin), Claim>,
     vendor: Vendor,
     names: &[Resolved],
+    compared: &[Vendor],
 ) -> TierJoin {
-    let mut out = TierJoin::default();
+    let mut out = TierJoin {
+        // The masters that were read, carried so `uncorroborated` asks a
+        // question about files that exist rather than about a static list.
+        compared: compared.to_vec(),
+        ..TierJoin::default()
+    };
     for Resolved { symbol, identity } in names.iter().copied() {
         let isin = match identity {
             Ok(found) => found,
@@ -1241,7 +1259,12 @@ mod tests {
         assert_eq!(groww_reliance.isin, isin(RELIANCE));
         // Both files carry NSE's ISIN, so the exchange's column has two
         // independent confirmations here rather than one.
-        for vendor in Vendor::MASTERED {
+        //
+        // ASKED OF THE MASTERS THIS FIXTURE SUPPLIED, not of `Vendor::MASTERED`
+        // — which is the set that PUBLISHES one. A third mastered vendor whose
+        // file is absent corroborates nothing, and asserting against the static
+        // list made this fail the moment one was named.
+        for vendor in [Vendor::Groww, Vendor::Dhan] {
             assert!(dhan_reliance.corroboration.contains(vendor));
         }
         assert!(
@@ -1488,7 +1511,12 @@ mod tests {
                 identity: nse_identity_of(name),
             })
             .collect();
-        let answer = bucket(&index_by_isin(&merged), Vendor::Groww, &rows);
+        let answer = bucket(
+            &index_by_isin(&merged),
+            Vendor::Groww,
+            &rows,
+            &merged.contributed,
+        );
         let mut named: Vec<&str> = answer.malformed.iter().map(|r| r.symbol).collect();
         named.sort_unstable();
         assert_eq!(named, vec!["DUMMYINXGN", "RELIANCE LTD"]);
@@ -1741,6 +1769,9 @@ mod tests {
             by_key,
             conflicts: Vec::new(),
             eligibility: Vec::new(),
+            // The fixture supplies both brokers' rows, so both are what any
+            // cross-check here is asked of.
+            contributed: vec![Vendor::Groww, Vendor::Dhan],
         }
     }
 

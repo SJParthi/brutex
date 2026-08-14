@@ -152,11 +152,28 @@ struct Columns {
     vendor_id: usize,
     exchange: usize,
     segment: usize,
-    underlying: usize,
+    /// `None` when this master has NO underlying column.
+    ///
+    /// # An empty declared name means ABSENT, not a column called ""
+    ///
+    /// `MasterColumns` names a header per field, and a vendor may genuinely
+    /// publish no such header. Zerodha's instrument dump has twelve columns and
+    /// among them is no underlying, no board series and **no ISIN** — its own
+    /// `name` column is the COMPANY name, blank on a derivative row, so reading
+    /// it as an underlying would put "INFOSYS" where "INFY" belongs.
+    ///
+    /// Before this was an `Option`, `locate` looked for a column literally
+    /// named `""`, failed to find one, and refused the whole master with
+    /// `no column ""` — reporting a vendor whose file was perfectly correct as
+    /// unreadable. `option_side` already carried this shape for exactly the
+    /// same reason, one field over.
+    underlying: Option<usize>,
     trading_symbol: usize,
     instrument_type: usize,
-    listing_class: usize,
-    isin: usize,
+    /// `None` when this master carries no board-series column.
+    listing_class: Option<usize>,
+    /// `None` when this master carries no ISIN column at all.
+    isin: Option<usize>,
     expiry: usize,
     strike: usize,
     option_side: Option<usize>,
@@ -183,16 +200,26 @@ impl Columns {
                 .copied()
                 .ok_or_else(|| format!("no column {n:?}"))
         };
+        // AN EMPTY DECLARED NAME IS AN ABSENT COLUMN, not a column named "".
+        // A vendor that publishes no ISIN is described by leaving the name
+        // empty, and looking for `""` in the header refused a file that was
+        // entirely correct. See `Columns::underlying`.
+        let maybe = |n: &str| -> Result<Option<usize>, String> {
+            if n.is_empty() {
+                return Ok(None);
+            }
+            need(n).map(Some)
+        };
         let names = vendor.master_columns();
         Ok(Self {
             vendor_id: need(names.vendor_id)?,
             exchange: need(names.exchange)?,
             segment: need(names.segment)?,
-            underlying: need(names.underlying)?,
+            underlying: maybe(names.underlying)?,
             trading_symbol: need(names.trading_symbol)?,
             instrument_type: need(names.instrument_type)?,
-            listing_class: need(names.listing_class)?,
-            isin: need(names.isin)?,
+            listing_class: maybe(names.listing_class)?,
+            isin: maybe(names.isin)?,
             expiry: need(names.expiry)?,
             strike: need(names.strike)?,
             option_side: names.option_side.map(need).transpose()?,
@@ -210,15 +237,16 @@ impl Columns {
         // checked. `option_side` chains in only for the vendor that has one.
         [
             self.segment,
-            self.underlying,
             self.trading_symbol,
             self.instrument_type,
-            self.listing_class,
-            self.isin,
             self.expiry,
             self.strike,
         ]
         .into_iter()
+        // The optional columns widen the row only where the vendor has them.
+        .chain(self.underlying)
+        .chain(self.listing_class)
+        .chain(self.isin)
         .chain(self.option_side)
         .fold(self.exchange, usize::max)
     }
@@ -324,11 +352,11 @@ pub fn load(path: &std::path::Path, vendor: Vendor) -> Result<Loaded, String> {
             vendor_id: get(cols.vendor_id),
             exchange: get(cols.exchange),
             segment: get(cols.segment),
-            underlying: get(cols.underlying),
+            underlying: cols.underlying.map_or("", get),
             trading_symbol: get(cols.trading_symbol),
             instrument_type: get(cols.instrument_type),
-            listing_class: get(cols.listing_class),
-            isin: get(cols.isin),
+            listing_class: cols.listing_class.map_or("", get),
+            isin: cols.isin.map_or("", get),
             expiry: get(cols.expiry),
             strike_rupees: get(cols.strike),
             option_side: cols.option_side.map_or("", get),

@@ -2926,7 +2926,12 @@ mod vendor_parse_tests {
 
         // AND THE HALF THAT WAS WRONG: a name this build has no feed for is
         // `None`, so a caller must refuse rather than pick something.
-        for wrong in ["zerodha", "upstox", "DHANN", "gro ww", "0", "'"] {
+        //
+        // `zerodha` LEFT THIS LIST on 14 Aug 2026, and it left it by becoming a
+        // real feed — it is asserted in the loop above like every other. A test
+        // for an unknown vendor has to name one that stays unknown, so the
+        // examples are now brokers this build does not carry.
+        for wrong in ["upstox", "angelone", "DHANN", "gro ww", "0", "'"] {
             assert_eq!(
                 parse_vendor(wrong),
                 None,
@@ -3022,7 +3027,10 @@ mod route_tests {
             ("from=2020-01-01&to=2020-01-31", "target"),
             ("target=swept&from=&to=2020-01-31", "from"),
             (
-                "target=swept&from=2020-01-01&to=2020-01-31&vendor=zerodha",
+                // `zerodha` was this example until 14 Aug 2026, when it became a
+                // real feed. A test for an UNKNOWN vendor has to name one that
+                // stays unknown.
+                "target=swept&from=2020-01-01&to=2020-01-31&vendor=upstox",
                 "vendor",
             ),
             ("target=nope&from=2020-01-01&to=2020-01-31", "target"),

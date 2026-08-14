@@ -828,6 +828,8 @@ mod tests {
             );
         }
         Catalog::build(&Merged {
+            // The fixture cross-checks the two masters it supplies.
+            contributed: vec![Vendor::Groww, Vendor::Dhan],
             by_key,
             conflicts: Vec::new(),
             eligibility: Vec::new(),
@@ -1080,6 +1082,8 @@ mod tests {
         // read still answers rather than panicking.
         assert_eq!(
             Catalog::build(&Merged {
+                // The fixture cross-checks the two masters it supplies.
+                contributed: vec![Vendor::Groww, Vendor::Dhan],
                 by_key: HashMap::new(),
                 conflicts: Vec::new(),
                 eligibility: Vec::new(),
