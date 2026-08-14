@@ -171,8 +171,51 @@ one source, operator-stated, with no vendor page read against it.
 
 | Fact | Value | Lane |
 |---|---|---|
-| History depth | rolling 10 years | operator-stated 11 Aug 2026, no vendor page read |
+| History depth | rolling 10 years | operator-stated 11 Aug 2026, restated 14 Aug 2026, no vendor page states it |
 | Descriptor | **none exists.** Not a feed this build can name. | verified from source |
+
+**The vendor page has now been read.** `https://kite.trade/docs/connect/v3/historical/`,
+read 14 Aug 2026. Every row below is quoted from it, so the "no vendor page read"
+lane above applies only to the history depth, which that page still does not state.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Base URL | `https://api.kite.trade` | documented |
+| Endpoint | `GET /instruments/historical/:instrument_token/:interval` | documented |
+| Auth | header `Authorization: token api_key:access_token`, plus `X-Kite-Version: 3` | documented |
+| Instrument identity | numeric `instrument_token`, from the instruments API — **not a symbol** | documented |
+| Intervals | `minute` `3minute` `5minute` `10minute` `15minute` `30minute` `60minute` `day` | documented |
+| Window params | `from` / `to`, `yyyy-mm-dd hh:mm:ss` | documented |
+| Extra params | `continuous` (0/1), `oi` (0/1) | documented |
+| Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
+| Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
+| Prices | decimal rupees (`1704.5`) | documented |
+| Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
+| Window cap | **UNVERIFIED.** The page states none. | unverified |
+
+#### Why this vendor cannot be described by the current descriptor, and it is all three
+
+`docs/07-plan.md` §5 measured three fields that "cannot express an arbitrary
+broker at all" and predicted the vendor that would prove it. Zerodha is that
+vendor, and it trips **every one**:
+
+1. **`HttpSpec::bars_path` is a fixed string concatenated with `base_url`.**
+   Kite carries the instrument AND the interval as PATH SEGMENTS
+   (`/instruments/historical/5633/minute`). §5's exact words: "A vendor whose
+   instrument and granularity are *path segments* cannot be described."
+2. **`AuthScheme` is `Raw | Bearer`.** Kite's is `token api_key:access_token` —
+   a prefix AND a second secret. §5: "A scheme carrying a prefix and a **second**
+   secret cannot be described."
+3. **`TimestampEncoding::IsoDateTimeText` documents itself as carrying no zone.**
+   Kite returns `+0530`. §5: "A vendor returning `+0530` cannot be described."
+
+A fourth, not in §5 and found here: the instrument is a NUMERIC TOKEN from a
+separate instruments call, not a tradingsymbol, so the (exchange, symbol) key
+this repository joins on does not address a Kite request at all.
+
+**So adding Zerodha is not a descriptor row.** It is three `pull::vendor` type
+changes plus an instrument-token map, and each needs its own decision entry. The
+prediction in §5 was right and this is the evidence that closed it.
 
 ### 4a. Instrument facts transcribed into source
 
