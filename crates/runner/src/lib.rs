@@ -45,6 +45,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod identity;
 pub mod synthetic;
 
 use engine::{Ladder, Sweep};
