@@ -1088,9 +1088,7 @@
   // tick, and the drawer holds only what is NOT chosen. Pick a NIFTY family and
   // the sweep pair folds away; pick the sweep pair and it rides up beside them.
   const sweptIsChosen = $derived(universe === SWEPT.id);
-  const uniTucked = $derived(
-    sweptIsChosen ? refusedUniverses.map((x) => x.u) : [SWEPT, ...refusedUniverses.map((x) => x.u)]
-  );
+  const uniTucked = $derived(refusedUniverses.map((x) => x.u));
   const uniOpen = $derived(uniTuck);
   const uniTuckLabel = $derived(
     uniTucked.length === 1
@@ -2451,7 +2449,22 @@
    * transport.
    */
   const isArchiveFeed = $derived(active?.kind === 'folder');
-  const segServed = (s) => s.served || isArchiveFeed;
+  /**
+   * EVERY SEGMENT IS OFFERED ON EVERY FEED — the operator's decision, stated
+   * three times and overruling the per-feed rule that stood here.
+   *
+   * WHAT THAT COSTS, RECORDED RATHER THAN DISCOVERED. On an ARCHIVE this is
+   * simply correct: expired futures and options are what the bought CSVs hold.
+   * On a BROKER it offers something the vendor cannot answer, and all three
+   * reasons remain true — the master purges on expiry so every FUT row decodes
+   * as `Skip::LiveContract`, `POST /pull/fno` answers 503 for want of an HTTP
+   * transport, and `FnoRequest` names one contract rather than a set.
+   *
+   * So a broker request for an expired segment WILL be refused. It is refused
+   * LOUDLY and by name — §4's requirement is that a failure is named, not that
+   * it is made unreachable — and the reason still sits on the row.
+   */
+  const segServed = (_s) => true;
   const segmentsReached = $derived(SEGMENTS.filter((s) => segSet.has(s.key) && segServed(s)));
   const segmentsUnserved = $derived(SEGMENTS.filter((s) => !segServed(s)));
   /**
@@ -4346,10 +4359,14 @@
                              unable to build a legal request at all.
                              The refusals keep their reasons; each names whether
                              the gap is membership or the wire. -->
-                        <!-- THE PROMOTED SELECTION. Only drawn when the sweep
-                             pair is the current choice, so the menu always
-                             shows a tick without having to open anything. -->
-                        {#if sweptIsChosen}
+                        <!-- THE SWEEP PAIR IS NO LONGER OFFERED. The operator
+                             asked for it gone three times; §1 still names it as
+                             the engine surface and `api::ingest::SpotTarget`
+                             still spells only swept, indices and equities, so
+                             this menu can now name NO set a broker pull can
+                             serve until that enum grows. Recorded in the commit
+                             rather than argued here. -->
+                        {#if false}
                           <button
                             class="ddr"
                             type="button"
@@ -4374,7 +4391,7 @@
                             <span class="ct">{uniOpen ? 'hide' : 'show'}</span>
                           </button>
                           {#if uniOpen}
-                            {#if !sweptIsChosen}
+                            {#if false}
                               <!-- LIVE, and only here while it is NOT the
                                    selection. When it IS, it is promoted above
                                    the drawer instead — see `uniTucked`. -->
