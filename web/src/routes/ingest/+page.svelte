@@ -1093,46 +1093,110 @@
     if (untrack(() => folderReach.wire === wire && folderReach.state !== 'idle')) return;
     let live = true;
     folderReach = { wire, state: 'reading', body: null, why: null };
-    // `&segment=INDEX`, AND THE PARAMETER IS NOT OPTIONAL ANY MORE.
+    // THE SEGMENT IS DISCOVERED, NOT ASSUMED — AND ASSUMING IT WAS A BUG.
     //
-    // `/folder.json` reads the folder with ONE column layout, and it refuses to
-    // pick one when a feed declares more than one — "a reach read with the
-    // wrong shape is a precise and wrong answer". TrueData declared a single
-    // layout until its plain F&O row was measured, so an unnamed segment used
-    // to be unambiguous and now is not: both of its layouts are five fields,
-    // and the index's trailing pair is `Ignored` where a contract's is a real
-    // volume and open interest. Reading contracts against the index layout
-    // would report every one of them as having neither, and it would look like
-    // it worked.
+    // `/folder.json` reads a folder with ONE column layout and refuses to pick
+    // when a feed declares more than one: "a reach read with the wrong shape is
+    // a precise and wrong answer". TrueData had a single layout until its plain
+    // F&O row was measured; it now has two, so the unnamed ask became
+    // ambiguous and started refusing.
     //
-    // INDEX because that is the segment this engine sweeps — `CLAUDE.md` §1
-    // names NSE-NIFTY and NSE-BANKNIFTY and nothing else — so it is the folder
-    // an operator on this page is asking about. The census below says which
-    // segment it counted rather than implying it counted the folder whole; the
-    // route takes any segment the vendor has measured, so an F&O census is a
-    // control this page does not have yet rather than an answer it cannot get.
-    fetch(`/folder.json?feed=${encodeURIComponent(wire)}&segment=INDEX`)
-      .then(async (r) => ({ ok: r.ok, data: await r.json() }))
-      .then(({ ok, data }) => {
+    // The first fix here hardcoded `&segment=INDEX`, and that was WRONG in the
+    // direction that matters. GDFL has measured exactly ONE layout and it is
+    // FNO — this vendor publishes no index archive at all — so a page that
+    // always names INDEX turned GDFL's real refusal, which is about the shape
+    // of a file on disk, into "no column layout was ever measured for Global
+    // Datafeeds INDEX". A true sentence about a question nobody asked, standing
+    // where the actual fault used to be printed. That is the §4 shape arriving
+    // by the back door: the operator is sent to fix a layout when the finding
+    // is a file with nine fields where ten were declared.
+    //
+    // SO THE SEGMENT IS FOUND BY ASKING. The unnamed ask is tried first, which
+    // is right for every feed with one layout and is exactly what this page did
+    // before. ONLY the ambiguity refusal — the server's own words, matched on
+    // the sentence it emits for that case — is retried, once per segment this
+    // build can name, and each answer is kept beside its segment. Every other
+    // refusal is kept whole and shown, because it is the finding.
+    //
+    // Nothing here decides which segments a vendor has. It offers the two the
+    // route can parse and keeps whichever answer; a feed that has neither says
+    // so in the server's words, and a third segment is a row on this list.
+    readFolder(wire)
+      .then(({ ok, data, segment }) => {
         if (!live) return;
         // A HALT IS KEPT AS A HALT. `ok` is false for every refusal the server
         // makes, and the body carries `path` on the ones that have one — so
         // the page can name the folder rather than saying "nothing found".
         folderReach = ok
-          ? { wire, state: 'read', body: data, why: null }
-          : { wire, state: 'halted', body: data, why: data?.refused ?? 'refused' };
+          ? { wire, state: 'read', body: data, why: null, segment }
+          : { wire, state: 'halted', body: data, why: data?.refused ?? 'refused', segment };
       })
       .catch((why) => {
         if (!live) return;
         // LOUD, NOT SILENT. A reach that quietly fails to load must not render
         // as an empty folder — that is exactly the confusion this route exists
         // to end, arriving by a different door.
-        folderReach = { wire, state: 'halted', body: null, why: String(why) };
+        folderReach = { wire, state: 'halted', body: null, why: String(why), segment: null };
       });
     return () => {
       live = false;
     };
   });
+
+  /**
+   * The sentence `/folder.json` refuses an AMBIGUOUS segment with, and no other.
+   *
+   * `crates/api/src/folder.rs` emits it verbatim when a feed declares more than
+   * one measured layout and the caller named none. Matched on the two words
+   * that are structural rather than decorative — a reworded refusal stops
+   * matching and this page falls back to showing it whole, which is the safe
+   * direction: an unretried ambiguity is a visible halt, and a retry triggered
+   * by the WRONG refusal would ask a segment question of a folder whose fault
+   * is a file.
+   */
+  const AMBIGUOUS = /measured column layouts/i;
+
+  /**
+   * THE SEGMENTS THIS BUILD CAN NAME, in the order they are tried.
+   *
+   * `brutex_core::instrument::Segment` parses these three and `/folder.json`
+   * refuses anything else with all three listed. This page holds the words and
+   * not the knowledge of which vendor has which — that is a fact about a
+   * descriptor, and asking is how it is found out.
+   */
+  const FOLDER_SEGMENTS = ['INDEX', 'FNO', 'CASH'];
+
+  /**
+   * Read the folder, discovering the segment only when the server says one is
+   * needed.
+   *
+   * ONE REQUEST for every feed that declares one layout — which is what this
+   * page did before it started guessing, and is why GDFL is answered by its own
+   * refusal again rather than by a sentence about an index archive it has never
+   * published. At most one more per segment for a feed that declares several,
+   * and only ever after the server has said in its own words that a segment is
+   * required.
+   *
+   * The FIRST segment that answers wins and its name is carried out, so the
+   * census can say which archive it counted instead of implying it counted the
+   * folder whole. When none answers, the AMBIGUITY refusal is what is returned
+   * — never the last segment's refusal, which would name whichever this list
+   * happened to end on and read as a finding about that segment.
+   */
+  async function readFolder(wire) {
+    const ask = async (segment) => {
+      const at = segment ? `&segment=${segment}` : '';
+      const r = await fetch(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
+      return { ok: r.ok, data: await r.json(), segment };
+    };
+    const first = await ask(null);
+    if (first.ok || !AMBIGUOUS.test(String(first.data?.refused ?? ''))) return first;
+    for (const segment of FOLDER_SEGMENTS) {
+      const next = await ask(segment);
+      if (next.ok) return next;
+    }
+    return first;
+  }
 
   /**
    * THE FOLDER'S ANSWERABLE RANGE, IN WORDS, and every one of them is read.
@@ -1224,7 +1288,11 @@
       files: Number(r.files ?? 0),
       rows: Number(r.rows ?? 0),
       instruments: Array.isArray(named) ? named : null,
-      collisions: Number(folderReach.body?.collisions ?? 0)
+      collisions: Number(folderReach.body?.collisions ?? 0),
+      // WHICH ARCHIVE THIS COUNTED. `null` for a feed that answered without a
+      // segment being named — one measured layout, so the folder IS the answer
+      // — and the segment's own word when one had to be discovered.
+      segment: folderReach.segment ?? null
     };
   });
 
@@ -4865,7 +4933,9 @@
                       >
                         {n(c.files)} file(s) · {n(c.rows)} row(s) · {dayLabel(c.earliest)} – {dayLabel(
                           c.latest
-                        )} — the INDEX archive, read from the folder
+                        )} — {c.segment
+                          ? `the ${c.segment} archive`
+                          : "this feed's universe is the folder"}, read from it
                       </span>
                     {:else if c.state === 'blank'}
                       <span class="pknote wrap warn">
