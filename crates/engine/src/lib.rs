@@ -206,6 +206,42 @@ impl Frontier {
     }
 }
 
+/// A level that would have enumerated more candidates than the ladder may hold.
+///
+/// # Why this exists, and why it is not the depth parameter §6 forbids
+///
+/// It will be read as one, so: a depth parameter says "stop at k=N" and returns a
+/// TRUNCATED answer that looks complete. This says "level k wanted more than the
+/// ceiling and I refused" and returns the levels below it, which are complete,
+/// beside a named reason. `CLAUDE.md` §4 asks for exactly that — degrade loudly
+/// and name the reason, or refuse, never both silently — and §6 forbids the
+/// other thing. A caller cannot set this to get a shallower ANSWER; it can only
+/// set how much memory a single level may occupy before the walk gives up.
+///
+/// # The hole this closes
+///
+/// `CLAUDE.md` §6 replaces a depth parameter with extinction: the walk stops
+/// where the frequent frontier empties, justified by anti-monotonicity. That
+/// argument is sound and it is **not a termination guarantee**. If a set of P
+/// positions co-occurs on at least `min_hits` bars, then every subset of it is
+/// frequent, [`every_subset_is_frequent`] never prunes, and the frontier at
+/// level k is `C(P, k)`. At P = 40 that is 137,846,528,820 itemsets at level 20
+/// — 7.7 TB — and correlated bits on a range-bound session are ordinary, not
+/// pathological. Before this type the only thing between that and the operator
+/// was the allocator, and the failure was a process abort with no message, no
+/// partial result and no event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Halt {
+    /// The level that breached. Its [`Frontier`] is in [`Sweep::levels`] and is
+    /// **partial** — it holds what was evaluated before the ceiling was reached.
+    pub k: u32,
+    /// Distinct candidates admitted at that level before the walk stopped.
+    /// Equal to the ceiling that was in force.
+    pub candidates: usize,
+    /// The ceiling that was in force, echoed so the result is self-describing.
+    pub ceiling: usize,
+}
+
 /// The outcome of a whole sweep.
 #[derive(Clone, Debug, Default)]
 pub struct Sweep {
@@ -218,6 +254,11 @@ pub struct Sweep {
     pub bars: u64,
     /// The threshold actually applied, echoed so a result is self-describing.
     pub min_hits: u64,
+    /// `None` when the ladder went extinct, which is the answer §6 asks for.
+    /// `Some` when a level breached the candidate ceiling and the walk stopped
+    /// short — see [`Halt`]. A reader that ignores this field reads a partial
+    /// sweep as a complete one, which is why [`Sweep::completed`] exists.
+    pub halted: Option<Halt>,
 }
 
 impl Sweep {
@@ -236,12 +277,44 @@ impl Sweep {
     pub fn all_frequent(&self) -> impl Iterator<Item = &Itemset> {
         self.levels.iter().flat_map(|l| l.frequent.iter())
     }
+
+    /// Did the ladder go extinct, which is the answer `CLAUDE.md` §6 asks for?
+    ///
+    /// False means a level breached the candidate ceiling and the walk stopped
+    /// short, so the deepest level held is **partial** and combinations exist
+    /// that this sweep did not enumerate. A reader that treats a halted sweep as
+    /// a complete one is making the claim §3 rule 6 forbids.
+    #[must_use]
+    pub const fn completed(&self) -> bool {
+        self.halted.is_none()
+    }
 }
+
+/// Distinct candidates one level may admit before the walk refuses.
+///
+/// # Where the number comes from
+///
+/// Bytes, not taste. A level holds each distinct candidate twice: once in `seen`
+/// as a [`ConditionMask`] key (48 bytes) and once, if it survives, in `out` as an
+/// [`Itemset`] (56 bytes). `hashbrown` carries roughly one slot in eight spare
+/// plus a control byte, so 128 bytes per candidate across both is a safe
+/// round-up. `2^23 · 128 B = 1 GiB`, which is the largest single level this
+/// crate will build on an ordinary machine without the operator having said so.
+///
+/// It is deliberately far above anything a healthy sweep reaches. With all 238
+/// live positions frequent at k=1 — the worst case the vocabulary permits — the
+/// distinct-candidate counts are `C(238,2) = 28,203` and `C(238,3) = 2,215,180`,
+/// both under this. `C(238,4) = 130,344,865` is fifteen times over it, and that
+/// level is the one an adversarial audit measured at 4.69 years of support
+/// counting and 24.9 GB of peak memory. So the ceiling first bites exactly where
+/// the walk stops being a computation and starts being a hang.
+pub const DEFAULT_CEILING: usize = 1 << 23;
 
 /// The ladder. **Carries no depth field**, by `CLAUDE.md` §6.
 #[derive(Clone, Copy, Debug)]
 pub struct Ladder {
     min_hits: u64,
+    ceiling: usize,
 }
 
 impl Ladder {
@@ -268,7 +341,33 @@ impl Ladder {
         // One is the floor because a frequent set means "occurred", and the smallest
         // number of occurrences that is an occurrence is one.
         let floor = if min_hits == 0 { 1 } else { min_hits };
-        Self { min_hits: floor }
+        Self {
+            min_hits: floor,
+            ceiling: DEFAULT_CEILING,
+        }
+    }
+
+    /// The same ladder with a different per-level candidate ceiling.
+    ///
+    /// A ceiling of zero is raised to one, for the reason
+    /// [`Ladder::with_min_hits`] raises `min_hits`: a ceiling of zero refuses
+    /// before admitting anything, so every level past k=1 would halt at once and
+    /// report a breach that describes the caller rather than the data.
+    ///
+    /// **This is not a depth control.** See [`Halt`] for why the distinction is
+    /// real and not a wording choice.
+    #[must_use]
+    pub const fn with_ceiling(self, ceiling: usize) -> Self {
+        Self {
+            min_hits: self.min_hits,
+            ceiling: if ceiling == 0 { 1 } else { ceiling },
+        }
+    }
+
+    /// The per-level candidate ceiling this ladder will actually apply.
+    #[must_use]
+    pub const fn ceiling(&self) -> usize {
+        self.ceiling
     }
 
     /// The threshold this ladder will actually apply.
@@ -411,16 +510,31 @@ impl Ladder {
             // `break` nothing can prove. Saturation agrees with `checked_add` on
             // every reachable value of `k` and adds no arm to defend.
             k = k.saturating_add(1);
-            let next = self.next_level(bar_bits, &current, k);
+            let (next, halt) = self.next_level(bar_bits, &current, k);
             sweep.levels.push(current);
             current = next;
+            // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
+            // an incomplete frontier and label the result complete. Anti-monotonicity
+            // only licenses the prune when the previous level is the WHOLE frequent
+            // set; from a truncated one the subset test rejects candidates that are
+            // frequent, and nothing downstream could tell. So the walk stops, the
+            // partial level is recorded below, and `Sweep::halted` names why.
+            if halt.is_some() {
+                sweep.halted = halt;
+                break;
+            }
         }
         sweep.levels.push(current);
         sweep
     }
 
     /// Join the frontier with itself, subset-prune, evaluate what is left.
-    fn next_level(self, bar_bits: &[ConditionMask], prev: &Frontier, k: u32) -> Frontier {
+    fn next_level(
+        self,
+        bar_bits: &[ConditionMask],
+        prev: &Frontier,
+        k: u32,
+    ) -> (Frontier, Option<Halt>) {
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
@@ -437,8 +551,9 @@ impl Ladder {
         let mut duplicates: u64 = 0;
         let mut pruned: u64 = 0;
         let mut infrequent: u64 = 0;
+        let mut halted: Option<Halt> = None;
 
-        for (a_idx, a) in prev.frequent.iter().enumerate() {
+        'join: for (a_idx, a) in prev.frequent.iter().enumerate() {
             for b in prev.frequent.iter().skip(a_idx.saturating_add(1)) {
                 let cand = a.mask.union(&b.mask);
                 // A union of two distinct (k-1)-sets is a k-set only when they
@@ -446,6 +561,29 @@ impl Ladder {
                 // needs no canonical-prefix bookkeeping.
                 if cand.popcount() != k {
                     continue;
+                }
+                // THE CEILING, AND IT IS CHECKED BEFORE ANY COUNTER MOVES.
+                //
+                // Placement is the whole correctness argument. Guarding `out.len()`
+                // would guard the wrong number: `seen` is filled BEFORE the support
+                // test, so a level whose survivors all fall under `min_hits` still
+                // allocates every distinct candidate it enumerated -- the level that
+                // goes extinct is the level that allocates most. `seen` is the
+                // allocation, so `seen` is what is bounded.
+                //
+                // Checking here, rather than after `seen.insert`, keeps
+                // `Frontier::reconciles` an invariant: nothing half-processed is
+                // ever counted. The cost is that a level which has admitted exactly
+                // `ceiling` distinct candidates halts even if every remaining pair
+                // would have been a duplicate. That is conservative in the safe
+                // direction and it is stated rather than hidden.
+                if seen.len() >= self.ceiling {
+                    halted = Some(Halt {
+                        k,
+                        candidates: seen.len(),
+                        ceiling: self.ceiling,
+                    });
+                    break 'join;
                 }
                 generated = generated.saturating_add(1);
                 // Duplicate rejection: O(1). The same k-set arises from several
@@ -471,15 +609,18 @@ impl Ladder {
             }
         }
         sort_canonically(&mut out);
-        Frontier {
-            k,
-            frequent: out,
-            generated,
-            duplicates,
-            excluded: 0,
-            pruned,
-            infrequent,
-        }
+        (
+            Frontier {
+                k,
+                frequent: out,
+                generated,
+                duplicates,
+                excluded: 0,
+                pruned,
+                infrequent,
+            },
+            halted,
+        )
     }
 }
 
@@ -902,8 +1043,142 @@ mod tests {
     fn the_type_carries_no_depth_field() {
         // CLAUDE.md §6: "There is no k parameter. Not a default, not a token,
         // not an environment override. The type does not carry the field."
-        // A Ladder is exactly one u64, so there is nowhere for a depth to hide.
-        assert_eq!(core::mem::size_of::<Ladder>(), core::mem::size_of::<u64>());
+        //
+        // THE SIZE WAS THE WHOLE TEST, AND THE SIZE WAS ONLY EVER A PROXY. It
+        // read "a Ladder is exactly one u64, so there is nowhere for a depth to
+        // hide", which was true while one field existed and stopped being an
+        // argument the moment a second one could be justified. A size check
+        // notices that a field ARRIVED; it can never ask what the field does.
+        //
+        // The size is still pinned, derived from the two fields rather than
+        // written as a literal, so a THIRD field fails here and has to be
+        // argued for in this comment before it can compile.
+        assert_eq!(
+            core::mem::size_of::<Ladder>(),
+            core::mem::size_of::<u64>() + core::mem::size_of::<usize>()
+        );
+    }
+
+    /// The behavioural half of §6, and the half a size assertion cannot reach.
+    ///
+    /// A depth parameter CHANGES the depth — that is what makes it one, and what
+    /// made the predecessor's silent fallback to `k = [1, 2]` invisible. A memory
+    /// ceiling does not: across every ceiling that does not bite, the walk reaches
+    /// the same depth and returns the same combinations, byte for byte.
+    #[test]
+    fn the_ceiling_cannot_choose_a_depth() {
+        let b = bars(&[&[0, 1], &[0, 1], &[0, 1], &[2], &[2], &[0]]);
+        let roomy = Ladder::with_min_hits(2).walk(&b, &[0, 1, 2]);
+        let tight = Ladder::with_min_hits(2)
+            .with_ceiling(64)
+            .walk(&b, &[0, 1, 2]);
+
+        assert!(
+            roomy.completed() && tight.completed(),
+            "neither should bite"
+        );
+        assert_eq!(roomy.depth(), tight.depth(), "a ceiling is not a depth");
+        let wide: Vec<Itemset> = roomy.all_frequent().copied().collect();
+        let narrow: Vec<Itemset> = tight.all_frequent().copied().collect();
+        assert_eq!(wide, narrow, "and it changes no combination either");
+    }
+
+    /// The hole this closes: a frontier that never empties.
+    ///
+    /// Four positions that co-occur on most bars. Every subset of a frequent set
+    /// is frequent, so `every_subset_is_frequent` never prunes and extinction —
+    /// §6's entire replacement for a depth parameter — never happens. Before the
+    /// ceiling the only thing under this was the allocator.
+    #[test]
+    fn a_level_that_would_outgrow_the_ceiling_halts_loudly() {
+        let b = bars(&[&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1, 2, 3], &[4]]);
+        let s = Ladder::with_min_hits(1)
+            .with_ceiling(2)
+            .walk(&b, &[0, 1, 2, 3, 4]);
+
+        assert!(
+            !s.completed(),
+            "a partial sweep must never report itself whole"
+        );
+        // `unwrap_or_default` and not `expect`: this crate denies both
+        // `expect_used` and `panic` in tests as well as in shipping code, and the
+        // assertion above already proves the `Some`. A defaulted `Halt` is all
+        // zeroes, so every field assertion below still fails loudly if it were not.
+        let halt = s.halted.unwrap_or_default();
+        assert_eq!(halt.ceiling, 2, "the ceiling in force is echoed");
+        assert_eq!(halt.candidates, 2, "and so is what it admitted");
+        assert_eq!(halt.k, 2, "the level that breached is named");
+        // The partial level is KEPT, not discarded: everything below it is
+        // complete and a caller paid for it.
+        assert!(s.levels.iter().any(|l| l.k == halt.k));
+    }
+
+    /// A halted level has lost no candidate — it simply stopped admitting them.
+    #[test]
+    fn a_halted_level_still_reconciles() {
+        let b = bars(&[&[0, 1, 2, 3], &[0, 1, 2, 3], &[0, 1, 2, 3], &[4]]);
+        let s = Ladder::with_min_hits(1)
+            .with_ceiling(2)
+            .walk(&b, &[0, 1, 2, 3, 4]);
+        assert!(s.halted.is_some(), "the fixture must actually breach");
+        for level in &s.levels {
+            assert!(level.reconciles(), "level {} lost a candidate", level.k);
+        }
+    }
+
+    /// Extinction is silent, and that silence is the positive result.
+    #[test]
+    fn a_ladder_that_goes_extinct_reports_no_halt() {
+        let b = bars(&[&[0, 1], &[0, 1], &[0, 1], &[2], &[2], &[0]]);
+        let s = Ladder::with_min_hits(2).walk(&b, &[0, 1, 2]);
+        assert!(s.completed());
+        assert_eq!(s.halted, None, "nothing breached, so nothing is named");
+    }
+
+    /// The sentinel `unwrap_or_default` leans on, pinned.
+    ///
+    /// `a_level_that_would_outgrow_the_ceiling_halts_loudly` reads its `Halt`
+    /// through `unwrap_or_default`, which is only sound because a defaulted
+    /// `Halt` is a value no real breach can produce — `k` is at least 2 and both
+    /// counts are at least 1 whenever one is constructed. Without this test the
+    /// `Default` impl is also a function no test enters, and llvm-cov counts it.
+    #[test]
+    fn a_defaulted_halt_is_a_value_no_breach_can_produce() {
+        let d = Halt::default();
+        assert_eq!(d.k, 0, "no level is k=0");
+        assert_eq!(d.candidates, 0, "a breach admitted at least one candidate");
+        assert_eq!(d.ceiling, 0, "and ran under a ceiling of at least one");
+        assert_ne!(
+            d,
+            Halt {
+                k: 2,
+                candidates: 2,
+                ceiling: 2
+            }
+        );
+    }
+
+    #[test]
+    fn a_zero_ceiling_is_raised_to_one() {
+        // Same reason zero `min_hits` is raised: a ceiling of zero refuses before
+        // admitting anything, so every level past k=1 reports a breach that
+        // describes the caller rather than the data.
+        assert_eq!(Ladder::with_min_hits(1).with_ceiling(0).ceiling(), 1);
+        assert_eq!(Ladder::with_min_hits(1).with_ceiling(7).ceiling(), 7);
+    }
+
+    #[test]
+    fn the_default_ceiling_is_the_one_its_arithmetic_describes() {
+        assert_eq!(Ladder::with_min_hits(1).ceiling(), DEFAULT_CEILING);
+        assert_eq!(DEFAULT_CEILING, 8_388_608, "2^23, one GiB at 128 B each");
+        // The doc's claim that a healthy sweep never reaches the ceiling, pinned
+        // at COMPILE time rather than run time. Both operands are constants, so a
+        // runtime assertion would only ever restate what the compiler already
+        // knew; a `const` block fails the BUILD if the ceiling is ever moved to a
+        // value that puts C(238,3) outside it or C(238,4) inside it, which is the
+        // arithmetic the doc block on `DEFAULT_CEILING` argues from.
+        const { assert!(2_215_180 < DEFAULT_CEILING, "C(238,3) must fit") };
+        const { assert!(130_344_865 > DEFAULT_CEILING, "C(238,4) must not") };
     }
 
     #[test]
