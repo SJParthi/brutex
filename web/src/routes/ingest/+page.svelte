@@ -1068,29 +1068,34 @@
    */
   const notReadyFeeds = $derived(feeds.all.filter((f) => f.ready !== true));
   let feedTuck = $state(false);
-  const feedOpen = $derived(
-    feedTuck || notReadyFeeds.some((f) => f.wire === feeds.active)
+  // Same promotion rule as the universe drawer, for the same reason: forcing it
+  // open whenever the selection was inside meant it was open whenever an
+  // operator had selected a not-ready feed, which is exactly when the menu most
+  // needs to be short. The selected feed is rendered above the drawer instead.
+  const feedOpen = $derived(feedTuck);
+  const tuckedFeeds = $derived(notReadyFeeds.filter((f) => f.wire !== feeds.active));
+  const activeNotReady = $derived(notReadyFeeds.find((f) => f.wire === feeds.active) ?? null);
+  // THE SELECTED ROW IS PROMOTED OUT OF THE DRAWER, NOT AUTO-OPENED INTO VIEW.
+  //
+  // The first draft forced the drawer open whenever the selection lived inside
+  // it, so that a menu could never draw without a visible tick. That reasoning
+  // was right and the result was useless: `universe` DEFAULTS to `'swept'`, so
+  // the selection was always inside, so the drawer was always open, so the menu
+  // looked exactly as it had before and the operator correctly said nothing had
+  // changed.
+  //
+  // Promoting instead satisfies both: the chosen row is always visible with its
+  // tick, and the drawer holds only what is NOT chosen. Pick a NIFTY family and
+  // the sweep pair folds away; pick the sweep pair and it rides up beside them.
+  const sweptIsChosen = $derived(universe === SWEPT.id);
+  const uniTucked = $derived(
+    sweptIsChosen ? refusedUniverses.map((x) => x.u) : [SWEPT, ...refusedUniverses.map((x) => x.u)]
   );
-  /**
-   * WHAT IS IN THE UNIVERSE DRAWER, and whether it has to be open.
-   *
-   * The sweep pair sits in here with the refusals — the operator wants the NSE
-   * families leading the menu — but it is LIVE and it is the DEFAULT selection
-   * (`universe` starts at `'swept'`). A closed drawer holding the current
-   * choice would draw a menu with no visible tick anywhere, which reads as
-   * "nothing is selected" on the one control that always has a selection.
-   *
-   * So `uniOpen` is forced true whenever the selection lives inside the drawer,
-   * and `uniTuck` only decides it when the selection is visible above. The
-   * operator can still fold it once he has picked one of the families.
-   */
-  const uniTucked = $derived([SWEPT, ...refusedUniverses.map((x) => x.u)]);
-  const selectionIsTucked = $derived(uniTucked.some((u) => u.id === universe));
-  const uniOpen = $derived(uniTuck || selectionIsTucked);
+  const uniOpen = $derived(uniTuck);
   const uniTuckLabel = $derived(
-    refusedUniverses.length === 0
-      ? 'the pair this engine sweeps'
-      : `the swept pair + ${n(refusedUniverses.length)} no request can name`
+    uniTucked.length === 1
+      ? `1 set ${sweptIsChosen ? 'no request can name' : 'more'}`
+      : `${n(uniTucked.length)} set(s) not offered here`
   );
   let segSet = $state(new Set(['spot']));
   /**
@@ -4319,6 +4324,22 @@
                              unable to build a legal request at all.
                              The refusals keep their reasons; each names whether
                              the gap is membership or the wire. -->
+                        <!-- THE PROMOTED SELECTION. Only drawn when the sweep
+                             pair is the current choice, so the menu always
+                             shows a tick without having to open anything. -->
+                        {#if sweptIsChosen}
+                          <button
+                            class="ddr"
+                            type="button"
+                            aria-pressed={true}
+                            title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface. It is the only set a broker path can serve: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
+                            onclick={() => (drop = null)}
+                          >
+                            <span class="tk">✓</span>
+                            <span class="nm">{SWEPT.label}</span>
+                            <span class="ct">the pair this engine sweeps</span>
+                          </button>
+                        {/if}
                         {#if uniTucked.length > 0}
                           <button
                             class="ddr tuck"
@@ -4331,24 +4352,25 @@
                             <span class="ct">{uniOpen ? 'hide' : 'show'}</span>
                           </button>
                           {#if uniOpen}
-                            <!-- THE SWEEP PAIR IS IN HERE AND IT IS LIVE. A
-                                 drawer that only ever held dead rows would make
-                                 this one look dead too, so it keeps its tick,
-                                 its click and its own note. -->
-                            <button
-                              class="ddr"
-                              type="button"
-                              aria-pressed={universe === SWEPT.id}
-                              title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                              onclick={() => {
-                                universe = SWEPT.id;
-                                drop = null;
-                              }}
-                            >
-                              <span class="tk">{universe === SWEPT.id ? '✓' : ''}</span>
-                              <span class="nm">{SWEPT.label}</span>
-                              <span class="ct">the pair this engine sweeps</span>
-                            </button>
+                            {#if !sweptIsChosen}
+                              <!-- LIVE, and only here while it is NOT the
+                                   selection. When it IS, it is promoted above
+                                   the drawer instead — see `uniTucked`. -->
+                              <button
+                                class="ddr"
+                                type="button"
+                                aria-pressed={false}
+                                title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
+                                onclick={() => {
+                                  universe = SWEPT.id;
+                                  drop = null;
+                                }}
+                              >
+                                <span class="tk"></span>
+                                <span class="nm">{SWEPT.label}</span>
+                                <span class="ct">the pair this engine sweeps</span>
+                              </button>
+                            {/if}
                             {#each refusedUniverses as x (x.u.id)}
                               <button class="ddr off" type="button" disabled title={x.why}>
                                 <span class="tk"></span>
@@ -6032,7 +6054,26 @@
               >
             </button>
           {/each}
-          {#if notReadyFeeds.length > 0}
+          <!-- THE PROMOTED SELECTION. An operator CAN select a not-ready feed —
+               the page carries blank states for exactly that — and when he has,
+               the row rides above the drawer so the menu still shows a tick
+               without opening anything. -->
+          {#if activeNotReady}
+            <button
+              class="ddr off"
+              type="button"
+              disabled
+              aria-pressed={true}
+              title={`${activeNotReady.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${activeNotReady.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+            >
+              <span class="tk">✓</span>
+              <span class="nm">{activeNotReady.display}</span>
+              <span class="ct warn"
+                >{activeNotReady.kind_label ?? 'kind not stated'} · unavailable</span
+              >
+            </button>
+          {/if}
+          {#if tuckedFeeds.length > 0}
             <button
               class="ddr tuck"
               type="button"
@@ -6040,11 +6081,11 @@
               onclick={() => (feedTuck = !feedOpen)}
             >
               <span class="tk">{feedOpen ? '▾' : '▸'}</span>
-              <span class="nm">{n(notReadyFeeds.length)} feed(s) this build cannot pull</span>
+              <span class="nm">{n(tuckedFeeds.length)} feed(s) this build cannot pull</span>
               <span class="ct">{feedOpen ? 'hide' : 'show why'}</span>
             </button>
             {#if feedOpen}
-              {#each notReadyFeeds as f (f.wire)}
+              {#each tuckedFeeds as f (f.wire)}
                 <button
                   class="ddr off"
                   type="button"
