@@ -1503,7 +1503,7 @@ fn finest_fields(feed: pull::vendor::Feed) -> String {
 /// withdrawn rung is a fact worth keeping rather than a capability being
 /// advertised.
 async fn feeds_json(
-    axum::extract::State(site): axum::extract::State<Loaded>,
+    axum::extract::State(_site): axum::extract::State<Loaded>,
 ) -> ([(axum::http::HeaderName, &'static str); 1], String) {
     let mut out = String::from("[");
     // ONE CLOCK READ FOR THE WHOLE ANSWER, so two feeds' rolling floors are
@@ -1576,13 +1576,11 @@ async fn feeds_json(
         // a feed that vanishes teaches the operator nothing, and one that says
         // "no data held, and no credential configured" tells them exactly which
         // of the two things to do.
-        let held = feed.store_vendor().and_then(|vendor| {
-            site.censuses
-                .iter()
-                .find(|c| c.vendor == vendor)
-                .and_then(census::VendorCensus::counters)
-                .map(|(n_valid, _n_keys, _rows)| n_valid)
-        });
+        // THE CENSUS READ IS GONE, and its absence is the fix rather than a
+        // tidy-up. It counted what had been INGESTED and was then used to
+        // answer whether a feed could BE ingested — the circularity that made
+        // both archive feeds unreachable. Readiness below asks the kind and the
+        // store prefix; nothing here needs a counter.
         // A BROKER IS READY WITH AN EMPTY STORE. Its credential is what proves
         // entitlement and the first pull is what fills the store; an empty
         // census means "nothing pulled yet", not "not owned". Using the census
@@ -1597,32 +1595,45 @@ async fn feeds_json(
         // as a second `match` on the transport that happens to land the same
         // way. The two were separate and could have drifted; the predicate is
         // now the same value `kind`, `kind_label` and `verb` are read from.
-        let (ready, why) = match held {
-            _ if kind.needs_credential() => (true, String::new()),
-            // AN ARCHIVE'S EVIDENCE IS ITS FOLDER, NOT ITS CENSUS.
-            //
-            // This arm used to read `Some(n) if n > 0` — ready only once the
-            // census already held rows. That is CIRCULAR and it is why the
-            // operator's bought archives could never be selected: the census is
-            // filled by an ingest, an ingest needs a ready feed, and the feed
-            // needs a census. TrueData and GDFL were unreachable by
-            // construction, and no amount of buying data changed it.
-            //
-            // The comment two arms up already said what the evidence should be
-            // — "there is no credential, so the only evidence of ownership is
-            // data read from files the operator bought" — and then asked the
-            // wrong question. It asks the folder now.
-            Some(_) => archive_ready(feed),
-            // `store_vendor` is None for a feed with no store prefix of its
-            // own. It has nowhere to file bars, so it cannot serve whatever
-            // else is true.
-            None => (
+        // THE PREDICATE IS THE FEED'S KIND AND ITS STORE PREFIX — NOT ITS CENSUS.
+        //
+        // `a966a6f` moved archive readiness onto the folder and put the call in
+        // the `Some(_)` arm of a match on `held`. That was DEAD CODE, and the
+        // audit caught it: `held` is `Some` only when the census is
+        // `Census::Held` (`census.rs` returns `None` for `Absent` and
+        // `Unreadable`), so a never-ingested TrueData or GDFL produced
+        // `held == None`, fell to the `None` arm, and was refused. The fix sat
+        // behind the very condition it was written to remove and the
+        // circularity survived it — manifest needs an ingest, an ingest needs
+        // ready, ready needed the manifest.
+        //
+        // AND THE ARM IT FELL TO LIED. It said "<feed> has no store prefix",
+        // while `Feed::store_vendor` returns `Some(Vendor::TrueData)` and
+        // `Some(Vendor::Gdfl)`. The operator was told to buy the archive he had
+        // already bought and to give the feed a prefix it already had — two
+        // remedies that are both no-ops, so following the page could never
+        // clear the state.
+        //
+        // `held` is therefore not consulted at all. It answered a question
+        // about INGEST HISTORY and readiness is a question about ENTITLEMENT.
+        let (ready, why) = if kind.needs_credential() {
+            // A broker's credential is the entitlement, so it is ready with an
+            // empty store: the first pull is what fills it.
+            (true, String::new())
+        } else if feed.store_vendor().is_none() {
+            // The one case the old `None` arm was actually written for, and now
+            // the only case that can reach this sentence.
+            (
                 false,
                 format!(
                     "{} has no store prefix, so nothing it pulled could be filed",
                     feed.display()
                 ),
-            ),
+            )
+        } else {
+            // An archive has no credential, so the evidence is the files the
+            // operator bought — whatever the census has or has not recorded.
+            archive_ready(feed)
         };
 
         // THE KIND, ITS LABEL AND THE VERB — ALL THREE FROM ONE VALUE, ALL
