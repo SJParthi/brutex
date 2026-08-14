@@ -322,7 +322,32 @@
     { id: 'n500', label: 'NIFTY 500', field: 'n500', token: null, target: 'n500' },
     { id: 'ntm', label: 'NIFTY Total Market', field: null, token: 'ntm', target: 'equities' },
     { id: 'fno', label: 'F&O underlyings', field: null, token: 'fno', target: null },
-    { id: 'index', label: 'NSE indices', field: null, token: 'index', target: 'indices' },
+    // NOT AN NSE CONSTITUENT FILE, AND THE LABEL MUST NOT IMPLY ONE.
+    //
+    // The four NIFTY tiers and the Total Market each come from a published NSE
+    // CSV, transcribed with its URL and fetch date in `core::universe`, and are
+    // joined to a vendor's master on (exchange, ISIN) by
+    // `api::constituents` under a partition that must sum.
+    //
+    // This row is different in kind. `api::ingest::SpotTarget::Indices`
+    // resolves as `universe.contains(Universe::INDEX)` — "whatever the vendor
+    // master lists as an index series on this build" — and its `members()`
+    // returns None ON PURPOSE, because NSE publishes no file naming that set
+    // and hardcoding one would be invention (§3 rule 1) that went stale the day
+    // a vendor added a series.
+    //
+    // The consequence the operator has to know: THIS SET IS PER FEED AND THE
+    // FEEDS MAY LEGITIMATELY DIFFER. There is no canonical list to verify
+    // against, so "Groww's indices" and "Dhan's indices" are two answers to two
+    // questions, not one answer measured twice. `note` says so on the control.
+    {
+      id: 'index',
+      label: 'NSE indices',
+      field: null,
+      token: 'index',
+      target: 'indices',
+      note: 'this feed’s own index series — NSE publishes no list of them, so the set is the vendor’s and two feeds may differ'
+    },
     { id: 'all', label: 'Everything', field: null, token: '*', target: null }
   ];
 
@@ -4270,7 +4295,7 @@
                             disabled={why !== null}
                             aria-pressed={universe === u.id}
                             title={why ??
-                              `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.`}
+                              `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.${u.note ? ` ${u.note}.` : ''}`}
                             onclick={() => {
                               universe = u.id;
                               drop = null;
