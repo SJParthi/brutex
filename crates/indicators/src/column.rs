@@ -54,11 +54,18 @@
 //!
 //! # Nothing is logged
 //!
-//! CI gate 17 forbids `telemetry::` in this crate outright: the sweep evaluates
+//! CI gate 17 forbids an event emit in this crate outright: the sweep evaluates
 //! a mask per (bar, combination) and a billion O(1) calls is still a billion
 //! calls. [`Census`] is plain integers, returned to the caller, who emits it
 //! **once** at a structural boundary. That is the shape `pull::session::
 //! DropCensus` already uses.
+//!
+//! **The rule is spelled around, not quoted, and that is deliberate.** Gate 17
+//! greps for the emit path as a literal token and does **not** strip comments,
+//! so a doc block quoting the banned spelling in order to explain it fails the
+//! gate it is describing. This paragraph exists because that is exactly what
+//! happened here — the same "text in a comment is text" defect gate 22's own
+//! clause A records having been caught by.
 //!
 //! # Cost
 //!
@@ -66,7 +73,14 @@
 //! reserved once at entry. No allocation inside the loop, no scan of what came
 //! before, and no branch whose cost depends on the data. The per-bar cost is
 //! therefore whatever `step` costs plus a constant, and it is measured rather
-//! than asserted by `crates/indicators/benches/ratio.rs`.
+//! than asserted: row `C-I-06` of `crates/indicators/benches/ratio.rs` builds a
+//! 20,000-bar column and a 200,000-bar one and compares the cost PER BAR.
+//!
+//! That row exists because naming a bench that does not measure the claim is the
+//! one thing CI gate 12 cannot see -- it checks that a proof is named and that
+//! the named thing exists, never that it proves anything. This doc block named
+//! the file before the row was written, which is precisely the defect the gate
+//! converts from unfalsifiable to falsifiable and no further.
 
 use vocab::ConditionMask;
 
@@ -186,7 +200,7 @@ impl Column {
     ///
     /// One `bool` read, one [`Evaluator::step`] and one amortised push per bar,
     /// into a vector reserved once before the loop. Constant per bar, measured
-    /// by `crates/indicators/benches/ratio.rs`.
+    /// by row `C-I-06` of `crates/indicators/benches/ratio.rs`.
     #[must_use]
     pub fn build(bars: &[Candle], evaluator: &mut Evaluator) -> Self {
         let mut bits = Vec::with_capacity(bars.len());

@@ -54,6 +54,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use indicators::column::Column;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::{Availability, ITERATION_CEILING, isqrt_i128, isqrt_i128_counted};
@@ -213,6 +214,57 @@ fn a_candle_stays_within_its_budget(floor: u128) -> bool {
         black_box(state.step(black_box(&c)))
     });
     budget("C-I-05 step: one bar, every family", floor, at, ALLOWED)
+}
+
+/// `n` consecutive candles, one per minute, for a whole-column build.
+fn column_bars(n: i64) -> Vec<Candle> {
+    let mut out = Vec::with_capacity(usize::try_from(n).unwrap_or(0));
+    for m in 0..n {
+        out.push(wandering(m));
+    }
+    out
+}
+
+/// Cost of one bar as `Column::build` actually pays it, in picoseconds.
+///
+/// The evaluator is constructed INSIDE the timed region because it has to be:
+/// `Column::build` folds monotonic timestamps, so a second build against a used
+/// evaluator refuses every bar for a receding timestamp and would measure the
+/// refusal path instead of the fold. That construction is one fixed-size struct
+/// against `n` steps, so it shrinks as `n` grows -- it can only bias this ratio
+/// DOWNWARD, never toward a false pass.
+fn column_per_bar_ps(n: i64) -> u128 {
+    let bars = column_bars(n);
+    let count = u128::try_from(bars.len()).unwrap_or(1).max(1);
+    let whole = cost_ps(1, || {
+        let mut e = fresh();
+        black_box(Column::build(black_box(&bars), &mut e))
+    });
+    whole / count
+}
+
+/// C-I-06 — building the column costs the same per bar however long it is.
+///
+/// # What this catches that `C-I-01` cannot
+///
+/// `C-I-01` measures one `step` against a deeper evaluator, which is the fold's
+/// own bound. This measures the WHOLE column build: the vector that backs it, the
+/// warm-up test taken per bar, and the census. A `Vec` that reallocated per push,
+/// a census that scanned its own buckets, or a warm-up test that walked history
+/// would all be invisible to `C-I-01` and visible here.
+///
+/// Both legs are past the warm-up boundary -- 20,000 minutes is about thirteen
+/// sessions and 200,000 is about a hundred and thirty-eight, and the run warms
+/// after five. A short leg that never warmed would take the no-push branch for
+/// every bar and this row would compare two different code paths.
+fn the_column_costs_the_same_per_bar_however_long_it_is() -> bool {
+    let base = column_per_bar_ps(20_000);
+    let at = column_per_bar_ps(200_000);
+    ratio(
+        "C-I-06 Column::build: 20,000 bars -> 200,000 bars",
+        base,
+        at,
+    )
 }
 
 fn refuse(what: &str) -> ! {
@@ -544,6 +596,7 @@ fn main() {
     ok &= a_candle_costs_the_same_whatever_it_contains();
     ok &= the_integer_square_root_is_bounded_and_flat_per_iteration();
     ok &= a_session_rollover_costs_what_an_ordinary_candle_costs();
+    ok &= the_column_costs_the_same_per_bar_however_long_it_is();
     if ok {
         println!("all ratios within the ceiling");
     } else {
