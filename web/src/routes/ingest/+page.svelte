@@ -1033,6 +1033,20 @@
    */
   let uniTuck = $state(false);
   /**
+   * The feeds this build cannot pull, and whether their drawer must be open.
+   *
+   * Same trap as the universe drawer: `feeds.active` can BE one of these — the
+   * default picks the feed holding the most bars, but an operator can select a
+   * not-ready feed and the page has blank states for exactly that. A closed
+   * drawer holding the current selection would draw a menu with no tick, so the
+   * open state is derived and forced whenever the selection is inside.
+   */
+  const notReadyFeeds = $derived(feeds.all.filter((f) => f.ready !== true));
+  let feedTuck = $state(false);
+  const feedOpen = $derived(
+    feedTuck || notReadyFeeds.some((f) => f.wire === feeds.active)
+  );
+  /**
    * WHAT IS IN THE UNIVERSE DRAWER, and whether it has to be open.
    *
    * The sweep pair sits in here with the refusals — the operator wants the NSE
@@ -5965,8 +5979,13 @@
       >
       {#if drop === 'feed'}
         <div class="ddm" role="group" aria-label="Broker feed — the page's whole scope">
-          {#each feeds.all as f (f.wire)}
-            {@const ready = f.ready === true}
+          <!-- SAME DRAWER RULE AS THE UNIVERSE AND THE PICKERS. TrueData and
+               GDFL are `ready: false` -- samples were supplied and the real
+               archives were never bought -- so they sat dead at the TOP of this
+               menu, above the feeds that work. They are folded below now, with
+               /feeds.json's own reason intact on each. -->
+          {#each feeds.all.filter((f) => f.ready === true) as f (f.wire)}
+            {@const ready = true}
             <button
               class="ddr"
               type="button"
@@ -5988,6 +6007,34 @@
               >
             </button>
           {/each}
+          {#if notReadyFeeds.length > 0}
+            <button
+              class="ddr tuck"
+              type="button"
+              aria-expanded={feedOpen}
+              onclick={() => (feedTuck = !feedOpen)}
+            >
+              <span class="tk">{feedOpen ? '▾' : '▸'}</span>
+              <span class="nm">{n(notReadyFeeds.length)} feed(s) this build cannot pull</span>
+              <span class="ct">{feedOpen ? 'hide' : 'show why'}</span>
+            </button>
+            {#if feedOpen}
+              {#each notReadyFeeds as f (f.wire)}
+                <button
+                  class="ddr off"
+                  type="button"
+                  disabled
+                  title={`${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+                >
+                  <span class="tk"></span>
+                  <span class="nm">{f.display}</span>
+                  <span class="ct warn"
+                    >{f.kind_label ?? 'kind not stated'} · unavailable</span
+                  >
+                </button>
+              {/each}
+            {/if}
+          {/if}
           {#if feeds.all.length === 0}
             <p class="insnone">
               The server answered <span class="mono">/feeds.json</span> with an empty list, so there

@@ -2657,9 +2657,16 @@
      ====================================================================== */
   const VIEWS = [
     {
+      // KEY STAYS `census`. It is an identifier -- it keys `view`, `VIEWS.find`
+      // and every comparison in this file -- and renaming an id to match a
+      // label is how a rename becomes a bug. Only the words the operator reads
+      // change.
       key: 'census',
-      label: 'Census',
-      sub: 'one row per instrument-month',
+      // "Census" was internal vocabulary. The operator read the tab and could
+      // not tell what the view was FOR. "Coverage" says it: this is the view
+      // that answers what you hold and what is missing.
+      label: 'Coverage',
+      sub: 'what you hold, per instrument-month',
       showing: 'one row per INSTRUMENT-MONTH, counted from /store.json',
       title:
         'What the store HOLDS. One row per instrument-month, off /store.json - bars, sessions, completeness, % change. No bar file is opened, so this is the only view that can survey the whole store for a hole.'
@@ -2667,13 +2674,20 @@
     {
       key: 'bars',
       label: 'Bars',
-      sub: 'one row per bar',
+      sub: 'the stored values, one row per bar',
       showing: 'one row per BAR, read from /bars.json',
       title:
         'What the store CONTAINS. One row per stored bar, off /bars.json - one request per instrument-month, so the read budget decides how many files are opened. Prices are the store’s own paisa integers.'
     }
   ];
-  let view = $state('census');
+  // OPENS ON THE DATA, NOT ON THE INVENTORY.
+  //
+  // The page used to open on the coverage view, so the first thing an operator
+  // saw was a survey of what he holds rather than the values themselves -- and
+  // with a nearly-empty store that survey is a screen of zeros, which reads as
+  // a broken page rather than as an empty one. Bars is the table the page is
+  // for; coverage is the second question, and it is one click away.
+  let view = $state('bars');
   const viewNow = $derived(VIEWS.find((v) => v.key === view) ?? VIEWS[0]);
 
   /* ---------------------------------------------------------------------
