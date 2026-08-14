@@ -192,7 +192,24 @@ lane above applies only to the history depth, which that page still does not sta
 | Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
 | Prices | decimal rupees (`1704.5`) | documented |
 | Expired F&O | `continuous=1` returns **day** candles for expired contracts of a live token's underlying, NFO and MCX futures | documented |
-| Window cap | **UNVERIFIED.** The page states none. | unverified |
+| Window cap | **UNVERIFIED.** The historical page states none. | unverified |
+| Rate limit | **3 requests/second** on the historical candle endpoint | documented |
+| Rate-limit refusal | HTTP **429** | documented |
+| Session expiry | **`TokenException`, HTTP 403.** Caused by logout, natural expiry, **or the user logging into another Kite instance.** Clear the session and re-login. | documented |
+| Other exceptions | `InputException` (bad params) · `NetworkException` (API↔OMS) · `DataException` (OMS response unparseable) · `GeneralException` | documented |
+| Other HTTP codes | 400 bad params · 404 not found · 410 gone permanently · 500 · 502 OMS down · 503 · 504 | documented |
+| History DEPTH per interval | **UNVERIFIED.** No page read states how far back any interval reaches. The operator's rolling 10 years is the only figure, and no vendor page confirms it. | unverified |
+| Gap-filling / completeness | **UNVERIFIED, and no page claims it.** Nothing read states that a candle exists for every session minute, nor what a missing session returns. | unverified |
+
+**`TokenException` is the row to read twice.** It fires when the user logs into
+ANOTHER Kite instance — so a human opening kite.zerodha.com while a backfill runs
+kills that backfill's session. `CLAUDE.md` §8's rule that this repository never
+mints a token is not a limitation here, it is the correct posture: a mint would
+invalidate whatever else holds the session.
+
+At 3 req/s the arithmetic for a 2020→yesterday backfill is 80 month-windows ×
+~800 instruments ÷ 3 = **~5.9 hours of wall clock at the cap, per rung**, before
+any retry. That is arithmetic from a published limit, not a measurement.
 
 #### Why this vendor cannot be described by the current descriptor, and it is all three
 
