@@ -2827,6 +2827,12 @@ jobs:
           #
           # The two entries below are bounded sorts, not O(universe), and each is
           # bounded by something the type system or the vocabulary fixes:
+          #   engine   TWO sorts since the prefix join (D-0138 era). `sort_canonically`
+          #            orders ONE level's frequent set; `next_level` also sorts the
+          #            frontier by (prefix, mask) to form the join's blocks, because
+          #            `sort_canonically`'s word order groups by the HIGHEST bit and
+          #            prefix blocks are NOT contiguous under it. Both are per level,
+          #            never per candidate.
           #   engine   `sort_canonically` orders ONE level's frequent set, which the
           #            ladder has already bounded, and canonical order is what makes a
           #            rerun byte-identical under §3.5.
@@ -2887,7 +2893,7 @@ jobs:
           allow_sort='
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
-          crates/engine/src/lib.rs 1
+          crates/engine/src/lib.rs 2
           crates/indicators/src/evaluator.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/catalog.rs 2

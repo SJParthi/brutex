@@ -102,12 +102,34 @@ generates level k only from level k−1's survivors, and the ladder stops at
 extinction. If pruning leaves nothing at k=5, k=7 does not exist as a set to be
 too large.
 
-What the design does **not** do, stated plainly because this section previously
-claimed the opposite: **there is no refusal.** `crates/engine` has no cap, no
-`try_reserve`, no progress report and no bound check. `next_level` builds `out`
-with `Vec::new` and `seen` with `HashSet::new` and lets them grow; an allocation
-failure aborts the process. The earlier text said "the refusal is loud rather
-than an OOM". It is an OOM, and it is silent until the process dies.
+**This paragraph said there was no refusal, and it was stale for the whole of the
+day D-0138 landed.** An adversarial audit caught it — together with D-0138's own
+claim that the limit "is recorded in `docs/06-limits.md`", which was false when
+it was written. Two documents disagreed and the one asserting compliance was the
+wrong one. What is true now:
+
+There are **two** bounds, with different failure modes, and neither is claimed to
+be the other.
+
+| bound | what refuses | what it catches | what it misses |
+|---|---|---|---|
+| `DEFAULT_CEILING` = 2^26 | a constant | overcommit death | the right value for a machine it has not seen |
+| `Breach::Memory` | the allocator | an honest refusal, discovered at runtime | overcommit |
+
+`Ladder::exhausted` asks both as one question. The allocator half is
+`HashSet::try_reserve`, which returns rather than aborts, so the walk halts
+naming memory instead of dying. It takes what a 4 GB machine has and what a
+48 GB machine has and works out which at runtime.
+
+**The limit that remains, stated plainly:** `try_reserve` reports what the
+ALLOCATOR refuses. macOS and Linux both overcommit by default, so a reservation
+can succeed and the process still be killed when the pages are touched. So the
+OOM this section used to describe is **narrowed, not eliminated** — it is why the
+constant survives beside the dynamic bound rather than being deleted.
+
+Measured on 1,124 swept bars at `min_hits = 50`: the walk went extinct at depth
+23 holding 34,979,095 combinations and **5.0 GB** peak, against the 8 GiB the
+ceiling's own arithmetic describes.
 
 Whether the worst case is REACHABLE is **UNMEASURED**. It depends on how fast the
 frequent frontier collapses on real bars at a real `min_hits`, and §4 of this

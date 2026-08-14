@@ -383,16 +383,26 @@ impl Sweep {
 /// as a [`ConditionMask`] key (48 bytes) and once, if it survives, in `out` as an
 /// [`Itemset`] (56 bytes). `hashbrown` carries roughly one slot in eight spare
 /// plus a control byte, so 128 bytes per candidate across both is a safe
-/// round-up. `2^23 · 128 B = 1 GiB`, which is the largest single level this
+/// round-up. `2^26 · 128 B = 8 GiB`, which is the largest single level this
 /// crate will build on an ordinary machine without the operator having said so.
 ///
-/// It is deliberately far above anything a healthy sweep reaches. With all 238
-/// live positions frequent at k=1 — the worst case the vocabulary permits — the
-/// distinct-candidate counts are `C(238,2) = 28,203` and `C(238,3) = 2,218,636`,
-/// both under this. `C(238,4) = 130,344,865` is fifteen times over it, and that
-/// level is the one an adversarial audit measured at 4.69 years of support
-/// counting and 24.9 GB of peak memory. So the ceiling first bites exactly where
-/// the walk stops being a computation and starts being a hang.
+/// **This paragraph said `2^23 · 128 B = 1 GiB` after the constant moved to
+/// `2^26`, understating the bound it justifies by eight times.** An adversarial
+/// audit caught it. Measured against the real figure: at `min_hits = 50` this
+/// engine went extinct holding **5.0 GB**, which is the arithmetic above being
+/// approximately right rather than an accident.
+///
+/// # The headroom argument this doc used to make no longer holds
+///
+/// With all 238 live positions frequent at k=1 — the worst case the vocabulary
+/// permits — the distinct-candidate counts are `C(238,2) = 28,203` and
+/// `C(238,3) = 2,218,636`, both far under this. `C(238,4) = 130,344,865` used to
+/// be **fifteen times** over the ceiling; against `2^26` it is **1.94 times**
+/// over. The comfortable margin the old text argued from is gone, and that is
+/// the deliberate consequence of D-0138: the ceiling was capping DEPTH, which
+/// §6 forbids, so it was raised until the allocator rather than a constant is
+/// what stops the walk. [`Breach::Memory`] is now the bound that carries the
+/// weight this paragraph used to.
 ///
 /// Both bounds are pinned by
 /// `engine::tests::the_default_ceiling_is_the_one_its_arithmetic_describes`,
