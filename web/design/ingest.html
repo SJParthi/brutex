@@ -1209,12 +1209,21 @@
         >
         <span class="note quiet">yesterday</span>
       </div>
+      <!-- THE TICK CHIP IS AN ARCHIVE CHIP NOW, AND IT IS NOT ALWAYS DRAWN.
+           It stood here disabled, captioned "refused before the feed is
+           consulted", which was the `tick` RUNG — refused for every feed by
+           `Granularity::is_requestable` and no longer offered at all. What the
+           operator buys and calls a tick is the `_TICK_` archive, and those
+           files were measured at one row per whole second: that is the `1s`
+           rung, and it is drawn for TrueData and GDFL alone because their
+           granularity floor reaches it and no broker's does. Owner's rule,
+           14 Aug 2026. On a broker feed this field is absent, not struck. -->
       <div class="field">
         <span class="lab" id="l-tick">Tick</span>
-        <span class="ctl off" aria-labelledby="l-tick" aria-disabled="true"
-          ><span>Tick</span><span class="caret">✕</span></span
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-tick"
+          ><span>1 second</span><span class="caret">▾</span></span
         >
-        <span class="note">refused before the feed is consulted</span>
+        <span class="note quiet">archive feeds only — a conflated snapshot</span>
       </div>
       <div class="field go">
         <span class="lab" aria-hidden="true">Go</span>

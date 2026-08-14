@@ -13349,3 +13349,133 @@ be the other. Recorded in `docs/06-limits.md`.
 **Proven by.** `engine::tests::the_allocator_refusing_to_grow_is_a_halt_and_not_a_panic`
 covers both answers without a machine that is out of memory: `try_reserve(usize::MAX)`
 fails on capacity overflow without allocating.
+
+## D-0139 · 2026-08-14 · The timeframe control offers three rungs, because the other eight were rungs no feed in this build declares and every one of them is a fold of bars already on this disk
+
+### The rule
+
+The owner, 14 Aug 2026, twice — the second time to pin which feeds:
+
+> "under timeframes just show one minute and one day alone, and one and only
+> for TrueData or GDFL alone ticks should be displayed along with this. Even
+> dynamic timeframes adding is not even needed — do you know why, because after
+> pulling one day or one min or ticks for TrueData or GDFL, always we will do
+> the internal calculations."
+
+> "this ticks should be entirely one and only visible when we select the feeds
+> as TrueData or GDFL."
+
+### What was on the screen, and what it was worth
+
+`web/src/routes/ingest/+page.svelte` drew eleven rows — the whole of
+`Granularity::ALL` minus whatever the active feed's floor refused. D-0137 had
+already stopped drawing the permanently-refused ones, which left eight on a
+broker and nine on an archive.
+
+**Eight of those rungs are declared by no feed in this build.**
+`Descriptor::granularities` is the gate `crates/api`'s `served()` refuses the
+POST on, and it reads:
+
+| feed | declares | floor |
+|---|---|---|
+| Dhan | `1day` | 1 minute, a candle |
+| Groww | `1min` `1day` | 1 minute, a candle |
+| `TrueData` | `1s` `1min` | 1 second, a conflated snapshot |
+| GDFL | `1s` | 1 second, a conflated snapshot |
+
+The union of all four is `{1s, 1min, 1day}` — **exactly** the three rows that
+remain. `3min`, `5min`, `15min`, `30min`, `60min`, `1week`, `5s` and `tick` were
+drawn live and annotated *"not fetched by this build"*, on every feed, on every
+load, forever. There was never a run behind any of them.
+
+`crates/api` has said so all along and nobody read it across: `render.rs`'s
+`granularity_select` — the no-JS form at `/pull` — offers a rung only where some
+feed declares it **and** the store can file it, which is `1min` and `1day`. The
+SvelteKit page was the only surface in this product drawing eleven.
+
+### Why "add a timeframe" is not a missing control
+
+Because a coarser rung is arithmetic, not a purchase. `pull::fold` folds
+one-minute bars into any multiple whose length divides the 555-minute offset of
+the NSE open; the bars are already on this disk. Asking a vendor for five
+minutes spends a request, a quota and a window on a computation that costs
+nothing — and on an archive feed it re-reads a folder that was already read.
+That is the owner's second sentence and it is the whole reason the control does
+not grow.
+
+### `tick` is not one of the three, and `1s` carries the word
+
+`Granularity::is_requestable` is `false` for `Tick` and true for every other
+rung, for every feed (D-0118). A `tick` row is therefore a row that can never be
+sent, and drawing one is the control-that-hides-a-failure `CLAUDE.md` §4 bans —
+the row existed only to explain why it was dead.
+
+What the operator buys and calls a tick is the **archive**: `NSE_<seg>_TICK_
+<date>.zip` and `GFDLNFO_TICK_<date>.zip`, the file names in `pull::vendor`'s own
+`ArchiveName` consts. `docs/08-vendor-samples.md` measured what is inside them —
+every timestamp resolving to a whole second, no sub-second field anywhere in the
+layout, 22,426 rows across a 22,500-second session, up to four rows sharing a
+second with no tiebreaker. **That is the `1s` rung.** So `1s` is the row the
+operator's word lands on, and the row's own sentence says what one record at it
+actually is rather than repeating the file name back at him. D-0118 is not
+reversed by this; it is where the word finally has somewhere true to sit.
+
+### "For TrueData or GDFL alone" is spelled nowhere in the browser
+
+`RUNGS` offers `1s` unconditionally. `floorVerdict` marks it `refused` and
+`permanent` for any feed whose `/feeds.json` floor is a minute, and `rungRows`
+drops a permanently-refused row — D-0137's filter, unchanged. Dhan and Groww
+bottom out at a minute; the two archives bottom out at a second. Executed
+against the four floors `crates/pull` declares:
+
+```
+dhan      → 1min (finest), 1day
+groww     → 1min (finest), 1day
+truedata  → 1s (finest), 1min, 1day
+gdfl      → 1s (finest), 1min, 1day
+```
+
+A pair of feed names written into a condition would answer the same today and be
+the second copy of a vendor fact tomorrow — which is what D-0126, D-0131 and
+D-0138's predecessor each deleted from this page. A fifth feed that reaches a
+second gets the row the day its descriptor says so, with no browser edit.
+
+### The ladder's ORDER is still all eleven, and that is not an oversight
+
+`LADDER` keeps every rung name in `Granularity::ALL`'s sequence and carries
+nothing else — no label, no store flag, no session count. `RUNG_RANK` is built
+from it so `finerThan` is total over every name the wire can send. Shortening
+the rank map to the three offered rungs would make `finerThan` answer `false`
+for an unplaceable floor, and a rung **below** an unplaceable floor would be
+drawn live and offered. The order is a vendor fact; what the control offers is
+the owner's rule; they are two lists because they are two decisions.
+
+### What this does NOT fix, stated rather than discovered
+
+**A `1s` pull still cannot be filed.** `store::path::Timeframe::KNOWN` ships
+`1min 3min 5min 15min 30min 60min 1day` and nothing below a minute, so
+`Granularity::store_timeframe` answers `None` for `Second1` and
+`pull::ingest::Plan::timeframe` refuses the bar BY NAME at the write boundary.
+The row says `1s · no store directory` before it is ticked and the hover names
+the fix — widen `crates/store`. The row is offered rather than hidden because
+that refusal is work a person can do, which is the rule D-0137 drew the line on.
+
+The path from those archive seconds to storable bars already exists and is not
+this rung: `pull::fold` buckets at one second — first, max, min, last in **file
+order**, never sorted, because rows sharing a second have no recoverable order —
+and it runs when either archive feed is asked for `1min`.
+
+### Also corrected here
+
+The control's own caption read *"N ticked of M this feed serves"*, reading the
+DRAWN count as a SERVED count. It overstated every archive feed by one — Dhan is
+offered `1min` and declares none of it, `TrueData` is offered `1day` and declares
+none of it. It now reads *"of M offered"*, and which of them this build fetches
+stays where it was already answered: on the row, from `history[].served`.
+
+### Outstanding
+
+`RUNGS` still holds each rung's label, its `stored` flag and its bars-per-session
+count. Those are three per-rung facts `crates/pull` and `crates/store` own, and
+`/feeds.json` carries none of them, so the browser holds them. Three rows of it
+now instead of eleven, and the same copy D-0137 recorded as outstanding.

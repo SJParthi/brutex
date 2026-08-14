@@ -775,13 +775,30 @@ jobs:
           kite 350 400
           '
 
+          # ---- group 22: TWO WORDS FROM THE EXCHANGE'S OWN NAVIGATION.
+          # crates/pull/src/resolve.rs tests.
+          #
+          # `sectoral-indices` and `strategy` are asserted substrings: a test
+          # that breaks one category's listing checks the failure it collects
+          # NAMES that category, so a refusal cannot stop saying which family
+          # went missing. They are components of a public exchange URL --
+          # niftyindices.com/indices/equity/sectoral-indices -- and the four
+          # such paths live in `nse::Category::path`, where they are slash-
+          # joined and therefore never reach this scan; these two are the bare
+          # words a test quotes.
+          #
+          # Neither names an org, an env, a vendor or a field, and no Parameter
+          # Store path this repository reads has a `strategy` component. They
+          # describe a family of stock-market indices.
+          nav_word='sectoral-indices strategy'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

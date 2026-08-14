@@ -93,6 +93,11 @@ pub mod manifest;
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
 pub mod rate;
+/// One pass over the exchange's directory, and the dated snapshot it produces.
+///
+/// Every file in a pass is the same age, and a snapshot is published whole or
+/// not at all.
+pub mod resolve;
 pub mod secret;
 pub mod session;
 pub mod ssm;

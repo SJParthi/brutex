@@ -51,78 +51,44 @@
   // ---------------------------------------------------------------- constants
 
   /**
-   * The bar-length ladder, spelled with the wire values
-   * `pull::vendor::Granularity::dir()` emits — which is also the directory the
-   * store writes under and the value `api::ingest::parse_granularity` matches
-   * case-insensitively. One spelling for the control, the request and the path.
+   * THE LADDER'S ORDER, AND THE ORDER ONLY.
    *
-   * `stored` is `Granularity::store_timeframe().is_some()`: only the minute and
-   * the day rung have a `store::path::Timeframe`, so every other rung is
-   * refused at the WRITE boundary rather than here. The control offers them and
-   * warns, instead of hiding a rung the parser accepts — a control that silently
-   * omits a legal value is the same lie as one that silently adds one.
+   * `pull::vendor::Granularity::ALL` in its declared sequence, which ASCENDS
+   * with coarseness. That is not an accident anybody may rely on quietly:
+   * `crates/pull/src/vendor.rs` pins it with a `const` block that destructures
+   * all eleven variants and asserts every discriminant, so a rung inserted in
+   * the middle of the ladder is a BUILD FAILURE there before it is a wrong
+   * answer here.
+   *
+   * IT CARRIES NOTHING BUT NAMES — no label, no store flag, no session count.
+   * Those are facts about a rung that can go stale against the Rust, and this
+   * list exists for one thing: making "is this rung finer than that one" ONE
+   * integer comparison rather than a walk, the same comparison
+   * `Granularity::is_finer_than` makes on the discriminant.
+   *
+   * IT IS ALL ELEVEN WHILE `RUNGS` BELOW IS THREE, AND THE SPLIT IS LOAD
+   * BEARING. `/feeds.json` states a feed's floor with any rung name the enum
+   * can spell, and a floor this file cannot PLACE is a floor it cannot compare
+   * against: `finerThan` answers `false` for a name missing from the map, so a
+   * rung BELOW an unplaceable floor would be drawn live and offered. The order
+   * is therefore total over every name the wire can send, and what the control
+   * OFFERS is a separate decision, made below and for separate reasons.
    */
-  /**
-   * `per` — BARS PER NSE SESSION, and it is `null` wherever this page cannot
-   * state one from a verified fact.
-   *
-   * Two rungs carry a number and both are arithmetic on the session NSE
-   * publishes: 09:15 to 15:30 is 375 minutes, so a full minute session is 375
-   * bars and a full day session is 1. They are also the only two the store
-   * files at all (`stored`), so they are the only two a stored count can be
-   * checked against.
-   *
-   * EVERY OTHER RUNG IS `null` ON PURPOSE. A 30-minute session is 12 full bars
-   * and one 15-minute stub, and whether a vendor emits that stub is a fact
-   * about the vendor, not a division this page may perform. A `null` here makes
-   * the census say "no yardstick" for that rung instead of printing an expected
-   * count nobody measured — `CLAUDE.md` §3 rule 6.
-   */
-  const RUNGS = [
-    { dir: 'tick', label: 'Tick', note: 'every print — no fixed interval', stored: false, per: null },
-    { dir: '1s', label: '1 second', note: 'one-second grid', stored: false, per: null },
-    { dir: '5s', label: '5 seconds', note: 'five-second grid', stored: false, per: null },
-    { dir: '1min', label: '1 minute', note: 'what the engine sweeps', stored: true, per: 375 },
-    // 555 IS WHY THESE FIVE ROWS SPLIT THREE-TWO, AND IT IS NOT A UI CHOICE.
-    //
-    // `crates/store` ships a directory for all five. The NSE open is 555
-    // minutes past IST midnight and `pull::fold`'s grid is anchored at IST
-    // midnight, so a rung files a correct opening bar exactly when its length
-    // divides 555. Three, five and fifteen do. Thirty (18.5) and sixty (9.25)
-    // do not — their first bar of the day is a 15- and a 45-minute stub that
-    // would be filed as a full one — so `Granularity::store_timeframe` refuses
-    // them and `stored` is false HERE for the same reason it is false there.
-    // D-0132, and `store::path::Timeframe::aligns_with_the_open` is the
-    // predicate both sides ask.
-    { dir: '3min', label: '3 minutes', note: 'three-minute grid', stored: true, per: 125 },
-    { dir: '5min', label: '5 minutes', note: 'five-minute grid', stored: true, per: 75 },
-    { dir: '15min', label: '15 minutes', note: 'fifteen-minute grid', stored: true, per: 25 },
-    { dir: '30min', label: '30 minutes', note: 'thirty-minute grid — 555/30 is 18.5, so the session opens on a 15-minute stub', stored: false, per: null },
-    // `60min`, NOT `1hr`. The store has always spelled this rung `60min` and
-    // `Granularity::dir` said `1hr`; D-0132 made them one word. This row sent
-    // `granularity=1hr`, which the server now refuses BY NAME as an unknown
-    // rung — so the spelling here is not cosmetic, it is whether the row works.
-    { dir: '60min', label: '1 hour', note: 'hourly grid — 555/60 is 9.25, so the session opens on a 45-minute stub', stored: false, per: null },
-    { dir: '1day', label: '1 day', note: 'one bar per session', stored: true, per: 1 },
-    { dir: '1week', label: '1 week', note: 'one bar per trading week', stored: false, per: null }
+  const LADDER = [
+    'tick',
+    '1s',
+    '5s',
+    '1min',
+    '3min',
+    '5min',
+    '15min',
+    '30min',
+    '60min',
+    '1day',
+    '1week'
   ];
-
-  /**
-   * THE RUNG'S PLACE ON THE LADDER, AND IT IS THE LADDER'S OWN ORDER.
-   *
-   * `RUNGS` above is `pull::vendor::Granularity::ALL` transcribed in its
-   * declared sequence, and that sequence ASCENDS with coarseness. That is not
-   * an accident anybody may rely on quietly: `crates/pull/src/vendor.rs` pins
-   * it with a `const` block that destructures all eleven variants and asserts
-   * every discriminant, so a rung inserted in the middle of the ladder is a
-   * BUILD FAILURE there before it is a wrong answer here.
-   *
-   * It is what makes "is this rung finer than that one" ONE integer comparison
-   * rather than a walk — the same comparison `Granularity::is_finer_than`
-   * makes on the discriminant. Built once, at module scope; O(1) per lookup,
-   * and the cost does not move when the ladder grows.
-   */
-  const RUNG_RANK = new Map(RUNGS.map((r, i) => [r.dir, i]));
+  /** O(1) per lookup, built once at module scope. It does not scan. */
+  const RUNG_RANK = new Map(LADDER.map((dir, i) => [dir, i]));
   /**
    * Strictly finer — `a` sits nearer the event end of the ladder than `b`.
    *
@@ -135,6 +101,79 @@
     const y = RUNG_RANK.get(b);
     return x !== undefined && y !== undefined && x < y;
   }
+
+  /**
+   * WHAT THE CONTROL OFFERS: ONE MINUTE, ONE DAY, AND THE ARCHIVES' SECOND.
+   *
+   * THE OWNER'S RULE, 14 Aug 2026: *"under timeframes just show one minute and
+   * one day alone, and one and only for TrueData or GDFL alone ticks should be
+   * displayed along with this. Even dynamic timeframes adding is not needed —
+   * because after pulling one day or one min or ticks for TrueData or GDFL,
+   * always we will do the internal calculations."*
+   *
+   * Eleven rows stood here. Three are drawn now, and the other eight were never
+   * rungs anybody could pull:
+   *
+   *   NO FEED IN THIS BUILD DECLARES ONE OF THEM. `Descriptor::granularities`
+   *   is Dhan `{1day}`, Groww `{1min, 1day}`, `TrueData` `{1s, 1min}`, GDFL
+   *   `{1s}` — and the union of all four is EXACTLY the three rows below. Every
+   *   other rung was drawn live and annotated "not fetched by this build", on
+   *   every feed, forever. `crates/api`'s own no-JS form has said so all along:
+   *   `render::granularity_select` offers a rung only where some feed declares
+   *   it AND the store can file it, which is `1min` and `1day`. This control was
+   *   the only surface in the product drawing eleven.
+   *
+   *   AND COARSER IS COMPUTED, NOT BOUGHT. Five minutes is a fold of five
+   *   one-minute bars this repository already holds. Asking a vendor for it
+   *   spends a request, a quota and a window on arithmetic `crates/pull`
+   *   performs for nothing — which is the owner's second sentence, and it is
+   *   why "add a timeframe" is not a control that is missing.
+   *
+   * WHY `tick` IS NOT ONE OF THE THREE, AND WHY `1s` CARRIES THE WORD INSTEAD.
+   * `Granularity::is_requestable` is `false` for `Tick` and true for every other
+   * rung, for every feed (D-0118) — so a `tick` row is a row that could never be
+   * sent, and drawing one is the control-that-hides-a-failure `CLAUDE.md` §4
+   * bans. What the operator BUYS and calls a tick is the archive:
+   * `NSE_<seg>_TICK_<date>.zip` and `GFDLNFO_TICK_<date>.zip` are the file names
+   * in `pull::vendor`'s own `ArchiveName` consts. Those files were MEASURED at
+   * one row per whole second with no sub-second field — 22,426 rows across a
+   * 22,500-second session, up to four rows sharing a second with no tiebreaker
+   * (`docs/08-vendor-samples.md`). That is the `1s` rung, and it is a conflated
+   * snapshot rather than a print stream. So `1s` is the row his word lands on,
+   * and the row states what one record at it actually is rather than repeating
+   * the file name back at him.
+   *
+   * "FOR TRUEDATA OR GDFL ALONE" IS NOT SPELLED HERE, AND MUST NOT BE. It falls
+   * out of `/feeds.json`: `floorVerdict` marks `1s` permanently refused for any
+   * feed whose stated floor is a minute, and `rungRows` drops a permanently
+   * refused row (D-0137). Dhan and Groww bottom out at one minute, the two
+   * archives bottom out at one second, so the row appears on exactly those two
+   * — read from the server on every load, with no vendor named in this file. A
+   * fifth feed that reaches a second gets the row the day its descriptor says
+   * so; a hardcoded pair would not, and would be the second copy of a vendor
+   * fact that D-0126, D-0131 and D-0138 each deleted from this page.
+   *
+   * `stored` is `Granularity::store_timeframe().is_some()`. It is FALSE on `1s`,
+   * and that is the honest state of a tick pull today: the request parses, the
+   * feed declares the rung, and `pull::ingest::Plan::timeframe` then refuses it
+   * BY NAME at the write boundary because `crates/store` ships no `1s`
+   * directory. The row says so before it is ticked. The fold that makes those
+   * same archive seconds storable already exists — `pull::fold`, one-second
+   * buckets, first/max/min/last in file order — and it runs when these two feeds
+   * are asked for `1min`.
+   *
+   * `per` is BARS PER NSE SESSION, and `null` where this page cannot state one
+   * from a verified fact. 09:15 to 15:30 is 375 minutes, so a full minute
+   * session is 375 bars and a full day session is 1. `1s` is `null`: a session
+   * is 22,500 seconds and the archive held 22,426 rows, so a second is not a
+   * bar that either exists or is missing and no yardstick divides it —
+   * `CLAUDE.md` §3 rule 6.
+   */
+  const RUNGS = [
+    { dir: '1s', label: '1 second', stored: false, per: null },
+    { dir: '1min', label: '1 minute', stored: true, per: 375 },
+    { dir: '1day', label: '1 day', stored: true, per: 1 }
+  ];
 
   // ───────────────────── HOW FINE EACH FEED CAN EVER ANSWER ─────────────────
   //
@@ -203,7 +242,8 @@
   // vendors said the last time this file was edited.
   //
   // O(feeds) ONCE PER FEED-LIST CHANGE, then O(1) per lookup. `floorVerdict`
-  // is called eleven times per render of the rung control and must not scan.
+  // is called once per offered rung per render of the control and must not
+  // scan.
   const finestByWire = $derived.by(() => {
     const m = new Map();
     for (const f of feeds.all) {
@@ -241,16 +281,8 @@
   /**
    * WHAT THIS FEED'S GRANULARITY FLOOR SAYS ABOUT ONE RUNG.
    *
-   * The browser spelling of `pull::vendor::Descriptor::granularity_verdict`,
-   * with one arm the Rust does not need and this page cannot do without:
+   * The browser spelling of `pull::vendor::Descriptor::granularity_verdict`:
    *
-   *   never     the rung is a TICK, and no feed in this build serves one. Not a
-   *             floor some feed clears — a rung no vendor here publishes at
-   *             all, which is why this arm does not consult the feed. It is
-   *             `Granularity::is_requestable`, which is `false` for `Tick` and
-   *             true for every other rung, for every vendor, on the owner's
-   *             rule of 12 Aug 2026, and `/feeds.json` states the same fact
-   *             from the other side: no row carries `tick_stream: true`.
    *   refused   finer than THIS feed's finest. Permanent.
    *   finest    this rung IS the feed's finest, and the floor says what one
    *             record at it is. The one rung where that is answerable at all.
@@ -265,9 +297,18 @@
    *             refused on the strength of it and the page says why.
    *
    * One map read and one integer comparison. It does not walk the ladder.
+   *
+   * A `never` arm stood above `refused`, answering for `tick` without consulting
+   * the feed. `RUNGS` no longer offers that rung and nothing else on this page
+   * can name one, so the arm was unreachable — and an unreachable branch in the
+   * function that decides whether a control is dead is a claim nobody can check.
+   * The fact it carried is not lost: `Granularity::is_requestable` still refuses
+   * a tick for every feed in `crates/pull`, `/feeds.json` still states it from
+   * the other side with `tick_stream: false` on every row, and the `finest` arm
+   * below is where an operator now reads it — on the two archive feeds, on the
+   * rung their tick files actually hold.
    */
   function floorVerdict(wire, dir) {
-    if (dir === 'tick') return { state: 'never', permanent: true, floor: null };
     const floor = finestByWire.get(wire);
     if (!floor) return { state: 'unstated', permanent: false, floor: null };
     if (finerThan(dir, floor.rung)) return { state: 'refused', permanent: true, floor };
@@ -1219,7 +1260,12 @@
    * annotation stays on rows the vendor refuses: a rung can be refused twice,
    * and saying only the louder half is still a half.
    *
-   * O(1) per row, eleven rows. No lookup here scans.
+   * O(1) per row, three rows. No lookup here scans.
+   *
+   * TWO OF THE THREE ARE DRAWN ON EVERY FEED and the third is drawn on the two
+   * whose floor reaches it — see `RUNGS`. The vendor question is the only one
+   * that removes a row, so "which feeds show the second rung" is answered by
+   * `/feeds.json` on every load and by nothing written in this file.
    */
   const rungRows = $derived.by(() => {
     const wire = feeds.active ?? '';
@@ -1237,17 +1283,11 @@
       // refusals on every row and the result was "the store has no directory
       // for it" repeated down nine of eleven rows — which is where a reader
       // stops reading, and the one sentence that mattered was on the row they
-      // stopped at. The other two refusals are compact in the detail column,
+      // stopped at. Eleven is three now and the argument is unchanged: one row
+      // says one thing. The other two refusals are compact in the detail column,
       // whole in the hover, and in full sentences under the form for the rungs
       // actually TICKED, which is where they are actionable.
-      if (v.state === 'never') {
-        says.push(
-          'No feed in this build serves a tick stream — and this is not a floor some feed clears: no vendor here publishes prints at all.'
-        );
-        long.push(
-          'A tick is raw input that gets keyed down to a second, never a granularity anybody requests: pull::vendor::Granularity::is_requestable is false for this rung and true for every other, for every feed. The two archives sold as tick-by-tick were MEASURED at one row per whole second with no sub-second field (docs/08-vendor-samples.md), and a broker publishes nothing finer than a minute. The rung is kept on the ladder so it can be refused BY NAME — a word both vendors print on an invoice, deleted from the list, comes back as "not a rung", which reads as a typo. Owner’s rule, 12 Aug 2026; D-0118.'
-        );
-      } else if (v.state === 'refused') {
+      if (v.state === 'refused') {
         says.push(
           `${shortFloor(wire)} Nothing makes this rung exist — not a pull, not an entitlement, not a purchase, not a code change.`
         );
@@ -1257,9 +1297,15 @@
         // `pull::vendor::FinestKind::is_conflated` answered on the server, so
         // this page never decides from a string whether the sentence beside a
         // number may say "tick".
+        //
+        // THIS IS THE ROW THE OPERATOR CALLS THE TICK ROW, and it is the only
+        // place on this control where the word can be answered honestly. It is
+        // drawn on exactly the feeds whose stated floor reaches a second — the
+        // two archives — and its sentence is what the archive was MEASURED to
+        // hold, not what its file name says.
         says.push(
           v.floor.conflated === true
-            ? `The finest ${name} serves, and one record is a CONFLATED SNAPSHOT — the best bid, the best ask and the best last price as of that second. SECOND-KEYED: two rows can share a second, and that is expected input. Never a tick.`
+            ? `The finest ${name} serves, and it is what its tick archive actually holds: one record is a CONFLATED SNAPSHOT — the best bid, the best ask and the best last price as of that second. SECOND-KEYED: two rows can share a second, and that is expected input. Never a print.`
             : `The finest ${name} serves, and one record is a ${v.floor.label ?? v.floor.kind}.`
         );
         long.push(`${v.floor.label ?? v.floor.kind}. ${v.floor.because} — ${v.floor.source}`);
@@ -1272,12 +1318,11 @@
       // ── THE OTHER TWO REFUSALS: COMPACT IN THE COLUMN, WHOLE IN THE HOVER ──
       //
       // The detail column states the STRONGEST true thing about the row and
-      // stops. `never served` on a dead row is what replaces the annotation
-      // this whole change exists to remove: a `tick` row read `no directory`,
-      // which is a sentence about the store — "nothing filed here yet" —
-      // printed where the fact was "no vendor on earth serves this". The store
-      // has no directory for a rung nothing can ever produce, and saying so is
-      // true and worthless; it stays in the hover so nothing is lost.
+      // stops. These two are the refusals a PERSON can close, so they never
+      // remove a row — they annotate one. `no store directory` on the second
+      // rung is the whole of why a tick pull cannot land today, and it is the
+      // sentence that must not be softened: the feed answers, the request
+      // parses, and the bar has nowhere to go.
       if (fetches === false) {
         long.push(
           `${name} does not declare this rung: crates/api's served() refuses the POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would be answered with a DIFFERENT bar length and filed under the one you asked for. Fixable, and not from here: record the endpoint in pull::vendor.`
@@ -1285,7 +1330,7 @@
       }
       if (!r.stored) {
         long.push(
-          'The store has no directory for it: pull::vendor::Granularity::store_timeframe answers for 1 minute and 1 day only, so the WRITE boundary refuses the bar. That is a store-format limit and not a vendor one — the feed answers, and nothing here can file what it answers with.'
+          'The store has no directory for it, and the refusal is at the WRITE boundary rather than here: store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so pull::vendor::Granularity::store_timeframe answers None and pull::ingest::Plan::timeframe refuses the bar BY NAME rather than filing it under a rung it is not. That is a store-format limit and not a vendor one — the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.'
         );
       }
 
@@ -1336,6 +1381,20 @@
       // second — TrueData, GDFL — still shows it, because `permanent` is
       // answered per feed and not per rung. That is the whole of why this is a
       // filter here and not a deletion from the ladder. D-0137.
+      //
+      // ═══ AND THIS LINE IS NOW THE WHOLE OF "TICKS FOR TRUEDATA OR GDFL
+      // ALONE" ═══
+      //
+      // The operator's rule of 14 Aug 2026 asks for the second rung on exactly
+      // two feeds. Nothing in this file names them. `RUNGS` offers `1s`
+      // unconditionally; `floorVerdict` marks it `refused` and `permanent` for
+      // any feed whose `/feeds.json` floor is a minute; this filter drops it.
+      // Dhan and Groww bottom out at a minute and the two archives bottom out
+      // at a second, so the row is drawn for those two and for nobody else —
+      // decided by the server on every load. A pair of feed names written into
+      // a condition here would answer the same today and be a second copy of a
+      // vendor fact tomorrow, which is what D-0126, D-0131 and D-0138 each
+      // deleted from this page.
       .filter((row) => !row.disabled);
   });
 
@@ -1431,17 +1490,16 @@
       droppedRungs = {
         feed: feedName(wire),
         kept: kept.length,
-        rows: gone.map((r) => {
-          const v = floorVerdict(wire, r.dir);
-          return {
-            dir: r.dir,
-            label: r.label,
-            why:
-              v.state === 'never'
-                ? 'no feed in this build serves a tick stream, and no feed ever did'
-                : `${shortFloor(wire)} It was ticked for a feed that reaches below a minute.`
-          };
-        })
+        // ONE REASON, BECAUSE THERE IS ONE WAY TO BE DROPPED. A `never` arm
+        // stood beside this one and answered for `tick`; that rung is no longer
+        // offered, so the only rung a feed change can take is the second — and
+        // it is taken for exactly one reason, which is that the feed it was
+        // ticked for reaches below a minute and this one does not.
+        rows: gone.map((r) => ({
+          dir: r.dir,
+          label: r.label,
+          why: `${shortFloor(wire)} It was ticked for a feed that reaches below a minute.`
+        }))
       };
     });
   });
@@ -1783,7 +1841,7 @@
   const cautions = $derived.by(() => {
     const out = [];
     // EVERY TICKED RUNG, NOT THE FIRST ONE. This read `rungsChosen[0]` while
-    // the control below it takes N ticks, so a run with `1min` and `5min`
+    // the control below it takes N ticks, so a run with `1min` and `1day`
     // ticked described the minute rung and said nothing at all about the other
     // request it was about to send.
     //
@@ -4681,43 +4739,34 @@
                      wire. All three, once, on the one control that carries
                      them.
 
-                     WHAT A ROW SAYS NOW, AND WHY IT IS NOT ONE WORD. It used to
-                     annotate every rung the store cannot file as `no directory`
-                     — the SAME annotation on Groww's `tick`, which no vendor on
-                     earth serves, as on TrueData's `1s`, which a vendor serves
-                     today and nobody has pulled. Two refusals of opposite kinds
-                     rendered identically is the failure §4 bans, and the
-                     operator's own rule is the one it hid: everything starts at
-                     one minute, and one second exists for the two archives
-                     alone as a CONFLATED SNAPSHOT, never as a tick.
+                     TWO ROWS ON A BROKER, THREE ON AN ARCHIVE, AND NEVER
+                     ELEVEN. The owner's rule of 14 Aug 2026: one minute and one
+                     day alone, plus the tick rung for TrueData and GDFL alone.
+                     The eight that left were rungs NO feed in this build
+                     declares — the union of all four descriptors' declared
+                     granularities is exactly the three that remain — so they
+                     were drawn live and annotated "not fetched by this build"
+                     on every feed, forever. Everything coarser than a minute is
+                     a fold of bars already on this disk, which is why there is
+                     no "add a timeframe" here and nothing missing that one
+                     would add. See `RUNGS`.
 
-                     A ROW IS DEAD ONLY WHERE NOTHING COULD EVER MAKE IT LIVE.
-                     `tick`, for every feed; and every rung below the selected
-                     feed's own floor. Both are drawn rather than dropped: the
-                     two archives SELL the word tick, so a list that omits it
-                     answers the operator with silence where he needs the
-                     sentence. Everything else — undeclared by this build, or
-                     unfilable by the store — stays live and says so, because
-                     each of those names work somebody could do. -->
+                     WHICH TWO FEEDS SHOW THE THIRD ROW IS NOT DECIDED HERE. It
+                     is `/feeds.json`'s granularity floor: a feed that bottoms
+                     out at a minute has the second rung permanently refused and
+                     `rungRows` drops it. No vendor is named in this file. -->
                 <div class="pk">
                   <span
                     class="plbl"
                     title="Bar lengths — the granularity field on the wire. Timeframe is the cascade's word for this rung and the word /db and /markets use for the same axis; bar length is what it means; granularity is what it is called on the wire. All three name one thing."
                     >Timeframe</span
                   >
-                  <!-- `tuck`: on Groww this menu opened with THREE struck-through
-                       rows — tick, 1s, 5s — above the first usable one, and no
-                       operator action turns any of them on because the vendor
-                       does not serve them. They are collapsed behind one line
-                       that states its own count; nothing is deleted and every
-                       reason is one click away. See Picker's `tuck` prop. -->
                   <Picker
-                    tuck
                     label="bar lengths"
                     summary={rungsChosen.length === 0
                       ? 'No timeframe ticked'
                       : rungsChosen.length === rungTally.live
-                        ? `All ${n(rungTally.live)} this feed can serve`
+                        ? `All ${n(rungTally.live)} offered`
                         : rungsChosen.map((r) => r.label).join(', ')}
                     rows={rungRows}
                     selected={rungSet}
@@ -4756,7 +4805,8 @@
                   <!-- THE FEED'S OWN FLOOR, STATED ONCE, WHERE IT BINDS. The
                        row-level sentences say what each rung is refused for;
                        this says what the FEED is, which is the fact that
-                       decides all eleven of them. -->
+                       decides whether the second rung is one of the rows
+                       above. -->
                   {#if feedFinest}
                     <span class="pknote wrap" title={`${feedFinest.because} — ${feedFinest.source}`}>
                       {feedFinest.short} One record at {feedFinest.rungLabel} is a
@@ -4782,26 +4832,38 @@
                        POSTs sent in the ladder's order — the wire fold prints
                        every one and the run card counts them.
 
-                       THERE IS NO "+ ADD A TIMEFRAME" HERE AND THERE CANNOT BE.
-                       The ladder is `pull::vendor::Granularity::ALL`, which
-                       `api::ingest::parse_granularity` matches by directory
-                       name: a rung invented in the browser is refused by name
-                       at the parser. Nothing is missing to add.
+                       THERE IS NO "+ ADD A TIMEFRAME" HERE, AND THE REASON IS
+                       NOT THAT ONE IS HARD TO BUILD. Everything coarser than a
+                       minute is a fold of one-minute bars already on this disk,
+                       so asking a vendor for it spends a request, a quota and a
+                       window on arithmetic `crates/pull` does for nothing. The
+                       owner's rule, 14 Aug 2026. And a rung invented in the
+                       browser would be refused anyway:
+                       `api::ingest::parse_granularity` matches the directory
+                       name exactly.
 
-                       WHAT IS DRAWN IS PER FEED, not the whole ladder. A rung
-                       the active vendor does not publish is filtered out —
-                       `rungRows`, D-0137 — because no work closes it. The
-                       rungs that ARE still drawn while refused are the ones a
-                       person could close: unfetched, or unstored. -->
+                       WHAT IS DRAWN IS PER FEED. A rung the active vendor does
+                       not publish is filtered out — `rungRows`, D-0137 —
+                       because no work closes it, and that filter is what puts
+                       the second rung on the two archive feeds and nowhere
+                       else. The rungs drawn WHILE refused are the ones a person
+                       could close: unfetched, or unstored. -->
                   <span
                     class="pknote"
                     class:warn={rungsChosen.length === 0}
-                    title="Every rung THIS FEED can serve is drawn. A rung its vendor does not publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. Rungs this build does not fetch yet, and rungs the store has no directory for, ARE drawn — each names work a person could do. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
+                    title="Three rungs are offered — one minute, one day, and the archives' one second — because they are the whole of what the four descriptors in pull::vendor declare between them, and because everything coarser is folded from bars this repository already holds. A rung the active vendor cannot publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. Rungs this build does not fetch yet, and rungs the store has no directory for, ARE drawn — each names work a person could do. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
                   >
                     {#if rungsChosen.length === 0}
                       no timeframe ticked — nothing below can be counted
                     {:else}
-                      {n(rungsChosen.length)} ticked of {n(rungTally.live)} this feed serves ·
+                      <!-- "offered", NOT "this feed serves". `rungTally.live` is
+                           what is DRAWN, and a drawn row may still be one this
+                           build does not fetch — TrueData is offered 1 day and
+                           declares none. The old wording read the drawn count
+                           as a served count and overstated every archive feed
+                           by one. The per-row `not fetched by this build` is
+                           where that is answered. -->
+                      {n(rungsChosen.length)} ticked of {n(rungTally.live)} offered ·
                       {n(rungsChosen.filter((r) => r.stored).length)} with a store directory ·
                       {n(rungsChosen.length)} request(s) per {verb}
                     {/if}
@@ -6783,11 +6845,14 @@
   /* ONE HEIGHT FOR EVERY BUTTON IN THE STRIP, INCLUDING THE TWO THAT ARE NOT
      OURS. `$lib/Picker.svelte`'s `.pbtn` already agrees with `.ddb` on every
      metric — 15px semibold mono, 11px/14px padding, 9px radius — but it does
-     not clip, so a long summary ("All 11 this feed can serve, 1min, 3min, …")
-     wraps to a second line and that ONE control becomes taller than its four
-     neighbours. That is the row broken again, by a string rather than by a
-     rule. Picker is shared and is not edited from here; the clip is applied
-     from this page, to Pickers inside this strip only. */
+     not clip, so a long summary wraps to a second line and that ONE control
+     becomes taller than its four neighbours. That is the row broken again, by
+     a string rather than by a rule. It was measured on a summary the timeframe
+     control can no longer produce — the ladder is three rungs now — and the
+     clip stays because it is a RULE about this strip, not a reaction to one
+     string: Instruments and Universe reach the same width on a long name.
+     Picker is shared and is not edited from here; the clip is applied from
+     this page, to Pickers inside this strip only. */
   .pk :global(.pbtn) {
     white-space: nowrap;
     overflow: hidden;
