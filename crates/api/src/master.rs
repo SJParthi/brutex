@@ -474,12 +474,23 @@ fn note_parsed(path: &std::path::Path, vendor: Vendor, out: &Loaded) {
 mod zerodha_master_tests {
     use super::*;
 
+    // INDENTED, AND THE INDENT COSTS NOTHING. A `\` before the newline is
+    // Rust's string-continuation escape: it eats the newline AND every leading
+    // space on the next line, so this literal is byte-identical to the flush-
+    // left version it replaces. It is written this way because gate 11 refuses
+    // to brace-count Rust (braces live inside strings, so counting them is
+    // unsound) and delimits a `#[cfg(test)]` module by INDENT instead. Flush-
+    // left CSV rows inside a test module are indistinguishable from top-level
+    // items to that scanner, and it declared the module undelimited rather
+    // than guess -- which aborted gate 11 before a single rule ran, on every
+    // file in the workspace. The scanner is right to refuse; the string is
+    // what had to move.
     const DUMP: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
-strike,tick_size,lot_size,instrument_type,segment,exchange\n\
-408065,1594,INFY,INFOSYS,0,,0,0.05,1,EQ,NSE,NSE\n\
-738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n\
-5720322,22345,NIFTY15DECFUT,,78.0,2015-12-31,0,0.05,75,FUT,NFO-FUT,NFO\n\
-5720578,22346,NIFTY159500CE,,23.0,2015-12-31,9500,0.05,75,CE,NFO-OPT,NFO\n";
+        strike,tick_size,lot_size,instrument_type,segment,exchange\n\
+        408065,1594,INFY,INFOSYS,0,,0,0.05,1,EQ,NSE,NSE\n\
+        738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n\
+        5720322,22345,NIFTY15DECFUT,,78.0,2015-12-31,0,0.05,75,FUT,NFO-FUT,NFO\n\
+        5720578,22346,NIFTY159500CE,,23.0,2015-12-31,9500,0.05,75,CE,NFO-OPT,NFO\n";
 
     /// NAMED PER TEST, because these run in parallel and shared a directory.
     /// One test's write raced another's read and the loser saw "file is empty"

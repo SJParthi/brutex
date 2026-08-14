@@ -266,10 +266,8 @@ pub async fn crawl<S: DocumentSource>(
         let listing = match source.get(&listing_url).await {
             Ok(body) => body,
             Err(why) => {
-                failures.push(IndexFailure {
-                    at: listing_url,
-                    why,
-                });
+                let refusal = note_refused(listing_url, why);
+                failures.push(refusal);
                 continue;
             }
         };
@@ -281,16 +279,17 @@ pub async fn crawl<S: DocumentSource>(
         // silently loses 34 sets.
         let links = nse::index_links(&listing, category);
         if links.is_empty() {
-            failures.push(IndexFailure {
-                at: listing_url,
-                why: format!(
+            let refusal = note_refused(
+                listing_url,
+                format!(
                     "this listing yielded no index links. The exchange publishes \
                      none empty — it listed {} on 14 Aug 2026 — so zero here is \
                      the page having changed shape, not the family having \
                      emptied.",
                     category.counted_on_14_aug_2026()
                 ),
-            });
+            );
+            failures.push(refusal);
             continue;
         }
 
@@ -299,7 +298,8 @@ pub async fn crawl<S: DocumentSource>(
             let page = match source.get(&page_url).await {
                 Ok(body) => body,
                 Err(why) => {
-                    failures.push(IndexFailure { at: page_url, why });
+                    let refusal = note_refused(page_url, why);
+                    failures.push(refusal);
                     continue;
                 }
             };
@@ -307,25 +307,24 @@ pub async fn crawl<S: DocumentSource>(
             let csv_url = match nse::constituent_link(&page, &link.path) {
                 Ok(url) => url,
                 Err(why) => {
-                    failures.push(IndexFailure {
-                        at: page_url,
-                        why: why.to_string(),
-                    });
+                    let refusal = note_refused(page_url, why.to_string());
+                    failures.push(refusal);
                     continue;
                 }
             };
             let body = match source.get(&csv_url).await {
                 Ok(body) => body,
                 Err(why) => {
-                    failures.push(IndexFailure { at: csv_url, why });
+                    let refusal = note_refused(csv_url, why);
+                    failures.push(refusal);
                     continue;
                 }
             };
             match nse::constituents(&body) {
-                Err(why) => failures.push(IndexFailure {
-                    at: csv_url,
-                    why: why.to_string(),
-                }),
+                Err(why) => {
+                    let refusal = note_refused(csv_url, why.to_string());
+                    failures.push(refusal);
+                }
                 Ok(published) => resolutions.push(crate::universe::resolve(
                     &link.path, feed, key, &published, master,
                 )),
@@ -340,6 +339,41 @@ pub async fn crawl<S: DocumentSource>(
         resolutions,
         failures,
     }
+}
+
+/// Record one refusal on the log, and hand back the receipt entry for it.
+///
+/// # Why this builds the failure rather than sitting beside it
+///
+/// [`crawl`] has six arms that can refuse — an unreachable listing, a listing
+/// that yielded no links, an unreachable index page, a page with no constituent
+/// link, an unreachable file, and a file that will not parse. Every one of them
+/// built an [`IndexFailure`] inline and pushed it, and every one was **silent**:
+/// the snapshot carried the refusal and `/logs` did not. An operator reading the
+/// log after a pass that resolved nothing saw a quiet file, which is the exact
+/// shape `CLAUDE.md` §4 forbids — a fallback that hides a failure. CI gate 19
+/// refused all six at once.
+///
+/// Emitting beside each push would have fixed the log and left the shape
+/// intact: the seventh arm somebody adds later would be silent again, and the
+/// gate would say so only after it had shipped. So the only way to build a
+/// failure for a crawl is to call this, and calling it emits. The gate stays a
+/// backstop rather than the sole defence.
+///
+/// `Error` and not `Warn` because `Warn` sits at the default log floor's edge —
+/// a refusal filtered out by the floor is the same quiet file with more steps.
+///
+/// # Cost
+///
+/// One event per refusal, and a pass refuses at most once per document it
+/// fetched. Nothing here is per-bar and nothing scans. `CLAUDE.md` §3 rule 4.
+fn note_refused(at: String, why: String) -> IndexFailure {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.resolve", "index refused")
+            .with("at", telemetry::Value::Str(&at))
+            .with("why", telemetry::Value::Str(&why)),
+    );
+    IndexFailure { at, why }
 }
 
 /// How long one document fetch may take before it is abandoned.
