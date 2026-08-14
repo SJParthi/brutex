@@ -1,24 +1,23 @@
-<title>Brutex Ingest Page</title>
+<title>Brutex Ingest Console</title>
 
 <!--
-  /ingest — THE DESIGN REFERENCE, DRAWN AS THE PAGE ITSELF.
+  /ingest — THE DESIGN REFERENCE.
 
-  Standalone. Reconstructed 2026-08-14 from web/src/lib/theme.css (tokens,
-  verbatim), the markup web/src/routes/ingest/+page.svelte declares, and the
-  design requirements stranded in that file's comments.
+  Built on web/src/lib/theme.css's ramp, elevated: a strict alignment grid, a
+  layered surface treatment, and an orchestrated load sequence. Every control
+  in the strip sits on ONE baseline because the strip is a grid with named
+  rows, not a flex row of variable-height columns -- that was what made the
+  previous draft ragged, and a refusal is now a chip that cannot change a row's
+  height.
 
-  The theming mechanism is the PRODUCT'S, not a mockup's: bare :root carries
-  the light ramp, prefers-color-scheme carries dark for an unset toggle, and
-  :root[data-theme] wins in both directions. The toggle in the corner stamps
-  the attribute exactly as the app shell does.
-
-  Fixture data is shape-correct and is not a claim about any vendor.
+  All motion respects prefers-reduced-motion.
 -->
 
 <style>
-  /* ======================================================================
-     1. THE RAMP — copied from web/src/lib/theme.css without alteration.
-     ================================================================== */
+  /* ====================================================================== 1
+     THE RAMP — web/src/lib/theme.css, verbatim, plus the depth layer this
+     reference adds on top of it.
+     =================================================================== */
   :root {
     --n0: #e9edf5;
     --n1: #f5f7fb;
@@ -33,7 +32,6 @@
     --n10: #38415a;
     --n11: #0d1220;
     --n12: #000814;
-
     --up: #00875a;
     --down: #d3143f;
     --warn: #a86a06;
@@ -41,16 +39,19 @@
     --acc: #0e7f96;
     --acc-hi: #1c58c8;
     --on-acc: #ffffff;
-
     --acc-soft: rgba(14, 127, 150, 0.1);
     --up-soft: rgba(0, 135, 90, 0.12);
     --down-soft: rgba(211, 20, 63, 0.11);
     --warn-soft: rgba(168, 106, 6, 0.13);
     --info-soft: rgba(109, 69, 217, 0.11);
-
     --focus: #0b6376;
+
     --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
     --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+    --e3: 0 20px 50px rgba(16, 24, 40, 0.16), 0 0 0 1px rgba(16, 24, 40, 0.06);
+    --glass: rgba(255, 255, 255, 0.78);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0));
+    --gridline: rgba(13, 18, 32, 0.045);
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme='light']) {
@@ -82,6 +83,10 @@
       --focus: #67e8f9;
       --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
       --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+      --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+      --glass: rgba(17, 21, 31, 0.72);
+      --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+      --gridline: rgba(230, 235, 245, 0.045);
     }
   }
   :root[data-theme='dark'] {
@@ -113,9 +118,16 @@
     --focus: #67e8f9;
     --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
     --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    --e3: 0 18px 48px rgba(0, 0, 0, 0.62), 0 0 0 1px rgba(255, 255, 255, 0.05);
+    --glass: rgba(17, 21, 31, 0.72);
+    --sheen: linear-gradient(180deg, rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0));
+    --gridline: rgba(230, 235, 245, 0.045);
   }
 
-  /* ================================================= 2. MAPPING + SCALES */
+  /* ====================================================================== 2
+     MAPPING + SCALES. One control height, one row height, one label height —
+     this is where alignment is decided, and nothing below may override it.
+     =================================================================== */
   :root {
     --bg: var(--n1);
     --bg-2: var(--n2);
@@ -142,12 +154,8 @@
     --fs-md: 14px;
     --fs-lg: 17px;
     --fs-xl: 22px;
-    --fs-2xl: 28px;
-    --lh-tight: 1.15;
-    --lh-base: 1.45;
-    --w-mid: 500;
-    --w-semi: 600;
-    --w-bold: 700;
+    --fs-2xl: 30px;
+    --fs-3xl: 42px;
     --track-caps: 0.1em;
 
     --s1: 2px;
@@ -158,13 +166,33 @@
     --s6: 16px;
     --s7: 24px;
     --s8: 32px;
+    --s9: 48px;
     --r1: 4px;
     --r2: 6px;
     --r: 8px;
     --r4: 12px;
+    --r5: 16px;
     --r-full: 999px;
-    --row-h: 30px;
-    --topbar-h: 46px;
+
+    /* THE THREE HEIGHTS ALIGNMENT DEPENDS ON. */
+    --lab-h: 14px;
+    --ctl-h: 34px;
+    --row-h: 34px;
+    --topbar-h: 54px;
+
+    --gutter: var(--s7);
+    --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --ease-spring: cubic-bezier(0.2, 0.9, 0.3, 1.25);
+  }
+
+  /* BORDER-BOX EVERYWHERE, AND IT IS LOAD-BEARING. Without it a 34px control
+     with a 1px border measures 36 and its neighbour measures 34, so a row of
+     controls that share one grid track still do not share one edge. Measured:
+     the heights came back as two values until this rule existed. */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
   }
 
   body {
@@ -172,221 +200,310 @@
     color: var(--ink);
     font-family: var(--sans);
     font-size: var(--fs-base);
-    line-height: var(--lh-base);
+    line-height: 1.45;
     -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    /* A faint measure grid, so the eye can verify the alignment claim. */
+    background-image: linear-gradient(var(--gridline) 1px, transparent 1px),
+      linear-gradient(90deg, var(--gridline) 1px, transparent 1px);
+    background-size: 100% 34px, 34px 100%;
   }
   :focus-visible {
     outline: 2px solid var(--focus);
-    outline-offset: 1px;
+    outline-offset: 2px;
+    border-radius: var(--r1);
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
   }
 
-  /* ================================================== 3. THE GLOBAL BAR */
+  /* ====================================================================== 3
+     MOTION — one orchestrated load sequence, not scattered effects.
+     =================================================================== */
+  @keyframes rise {
+    from {
+      opacity: 0;
+      transform: translateY(14px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes drop {
+    from {
+      opacity: 0;
+      transform: translateY(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes pop {
+    0% {
+      opacity: 0;
+      transform: scale(0.82);
+    }
+    100% {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes fill {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: none;
+    }
+  }
+  @keyframes draw {
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+  @keyframes sweep {
+    from {
+      background-position: -220% 0;
+    }
+    to {
+      background-position: 220% 0;
+    }
+  }
+  @keyframes pulse-dot {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.45;
+      transform: scale(0.78);
+    }
+  }
+
+  .rise {
+    opacity: 0;
+    animation: rise 620ms var(--ease) forwards;
+  }
+  .topbar {
+    animation: drop 520ms var(--ease) both;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 1ms !important;
+    }
+    .rise {
+      opacity: 1;
+    }
+  }
+
+  /* ====================================================================== 4
+     THE GLOBAL BAR — glass, sticky, one accent thread along the bottom.
+     =================================================================== */
   .topbar {
     height: var(--topbar-h);
     display: flex;
     align-items: center;
-    gap: var(--s6);
-    padding: 0 var(--s5);
-    background: var(--bg-2);
+    gap: var(--s7);
+    padding: 0 var(--gutter);
+    background: var(--glass);
+    backdrop-filter: blur(14px) saturate(1.6);
+    -webkit-backdrop-filter: blur(14px) saturate(1.6);
     border-bottom: 1px solid var(--line);
     position: sticky;
     top: 0;
-    z-index: 20;
+    z-index: 40;
+  }
+  .topbar::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -1px;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--acc), transparent);
+    opacity: 0.55;
   }
   .brand {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
     font-family: var(--mono);
-    font-weight: var(--w-bold);
+    font-weight: 700;
     font-size: var(--fs-md);
-    letter-spacing: -0.01em;
+    letter-spacing: -0.02em;
     color: var(--ink-hi);
   }
-  .brand em {
-    color: var(--acc);
-    font-style: normal;
+  .brand .mark {
+    width: 22px;
+    height: 22px;
+    border-radius: var(--r2);
+    background: linear-gradient(140deg, var(--acc), var(--info));
+    display: grid;
+    place-items: center;
+    color: var(--on-acc);
+    font-size: 12px;
+    font-weight: 800;
+    box-shadow: 0 0 0 1px var(--acc-soft), 0 4px 12px var(--acc-soft);
   }
   .navs {
     display: flex;
     gap: var(--s1);
   }
   .navs a {
+    position: relative;
     font-size: var(--fs-sm);
-    padding: var(--s2) var(--s5);
+    padding: var(--s3) var(--s5);
     border-radius: var(--r-full);
     color: var(--dim);
     text-decoration: none;
+    transition: color 140ms var(--ease), background 140ms var(--ease);
+  }
+  .navs a:hover {
+    color: var(--ink);
+    background: var(--panel-2);
   }
   .navs a.on {
     background: var(--acc-soft);
     color: var(--acc);
-    font-weight: var(--w-semi);
+    font-weight: 600;
   }
   .topright {
     margin-left: auto;
     display: flex;
     align-items: center;
     gap: var(--s5);
+  }
+  .clock {
     font-family: var(--mono);
     font-size: var(--fs-xs);
     color: var(--faint);
+    font-variant-numeric: tabular-nums;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .live {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--up);
+    animation: pulse-dot 2.1s ease-in-out infinite;
   }
   .tog {
     display: inline-flex;
-    border: 1px solid var(--line-hard);
+    border: 1px solid var(--line);
     border-radius: var(--r-full);
     overflow: hidden;
+    background: var(--well);
   }
   .tog button {
     font-family: var(--mono);
     font-size: var(--fs-mini);
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
-    padding: 3px 10px;
+    padding: 5px 12px;
     border: 0;
     background: transparent;
     color: var(--dim);
-    cursor: pointer;
+    transition: color 140ms var(--ease), background 140ms var(--ease);
   }
   .tog button[aria-pressed='true'] {
     background: var(--acc);
     color: var(--on-acc);
-    font-weight: var(--w-bold);
+    font-weight: 700;
   }
 
-  /* ======================================================= 4. PANE HEAD */
-  .pane-head {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s5);
-    padding: var(--s6) var(--s5) var(--s5);
-    flex-wrap: wrap;
-  }
-  .pane-head h1 {
-    font-size: var(--fs-lg);
-    font-weight: var(--w-bold);
-    letter-spacing: -0.01em;
-    color: var(--ink-hi);
-    margin: 0;
-  }
-  .pane-head .sub {
-    font-size: var(--fs-sm);
-    color: var(--dim);
-  }
-
-  /* ===================================== 5. THE STRIP — ONE ROW, LABELLED */
-  .strip {
-    display: flex;
-    gap: var(--s3);
-    padding: 0 var(--s5) var(--s5);
-    flex-wrap: wrap;
-    align-items: flex-start;
-  }
-  .cell {
+  /* ====================================================================== 5
+     PAGE SHELL — one gutter, one max measure, everything hangs off it.
+     =================================================================== */
+  main {
+    max-width: 1560px;
+    margin: 0 auto;
+    padding: var(--s8) var(--gutter) var(--s9);
     display: flex;
     flex-direction: column;
-    gap: var(--s1);
-    min-width: 0;
+    gap: var(--s7);
   }
-  .cell > label,
-  .cell > .lab {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    font-weight: var(--w-semi);
-  }
-  .ctl {
-    height: var(--row-h);
+  .head {
     display: flex;
-    align-items: center;
-    gap: var(--s4);
-    padding: 0 var(--s4);
-    background: var(--bg-2);
-    border: 1px solid var(--line-hard);
-    border-radius: var(--r2);
-    font-size: var(--fs-sm);
-    color: var(--ink);
-    white-space: nowrap;
-    box-shadow: var(--e1);
-    cursor: default;
+    align-items: flex-end;
+    gap: var(--s6);
+    flex-wrap: wrap;
   }
-  .ctl .caret {
-    color: var(--faint);
-    font-size: 9px;
+  .head h1 {
+    font-size: var(--fs-2xl);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    color: var(--ink-hi);
+    margin: 0;
+    line-height: 1.05;
+  }
+  .head .sub {
+    font-size: var(--fs-md);
+    color: var(--dim);
+    padding-bottom: 3px;
+  }
+  .head .feedchip {
     margin-left: auto;
-    padding-left: var(--s4);
-  }
-  .ctl.off {
-    background: var(--well);
-    color: var(--faint);
-    border-color: var(--line);
-    border-style: dashed;
-    box-shadow: none;
-  }
-  .ctl.find {
-    min-width: 200px;
-    color: var(--faint);
-  }
-  .refusal {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    color: var(--warn);
-    padding-top: var(--s1);
-    max-width: 168px;
-    white-space: normal;
-    line-height: 1.3;
-  }
-  .btn {
-    height: var(--row-h);
-    padding: 0 var(--s5);
-    border-radius: var(--r2);
-    border: 1px solid var(--line-hard);
-    background: var(--bg-2);
-    color: var(--ink);
-    font-family: var(--sans);
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
     display: inline-flex;
     align-items: center;
-    gap: var(--s3);
-    box-shadow: var(--e1);
-    cursor: pointer;
-  }
-  .btn.primary {
-    background: var(--acc);
-    border-color: var(--acc);
-    color: var(--on-acc);
-  }
-  .btn.ghost {
-    background: transparent;
-    box-shadow: none;
-    border-color: var(--line);
-    color: var(--dim);
-    font-weight: var(--w-mid);
-  }
-  .btn.sm {
-    height: 26px;
-    padding: 0 var(--s4);
-    font-size: var(--fs-xs);
-  }
-
-  /* ============================================ 6. THE INSTRUMENT PICKER */
-  .sel {
+    gap: var(--s4);
+    height: var(--ctl-h);
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
     background: var(--panel);
     border: 1px solid var(--line);
-    border-radius: var(--r);
-    margin: 0 var(--s5) var(--s5);
-    overflow: hidden;
     box-shadow: var(--e1);
+    font-size: var(--fs-sm);
   }
-  .sel-h {
+  .head .feedchip b {
+    color: var(--ink-hi);
+  }
+  .head .feedchip .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--up);
+  }
+
+  /* ====================================================================== 6
+     THE STRIP — A GRID, NOT A FLEX ROW. Three named rows: label, control,
+     note. Every cell contributes to the same three tracks, so a refusal note
+     in one cell CANNOT push a control in another out of line. This is the
+     whole fix for the ragged row.
+     =================================================================== */
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    box-shadow: var(--e2);
+    overflow: hidden;
+    position: relative;
+  }
+  .panel::before {
+    content: '';
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 56px;
+    background: var(--sheen);
+    pointer-events: none;
+  }
+  .panel-h {
     display: flex;
     align-items: center;
-    gap: var(--s4);
-    padding: var(--s4) var(--s5);
-    border-bottom: 1px solid var(--line);
-    background: var(--panel-2);
-    flex-wrap: wrap;
+    gap: var(--s5);
+    padding: var(--s5) var(--s6);
+    border-bottom: 1px solid var(--line-soft);
+    position: relative;
   }
   .ttl {
     font-family: var(--mono);
@@ -394,43 +511,313 @@
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--faint);
-    font-weight: var(--w-bold);
-  }
-  .sel-h .count {
-    font-family: var(--mono);
-    font-size: var(--fs-sm);
-    color: var(--ink);
-    font-variant-numeric: tabular-nums;
+    font-weight: 700;
   }
   .spacer {
     margin-left: auto;
   }
-  .picklist {
-    max-height: 246px;
-    overflow-y: auto;
+
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
+    grid-template-rows: var(--lab-h) var(--ctl-h) auto;
+    gap: var(--s2) var(--s4);
+    padding: var(--s6);
+    align-items: start;
   }
-  .prow {
+  .strip .field {
+    display: grid;
+    grid-template-rows: subgrid;
+    grid-row: span 3;
+    gap: var(--s2);
+    min-width: 0;
+  }
+  /* THE ACTION IS A FIELD LIKE ANY OTHER. Giving it `grid-row: 2/3` let
+     auto-placement drop it into the first free slot in row 2 — which is
+     column ONE, in front of Universe. It keeps the same three tracks as its
+     neighbours with an empty label and an empty note, so it flows last, in
+     document order, with its button on the shared control baseline. */
+  .strip .field.go .lab,
+  .strip .field.go .note {
+    visibility: hidden;
+  }
+  .strip .field.go .btn {
+    width: 100%;
+  }
+  .lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    line-height: var(--lab-h);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctl {
+    height: var(--ctl-h);
     display: flex;
     align-items: center;
     gap: var(--s4);
-    height: var(--row-h);
     padding: 0 var(--s5);
+    background: var(--bg-2);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    box-shadow: var(--e1);
+    transition: border-color 140ms var(--ease), box-shadow 140ms var(--ease),
+      transform 140ms var(--ease);
+    min-width: 0;
+  }
+  .ctl > span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ctl:hover {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--acc-soft);
+  }
+  .ctl .caret {
+    color: var(--faint);
+    font-size: 9px;
+    margin-left: auto;
+    flex: none;
+  }
+  .ctl.off {
+    background: repeating-linear-gradient(
+      -45deg,
+      var(--well),
+      var(--well) 6px,
+      transparent 6px,
+      transparent 12px
+    );
+    color: var(--faint);
+    border-color: var(--line);
+    border-style: dashed;
+    box-shadow: none;
+    cursor: not-allowed;
+  }
+  .ctl.off:hover {
+    border-color: var(--warn);
+    box-shadow: none;
+  }
+  /* A refusal is a CHIP on the note track. It has a reserved row, so it can
+     never change the height of the control row above it. */
+  .note {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    line-height: 1.35;
+    color: var(--warn);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--s2);
+    min-height: 13px;
+  }
+  .note::before {
+    content: '▲';
+    font-size: 7px;
+    line-height: 1.9;
+    flex: none;
+  }
+  .note.quiet {
+    color: var(--faint);
+  }
+  .note.quiet::before {
+    content: '·';
+    font-size: 11px;
+    line-height: 1;
+  }
+
+  .btn {
+    height: var(--ctl-h);
+    padding: 0 var(--s6);
+    border-radius: var(--r2);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s3);
+    box-shadow: var(--e1);
+    white-space: nowrap;
+    transition: transform 140ms var(--ease), box-shadow 140ms var(--ease),
+      filter 140ms var(--ease);
+  }
+  .btn:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--e2);
+  }
+  .btn:active {
+    transform: translateY(0);
+  }
+  .btn.primary {
+    background: linear-gradient(140deg, var(--acc), color-mix(in srgb, var(--acc) 72%, var(--info)));
+    border-color: transparent;
+    color: var(--on-acc);
+    box-shadow: 0 4px 14px var(--acc-soft), var(--e1);
+    position: relative;
+    overflow: hidden;
+  }
+  .btn.primary::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      100deg,
+      transparent 30%,
+      rgba(255, 255, 255, 0.45) 50%,
+      transparent 70%
+    );
+    background-size: 220% 100%;
+    animation: sweep 3.6s var(--ease) infinite;
+  }
+  .btn.ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: var(--line);
+    color: var(--dim);
+    font-weight: 500;
+  }
+  .btn.sm {
+    height: 28px;
+    padding: 0 var(--s5);
+    font-size: var(--fs-xs);
+  }
+
+  /* ====================================================================== 7
+     THE METRIC BAND — big tabular numerals that count up, each with a
+     sparkline. This is the summary a scanned page needs before any detail.
+     =================================================================== */
+  .band {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(184px, 1fr));
+    gap: 1px;
+    background: var(--line-soft);
+    border: 1px solid var(--line);
+    border-radius: var(--r5);
+    overflow: hidden;
+    box-shadow: var(--e2);
+  }
+  .metric {
+    background: var(--panel);
+    padding: var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s3);
+    position: relative;
+    transition: background 160ms var(--ease);
+  }
+  .metric:hover {
+    background: var(--panel-2);
+  }
+  .metric .k {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .metric .v {
+    font-family: var(--mono);
+    font-size: var(--fs-xl);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .metric .foot {
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .spark {
+    position: absolute;
+    right: var(--s5);
+    bottom: var(--s5);
+    width: 64px;
+    height: 22px;
+    opacity: 0.85;
+  }
+  .spark path {
+    fill: none;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-dasharray: 200;
+    stroke-dashoffset: 200;
+    animation: draw 1.5s var(--ease) forwards;
+  }
+
+  /* ====================================================================== 8
+     THE PICKER.
+     =================================================================== */
+  .search {
+    height: 28px;
+    min-width: 210px;
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: 0 var(--s5);
+    border-radius: var(--r-full);
+    border: 1px solid var(--line-hard);
+    background: var(--well);
+    color: var(--faint);
+    font-size: var(--fs-xs);
+  }
+  .plist {
+    max-height: 306px;
+    overflow-y: auto;
+  }
+  .prow {
+    display: grid;
+    grid-template-columns: 22px 128px 1fr 120px 128px;
+    align-items: center;
+    gap: var(--s4);
+    height: var(--row-h);
+    padding: 0 var(--s6);
     border-bottom: 1px solid var(--line-soft);
     font-size: var(--fs-sm);
+    position: relative;
+    transition: background 130ms var(--ease);
+  }
+  .prow::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--acc);
+    transform: scaleY(0);
+    transition: transform 160ms var(--ease);
   }
   .prow:hover {
     background: var(--panel-2);
   }
+  .prow:hover::before {
+    transform: none;
+  }
   .prow input {
     accent-color: var(--acc);
-    width: 13px;
-    height: 13px;
+    width: 14px;
+    height: 14px;
   }
   .prow .sym {
     font-family: var(--mono);
-    font-weight: var(--w-semi);
-    min-width: 112px;
+    font-weight: 600;
     color: var(--ink);
+    letter-spacing: -0.01em;
   }
   .prow .nm {
     color: var(--dim);
@@ -438,92 +825,37 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .prow .bars {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    text-align: right;
+    color: var(--ink-2);
+    font-variant-numeric: tabular-nums;
+  }
   .prow .isin {
-    margin-left: auto;
     font-family: var(--mono);
     font-size: var(--fs-xs);
     color: var(--faint);
+    text-align: right;
     white-space: nowrap;
   }
-  .prow.dead .sym,
-  .prow.dead .nm {
-    color: var(--faint);
+  .prow.dead {
+    opacity: 0.62;
   }
 
-  /* ===================================================== 7. CARDS + FACTS */
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r);
-    margin: 0 var(--s5) var(--s5);
-    padding: var(--s5);
-    display: flex;
-    flex-direction: column;
-    gap: var(--s5);
-    box-shadow: var(--e1);
-  }
-  .card-h {
-    display: flex;
-    align-items: center;
-    gap: var(--s4);
-    flex-wrap: wrap;
-  }
-  .tag {
-    font-family: var(--mono);
-    font-size: var(--fs-xs);
-    color: var(--dim);
-    background: var(--well);
-    border-radius: var(--r-full);
-    padding: 2px 9px;
-    font-variant-numeric: tabular-nums;
-  }
-  .facts {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
-    gap: var(--s4);
-  }
-  .fact {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    padding: var(--s4) var(--s5);
-    background: var(--well);
-    border-radius: var(--r1);
-  }
-  .fact b {
-    font-family: var(--mono);
-    font-size: var(--fs-md);
-    font-variant-numeric: tabular-nums;
-    color: var(--ink-hi);
-  }
-  .fact span {
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-  }
-  .said {
-    font-size: var(--fs-sm);
-    color: var(--dim);
-    margin: 0;
-  }
-  .said b.warn {
-    color: var(--warn);
-  }
-
-  /* ================================================= 8. THE VERDICT STRIP
-     One sentence, the judgement under it, the non-zero counts as filters,
-     the total they must reach, and the one bulk action.
-     ================================================================== */
+  /* ====================================================================== 9
+     THE VERDICT STRIP.
+     =================================================================== */
   .lstrip {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(240px, 1fr) auto;
+    gap: var(--s5) var(--s6);
     align-items: center;
-    gap: var(--s5);
-    flex-wrap: wrap;
-    padding: var(--s5);
-    border-radius: var(--r2);
+    padding: var(--s6);
+    margin: var(--s6);
+    border-radius: var(--r4);
     background: var(--well);
+    border: 1px solid var(--line);
     border-left: 3px solid var(--line-hard);
   }
   .lstrip.up {
@@ -538,48 +870,54 @@
     background: var(--down-soft);
     border-left-color: var(--down);
   }
-  .lq {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 210px;
-  }
   .lq b {
-    font-size: var(--fs-md);
+    display: block;
+    font-size: var(--fs-lg);
     color: var(--ink-hi);
-    font-weight: var(--w-bold);
+    font-weight: 700;
+    letter-spacing: -0.015em;
   }
   .lq span {
+    display: block;
     font-size: var(--fs-sm);
     color: var(--dim);
-    max-width: 62ch;
+    max-width: 66ch;
+    margin-top: 2px;
   }
   .lpills {
+    grid-column: 1 / -1;
     display: flex;
     gap: var(--s3);
     flex-wrap: wrap;
+    align-items: center;
   }
   .lp {
     display: inline-flex;
     align-items: center;
     gap: var(--s3);
-    height: 26px;
-    padding: 0 var(--s4);
+    height: 30px;
+    padding: 0 var(--s5);
     border-radius: var(--r-full);
     border: 1px solid var(--line-hard);
     background: var(--bg-2);
-    font-family: var(--sans);
     font-size: var(--fs-xs);
     color: var(--ink-2);
-    cursor: pointer;
+    opacity: 0;
+    animation: pop 380ms var(--ease-spring) forwards;
+    transition: transform 140ms var(--ease), box-shadow 140ms var(--ease);
+  }
+  .lp:hover {
+    transform: translateY(-1px);
+    box-shadow: var(--e1);
   }
   .lp[aria-pressed='true'] {
     border-color: var(--acc);
-    box-shadow: 0 0 0 1px var(--acc);
+    box-shadow: 0 0 0 2px var(--acc-soft);
+    background: var(--panel);
   }
   .lp .n {
     font-family: var(--mono);
-    font-weight: var(--w-bold);
+    font-weight: 700;
     color: var(--ink-hi);
     font-variant-numeric: tabular-nums;
   }
@@ -588,62 +926,95 @@
     height: 7px;
     border-radius: 50%;
     background: var(--line-hard);
+    flex: none;
   }
   .dot.up {
     background: var(--up);
+    box-shadow: 0 0 0 3px var(--up-soft);
   }
   .dot.down {
     background: var(--down);
+    box-shadow: 0 0 0 3px var(--down-soft);
   }
   .dot.warn {
     background: var(--warn);
+    box-shadow: 0 0 0 3px var(--warn-soft);
   }
-  .dot.acc {
+  .dot.info {
     background: var(--info);
+    box-shadow: 0 0 0 3px var(--info-soft);
   }
   .ltot {
     font-family: var(--mono);
     font-size: var(--fs-xs);
     color: var(--dim);
     font-variant-numeric: tabular-nums;
-  }
-  .ltot.bad {
-    color: var(--down);
-    font-weight: var(--w-bold);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-  .lact {
     margin-left: auto;
   }
 
-  /* ============================================================ 9. GRIDS */
-  .tbl-scroll {
+  /* ===================================================================== 10
+     THE PROGRESS METER — a partition that sums on screen.
+     ================================================================== */
+  .meter {
+    grid-column: 1 / -1;
+    display: flex;
+    height: 8px;
+    border-radius: var(--r-full);
+    overflow: hidden;
+    background: var(--well);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .meter i {
+    display: block;
+    transform-origin: left;
+    animation: fill 900ms var(--ease) both;
+  }
+  .meter i.ok {
+    background: var(--up);
+  }
+  .meter i.sh {
+    background: var(--warn);
+  }
+  .meter i.no {
+    background: var(--down);
+  }
+  .meter i.out {
+    background: var(--line-hard);
+  }
+
+  /* ===================================================================== 11
+     GRIDS.
+     ================================================================== */
+  .tblwrap {
     overflow-x: auto;
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--bg-2);
   }
   table.grid {
     border-collapse: collapse;
+    width: 100%;
     font-size: var(--fs-sm);
     white-space: nowrap;
-    width: 100%;
   }
+  /* STICKY AT ZERO. `.tblwrap` sets `overflow-x: auto`, which makes it the
+     scroll container, so a `top` of the topbar's height offsets the header
+     down INSIDE the wrapper and drops it below the first data row. */
   table.grid th {
     position: sticky;
     top: 0;
-    background: var(--bg-2);
+    z-index: 5;
+    background: var(--panel);
     text-align: left;
     font-family: var(--mono);
     font-size: var(--fs-micro);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--faint);
-    font-weight: var(--w-semi);
-    padding: var(--s3) var(--s4);
+    font-weight: 600;
+    padding: var(--s4) var(--s5);
     border-bottom: 1px solid var(--line-hard);
-    cursor: pointer;
+    transition: color 130ms var(--ease);
+  }
+  table.grid th:hover {
+    color: var(--acc);
   }
   table.grid th.n,
   table.grid td.n {
@@ -652,13 +1023,16 @@
   }
   table.grid td {
     height: var(--row-h);
-    padding: 0 var(--s4);
+    padding: 0 var(--s5);
     border-bottom: 1px solid var(--line-soft);
     color: var(--ink);
   }
   table.grid td.mono,
   table.grid td.n {
     font-family: var(--mono);
+  }
+  table.grid tbody tr {
+    transition: background 130ms var(--ease);
   }
   table.grid tbody tr:hover td {
     background: var(--panel-2);
@@ -671,6 +1045,14 @@
     align-items: center;
     gap: var(--s3);
     font-size: var(--fs-xs);
+    padding: 3px 9px;
+    border-radius: var(--r-full);
+    background: var(--well);
+    border: 1px solid var(--line);
+  }
+  .gain {
+    color: var(--up);
+    font-weight: 600;
   }
   .nosrc {
     font-family: var(--mono);
@@ -678,74 +1060,62 @@
     color: var(--faint);
     font-style: italic;
   }
-
-  .census {
-    margin: 0 var(--s5) var(--s5);
-    display: flex;
-    flex-direction: column;
-    gap: var(--s5);
+  .cov {
+    display: inline-flex;
+    gap: 2px;
   }
-  h2.sec {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s4);
-    font-size: var(--fs-md);
-    font-weight: var(--w-bold);
-    color: var(--ink-hi);
-    margin: 0;
+  .cov i {
+    width: 8px;
+    height: 14px;
+    border-radius: 1px;
+    background: var(--line-hard);
+    transform-origin: bottom;
+    animation: fill 700ms var(--ease) both;
   }
-  h2.sec .cnt {
-    font-family: var(--mono);
-    color: var(--acc);
-    font-variant-numeric: tabular-nums;
+  .cov i.q1 {
+    background: var(--down);
   }
-  h2.sec em {
-    font-style: normal;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-mid);
-    color: var(--dim);
+  .cov i.q2 {
+    background: var(--warn);
+  }
+  .cov i.q3 {
+    background: color-mix(in srgb, var(--up) 55%, var(--warn));
+  }
+  .cov i.q4 {
+    background: var(--up);
   }
 
   .pgbar {
     display: flex;
     align-items: center;
     gap: var(--s5);
-    padding: var(--s4) 0;
+    padding: var(--s5) var(--s6);
     font-family: var(--mono);
     font-size: var(--fs-xs);
     color: var(--dim);
     flex-wrap: wrap;
+    border-top: 1px solid var(--line-soft);
   }
-  footer.legend {
-    margin: var(--s7) var(--s5) var(--s8);
-    padding-top: var(--s5);
-    border-top: 1px solid var(--line);
+  footer {
     font-family: var(--mono);
     font-size: var(--fs-xs);
     color: var(--faint);
     display: flex;
-    gap: var(--s6);
+    gap: var(--s7);
     flex-wrap: wrap;
-  }
-  @media (prefers-reduced-motion: reduce) {
-    * {
-      animation: none !important;
-      transition: none !important;
-    }
+    padding-top: var(--s6);
+    border-top: 1px solid var(--line);
   }
 </style>
 
 <header class="topbar">
-  <span class="brand">brute<em>X</em></span>
+  <span class="brand"><span class="mark">X</span>bruteX</span>
   <nav class="navs">
     <a href="#top">Markets</a><a class="on" href="#top">Ingest</a><a href="#top">DB</a
     ><a href="#top">Autopilot</a><a href="#top">Audit</a>
   </nav>
   <span class="topright">
-    <span class="ctl sm" style="height:26px;font-size:var(--fs-xs)"
-      >Groww <span class="caret">▾</span></span
-    >
-    <span>IST 15:31</span>
+    <span class="clock"><i class="live"></i>IST 15:31:04</span>
     <span class="tog" role="group" aria-label="Theme">
       <button type="button" data-t="light" aria-pressed="true">Light</button>
       <button type="button" data-t="dark" aria-pressed="false">Dark</button>
@@ -754,123 +1124,163 @@
 </header>
 
 <main id="top">
-  <div class="pane-head">
+  <div class="head rise" style="animation-delay:60ms">
     <h1>Ingest</h1>
     <span class="sub">Ask a feed for bars, and land them in the store.</span>
+    <span class="feedchip"><i class="dot"></i>Feed <b>Groww</b> · ready</span>
   </div>
 
-  <!-- THE STRIP. One row of labelled dropdowns spanning the top, and the feed
-       is NOT among them — it is chosen once, in the bar above. -->
-  <section class="strip" aria-label="What to ask for">
-    <div class="cell">
-      <span class="lab" id="l-uni">Universe</span>
-      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-uni"
-        >NIFTY Total Market <span class="caret">▾</span></span
-      >
+  <!-- THE METRIC BAND. Summary before detail. -->
+  <section class="band rise" style="animation-delay:140ms" aria-label="This request">
+    <div class="metric">
+      <span class="k">Month windows</span>
+      <span class="v" data-count="80">0</span>
+      <span class="foot">2020-01 → 2026-08</span>
     </div>
-    <div class="cell">
-      <span class="lab" id="l-seg">Segment</span>
-      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-seg"
-        >Spot <span class="caret">▾</span></span
-      >
+    <div class="metric">
+      <span class="k">Instruments</span>
+      <span class="v" data-count="6">0</span>
+      <span class="foot">of 1,813 tracked</span>
     </div>
-    <div class="cell">
-      <span class="lab" id="l-tf">Bar length</span>
-      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-tf"
-        >1 day <span class="caret">▾</span></span
-      >
+    <div class="metric">
+      <span class="k">Requests</span>
+      <span class="v" data-count="480">0</span>
+      <span class="foot">80 × 6, one per month file</span>
+      <svg class="spark" viewBox="0 0 64 22" aria-hidden="true">
+        <path
+          d="M1 18 L9 15 L17 16 L25 10 L33 12 L41 6 L49 8 L57 3"
+          stroke="var(--acc)"
+          style="animation-delay:700ms"
+        />
+      </svg>
     </div>
-    <div class="cell">
-      <span class="lab" id="l-from">From</span>
-      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-from"
-        >2020-01-01 <span class="caret">▾</span></span
-      >
+    <div class="metric">
+      <span class="k">Feed floor</span>
+      <span class="v" style="font-size:var(--fs-lg)">2020-01-01</span>
+      <span class="foot"><i class="dot info"></i>operator · 12 Aug 2026</span>
     </div>
-    <div class="cell">
-      <span class="lab" id="l-to">To</span>
-      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-to"
-        >2026-08-13 <span class="caret">▾</span></span
-      >
-    </div>
-    <div class="cell">
-      <span class="lab" id="l-tick">Tick</span>
-      <span class="ctl off" aria-labelledby="l-tick" aria-disabled="true">Tick ✕</span>
-      <span class="refusal">refused before the feed is consulted — no feed serves it</span>
-    </div>
-    <div class="cell">
-      <span class="lab">&nbsp;</span>
-      <button class="btn primary" type="button">Pull selected</button>
+    <div class="metric">
+      <span class="k">Newest allowed</span>
+      <span class="v" style="font-size:var(--fs-lg)">2026-08-13</span>
+      <span class="foot">yesterday — never today</span>
     </div>
   </section>
 
-  <!-- THE INSTRUMENT RUNG IS A PICKER, NOT A COUNTER. -->
-  <section class="sel" aria-label="Instruments">
-    <div class="sel-h">
-      <span class="ttl">Instruments</span>
-      <span class="count">6 selected of 1,813</span>
+  <!-- THE STRIP. A GRID WITH THREE NAMED ROWS. -->
+  <section class="panel rise" style="animation-delay:220ms" aria-label="What to ask for">
+    <div class="panel-h">
+      <span class="ttl">What to ask for</span>
       <span class="spacer"></span>
-      <span class="ctl find sm">Search symbol or name…</span>
+      <span class="ttl" style="color:var(--acc)">6 selected · 480 requests</span>
+    </div>
+    <div class="strip">
+      <div class="field">
+        <span class="lab" id="l-uni">Universe</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-uni"
+          ><span>NIFTY Total Market</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">750 members</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="l-seg">Segment</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-seg"
+          ><span>Spot</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">futures stored, never swept</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="l-tf">Bar length</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-tf"
+          ><span>1 day</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">1 bar per day, not 375</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="l-from">From</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-from"
+          ><span>2020-01-01</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">at the feed's floor</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="l-to">To</span>
+        <span class="ctl" role="button" tabindex="0" aria-labelledby="l-to"
+          ><span>2026-08-13</span><span class="caret">▾</span></span
+        >
+        <span class="note quiet">yesterday</span>
+      </div>
+      <div class="field">
+        <span class="lab" id="l-tick">Tick</span>
+        <span class="ctl off" aria-labelledby="l-tick" aria-disabled="true"
+          ><span>Tick</span><span class="caret">✕</span></span
+        >
+        <span class="note">refused before the feed is consulted</span>
+      </div>
+      <div class="field go">
+        <span class="lab" aria-hidden="true">Go</span>
+        <button class="btn primary" type="button">Pull selected</button>
+        <span class="note quiet" aria-hidden="true">.</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE PICKER. -->
+  <section class="panel rise" style="animation-delay:300ms" aria-label="Instruments">
+    <div class="panel-h">
+      <span class="ttl">Instruments</span>
+      <span style="font-family:var(--mono);font-size:var(--fs-sm);color:var(--ink)"
+        >6 selected of 1,813</span
+      >
+      <span class="spacer"></span>
+      <span class="search">⌕ Search symbol or name…</span>
       <button class="btn ghost sm" type="button">Select all</button>
       <button class="btn ghost sm" type="button">Clear all</button>
     </div>
-    <div class="picklist">
+    <div class="plist">
       <div class="prow">
         <input type="checkbox" checked aria-label="NIFTY 50" /><span class="sym">NIFTY50</span
-        ><span class="nm">NIFTY 50</span><span class="isin">no ISIN — index</span>
+        ><span class="nm">NIFTY 50</span><span class="bars">1,631 bars</span
+        ><span class="isin">index — no ISIN</span>
       </div>
       <div class="prow">
         <input type="checkbox" checked aria-label="NIFTY BANK" /><span class="sym">BANKNIFTY</span
-        ><span class="nm">NIFTY BANK</span><span class="isin">no ISIN — index</span>
+        ><span class="nm">NIFTY BANK</span><span class="bars">1,631 bars</span
+        ><span class="isin">index — no ISIN</span>
       </div>
       <div class="prow">
         <input type="checkbox" checked aria-label="RELIANCE" /><span class="sym">RELIANCE</span
-        ><span class="nm">Reliance Industries Limited</span><span class="isin">INE···A01018</span>
+        ><span class="nm">Reliance Industries Limited</span><span class="bars">1,628 bars</span
+        ><span class="isin">INE···A01018</span>
       </div>
       <div class="prow">
         <input type="checkbox" checked aria-label="HDFCBANK" /><span class="sym">HDFCBANK</span
-        ><span class="nm">HDFC Bank Limited</span><span class="isin">INE···A01026</span>
+        ><span class="nm">HDFC Bank Limited</span><span class="bars">1,204 bars</span
+        ><span class="isin">INE···A01026</span>
       </div>
       <div class="prow">
         <input type="checkbox" checked aria-label="INFY" /><span class="sym">INFY</span
-        ><span class="nm">Infosys Limited</span><span class="isin">INE···A01030</span>
+        ><span class="nm">Infosys Limited</span><span class="bars">1,229 bars</span
+        ><span class="isin">INE···A01030</span>
       </div>
       <div class="prow">
         <input type="checkbox" checked aria-label="TATAMOTORS" /><span class="sym">TATAMOTORS</span
-        ><span class="nm">Tata Motors Limited</span><span class="isin">INE···A01037</span>
+        ><span class="nm">Tata Motors Limited</span><span class="bars">61 bars</span
+        ><span class="isin">INE···A01037</span>
       </div>
       <div class="prow dead">
-        <input type="checkbox" disabled aria-label="AGL — no exchange ISIN" /><span class="sym"
-          >AGL</span
+        <input type="checkbox" disabled aria-label="AGL" /><span class="sym">AGL</span
         ><span class="nm">No exchange ISIN — the published file carries GRINDWELL's</span
-        ><span class="isin">withheld, not guessed</span>
+        ><span class="bars nosrc">never pulled</span><span class="isin">withheld</span>
       </div>
     </div>
   </section>
 
-  <!-- WHAT THE REQUEST COSTS, BEFORE IT IS SENT. -->
-  <section class="card" aria-label="What this request will ask for">
-    <div class="card-h"><span class="ttl">What this request will ask for</span></div>
-    <div class="facts">
-      <div class="fact"><b>80</b><span>month windows</span></div>
-      <div class="fact"><b>6</b><span>instruments</span></div>
-      <div class="fact"><b>480</b><span>requests</span></div>
-      <div class="fact"><b>2020-01-01</b><span>feed floor · operator</span></div>
-      <div class="fact"><b>2026-08-13</b><span>newest allowed · yesterday</span></div>
-    </div>
-    <p class="said">
-      The floor is the operator's fixed January 2020, restated 12 Aug 2026. Groww's own interval
-      table narrows the one-minute rung to a rolling quarter and is kept beside it as the contested
-      claim. Whether this rung truly reaches 2020 is
-      <b class="warn">UNVERIFIED</b> until a request measures it.
-    </p>
-  </section>
-
-  <!-- EVERY INSTRUMENT THE REQUEST NAMED, WITH ITS VERDICT. -->
-  <section class="card" aria-label="Every instrument this request named">
-    <div class="card-h">
+  <!-- THE OUTCOME. -->
+  <section class="panel rise" style="animation-delay:380ms" aria-label="Every instrument named">
+    <div class="panel-h">
       <span class="ttl">Every instrument this request named</span>
       <span class="spacer"></span>
-      <span class="tag">6 shown of 6</span>
+      <span class="ttl">6 shown of 6</span>
     </div>
 
     <div class="lstrip warn">
@@ -881,31 +1291,47 @@
           warranted and will very likely settle both.</span
         >
       </div>
-      <div class="lpills">
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot up"></span><span class="n">4</span> verified
-        </button>
-        <button class="lp" type="button" aria-pressed="true">
-          <span class="dot warn"></span><span class="n">1</span> short
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot warn"></span><span class="n">1</span> never pulled
-        </button>
+      <span class="ltot">480 series · 6 instruments × 80 months</span>
+      <div class="meter" aria-label="Partition">
+        <i class="ok" style="width:72.3%;animation-delay:600ms"></i>
+        <i class="sh" style="width:2.5%;animation-delay:680ms"></i>
+        <i class="no" style="width:0.6%;animation-delay:760ms"></i>
+        <i class="out" style="width:24.6%;animation-delay:840ms"></i>
       </div>
-      <span class="ltot">of 6 series</span>
-      <span class="lact"><button class="btn sm" type="button">Pull the 2 outstanding</button></span>
+      <div class="lpills">
+        <button class="lp" type="button" aria-pressed="false" style="animation-delay:640ms">
+          <span class="dot down"></span><span class="n">3</span> failed
+        </button>
+        <button class="lp" type="button" aria-pressed="false" style="animation-delay:700ms">
+          <span class="dot warn"></span><span class="n">80</span> never pulled
+        </button>
+        <button class="lp" type="button" aria-pressed="true" style="animation-delay:760ms">
+          <span class="dot warn"></span><span class="n">12</span> short
+        </button>
+        <button class="lp" type="button" aria-pressed="false" style="animation-delay:820ms">
+          <span class="dot info"></span><span class="n">2</span> retrying
+        </button>
+        <button class="lp" type="button" aria-pressed="false" style="animation-delay:880ms">
+          <span class="dot info"></span><span class="n">36</span> out of reach
+        </button>
+        <button class="lp" type="button" aria-pressed="false" style="animation-delay:940ms">
+          <span class="dot up"></span><span class="n">347</span> verified
+        </button>
+        <span class="ltot">of 480 series — the partition sums</span>
+      </div>
     </div>
 
-    <div class="tbl-scroll">
+    <div class="tblwrap">
       <table class="grid">
         <thead>
           <tr>
-            <th style="width:132px">Symbol</th>
+            <th style="width:140px">Symbol</th>
             <th>Name</th>
-            <th class="n" style="width:104px">Bars before</th>
-            <th class="n" style="width:104px">Bars after</th>
+            <th class="n" style="width:112px">Before</th>
+            <th class="n" style="width:112px">After</th>
             <th class="n" style="width:96px">Gained</th>
-            <th style="width:150px">Verdict</th>
+            <th style="width:108px">Coverage</th>
+            <th style="width:160px">Verdict</th>
           </tr>
         </thead>
         <tbody>
@@ -914,160 +1340,94 @@
             <td>NIFTY 50</td>
             <td class="n">1,592</td>
             <td class="n">1,631</td>
-            <td class="n" style="color:var(--up)">+39</td>
-            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+            <td class="n gain">+39</td>
+            <td>
+              <span class="cov"
+                ><i class="q4" style="animation-delay:700ms"></i
+                ><i class="q4" style="animation-delay:740ms"></i
+                ><i class="q4" style="animation-delay:780ms"></i
+                ><i class="q4" style="animation-delay:820ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot up"></i>verified</span></td>
           </tr>
           <tr>
             <td class="mono">BANKNIFTY</td>
             <td>NIFTY BANK</td>
             <td class="n">1,592</td>
             <td class="n">1,631</td>
-            <td class="n" style="color:var(--up)">+39</td>
-            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+            <td class="n gain">+39</td>
+            <td>
+              <span class="cov"
+                ><i class="q4" style="animation-delay:720ms"></i
+                ><i class="q4" style="animation-delay:760ms"></i
+                ><i class="q4" style="animation-delay:800ms"></i
+                ><i class="q4" style="animation-delay:840ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot up"></i>verified</span></td>
           </tr>
           <tr>
             <td class="mono">RELIANCE</td>
             <td>Reliance Industries Limited</td>
             <td class="n">1,589</td>
             <td class="n">1,628</td>
-            <td class="n" style="color:var(--up)">+39</td>
-            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+            <td class="n gain">+39</td>
+            <td>
+              <span class="cov"
+                ><i class="q4" style="animation-delay:740ms"></i
+                ><i class="q4" style="animation-delay:780ms"></i
+                ><i class="q3" style="animation-delay:820ms"></i
+                ><i class="q4" style="animation-delay:860ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot up"></i>verified</span></td>
           </tr>
           <tr>
             <td class="mono">HDFCBANK</td>
             <td>HDFC Bank Limited</td>
             <td class="n">1,165</td>
             <td class="n">1,204</td>
-            <td class="n" style="color:var(--up)">+39</td>
-            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+            <td class="n gain">+39</td>
+            <td>
+              <span class="cov"
+                ><i class="q2" style="animation-delay:760ms"></i
+                ><i class="q3" style="animation-delay:800ms"></i
+                ><i class="q4" style="animation-delay:840ms"></i
+                ><i class="q4" style="animation-delay:880ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot up"></i>verified</span></td>
           </tr>
           <tr>
             <td class="mono">INFY</td>
             <td>Infosys Limited</td>
             <td class="n">1,204</td>
             <td class="n">1,229</td>
-            <td class="n" style="color:var(--warn)">+25</td>
-            <td><span class="vd"><span class="dot warn"></span>short</span></td>
+            <td class="n" style="color:var(--warn);font-weight:600">+25</td>
+            <td>
+              <span class="cov"
+                ><i class="q4" style="animation-delay:780ms"></i
+                ><i class="q3" style="animation-delay:820ms"></i
+                ><i class="q2" style="animation-delay:860ms"></i
+                ><i class="q3" style="animation-delay:900ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot warn"></i>short</span></td>
           </tr>
           <tr>
             <td class="mono">TATAMOTORS</td>
             <td>Tata Motors Limited</td>
             <td class="n">0</td>
             <td class="n">0</td>
-            <td class="n nosrc">none</td>
-            <td><span class="vd"><span class="dot warn"></span>never pulled</span></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
-  <!-- EVERY SERIES IN THE WINDOW, MEASURED PER MONTH FILE. -->
-  <section class="census" aria-label="Every series in that window">
-    <h2 class="sec">
-      Every series in that window
-      <span class="cnt">480</span>
-      <em>6 instruments × 80 month files · Groww · 1 day</em>
-    </h2>
-
-    <div class="lstrip down">
-      <div class="lq">
-        <b>The ladder has halted, and 3 series are still short</b>
-        <span
-          >Attempts have stopped. A retry on its own will not help — the halt reason is the feed's
-          token, and this build never mints one.</span
-        >
-      </div>
-      <div class="lpills">
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot down"></span><span class="n">3</span> failed
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot warn"></span><span class="n">80</span> never pulled
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot warn"></span><span class="n">12</span> short
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot acc"></span><span class="n">2</span> retrying
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot acc"></span><span class="n">36</span> out of reach
-        </button>
-        <button class="lp" type="button" aria-pressed="false">
-          <span class="dot up"></span><span class="n">347</span> verified
-        </button>
-      </div>
-      <span class="ltot">of 480 series</span>
-    </div>
-
-    <div class="tbl-scroll">
-      <table class="grid">
-        <thead>
-          <tr>
-            <th style="width:132px">Symbol</th>
-            <th style="width:96px">Month</th>
-            <th style="width:80px">TF</th>
-            <th class="n" style="width:104px">Held</th>
-            <th class="n" style="width:104px">Expected</th>
-            <th class="n" style="width:88px">Short by</th>
-            <th style="width:160px">Verdict</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="mono">TATAMOTORS</td>
-            <td class="mono">2020-01</td>
-            <td class="mono">1day</td>
-            <td class="n">0</td>
-            <td class="n">21</td>
-            <td class="n" style="color:var(--warn)">21</td>
-            <td><span class="vd"><span class="dot warn"></span>never pulled</span></td>
-          </tr>
-          <tr>
-            <td class="mono">INFY</td>
-            <td class="mono">2026-07</td>
-            <td class="mono">1day</td>
-            <td class="n">18</td>
-            <td class="n">23</td>
-            <td class="n" style="color:var(--warn)">5</td>
-            <td><span class="vd"><span class="dot warn"></span>short</span></td>
-          </tr>
-          <tr>
-            <td class="mono">HDFCBANK</td>
-            <td class="mono">2020-03</td>
-            <td class="mono">1day</td>
-            <td class="n nosrc">—</td>
-            <td class="n nosrc">—</td>
-            <td class="n nosrc">—</td>
-            <td><span class="vd"><span class="dot acc"></span>out of reach</span></td>
-          </tr>
-          <tr>
-            <td class="mono">RELIANCE</td>
-            <td class="mono">2026-08</td>
-            <td class="mono">1day</td>
-            <td class="n">9</td>
-            <td class="n">9</td>
-            <td class="n">0</td>
-            <td><span class="vd"><span class="dot acc"></span>retrying</span></td>
-          </tr>
-          <tr>
-            <td class="mono">NIFTY50</td>
-            <td class="mono">2026-08</td>
-            <td class="mono">1day</td>
-            <td class="n">9</td>
-            <td class="n">9</td>
-            <td class="n">0</td>
-            <td><span class="vd"><span class="dot up"></span>verified</span></td>
-          </tr>
-          <tr>
-            <td class="mono">BANKNIFTY</td>
-            <td class="mono">2025-11</td>
-            <td class="mono">1day</td>
-            <td class="n">20</td>
-            <td class="n nosrc">no yardstick</td>
-            <td class="n nosrc">—</td>
-            <td><span class="vd"><span class="dot acc"></span>no yardstick</span></td>
+            <td class="n"><span class="nosrc">none</span></td>
+            <td>
+              <span class="cov"
+                ><i style="animation-delay:800ms"></i><i style="animation-delay:840ms"></i
+                ><i style="animation-delay:880ms"></i><i style="animation-delay:920ms"></i
+              ></span>
+            </td>
+            <td><span class="vd"><i class="dot warn"></i>never pulled</span></td>
           </tr>
         </tbody>
       </table>
@@ -1081,15 +1441,14 @@
     </div>
   </section>
 
-  <footer class="legend">
-    <span>7 verdicts, worst first: failed · never pulled · short · retrying · no yardstick · out of reach · verified</span>
-    <span>Every number monospace, tabular, right-aligned</span>
-    <span>Row 30px · base 13px · labels 9.5px at 0.1em</span>
+  <footer class="rise" style="animation-delay:460ms">
+    <span>7 verdicts, worst first · failed → never pulled → short → retrying → no yardstick → out of reach → verified</span>
+    <span>Control 34px · label 14px · row 34px — one grid, three tracks</span>
   </footer>
 </main>
 
 <script>
-  // The app shell's own mechanism: stamp data-theme for an explicit choice.
+  // Theme: the app shell's own mechanism.
   document.querySelector('.tog').addEventListener('click', function (event) {
     var btn = event.target.closest('button[data-t]');
     if (!btn) return;
@@ -1097,5 +1456,30 @@
     this.querySelectorAll('button').forEach(function (b) {
       b.setAttribute('aria-pressed', String(b === btn));
     });
+  });
+
+  // Count-up on the metric band. Skipped entirely under reduced motion.
+  var still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.querySelectorAll('[data-count]').forEach(function (el, i) {
+    var target = Number(el.dataset.count);
+    var fmt = function (v) {
+      return v.toLocaleString('en-IN');
+    };
+    if (still) {
+      el.textContent = fmt(target);
+      return;
+    }
+    var start = null;
+    var dur = 1100;
+    var delay = 260 + i * 90;
+    setTimeout(function () {
+      requestAnimationFrame(function step(t) {
+        if (start === null) start = t;
+        var p = Math.min(1, (t - start) / dur);
+        var eased = 1 - Math.pow(1 - p, 3);
+        el.textContent = fmt(Math.round(target * eased));
+        if (p < 1) requestAnimationFrame(step);
+      });
+    }, delay);
   });
 </script>
