@@ -343,7 +343,7 @@
     // sat complete one crate away. `SpotTarget::Fno` now maps to that tier, so
     // the count beside this row is a MEASURED join per feed, not a roster
     // length.
-    { id: 'fno', label: 'F&O underlyings', field: null, token: 'fno', target: 'fno' },
+    { id: 'fno', label: 'F&O Underlyings', field: null, token: 'fno', target: 'fno' },
     // NOT AN NSE CONSTITUENT FILE, AND THE LABEL MUST NOT IMPLY ONE.
     //
     // The four NIFTY tiers and the Total Market each come from a published NSE
@@ -364,7 +364,7 @@
     // questions, not one answer measured twice. `note` says so on the control.
     {
       id: 'index',
-      label: 'NSE indices',
+      label: 'NSE Indices',
       field: null,
       token: 'index',
       target: 'indices',
@@ -4440,9 +4440,22 @@
                           >
                             <span class="tk">{universe === u.id ? '✓' : ''}</span>
                             <span class="nm">{u.label}</span>
-                            <span class="ct" class:warn={why !== null}
-                              >{why === null ? `target=${u.target}` : 'no target'}</span
-                            >
+                            <!-- THE WIRE SLUG IS NOT DRAWN BESIDE THE NAME.
+                                 It read `target=n50` in a second column on
+                                 every row — the value the form POSTs, which is
+                                 an implementation detail of the request and
+                                 not a property of the SET the reader is
+                                 choosing between. Removed at the operator's
+                                 instruction, 14 Aug 2026. It is still on the
+                                 wire, still in the request body the "What goes
+                                 on the wire" fold prints, and still the row's
+                                 `u.target`; what is gone is restating it in
+                                 the picker, where the only question is which
+                                 set. A row that CANNOT be requested keeps its
+                                 word, because there the absence is the fact. -->
+                            {#if why !== null}
+                              <span class="ct warn">no target</span>
+                            {/if}
                           </button>
                         {/each}
 

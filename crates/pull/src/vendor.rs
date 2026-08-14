@@ -292,6 +292,45 @@ impl Granularity {
         }
     }
 
+    /// What a HUMAN calls this rung.
+    ///
+    /// # Why this is here and not in the browser
+    ///
+    /// `web/src/routes/ingest/+page.svelte` carried an eleven-row table
+    /// transcribing this enum — each rung's directory name, its display name,
+    /// whether the store can file it and how many records a session holds. It
+    /// was a second copy of a fact this file owns, and it went stale exactly
+    /// the way a second copy does: when D-0132 corrected `store_timeframe`,
+    /// five of its `stored` flags became lies and the hour's directory name
+    /// became one too.
+    ///
+    /// D-0126 and D-0131 each removed one such copy already — the granularity
+    /// floor and the history floor — and the argument is the same one both
+    /// times. The rung ladder is the third. With this, `/feeds.json` can carry
+    /// a rung whole and the page can hold nothing: adding a rung to the ladder
+    /// or a feed to the table reaches the operator's form without a browser
+    /// edit. D-0138.
+    ///
+    /// Distinct from [`Self::dir`], which is the STORE DIRECTORY and a path
+    /// segment `CLAUDE.md` §3 rule 8 protects. This is prose and may be
+    /// reworded freely; that one may not.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Tick => "Tick",
+            Self::Second1 => "1 second",
+            Self::Second5 => "5 seconds",
+            Self::Minute1 => "1 minute",
+            Self::Minute3 => "3 minutes",
+            Self::Minute5 => "5 minutes",
+            Self::Minute15 => "15 minutes",
+            Self::Minute30 => "30 minutes",
+            Self::Hour1 => "1 hour",
+            Self::Day1 => "1 day",
+            Self::Week1 => "1 week",
+        }
+    }
+
     /// The grid this rung sits on.
     #[must_use]
     pub const fn grid(self) -> Grid {
