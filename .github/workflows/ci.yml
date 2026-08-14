@@ -277,6 +277,23 @@ jobs:
           # sentence and the tree disagree and the tree is not being hidden.
           vendor_wire='groww dhan truedata gdfl'
 
+          # ---- group 2b: the CLAIM STANDINGS, which are wire words about WHO
+          # made a claim and are not vendor, org, env or field names at all.
+          #
+          # `pull::vendor::ClaimStanding::word` emits `vendor_doc` and
+          # `operator` on `/feeds.json` so a page can say which of two
+          # disagreeing history floors binds without matching prose against the
+          # string "the operator" — D-0131. `vendor_doc` trips this gate for
+          # the same reason `groww` does: it is lower-case, underscored and
+          # segment-shaped. It names a KIND OF SOURCE, never a path segment,
+          # and no Parameter Store path this repository reads has a `vendor_doc`
+          # or an `operator` component.
+          #
+          # Declared rather than excluded by pattern: an allowlist that grows by
+          # rule stops being an allowlist, which is the failure mode group 1's
+          # own comment names.
+          claim_standing='vendor_doc operator'
+
           # ---- group 3: invented configuration fixtures. Nonsense by
           # construction — no operator's path reads `orgone/testenv/vendorone`.
           config_fixture='
@@ -659,7 +676,7 @@ jobs:
           # from a `YearMonth` and never from a caller's string.
           year_month='2026-01'
 
-          allowed="${seg_shape} ${vendor_wire} ${config_fixture}
+          allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
