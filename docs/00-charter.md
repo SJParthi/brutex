@@ -162,17 +162,32 @@ Evidence lane is recorded per row and is never promoted while copying.
 ### 4z. Zerodha — recorded, and carried nowhere
 
 The operator stated on **11 Aug 2026** that Zerodha serves **a rolling 10 years**
-of history. It is written here because §3 rule 1 wants a stated fact traceable,
-and it is carried in **no** descriptor: `pull::vendor::Feed` has four rows and
-none of them is this vendor. There is no transport, no credential field and no
-wire name for it in this repository, so there is nothing for a floor to hang
-off. If a row is ever added, this line is the source it starts from — and it is
-one source, operator-stated, with no vendor page read against it.
+of history. It is written here because §3 rule 1 wants a stated fact traceable.
+
+**IT IS NOW CARRIED IN A DESCRIPTOR, and this paragraph said the opposite until
+14 Aug 2026.** It read: *"it is carried in no descriptor: `pull::vendor::Feed`
+has four rows and none of them is this vendor. There is no transport, no
+credential field and no wire name for it in this repository."* Every clause of
+that is now false, and leaving it standing made §4z — the traceability anchor
+every Zerodha fact in the code cites — assert that the thing citing it does not
+exist.
+
+| What shipped | Where |
+|---|---|
+| `Feed::Zerodha`, the fifth row | `pull::vendor::DESCRIPTORS` |
+| Store prefix `zerodha` | `core::vendor::Vendor::Zerodha` |
+| Transport | HTTP, `https://api.kite.trade` |
+| Credential fields | `api-key` and `access-token`, the second named by `Auth::key_field` |
+| Rungs asked for | `minute` and `day` |
+
+**The history-depth lane below is unchanged and still true**: one source,
+operator-stated, with no vendor page confirming it. A descriptor existing does
+not make an unverified figure verified, and the row still says so.
 
 | Fact | Value | Lane |
 |---|---|---|
 | History depth | rolling 10 years | operator-stated 11 Aug 2026, restated 14 Aug 2026, no vendor page states it |
-| Descriptor | **none exists.** Not a feed this build can name. | verified from source |
+| Descriptor | **`Feed::Zerodha`, shipped 14 Aug 2026.** Was "none exists"; see the paragraph above for what that claim cost while it stood. | verified from source |
 
 **The vendor page has now been read.** `https://kite.trade/docs/connect/v3/historical/`,
 read 14 Aug 2026. Every row below is quoted from it, so the "no vendor page read"

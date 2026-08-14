@@ -1237,6 +1237,33 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         // series -- Groww's `series` is empty on all 24 of its NSE index rows
         // and Dhan writes `NA` -- so gating any earlier deletes NIFTY and
         // BANKNIFTY.
+        // A VENDOR THAT PUBLISHES NO SERIES COLUMN CANNOT BE GATED ON ONE, and
+        // treating its absence as an unrecognised value declined EVERY EQUITY
+        // ROW IT HAS.
+        //
+        // Measured on a real-shaped Kite dump: kept = 0, and
+        // `skipped_by_reason` was `[("unrecognised listing class", 2)]` for two
+        // perfectly ordinary NSE equities. `api::master` maps an absent column
+        // to the empty string, `board_of("")` matches none of the three series
+        // tables, and `Unrecognised` is a decline — so a feed whose universe is
+        // empty by construction reported itself as a vendor publishing rows
+        // this build did not understand. Both are silent-looking states and
+        // only one of them was true.
+        //
+        // ABSENT AND UNRECOGNISED ARE DIFFERENT FACTS. An empty value in a
+        // column the vendor HAS is a row this build cannot classify, and it is
+        // still declined by name. No column at all is a question this vendor's
+        // master cannot answer, and the honest response is to let the row
+        // through ungated rather than to answer it wrongly.
+        //
+        // WHAT THAT COSTS, STATED RATHER THAN DISCOVERED. D-0025's board gate
+        // is what keeps SME and debt listings out of the equity universe, and
+        // it does not run for such a vendor: its cash rows are kept on the
+        // instrument type alone. Nothing else in this decoder is weakened, and
+        // the vendors that DO publish a series are gated exactly as before —
+        // the arm below is reached only when `master_columns().listing_class`
+        // is empty, which is a property of the vendor and not of the row.
+        "EQ" if vendor.master_columns().listing_class.is_empty() => (Segment::Cash, Kind::Equity),
         "EQ" => match board_of(row.listing_class) {
             EquityVerdict::MainBoard => (Segment::Cash, Kind::Equity),
             EquityVerdict::Sme => return declined(Skip::SmeBoard),

@@ -686,9 +686,22 @@ impl Join {
     #[must_use]
     pub fn notes(&self) -> Vec<String> {
         let mut out = Vec::new();
+        // THE FOURTH SITE THAT ASKED THE WRONG SET, and the one that was missed
+        // when the other three were corrected.
+        //
+        // `Vendor::MASTERED` is who PUBLISHES a master. A vendor whose file is
+        // not on disk joins nothing, so every tier reported it as lacking every
+        // name — measured at 1,807 across the six lists, printed as a coverage
+        // gap on a build where the only fact is that a master was never read.
+        // `TierJoin::compared` is the set actually compared; a vendor absent
+        // from it has no line to contribute here, and `Read::master` already
+        // writes the sentence that says why.
         for vendor in Vendor::MASTERED {
             for tier in Tier::ALL {
                 let join = self.tier(vendor, tier);
+                if !join.compared.contains(&vendor) {
+                    continue;
+                }
                 let mut line = format!(
                     "{} · {}: {} matched, {} vendor lacks, {} ambiguous, {} malformed, \
                      {} no NSE ISIN — {} of {} published",
@@ -1630,7 +1643,8 @@ mod tests {
 
     #[test]
     fn the_notes_name_the_five_buckets_their_sum_and_every_unresolved_row() {
-        let join = Join::build(&universe_with_every_shape());
+        let merged = universe_with_every_shape();
+        let join = Join::build(&merged);
         let notes = join.notes();
         assert!(
             join.indexed() >= 3,
@@ -1704,9 +1718,16 @@ mod tests {
             !quiet_head.contains("only ONE master's file"),
             "a line with nothing uncorroborated must not carry the clause: {quiet_head}"
         );
-        // Every tier of every mastered vendor gets a line, so a tier that
+        // Every tier of every COMPARED vendor gets a line, so a tier that
         // resolves to nothing cannot be silently absent from the report.
-        for vendor in Vendor::MASTERED {
+        //
+        // Compared, not `Vendor::MASTERED`. A vendor that publishes a master
+        // and supplied none here joins nothing, and printing a line per tier
+        // for it reported an unread file as a 1,807-name coverage gap — a
+        // finding about the vendor when the only fact is that its file was
+        // never read. `Read::master` writes that sentence, once, where it is
+        // true.
+        for vendor in merged.contributed.clone() {
             for tier in Tier::ALL {
                 let want = format!("{} · {}:", vendor.as_str(), tier.label());
                 assert!(

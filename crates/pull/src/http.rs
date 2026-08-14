@@ -1273,9 +1273,16 @@ fn stated_offset(text: &str) -> Option<i64> {
     }
     let hours: i64 = digits.get(0..2)?.parse().ok()?;
     let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+    // BOTH FIELDS ARE BOUNDED, and the hours one was not.
+    //
     // A minutes field past 59 is not a zone, it is a malformed value, and
-    // reading it as an hour and a bit would invent an offset nobody stated.
-    if minutes > 59 {
+    // reading it as an hour and a bit would invent an offset nobody stated. The
+    // same is true of the hours, and leaving it open was worse: `+9900` parsed
+    // to 99 hours and shifted a bar FOUR DAYS, landing it on a plausible
+    // session minute of a different day — a value that stores rather than
+    // refuses. No zone on earth is past 14 hours from UTC (Line Islands,
+    // +14:00), so anything beyond that is a malformed value wearing a zone.
+    if hours > 14 || minutes > 59 {
         return None;
     }
     Some(sign * (hours * 3_600 + minutes * 60))
@@ -1705,6 +1712,188 @@ mod tests {
             panic!("an empty object holds no envelope")
         };
         assert!(detail.contains("no keys at all"), "{detail}");
+    }
+
+    /// **THE W1 PAIR, AND THE TEST THIS CODE ALREADY CLAIMED TO HAVE.**
+    ///
+    /// `IsoDateTimeOffset` works only because TWO arms agree: `one_stamp`
+    /// applies the stated offset, and `fetch::land` passes the result through
+    /// instead of subtracting IST again. Either alone is wrong, and the wrong
+    /// direction is the one that **stores** — a Kite bar run through the IST
+    /// arm lands 5h30m early, and 03:45 on a trading day is a plausible
+    /// timestamp rather than an obviously broken one.
+    ///
+    /// Both this file and `vendor.rs` cited a test proving it. **No such test
+    /// existed**: an adversarial pass moved the variant into the IST arm and
+    /// the whole suite stayed green. This is that test, driven through the
+    /// SHIPPED descriptor rather than a fixture.
+    #[test]
+    fn a_zone_carrying_stamp_is_converted_once_and_the_two_arms_must_agree() {
+        let crate::vendor::Transport::Http(zerodha) =
+            crate::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        // The vendor's own first example row, verbatim from charter §4z.
+        let body = r#"{"status":"success","data":{"candles":[
+            ["2017-12-15T09:15:00+0530",1704.5,1705,1699.25,1702.8,2499]]}}"#;
+        let raw = decode_body(body, &zerodha).expect("the vendor's own example decodes");
+
+        // Computed independently of the code under test: 17,515 days since the
+        // epoch, plus 9h15m, minus the stated 5h30m.
+        const TRUE_UTC: i64 = 17_515 * 86_400 + 9 * 3_600 + 15 * 60 - 19_800;
+        assert_eq!(TRUE_UTC, 1_513_309_500, "the hand computation");
+
+        let request = BarRequest {
+            instrument_id: "5633".to_owned(),
+            listing: crate::vendor::Listing::Equity,
+            window: crate::session::Window::new(
+                crate::session::Day::new(2017, 12, 15).expect("a day"),
+                crate::session::Day::new(2017, 12, 15).expect("a day"),
+            )
+            .expect("a window"),
+            granularity: crate::vendor::Granularity::Minute1,
+        };
+        let landed = crate::fetch::land(&raw, &request, zerodha.timestamps, PriceScale::Paisa)
+            .expect("the bar lands");
+        assert_eq!(landed.bars.len(), 1);
+        assert_eq!(
+            landed.bars[0].ts_micros,
+            TRUE_UTC * 1_000_000,
+            "the offset is applied ONCE. If this reads 19,800 seconds early, \
+             the IsoDateTimeOffset arm has been moved into fetch::land's IST \
+             branch and every Kite bar is stored 5h30m before it happened"
+        );
+
+        // AND THE OTHER DIRECTION. Landing the SAME rows under the zoneless
+        // encoding must differ by exactly the IST offset — that is what makes
+        // moving the arm a failure rather than a no-op.
+        let zoneless = crate::fetch::land(
+            &raw,
+            &request,
+            crate::vendor::TimestampEncoding::IsoDateTimeText,
+            PriceScale::Paisa,
+        )
+        .expect("it still lands, wrongly");
+        //
+        // ON THIS WINDOW IT DROPS THE BAR RATHER THAN MISPLACING IT, and the
+        // distinction is worth writing down. Shifted 5h30m, 09:15 IST becomes
+        // 03:45 IST — before the session opens — so the filter refuses it and
+        // the window comes back EMPTY. That is the lucky case. The fault is
+        // called silent because a shift that lands INSIDE a session does not
+        // get caught: a day-rung bar, or any window whose shifted instant is
+        // still between 09:15 and 15:29, stores a wrong timestamp that passes
+        // every check below it.
+        //
+        // So the assertion is that the two encodings DISAGREE, by either route.
+        // Requiring one specific route would make this test pass or fail on the
+        // window it happens to use rather than on the pairing it exists to pin.
+        assert!(
+            zoneless.bars.len() != landed.bars.len()
+                || zoneless.bars.first().map(|b| b.ts_micros)
+                    != landed.bars.first().map(|b| b.ts_micros),
+            "the two encodings must not agree, or this proves nothing: \
+             zoneless landed {} bar(s), zone-carrying landed {}",
+            zoneless.bars.len(),
+            landed.bars.len()
+        );
+    }
+
+    /// The descriptor's own bytes, against the vendor's published curl example.
+    ///
+    /// Nine single-field mutations to the Zerodha row left the suite green
+    /// before this existed — the base URL, both path literals, the placeholder
+    /// order, the two interval words, the prefix and the separator.
+    #[test]
+    fn the_zerodha_request_is_the_url_and_header_the_vendor_documents() {
+        let crate::vendor::Transport::Http(zerodha) =
+            crate::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        let source = HttpSource::new(
+            zerodha,
+            Credential::pair("APIKEY".to_owned(), "TOKEN".to_owned()),
+        )
+        .expect("a client builds");
+
+        let minute = BarRequest {
+            instrument_id: "5633".to_owned(),
+            listing: crate::vendor::Listing::Equity,
+            window: crate::session::Window::new(
+                crate::session::Day::new(2017, 12, 15).expect("a day"),
+                crate::session::Day::new(2017, 12, 15).expect("a day"),
+            )
+            .expect("a window"),
+            granularity: crate::vendor::Granularity::Minute1,
+        };
+        assert_eq!(
+            source
+                .url(&minute, "unused", "unused")
+                .expect("the URL resolves"),
+            "https://api.kite.trade/instruments/historical/5633/minute",
+            "byte for byte, the vendor's own curl example"
+        );
+        let day = BarRequest {
+            granularity: crate::vendor::Granularity::Day1,
+            ..minute.clone()
+        };
+        assert!(
+            source
+                .url(&day, "u", "u")
+                .expect("the day rung resolves")
+                .ends_with("/5633/day"),
+            "the rung reaches the PATH as the vendor's word, not the store's"
+        );
+
+        let (name, value) = source.header();
+        assert_eq!(name, "Authorization");
+        assert_eq!(
+            value, "token APIKEY:TOKEN",
+            "key first, one colon, one trailing space in the prefix"
+        );
+        assert!(
+            zerodha
+                .extra_headers
+                .iter()
+                .any(|(h, v)| *h == "X-Kite-Version" && *v == "3"),
+            "every Kite curl example carries it beside the credential"
+        );
+    }
+
+    /// Both mismatch directions refuse before a client exists.
+    #[test]
+    fn a_credential_that_does_not_match_the_scheme_refuses_at_construction() {
+        let crate::vendor::Transport::Http(zerodha) =
+            crate::vendor::Feed::Zerodha.descriptor().transport
+        else {
+            panic!("Zerodha is an HTTP feed");
+        };
+        let crate::vendor::Transport::Http(groww) =
+            crate::vendor::Feed::Groww.descriptor().transport
+        else {
+            panic!("Groww is an HTTP feed");
+        };
+        // Two wanted, one given: would have sent `token :TOKEN`, which a vendor
+        // answers 403 to — indistinguishable from an expired session.
+        assert_eq!(
+            HttpSource::new(zerodha, Credential::token("TOKEN".to_owned()))
+                .err()
+                .expect("a two-secret scheme refuses one secret"),
+            FetchError::CredentialMismatch {
+                names_two: true,
+                given_two: false
+            }
+        );
+        assert_eq!(
+            HttpSource::new(groww, Credential::pair("K".to_owned(), "T".to_owned()))
+                .err()
+                .expect("a one-secret scheme refuses two"),
+            FetchError::CredentialMismatch {
+                names_two: false,
+                given_two: true
+            }
+        );
     }
 
     /// The blocking seam refuses by name rather than silently blocking, and
