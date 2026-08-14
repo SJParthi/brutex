@@ -2834,6 +2834,15 @@ jobs:
           # An adversarial audit proposed moving the function next to the other
           # float-bearing module instead; that fails, because outcome.rs is pinned
           # at exactly 5 and would then measure 8.
+          # significance.rs MOVED FROM 7 TO 18, and the count is the whole point of
+          # pinning it: the reason above did not change, the module did. It gained
+          # Bailey-Lopez de Prado's expected-maximum (EULER_MASCHERONI, expected_max_bailey),
+          # Benjamini-Hochberg, Acklam's inverse-normal quantile and the Abramowitz-Stegun
+          # normal CDF, and each carries its own f64 signature or constant. Every one of
+          # the 18 is a STATISTIC -- a threshold, a p-value, a quantile, a count coerced
+          # to compute one. Not one is a price: no paisa figure enters this module at all,
+          # which is what separates it from report.rs two lines up. The count was raised by
+          # reading all 18 against that test, not by taking the number the gate printed.
           allow_float='
           crates/core/src/price.rs 4
           crates/greeks/src/bsm.rs 36
@@ -2841,7 +2850,7 @@ jobs:
           crates/greeks/src/error.rs 17
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
-          crates/runner/src/significance.rs 7
+          crates/runner/src/significance.rs 18
           crates/runner/src/outcome.rs 5
           crates/runner/src/report.rs 3
           crates/lake/src/bar.rs 9
@@ -3028,11 +3037,26 @@ jobs:
           # them here cannot and does not silence it. C-15 is undocumented in
           # `docs/06-limits.md` and unrecorded in `docs/11-findings.md`, and gate 8 is red
           # on it.
+          # `crates/runner/src/significance.rs` ONE sort, and the procedure is DEFINED on
+          # a sorted list: Benjamini-Hochberg (1995) compares the k-th smallest p-value
+          # against k/m*FWER, so "the k-th smallest" is the algorithm and not an
+          # implementation convenience. Removing the sort does not make it cheaper, it
+          # makes it a different and wrong procedure.
+          # WHAT IT IS BOUNDED BY, because that is what this rule actually asks: the slice
+          # is the p-values of the RETAINED findings, and retention is the bounded top-N
+          # heap in `rank.rs` two lines above -- `Ranked::top` is capped before this is
+          # ever called. It is NOT the frequent-itemset count and NOT the candidate count,
+          # so it does not grow with the sweep. The sweep measured 34,979,095 combinations
+          # at k=23 and this slice still sees only what the heap kept.
+          # It is `sort_unstable_by(f64::total_cmp)` and not a comparator of its own: a
+          # NaN p-value under a partial_cmp-based comparator is the ordering bug rule 4's
+          # neighbour in `rank.rs` already carries a reason about.
           allow_sort='
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/engine/src/lib.rs 2
           crates/runner/src/rank.rs 3
+          crates/runner/src/significance.rs 1
           crates/indicators/src/evaluator.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/catalog.rs 2
