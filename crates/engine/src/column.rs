@@ -131,16 +131,6 @@ impl Column {
         self.bars
     }
 
-    /// One position's bitmap.
-    fn bitmap(&self, position: u32) -> &[u64] {
-        let start = usize::try_from(position)
-            .unwrap_or(0)
-            .saturating_mul(self.stride);
-        self.bits
-            .get(start..start.saturating_add(self.stride))
-            .unwrap_or(&[])
-    }
-
     /// How many bars carry every bit `candidate` requires.
     ///
     /// The same answer [`crate::support`] gives, by the same rule -- a bar hits iff it
@@ -171,10 +161,24 @@ impl Column {
         // is neither constant nor sized. A fixed array indexed by `zip` is both,
         // costs 1,536 bytes of stack, and cannot be larger because a mask cannot
         // name more positions than it has bits.
-        let mut required = [0_u32; ConditionMask::BITS as usize];
+        // BASE OFFSETS, DERIVED ONCE -- not a bitmap slice per (word, position).
+        //
+        // The first version called `self.bitmap(position)` inside the word loop.
+        // That is a `try_from`, a `saturating_mul`, a `saturating_add`, a range
+        // bounds check and a slice construction, `stride * k` times: at 1,222,791
+        // bars the stride is 19,107, so a k=8 candidate re-derived the same eight
+        // slices 152,856 times. An audit measured the waste at 2.19x-3.25x on the
+        // single hottest path in the sweep.
+        //
+        // The address of position `p`'s word `w` is `p * stride + w`. Only the
+        // first term depends on the position, so it is computed once per candidate
+        // and the inner loop is one add and one bounds-checked read.
+        let mut bases = [0_usize; ConditionMask::BITS as usize];
         let mut count = 0_usize;
-        for (slot, position) in required.iter_mut().zip(set_positions(candidate)) {
-            *slot = position;
+        for (slot, position) in bases.iter_mut().zip(set_positions(candidate)) {
+            *slot = usize::try_from(position)
+                .unwrap_or(0)
+                .saturating_mul(self.stride);
             count = count.saturating_add(1);
         }
 
@@ -198,8 +202,12 @@ impl Column {
             // an AND of real bitmaps does too. The `popcount == 0` guard above is
             // what guarantees there is a first one.
             let mut acc = u64::MAX;
-            for position in required.iter().take(count) {
-                acc &= self.bitmap(*position).get(word).copied().unwrap_or(0);
+            for base in bases.iter().take(count) {
+                acc &= self
+                    .bits
+                    .get(base.saturating_add(word))
+                    .copied()
+                    .unwrap_or(0);
             }
             hits = hits.saturating_add(acc.count_ones());
         }
