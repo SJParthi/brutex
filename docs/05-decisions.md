@@ -13557,3 +13557,121 @@ D-0054 and `store_timeframe` answers for five of them. It was the same stale
 sentence D-0139 corrected on the row-level hover and missed on this one. It now
 states the fact that actually bears on the only rung which can reach it: nothing
 below a minute is filed, and `pull::ingest::Plan::timeframe` is what refuses it.
+
+## D-0141 · 2026-08-14 · A feed's reach is EVIDENCED, and there are two kinds of evidence — a vendor master for the three REST feeds, the day's folder for the two archives
+
+### The finding
+
+`crates/api/src/constituents.rs` joins NSE's published universe to a vendor's
+instrument master, keyed on ISIN at both ends, and produces a `VendorId` — the
+vendor's own id, `groww_symbol` or Dhan's `securityId`. Four buckets that sum:
+`matched`, `lacks`, `ambiguous`, `no_nse_isin`.
+
+An archive has no master, so **every name falls into `lacks`** — proven by
+`a_vendor_with_no_master_lacks_every_name_and_the_sum_still_holds`: NIFTY 50
+resolves 0 matched, 50 lacks for `TrueData`.
+
+`lacks` is documented as *"NSE's ISIN, and no row of this vendor's master
+carries it"* — a real coverage gap worth telling the vendor about. That is not
+what is true of an archive. The archive is not missing rows from a master; it
+has no master because it needs none, and reporting a category error as a
+coverage gap is the `CLAUDE.md` §4 shape.
+
+### Why a security id cannot exist for an archive, structurally
+
+A security id exists because a REQUEST must name the instrument in the vendor's
+id space — `securityId` goes in Dhan's body, `instrument_token` is a PATH
+SEGMENT in Zerodha's (D-0133). An archive sends no request. The instrument **is
+a file**, and a file is addressed by a path. There is nothing for an id to be.
+
+The repository already says this in two places that were never joined:
+
+| | where | addresses with |
+|---|---|---|
+| `VendorId` | `constituents.rs` — *"the vendor's own id"* | the three REST feeds |
+| `MemberPattern` | `vendor.rs` — *"the addressing itself"* | **the two archives, BY SYMBOL** |
+
+And `brutex_core::vendor::Vendor::MASTERED` is `[Groww, Dhan, Zerodha]` — the
+line is already drawn, and it already falls exactly on `SourceKind`.
+
+### The decision
+
+**Reach is evidenced, and the evidence is chosen by `SourceKind`.**
+
+```
+UNIVERSE — NSE's own, feed-independent
+   identity    (exchange, ISIN)
+   membership  which tier
+   symbol      the name NSE printed beside that ISIN, ON THAT DAY
+        |
+        +-- REST   (Dhan, Groww, Zerodha) -> VendorId
+        |          ISIN -> vendor master -> securityId / groww_symbol / instrument_token
+        +-- FOLDER (TrueData, GDFL)       -> MemberName
+                   symbol-on-that-day -> MemberPattern -> file
+```
+
+**ISIN stays the identity for every feed.** The symbol is not a second identity —
+it is the ADDRESS for one of the two modes, and it sits on the same NSE row as
+the ISIN, so nothing is looked up by name. D-0125 removed a symbol STEP from the
+identity join; this adds none back.
+
+**THE FOUR BUCKETS KEEP THEIR MEANING. ONLY THE EVIDENCE CHANGES.**
+
+| bucket | REST evidence: the master | FOLDER evidence: that day's folder |
+|---|---|---|
+| `matched` | exactly one master row for this ISIN | a file exists for that day's symbol |
+| `lacks` | the master does not carry it | **it was not bought** |
+| `ambiguous` | two master rows claim it | two files claim the symbol |
+| `no_nse_isin` | NSE's own row names no ISIN | unchanged |
+
+`lacks` on an archive becomes *"you did not buy this one"* — as actionable as
+the REST reading, and the partition still sums, so `is_sound` still catches a
+join defect. **A fifth bucket is the wrong fix**; running an archive against a
+master it does not have is the defect.
+
+### An archive's reach is DATED; a broker's is not
+
+A master is current. A folder is per-day — `NSE_IDX_TICK_20221003`. So the
+archive key is `(day, ISIN) -> file`, resolved through the symbol **the dated
+snapshot carries for that day**. A rename cannot corrupt history because each
+day is addressed with that day's symbol, and the dated snapshot is already built
+— one day per pass, stamped, published whole or not at all.
+
+Consequence for `/ingest`: the cascade branches. REST is
+feed -> universe -> instruments -> segment -> timeframe -> window. **An archive
+puts the window FIRST**, because it cannot say what it holds without saying when.
+
+### Timeframe means ONE thing on every feed, and it is not "which endpoint"
+
+It is **what gets FILED** — `api::ingest::SpotRequest::granularity`'s own doc
+says *"which rung of the ladder to file under"*. On a REST feed that also
+selects the endpoint, because the vendor bills per bar length. On an archive it
+selects only the fold width, because the input is fixed at one second.
+
+So no branch is needed here. What is wrong is the DECLARATION:
+`Descriptor::granularities` on an archive should be *what the fold can produce*,
+and `pull::fold` is indifferent to width. `TrueData` declares `{1s, 1min}` and
+GDFL declares `{1s}`; both are under-stated, and unlike every other row in that
+table neither carries a comment saying why. **Both should declare
+`{1s, 1min, 1day}`.**
+
+The three-rung ladder D-0139 shipped survives the fifth feed with no edit:
+Zerodha declares `{1min, 1day}`, so the union across all five is still exactly
+`{1s, 1min, 1day}`.
+
+### What this does NOT decide
+
+**Whether raw seconds are filed at all.** `Timeframe::KNOWN` ships nothing below
+a minute, so a `1s` request is refused by `pull::ingest::Plan::timeframe` at the
+write boundary today. Widening `crates/store` is a store-format version with its
+own append-only consequences and is the operator's call. Until it is made, the
+Ticks rung is offered and refuses loudly, which is D-0139's recorded position.
+
+### Ownership
+
+The moves this entry specifies land in `crates/api/constituents.rs`,
+`crates/api/folder.rs` and `crates/pull/vendor.rs` — all owned by the session
+carrying the universe resolution and the Zerodha integration, and all dirty at
+the time this was written. This entry is the shape, agreed before either session
+writes it, so the two do not land two answers to one question. The `web/` half —
+the archive cascade on `/ingest` — is the other session's to leave alone.
