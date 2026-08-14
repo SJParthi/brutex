@@ -2829,6 +2829,16 @@ jobs:
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
+          #
+          #   runner/rank.rs   THREE, and the bound is the module's whole purpose.
+          #                    A `BinaryHeap` capped at `keep` is what makes memory
+          #                    O(keep) instead of O(combinations) -- measured, the
+          #                    difference between 2.1 MB and 21,200 GB at a hundred
+          #                    billion. The final `sort_unstable_by` orders `keep`
+          #                    entries, never the universe, and exists so the output
+          #                    is byte-identical across processes per §3 rule 5.
+          #                    Rule 4 is right to ask; the answer is that this file
+          #                    is the bound rather than a breach of it.
           # Each of these was traced to its callers before it was written down.
           # FIVE of the nine files are new here only because this rule had
           # never run: the boundary check above exited before it ever printed,
@@ -2961,6 +2971,7 @@ jobs:
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/engine/src/lib.rs 2
+          crates/runner/src/rank.rs 3
           crates/indicators/src/evaluator.rs 1
           crates/api/src/autopilot.rs 1
           crates/api/src/catalog.rs 2

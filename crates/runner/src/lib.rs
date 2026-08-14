@@ -51,6 +51,7 @@
 
 pub mod identity;
 pub mod outcome;
+pub mod rank;
 pub mod report;
 pub mod resample;
 pub mod significance;
