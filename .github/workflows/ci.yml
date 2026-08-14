@@ -743,13 +743,45 @@ jobs:
           nifty-bank doctype transport
           '
 
+          # ---- group 21: THE JOIN'S OWN VOCABULARY. crates/pull/src/universe.rs.
+          #
+          # `isin`, `symbol` (already on group 17), `matched`, `lacks`,
+          # `no-isin` and `ambiguous` are the words a resolution emits for WHAT
+          # BECAME OF A NAME. They name a verdict, never a path component, and
+          # no Parameter Store path this repository reads has an `ambiguous` or
+          # a `no-isin` segment. They are on the wire because a page has to
+          # render the bucket, and D-0105's rule -- the slugs are the wire's own
+          # words -- makes emitting them the correct choice rather than
+          # inventing a second vocabulary for the browser.
+          #
+          # `isin` is worth its own sentence. It is the International Securities
+          # Identification Number, an ISO 6166 identifier the EXCHANGE issues
+          # and publishes in every constituent file. It identifies an
+          # instrument, not an account: it is printed on public filings, it is
+          # the join key D-0125 already chose, and it carries none of the four
+          # things this gate protects.
+          #
+          # `kite` is the wire name of a vendor whose descriptor this build does
+          # not yet carry, used in a TEST as the feed a symbol-keyed join is
+          # attributed to. It is on the same footing as `groww` and `dhan` in
+          # group 2, and for the same reason: it is that vendor's own public
+          # product name, already tracked in docs/00-charter.md section 4z.
+          #
+          # `350` and `400` are the two counts in the collapse test -- a
+          # universe that shrank from 750 to 350, losing 400 -- asserted to
+          # appear IN the refusal so the message cannot stop naming them.
+          join_verdict='
+          isin no-isin matched lacks ambiguous
+          kite 350 400
+          '
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

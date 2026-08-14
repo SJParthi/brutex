@@ -97,6 +97,11 @@ pub mod secret;
 pub mod session;
 pub mod ssm;
 pub mod totp;
+/// Joining the exchange's published constituents against a vendor's master.
+///
+/// The step that makes a download a verification: every published name lands in
+/// exactly one bucket and the buckets sum, so a join defect is findable.
+pub mod universe;
 
 pub mod vendor;
 pub mod work;
