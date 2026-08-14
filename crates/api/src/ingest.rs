@@ -915,6 +915,13 @@ pub struct SpotRequest {
     /// A `Vec` would make that a scan per instrument — 213 × 2,795 at the sizes
     /// this build already carries. A hash probe is O(1) and the cost does not
     /// move when either side grows. `docs/07-o1-architecture.md` law 1.
+    ///
+    /// UNVERIFIED as a measured figure. No bench times this probe, and none is
+    /// claimed: what is asserted is the shape — `HashSet::contains` is the
+    /// standard library's hashed lookup, and the per-instrument loop reads the
+    /// set BY REFERENCE, so neither the ticked set nor the target's set is
+    /// walked per instrument. `CLAUDE.md` §3 rule 6: label an extrapolation as
+    /// an extrapolation rather than name a test that does not exist.
     pub members: std::collections::HashSet<Symbol>,
     /// The operator's inclusive range.
     pub window: Window,

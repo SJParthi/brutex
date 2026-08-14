@@ -4333,6 +4333,13 @@ fn monotonic_micros() -> u64 {
 /// this runs on the `/feeds.json` render path, where the comment above the
 /// readiness match already warns that an O(files) probe is the cost `/store`
 /// exists to avoid.
+///
+/// UNVERIFIED as a measured figure. Nothing here was timed against a folder of
+/// 100,000 CSVs, and the sentence above about one answering as fast as a folder
+/// of one is what the STRUCTURE implies — one `read_dir` and one `next()`,
+/// never a `count()` and never a `collect()` — not a reading anybody took.
+/// `CLAUDE.md` §3 rule 6, and the same admission `docs/06-limits.md` §65 makes
+/// about the walk this probe exists to avoid.
 fn archive_ready(feed: pull::vendor::Feed) -> (bool, String) {
     let root = match pull::folder::root() {
         Ok(root) => root,
