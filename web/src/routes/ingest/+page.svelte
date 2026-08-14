@@ -2430,8 +2430,30 @@
   // its own value happened to be set, three rungs below an unanswered feed.
 
   /** What a segment tick can actually REACH: ticked AND served by this form. */
-  const segmentsReached = $derived(SEGMENTS.filter((s) => segSet.has(s.key) && s.served));
-  const segmentsUnserved = $derived(SEGMENTS.filter((s) => !s.served));
+  /**
+   * IS THIS SEGMENT SERVED **BY THE SELECTED FEED**, which is not a property of
+   * the segment.
+   *
+   * `SEGMENTS[].served` is a static field and it was written for a BROKER: both
+   * vendors purge their master on expiry, `core::vendor::decode_master_row`
+   * declines every FUT row as `Skip::LiveContract`, and `POST /pull/fno`
+   * answers 503 because expired F&O has no HTTP transport. All true, and all
+   * true of a BROKER only.
+   *
+   * AN ARCHIVE IS THE OPPOSITE CASE. TrueData and GDFL are folders of CSVs the
+   * operator BOUGHT, and expired futures and expired options are precisely what
+   * those files contain — 642 futures CSVs and 11,490 option members measured
+   * in one GDFL day. Refusing the segments an archive exists to hold was the
+   * static field applied to the wrong kind of feed.
+   *
+   * `kind === 'folder'` is `SourceKind`'s own word off `/feeds.json`, the same
+   * value `kind_label` and `verb` are read from — not a second guess at the
+   * transport.
+   */
+  const isArchiveFeed = $derived(active?.kind === 'folder');
+  const segServed = (s) => s.served || isArchiveFeed;
+  const segmentsReached = $derived(SEGMENTS.filter((s) => segSet.has(s.key) && segServed(s)));
+  const segmentsUnserved = $derived(SEGMENTS.filter((s) => !segServed(s)));
   /**
    * HOW MANY RUNGS ARE TICKED — and therefore how many requests this form
    * sends. `/pull/spot` carries a single `granularity` field, so the factor
@@ -6158,7 +6180,7 @@
         key: s.key,
         name: s.label,
         detail: s.note,
-        disabled: !s.served,
+        disabled: !segServed(s),
         why: s.short,
         title: s.why
       }))}
