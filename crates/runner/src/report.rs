@@ -315,7 +315,6 @@ mod tests {
         let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
         let text = render(&out, None);
 
-        println!("\n{text}");
         for section in ["SWEEP", "BARS", "LADDER", "VERDICT"] {
             assert!(text.contains(section), "missing section {section}");
         }
