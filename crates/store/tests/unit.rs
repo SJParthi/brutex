@@ -298,6 +298,84 @@ fn ohlc_sanity_accepts_real_bars_and_rejects_impossible_ones() {
     );
 }
 
+/// D-0143 — every price is `>= 0`, and the containment clauses never said so.
+#[test]
+fn negative_prices_are_not_sane_however_well_ordered() {
+    // THE BAR THAT USED TO PASS. Every one of the five containment comparisons
+    // is satisfied -- high is the highest, low is the lowest -- because all
+    // five are RELATIVE and this bar is perfectly ordered. It was appended,
+    // the header advanced, the CRC was right, the count was right, and the
+    // month was recorded as good.
+    let all_negative = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: -100,
+        high: -100,
+        low: -100,
+        close: -100,
+        volume: 0,
+        open_interest: OI_NULL,
+    };
+    assert!(
+        !all_negative.ohlc_is_sane(),
+        "a well-ordered bar whose every price is below zero is still impossible",
+    );
+
+    // Each field alone, so no clause can hide behind another. `low` is the one
+    // the ordering would have caught anyway if the others were positive, and it
+    // is asserted here for the same reason the other three are: this predicate
+    // must not depend on a clause of itself being true.
+    let real = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: 2_333_870,
+        high: 2_333_870,
+        low: 2_308_370,
+        close: 2_310_955,
+        volume: 0,
+        open_interest: OI_NULL,
+    };
+    assert!(real.ohlc_is_sane());
+    for (name, bar) in [
+        (
+            "open",
+            Bar {
+                open: -1,
+                low: -2,
+                ..real
+            },
+        ),
+        (
+            "high",
+            Bar {
+                high: -1,
+                open: -1,
+                low: -2,
+                close: -1,
+                ..real
+            },
+        ),
+        ("low", Bar { low: -1, ..real }),
+        (
+            "close",
+            Bar {
+                close: -1,
+                low: -2,
+                ..real
+            },
+        ),
+    ] {
+        assert!(!bar.ohlc_is_sane(), "{name} below zero must be refused");
+    }
+
+    // Zero itself is a price, not an absence -- the boundary is `< 0`, and a
+    // bar of four zeroes is the `Bar::default()` a lost write leaves behind,
+    // which the block checksum is responsible for, not this predicate.
+    assert!(Bar::default().ohlc_is_sane());
+
+    // AND THE CONSEQUENCE THE OVERFLOW GUARDS ELSEWHERE DEPEND ON: with
+    // `high >= low >= 0`, the span cannot wrap. See `indicators::Corrupt`.
+    assert!(real.high.checked_sub(real.low).is_some());
+}
+
 // ===========================================================================
 // The record's 56 bytes — the encoder, pinned
 // ===========================================================================

@@ -174,10 +174,9 @@ pub enum Corrupt {
     /// `high - low` does not fit in an `i64`.
     ///
     /// It cannot happen on real market data — the widest Indian index span is
-    /// about 10^7 paisa against an `i64` ceiling of 9.2 x 10^18. It CAN happen
-    /// from a corrupt record: a bar with `low = i64::MIN` and `open = close =
-    /// i64::MIN` satisfies `store::format::Bar::ohlc_is_sane` and the subtraction
-    /// still overflows.
+    /// about 10^7 paisa against an `i64` ceiling of 9.2 x 10^18. It can only
+    /// happen from a bar this crate was handed directly, never from one that
+    /// came off disk.
     ///
     /// **This paragraph previously said `ohlc_is_sane` "checks field ORDER only".
     /// That was false**, and the falsehood had a cost: it is why [`Evaluator`] was
@@ -185,6 +184,27 @@ pub enum Corrupt {
     /// containment — `high >= open`, `high >= low`, `high >= close`, `low <= open`,
     /// `low <= close` — so the store would have refused the mis-assembled OHLC that
     /// this crate accepted. See [`Corrupt::PriceOutsideRange`].
+    ///
+    /// **It also previously offered `low = open = close = i64::MIN` as a record
+    /// that satisfies `ohlc_is_sane` while overflowing the subtraction. That is
+    /// no longer true either**, and this time the predicate moved rather than the
+    /// description being wrong: D-0143 added `open|high|low|close >= 0` to
+    /// `ohlc_is_sane`, because the containment clauses above are all RELATIVE and
+    /// `-100/-100/-100/-100` satisfies every one of them.
+    ///
+    /// That has a consequence worth stating plainly, because it is easy to read
+    /// as making this guard redundant: with `high >= low >= 0`, the difference
+    /// `high - low` lies in `0 ..= i64::MAX` and CANNOT overflow. Every bar that
+    /// crossed `BarFile::append` is therefore safe here.
+    ///
+    /// **The guard stays anyway, and the reason is the one that mattered the
+    /// first time.** `ohlc_is_sane` is a guarantee about the WRITE BOUNDARY, not
+    /// about the `Bar` type — the struct's four fields are plain `i64` and still
+    /// hold anything. This crate is handed bars by callers that never went near a
+    /// store file, and the last time this crate trusted a neighbouring crate's
+    /// predicate to be the whole story, it shipped without a containment check.
+    /// A guarantee that holds only for values that arrived by one particular
+    /// route is not a guarantee this crate may assume.
     ///
     /// Refused loudly rather than saturated. A saturating range would silently
     /// answer a different question than the one asked, which is the fallback

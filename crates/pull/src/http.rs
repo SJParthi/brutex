@@ -753,12 +753,45 @@ fn one_price(v: &serde_json::Value, name: &str, scale: PriceScale) -> Result<i64
     let Some(number) = v.as_number() else {
         return Err(refuse());
     };
-    match scale {
+    let paisa = match scale {
         // Already paisa: an integer count, and nothing to convert.
-        PriceScale::Paisa => number.as_i64().ok_or_else(refuse),
+        PriceScale::Paisa => number.as_i64().ok_or_else(refuse)?,
         // Rupees: the text is the truth, and `csv::paisa` owns the rule.
-        PriceScale::Rupees => crate::csv::paisa(&number.to_string()).ok_or_else(refuse),
+        PriceScale::Rupees => crate::csv::paisa(&number.to_string()).ok_or_else(refuse)?,
+    };
+    // A NEGATIVE PRICE IS NOT A PRICE, AND IT USED TO LAND.
+    //
+    // `csv::paisa` parses a leading minus deliberately — it is a general
+    // decimal reader and a negative is a real value for fields that can hold
+    // one. Nothing downstream disagreed: a negative open decoded here, survived
+    // `land`, folded, appended, and the month was recorded as good.
+    // `store::format::Bar::ohlc_is_sane` checked the four prices' ORDERING and
+    // nothing else, and -100/-100/-100/-100 satisfies every clause of it.
+    // D-0143 closed that at the write boundary too, so this is now the outer of
+    // two refusals rather than the only one.
+    //
+    // Nothing on the exchanges this build reads trades below zero. A negative
+    // arriving here means the descriptor's `PriceScale` is wrong, or the vendor
+    // sent something that is not a price — both faults to name rather than to
+    // store.
+    //
+    // Refused HERE, where the vendor's own value is still visible. By the
+    // append it is one `i64` among millions with nothing left to say where it
+    // came from. Same place a third decimal place is already refused, and for
+    // the same reason.
+    if paisa < 0 {
+        return Err(FetchError::TransportFailed {
+            detail: format!(
+                "{name:?} holds {v}, which is below zero. Nothing this build \
+                 reads trades at a negative price, so this is the descriptor's \
+                 price scale being wrong or the vendor sending something that \
+                 is not a price — and a stored negative passes every ordering \
+                 check downstream, which is why it is refused here rather than \
+                 written."
+            ),
+        });
     }
+    Ok(paisa)
 }
 
 /// One named array of counts — volumes, timestamps, open interest.
@@ -1375,6 +1408,46 @@ fn local_seconds(text: &str) -> Option<i64> {
 mod tests {
     use super::*;
     use crate::vendor::{Budget, FieldNames, Pooling, TimestampEncoding};
+
+    /// D-0143 — the vendor boundary refuses a negative while it can still say
+    /// what the vendor actually sent.
+    #[test]
+    fn a_negative_price_is_refused_where_the_vendor_value_can_still_be_named() {
+        // Rupees: `csv::paisa` reads the leading minus happily, because it is a
+        // decimal reader and a negative is a real value for the fields that
+        // hold one. That is exactly how this used to land.
+        let sent = serde_json::json!(-24.5);
+        let why = one_price(&sent, "close", PriceScale::Rupees)
+            .expect_err("a negative rupee price must not decode");
+        let said = why.to_string();
+        assert!(
+            said.contains("-24.5"),
+            "the refusal must quote what the vendor sent, said: {said}"
+        );
+        assert!(
+            said.contains("close"),
+            "the refusal must name the field, said: {said}"
+        );
+
+        // Paisa: the same rule on the integer path, which never reaches
+        // `csv::paisa` and so had no sign check of any kind.
+        let raw = serde_json::json!(-2450);
+        let why = one_price(&raw, "open", PriceScale::Paisa)
+            .expect_err("a negative paisa price must not decode");
+        assert!(why.to_string().contains("-2450"));
+
+        // Zero is a price. The boundary is BELOW zero, not at it.
+        let zero_p = one_price(&serde_json::json!(0), "low", PriceScale::Paisa);
+        assert_eq!(zero_p.expect("zero is a price"), 0);
+        let zero_r = one_price(&serde_json::json!(0.0), "low", PriceScale::Rupees);
+        assert_eq!(zero_r.expect("zero is a price"), 0);
+
+        // And an ordinary value still decodes on both scales.
+        let p = one_price(&serde_json::json!(2450), "high", PriceScale::Paisa);
+        assert_eq!(p.expect("an ordinary paisa price"), 2450);
+        let r = one_price(&serde_json::json!(24.50), "high", PriceScale::Rupees);
+        assert_eq!(r.expect("an ordinary rupee price"), 2450);
+    }
 
     /// A descriptor with only the fields the decoder reads, so a test says what
     /// it is testing. `prices` is the parameter every price case turns on.

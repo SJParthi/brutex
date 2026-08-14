@@ -379,7 +379,8 @@ impl Vwap {
         // bound a product that has already wrapped, and the earlier version
         // compared `self.p2v + price * price * volume` to ACC_CEILING *after*
         // computing it: with high = low = close = 5e18 (each inside i64, and
-        // `store::format::ohlc_is_sane` checks field ORDER only, never magnitude)
+        // `store::format::ohlc_is_sane` bounds the fields' ORDER and their SIGN,
+        // never their MAGNITUDE — 5e18 is positive and well ordered, so it passes)
         // price is 1.5e19 and price² is 2.25e38, past i128::MAX. In release that
         // wrapped to a large NEGATIVE value, which is not > ACC_CEILING, so the
         // guard passed and `fold` returned Ok(()) with a poisoned accumulator —
@@ -719,8 +720,9 @@ mod tests {
     /// The accumulator refuses the i64 extreme instead of wrapping or panicking.
     ///
     /// `high = low = close = 5e18` is inside `i64`, and `store::format`'s
-    /// `ohlc_is_sane` checks field ORDER only — never magnitude — so this bar is
-    /// legally writable to the store and readable back with a valid CRC. Before the
+    /// `ohlc_is_sane` bounds field ORDER and SIGN — never MAGNITUDE — and 5e18 is
+    /// positive and well ordered, so this bar is legally writable to the store and
+    /// readable back with a valid CRC. Before the
     /// checked arithmetic went in, `price * price` was 2.25e38, past `i128::MAX`:
     /// release wrapped it to a large negative value that is not `> ACC_CEILING`, so
     /// `fold` returned `Ok(())` and `value()` answered `Some(5000000000000000000)`

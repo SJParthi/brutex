@@ -2328,3 +2328,24 @@ could have broken silently, and did not.
 `docs/06-limits.md` §67 records that `coverage::Coverage::notes` grows with the
 universe, that `/health` still writes every byte of it on every poll, and that
 nothing in CI would fail if a third note started growing the same way.
+
+## A stored price is never negative — D-0143
+
+At every boundary a price crosses, it is `>= 0`.
+
+`Bar::ohlc_is_sane` (`crates/store/src/format.rs`) is the binding one, because
+`BarFile::append` calls `survey` before it writes a byte and every ingest path
+— vendor JSON and CSV archive alike — reaches `append`. `http::one_price`
+(`crates/pull/src/http.rs`) refuses earlier, where the vendor's original value
+is still in hand and can be named in the refusal.
+
+**Why the ordering check was not already this.** The three clauses of
+`ohlc_is_sane` compare the four prices to EACH OTHER. `-100/-100/-100/-100`
+satisfies all three, so a fully negative bar was appended, checksummed, counted
+and recorded as good. §3 rule 8 makes that month permanent.
+
+**Proved by** `negative_prices_are_not_sane_however_well_ordered` in
+`crates/store/tests/unit.rs` and
+`a_negative_price_is_refused_where_the_vendor_value_can_still_be_named` in
+`crates/pull/src/http.rs`.
+

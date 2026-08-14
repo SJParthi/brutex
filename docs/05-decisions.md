@@ -13722,3 +13722,70 @@ map, added in the commit before this one.
 `the_return_is_close_to_close_and_the_tail_has_none`,
 `the_empty_mask_fires_on_every_bar_that_has_an_outcome` (which counts the tail
 exclusion exactly) and `an_identical_sample_reports_zero_rather_than_an_infinite_t`.
+
+## D-0143 — a price below zero is refused twice, and the ordering check never saw it
+
+**Decided.** `Bar::ohlc_is_sane` now also requires all four prices to be `>= 0`,
+and `http::one_price` refuses a negative at the vendor boundary before it ever
+becomes a `Bar`.
+
+**What was wrong.** `ohlc_is_sane` asked three questions, and all three were
+about the four prices' RELATIONSHIP to each other — high is the highest, low is
+the lowest. `-100 / -100 / -100 / -100` answers every one of them correctly.
+So a bar whose prices were all negative passed the only check between a decoded
+row and the disk: it was appended, the month header advanced, the checksum was
+right, the count was right, and the month was recorded as good. Nothing
+downstream disagreed, because nothing downstream looks at a price's sign.
+
+That is the §4 row this repository bans — a fallback that hides a failure —
+arriving as an ABSENCE rather than as a fallback. The file is well-formed and
+wrong, and §3 rule 8 makes it permanent: the month cannot be rewritten.
+
+**Where the two checks sit, and why both.**
+
+`http::one_price` is the VENDOR boundary. It still holds the original JSON
+value, so its refusal can name what the vendor actually sent, which is the only
+place that fact still exists. `crate::csv::paisa` parses a leading minus
+happily — it is a number parser, not a price parser — so without this the sign
+was never examined on the JSON path at all.
+
+`Bar::ohlc_is_sane` is the WRITE boundary, and it is the one every path
+crosses. The CSV archives reach `BarFile::append` without passing through
+`one_price`, so the vendor-side refusal alone would leave that route open.
+`append` calls `survey(batch)` before it writes a byte, so this refusal is
+all-or-nothing: a bad batch leaves the month exactly as it was.
+
+**Cost.** Four integer comparisons on a value already in a register, on a path
+that already ran three. §3 rule 4 is unaffected.
+
+**What was rejected.** Checking `low >= 0` alone. It is sufficient WHILE the
+ordering clauses hold, and that is exactly the problem — a predicate must not
+depend on another clause of itself being true, or a later edit to the ordering
+silently widens what a price may be.
+
+## D--0144 — 403 TokenException is a credential fault, not a transport blip
+
+**Decided.** `autopilot::classify` adds `status 403` and `tokenexception` to the
+CREDENTIAL table.
+
+**Why it matters more than the one line suggests.** `docs/00-charter.md` §4z
+records the third broker's session death as **403 TokenException**, raised on
+expiry, on logout, and **when the user logs into another Kite instance** — so a
+human opening the web terminal kills a running backfill. Every other vendor
+here says 401, and 401 was the only status this table knew.
+
+Filed as `Transport`, that fault fell to the retry ladder: attempts, backoff,
+and re-attempts against a session that cannot come back without a human, while
+holding the oldest-month slot away from the feeds that could still run. The
+charter names this vendor's expiry its headline failure mode, and the build was
+treating it as a network hiccup.
+
+**Known limit, recorded rather than fixed here.** This table matches on PROSE.
+`FetchError::VendorRefused` already carries `status: u16`, and the server
+converts it with `why.to_string()` before the classifier ever sees it, so a
+structured status is available and is being discarded. Matching the number's
+rendered form works because that rendering is this repository's own, but it is
+a coupling between a formatter and a classifier that nothing tests together.
+Replacing the prose match with the carried `status` is the correct fix and is
+not in this change.
+

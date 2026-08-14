@@ -356,12 +356,32 @@ pub fn classify(reason: &str) -> Trouble {
     // CREDENTIAL FIRST. `with_retry`'s expired-token message contains the word
     // "store" (Parameter Store), so testing for the disk first would read a
     // dead token as a full disk and halt for the wrong reason.
-    const CREDENTIAL: [&str; 6] = [
+    // `status 403` AND `tokenexception` ARE THE THIRD BROKER'S SESSION DEATH,
+    // AND THEY WERE FILED AS A TRANSPORT BLIP.
+    //
+    // docs/00-charter.md §4z records it as the row to read twice: Kite answers
+    // **403 TokenException** when a session expires, when the user logs out, or
+    // **when the user logs into another Kite instance** — so a human opening
+    // kite.zerodha.com kills a running backfill. That is a credential fact, and
+    // the only cure is a new token; nothing about it improves by waiting.
+    //
+    // Classified as `Transport`, it fell to the retry ladder: nine attempts per
+    // month, backing off, forever, on a session that will never come back
+    // without a human — while holding the oldest-month slot away from the feeds
+    // that could still run. The charter calls this vendor's expiry its headline
+    // failure mode and this build was treating it as a network hiccup.
+    //
+    // `401` was already here for the other two brokers. `403` is the same fact
+    // at a vendor that spells it differently, which is precisely what this
+    // table is for.
+    const CREDENTIAL: [&str; 8] = [
         "credential",
         "access token expired",
         "aws identity",
         "parameter path",
         "status 401",
+        "status 403",
+        "tokenexception",
         "invalid_authentication",
     ];
     const STORE: [&str; 5] = [

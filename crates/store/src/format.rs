@@ -267,7 +267,29 @@ impl Bar {
     pub const fn ohlc_is_sane(&self) -> bool {
         let hi_ok = self.high >= self.open && self.high >= self.low && self.high >= self.close;
         let lo_ok = self.low <= self.open && self.low <= self.close;
-        hi_ok && lo_ok
+        // AND NONE OF THEM IS BELOW ZERO, which the ordering alone never said.
+        //
+        // The three comparisons above are about the four prices' RELATIONSHIP,
+        // and `-100 / -100 / -100 / -100` satisfies every one of them. So a bar
+        // whose prices were all negative passed this check, was appended, and
+        // the month was recorded as good — the ordering was consistent and
+        // nothing else looked.
+        //
+        // Nothing on the exchanges this store holds trades below zero, so a
+        // negative here is a decoder that read the wrong column, a price scale
+        // that is wrong by a sign, or a vendor sending something that is not a
+        // price. `crate::http::one_price` refuses one at the vendor boundary
+        // where the original value is still visible and can be named; this is
+        // the same rule at the WRITE boundary, which is the one every path
+        // crosses — the CSV archives reach `append` without passing through
+        // that decoder at all.
+        //
+        // `low` alone would be enough while the ordering holds, and all four are
+        // tested anyway: this predicate must not depend on another clause of
+        // itself being true, or a future edit to the ordering silently widens
+        // what a price may be.
+        let signs_ok = self.open >= 0 && self.high >= 0 && self.low >= 0 && self.close >= 0;
+        hi_ok && lo_ok && signs_ok
     }
 
     /// The close, as a price.
