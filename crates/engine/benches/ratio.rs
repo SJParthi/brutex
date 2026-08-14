@@ -306,6 +306,54 @@ fn support_costs_the_same_per_bar_at_every_depth() -> bool {
     ok
 }
 
+/// C-E-08 — one pair of the join costs the same whatever the frontier holds.
+///
+/// # The row `DEFAULT_PAIR_BUDGET` cited before it existed
+///
+/// `engine::DEFAULT_PAIR_BUDGET`'s doc said the per-pair cost was "measured by
+/// `C-E-08`". **There was no C-E-08.** The rows ran 01–07 and 09, so the budget —
+/// the thing that bounds a sweep's wall time — was stated in a unit nothing
+/// measured. An audit found it; that is exactly the defect CI gate 12 exists to
+/// catch, and it was written while fixing gate-12 defects.
+///
+/// The budget is in pair iterations rather than seconds because seconds are a
+/// claim about a machine. That only works if a pair costs the same everywhere in
+/// the walk, which is what this measures: a mask union and a popcount, against a
+/// frontier ten times larger. If the per-pair cost drifted with frontier size the
+/// budget would mean different amounts of work at different depths, and a bound
+/// that changes meaning is not a bound.
+fn one_join_pair_costs_the_same_at_every_frontier_width() -> bool {
+    let pair_ps = |width: usize| -> u128 {
+        // A frontier of `width` distinct single-bit masks, joined pairwise
+        // exactly as `next_level` does: union, then popcount.
+        let frontier: Vec<ConditionMask> = (0..width)
+            .map(|i| {
+                let bit = u32::try_from(i).unwrap_or(0) % ConditionMask::BITS;
+                ConditionMask::default().with_bit(bit)
+            })
+            .collect();
+        let pairs = u128::try_from(width.saturating_mul(width.saturating_sub(1)) / 2)
+            .unwrap_or(1)
+            .max(1);
+        let total = once_ps(|| {
+            let mut acc = 0_u32;
+            for (i, a) in frontier.iter().enumerate() {
+                for b in frontier.iter().skip(i.saturating_add(1)) {
+                    acc = acc.wrapping_add(black_box(a).union(black_box(b)).popcount());
+                }
+            }
+            black_box(acc)
+        });
+        total / pairs
+    };
+
+    ratio(
+        "C-E-08 one join pair: 100-wide frontier -> 1,000-wide",
+        pair_ps(100),
+        pair_ps(1_000),
+    )
+}
+
 /// C-E-09 — the transposed layout costs a CONSTANT per bitmap read, and a
 /// candidate reads exactly `k` of them.
 ///
@@ -558,6 +606,7 @@ fn main() {
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
     ok &= transposed_support_costs_the_same_whether_bars_match_or_not();
+    ok &= one_join_pair_costs_the_same_at_every_frontier_width();
     ok &= transposed_support_costs_a_constant_per_bitmap_read();
     ok &= a_ladder_walk_costs_the_same_per_bar_at_every_column_length();
     if ok {
