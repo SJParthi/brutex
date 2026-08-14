@@ -12735,3 +12735,88 @@ asserts three different shapes and not one number.
   and gate 8 is red on it." The first clause is now stale — §67 documents it —
   and so is the last. That comment is the next thing to fix, and it is named
   here rather than edited across a session boundary.
+
+## D-0131 · 2026-08-14 · A direct observation outranks a published table, the browser stops holding its own copy of the floor, and the clamp stops reading the clock
+
+**Number taken as max+1 and asserted free before writing.** The highest heading
+in this file was `D-0130`; `grep -n '^## D-0131'` returned nothing immediately
+before appending. The identifier was already cited by `crates/pull/src/vendor.rs`,
+`crates/api/src/server.rs` and `docs/00-charter.md` — this entry is the one those
+citations pointed at, and its absence was itself a `CLAUDE.md` §9 breach.
+
+### 1. The rule that was right for three rows and wrong for the fourth
+
+Two disagreeing floors were resolved by "the STRICTER one binds — the later day
+refuses first". That is correct when two sources are two independent readings of
+one question. Groww's one-minute rung is not that case:
+
+> A vendor's published table describes what the product does IN GENERAL.
+> The operator describes what HIS OWN ENTITLEMENT actually answered.
+
+Groww's interval table gives its `1 min` row "Last 3 months". The operator,
+having watched this build refuse January 2020 through May 2026 on his own
+account, restated on **12 Aug 2026**: *"GROWW — data is available from JANUARY
+2020. A fixed floor, not a rolling one."* The looser claim has the better
+evidence behind it, so strictness was comparing the wrong thing.
+
+`pull::vendor::ClaimStanding` makes the distinction a field rather than a
+sentence, and the rule is two tiers:
+
+1. `OperatorObservation` outranks `VendorDocument`, whatever the strictness.
+2. Between two claims of the SAME standing, the stricter binds — the whole of
+   the old rule, kept as the fall-through.
+
+`the_binding_floor_is_never_the_looser_of_the_two` checks both tiers over every
+row of every feed, and counts that both are actually EXERCISED by rows in this
+build, so neither can rot unreached.
+
+**The cost, stated rather than discovered.** Tier 1 can WIDEN a floor, and a
+widened floor spends real requests on days that may come back empty — and an
+empty answer reads exactly like a market holiday. It is paid on exactly one row,
+and that row's `binds_because` marks the widening **UNVERIFIED** until a request
+measures it. He stated the figure against the VENDOR, not against a rung, so it
+is applied to both rungs unchanged; narrowing it on a guess is what §3 rule 1
+forbids.
+
+### 2. The browser held its own copy, and it had already drifted twice
+
+`web/src/routes/ingest/+page.svelte` carried `FLOOR_OPERATOR` and `FLOOR_DOC`,
+two hardcoded tables of the same fact `/feeds.json` has emitted as `history`
+since D-0110. The file's own comment admitted they were a second copy and that
+wiring them up "is not done here". Measured drift:
+
+* a `zerodha` row for a feed no descriptor in this build names, and no row for
+  `truedata` or `gdfl`, which the wire answers for;
+* after §1 the wire moved to 2020-01-01 and the tables did not, so the page went
+  on refusing six years of days on a rung the server says answers for them —
+  the very symptom §1 was written to correct, reappearing one process later.
+
+Deleted. `pairFloor` is now a lookup into `feeds.all`, and the page holds no
+vendor fact of its own.
+
+**A clock bug went with them.** `rollFloor` recomputed a rolling floor in the
+browser with `Date.UTC(y - years, …)` and compared the result against an IST
+day — two clocks in one comparison, wrong by a day for part of every day on any
+machine west of IST. `oldest` arrives resolved, so the whole computation is
+gone.
+
+### 3. `clamp_to_floor` read the clock, so it could not be tested
+
+Both rolling arms called `SystemTime::now()` and therefore IGNORED the `today`
+a caller threaded in. `the_two_floors_that_name_no_day_resolve_to_none` passes a
+fixed 2026-08-12 and asserts 2026-05-12; it was **green on exactly one day** and
+had been red for two when this was found — while `pull::vendor`'s own floor test
+already states the rule: *"a test that reads the clock asserts a different thing
+every day it runs"*.
+
+The clock moves OUT to the three callers, each reading it where it already had
+the means to. Production behaviour is unchanged to the day; the resolution is
+now a pure function of `(window, floor, today)`.
+
+### What this does not close
+
+`web/build` staleness is untouched, and it is what made §1 invisible for two
+days: the release binary was built 12 Aug 18:57 and `vendor.rs` was corrected
+12 Aug 19:10 — thirteen minutes later — so the running server answered with the
+old floor while the source carried the new one. A gate proving the served bundle
+and binary came from current source is specified in `web/design/` and not built.

@@ -1304,7 +1304,8 @@ fn floor_oldest(
         | HistoryFloor::RollingMonths { .. } => {
             let epoch = pull::session::Day::from_days(0).ok()?;
             let whole = pull::session::Window::new(epoch, today).ok()?;
-            clamp_to_floor(whole, floor)
+            // THE DAY THE CALLER NAMED, which is what makes this testable.
+            clamp_to_floor(whole, floor, today)
                 .ok()
                 .map(pull::session::Window::from)
         }
@@ -1334,9 +1335,9 @@ fn claim_fields(
 
     // NO CLAIM IS A CLAIM OF NOTHING, not a claim of everything. An unrecorded
     // rung answers `unknown` with a null source.
-    let (floor, source) = match claim {
-        Some(made) => (made.floor, Some(made.source)),
-        None => (HistoryFloor::Unstated, None),
+    let (floor, source, standing) = match claim {
+        Some(made) => (made.floor, Some(made.source), Some(made.standing)),
+        None => (HistoryFloor::Unstated, None, None),
     };
     let (kind, unit, count) = match floor {
         HistoryFloor::Fixed { .. } => ("fixed", None, None),
@@ -1370,8 +1371,23 @@ fn claim_fields(
         Some(text) => render::json_string(text),
         None => "null".to_owned(),
     };
+    // WHAT KIND OF SOURCE SAID IT, as the wire's own word.
+    //
+    // Emitted beside `source` rather than parsed out of it. The page has to
+    // say WHICH of two disagreeing claims binds — it drew that from a second,
+    // hand-maintained table in the browser until D-0131 deleted it — and
+    // deciding it by matching prose against the string "the operator" would be
+    // the same second copy wearing a regular expression.
+    //
+    // `null` only where there is no claim at all, which `kind":"unknown"`
+    // already says. A claim always has a standing; that is what makes the
+    // binding rule checkable.
+    let standing = match standing {
+        Some(who) => render::json_string(who.word()),
+        None => "null".to_owned(),
+    };
     format!(
-        r#""kind":{},"unit":{unit},"n":{count},"from":{from},"oldest":{oldest},"source":{source}"#,
+        r#""kind":{},"unit":{unit},"n":{count},"from":{from},"oldest":{oldest},"source":{source},"standing":{standing}"#,
         render::json_string(kind),
     )
 }
@@ -4122,9 +4138,26 @@ fn monotonic_micros() -> u64 {
 /// the vendor no longer has. Refused by name rather than answered empty,
 /// because an empty answer here is indistinguishable from a market holiday and
 /// would be recorded as "nothing to store" rather than "nothing available".
+///
+/// # THE DAY IS THE CALLER'S, AND THAT IS THE WHOLE POINT OF THE PARAMETER
+///
+/// This function used to read `SystemTime::now()` itself, in both rolling arms.
+/// It therefore ignored any day a caller threaded in, and
+/// `the_two_floors_that_name_no_day_resolve_to_none` — which passes a fixed
+/// 2026-08-12 and asserts 2026-05-12 — was GREEN ON EXACTLY ONE DAY and red on
+/// every other. It had been red for two days when this was found.
+///
+/// A function that reads the clock cannot be tested against a day, and
+/// `pull::vendor`'s own floor test already states the rule this one broke: "a
+/// test that reads the clock asserts a different thing every day it runs".
+///
+/// So the clock moves OUT, to the three callers. Each reads it exactly where it
+/// already had the means to, production behaviour is unchanged to the day, and
+/// the resolution itself is now a pure function of (window, floor, today).
 pub(crate) fn clamp_to_floor(
     window: pull::session::Window,
     floor: pull::vendor::HistoryFloor,
+    today: pull::session::Day,
 ) -> Result<pull::session::Window, String> {
     use pull::vendor::HistoryFloor;
 
@@ -4142,21 +4175,16 @@ pub(crate) fn clamp_to_floor(
         // arm is: from today's clock, never from a stored date. The calendar
         // walk lives on `Day` because a month is not a fixed number of days
         // and dividing one into 30 would be a figure no vendor published.
-        HistoryFloor::RollingMonths { months } => {
-            let today = ingest::ist_day(std::time::SystemTime::now())
-                .map_err(|why| format!("the clock is unusable: {why}"))?;
-            today
-                .months_before(months)
-                .map_err(|why| format!("the rolling floor lands before the epoch: {why}"))?
-        }
+        HistoryFloor::RollingMonths { months } => today
+            .months_before(months)
+            .map_err(|why| format!("the rolling floor lands before the epoch: {why}"))?,
         HistoryFloor::Fixed { year, month, day } => pull::session::Day::new(year, month, day)
             .map_err(|why| format!("the feed's history floor is not a real day: {why}"))?,
         HistoryFloor::Rolling { years } => {
             // RECOMPUTED FROM TODAY, never stored. A stored rolling floor is a
             // frozen one, and a frozen rolling floor is the bug this exists to
-            // prevent.
-            let today = ingest::ist_day(std::time::SystemTime::now())
-                .map_err(|why| format!("the clock is unusable: {why}"))?;
+            // prevent. `today` is the caller's — see the header.
+            //
             // 365.25 days per year, so four years of leap days do not drift the
             // floor a day earlier than the vendor's own.
             let back = u32::try_from(u64::from(years) * 36_525 / 100).unwrap_or(u32::MAX);
@@ -4231,7 +4259,9 @@ async fn fetch_chunks(
     // for 2020 today is asking for ~5 months it no longer has, and that gap
     // widens every month while nothing notices. Clamping is what stops
     // "complete" from being a claim with an expiry date.
-    let asked_window = clamp_to_floor(asked.window, spec.history_floor)?;
+    let today = ingest::ist_day(std::time::SystemTime::now())
+        .map_err(|why| format!("the clock is unusable: {why}"))?;
+    let asked_window = clamp_to_floor(asked.window, spec.history_floor, today)?;
 
     let chunks = pull::session::split_window(asked_window, spec.window_cap_days(asked.granularity))
         .map_err(|why| format!("the window could not be split to the vendor's cap: {why}"))?;
@@ -12509,17 +12539,44 @@ mod tests {
         let site = Loaded::new(Site::load(&dir, &store_root("feeds-floors")));
         let (_, body) = feeds_json(axum::extract::State(site)).await;
 
-        // ONE VENDOR, TWO RUNGS, TWO DIFFERENT FLOORS — the whole reason the
-        // field is keyed on the rung.
-        assert!(
-            body.contains(r#"{"rung":"1min","served":true,"kind":"rolling","unit":"m","n":3"#),
-            "Groww's one-minute rung rolls three months: {body}"
-        );
+        // ONE VENDOR, TWO RUNGS, AND THE DISAGREEMENT IS PER RUNG — the whole
+        // reason the field is keyed on the rung.
+        //
+        // What BINDS is the operator's fixed January 2020 at both rungs; he
+        // stated it against the vendor and not against a rung, and D-0131
+        // records that applying one figure to both is UNVERIFIED rather than
+        // split on a guess.
+        for rung in ["1min", "1day"] {
+            assert!(
+                body.contains(&format!(
+                    r#"{{"rung":"{rung}","served":true,"kind":"fixed","unit":null,"n":null,"from":"2020-01-01""#
+                )),
+                "Groww's {rung} rung binds at the operator's fixed 2020: {body}"
+            );
+        }
+        // What the VENDOR claims still differs between the two, and both are
+        // carried as `contested` — deleting them would leave a number no
+        // reader could argue with.
         assert!(
             body.contains(
-                r#"{"rung":"1day","served":true,"kind":"fixed","unit":null,"n":null,"from":"2020-01-01""#
+                r#""contested":{"kind":"rolling","unit":"m","n":3,"from":null,"oldest":"#
             ),
-            "and its day rung is a fixed date: {body}"
+            "the vendor's published quarter is kept beside the minute rung: {body}"
+        );
+
+        // WHO SAID IT, AS A WORD RATHER THAN A PROSE MATCH. The page decides
+        // which of two claims binds from this field; before D-0131 it decided
+        // it from a second table in the browser.
+        assert!(
+            body.contains(r#""standing":"operator""#)
+                && body.contains(r#""standing":"vendor_doc""#),
+            "both standings reach the wire: {body}"
+        );
+        // A rung nobody has said anything about has no standing to report, and
+        // that is the one place the field is null.
+        assert!(
+            body.contains(r#""kind":"unknown","unit":null,"n":null,"from":null,"oldest":null,"source":null,"standing":null"#),
+            "an unrecorded rung reports no standing rather than a default: {body}"
         );
 
         // A ROLLING FLOOR IS RESOLVED, NOT STORED. The day is computed from

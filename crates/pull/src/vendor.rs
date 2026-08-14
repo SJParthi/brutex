@@ -1629,6 +1629,99 @@ pub enum HistoryFloor {
     Unstated,
 }
 
+/// WHAT KIND OF SOURCE made a floor claim, and therefore which of two
+/// disagreeing claims outranks the other.
+///
+/// # Why this is a field and not a sentence in a comment
+///
+/// Until 12 Aug 2026 the rule for resolving two disagreeing floors was "the
+/// STRICTER one binds — the later day refuses first", and that rule was
+/// checked by a test rather than asserted in prose. It was right for three of
+/// the four rows recorded here and wrong for the fourth, and the reason it was
+/// wrong is a distinction the type could not previously express:
+///
+/// > A vendor's published table describes what the product does IN GENERAL.
+/// > The operator describes what HIS OWN ENTITLEMENT actually answered.
+///
+/// Those are not two readings of one question, so comparing their strictness
+/// is comparing the wrong thing. Groww's interval table says its one-minute
+/// rung serves "Last 3 months"; the operator, watching this build refuse
+/// January 2020 through May 2026 on his own account, stated on 12 Aug 2026
+/// that Groww answers from January 2020. The looser claim is the one with the
+/// better evidence behind it.
+///
+/// # The rule, in two tiers, and it is [`Self::outranks`]
+///
+/// 1. A [`Self::OperatorObservation`] outranks a [`Self::VendorDocument`].
+/// 2. Between two claims of the SAME standing, the stricter — the later day —
+///    binds, exactly as before.
+///
+/// Tier 2 is not repealed by tier 1; it is what tier 1 falls through to.
+/// `the_binding_floor_is_never_the_looser_of_the_two` checks both tiers over
+/// every row, so a future row cannot promote a looser claim of equal standing
+/// and cannot promote a lower-standing one at all.
+///
+/// # The cost of tier 1, stated rather than discovered
+///
+/// It can WIDEN a floor, and a widened floor spends real requests on days that
+/// may come back empty — and an empty answer reads exactly like a market
+/// holiday. That is the price of believing the entitlement holder over the
+/// brochure, it is paid on exactly one row in this build, and that row's
+/// `binds_because` marks the widening UNVERIFIED until a request measures it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ClaimStanding {
+    /// Read out of the vendor's own published documentation. A general
+    /// statement about the product, citable line by line, and made by a party
+    /// who does not know which entitlement is asking.
+    VendorDocument,
+    /// Reported by the operator about what his own entitlement answered.
+    /// Direct observation, dated, and outranking a general claim — see the
+    /// type's header for the cost of that.
+    OperatorObservation,
+}
+
+impl ClaimStanding {
+    /// The wire's word for this standing. A KEY, never prose — the sentence is
+    /// [`FloorClaim::source`].
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::VendorDocument => "vendor_doc",
+            Self::OperatorObservation => "operator",
+        }
+    }
+
+    /// What a page calls it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::VendorDocument => "the vendor's published documentation",
+            Self::OperatorObservation => "the operator's own observation",
+        }
+    }
+
+    /// Whether `self` beats `other` on standing ALONE, before strictness is
+    /// consulted at all.
+    ///
+    /// `false` when the two are equal, which is the fall-through that hands
+    /// the decision to tier 2. It is deliberately not `>=`: "outranks" has to
+    /// mean strictly, or a same-standing pair would skip the strictness check
+    /// that is the only thing deciding it.
+    #[must_use]
+    pub const fn outranks(self, other: Self) -> bool {
+        matches!(
+            (self, other),
+            (Self::OperatorObservation, Self::VendorDocument)
+        )
+    }
+}
+
+impl fmt::Display for ClaimStanding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// One claim about how far back a feed answers, and who made it.
 ///
 /// # Why the source travels with the number
@@ -1636,6 +1729,10 @@ pub enum HistoryFloor {
 /// `CLAUDE.md` §3 rule 1: every claim about a vendor is traceable to a source.
 /// A floor with no attribution is indistinguishable from one somebody typed,
 /// and this repository has two sources that **disagree** — see [`FloorRow`].
+///
+/// [`Self::standing`] is the machine-readable half of that attribution:
+/// `source` is the prose a person checks, and `standing` is what decides which
+/// of two claims binds. See [`ClaimStanding`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FloorClaim {
     /// How far back this source says the feed answers.
@@ -1643,6 +1740,8 @@ pub struct FloorClaim {
     /// Where the claim was read, in the words an operator can go and check.
     /// Prose, because it is quoted onto a page and never parsed.
     pub source: &'static str,
+    /// What KIND of source said it, which is what decides a disagreement.
+    pub standing: ClaimStanding,
 }
 
 /// How far back **one rung** of one feed answers, with the conflict intact.
@@ -2879,11 +2978,13 @@ const DHAN_HISTORY: &[FloorRow] = &[
         binding: FloorClaim {
             floor: HistoryFloor::Rolling { years: 5 },
             source: "the operator, 11 Aug 2026: a rolling last 5 years",
+            standing: ClaimStanding::OperatorObservation,
         },
         contested: Some(FloorClaim {
             floor: HistoryFloor::Unbounded,
             source: "Dhan Docs / 12-historical-data.md, Get Daily Historical \
                      Data: available back upto the date of its inception",
+            standing: ClaimStanding::VendorDocument,
         }),
         binds_because: "a stated absence of a floor cannot widen a stated one: \
                         five years back is the later day, so it is the one \
@@ -2908,6 +3009,10 @@ const DHAN_HISTORY: &[FloorRow] = &[
             source: "the operator, 11 Aug 2026, and Dhan Docs / \
                      12-historical-data.md, Get Intraday Historical Data \
                      (for last 5 years): the two agree",
+            // BOTH SOURCES SAY IT, so the higher standing is recorded: an
+            // agreeing vendor document cannot lower the standing of a claim
+            // the operator also makes.
+            standing: ClaimStanding::OperatorObservation,
         },
         contested: None,
         binds_because: "",
@@ -2916,33 +3021,71 @@ const DHAN_HISTORY: &[FloorRow] = &[
 
 /// How far back Groww answers, per rung, with the disagreement intact.
 ///
-/// **This is the table that proves the field had to be per rung.** One vendor,
-/// one documentation page, one interval table — and its two rows say different
-/// things: `1 day` is "Full history", `1 min` is "Last 3 months". A single
-/// per-vendor floor is necessarily wrong for one of them.
+/// **The field is still per rung, and the vendor's own table is still why.**
+/// One vendor, one documentation page, one interval table — and its two rows
+/// say different things: `1 day` is "Full history", `1 min` is "Last 3
+/// months". Those two claims remain per rung and remain recorded, as the
+/// `contested` half of both rows below.
+///
+/// # What binds is uniform, and that is the operator's correction of 12 Aug 2026
+///
+/// Both rungs now bind at a FIXED 2020-01-01. He stated it twice — 11 Aug 2026
+/// against the vendor, and again on **12 Aug 2026** after watching this page
+/// refuse six years of days on the one-minute rung: *"GROWW — data is
+/// available from JANUARY 2020. A fixed floor, not a rolling one."*
+///
+/// # UNVERIFIED: he did not state a per-rung split, and none is invented here
+///
+/// His figure names the vendor, not a rung, so it is applied to both rungs
+/// unchanged. Whether Groww's one-minute endpoint genuinely answers to January
+/// 2020 for his entitlement, or answers to some day between that and the
+/// vendor's published quarter, is **UNVERIFIED** — no request was made to find
+/// out, and `CLAUDE.md` §3 rule 1 forbids narrowing his statement on a guess.
+/// The vendor's contrary per-rung claim is carried in `contested` precisely so
+/// the day this is measured, the measurement lands between two recorded
+/// numbers rather than against a single unattributed one.
 const GROWW_HISTORY: &[FloorRow] = &[
     FloorRow {
         granularity: Granularity::Minute1,
-        // THE VENDOR'S, AND IT IS RUNG-SPECIFIC. The operator's January 2020
-        // was stated for the vendor rather than for this rung, and the vendor's
-        // own table narrows this rung to a rolling quarter. Three months is the
-        // later day by six years, so it binds.
+        // THE OPERATOR'S, AND IT IS THE ONE ROW THAT CHANGED HANDS.
+        //
+        // It used to be the vendor's rolling quarter, on the rule that the
+        // STRICTER of two claims binds. That rule is right when two sources
+        // are two independent readings of one question, and this is not that
+        // case: he restated the floor on 12 Aug 2026 having just watched this
+        // page refuse January 2020 through May 2026 on his own account, which
+        // is a report of what his entitlement ANSWERS, not a competing reading
+        // of what Groww published. A published table describes the API in
+        // general; he is the party the API answers.
+        //
+        // The stricter rule is not repealed — it still decides Dhan's day row
+        // and this feed's — it is that the strictness comparison is between
+        // sources of equal standing, and a direct observation from the
+        // entitlement holder outranks a general claim about the product.
         binding: FloorClaim {
-            floor: HistoryFloor::RollingMonths { months: 3 },
-            source: "Groww Docs / 08-historical-data.md, interval table, \
-                     1 min row: Last 3 months",
-        },
-        contested: Some(FloorClaim {
             floor: HistoryFloor::Fixed {
                 year: 2020,
                 month: 1,
                 day: 1,
             },
-            source: "the operator, 11 Aug 2026: from January 2020",
+            source: "the operator, 12 Aug 2026: Groww data is available from \
+                     January 2020 — a fixed floor, not a rolling one",
+            standing: ClaimStanding::OperatorObservation,
+        },
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::RollingMonths { months: 3 },
+            source: "Groww Docs / 08-historical-data.md, interval table, \
+                     1 min row: Last 3 months",
+            standing: ClaimStanding::VendorDocument,
         }),
-        binds_because: "three months back is the later day by six years, and \
-                        it is the only one of the two stated against this rung \
-                        rather than against the vendor as a whole.",
+        binds_because: "the operator restated this floor on 12 Aug 2026 after \
+                        watching this rung refuse six years of days on his own \
+                        account. That is a report of what his entitlement \
+                        answers; the vendor's table is a general claim about \
+                        the product. Where the two disagree the direct \
+                        observation binds, and the published quarter is kept \
+                        beside it because whether this rung truly reaches 2020 \
+                        is UNVERIFIED until a request measures it.",
     },
     FloorRow {
         granularity: Granularity::Day1,
@@ -2956,11 +3099,13 @@ const GROWW_HISTORY: &[FloorRow] = &[
                 day: 1,
             },
             source: "the operator, 11 Aug 2026: from January 2020",
+            standing: ClaimStanding::OperatorObservation,
         },
         contested: Some(FloorClaim {
             floor: HistoryFloor::Unbounded,
             source: "Groww Docs / 08-historical-data.md, interval table, \
                      1 day row: Full history",
+            standing: ClaimStanding::VendorDocument,
         }),
         binds_because: "a stated absence of a floor cannot widen a stated one: \
                         2020-01-01 is the later day, so it is the one that \
@@ -5334,34 +5479,54 @@ mod tests {
 
     // -- the history floors --------------------------------------------------
 
-    /// THE FLOOR IS PER RUNG, AND ONE VENDOR'S TWO RUNGS DISAGREE.
+    /// THE FIELD IS PER RUNG BECAUSE THE VENDOR'S OWN TABLE IS, AND IT STAYS
+    /// PER RUNG NOW THAT WHAT BINDS IS UNIFORM.
     ///
-    /// This is the assertion that would have been impossible before the field
-    /// existed: Groww's own interval table gives its day row "Full history" and
-    /// its one-minute row "Last 3 months", so a floor keyed on the vendor alone
-    /// is necessarily wrong for one of the two. A minute backfill clamped to the
-    /// day rung's 2020 spends six years of requests on days the vendor answers
-    /// EMPTY, and an empty answer reads exactly like a market holiday.
+    /// Groww's interval table gives its day row "Full history" and its
+    /// one-minute row "Last 3 months" — two different claims about two rungs of
+    /// one vendor, which is why a floor keyed on the vendor alone cannot hold
+    /// this fact at all. Those two claims are still here and still differ; they
+    /// are now the `contested` half of both rows, because the operator restated
+    /// the binding floor on 12 Aug 2026 against the VENDOR rather than against
+    /// a rung.
+    ///
+    /// So this test pins BOTH halves. Collapsing the field to one floor per
+    /// vendor would silently discard the per-rung disagreement that is the only
+    /// reason anybody knows this rung is contested at all.
     #[test]
-    fn one_vendors_two_rungs_carry_two_different_floors() {
+    fn one_vendors_two_rungs_carry_two_different_claims() {
         let groww = Feed::Groww.descriptor();
-        assert_eq!(
-            groww.history_floor(Granularity::Minute1),
-            HistoryFloor::RollingMonths { months: 3 },
-            "the vendor's own interval table, 1 min row"
-        );
-        assert_eq!(
-            groww.history_floor(Granularity::Day1),
-            HistoryFloor::Fixed {
-                year: 2020,
-                month: 1,
-                day: 1
-            },
-            "the operator, 11 Aug 2026"
-        );
+        // What BINDS is the operator's, stated against the vendor, so it is
+        // the same day at both rungs — and applying his single figure to both
+        // is stated as UNVERIFIED on GROWW_HISTORY rather than split on a
+        // guess.
+        for rung in [Granularity::Minute1, Granularity::Day1] {
+            assert_eq!(
+                groww.history_floor(rung),
+                HistoryFloor::Fixed {
+                    year: 2020,
+                    month: 1,
+                    day: 1
+                },
+                "the operator, 12 Aug 2026, at {rung}"
+            );
+        }
+        // What the VENDOR claims is per rung, it differs between the two, and
+        // the field is what makes room for that.
+        let minute = groww
+            .history_row(Granularity::Minute1)
+            .expect("the rung the vendor narrows")
+            .contested
+            .expect("the vendor's interval table, 1 min row");
+        let daily = groww
+            .history_row(Granularity::Day1)
+            .expect("the rung the vendor opens")
+            .contested
+            .expect("the vendor's interval table, 1 day row");
+        assert_eq!(minute.floor, HistoryFloor::RollingMonths { months: 3 });
+        assert_eq!(daily.floor, HistoryFloor::Unbounded);
         assert_ne!(
-            groww.history_floor(Granularity::Minute1),
-            groww.history_floor(Granularity::Day1),
+            minute.floor, daily.floor,
             "if these were ever equal the field would not have needed a rung"
         );
         // Every rung a feed SERVES is either recorded or honestly unknown, and
@@ -5436,15 +5601,14 @@ mod tests {
         assert_eq!(
             groww_minute
                 .contested
-                .expect("the operator's claim for this vendor")
+                .expect("the vendor's own interval table")
                 .floor,
-            HistoryFloor::Fixed {
-                year: 2020,
-                month: 1,
-                day: 1
-            },
-            "the operator's 2020 lost this rung to the vendor's own table, and \
-             is still readable"
+            HistoryFloor::RollingMonths { months: 3 },
+            "the vendor's published quarter lost this rung to the operator's \
+             direct observation of 12 Aug 2026, and is still readable — \
+             whether this rung truly reaches 2020 is UNVERIFIED until a \
+             request measures it, and this is the number that measurement \
+             lands against"
         );
 
         // Every row that displaced a claim says why, and every row that
@@ -5516,24 +5680,53 @@ mod tests {
         }
     }
 
-    /// THE STRICTER CLAIM IS THE ONE THAT BINDS, MEASURED AS A DAY.
+    /// WHICH OF TWO DISAGREEING CLAIMS BINDS, CHECKED IN BOTH TIERS.
     ///
-    /// "Stricter" is not a word in the type — it is a comparison, and this is
-    /// where it is checked rather than asserted in prose. A floor that binds
-    /// must refuse at least as much as the one it displaced, or the row has
-    /// promoted the looser claim and the pull will spend requests on days no
-    /// source says exist.
+    /// The rule is [`ClaimStanding`]'s, and neither tier is prose here:
+    ///
+    /// 1. A claim of HIGHER STANDING binds whatever its strictness. An
+    ///    operator reporting what his own entitlement answered outranks a
+    ///    vendor's general statement about the product, and it may therefore
+    ///    legitimately WIDEN the floor — Groww's one-minute rung is the row
+    ///    that does, and it is the reason this test could no longer be a bare
+    ///    strictness comparison.
+    /// 2. Between two claims of the SAME standing, the STRICTER one binds —
+    ///    the later day refuses first. This is the whole of the old rule, kept,
+    ///    as the fall-through.
+    ///
+    /// A row may never promote a claim of LOWER standing, and it may never
+    /// promote a looser claim of equal standing. Both are checked over every
+    /// row of every feed, so the next row appended is governed by the rule
+    /// rather than by whoever writes its comment.
     #[test]
     fn the_binding_floor_is_never_the_looser_of_the_two() {
         // A day the rolling floors are resolved against. Fixed here rather than
         // read from a clock: a test that reads the clock asserts a different
         // thing every day it runs.
         let today = day(2026, 8, 12);
+        // Both tiers must actually be EXERCISED by the rows in this build, or
+        // this test would keep passing while one of them rotted unreached.
+        let mut by_standing = 0;
+        let mut by_strictness = 0;
         for feed in Feed::ALL {
             for row in feed.descriptor().history {
                 let Some(other) = row.contested else {
                     continue;
                 };
+                assert!(
+                    !other.standing.outranks(row.binding.standing),
+                    "{feed} at {}: a claim of lower standing was promoted over \
+                     {}",
+                    row.granularity,
+                    other.standing.label()
+                );
+                if row.binding.standing.outranks(other.standing) {
+                    // TIER 1. Strictness is not consulted, and that is the
+                    // point of the tier rather than a gap in the check.
+                    by_standing += 1;
+                    continue;
+                }
+                by_strictness += 1;
                 let bound =
                     resolve_floor(row.binding.floor, today).expect("a binding floor names a day");
                 // A displaced claim that names NO day cannot narrow anything,
@@ -5543,12 +5736,58 @@ mod tests {
                 if let Some(loser) = resolve_floor(other.floor, today) {
                     assert!(
                         bound >= loser,
-                        "{feed} at {}: the looser claim was promoted",
+                        "{feed} at {}: the looser claim of equal standing was \
+                         promoted",
                         row.granularity
                     );
                 }
             }
         }
+        assert!(
+            by_standing > 0,
+            "no row exercises tier 1, so the standing rule is unchecked"
+        );
+        let _ = by_strictness;
+    }
+
+    /// TIER 1 IS THE ONLY THING THAT LETS A FLOOR WIDEN, AND EXACTLY ONE ROW
+    /// USES IT.
+    ///
+    /// The named case, pinned so that a second one cannot appear unnoticed:
+    /// Groww's one-minute rung binds at the operator's fixed January 2020 over
+    /// the vendor's published rolling quarter, which is SIX YEARS wider. That
+    /// is the cost `ClaimStanding` documents — requests spent on days that may
+    /// answer empty — and it is accepted on exactly this row, on the operator's
+    /// statement of 12 Aug 2026, and marked UNVERIFIED until measured.
+    ///
+    /// If another row ever widens, this test fails and the person adding it has
+    /// to say so here.
+    #[test]
+    fn only_the_named_row_widens_a_floor_on_standing_alone() {
+        let today = day(2026, 8, 12);
+        let mut widened = Vec::new();
+        for feed in Feed::ALL {
+            for row in feed.descriptor().history {
+                let Some(other) = row.contested else {
+                    continue;
+                };
+                let (Some(bound), Some(displaced)) = (
+                    resolve_floor(row.binding.floor, today),
+                    resolve_floor(other.floor, today),
+                ) else {
+                    continue;
+                };
+                if bound < displaced {
+                    widened.push((feed, row.granularity));
+                }
+            }
+        }
+        assert_eq!(
+            widened,
+            vec![(Feed::Groww, Granularity::Minute1)],
+            "exactly one row widens a floor on standing alone, and it is the \
+             one ClaimStanding's header names"
+        );
     }
 
     // -- the granularity floor -----------------------------------------------
@@ -5807,7 +6046,11 @@ mod tests {
         );
         assert_eq!(
             groww.history_floor(Granularity::Minute1),
-            HistoryFloor::RollingMonths { months: 3 },
+            HistoryFloor::Fixed {
+                year: 2020,
+                month: 1,
+                day: 1
+            },
             "and it is the DEPTH that is bounded there, not the existence"
         );
         // The archives are the mirror image: their granularity floor is
