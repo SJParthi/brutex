@@ -726,84 +726,136 @@ impl Ladder {
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
 
+        // THE JOIN, GROUPED BY (k−2)-PREFIX — and the whole cost of this level.
+        //
+        // # What it replaces, and what that cost
+        //
+        // This was `for a in F { for b in F[a+1..] }` with a popcount filter:
+        // every pair of survivors unioned, then discarded unless the union
+        // happened to have exactly k bits. The filter is correct and it is
+        // cheap per pair, and it was still the dominant expense of the sweep,
+        // because almost every pair fails it. Measured over one 1,124-bar run:
+        //
+        // | k | \|F\| | pairs walked | survived | wasted |
+        // |---|---|---|---|---|
+        // | 5 | 607 | 183,921 | 9,345 | 94.9% |
+        // | 6 | 837 | 349,866 | 13,421 | 96.2% |
+        // | 7 | 823 | 338,253 | 13,059 | 96.1% |
+        // | **all** | | **1,141,847** | **54,915** | **95.19%** |
+        //
+        // # Why the prefix is the whole trick
+        //
+        // Two distinct (k−1)-sets union to a k-set exactly when they share
+        // k−2 positions. The pairs that do are precisely the pairs that agree
+        // on every position but their HIGHEST — so grouping the frontier by
+        // "the itemset minus its highest position" puts every joinable pair in
+        // one group and no joinable pair across two.
+        //
+        // Completeness, which is the only thing that matters: for a frequent
+        // k-set S = {p₁ < … < p_k}, the subsets S∖{p_k} and S∖{p_{k−1}} are
+        // both frequent by anti-monotonicity, both have prefix {p₁…p_{k−2}},
+        // and their union is S. So S is enumerated. Uniqueness: any pair
+        // producing S must contribute S's two largest positions as its two
+        // highest bits, which is that same pair and no other — so `duplicates`
+        // becomes a MEASURED zero rather than an assumed one, and `seen` is
+        // kept precisely to keep measuring it.
+        //
+        // # The grouping is built, not assumed
+        //
+        // `sort_canonically` orders by `mask.words()`, which is numeric word
+        // order — it groups by the HIGHEST bit, the opposite of what this
+        // needs, and prefix blocks are NOT contiguous under it. Relying on it
+        // would silently drop candidates. So the key is computed and sorted on
+        // explicitly here: |F| log |F| per level against the |F|²/2 it removes.
+        let mut keyed: Vec<(ConditionMask, ConditionMask)> =
+            Vec::with_capacity(prev.frequent.len());
+        keyed.extend(
+            prev.frequent
+                .iter()
+                .map(|it| (without_highest(&it.mask), it.mask)),
+        );
+        keyed.sort_unstable_by_key(|(prefix, mask)| (prefix.words(), mask.words()));
+
         let mut pairs: u64 = 0;
-        'join: for (a_idx, a) in prev.frequent.iter().enumerate() {
-            // THE PAIR BUDGET, CHECKED ONCE PER OUTER ROW so it costs nothing per
-            // pair. `a_idx` rows contribute `|F| - a_idx - 1` pairs each, and the
-            // count is exact rather than estimated because the inner loop below
-            // increments it.
-            //
-            // This is the budget that bounds TIME. The candidate ceiling bounds
-            // bytes, and the two are five orders of magnitude apart on a wide
-            // frontier -- see `Halt::pairs`. Without this, the only symptom of a
-            // `min_hits` set too low is a process that never returns, which is the
-            // opposite of the loud refusal `CLAUDE.md` §4 requires.
-            if pairs_walked.saturating_add(pairs) >= self.pair_budget {
-                halted = Some(Halt {
-                    k,
-                    candidates: admitted.saturating_add(seen.len()),
-                    ceiling: self.ceiling,
-                    pairs: pairs_walked.saturating_add(pairs),
-                    pair_budget: self.pair_budget,
-                    breach: Breach::Pairs,
-                });
-                break 'join;
-            }
-            for b in prev.frequent.iter().skip(a_idx.saturating_add(1)) {
-                pairs = pairs.saturating_add(1);
-                let cand = a.mask.union(&b.mask);
-                // A union of two distinct (k-1)-sets is a k-set only when they
-                // share exactly k-2 bits. Checking popcount is the same test and
-                // needs no canonical-prefix bookkeeping.
-                if cand.popcount() != k {
-                    continue;
-                }
-                // THE CEILING, AND IT IS CHECKED BEFORE ANY COUNTER MOVES.
+        'join: for block in keyed.chunk_by(|a, b| a.0 == b.0) {
+            for (offset, (_, a)) in block.iter().enumerate() {
+                // THE PAIR BUDGET, CHECKED ONCE PER OUTER ROW so it costs nothing
+                // per pair. The count is exact rather than estimated because the
+                // inner loop below increments it.
                 //
-                // Placement is the whole correctness argument. Guarding `out.len()`
-                // would guard the wrong number: `seen` is filled BEFORE the support
-                // test, so a level whose survivors all fall under `min_hits` still
-                // allocates every distinct candidate it enumerated -- the level that
-                // goes extinct is the level that allocates most. `seen` is the
-                // allocation, so `seen` is what is bounded.
-                //
-                // Checking here, rather than after `seen.insert`, keeps
-                // `Frontier::reconciles` an invariant: nothing half-processed is
-                // ever counted. The cost is that a level which has admitted exactly
-                // `ceiling` distinct candidates halts even if every remaining pair
-                // would have been a duplicate. That is conservative in the safe
-                // direction and it is stated rather than hidden.
-                if admitted.saturating_add(seen.len()) >= self.ceiling {
+                // This is the budget that bounds TIME. The candidate ceiling
+                // bounds bytes, and the two are five orders of magnitude apart on
+                // a wide frontier -- see `Halt::pairs`. Without this, the only
+                // symptom of a `min_hits` set too low is a process that never
+                // returns, which is the opposite of the loud refusal
+                // `CLAUDE.md` §4 requires.
+                if pairs_walked.saturating_add(pairs) >= self.pair_budget {
                     halted = Some(Halt {
                         k,
                         candidates: admitted.saturating_add(seen.len()),
                         ceiling: self.ceiling,
                         pairs: pairs_walked.saturating_add(pairs),
                         pair_budget: self.pair_budget,
-                        breach: Breach::Candidates,
+                        breach: Breach::Pairs,
                     });
                     break 'join;
                 }
-                generated = generated.saturating_add(1);
-                // Duplicate rejection: O(1). The same k-set arises from several
-                // pairs and must be evaluated once.
-                if !seen.insert(cand) {
-                    duplicates = duplicates.saturating_add(1);
-                    continue;
-                }
-                // Subset prune, justified by anti-monotonicity: a bar matches a
-                // mask iff every bit is set, so adding a bit can only remove
-                // hits. If any (k-1)-subset is infrequent the k-set cannot be
-                // frequent, and it is never evaluated against a single bar.
-                if !every_subset_is_frequent(&cand, &frequent_prev) {
-                    pruned = pruned.saturating_add(1);
-                    continue;
-                }
-                let hits = column.support(&cand);
-                if hits >= self.min_hits {
-                    out.push(Itemset { mask: cand, hits });
-                } else {
-                    infrequent = infrequent.saturating_add(1);
+                for (_, b) in block.iter().skip(offset.saturating_add(1)) {
+                    pairs = pairs.saturating_add(1);
+                    // No popcount filter, because the grouping already IS that
+                    // filter: `a` and `b` share a prefix of k−2 positions and
+                    // differ in their highest, so the union has exactly k. A
+                    // branch here could never be taken, and an unreachable
+                    // branch is a coverage hole -- the property is proved by
+                    // `every_generated_candidate_has_exactly_k_bits` instead.
+                    let cand = a.union(b);
+                    // THE CEILING, AND IT IS CHECKED BEFORE ANY COUNTER MOVES.
+                    //
+                    // Placement is the whole correctness argument. Guarding `out.len()`
+                    // would guard the wrong number: `seen` is filled BEFORE the support
+                    // test, so a level whose survivors all fall under `min_hits` still
+                    // allocates every distinct candidate it enumerated -- the level that
+                    // goes extinct is the level that allocates most. `seen` is the
+                    // allocation, so `seen` is what is bounded.
+                    //
+                    // Checking here, rather than after `seen.insert`, keeps
+                    // `Frontier::reconciles` an invariant: nothing half-processed is
+                    // ever counted. The cost is that a level which has admitted exactly
+                    // `ceiling` distinct candidates halts even if every remaining pair
+                    // would have been a duplicate. That is conservative in the safe
+                    // direction and it is stated rather than hidden.
+                    if admitted.saturating_add(seen.len()) >= self.ceiling {
+                        halted = Some(Halt {
+                            k,
+                            candidates: admitted.saturating_add(seen.len()),
+                            ceiling: self.ceiling,
+                            pairs: pairs_walked.saturating_add(pairs),
+                            pair_budget: self.pair_budget,
+                            breach: Breach::Candidates,
+                        });
+                        break 'join;
+                    }
+                    generated = generated.saturating_add(1);
+                    // Duplicate rejection: O(1). The same k-set arises from several
+                    // pairs and must be evaluated once.
+                    if !seen.insert(cand) {
+                        duplicates = duplicates.saturating_add(1);
+                        continue;
+                    }
+                    // Subset prune, justified by anti-monotonicity: a bar matches a
+                    // mask iff every bit is set, so adding a bit can only remove
+                    // hits. If any (k-1)-subset is infrequent the k-set cannot be
+                    // frequent, and it is never evaluated against a single bar.
+                    if !every_subset_is_frequent(&cand, &frequent_prev) {
+                        pruned = pruned.saturating_add(1);
+                        continue;
+                    }
+                    let hits = column.support(&cand);
+                    if hits >= self.min_hits {
+                        out.push(Itemset { mask: cand, hits });
+                    } else {
+                        infrequent = infrequent.saturating_add(1);
+                    }
                 }
             }
         }
@@ -835,6 +887,37 @@ pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
         0_u64,
         |n, b| if b.hits(mask) { n.saturating_add(1) } else { n },
     )
+}
+
+/// The itemset minus its highest set position — the join's grouping key.
+///
+/// Two (k−1)-sets union to a k-set exactly when they agree on every position
+/// but their highest, so this value is equal for precisely the pairs the join
+/// should visit and unequal for every pair it should not.
+///
+/// O(1): the scan is over [`ConditionMask`]'s six words, a compile-time
+/// constant, not over the set bits.
+///
+/// # The empty mask
+///
+/// Returns the mask unchanged when nothing is set. The walk never supplies one
+/// — a frontier holds (k−1)-sets and k ≥ 2 there, so popcount is at least one —
+/// but the arm is real code and is covered by a direct unit test rather than
+/// left as a branch no run reaches. At k=2 the prefix of every 1-set IS the
+/// empty mask, which puts all of them in a single block and reproduces the
+/// exhaustive pairing that level requires.
+fn without_highest(m: &ConditionMask) -> ConditionMask {
+    let words = m.words();
+    for (index, word) in words.iter().enumerate().rev() {
+        if *word != 0 {
+            // `leading_zeros` is 0..=63 for a non-zero word, so the subtraction
+            // cannot wrap; `saturating_sub` says so without a lint exception.
+            let bit = 63_u32.saturating_sub(word.leading_zeros());
+            let base = u32::try_from(index).unwrap_or(0).saturating_mul(64);
+            return m.without_bit(base.saturating_add(bit));
+        }
+    }
+    *m
 }
 
 /// True when every (k−1)-subset of `cand` is in the previous frequent frontier.
@@ -1390,10 +1473,16 @@ mod tests {
             let (Some(prev), Some(level)) = (pair.first(), pair.last()) else {
                 continue;
             };
+            // Recomputed for the PREFIX join: the pairs it walks are exactly the
+            // pairs sharing a (k−2)-prefix. The older form counted every pair
+            // whose union had popcount k, which is the same SET of k-sets
+            // reached through every producing pair rather than through one --
+            // 360 pairs where 120 sets exist. Counting producing pairs against a
+            // join that no longer walks them would fail on a correct engine.
             let mut expected: u64 = 0;
             for (i, a) in prev.frequent.iter().enumerate() {
                 for c in prev.frequent.iter().skip(i.saturating_add(1)) {
-                    if a.mask.union(&c.mask).popcount() == level.k {
+                    if without_highest(&a.mask) == without_highest(&c.mask) {
                         expected = expected.saturating_add(1);
                     }
                 }
@@ -1551,10 +1640,17 @@ mod tests {
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
              breach, the join's outer row on the pair budget, the join's inner \
              pair on the candidate ceiling;\n\
-             \x20 5 FILTER SKIPS, which advance rather than truncate -- a \
-             duplicate position and a non-live one at k=1, the `popcount != k` \
-             test, a duplicate candidate, a subset-pruned candidate;\n\
-             \x20 1 PREDICATE RETURN -- `every_subset_is_frequent` answering false.\n\
+             \x20 4 FILTER SKIPS, which advance rather than truncate -- a \
+             duplicate position and a non-live one at k=1, a duplicate \
+             candidate, a subset-pruned candidate;\n\
+             \x20 1 PREDICATE RETURN -- `every_subset_is_frequent` answering false;\n\
+             \x20 1 KEY RETURN -- `without_highest` handing back the join's \
+             grouping key once it has found the top word.\n\
+             The count did not move when the prefix join landed, and that is a \
+             coincidence worth naming: the `popcount != k` skip it deleted and \
+             the `without_highest` return it added cancel exactly. A count that \
+             holds for a changed reason is only honest if the reason is \
+             rewritten with it.\n\
              A tenth is how a silent truncation arrives. `break` alone was not \
              enough: an audit defeated the first draft with an early `return` and \
              with a labelled `continue 'join`, neither of which carries the token \
@@ -1595,9 +1691,16 @@ mod tests {
              invisible to the count above."
         );
         assert!(
-            code.contains(concat!("for b in prev.", "frequent.iter().skip(")),
-            "the join's inner loop must run over the whole remaining frontier. A \
+            code.contains(concat!("for (_, b) in block.", "iter().skip(")),
+            "the join's inner loop must run over the whole remaining block. A \
              `.take(n)` or a narrowed range truncates the level without a `break`."
+        );
+        assert!(
+            code.contains(concat!("for block in keyed.", "chunk_by(")),
+            "the join's outer loop must visit EVERY prefix block. Skipping a block \
+             drops every k-set whose two largest positions live in it, and does so \
+             without a `break`, a `continue` or a counter moving -- the level would \
+             reconcile perfectly against a frontier that is quietly short."
         );
     }
 
@@ -2077,8 +2180,15 @@ mod tests {
 
     #[test]
     fn one_k_set_is_evaluated_once_however_many_pairs_produce_it() {
-        // {0,1,2} arises from three different pairs of 2-sets. Duplicate
-        // rejection is what keeps it one evaluation.
+        // {0,1,2} is reachable from three different pairs of 2-sets -- {0,1}+{0,2},
+        // {0,1}+{1,2} and {0,2}+{1,2}. It must be EVALUATED once.
+        //
+        // The pairwise join reached it three times and leaned on `seen` to reject
+        // two. The prefix join walks only the pair that agrees on everything but
+        // its highest position -- {0,1}+{0,2} -- so it is reached once and the
+        // duplicate rejection has nothing to reject. Both satisfy the name; the
+        // second is the stronger property, so the assertions below pin THAT and
+        // keep `duplicates` as the witness rather than the mechanism.
         //
         // The trailing `&[3]` bar is load-bearing and was missing when this test
         // was first written: without it, 0, 1 and 2 are each set on every bar, so
@@ -2092,8 +2202,101 @@ mod tests {
             "exactly one 3-set survives"
         );
         assert!(
-            k3.is_some_and(|l| l.generated >= 3),
-            "the join really does produce it 3 times"
+            k3.is_some_and(|l| l.generated == 1),
+            "the prefix join must REACH it once, not reach it three times and \
+             discard two"
+        );
+        assert!(
+            k3.is_some_and(|l| l.duplicates == 0),
+            "and the duplicate counter is the witness: a prefix join that emitted \
+             the same k-set twice would be enumerating pairs it has no business \
+             walking"
+        );
+    }
+
+    /// The prefix join returns exactly what an exhaustive pairwise join returns.
+    ///
+    /// This is the only test that matters for the change that introduced it.
+    /// Everything else here measures the join's COST; this measures its ANSWER,
+    /// against an oracle written the slow, obvious way -- every pair, popcount
+    /// filter, deduplicate, subset-prune, count support. If the prefix grouping
+    /// ever drops a joinable pair, the two sets diverge and this fails, whatever
+    /// the counters say and however perfectly each level reconciles.
+    #[test]
+    fn the_prefix_join_finds_exactly_what_an_exhaustive_join_would() {
+        // Wide enough that most pairs do NOT share a prefix, so a grouping bug
+        // has somewhere to lose candidates rather than being masked by a frontier
+        // small enough that every pair happens to be in one block.
+        let wide: &[u32] = &[0, 1, 2, 3, 4, 5, 6, 7];
+        let b = bars(&[wide, wide, wide, &[0, 1, 2], &[3, 4, 5], &[8], &[8]]);
+        let live: Vec<u32> = (0..=8).collect();
+        let min_hits = 2;
+        let s = Ladder::with_min_hits(min_hits).walk(&b, &live);
+        assert!(s.completed(), "the fixture must not breach a budget");
+        assert!(
+            s.depth() >= 3,
+            "and must climb far enough to be worth checking"
+        );
+
+        // The oracle: rebuild each level from the one below by brute force.
+        let mut oracle: Vec<ConditionMask> = s
+            .levels
+            .first()
+            .map(|l| l.frequent.iter().map(|i| i.mask).collect())
+            .unwrap_or_default();
+        for level in s.levels.iter().skip(1) {
+            let prev: HashSet<ConditionMask> = oracle.iter().copied().collect();
+            let mut next: HashSet<ConditionMask> = HashSet::new();
+            for (i, a) in oracle.iter().enumerate() {
+                for c in oracle.iter().skip(i.saturating_add(1)) {
+                    let cand = a.union(c);
+                    if cand.popcount() == level.k
+                        && every_subset_is_frequent(&cand, &prev)
+                        && support(&b, &cand) >= min_hits
+                    {
+                        next.insert(cand);
+                    }
+                }
+            }
+            let mut got: Vec<ConditionMask> = level.frequent.iter().map(|i| i.mask).collect();
+            let mut want: Vec<ConditionMask> = next.into_iter().collect();
+            got.sort_unstable_by_key(ConditionMask::words);
+            want.sort_unstable_by_key(ConditionMask::words);
+            assert_eq!(
+                got, want,
+                "level {} disagrees with an exhaustive join -- the prefix grouping \
+                 reached a different set of k-sets, which no counter in this file \
+                 would notice",
+                level.k
+            );
+            oracle = want;
+        }
+    }
+
+    #[test]
+    fn without_highest_clears_the_top_bit_and_leaves_an_empty_mask_alone() {
+        let empty = ConditionMask::default();
+        assert_eq!(
+            without_highest(&empty),
+            empty,
+            "nothing set means nothing to clear -- the walk never supplies this, \
+             so it is proved here rather than left as a branch no run reaches"
+        );
+        // Highest is cleared, not lowest, and not merely any one bit.
+        let m = ConditionMask::default()
+            .with_bit(3)
+            .with_bit(70)
+            .with_bit(200);
+        assert_eq!(
+            without_highest(&m),
+            ConditionMask::default().with_bit(3).with_bit(70),
+            "the key must drop the TOP position, across word boundaries"
+        );
+        // A single bit reduces to empty, which is what puts every 1-set of the
+        // k=1 frontier into one block and makes k=2 the exhaustive level it is.
+        assert_eq!(
+            without_highest(&ConditionMask::default().with_bit(5)),
+            empty
         );
     }
 
