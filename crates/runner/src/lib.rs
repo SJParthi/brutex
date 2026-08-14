@@ -127,6 +127,110 @@ impl Sweeper {
     }
 }
 
+/// Pairs one probe may walk while the search is looking for a threshold.
+///
+/// A search parameter, not a result parameter. It is small on purpose: a probe
+/// only has to answer "is this threshold cheap", and a threshold that **finishes**
+/// inside four million pair iterations has finished — running it again under a
+/// larger budget cannot change its answer, because it never reached the smaller
+/// one. So the kept sweep is returned as measured and is never re-walked.
+///
+/// The consequence is that the search is **conservative**: a threshold needing
+/// more than this but less than the ladder's real budget is rejected, so the
+/// chosen threshold may be higher than strictly necessary. That is the safe
+/// direction, and it is stated rather than hidden.
+const PROBE_PAIRS: u64 = 1 << 22;
+
+/// A sweep the engine tuned for itself, and the search that got there.
+#[derive(Clone, Debug)]
+pub struct Auto {
+    /// The deepest sweep that proved affordable, with its census.
+    pub outcome: Outcome,
+    /// The threshold it settled on. `None` when the column was empty or when even
+    /// the cheapest threshold refused.
+    pub min_hits: Option<u64>,
+    /// Ladders walked, one per halving.
+    pub attempts: u32,
+    /// The first threshold that refused. Below this the column is unaffordable.
+    pub refused_below: Option<u64>,
+}
+
+impl Sweeper {
+    /// Sweeps without a caller choosing a threshold.
+    ///
+    /// # The manual step this removes
+    ///
+    /// `min_hits` is the only knob a sweep has, and it cannot be guessed. An
+    /// audit measured this exact column: 53% support finishes in 6 ms, 11%
+    /// support takes 495 seconds, and 9% support ran for over 1,500 seconds
+    /// before it was killed. The safe value is a property of the data, and no
+    /// operator can know it before running.
+    ///
+    /// # Why this could not be written before the pair budget existed
+    ///
+    /// A first attempt predicted affordability from `C(n, 2)` at k=2. It hung,
+    /// because k=2 is never what explodes — the frontier blows up at k≥10, and no
+    /// arithmetic over one level bounds the ladder.
+    ///
+    /// A search only became possible once **every walk terminates**. With the
+    /// pair budget in place a probe that is too low refuses in bounded time
+    /// instead of running for ever, so the search can simply *try*.
+    ///
+    /// # The search
+    ///
+    /// Cost is monotone in the threshold: a higher `min_hits` admits fewer
+    /// positions, so fewer candidates and fewer pairs — always. So the search
+    /// starts at the whole column, where nothing can be frequent, and halves. The
+    /// last probe that **completed** is the answer; the first that refused is the
+    /// edge, reported so a caller can see what this column cannot afford.
+    /// Monotonicity is what makes stopping at the first refusal correct rather
+    /// than merely convenient.
+    ///
+    /// The column is folded **once** and every probe walks the same one, so the
+    /// search costs `log2(bars)` ladder walks over a column built one time.
+    pub fn auto(bars: &[Candle], evaluator: &mut Evaluator) -> Auto {
+        let column = Column::build(bars, evaluator);
+        let live = live_positions();
+        let census = column.census();
+        let first_swept = column.first_swept();
+
+        let mut attempts = 0_u32;
+        let mut best: Option<(u64, Sweep)> = None;
+        let mut refused_below = None;
+        let mut threshold = census.swept;
+
+        // `swept == 0` is a run that never warmed up: no column, nothing to tune.
+        while threshold >= 1 {
+            attempts = attempts.saturating_add(1);
+            let sweep = Ladder::with_min_hits(threshold)
+                .with_pair_budget(PROBE_PAIRS)
+                .walk(column.bits(), &live);
+            if sweep.completed() {
+                best = Some((threshold, sweep));
+            } else {
+                refused_below = Some(threshold);
+                break;
+            }
+            if threshold == 1 {
+                break;
+            }
+            threshold = threshold.checked_div(2).unwrap_or(1).max(1);
+        }
+
+        let (min_hits, sweep) = best.map_or((None, Sweep::default()), |(t, s)| (Some(t), s));
+        Auto {
+            outcome: Outcome {
+                census,
+                first_swept,
+                sweep,
+            },
+            min_hits,
+            attempts,
+            refused_below,
+        }
+    }
+}
+
 /// Every position the indicator crate can compute, as the ladder wants them.
 ///
 /// `Evaluator::positions()` returns `u16`; `Ladder::walk` takes `u32`. The
@@ -506,6 +610,86 @@ mod tests {
         );
         assert!(!out.is_complete(), "and it must not read as a whole answer");
         assert!(out.census.reconciles());
+    }
+
+    /// A sweep with no human number in it, and it terminates.
+    ///
+    /// The first version of this hung. It predicted affordability from `C(n,2)`
+    /// at k=2, and k=2 is never what explodes. This one probes, which is only
+    /// possible because the pair budget makes every probe terminate.
+    #[test]
+    fn auto_tunes_itself_and_finishes() {
+        let bars = synthetic::sessions(8);
+        let auto = Sweeper::auto(&bars, &mut evaluator());
+
+        let chosen = auto.min_hits.expect("a warm column must yield a threshold");
+        assert!(auto.outcome.is_complete(), "what it keeps must be whole");
+        assert_eq!(
+            auto.outcome.sweep.min_hits, chosen,
+            "the sweep must echo the threshold the search settled on"
+        );
+        assert!(chosen <= auto.outcome.census.swept);
+        // Halving, so the search is logarithmic rather than linear.
+        assert!(
+            auto.attempts <= 64,
+            "{} attempts is not a halving search",
+            auto.attempts
+        );
+    }
+
+    /// It never hands back a partial answer, whatever it had to reject.
+    #[test]
+    fn auto_never_returns_a_partial_answer() {
+        let bars = synthetic::sessions(8);
+        let auto = Sweeper::auto(&bars, &mut evaluator());
+        assert!(
+            auto.outcome.sweep.halted.is_none(),
+            "a refused probe must be discarded, never returned"
+        );
+        // Monotone: the edge it found is strictly below what it kept. Checked over
+        // a warm column AND a cold one so both arms of the match are taken —
+        // an arm no run enters is a region llvm-cov counts forever.
+        for column in [synthetic::sessions(8), synthetic::sessions(1)] {
+            let a = Sweeper::auto(&column, &mut evaluator());
+            let monotone = match (a.min_hits, a.refused_below) {
+                (Some(kept), Some(edge)) => edge < kept,
+                _ => true,
+            };
+            assert!(monotone, "the refused threshold must be below the kept one");
+        }
+    }
+
+    /// A column of exactly one swept bar, which is where the search starts at 1.
+    ///
+    /// The `threshold == 1` exit is otherwise unreachable: on any real column the
+    /// search refuses long before halving that far, so the arm would be a region
+    /// no run enters.
+    #[test]
+    fn auto_over_a_single_swept_bar_starts_and_stops_at_one() {
+        let all = synthetic::sessions(8);
+        let warm = Sweeper::auto(&all, &mut evaluator())
+            .outcome
+            .first_swept
+            .expect("eight sessions warm up");
+        // One bar past the warm-up boundary, so exactly one bar is swept.
+        let head = all.get(..warm.saturating_add(1)).unwrap_or(&[]);
+        let auto = Sweeper::auto(head, &mut evaluator());
+
+        assert_eq!(auto.outcome.census.swept, 1, "exactly one bar past warm-up");
+        assert_eq!(auto.attempts, 1, "the search starts at 1 and stops there");
+        assert_eq!(auto.min_hits, Some(1));
+        assert!(auto.outcome.census.reconciles());
+    }
+
+    #[test]
+    fn auto_over_a_cold_or_empty_column_attempts_nothing() {
+        for bars in [synthetic::sessions(1), Vec::new()] {
+            let auto = Sweeper::auto(&bars, &mut evaluator());
+            assert_eq!(auto.min_hits, None, "there was no column to tune");
+            assert_eq!(auto.attempts, 0, "and so nothing was walked");
+            assert!(!auto.outcome.is_complete());
+            assert!(auto.outcome.census.reconciles());
+        }
     }
 
     #[test]
