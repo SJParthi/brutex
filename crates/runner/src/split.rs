@@ -124,13 +124,76 @@ pub fn purged_folds(bars: usize, horizon: Horizon, folds: usize) -> Vec<Fold> {
     out
 }
 
+/// Growing-prefix folds: train on everything before, test on what comes next.
+///
+/// # Why this exists beside [`purged_folds`], rather than instead of it
+///
+/// [`purged_folds`] puts a test window in the MIDDLE of the series, which
+/// leaves training data on both sides. That is the right shape for a
+/// cross-validated overfitting probability — and it **cannot drive this
+/// engine's evaluator**.
+///
+/// `indicators::Evaluator` is stateful: EMAs, session rollovers, a warm-up
+/// prefix. It consumes bars in order and cannot be handed two disjoint ranges
+/// without either restarting the warm-up in the middle of the series or
+/// pretending the gap is not there. Both are lies about what the indicators
+/// saw, and the second is the quieter one.
+///
+/// So a walk-forward over THIS engine is anchored: `train = 0..t`,
+/// `test = t+H..end`, both contiguous, with the purge between them. The
+/// evaluator sees an unbroken prefix, which is the only thing it can honestly
+/// be given.
+///
+/// # What it costs, stated rather than hidden
+///
+/// An anchored walk-forward tests each period once and trains on everything
+/// before it, so the earliest fold has the least data and the latest has the
+/// most. It is a weaker design than k-fold — fewer test observations, and the
+/// folds are not exchangeable. It is what the evaluator permits.
+///
+/// `splits` is the number of TEST periods. The first `1/(splits+1)` of the
+/// series is training-only, so a model always has something to fit before the
+/// first judgement.
+#[must_use]
+pub fn anchored_folds(bars: usize, horizon: Horizon, splits: usize) -> Vec<Fold> {
+    let h = horizon.as_bars() as usize;
+    let blocks = splits.saturating_add(1);
+    if splits == 0 || bars == 0 || bars < blocks {
+        return Vec::new();
+    }
+    let width = bars / blocks;
+
+    let mut out: Vec<Fold> = Vec::with_capacity(splits);
+    for s in 0..splits {
+        // Training is everything up to the boundary; the test period follows the
+        // purge. The last split takes the remainder so no bar is lost.
+        let boundary = s.saturating_add(1).saturating_mul(width);
+        let test_start = boundary.saturating_add(h).min(bars);
+        let test_end = if s.saturating_add(1) == splits {
+            bars
+        } else {
+            boundary.saturating_add(width).saturating_add(h).min(bars)
+        };
+        out.push(Fold {
+            purged: test_start.saturating_sub(boundary),
+            embargoed: 0,
+            // The right-hand training range is deliberately empty: an anchored
+            // fold never trains on anything after its test period, because that
+            // is the future at the moment the decision is made.
+            train: (0..boundary, 0..0),
+            test: test_start..test_end,
+        });
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::purged_folds;
+    use super::{anchored_folds, purged_folds};
     use crate::outcome::Horizon;
 
     fn h(n: u32) -> Horizon {
@@ -234,6 +297,73 @@ mod tests {
         let one = purged_folds(100, h(5), 1);
         assert_eq!(one.len(), 1);
         assert_eq!(one.first().map(super::Fold::train_len), Some(0));
+    }
+
+    #[test]
+    fn an_anchored_fold_never_trains_on_its_own_future() {
+        // The property that distinguishes a walk-forward from a k-fold: at the
+        // moment a decision is made, everything after it is the future.
+        let bars = 1_000;
+        let folds = anchored_folds(bars, h(15), 4);
+        assert_eq!(folds.len(), 4);
+        for f in &folds {
+            assert!(
+                f.train.1.is_empty(),
+                "an anchored fold has no training data after its test period"
+            );
+            assert!(
+                f.train.0.end <= f.test.start,
+                "training must end before testing begins: {:?} then {:?}",
+                f.train.0,
+                f.test
+            );
+            // And the purge holds: no training bar's outcome reaches the test.
+            for i in f.train.0.clone() {
+                assert!(
+                    i.saturating_add(15) < f.test.start || f.test.is_empty(),
+                    "training bar {i} reaches into {:?}",
+                    f.test
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_training_prefix_grows_and_the_test_periods_advance() {
+        let folds = anchored_folds(1_000, h(10), 4);
+        let mut previous_train = 0_usize;
+        let mut previous_test_start = 0_usize;
+        for f in &folds {
+            assert!(
+                f.train_len() > previous_train,
+                "each anchored fold must train on strictly more than the last"
+            );
+            assert!(
+                f.test.start > previous_test_start,
+                "and test strictly later"
+            );
+            previous_train = f.train_len();
+            previous_test_start = f.test.start;
+        }
+        // The last fold reaches the end of the series.
+        assert_eq!(folds.last().map(|f| f.test.end), Some(1_000));
+    }
+
+    #[test]
+    fn an_anchored_split_that_cannot_be_honoured_returns_nothing() {
+        assert!(anchored_folds(0, h(5), 3).is_empty(), "no bars");
+        assert!(anchored_folds(100, h(5), 0).is_empty(), "no splits");
+        assert!(
+            anchored_folds(3, h(5), 10).is_empty(),
+            "more blocks than bars cannot be honoured"
+        );
+        // A horizon swallowing the series leaves empty test periods rather than
+        // wrapping: the purge consumes everything after the boundary.
+        let swallowed = anchored_folds(50, h(1_000), 2);
+        for f in &swallowed {
+            assert!(f.test.is_empty(), "nothing survives the purge to be tested");
+            assert!(f.train_len() > 0, "but the prefix is still trainable");
+        }
     }
 
     #[test]
