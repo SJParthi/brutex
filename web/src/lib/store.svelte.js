@@ -413,7 +413,12 @@ let foldMemo = { key: null, value: null };
 export function foldMonths(months, scope) {
   const list = [...(months ?? [])];
   const key = foldKey(store.reads, list, scope);
-  if (foldMemo.key === key) return foldMemo.value;
+  // THE VALUE IS CHECKED, NOT ONLY THE KEY. `foldMemo` starts
+  // `{ key: null, value: null }`, so a hit is only a hit if something was
+  // actually stored — and a memo that returns null on a hit would hand every
+  // caller `shot.units` on nothing. The checker flagged exactly that: six
+  // "possibly null" reads on `/ingest` traced back through this one return.
+  if (foldMemo.key === key && foldMemo.value) return foldMemo.value;
   // THE ARITHMETIC IS IN `$lib/fold.js`, WHERE A TEST CAN REACH IT. This
   // function owns the shared reading, the stamp and the memo; what a scoped
   // window actually counts is a pure function with no runes in it.

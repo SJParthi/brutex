@@ -1454,10 +1454,19 @@
   const feedFloor = $derived.by(() => {
     const wire = feeds.active ?? '';
     if (rungsChosen.length === 0) return pairFloor(wire, rung);
-    let worst = null;
-    for (const r of rungsChosen) {
+    // SEEDED FROM THE FIRST RUNG RATHER THAN FROM null.
+    //
+    // The old shape started at `null` and relied on `!worst` being true on the
+    // first pass to fill it. That is true — the early return above guarantees at
+    // least one iteration — but it is true by an argument a reader has to
+    // reconstruct, and the checker cannot reconstruct it at all: it flagged
+    // `worst.f` and `worst.r` on the return as possibly null. Seeding removes
+    // the null from the type instead of asserting it away, so the guarantee is
+    // in the code rather than in a comment.
+    let worst = { r: rungsChosen[0], f: pairFloor(wire, rungsChosen[0].dir) };
+    for (const r of rungsChosen.slice(1)) {
       const f = pairFloor(wire, r.dir);
-      if (!worst || (f.at && (!worst.f.at || f.at > worst.f.at))) worst = { r, f };
+      if (f.at && (!worst.f.at || f.at > worst.f.at)) worst = { r, f };
     }
     return { ...worst.f, rung: worst.r };
   });
@@ -3533,11 +3542,20 @@
 
   $effect(() => {
     if (!vEl) return;
+    // CAPTURED, NOT RE-READ. `vEl` is `$state` and the observer callback fires
+    // LATER — after a route change or a conditional block closing, the binding
+    // can be null by the time it runs, and `vEl.clientHeight` inside the
+    // callback would throw on a page the operator has already left. The early
+    // return above proves nothing about a callback that outlives it.
+    //
+    // Holding the element the observer was attached to also makes the two agree
+    // by construction: it can only ever measure the node it observes.
+    const el = vEl;
     const ro = new ResizeObserver(() => {
-      vH = vEl.clientHeight;
+      vH = el.clientHeight;
     });
-    ro.observe(vEl);
-    vH = vEl.clientHeight;
+    ro.observe(el);
+    vH = el.clientHeight;
     return () => ro.disconnect();
   });
 
@@ -4705,7 +4723,14 @@
                         resolved: <button
                           class="pathbtn mono"
                           type="button"
-                          onclick={() => (folder = folderReach.body.path)}
+                          onclick={() => {
+                            // GUARDED, like the placeholder two lines above
+                            // already is. Without it a resolved-path button
+                            // rendered before the probe answered would assign
+                            // `undefined` into the folder box and the archive
+                            // path would silently become empty.
+                            if (folderReach.body?.path) folder = folderReach.body.path;
+                          }}
                           title="Use the folder this build resolves on its own — BRUTEX_ARCHIVES, else $HOME/.brutex/vendor-data, one subfolder per feed. Resolved exactly the way the store and masters roots are."
                           >{folderReach.body.path}</button
                         >
@@ -4926,7 +4951,13 @@
                 </p>
               {/if}
 
-              {#if etaSecs !== null}
+              <!-- GUARDED ON `rate` ITSELF, not only on `etaSecs`. The two are
+                   separate `$derived`s and `etaSecs` is `rate && …`, so today a
+                   non-null eta does imply a non-null rate — but that is a
+                   correlation a reader has to chase across two definitions and
+                   an edit to `etaSecs` would silently break. The dereference
+                   guards on the value it dereferences. -->
+              {#if etaSecs !== null && rate !== null}
                 <p class="hint">
                   <span class="tag info">extrapolation</span>
                   About <b class="mono">{clockOf(etaSecs * 1000)}</b> left, from a measured
@@ -5834,7 +5865,7 @@
         >
           {roster.busy
             ? 'Reading…'
-            : `Measure what ${active.display} is missing — ${n(feeds.all.length)} request(s)`}
+            : `Measure what ${active?.display ?? 'this feed'} is missing — ${n(feeds.all.length)} request(s)`}
         </button>
         {#if rosterBlock}
           <span class="hint warn">Cannot be measured yet: {rosterBlock}</span>
