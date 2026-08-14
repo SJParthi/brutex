@@ -203,7 +203,7 @@ impl Frontier {
             .saturating_add(self.excluded)
             .saturating_add(self.pruned)
             .saturating_add(self.infrequent)
-            .saturating_add(count_u64(self.frequent.iter()));
+            .saturating_add(len_u64(self.frequent.len()));
         accounted == self.generated
     }
 }
@@ -411,7 +411,7 @@ impl Ladder {
     /// even if every candidate were frequent.
     #[must_use]
     pub fn walk(self, bar_bits: &[ConditionMask], live: &[u32]) -> Sweep {
-        let bars = count_u64(bar_bits.iter());
+        let bars = len_u64(bar_bits.len());
         let mut sweep = Sweep {
             bars,
             min_hits: self.min_hits,
@@ -510,7 +510,7 @@ impl Ladder {
             }
         }
         sort_canonically(&mut first);
-        let generated = count_u64(live.iter());
+        let generated = len_u64(live.len());
         // `duplicates` was hardcoded `0` here, under a comment claiming none were
         // possible because "`live` is deduplicated". `live` is deduplicated BY THIS LOOP,
         // out of a caller list that may contain anything -- so the claim described the
@@ -521,7 +521,7 @@ impl Ladder {
             frequent: first,
             generated,
             duplicates,
-            excluded: count_u64(sweep.excluded.iter()),
+            excluded: len_u64(sweep.excluded.len()),
             pruned: 0,
             infrequent,
         };
@@ -572,7 +572,18 @@ impl Ladder {
         // allocation `docs/06-limits.md` §5 is about -- so this reserves the floor
         // rather than the ceiling, and says which.
         let mut seen: HashSet<ConditionMask> = HashSet::with_capacity(frequent_prev.len());
-        let mut out: Vec<Itemset> = Vec::new();
+        // PRE-SIZED, and it was not. `Vec::new()` here meant the survivor vector
+        // grew by doubling through every level, while its neighbour above carried
+        // a comment explaining why pre-sizing matters -- gate 11 rule 3, "an
+        // unsized map is a rehash the caller did not ask for", applied to one of
+        // the two collections and not the other. An audit found the gap.
+        //
+        // The floor, not the ceiling, for the reason `seen` uses the same one:
+        // the join emits at least `|F|` candidates before any are pruned, and
+        // reserving the true `|F|^2/2` is the allocation `docs/06-limits.md` §5 is
+        // about. Capped at the ladder's own ceiling so a huge frontier cannot
+        // reserve past what a level is allowed to hold anyway.
+        let mut out: Vec<Itemset> = Vec::with_capacity(frequent_prev.len().min(self.ceiling));
         let mut generated: u64 = 0;
         let mut duplicates: u64 = 0;
         let mut pruned: u64 = 0;
@@ -695,8 +706,22 @@ fn sort_canonically(v: &mut [Itemset]) {
 }
 
 /// `usize` count as `u64` without a cast lint or a panic.
-fn count_u64<I: Iterator>(it: I) -> u64 {
-    it.fold(0_u64, |n, _| n.saturating_add(1))
+/// A collection's length, as a `u64`.
+///
+/// # This was a fold, and the fold was a rule breach
+///
+/// It read `it.fold(0, |n, _| n + 1)` over an iterator — O(n) where `.len()` is
+/// O(1). An adversarial audit measured the difference over a 1,222,791-element
+/// slice: **612,083 ns against 0 ns**. It ran once per walk rather than once per
+/// candidate, so the cost was 0.6 ms and not a hot loss, but `CLAUDE.md` §3.4
+/// does not grade a scan by how often it happens — "a change that makes one of
+/// them scan fails the bench gate", and no bench row covered this one.
+///
+/// `try_from` rather than a cast, because `cast_possible_truncation` is denied
+/// workspace-wide; the `Err` arm cannot be reached on any 64-bit target and
+/// lives inside `core`, so it leaves no uncoverable region in this crate.
+fn len_u64(n: usize) -> u64 {
+    u64::try_from(n).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -1181,6 +1206,80 @@ mod tests {
                 candidates: 2,
                 ceiling: 2
             }
+        );
+    }
+
+    /// A silent depth cap is caught, which `the_ceiling_cannot_choose_a_depth`
+    /// alone did not do.
+    ///
+    /// An adversarial audit injected `if k > 4 { break; }` into `walk` — a
+    /// hardcoded, silent truncation returning a sweep whose `completed()` is
+    /// still true, which is precisely the §6-forbidden thing and precisely the
+    /// predecessor's `k = [1, 2]` failure. **All 37 tests passed.** The fixture
+    /// in that test reaches depth 2, so it cannot observe a cap at 3 or above.
+    ///
+    /// Eight positions co-occurring on three bars makes every subset frequent,
+    /// so extinction happens at k=9 and the ladder must report depth 8 with
+    /// exactly `2^8 - 1 = 255` subsets. Any cap below 8 changes both numbers.
+    ///
+    /// **Position 6 is not among them, and that is not arbitrary.** It is a
+    /// retired tombstone, so `walk` excludes it before k=1 under D-0080 and the
+    /// first draft of this fixture reached depth 7 with seven live bits while
+    /// claiming eight. The ninth position exists only so the other eight are not
+    /// set on *every* bar — at support == bars they would all be excluded as
+    /// `AlwaysTrue` instead — and it contributes its own k=1 singleton, which is
+    /// why the count is 256 rather than 255.
+    #[test]
+    fn a_silently_capped_depth_would_be_caught() {
+        let deep: &[u32] = &[0, 1, 2, 3, 4, 5, 7, 8];
+        let b = bars(&[deep, deep, deep, &[9], &[9]]);
+        let s = Ladder::with_min_hits(2).walk(&b, &[0, 1, 2, 3, 4, 5, 7, 8, 9]);
+
+        assert!(s.completed(), "nothing should breach the default ceiling");
+        assert_eq!(s.depth(), 8, "eight co-occurring live bits must reach k=8");
+        assert_eq!(
+            s.all_frequent().count(),
+            256,
+            "every non-empty subset of the eight, plus the ninth's singleton"
+        );
+        assert!(
+            s.levels.last().is_some_and(|l| l.frequent.is_empty()),
+            "the ladder must die of extinction, not of a cap"
+        );
+    }
+
+    /// The transpose stays wired into the sweep.
+    ///
+    /// # Why this is a source check and not a behavioural one
+    ///
+    /// The two layouts are answer-equivalent by construction — that is the whole
+    /// claim of `the_two_layouts_agree_on_every_candidate` — so **no test of the
+    /// output can tell them apart.** An audit proved it: reverting the k=1 site
+    /// to the row-major free function, which un-does the cheaper walk entirely,
+    /// survives every behavioural test AND gate 8. (The spelling of that call is
+    /// deliberately not repeated in this paragraph — it would be counted below.)
+    /// `C-E-04` is a ratio row that read `ok` before the wiring and `ok` after,
+    /// and `C-E-06` benchmarks the two layouts against each other directly rather
+    /// than through `walk`. Nothing in the repository would have noticed.
+    ///
+    /// So the guard has to be structural, which is the shape
+    /// `the_sweep_cannot_compute_a_condition_bit` already uses. The needles are
+    /// assembled with `concat!` because a literal spelling of them would appear
+    /// in this file and count itself.
+    #[test]
+    fn the_sweep_counts_support_against_the_transposed_column() {
+        let src = include_str!("lib.rs");
+        assert_eq!(
+            src.matches(concat!("column.", "support(&")).count(),
+            2,
+            "both support sites in the sweep -- k=1 and the level join -- must \
+             read the transposed column. One of them has gone back to the \
+             row-major walk, which is 9x more bytes moved per candidate and which \
+             no behavioural test can see."
+        );
+        assert!(
+            src.contains(concat!("Column::", "transpose(bar_bits)")),
+            "the walk must build the transposed layout once, before k=1"
         );
     }
 

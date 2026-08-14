@@ -31,9 +31,31 @@
 //!
 //! [`Evaluator::warmed_up`] published that boundary and **no caller consumed
 //! it**. This one does. A mask enters the column only if the run had already
-//! warmed up *before* the bar was folded, which is the correct test and not the
-//! convenient one: `step` emits before it folds, so a run that becomes warm
-//! *because of* bar `N` emitted bar `N`'s mask while it was still cold.
+//! warmed up *before* the bar was folded.
+//!
+//! ## The reason this doc first gave was wrong, and the correction is the point
+//!
+//! It said `step` emits before it folds, so the bar that makes a run warm emits
+//! its mask while still cold. **Three quarters of that is false.**
+//! [`Evaluator::warmed_up`] reads four things, and `prev5`, `yesterday` and
+//! `previous` are all written by `close_the_books` inside the session-rollover
+//! block, which runs *six lines before* the emit. Only the trend conjunct is
+//! updated by the fold that follows.
+//!
+//! So on the shape this engine actually sweeps — NSE one-minute spot, 375-bar
+//! sessions — the binding conjunct is the five-session ladder and not the
+//! 200-candle trend seed, and it fills before the emit. Reading the verdict
+//! after `step` would therefore sweep a bar that is genuinely **warm**. The cost
+//! of reading it before is one lost warm bar per run: 1 of 1,125 on an
+//! eight-session fixture.
+//!
+//! **Before is still what this module does**, and now for the true reason: it is
+//! correct for *every* shape, not just this one. The trend conjunct is the last
+//! to fill whenever a session is shorter than 200 bars — a daily timeframe, a
+//! Muhurat session, any instrument whose sessions are short — and on those the
+//! after-reading sweeps a bar whose EMA200 could not answer. Losing one warm bar
+//! is the price of a boundary that does not depend on the bar count per session,
+//! and paying it knowingly is different from paying it by accident.
 //!
 //! `warmed_up` is monotone, so the emitted column is a contiguous suffix of the
 //! offered bars less any refusals inside it —
@@ -210,10 +232,11 @@ impl Column {
         for (index, bar) in bars.iter().enumerate() {
             census.offered = census.offered.saturating_add(1);
 
-            // The verdict for the state BEFORE this bar folds, which is the
-            // state its own mask is emitted from. Reading it after `step` would
-            // sweep the one bar that made the run warm, whose bits were computed
-            // while it was not.
+            // The verdict for the state BEFORE this bar folds. On 375-bar
+            // sessions this drops one genuinely warm bar per run; on any session
+            // shorter than the 200-candle trend seed it is the only reading that
+            // does not sweep a bar whose EMA200 could not answer. The module doc
+            // carries the measurement and the correction it replaced.
             let warm = evaluator.warmed_up();
 
             match evaluator.step(bar) {
