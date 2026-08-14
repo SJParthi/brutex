@@ -282,7 +282,10 @@ jobs:
           # not a field — and gate 1c passes on the same tree. Read before
           # adding: the question this list answers is whether the word is a
           # VENDOR'S, and these three are its URL and nothing else.
-          vendor_wire='groww dhan truedata gdfl charts v1 v2'
+          # `instruments` joins for the same reason `charts` did: it is a
+          # `PathSegment::Literal` in a vendor's URL (vendor.rs:4330), a route on a
+          # public API rather than anything about an account.
+          vendor_wire='groww dhan truedata gdfl charts v1 v2 instruments'
 
           # ---- group 2b: the CLAIM STANDINGS, which are wire words about WHO
           # made a claim and are not vendor, org, env or field names at all.
@@ -311,10 +314,12 @@ jobs:
           #   digit account number is a perfectly ordinary <org> segment. These
           #   four are one digit each and name no account.
           # construction — no operator's path reads `orgone/testenv/vendorone`.
+          # 5633 and 999 sit beside 1 2 3 9: invented instrument_id and vendor_id
+          # values in http.rs and universe.rs fixtures, next to invented ISINs.
           config_fixture='
           orgone testenv vendorone vendortwo fieldone fieldtwo fieldthree
           field-one_2 a-value
-          1 2 3 9
+          1 2 3 9 5633 999
           '
 
           # ---- group 4: deliberately secret-SHAPED fixtures, which exist to
@@ -344,6 +349,12 @@ jobs:
           #   stolen       — the path a test redirect points at, named to read
           #                  as what following it would have meant (D-0050)
           #   redirect window_async — substrings a refusal must contain
+          # before broker censused declares indistinguishable mixed nested options
+          # too-deep u unused -- scratch directories and assertion substrings,
+          # every one inside a test. folder.rs builds directories with those
+          # names; nse.rs and resolve.rs assert that refusal messages CONTAIN
+          # before, declares and indistinguishable; http.rs passes u and unused as
+          # throwaway URL arguments it never reads.
           scaffold='
           a v one two no ok big good invalid genesis manifest write read-only deny
           anything mkdir notutf8 atthebound brutex-pull june july nifty
@@ -356,6 +367,8 @@ jobs:
           b h 2026 half nope other reads signs forwards readable
           bars empty idempotent lands paise shared lock-held
           brutex-ssm-no-such-file-ever
+          before broker censused declares indistinguishable mixed nested options
+          too-deep u unused
           '
 
           # ---- group 6: granularity and session tokens. `Granularity::dir`
@@ -419,10 +432,17 @@ jobs:
           # are the two query parameters a GET vendor takes its window in
           # (`Method::Get` in http.rs). All three are wire vocabulary, which is
           # the category this group exists for.
+          # symbol interval p success -- each read against its own call site.
+          # symbol is an NSE record field (nse.rs:632); interval a vendor query
+          # placeholder (vendor.rs:4337); p the page parameter NSE endpoints take
+          # (nse.rs:1057); success a status VALUE in a canned response body
+          # (http.rs:1744). All four are vendor vocabulary on the wire. None names
+          # an account, an environment or a credential field.
           record_field='
           open high low close volume timestamp open_interest payload csv
           data from to candles
           status error code message
+          symbol interval p success
           '
 
           # ---- group 9: an HTTP HEADER NAME, not a value. One broker sends
