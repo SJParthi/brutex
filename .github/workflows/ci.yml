@@ -275,7 +275,14 @@ jobs:
           # Note for the reader: CLAUDE.md §8 says crates/pull "holds no org,
           # env, or vendor literal". Four vendor literals are on this line. The
           # sentence and the tree disagree and the tree is not being hidden.
-          vendor_wire='groww dhan truedata gdfl'
+          # charts, v1 and v2 joined as URL PATH COMPONENTS of a vendor's candle
+          # endpoint: PathSegment::Literal("charts") at vendor.rs:3640 and the
+          # two API version segments beside it at 3639 and 3837. They name a
+          # route on a broker's public API — not an account, not an environment,
+          # not a field — and gate 1c passes on the same tree. Read before
+          # adding: the question this list answers is whether the word is a
+          # VENDOR'S, and these three are its URL and nothing else.
+          vendor_wire='groww dhan truedata gdfl charts v1 v2'
 
           # ---- group 2b: the CLAIM STANDINGS, which are wire words about WHO
           # made a claim and are not vendor, org, env or field names at all.
@@ -329,7 +336,7 @@ jobs:
           #                  as what following it would have meant (D-0050)
           #   redirect window_async — substrings a refusal must contain
           scaffold='
-          a v one no ok big good invalid genesis manifest write read-only deny
+          a v one two no ok big good invalid genesis manifest write read-only deny
           anything mkdir notutf8 atthebound brutex-pull june july nifty
           core store pull ratio
           real next small bounded three summed everything february
@@ -444,7 +451,16 @@ jobs:
           # "token", four characters, standing where a value would be if this
           # impl were derived. That it appears here is the evidence the redact
           # is in place, not evidence of a leak.
-          debug_label='base_url token'
+          #
+          # `key` is the third caption, and the paragraph above argues it
+          # unchanged: it is the word standing where a value would be if this
+          # impl were derived, and the value beside it is the fixed string
+          # `<redacted>` — crates/pull/src/http.rs:87 reads
+          # `.field("key", &self.key.as_ref().map(|_| "<redacted>"))`. Its
+          # presence on this list is the evidence the redact exists, not
+          # evidence of a leak, which is exactly what the note about `token`
+          # says and is the reason both are read rather than waved through.
+          debug_label='base_url token key'
 
           # ---- group 12: DATES ON THE WIRE, in the two compact formats.
           # `DateFormat::{CompactYmd,CompactDmy}` render 2025-07-01 as
