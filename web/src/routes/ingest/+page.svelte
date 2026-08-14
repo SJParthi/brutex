@@ -1032,6 +1032,27 @@
    * click away.
    */
   let uniTuck = $state(false);
+  /**
+   * WHAT IS IN THE UNIVERSE DRAWER, and whether it has to be open.
+   *
+   * The sweep pair sits in here with the refusals — the operator wants the NSE
+   * families leading the menu — but it is LIVE and it is the DEFAULT selection
+   * (`universe` starts at `'swept'`). A closed drawer holding the current
+   * choice would draw a menu with no visible tick anywhere, which reads as
+   * "nothing is selected" on the one control that always has a selection.
+   *
+   * So `uniOpen` is forced true whenever the selection lives inside the drawer,
+   * and `uniTuck` only decides it when the selection is visible above. The
+   * operator can still fold it once he has picked one of the families.
+   */
+  const uniTucked = $derived([SWEPT, ...refusedUniverses.map((x) => x.u)]);
+  const selectionIsTucked = $derived(uniTucked.some((u) => u.id === universe));
+  const uniOpen = $derived(uniTuck || selectionIsTucked);
+  const uniTuckLabel = $derived(
+    refusedUniverses.length === 0
+      ? 'the pair this engine sweeps'
+      : `the swept pair + ${n(refusedUniverses.length)} no request can name`
+  );
   let segSet = $state(new Set(['spot']));
   /**
    * THE TIMEFRAME IS A SET, NOT A VALUE.
@@ -4249,24 +4270,46 @@
                           </button>
                         {/each}
 
-                        <!-- THE DRAWER, and it holds the refusals rather than
-                             deleting them. Every reason `universeRefusal`
-                             produces is still readable, and each one names
-                             whether the gap is membership or the wire. -->
-                        {#if refusedUniverses.length > 0}
+                        <!-- THE DRAWER. It holds the SWEEP PAIR and the
+                             refusals, in that order, and it deletes neither.
+                             The operator asked for the NSE families to lead the
+                             menu; §1 still names NSE-NIFTY and NSE-BANKNIFTY as
+                             the whole engine surface, and it is still the only
+                             set a broker path can serve, so it moves DOWN
+                             rather than out. Removing it would leave this form
+                             unable to build a legal request at all.
+                             The refusals keep their reasons; each names whether
+                             the gap is membership or the wire. -->
+                        {#if uniTucked.length > 0}
                           <button
                             class="ddr tuck"
                             type="button"
-                            aria-expanded={uniTuck}
-                            onclick={() => (uniTuck = !uniTuck)}
+                            aria-expanded={uniOpen}
+                            onclick={() => (uniTuck = !uniOpen)}
                           >
-                            <span class="tk">{uniTuck ? '▾' : '▸'}</span>
-                            <span class="nm"
-                              >{n(refusedUniverses.length)} set(s) no request can name</span
-                            >
-                            <span class="ct">{uniTuck ? 'hide' : 'show why'}</span>
+                            <span class="tk">{uniOpen ? '▾' : '▸'}</span>
+                            <span class="nm">{uniTuckLabel}</span>
+                            <span class="ct">{uniOpen ? 'hide' : 'show'}</span>
                           </button>
-                          {#if uniTuck}
+                          {#if uniOpen}
+                            <!-- THE SWEEP PAIR IS IN HERE AND IT IS LIVE. A
+                                 drawer that only ever held dead rows would make
+                                 this one look dead too, so it keeps its tick,
+                                 its click and its own note. -->
+                            <button
+                              class="ddr"
+                              type="button"
+                              aria-pressed={universe === SWEPT.id}
+                              title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
+                              onclick={() => {
+                                universe = SWEPT.id;
+                                drop = null;
+                              }}
+                            >
+                              <span class="tk">{universe === SWEPT.id ? '✓' : ''}</span>
+                              <span class="nm">{SWEPT.label}</span>
+                              <span class="ct">the pair this engine sweeps</span>
+                            </button>
                             {#each refusedUniverses as x (x.u.id)}
                               <button class="ddr off" type="button" disabled title={x.why}>
                                 <span class="tk"></span>
@@ -4276,21 +4319,6 @@
                             {/each}
                           {/if}
                         {/if}
-                        <hr />
-                        <button
-                          class="ddr"
-                          type="button"
-                          aria-pressed={universe === SWEPT.id}
-                          title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                          onclick={() => {
-                            universe = SWEPT.id;
-                            drop = null;
-                          }}
-                        >
-                          <span class="tk">{universe === SWEPT.id ? '✓' : ''}</span>
-                          <span class="nm">{SWEPT.label}</span>
-                          <span class="ct">the pair this engine sweeps</span>
-                        </button>
                       </div>
                     {/if}
                   </div>
