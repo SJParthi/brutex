@@ -1398,6 +1398,40 @@
    * more ticks than it can send.
    */
   let rungSet = $state(new Set(['1min']));
+  /**
+   * WHETHER THE OPERATOR HAS TOUCHED THE TIMEFRAME HIMSELF.
+   *
+   * `false` until he does, and it is what separates HIS choice from THE
+   * DEFAULT — two things this control had no way to tell apart, and the
+   * difference is the whole of the bug below.
+   *
+   * # What went wrong, measured
+   *
+   * The default is `1min`. Dhan's descriptor declares `Day1` and nothing else,
+   * because its `bars_path` is pinned to the DAILY endpoint. So opening the
+   * page on Dhan and pressing Start sent a minute request that
+   * `crates/api`'s `served()` refused by name — and the audit journal caught
+   * exactly that at 21:11 on 14 Aug 2026:
+   *
+   * > `360ONE: Dhan does not serve 1min bars. Nothing was sent.`
+   *
+   * The refusal is correct and it is the gate working. What was wrong is that
+   * the form's OWN default guaranteed it: a first-time operator on this feed
+   * could not press the only button on the page without being refused, and
+   * nothing he did caused it.
+   *
+   * # Why this is not the drop effect below, and must not be folded into it
+   *
+   * That effect drops a rung the vendor can NEVER serve, and it deliberately
+   * keeps one this build merely does not fetch — "those refusals are somebody's
+   * work item, and taking the tick away would be this page deciding the work
+   * will never be done". That reasoning is about a tick the OPERATOR made.
+   *
+   * A default is not a decision he made. Moving it costs him nothing and tells
+   * him nothing false. Moving HIS tick would do both. So the two are separated
+   * by this flag rather than by making the drop rule cleverer.
+   */
+  let rungTouched = $state(false);
   /** The ticked rungs, in the ladder's order. Never the tick order. */
   const rungsChosen = $derived(RUNGS.filter((r) => rungSet.has(r.dir)));
   /**
@@ -1679,6 +1713,44 @@
    * this is a FEED CHANGE. Without it the effect would re-run on its own write,
    * and an effect that reacts to itself is one bad predicate away from a loop.
    */
+  /**
+   * AN UNTOUCHED DEFAULT FOLLOWS THE FEED; A TICK HE MADE DOES NOT.
+   *
+   * Runs before the drop effect below and answers a different question. That
+   * one asks *can this vendor ever serve the rung the operator chose*; this one
+   * asks *does the rung nobody chose have any chance of working here*.
+   *
+   * `feedFetches` is `/feeds.json`'s `history[].served`, which is the SAME bit
+   * `crates/api`'s `served()` gates the POST on — so "this will be refused" is
+   * read from the server rather than guessed, and a feed whose row carries no
+   * such flag (`null`) is left alone: an unknown is not a reason to move a
+   * default, and nothing here refuses on the strength of a missing field.
+   *
+   * The FIRST rung the feed declares, in the ladder's own order, so a feed that
+   * serves both a minute and a day opens on the minute — the finer of the two,
+   * and the one the engine sweeps.
+   *
+   * `untrack`, for the reason the drop effect gives: this effect WRITES
+   * `rungSet`, and reading it as a dependency would make every one of its own
+   * writes schedule another run.
+   */
+  $effect(() => {
+    const wire = feeds.active ?? '';
+    void wire;
+    untrack(() => {
+      if (rungTouched || !rungServed) return;
+      const chosen = RUNGS.filter((r) => rungSet.has(r.dir));
+      // ONLY WHERE EVERY TICKED RUNG WOULD BE REFUSED. One rung out of two
+      // that this build does not fetch is a partial run and a stated one, not
+      // a form that cannot be submitted.
+      if (chosen.length > 0 && chosen.some((r) => feedFetches(r.dir) !== false)) return;
+      const usable = RUNGS.find((r) => feedFetches(r.dir) === true);
+      if (usable && !rungSet.has(usable.dir)) {
+        rungSet = new Set([usable.dir]);
+      }
+    });
+  });
+
   let droppedRungs = $state(null);
   $effect(() => {
     const wire = feeds.active ?? '';
@@ -5205,6 +5277,9 @@
                     selected={rungSet}
                     onchange={(sel) => {
                       rungSet = sel;
+                      // FROM HERE THE TIMEFRAME IS HIS, and the default stops
+                      // following the feed. See `rungTouched`.
+                      rungTouched = true;
                       // The drop notice is the operator's to dismiss, and
                       // touching this control is how he does it: he has just
                       // answered it.
