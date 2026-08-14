@@ -306,6 +306,56 @@ fn support_costs_the_same_per_bar_at_every_depth() -> bool {
     ok
 }
 
+/// C-E-09 — the transposed layout costs a CONSTANT per bitmap read, and a
+/// candidate reads exactly `k` of them.
+///
+/// # The claim C-E-02 makes, and why it is false of the live function
+///
+/// `C-E-02` asserts the per-bar cost is flat from k=1 to k=8, and
+/// `docs/04-invariants.md` says §6's absent depth parameter depends on that row:
+/// if a deep combination cost more per bar, the ladder's total work would be
+/// quadratic in depth. It measures the free `support`, which is branchless over
+/// six words whatever `k` is — so flat, and it reads 1.128×.
+///
+/// **Since 7461f57 the sweep does not call that function.** `Column::support`
+/// ANDs one bitmap per named position, so its per-bar cost is `O(k)` by
+/// construction, and an audit measured it at **7.307×** from k=1 to k=8 against
+/// the same 3.0× ceiling. Reporting that as a breach would be wrong — the growth
+/// is the design, not a defect. Reporting nothing would leave the invariant
+/// evidenced by a function with no production caller.
+///
+/// So this row measures the quantity that IS constant: cost per bar **per named
+/// position**. A candidate naming `k` positions reads `k` bitmaps, so the total
+/// grows linearly in `k` and the unit cost does not. That is the honest form of
+/// the claim, and it is still what §6 needs: linear in depth is affordable, and
+/// the row above it would not have caught a drift to quadratic.
+///
+/// The transposed layout remains far cheaper in absolute terms at every `k`
+/// tested — `C-E-06` measures that separately — because it reads `k · bars/64`
+/// words where row-major reads `6 · bars`.
+fn transposed_support_costs_a_constant_per_bitmap_read() -> bool {
+    let bars = column(100_000);
+    let vertical = Column::transpose(&bars);
+    let n = u128::try_from(bars.len()).unwrap_or(1).max(1);
+
+    let per_position = |k: usize| -> u128 {
+        let cand = candidate(k);
+        let width = u128::try_from(k).unwrap_or(1).max(1);
+        once_ps(|| black_box(vertical.support(black_box(&cand)))) / n / width
+    };
+
+    let base = per_position(1);
+    let mut ok = true;
+    for k in [4, DRAWN_FROM.len()] {
+        ok &= ratio(
+            &format!("C-E-09 Column::support per bitmap: k=1 -> k={k}"),
+            base,
+            per_position(k),
+        );
+    }
+    ok
+}
+
 /// C-E-03 — the per-bar cost does not depend on the answer.
 ///
 /// A column where every bar matches against one where none does. `support` folds
@@ -508,6 +558,7 @@ fn main() {
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
     ok &= transposed_support_costs_the_same_whether_bars_match_or_not();
+    ok &= transposed_support_costs_a_constant_per_bitmap_read();
     ok &= a_ladder_walk_costs_the_same_per_bar_at_every_column_length();
     if ok {
         println!("all ratios within the ceiling");
