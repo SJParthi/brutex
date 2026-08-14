@@ -120,6 +120,20 @@ pub struct Params {
     pub min_hits: u64,
     /// The cumulative candidate budget actually applied.
     pub ceiling: u64,
+    /// The cumulative pair-iteration budget actually applied.
+    ///
+    /// # This was missing, and its absence broke the identity
+    ///
+    /// `Ladder` gained `pair_budget` in ca358b0 and this struct did not follow.
+    /// The two budgets decide **whether a walk halts**, so two runs over the same
+    /// bars with the same `min_hits` and the same ceiling can return *different
+    /// answers* — one complete, one truncated — and, without this field, hash to
+    /// the **same** `RunId`. An identity two different results can share is not an
+    /// identity, which is the whole property `CLAUDE.md` §3 rule 3 exists for.
+    ///
+    /// Found by an adversarial audit, not by a test: nothing here compared two
+    /// runs that differed only in a budget.
+    pub pair_budget: u64,
 }
 
 impl Params {
@@ -133,6 +147,7 @@ impl Params {
         Self {
             min_hits: ladder.min_hits(),
             ceiling: u64::try_from(ladder.ceiling()).unwrap_or(u64::MAX),
+            pair_budget: ladder.pair_budget(),
         }
     }
 }
@@ -251,11 +266,12 @@ pub fn identity(run: &Run<'_>) -> RunId {
     term(&mut hasher, tag::TIMEFRAME, run.timeframe.as_bytes());
 
     // 5. params — both knobs, fixed width.
-    let mut params = [0_u8; 16];
-    for (slot, value) in params
-        .chunks_exact_mut(8)
-        .zip([run.params.min_hits, run.params.ceiling])
-    {
+    let mut params = [0_u8; 24];
+    for (slot, value) in params.chunks_exact_mut(8).zip([
+        run.params.min_hits,
+        run.params.ceiling,
+        run.params.pair_budget,
+    ]) {
         slot.copy_from_slice(&value.to_le_bytes());
     }
     term(&mut hasher, tag::PARAMS, &params);
@@ -391,6 +407,12 @@ mod tests {
         let mut r = run_over(&k, d, m);
         r.params = Params::of(Ladder::with_min_hits(600).with_ceiling(7));
         assert_ne!(base, identity(&r), "ceiling");
+        // The pair budget decides WHETHER A WALK HALTS, so two runs differing
+        // only in it can return different answers. Before this was recorded they
+        // hashed identically -- an identity two results can share is not one.
+        let mut r = run_over(&k, d, m);
+        r.params = Params::of(Ladder::with_min_hits(600).with_pair_budget(7));
+        assert_ne!(base, identity(&r), "pair_budget");
 
         // 6. data_digest
         assert_ne!(base, identity(&run_over(&k, [0_u8; 32], m)), "data_digest");

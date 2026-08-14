@@ -197,7 +197,17 @@ impl Sweeper {
         let mut attempts = 0_u32;
         let mut best: Option<(u64, Sweep)> = None;
         let mut refused_below = None;
-        let mut threshold = census.swept;
+        // ONE BELOW THE COLUMN, NOT AT IT, AND THE DIFFERENCE IS A WRONG ANSWER.
+        //
+        // At `min_hits == swept` a position must hit every bar to be frequent —
+        // and D-0080 excludes a position at `support == bars` as `AlwaysTrue`
+        // before k=1. So that rung is empty BY CONSTRUCTION, not by measurement,
+        // and it always "completes". An audit found the consequence: if the next
+        // rung down refuses, the search keeps the empty one and `is_complete()`
+        // reports true on a sweep that measured nothing.
+        //
+        // `swept - 1` is the highest threshold that can yield anything at all.
+        let mut threshold = census.swept.saturating_sub(1);
 
         // `swept == 0` is a run that never warmed up: no column, nothing to tune.
         while threshold >= 1 {
@@ -671,14 +681,27 @@ mod tests {
             .outcome
             .first_swept
             .expect("eight sessions warm up");
-        // One bar past the warm-up boundary, so exactly one bar is swept.
-        let head = all.get(..warm.saturating_add(1)).unwrap_or(&[]);
+        // TWO bars past the warm-up, so the search starts at `swept - 1` = 1 and
+        // the `threshold == 1` exit is the one it takes.
+        let head = all.get(..warm.saturating_add(2)).unwrap_or(&[]);
         let auto = Sweeper::auto(head, &mut evaluator());
 
-        assert_eq!(auto.outcome.census.swept, 1, "exactly one bar past warm-up");
+        assert_eq!(auto.outcome.census.swept, 2, "two bars past warm-up");
         assert_eq!(auto.attempts, 1, "the search starts at 1 and stops there");
         assert_eq!(auto.min_hits, Some(1));
         assert!(auto.outcome.census.reconciles());
+
+        // And ONE swept bar has no threshold at all: the only position that could
+        // be frequent would hit every bar, which D-0080 excludes before k=1. The
+        // search must report that rather than invent a rung.
+        let single = all.get(..warm.saturating_add(1)).unwrap_or(&[]);
+        let none = Sweeper::auto(single, &mut evaluator());
+        assert_eq!(none.outcome.census.swept, 1);
+        assert_eq!(
+            none.attempts, 0,
+            "no threshold below a one-bar column exists"
+        );
+        assert_eq!(none.min_hits, None);
     }
 
     #[test]
