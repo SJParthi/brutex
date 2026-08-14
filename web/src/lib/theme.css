@@ -1765,3 +1765,210 @@ th.num .sort {
     transition: color var(--d-state) var(--ease-out);
   }
 }
+
+/* ==========================================================================
+   8. THE STRIP — web/design/ingest.html's system, moved here so it is ONE
+   --------------------------------------------------------------------------
+   WHY THIS SECTION EXISTS, AND IT IS THE ANSWER TO A QUESTION THAT KEPT
+   COMING BACK. `web/design/ingest.html` is the design reference and it carried
+   1,485 lines of its OWN inline <style>. Nothing imported it, nothing diffed
+   it, and the live page was built against this file instead — so there were
+   two hand-tuned CSS systems for one product and they drifted from the day
+   both existed. "Why does the real app not look like the mockup" has exactly
+   that answer, and no amount of re-tuning either copy fixes it.
+
+   The reference's classes live HERE now. The mockup and the four route pages
+   read the same rules, so they cannot drift: a change to the strip is a change
+   to both, or it is not a change at all.
+
+   NOTHING WAS RENAMED ON THE WAY IN, and none of these eight names existed in
+   this file before — checked, all zero. So this is additive: no page changes
+   behaviour by this section landing, and a page adopts the system by using the
+   names.
+   ========================================================================== */
+
+:root {
+  /* THE TWO ROW HEIGHTS THE STRIP IS BUILT ON. Lifted with the type scale in
+     section 1 — a 14px label row cannot hold an 11.5px uppercase label with
+     its own tracking, and a 34px control cannot hold 15px text with a border
+     and still look deliberate. */
+  --lab-h: 16px;
+  --ctl-h: 42px;
+}
+
+/* THE STRIP IS A GRID WITH NAMED ROWS, AND THAT IS THE WHOLE TRICK.
+   Every control sits on ONE baseline because label, control and note are three
+   SUBGRID rows shared by every field — not three flex children per column, each
+   free to be its own height. A refusal is a note that appears under one field,
+   and in a flex row it made that column taller and broke the line the eye was
+   following. Here it cannot: the note row is as tall as the tallest note and
+   every field uses it. */
+.strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-rows: var(--lab-h) var(--ctl-h) auto;
+  gap: var(--s2) var(--s4);
+  padding: var(--s6);
+  align-items: start;
+}
+.strip .field {
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-row: span 3;
+  gap: var(--s2);
+  min-width: 0;
+}
+/* The action column keeps the grid's shape and hides the two rows it has no
+   content for, rather than collapsing and pulling the button up a row. */
+.strip .field.go .lab,
+.strip .field.go .note {
+  visibility: hidden;
+}
+.strip .field.go .btn {
+  width: 100%;
+}
+
+.lab {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-semi);
+  line-height: var(--lab-h);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctl {
+  height: var(--ctl-h);
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+  padding: 0 var(--s5);
+  background: var(--bg-2);
+  border: 1px solid var(--line-hard);
+  border-radius: var(--r2);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  white-space: nowrap;
+  box-shadow: var(--e1);
+  min-width: 0;
+}
+.ctl > span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctl .caret {
+  margin-left: auto;
+  color: var(--faint);
+  font-size: var(--fs-mini);
+}
+.ctl.off {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* A NOTE IS ONE LINE UNDER ONE CONTROL, and it carries a marker so a refusal
+   is distinguishable from a remark at a glance rather than by reading it.
+   `▲` for something that needs attention, `·` for something that merely is. */
+.note {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  line-height: 1.35;
+  color: var(--warn);
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  min-height: 13px;
+}
+.note::before {
+  content: '▲';
+  font-size: 8px;
+  line-height: 1.9;
+  flex: none;
+}
+.note.quiet {
+  color: var(--faint);
+}
+.note.quiet::before {
+  content: '·';
+  font-size: var(--fs-xs);
+  line-height: 1.1;
+}
+
+/* THE METRIC TILE. The mockup's `.k / .v / .foot` triple, which is the same
+   shape as `.stat` in section 7 and is kept under its own name because the
+   reference uses it — one system, two entry points, no second ruleset. */
+.metric {
+  background: var(--panel);
+  padding: var(--s6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  position: relative;
+}
+.metric .k {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-semi);
+}
+.metric .v {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-data-lg);
+  font-weight: var(--w-bold);
+  line-height: var(--lh-tight);
+  color: var(--ink-hi);
+  white-space: nowrap;
+}
+.metric .foot {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+}
+
+.panel-h {
+  display: flex;
+  align-items: center;
+  gap: var(--s5);
+  padding: var(--s5) var(--s6);
+  border-bottom: 1px solid var(--line-soft);
+  position: relative;
+}
+.ttl {
+  font-family: var(--mono);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--faint);
+  font-weight: var(--w-bold);
+}
+.spacer {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ctl,
+  .metric {
+    transition:
+      background-color var(--d-hover) var(--ease-out),
+      border-color var(--d-hover) var(--ease-out),
+      box-shadow var(--d-state) var(--ease-out);
+  }
+  .ctl:hover {
+    border-color: var(--acc);
+    box-shadow: var(--e2);
+  }
+  .ctl.off:hover {
+    border-color: var(--line-hard);
+    box-shadow: var(--e1);
+  }
+  .metric:hover {
+    background: var(--panel-2);
+  }
+}
