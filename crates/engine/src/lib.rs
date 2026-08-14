@@ -308,6 +308,13 @@ impl Sweep {
 /// level is the one an adversarial audit measured at 4.69 years of support
 /// counting and 24.9 GB of peak memory. So the ceiling first bites exactly where
 /// the walk stops being a computation and starts being a hang.
+///
+/// Both bounds are pinned by
+/// `engine::tests::the_default_ceiling_is_the_one_its_arithmetic_describes`,
+/// which asserts them in `const` blocks — so moving this constant to a value that
+/// puts `C(238,3)` outside it, or `C(238,4)` inside it, fails the **build** and
+/// not a test run. The paragraph above is therefore checked arithmetic rather
+/// than a comment, which is the whole of what CI gate 12 asks for.
 pub const DEFAULT_CEILING: usize = 1 << 23;
 
 /// The ladder. **Carries no depth field**, by `CLAUDE.md` §6.
