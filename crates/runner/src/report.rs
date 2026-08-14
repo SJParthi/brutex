@@ -43,6 +43,7 @@
 use core::fmt::Write as _;
 
 use crate::identity::RunId;
+use crate::rank::Ranked;
 use crate::{Auto, Outcome};
 use engine::Sweep;
 use indicators::column::Census;
@@ -135,6 +136,123 @@ fn significance(out: &mut String, sweep: &Sweep) {
         "Harvey, Liu & Zhu: their floor is 3.0 for a HANDFUL of trials",
     );
     let _ = writeln!(out);
+}
+
+/// A statistical mean, rendered as the paisa integer §7 keeps money in.
+///
+/// `f64 as i64` truncates silently outside the integer range. No mean of paisa
+/// closes can reach that, and printing a wrapped number rather than refusing is
+/// the class of defect this repository keeps finding, so the conversion
+/// saturates and says so.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "saturated at the i64 bounds immediately below; a paisa mean \
+              outside them cannot arise from a price series."
+)]
+fn paisa(mean: f64) -> i64 {
+    // 2^62 as a literal, comfortably inside both f64 exactness and i64 range,
+    // so the comparison needs no lossy i64 -> f64 cast of its own. A paisa mean
+    // beyond it is 46 quadrillion rupees and cannot arise from a price series.
+    const UPPER: f64 = 4_611_686_018_427_387_904.0;
+    // Written as a negative literal, not as `-UPPER`: negation is arithmetic,
+    // and this module takes no float-arithmetic exception -- the one place that
+    // rule bites is where a bound is expressed rather than computed.
+    const LOWER: f64 = -4_611_686_018_427_387_904.0;
+    let r = mean.round();
+    if r >= UPPER {
+        i64::MAX
+    } else if r <= LOWER {
+        i64::MIN
+    } else {
+        r as i64
+    }
+}
+
+/// The kept combinations, each beside the bar it had to clear.
+///
+/// # Why the bar is printed on every row and not once at the top
+///
+/// The whole failure this guards against is a reader seeing `t = 4.1`, recalling
+/// that three is the threshold they have always used, and stopping there. The
+/// bar is a property of **how many hypotheses this run tested** — above six on a
+/// sixty-one-million sweep — and it is printed against each row so the
+/// comparison cannot be skipped.
+///
+/// A row that does not clear it is not a weak finding. It is **indistinguishable
+/// from the best of pure noise**, and the verdict column says exactly that.
+///
+/// # What this table looks like on the synthetic fixture, and why that is a trap
+///
+/// `synthetic::sessions` generates a deterministic upward DRIFT. Every condition
+/// that fires therefore "predicts" a rise, and the whole table clears the bar at
+/// t values above twenty. That is the pipeline working -- it measures what it is
+/// given -- and it is emphatically **not** an edge. On bars with no drift these
+/// collapse toward zero, which is the entire reason the bar is printed.
+///
+/// A reader who sees t = 23 here and concludes the engine found gold has made
+/// the mistake every part of this module exists to prevent.
+#[must_use]
+pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
+    let mut out = String::with_capacity(1_024);
+    let n = crate::significance::trials(sweep);
+    let bar = crate::significance::bonferroni_t(n);
+
+    let _ = writeln!(out, "FINDINGS");
+    row(
+        &mut out,
+        "combinations weighed",
+        &ranked.considered.to_string(),
+        "",
+    );
+    row(
+        &mut out,
+        "kept",
+        &ranked.top.len().to_string(),
+        "best by |t|",
+    );
+    row(
+        &mut out,
+        "bar every row must clear",
+        &format!("{bar:.2}"),
+        "Bonferroni 5% on this run's own trial count",
+    );
+    let _ = writeln!(out);
+
+    if ranked.top.is_empty() {
+        let _ = writeln!(out, "  nothing kept — the sweep produced no combination");
+        let _ = writeln!(out);
+        return out;
+    }
+
+    let _ = writeln!(
+        out,
+        "  {:<6}{:>10}{:>10}{:>14}{:>9}  verdict",
+        "rank", "hits", "n", "mean paisa", "t"
+    );
+    for (index, s) in ranked.top.iter().enumerate() {
+        let clears = s.edge.t.abs() >= bar;
+        let _ = writeln!(
+            out,
+            "  {:<6}{:>10}{:>10}{:>14}{:>9.2}  {}",
+            index.saturating_add(1),
+            s.hits,
+            s.edge.n,
+            // The mean is a paisa figure and is printed as one: §7 keeps money
+            // in integers, and a fractional paisa is not a price. `saturating`
+            // rather than a bare cast: a mean outside i64 cannot arise from
+            // paisa closes, and a truncating cast would print a wrapped number
+            // rather than refuse.
+            paisa(s.edge.mean_paisa),
+            s.edge.t,
+            if clears {
+                "clears"
+            } else {
+                "BELOW THE BAR — indistinguishable from luck"
+            }
+        );
+    }
+    let _ = writeln!(out);
+    out
 }
 
 /// Where every offered bar went.
@@ -651,6 +769,119 @@ mod tests {
         let text = render_auto(&auto, None);
         assert_eq!(cell(&text, "hypotheses tested"), "0");
         assert_eq!(cell(&text, "threshold"), "-");
+    }
+
+    #[test]
+    fn every_finding_is_printed_beside_the_bar_it_had_to_clear() {
+        // The failure this guards: a reader sees t = 4.1, remembers that three
+        // is the threshold they have always used, and stops. The bar is a
+        // property of how many hypotheses THIS run tested, so it goes on the
+        // page beside the rows rather than in a paper the reader has not read.
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let column = indicators::column::Column::build(&bars, &mut evaluator());
+        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let ranked = crate::rank::rank(&out.sweep, &column, &f, 10);
+        let text = crate::report::render_findings(&ranked, &out.sweep);
+
+        assert!(text.contains("FINDINGS"));
+        assert_eq!(cell(&text, "kept"), "10");
+        let bar: f64 = cell(&text, "bar every row must clear")
+            .parse()
+            .unwrap_or(0.0);
+        assert!(bar > 3.0, "a sweep of thousands cannot have a bar at 3.0");
+
+        // Every data row carries a verdict, and the verdict agrees with the bar.
+        let mut rows = 0_u32;
+        for line in text
+            .lines()
+            .filter(|l| l.trim_start().starts_with(char::is_numeric))
+        {
+            let clears = line.contains("clears");
+            let below = line.contains("BELOW THE BAR");
+            assert!(
+                clears ^ below,
+                "every row must carry exactly one verdict: {line}"
+            );
+            let t: f64 = line
+                .split_whitespace()
+                .nth(4)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
+            assert_eq!(
+                t.abs() >= bar,
+                clears,
+                "the verdict disagrees with the bar on this row: {line}"
+            );
+            rows = rows.saturating_add(1);
+        }
+        assert_eq!(rows, 10, "ten kept means ten rows");
+    }
+
+    #[test]
+    fn an_empty_ranking_says_so_rather_than_printing_an_empty_table() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let column = indicators::column::Column::build(&bars, &mut evaluator());
+        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let ranked = crate::rank::rank(&out.sweep, &column, &f, 0);
+        let text = crate::report::render_findings(&ranked, &out.sweep);
+
+        assert!(text.contains("nothing kept"));
+        assert!(!text.contains("rank"), "no header for a table with no rows");
+        // And the count of what was weighed is still stated: "kept none of four"
+        // and "kept none of sixty-one million" are different facts.
+        assert_ne!(cell(&text, "combinations weighed"), "0");
+    }
+
+    #[test]
+    fn a_paisa_mean_saturates_rather_than_wrapping() {
+        // `f64 as i64` truncates silently outside the range, printing a wrapped
+        // number instead of refusing -- the class of defect this repository
+        // keeps finding. No price series reaches these values; the arms exist
+        // so that if one ever did the output would be visibly wrong rather than
+        // quietly wrong.
+        assert_eq!(super::paisa(0.0), 0);
+        assert_eq!(super::paisa(47.4), 47, "rounds to the nearest paisa");
+        assert_eq!(super::paisa(-47.6), -48);
+        assert_eq!(super::paisa(f64::MAX), i64::MAX, "saturates, never wraps");
+        assert_eq!(super::paisa(f64::MIN), i64::MIN);
+        assert_eq!(super::paisa(f64::INFINITY), i64::MAX);
+        assert_eq!(super::paisa(f64::NEG_INFINITY), i64::MIN);
+    }
+
+    #[test]
+    fn a_row_below_the_bar_is_named_as_indistinguishable_from_luck() {
+        // The synthetic fixture has an upward DRIFT, so every real row on it
+        // clears -- which leaves the verdict that matters most untested. Built
+        // by hand: one strong row and one weak one against a real sweep's bar.
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let weak = crate::rank::Scored {
+            mask: vocab::ConditionMask::default().with_bit(3),
+            hits: 500,
+            edge: crate::outcome::Edge {
+                n: 500,
+                mean_paisa: 1.0,
+                t: 0.4,
+            },
+        };
+        let ranked = crate::rank::Ranked {
+            top: vec![weak],
+            considered: 3_689,
+        };
+        let text = crate::report::render_findings(&ranked, &out.sweep);
+
+        assert!(
+            text.contains("BELOW THE BAR"),
+            "a t of 0.4 against a bar above four must be named, not merely \
+             ranked last"
+        );
+        assert!(
+            text.contains("indistinguishable from luck"),
+            "and named in words a reader cannot misread as 'weak but real'"
+        );
+        assert!(!text.contains("  clears"), "nothing here clears");
     }
 
     #[test]
