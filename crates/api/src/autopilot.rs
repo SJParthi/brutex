@@ -1990,7 +1990,12 @@ pub fn floor_day(feed: pull::vendor::Feed, yesterday: Day) -> Option<Day> {
     };
     let epoch = Day::from_days(0).ok()?;
     let whole = Window::new(epoch, yesterday).ok()?;
-    crate::server::clamp_to_floor(whole, spec.history_floor)
+    // THE CLOCK IS READ HERE rather than inside the clamp, which used to read
+    // it and therefore could not be tested against a stated day. `yesterday` is
+    // the window's end and is NOT today: a rolling floor resolves against
+    // today, so today is what is asked for.
+    let today = crate::ingest::ist_day(std::time::SystemTime::now()).ok()?;
+    crate::server::clamp_to_floor(whole, spec.history_floor, today)
         .ok()
         .map(Window::from)
 }
