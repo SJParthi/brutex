@@ -4020,9 +4020,45 @@ struct BrokerWindow {
 /// operator has bought and placed in a folder — there is no vendor to be
 /// mid-session with, and a file's last day is not a question about the clock.
 fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
-    let today = ingest::ist_day(std::time::SystemTime::now())
+    let now = ingest::ist_moment(std::time::SystemTime::now())
         .map_err(|why| format!("the clock is unusable, so today cannot be established: {why}"))?;
-    if asked.window.to() >= today {
+    let today = now.day();
+
+    // TODAY IS ASKABLE ONCE ITS SESSION HAS CLOSED, and it was not.
+    //
+    // This refused `to >= today` unconditionally — at 21:11 IST, five and a
+    // half hours after the exchange shut, on a day whose bars had been final
+    // since 15:30. Measured: 213 instruments attempted, 0 reached, every one
+    // refused in 13.9 ms with "a session that is still running yields a partial
+    // day". No session was running.
+    //
+    // The BROWSER already had this right. `web/src/routes/ingest/+page.svelte`
+    // computes its ceiling as *today if the session has closed, else the
+    // previous session*, and says so in a sentence beside the date box. So the
+    // page offered a day and the server refused it — an operator following the
+    // page's own instruction got a 502 and a message about a session that had
+    // ended hours earlier.
+    //
+    // WHAT IS UNCHANGED IS THE RULE THIS EXISTS FOR. A partial day must never
+    // be stored: the store is append-only, so a half session written now can
+    // never be completed, only refused later. That is still enforced — the test
+    // is now whether the session has ENDED rather than whether the calendar day
+    // has. A future day, and today while the market is open, both still refuse.
+    //
+    // The close comes from the session table rather than a literal 15:30: NSE
+    // shuts at 15:30 on an ordinary day and at 14:45 on the 2025 Muhurat
+    // session, and a hardcoded time would refuse a finished Muhurat day for
+    // forty-five minutes and admit an unfinished one on another.
+    // NSE CASH, because that is the venue whose 15:30 close this is about and
+    // the one every spot instrument in the engine surface trades on. A venue
+    // with no row for the day — a holiday, or a date past the table — answers
+    // `Err`, and that is read as CLOSED: a day the exchange did not trade has
+    // no session left to finish, so nothing is gained by refusing it.
+    let closed = pull::vendor::Venue::NseCash
+        .hours_on(today)
+        .is_ok_and(|session| now.minute_of_day() >= session.close_minute())
+        || pull::vendor::Venue::NseCash.hours_on(today).is_err();
+    if asked.window.to() > today || (asked.window.to() == today && !closed) {
         // ONE COPY of this prose, in the `Refusal` that owns it. A second
         // hand-written sentence here would be the thing that drifts.
         return Err(ingest::Refusal::WindowReachesToday {
@@ -11162,6 +11198,68 @@ mod tests {
     /// pulled over HTTP paid a clock read, a `HOME`, a parsed credentials file,
     /// an AWS identity discovery and a socket to be told so. Every one of those
     /// is decidable from the descriptor before any of it.
+    /// **TODAY IS ASKABLE ONCE ITS SESSION HAS CLOSED, AND WAS NOT.**
+    ///
+    /// `finished_day_only` refused any window reaching today, unconditionally.
+    /// Measured at 21:11 IST on a session that shut at 15:30: 213 instruments
+    /// attempted, 0 reached, every one refused in 13.9 ms with *"a session that
+    /// is still running yields a partial day"*. No session was running.
+    ///
+    /// The browser already had it right — it offers today once the close has
+    /// passed — so an operator following the page's own instruction got a 502
+    /// about a session that had ended hours earlier.
+    ///
+    /// This reads the rule off the source rather than driving the clock,
+    /// because driving it would mean either mocking `SystemTime::now` or
+    /// writing a test whose answer changes at 15:30 every day — which is the
+    /// failure `pull::vendor`'s own floor test names in as many words.
+    #[test]
+    fn a_finished_session_is_askable_today_and_an_unfinished_one_is_not() {
+        let me = include_str!("server.rs");
+        let body = me
+            .split_once("fn finished_day_only")
+            .expect("the guard exists")
+            .1;
+        let body = &body[..body.find("\n}\n").expect("it has an end")];
+
+        // The comparison is against the SESSION, not the calendar day alone.
+        assert!(
+            body.contains("close_minute()"),
+            "whether today may be stored is a question about the session, and \
+             the guard must ask the session table: {body}"
+        );
+        assert!(
+            body.contains("minute_of_day()"),
+            "which needs the clock's minute, not just its date"
+        );
+        // A future day still refuses outright, and today refuses while open.
+        assert!(
+            body.contains("asked.window.to() > today"),
+            "a day after today is refused whatever the clock says"
+        );
+        assert!(
+            body.contains("== today && !closed"),
+            "and today is refused only while its session is still running"
+        );
+        // The close is READ, never hardcoded: NSE shuts at 15:30 ordinarily and
+        // at 14:45 on the 2025 Muhurat session, and a literal would refuse a
+        // finished Muhurat day for forty-five minutes.
+        //
+        // COMMENTS STRIPPED FIRST, and the first draft of this failed for it:
+        // the paragraph above the guard EXPLAINS the 15:30 it must not contain,
+        // and a scan that reads prose as code fails on the explanation for the
+        // rule it is checking. Same filter gates 17, 23 and 1d use.
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("15:30") && !code.contains("930"),
+            "the close comes from the session table, not from a literal: {code}"
+        );
+    }
+
     #[test]
     fn the_transport_is_checked_before_any_vendor_facing_cost() {
         // ORDER, read off the source rather than asserted about behaviour,

@@ -1327,9 +1327,25 @@ pub fn epoch_secs(at: SystemTime) -> i64 {
 /// default: an expiry compared against a guessed day is a gate that passes for
 /// the wrong reason.
 pub fn ist_day(at: SystemTime) -> Result<Day, Refusal> {
-    IstMoment::from_epoch_secs(epoch_secs(at))
-        .map(IstMoment::day)
-        .map_err(|why| Refusal::ClockUnusable { why })
+    ist_moment(at).map(IstMoment::day)
+}
+
+/// The whole IST moment, not just its date.
+///
+/// # Why the minute matters and the day alone did not
+///
+/// `finished_day_only` asked only for the date and refused any window reaching
+/// today — including at 21:11 IST, on a session that had closed at 15:30 and
+/// whose bars had been final for five and a half hours. Whether a day may be
+/// stored is a question about the SESSION, not the calendar, and answering it
+/// needs the clock as well as the date.
+///
+/// # Errors
+///
+/// [`Refusal::ClockUnusable`] for a clock before 1970 or past 9999, exactly as
+/// [`ist_day`] — which is now this function with the minute discarded.
+pub fn ist_moment(at: SystemTime) -> Result<IstMoment, Refusal> {
+    IstMoment::from_epoch_secs(epoch_secs(at)).map_err(|why| Refusal::ClockUnusable { why })
 }
 
 /// Today, in IST, from this machine's clock.
