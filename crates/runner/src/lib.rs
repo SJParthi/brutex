@@ -164,6 +164,13 @@ const PROBE_PAIRS: u64 = 1 << 28;
 /// A sweep the engine tuned for itself, and the search that got there.
 #[derive(Clone, Debug)]
 pub struct Auto {
+    /// Did the search find a threshold that actually measured something?
+    ///
+    /// False when no rung produced a non-empty result: either the column never
+    /// warmed, or every affordable threshold was vacuous. `min_hits` is `None`
+    /// in exactly those cases, and this field says so without a caller having to
+    /// infer it from an `Option`.
+    pub affordable: bool,
     /// The deepest sweep that proved affordable, with its census.
     pub outcome: Outcome,
     /// The threshold it settled on. `None` when the column was empty or when even
@@ -208,7 +215,7 @@ impl Sweeper {
     ///
     /// The column is folded **once** and every probe walks the same one, so the
     /// search costs `log2(bars)` ladder walks over a column built one time.
-    pub fn auto(bars: &[Candle], evaluator: &mut Evaluator) -> Auto {
+    pub fn auto(&self, bars: &[Candle], evaluator: &mut Evaluator) -> Auto {
         let column = Column::build(bars, evaluator);
         let live = live_positions();
         let census = column.census();
@@ -232,11 +239,33 @@ impl Sweeper {
         // `swept == 0` is a run that never warmed up: no column, nothing to tune.
         while threshold >= 1 {
             attempts = attempts.saturating_add(1);
+            // The CALLER's ceiling, not a fresh default: `auto` used to be an
+            // associated function and silently discarded whatever budget the
+            // `Sweeper` was built with.
             let sweep = Ladder::with_min_hits(threshold)
+                .with_ceiling(self.ladder.ceiling())
                 .with_pair_budget(PROBE_PAIRS)
                 .walk(column.bits(), &live);
             if sweep.completed() {
-                best = Some((threshold, sweep));
+                // A PROBE THAT FOUND NOTHING IS NOT AN ANSWER, and this is the
+                // whole of the bug an audit found on a 98,124-bar column.
+                //
+                // Near the top of the range every position is excluded before
+                // k=1 -- D-0080 refuses `support == bars` as `AlwaysTrue`, and
+                // nothing else clears so high a threshold -- so the walk
+                // "completes" with depth 0. Keeping that as the result reports
+                // `is_complete() == true` on a sweep that measured nothing,
+                // which reads exactly like a genuine finding of "no combination
+                // was frequent". The audit's column had 145,735 frequent sets
+                // waiting 3.9 seconds away at the very threshold the search had
+                // just refused.
+                //
+                // Starting one rung lower did NOT fix it: at 98,124 bars,
+                // `swept - 1` still demands 98,123 of 98,124 and is just as
+                // empty. Emptiness has to be tested for, not arithmetic'd around.
+                if sweep.depth() >= 1 {
+                    best = Some((threshold, sweep));
+                }
             } else {
                 refused_below = Some(threshold);
                 break;
@@ -249,6 +278,7 @@ impl Sweeper {
 
         let (min_hits, sweep) = best.map_or((None, Sweep::default()), |(t, s)| (Some(t), s));
         Auto {
+            affordable: min_hits.is_some(),
             outcome: Outcome {
                 census,
                 first_swept,
@@ -650,7 +680,7 @@ mod tests {
     #[test]
     fn auto_tunes_itself_and_finishes() {
         let bars = synthetic::sessions(8);
-        let auto = Sweeper::auto(&bars, &mut evaluator());
+        let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
 
         let chosen = auto.min_hits.expect("a warm column must yield a threshold");
         assert!(auto.outcome.is_complete(), "what it keeps must be whole");
@@ -671,7 +701,7 @@ mod tests {
     #[test]
     fn auto_never_returns_a_partial_answer() {
         let bars = synthetic::sessions(8);
-        let auto = Sweeper::auto(&bars, &mut evaluator());
+        let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
         assert!(
             auto.outcome.sweep.halted.is_none(),
             "a refused probe must be discarded, never returned"
@@ -680,7 +710,7 @@ mod tests {
         // a warm column AND a cold one so both arms of the match are taken —
         // an arm no run enters is a region llvm-cov counts forever.
         for column in [synthetic::sessions(8), synthetic::sessions(1)] {
-            let a = Sweeper::auto(&column, &mut evaluator());
+            let a = Sweeper::new(bounded()).auto(&column, &mut evaluator());
             let monotone = match (a.min_hits, a.refused_below) {
                 (Some(kept), Some(edge)) => edge < kept,
                 _ => true,
@@ -697,14 +727,15 @@ mod tests {
     #[test]
     fn auto_over_a_single_swept_bar_starts_and_stops_at_one() {
         let all = synthetic::sessions(8);
-        let warm = Sweeper::auto(&all, &mut evaluator())
+        let warm = Sweeper::new(bounded())
+            .auto(&all, &mut evaluator())
             .outcome
             .first_swept
             .expect("eight sessions warm up");
         // TWO bars past the warm-up, so the search starts at `swept - 1` = 1 and
         // the `threshold == 1` exit is the one it takes.
         let head = all.get(..warm.saturating_add(2)).unwrap_or(&[]);
-        let auto = Sweeper::auto(head, &mut evaluator());
+        let auto = Sweeper::new(bounded()).auto(head, &mut evaluator());
 
         assert_eq!(auto.outcome.census.swept, 2, "two bars past warm-up");
         assert_eq!(auto.attempts, 1, "the search starts at 1 and stops there");
@@ -715,7 +746,7 @@ mod tests {
         // be frequent would hit every bar, which D-0080 excludes before k=1. The
         // search must report that rather than invent a rung.
         let single = all.get(..warm.saturating_add(1)).unwrap_or(&[]);
-        let none = Sweeper::auto(single, &mut evaluator());
+        let none = Sweeper::new(bounded()).auto(single, &mut evaluator());
         assert_eq!(none.outcome.census.swept, 1);
         assert_eq!(
             none.attempts, 0,
@@ -724,10 +755,63 @@ mod tests {
         assert_eq!(none.min_hits, None);
     }
 
+    /// The tuner must never hand back an empty answer marked complete.
+    ///
+    /// # The bug this pins, which survived two earlier fixes
+    ///
+    /// An audit drove a 98,124-bar column and got back
+    /// `chose=98124 depth=0 frequent=0 is_complete=true` — while the very
+    /// threshold the search had just refused completed in **3.89 s with 145,735
+    /// frequent sets**. An empty result reported as whole reads exactly like a
+    /// genuine finding of "no combination was frequent", which is the worst
+    /// failure this crate can produce.
+    ///
+    /// Two fixes did not close it. Starting at `swept` was obviously wrong;
+    /// starting at `swept - 1` is *just as* empty on a large column, because
+    /// demanding 98,123 of 98,124 bars excludes everything the same way.
+    /// Emptiness has to be **tested for**, not arithmetic'd around: a probe is
+    /// only an answer if it found something.
+    #[test]
+    fn auto_never_keeps_a_vacuous_rung() {
+        // A cold column is in the list on purpose: it takes the `None` arm, and
+        // an arm no fixture enters is a region llvm-cov counts forever.
+        for sessions in [8_i64, 16, 1] {
+            let bars = synthetic::sessions(sessions);
+            let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
+
+            match auto.min_hits {
+                Some(chosen) => {
+                    assert!(
+                        auto.affordable,
+                        "a chosen threshold must be reported as affordable"
+                    );
+                    assert!(
+                        auto.outcome.sweep.depth() >= 1,
+                        "{sessions} sessions: kept threshold {chosen} measured \
+                         nothing -- depth 0 is emptiness by construction, not a \
+                         finding"
+                    );
+                    assert!(
+                        auto.outcome.sweep.all_frequent().count() >= 1,
+                        "a kept rung must carry at least one combination"
+                    );
+                    assert!(
+                        chosen < auto.outcome.census.swept,
+                        "a threshold at the column size excludes every position"
+                    );
+                }
+                None => assert!(
+                    !auto.affordable,
+                    "no threshold means not affordable, and both must agree"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn auto_over_a_cold_or_empty_column_attempts_nothing() {
         for bars in [synthetic::sessions(1), Vec::new()] {
-            let auto = Sweeper::auto(&bars, &mut evaluator());
+            let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
             assert_eq!(auto.min_hits, None, "there was no column to tune");
             assert_eq!(auto.attempts, 0, "and so nothing was walked");
             assert!(!auto.outcome.is_complete());
