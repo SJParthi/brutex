@@ -10472,16 +10472,28 @@ mod tests {
                 continue;
             };
             let Some(cap) = spec.window_cap_days(pull::vendor::Granularity::Minute1) else {
-                // `None` is "the vendor publishes no per-request cap at this
-                // rung", which is a legal state and not an omission — but the
-                // one-minute figure is in the charter for both shipped brokers,
-                // so reaching here means a row lost its number.
-                panic!(
-                    "{} is a broker and every shipped broker's ONE-MINUTE cap is \
-                     in the charter — a None here is a number that went missing, \
-                     not a vendor that published nothing",
+                // TWO REASONS FOR A MISSING NUMBER, AND THEY ARE TOLD APART BY
+                // THE ROW ITSELF RATHER THAN BY A LIST KEPT HERE.
+                //
+                // An EMPTY `window_caps` is a vendor that publishes no
+                // per-request cap at any rung — Zerodha, whose historical page
+                // states none, recorded UNVERIFIED in docs/00-charter.md §4z.
+                // That is a legal state: the store's month boundary is then the
+                // only bound, and inventing a figure would be §3 rule 1.
+                //
+                // A POPULATED table with no minute row is a number that went
+                // missing, which is the case this test was written for. Both
+                // shipped brokers carry theirs — Groww 30, Dhan 90 — and losing
+                // one would send a window wider than the vendor accepts.
+                assert!(
+                    spec.window_caps.is_empty(),
+                    "{} publishes caps at other rungs and none at ONE MINUTE — \
+                     that is a number that went missing, not a vendor that \
+                     published nothing. The figure is in docs/00-charter.md §4 \
+                     for every broker that has one.",
                     feed.display()
                 );
+                continue;
             };
             assert!(cap > 0, "{} must publish a positive cap", feed.display());
 
@@ -11004,14 +11016,19 @@ mod tests {
         // AND AN UNKNOWN FEED IS REFUSED BY NAME. `/instruments.json` answers
         // an unrecognised feed as Dhan; copying that here would silently
         // enable four controls against the other broker's reach.
+        //
+        // `zerodha` WAS THIS EXAMPLE until 14 Aug 2026, when it became a feed
+        // this build names. A test for an unknown feed has to name one that
+        // stays unknown, or it stops testing the refusal and starts testing
+        // whichever vendor was added last.
         let (status, _headers, refused) = universe_reach_json(
             axum::extract::State(loaded),
-            "/universes.json?feed=zerodha".parse().expect("a legal uri"),
+            "/universes.json?feed=upstox".parse().expect("a legal uri"),
         )
         .await;
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(
-            refused.contains(r#""feed":"zerodha""#)
+            refused.contains(r#""feed":"upstox""#)
                 && refused.contains("this build reads no feed called that")
                 && refused.contains("groww")
                 && refused.contains("dhan"),

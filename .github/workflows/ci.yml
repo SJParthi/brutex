@@ -821,13 +821,49 @@ jobs:
           # `an-index` is the placeholder page name in the sibling test.
           withdrawn_index='nifty-ipo an-index'
 
+          # ---- group 25: THE THIRD BROKER'S ROW. crates/pull/src/vendor.rs.
+          #
+          # `zerodha` is that vendor's own public product name, written down as
+          # the name its bars are filed under -- `Descriptor::wire`, and the
+          # store prefix `core::vendor::Vendor::as_str`. Same footing as `groww`
+          # and `dhan` in group 2 and checked the same way: it is already
+          # tracked and public in docs/00-charter.md section 4z. Whether it is
+          # ALSO an operator's real <vendor> segment is operator-side and
+          # unknowable from inside this repository -- docs/06-limits.md
+          # section 18, exactly as for the other four.
+          #
+          # `instrument_token` is the vendor's own name for the numeric id it
+          # issues, used as the PLACEHOLDER in the bars path
+          # (/instruments/historical/:instrument_token/:interval) and as a
+          # column header in its instrument dump. It names an instrument, not
+          # an account.
+          #
+          # `api-key` IS A CREDENTIAL FIELD AND IS THE LINE TO READ TWICE.
+          #
+          # It is the <field> of /<org>/<env>/<vendor>/<field> -- the LAST
+          # component of the shape, and the only one of the four that is not
+          # operator-specific. CLAUDE.md section 8 says in as many words that
+          # crates/pull "holds the shape and the field names"; this is a field
+          # name, and it is here because `Auth::key_field` now carries it so the
+          # descriptor decides how many secrets a scheme needs rather than a
+          # match on the feed in crates/api.
+          #
+          # It names no org, no env and no vendor, and it is ALREADY PUBLIC in
+          # this repository: docs/00-charter.md section 4 lists Groww's fields as
+          # api-key, totp-secret and access-token, and `access-token` has been on
+          # group 9 since the first broker row. The VALUE is read from Parameter
+          # Store at runtime and appears in no tracked file, no environment
+          # variable and no log -- section 8, and `pull::http::Credential`
+          # redacts it in Debug.
+          zerodha_row='zerodha instrument_token api-key'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

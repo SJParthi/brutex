@@ -4365,6 +4365,16 @@ const ZERODHA: Descriptor = Descriptor {
     exchange: Exchange::Nse,
 };
 
+/// Every feed, indexed by its own [`Feed`] discriminant.
+///
+/// **The index IS the variant.** [`Feed::descriptor`] reads this array at
+/// `self as usize` — one index, no search, no map — and the `const` assertions
+/// below are what make that sound: they pin the table's length to
+/// [`FEED_COUNT`] and row *i* to variant *i*, so a new variant with no row is a
+/// build failure rather than a lookup that finds somebody else's vendor.
+///
+/// Order is the discriminant's, not alphabetical and not the order a page draws
+/// them in. Those are reading orders; this one is an addressing scheme.
 pub const DESCRIPTORS: [&Descriptor; FEED_COUNT] = [&DHAN, &GROWW, &TRUE_DATA, &GDFL, &ZERODHA];
 
 const _: () = assert!(DESCRIPTORS.len() == FEED_COUNT);

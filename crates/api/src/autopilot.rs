@@ -4228,7 +4228,30 @@ mod tests {
             "the refusal reaches the page verbatim: {json}"
         );
         // AND IT PICKED THE OLDEST MONTH, from a store holding nothing.
-        assert!(json.contains(r#""cursor":"2020-01""#), "{json}");
+        //
+        // ASSERTED AGAINST THE FEED ROWS IN THE SAME ANSWER, never against a
+        // literal. It was `"cursor":"2020-01"` — Groww's fixed floor, which was
+        // the oldest until a feed claiming a ROLLING ten years joined the table
+        // and reached further back. A rolling floor moves with the clock, so a
+        // literal here would assert a different thing every month it ran, which
+        // is the failure `pull::vendor`'s own floor test names in as many
+        // words.
+        //
+        // The property that actually matters is unchanged and is what is
+        // checked: the cursor is the OLDEST month any feed is behind on.
+        let months: Vec<&str> = json
+            .match_indices(r#""month":""#)
+            .filter_map(|(at, key)| {
+                let rest = json.get(at.saturating_add(key.len())..)?;
+                rest.get(..rest.find('"')?)
+            })
+            .collect();
+        let oldest = months.iter().min().expect("at least one feed row");
+        assert!(
+            json.contains(&format!(r#""cursor":"{oldest}""#)),
+            "the cursor is the oldest month any feed is behind on, and the feed \
+             rows in this same answer are {months:?}: {json}"
+        );
         // THE TICK WAS JOURNALLED. One record per tick, in the store's own
         // journal, so a restart can read what this process did.
         assert!(
