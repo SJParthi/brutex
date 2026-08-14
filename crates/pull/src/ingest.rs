@@ -805,6 +805,34 @@ fn closes_on_disk(file: &BarFile, n_valid: u64) -> Result<(i64, i64), String> {
 /// [`crate::manifest::EntryFault::CloseNotAPrice`] for a negative close — which
 /// no tick grid produces, and which would otherwise become a not-recorded
 /// sentinel that looks like a price.
+///
+/// # Why the negative arm can no longer fire from here, and stays anyway
+///
+/// This runs AFTER `BarFile::append`, and that ordering used to matter: a
+/// negative close was refused here, with the bar already on disk. The month
+/// then held it permanently — §3 rule 8 forbids a rewrite — and every retry
+/// repeated the sequence exactly, appending nothing (`AlreadyPresent`) and
+/// failing here again. One bad candle, and the month could never be completed.
+///
+/// D-0143 removed the trigger rather than the ordering. A negative price is now
+/// refused twice before it reaches this line: at the vendor boundary by
+/// `http::one_price`, where the value the vendor sent can still be quoted, and
+/// at the write boundary by `store::format::Bar::ohlc_is_sane`, which `append`
+/// consults through `survey` BEFORE it writes a byte. Both sources this
+/// function reads — the batch just appended, and the records already on the
+/// file — have therefore crossed that check, so `Closes::known` cannot see a
+/// negative by this route.
+///
+/// The arm is kept because `Closes::known` is a constructor for a public type
+/// and is called by things that are not this function. A guard that is
+/// currently unreachable via one caller is not a guard that has stopped being
+/// needed; deleting it would move the invariant from the type into a comment
+/// about the order of two lines in this file.
+///
+/// What remains after the append is a failed READ — `closes_on_disk` returning
+/// the host's error. That leaves the bars written and the manifest entry
+/// unrecorded, which the next run resolves: the append answers `AlreadyPresent`
+/// and the read is retried. Recoverable, and not the same shape of fault.
 fn month_closes(file: &BarFile, header: &Header, batch: &[Bar]) -> Result<Closes, String> {
     let (first, last) = match closes_in_hand(header, batch) {
         Some(pair) => pair,
