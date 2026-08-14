@@ -1599,11 +1599,20 @@ async fn feeds_json(
         // now the same value `kind`, `kind_label` and `verb` are read from.
         let (ready, why) = match held {
             _ if kind.needs_credential() => (true, String::new()),
-            Some(n) if n > 0 => (true, String::new()),
-            Some(_) => (
-                false,
-                format!("nothing has been ingested for {} yet", feed.display()),
-            ),
+            // AN ARCHIVE'S EVIDENCE IS ITS FOLDER, NOT ITS CENSUS.
+            //
+            // This arm used to read `Some(n) if n > 0` — ready only once the
+            // census already held rows. That is CIRCULAR and it is why the
+            // operator's bought archives could never be selected: the census is
+            // filled by an ingest, an ingest needs a ready feed, and the feed
+            // needs a census. TrueData and GDFL were unreachable by
+            // construction, and no amount of buying data changed it.
+            //
+            // The comment two arms up already said what the evidence should be
+            // — "there is no credential, so the only evidence of ownership is
+            // data read from files the operator bought" — and then asked the
+            // wrong question. It asks the folder now.
+            Some(_) => archive_ready(feed),
             // `store_vendor` is None for a feed with no store prefix of its
             // own. It has nowhere to file bars, so it cannot serve whatever
             // else is true.
@@ -4154,6 +4163,80 @@ fn monotonic_micros() -> u64 {
 /// So the clock moves OUT, to the three callers. Each reads it exactly where it
 /// already had the means to, production behaviour is unchanged to the day, and
 /// the resolution itself is now a pure function of (window, floor, today).
+/// Whether an ARCHIVE feed has data the operator actually bought, and why not.
+///
+/// # Why the folder and not the census
+///
+/// A broker proves entitlement with a credential, so it is ready with an empty
+/// store — `SourceKind::needs_credential` answers that and this function is
+/// never reached for one. An archive has no credential, so the only evidence is
+/// the files themselves. Asking the census instead made readiness circular: the
+/// census fills from an ingest, the ingest needs readiness, so a freshly bought
+/// archive could never be selected to do the pull that would make it
+/// selectable.
+///
+/// # Three refusals, never one
+///
+/// `CLAUDE.md` §4 forbids collapsing distinct failures into one silence, and
+/// these three are the operator's whole diagnostic path — they tell him whether
+/// to set a path, fix a permission, or copy his files in:
+///
+/// * the root or the feed's folder cannot be resolved at all;
+/// * the folder is not there yet;
+/// * the folder is there and holds nothing.
+///
+/// # Cost
+///
+/// O(1). `read_dir` opens the directory and `next()` pulls ONE entry — the
+/// count of files in it is never walked, so a folder holding 100,000 CSVs
+/// answers in the same time as one holding a single file. That matters because
+/// this runs on the `/feeds.json` render path, where the comment above the
+/// readiness match already warns that an O(files) probe is the cost `/store`
+/// exists to avoid.
+fn archive_ready(feed: pull::vendor::Feed) -> (bool, String) {
+    let root = match pull::folder::root() {
+        Ok(root) => root,
+        Err(why) => {
+            return (
+                false,
+                format!("the archive root could not be resolved: {why}"),
+            );
+        }
+    };
+    let dir = match pull::folder::folder_of(&root, feed) {
+        Ok(dir) => dir,
+        Err(why) => {
+            return (
+                false,
+                format!(
+                    "{}'s archive folder could not be named: {why}",
+                    feed.display()
+                ),
+            );
+        }
+    };
+    let shown = dir.display();
+    match std::fs::read_dir(&dir) {
+        // NOT THERE YET is not the same fact as EMPTY, and the operator acts
+        // differently on each: one is a path to create or configure, the other
+        // is files to copy.
+        Err(why) if why.kind() == std::io::ErrorKind::NotFound => (
+            false,
+            format!("no folder at {shown} yet — the bought CSVs go there"),
+        ),
+        Err(why) => (false, format!("{shown} could not be read: {why}")),
+        Ok(mut entries) => match entries.next() {
+            Some(_) => (true, String::new()),
+            None => (
+                false,
+                format!(
+                    "{shown} is there and holds nothing — the bought CSVs have not been copied in"
+                ),
+            ),
+        },
+    }
+}
+
 pub(crate) fn clamp_to_floor(
     window: pull::session::Window,
     floor: pull::vendor::HistoryFloor,
