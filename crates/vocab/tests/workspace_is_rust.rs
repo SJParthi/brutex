@@ -210,14 +210,24 @@ fn the_dependency_set_has_not_moved_without_review() {
         h = h.wrapping_mul(0x0100_0000_01b3);
     }
 
+    // 187 -> 188 IS `crates/runner`, AND THE SCAN WAS RUN BEFORE THIS NUMBER MOVED.
+    //
+    // The message below says what the discipline is and why -- "that is how `ring`
+    // got in" -- so here is the scan it asks for, recorded rather than claimed.
+    // The new package is a workspace member, not a registry crate: it holds two
+    // `.rs` files and one `.toml`, ships no `.c`/`.cc`/`.h`/`.S`/`.asm`, carries no
+    // `build.rs`, and its four dependencies are `core`, `engine`, `indicators` and
+    // `vocab` -- every one already in this lock. So the delta is exactly the member
+    // itself and NO third-party code entered the tree with it. `DECLARED` is
+    // unchanged because there is nothing new to declare.
     assert_eq!(
         names.len(),
-        187,
+        188,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
     assert_eq!(
-        h, 0x3BDC_BF45_2CB6_25B7,
+        h, 0xDFBF_18A4_6ED8_1280,
         "the dependency SET changed — a package was added, removed or renamed. \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \

@@ -32,6 +32,12 @@ members = [
     "crates/vocab",
     "crates/indicators",
     "crates/engine",
+    # The only place `indicators` and `engine` can legally meet: gate 22 clause A
+    # pins both of their dependency sets to `vocab` alone and ships no allowlist,
+    # so the join has to live in a crate that is not on gate 22's list. See
+    # `crates/runner/Cargo.toml` for why that preserves the gate rather than
+    # avoiding it.
+    "crates/runner",
 ]
 
 [workspace.package]

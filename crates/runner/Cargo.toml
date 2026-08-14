@@ -1,0 +1,41 @@
+[package]
+name         = "runner"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "Drives one sweep: bars in, condition-bit column, Apriori ladder, result."
+
+# WHY THIS CRATE EXISTS, AND WHY IT COULD NOT BE A MODULE OF AN EXISTING ONE.
+#
+# `crates/indicators` turns a bar into a `ConditionMask`. `crates/engine` walks
+# the Apriori ladder over a slice of them. Nothing joined them, and neither of
+# them MAY: CI gate 22 clause A compares each sweep crate's flat `[dependencies]`
+# key set against a hardcoded `want` — `vocab` alone for both — and refuses any
+# other spelling outright. It ships no allowlist. So `indicators` cannot depend
+# on `engine`, `engine` cannot depend on `indicators`, and the only place the two
+# halves can legally meet is a crate that is not on gate 22's list.
+#
+# That is not a workaround. Gate 22 exists so a bar cannot reach the sweep, and
+# keeping the join OUT of the swept crates is exactly what preserves it: the
+# three crates that hold the mask, the vocabulary and the ladder still cannot
+# name a filesystem, and this crate — which also does not — is what carries data
+# between them.
+#
+# NO ARROW TO `store`, DELIBERATELY, AND NOT YET. This crate takes a slice of
+# candles the caller already holds. Reading them from disk is a separate unit
+# with a separate decision, and the operator's standing rule is that neither a
+# vendor pull nor the bars already on disk may be used at all — so the only
+# input this crate has ever been driven with is generated in-process.
+[dependencies]
+# A version alongside the path is required: deny.toml sets `wildcards = "deny"`
+# and a path dependency with no version IS a wildcard. The dependency KEY is
+# `brutex_core` and the PACKAGE is `core`, matching every other member.
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
+vocab       = { path = "../vocab", version = "0.1.0" }
+indicators  = { path = "../indicators", version = "0.1.0" }
+engine      = { path = "../engine", version = "0.1.0" }
+
+[lints]
+workspace = true
