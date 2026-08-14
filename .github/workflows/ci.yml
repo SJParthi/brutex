@@ -712,13 +712,44 @@ jobs:
           # from a `YearMonth` and never from a caller's string.
           year_month='2026-01'
 
+          # ---- group 20: THE EXCHANGE'S OWN PUBLISHED FILENAMES, and three
+          # test words that arrived with them. crates/pull/src/nse.rs.
+          #
+          # `ind_niftybanklist` and `ind_niftytotalmarket_list` are the names
+          # NSE Indices Limited gives two of its constituent files, published at
+          # niftyindices.com and read 14 Aug 2026 (docs/00-charter.md §4d).
+          # They are here for a reason worth reading twice: they are quoted in a
+          # REFUSAL MESSAGE, because the argument for refusing is that the two
+          # disagree with each other -- one is word-joined and the other is
+          # underscore-separated, so no rule turns an index's name into its
+          # filename and any rule guessed from one is already wrong about the
+          # other. A message that made that argument without showing both
+          # spellings would be asking the reader to take it on trust.
+          #
+          # Neither is a credential path segment and neither could become one:
+          # they name a public file on a public exchange host, they contain no
+          # org, env, vendor or field, and nse.rs COMPOSES NO FILENAME AT ALL --
+          # `constituent_link` reads the URL the exchange published and refuses
+          # a page that carries none. That is the whole point of the module and
+          # these two literals are the evidence for it, not an exception to it.
+          #
+          # `nifty-bank` is the page name in that refusal's own test. `doctype`
+          # and `transport` are assertion substrings: the first proves an
+          # interstitial is refused AS HTML rather than read as an index with no
+          # members, and the second proves an empty document and a failed fetch
+          # print as different facts.
+          nse_published='
+          ind_niftybanklist ind_niftytotalmarket_list
+          nifty-bank doctype transport
+          '
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month}"
+          ${telemetry_field} ${year_month} ${nse_published}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

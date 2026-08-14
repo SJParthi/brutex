@@ -87,6 +87,11 @@ pub mod folder;
 pub mod http;
 pub mod ingest;
 pub mod manifest;
+/// The exchange's own index directory and the constituent files it links to.
+///
+/// Read-only decoders over bytes somebody else fetched — no socket here, the
+/// same seam `fetch::BarSource` draws for vendor bars.
+pub mod nse;
 pub mod rate;
 pub mod secret;
 pub mod session;
