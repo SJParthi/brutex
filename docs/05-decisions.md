@@ -13763,7 +13763,7 @@ ordering clauses hold, and that is exactly the problem — a predicate must not
 depend on another clause of itself being true, or a later edit to the ordering
 silently widens what a price may be.
 
-## D--0144 — 403 TokenException is a credential fault, not a transport blip
+## D-0146 — 403 TokenException is a credential fault, not a transport blip
 
 **Decided.** `autopilot::classify` adds `status 403` and `tokenexception` to the
 CREDENTIAL table.
@@ -13780,14 +13780,22 @@ holding the oldest-month slot away from the feeds that could still run. The
 charter names this vendor's expiry its headline failure mode, and the build was
 treating it as a network hiccup.
 
-**Known limit, recorded rather than fixed here.** This table matches on PROSE.
+**Known limit, since closed by D-0145.** This table matches on PROSE.
 `FetchError::VendorRefused` already carries `status: u16`, and the server
 converts it with `why.to_string()` before the classifier ever sees it, so a
-structured status is available and is being discarded. Matching the number's
+structured status is available and was being discarded. Matching the number's
 rendered form works because that rendering is this repository's own, but it is
 a coupling between a formatter and a classifier that nothing tests together.
-Replacing the prose match with the carried `status` is the correct fix and is
-not in this change.
+D-0145 did exactly that replacement inside `with_retry`, where the `FetchError`
+is still in hand. `autopilot::classify` is downstream of a `String` and still
+matches on prose; the entries here are what make that visible.
+
+**Numbered 0146 and not 0144.** It was appended as `D--0144`, with a stray
+hyphen from the script that wrote it, so the next append's scan of `^## D-\d{4}`
+did not see it and reused 0144 for the entry now above. This ledger is
+append-only in CONTENT; a heading that no scan can read is not a record, and it
+is corrected here rather than left to collide. The number is the only thing that
+changed.
 
 ## D-0144 — Dhan's ticker is `UNDERLYING_SYMBOL`, and reading `SYMBOL_NAME` manufactured duplicates
 
