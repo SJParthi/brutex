@@ -39,3 +39,12 @@ engine      = { path = "../engine", version = "0.1.0" }
 
 [lints]
 workspace = true
+
+# ---------------------------------------------------------------------------
+# THIS IS NOT A DEPENDENCY. A [[bench]] target links this crate's own lib, its
+# dependencies and std. The [dependencies] table above is unchanged.
+# ---------------------------------------------------------------------------
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

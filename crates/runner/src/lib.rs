@@ -38,9 +38,13 @@
 //!
 //! Per bar the work is one [`indicators::column::Column`] step; per candidate it
 //! is what `engine::Ladder::walk` costs. This crate adds one pass over the
-//! column to hand it to the ladder and nothing else. UNVERIFIED as a measured
-//! figure: this crate ships no bench yet, and saying so is cheaper than a number
-//! nobody took.
+//! column to hand it to the ladder and nothing else.
+//!
+//! Measured by `C-R-01` in `crates/runner/benches/ratio.rs`: the column build
+//! costs the same per offered bar at 3,000 and 12,000 bars. The LADDER half is
+//! not per-bar and is not claimed to be -- it is O(candidates), `engine` bounds
+//! it, and a first version of that bench row which divided a whole run by a bar
+//! count read 0.002x and was measuring the vocabulary.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

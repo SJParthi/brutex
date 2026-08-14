@@ -34,11 +34,11 @@
 //! the number of LEVELS — twelve on the fixture — and touches no bar and no
 //! candidate, which is the whole reason it may exist outside gate 17's silence.
 //!
-//! **UNVERIFIED as a measured figure.** This crate ships no bench for the
-//! render, so the paragraph above is an argument from the code's shape and not
-//! a number anyone took. Gate 12 is right to want one, and saying so is cheaper
-//! than inventing it — the same admission `identity.rs` and `lib.rs` already
-//! carry in their own headers, and which this file was missing when it landed.
+//! Measured by `C-R-02` in `crates/runner/benches/ratio.rs`, with both ladders
+//! neutered to a single level so the level count is held equal and only the
+//! column varies: 1,124 against 10,124 swept bars, 0.914x. The row began as a
+//! per-LEVEL cost and read 0.197x, which is the fixed prologue amortising over
+//! a deeper ladder and says nothing whatever about bars.
 
 use core::fmt::Write as _;
 

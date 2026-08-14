@@ -1782,6 +1782,26 @@ dependence as one that is dearer.
 | C-E-03 | The per-bar cost does not depend on the ANSWER: a column where every bar matches against one where none does, verified to be those two extremes before being timed. `support` folds a branchless `hits` with no early exit, so a short-circuiting version would be fast on selective candidates and the sweep's runtime would track the market rather than the bar count | `engine::bench::support_costs_the_same_whether_bars_match_or_not` | ✓ |
 | C-E-04 | A whole ladder walk — generate, subset-prune, reject duplicates, count support — costs the same per bar at 10,000 and 100,000 bars, with the live set held fixed so only the bar count varies and the O(&#124;frontier&#124;²) join is not what is being measured. Every frontier is checked to reconcile before its cost is reported: a walk that is not sound is not worth timing | `engine::bench::a_ladder_walk_costs_the_same_per_bar_at_every_column_length` | ✓ |
 
+### `crates/runner` — cost rows
+
+The crate shipped three cost claims and no bench. Its `lib.rs` header admitted
+so in words, which satisfies gate 12 and does not satisfy gate 14: admitting a
+number is missing is not the same as taking it. An adversarial audit ran gate
+14"s own script and found the crate refused. These are the measurements.
+
+Two of the three rows below were REWRITTEN by their own first result. C-R-01
+began as `a run costs the same per bar` and read 0.002x -- the claim being
+false, not a regression, because a run contains an O(candidates) ladder that has
+no business being divided by a bar count. C-R-02 began as a per-level cost and
+read 0.197x, which is the fixed prologue amortising, not anything about bars.
+Neither ceiling was widened.
+
+| # | Must hold | Proven by | |
+|---|---|---|---|
+| C-R-01 | The COLUMN BUILD costs the same per offered bar at every column length: 3,000 against 12,000 bars, with the ladder neutered to `min_hits = u64::MAX` so only the per-bar pass is timed. Divided by OFFERED bars because `Column::build` steps every one of them -- a swept-bar divisor charges the fixed 1,876-bar warm-up to 1,124 bars in one column and 10,124 in the other, and read 0.348x for exactly that reason | `runner::bench::the_column_build_costs_the_same_per_bar_at_every_column_length` | ✓ |
+| C-R-02 | The audit costs NOTHING per bar. Both ladders are neutered to a single level so the level count is held equal and only the column varies -- 1,124 against 10,124 swept bars. `report.rs` is allowed to exist outside gate 17's silence precisely because it costs one string per run rather than anything per bar, and a render whose cost tracked the column would make that sentence false | `runner::bench::the_report_costs_nothing_per_bar` | ✓ |
+| C-R-03 | Assembling a run identity does not depend on how many bars the digest covered: by the time `identity` runs, the data digest is thirty-two bytes whatever produced it. `data_digest` itself is O(bars) and honestly so; it is computed outside the timed region. Measured at 20,000 repetitions because at five the row read 0.369x, which was the scheduler | `runner::bench::the_identity_does_not_depend_on_how_many_bars_the_digest_covered` | ✓ |
+
 Measured on the operator's machine, 2026-08-11, `cargo bench -p engine`, exit 0.
 `size_of::<Ladder>()` is **8 bytes** — one `u64`, with no room for a depth field.
 **Four measurement sites producing six points**: C-E-01 and C-E-02 each loop over
