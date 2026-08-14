@@ -645,6 +645,10 @@ impl Ladder {
         // Distinct candidates admitted across every level so far. The budget is
         // cumulative because the peak is -- `sweep.levels` keeps them all.
         let mut admitted: usize = 0;
+        // Cumulative on BOTH axes. `pairs` was per-level, which is the exact
+        // defect fixed for `admitted` in 5b791da reintroduced on the time axis:
+        // a walk of depth 12 could spend twelve budgets and record no Halt.
+        let mut pairs_walked: u64 = 0;
         while !current.frequent.is_empty() {
             // `saturating_add`, not `checked_add`, and the difference is a branch
             // no test can reach. A level's masks all have `popcount == k` and a
@@ -657,8 +661,10 @@ impl Ladder {
             // The budget is CUMULATIVE across levels, not per level. See `Halt`:
             // a per-level cap left the peak at `depth * ceiling`, and the process
             // died rather than refused.
-            let (next, halt, added) = self.next_level(&column, &current, k, admitted);
+            let (next, halt, added, walked) =
+                self.next_level(&column, &current, k, admitted, pairs_walked);
             admitted = admitted.saturating_add(added);
+            pairs_walked = pairs_walked.saturating_add(walked);
             sweep.levels.push(current);
             current = next;
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
@@ -683,7 +689,8 @@ impl Ladder {
         prev: &Frontier,
         k: u32,
         admitted: usize,
-    ) -> (Frontier, Option<Halt>, usize) {
+        pairs_walked: u64,
+    ) -> (Frontier, Option<Halt>, usize, u64) {
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
@@ -725,12 +732,12 @@ impl Ladder {
             // frontier -- see `Halt::pairs`. Without this, the only symptom of a
             // `min_hits` set too low is a process that never returns, which is the
             // opposite of the loud refusal `CLAUDE.md` §4 requires.
-            if pairs >= self.pair_budget {
+            if pairs_walked.saturating_add(pairs) >= self.pair_budget {
                 halted = Some(Halt {
                     k,
                     candidates: admitted.saturating_add(seen.len()),
                     ceiling: self.ceiling,
-                    pairs,
+                    pairs: pairs_walked.saturating_add(pairs),
                     pair_budget: self.pair_budget,
                     breach: Breach::Pairs,
                 });
@@ -765,7 +772,7 @@ impl Ladder {
                         k,
                         candidates: admitted.saturating_add(seen.len()),
                         ceiling: self.ceiling,
-                        pairs,
+                        pairs: pairs_walked.saturating_add(pairs),
                         pair_budget: self.pair_budget,
                         breach: Breach::Candidates,
                     });
@@ -807,6 +814,7 @@ impl Ladder {
             },
             halted,
             seen.len(),
+            pairs,
         )
     }
 }
@@ -1487,6 +1495,43 @@ mod tests {
              ceiling. A fourth exit is how a silent depth cap arrives -- and a cap \
              keyed above any fixture's scale (`live.len() > 200` survives all 44 \
              behavioural tests) is invisible to everything except this count."
+        );
+
+        // AND THE LOOP CONDITIONS THEMSELVES, because an exit does not need a
+        // `break` to exist. An audit turned
+        //     while !current.frequent.is_empty() {
+        // into
+        //     while !current.frequent.is_empty() && k < 13 {
+        // -- a silent depth cap that leaves the token count at three, passes every
+        // behavioural test, passes clippy, and changes no coverage. A guard that
+        // counts exits has to pin where the loop is allowed to stop as well.
+        //
+        // SEARCHED IN CODE, NOT IN THE FILE, and the first draft was not.
+        //
+        // It called `src.contains(..)` on the whole file. The mutation above is
+        // spelled out in this very paragraph, so `contains` found it in the
+        // COMMENT and the guard passed on a mutated tree -- verified: the cap
+        // survived all 45 tests. Assembling the needle with `concat!` was not
+        // enough, because the prose is the thing that matches.
+        //
+        // The exit count above already strips comments; these must too. Sixth
+        // time in this workspace, and the first where the guard warning about the
+        // defect contained it.
+        let code = src
+            .lines()
+            .map(|l| l.split_once("//").map_or(l, |(before, _)| before))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains(concat!("while !current.", "frequent.is_empty() {")),
+            "the k-loop must stop on extinction ALONE. A second conjunct in its \
+             condition is a depth cap that carries no `break` and is therefore \
+             invisible to the count above."
+        );
+        assert!(
+            code.contains(concat!("for b in prev.", "frequent.iter().skip(")),
+            "the join's inner loop must run over the whole remaining frontier. A \
+             `.take(n)` or a narrowed range truncates the level without a `break`."
         );
     }
 
