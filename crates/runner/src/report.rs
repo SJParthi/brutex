@@ -27,6 +27,18 @@
 //! No JSON, no HTML, no dependency. A sweep is audited from a terminal or a log
 //! file, and both of those are text. `web/` is where a browser view belongs and
 //! this crate cannot reach it.
+//!
+//! # Cost
+//!
+//! One `String` per run, sized once and written once. The render is linear in
+//! the number of LEVELS — twelve on the fixture — and touches no bar and no
+//! candidate, which is the whole reason it may exist outside gate 17's silence.
+//!
+//! **UNVERIFIED as a measured figure.** This crate ships no bench for the
+//! render, so the paragraph above is an argument from the code's shape and not
+//! a number anyone took. Gate 12 is right to want one, and saying so is cheaper
+//! than inventing it — the same admission `identity.rs` and `lib.rs` already
+//! carry in their own headers, and which this file was missing when it landed.
 
 use core::fmt::Write as _;
 
@@ -190,6 +202,20 @@ fn verdict(out: &mut String, outcome: &Outcome) {
     let sweep = &outcome.sweep;
     let _ = writeln!(out, "VERDICT");
     match sweep.halted {
+        // Extinction is a MEASUREMENT, and it may only be reported when one was
+        // taken. `halted == None` is true for a sweep that finished and equally
+        // true for one that never started: a cold column, a column where every
+        // bar was refused, and the `Sweep::default()` that `Sweeper::auto`
+        // substitutes when its search keeps no rung. All three used to print
+        // "the frontier went extinct, which is the answer" -- an answer nobody
+        // computed, which is the §4 breach this module's own header claims to
+        // exist to prevent, and which no test here caught.
+        None if sweep.levels.is_empty() || sweep.bars == 0 => row(
+            out,
+            "outcome",
+            "NOTHING MEASURED",
+            "no ladder was walked -- this is not extinction",
+        ),
         None => row(
             out,
             "outcome",
@@ -300,6 +326,23 @@ mod tests {
         Ladder::with_min_hits(600).with_ceiling(50_000)
     }
 
+    /// The VALUE cell of a labelled row — what a reader's eye lands on.
+    ///
+    /// `text.contains("NO")` is satisfied by "NOT RECORDED", which every report
+    /// rendered with `id = None` prints at the top; `text.contains("pairs")` is
+    /// satisfied by the "  pairs walked" row, which `verdict` prints for EVERY
+    /// halt whatever budget was breached. Two assertions in this file were
+    /// therefore tautologies and a third could not distinguish the two halt
+    /// kinds — an adversarial audit found all three, and none of them could have
+    /// failed on any input. Reading the one cell under test is the fix.
+    fn cell(text: &str, label: &str) -> String {
+        text.lines()
+            .find(|l| l.contains(label))
+            .and_then(|l| l.split_once(label))
+            .map(|(_, rest)| rest.split_whitespace().next().unwrap_or("").to_owned())
+            .unwrap_or_default()
+    }
+
     #[test]
     fn permille_is_integer_arithmetic_and_handles_the_empty_case() {
         assert_eq!(permille(0, 0), "-", "no denominator, no percentage");
@@ -373,10 +416,18 @@ mod tests {
         let out = Sweeper::new(tight).run(&bars, &mut evaluator());
         let text = render(&out, None);
 
-        assert!(text.contains("REFUSED"), "a halt must be loud");
-        assert!(text.contains("pairs"), "and must name which budget");
-        assert!(text.contains("trustworthy as a whole answer"));
-        assert!(text.contains("NO"), "a halted sweep is not trustworthy");
+        assert_eq!(cell(&text, "outcome"), "REFUSED", "a halt must be loud");
+        assert_eq!(
+            cell(&text, "budget spent"),
+            "pairs",
+            "and must name the budget that was actually spent -- the ceiling was \
+             never approached here"
+        );
+        assert_eq!(
+            cell(&text, "trustworthy as a whole answer"),
+            "NO",
+            "a halted sweep is not trustworthy"
+        );
     }
 
     #[test]
@@ -436,8 +487,16 @@ mod tests {
             "a census that does not add up must say so in the report, not \
              silently render a smaller total"
         );
-        assert!(
-            text.contains("trustworthy as a whole answer") && text.contains("NO"),
+        assert_eq!(
+            cell(&text, "every bar accounted for"),
+            "NO",
+            "the BARS cell must say NO -- the earlier form asserted \
+             `text.contains(\"NO\")`, which \"NOT RECORDED\" satisfies on every \
+             report rendered without an identity"
+        );
+        assert_eq!(
+            cell(&text, "trustworthy as a whole answer"),
+            "NO",
             "and the verdict must carry it, not just the BARS section"
         );
     }
@@ -469,11 +528,67 @@ mod tests {
         let out = Sweeper::new(tight).run(&bars, &mut evaluator());
         let text = render(&out, None);
 
-        assert!(text.contains("REFUSED"));
-        assert!(
-            text.contains("candidates"),
+        assert_eq!(cell(&text, "outcome"), "REFUSED");
+        assert_eq!(
+            cell(&text, "budget spent"),
+            "candidates",
             "the report must name the budget that was actually spent; the pair \
-             budget was untouched and saying 'pairs' here would misdirect"
+             budget was untouched and saying 'pairs' here would misdirect. The \
+             earlier form asserted `text.contains(\"candidates\")`, which the \
+             unconditional \"  candidates admitted\" row satisfies for a PAIR \
+             breach too -- it could not fail either way"
+        );
+    }
+
+    #[test]
+    fn a_healthy_report_raises_neither_alarm() {
+        // The negative direction, which nothing asserted. Both defect alarms
+        // could have been wired permanently ON -- rendering "LOST A CANDIDATE"
+        // on every row of every run -- and the two broken-fixture tests would
+        // still pass, because they only prove an alarm CAN fire.
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let text = render(&out, None);
+
+        assert_eq!(
+            cell(&text, "every bar accounted for"),
+            "yes",
+            "a clean census must say so in the cell, not merely fail to complain"
+        );
+        assert!(
+            !text.contains("LOST A CANDIDATE"),
+            "no level of a healthy sweep may carry the candidate alarm"
+        );
+        assert!(!text.contains("a bar was lost"), "nor the census alarm");
+        assert_eq!(cell(&text, "trustworthy as a whole answer"), "yes");
+    }
+
+    #[test]
+    fn a_search_that_kept_no_rung_says_nothing_was_measured() {
+        // `Sweeper::auto` substitutes `Sweep::default()` when no threshold was
+        // affordable: bars 0, no levels, and `halted: None` because nothing ran
+        // far enough to breach anything. `Sweep::completed()` reads that as a
+        // clean finish, so the report printed "the frontier went extinct, which
+        // is the answer" and "trustworthy: yes" for a search that walked nothing.
+        // A fallback wearing a success's clothes -- `CLAUDE.md` §4.
+        let bars = synthetic::sessions(1);
+        let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
+        let text = render_auto(&auto, None);
+
+        assert!(!auto.affordable, "the fixture must keep no rung");
+        assert_eq!(
+            cell(&text, "outcome"),
+            "NOTHING",
+            "an absent ladder must not be reported as an extinct one"
+        );
+        assert!(
+            !text.contains("went extinct"),
+            "extinction is a measurement, and none was taken"
+        );
+        assert_eq!(
+            cell(&text, "trustworthy as a whole answer"),
+            "NO",
+            "and the verdict must carry it"
         );
     }
 

@@ -77,13 +77,36 @@ pub struct Outcome {
 impl Outcome {
     /// Did this run produce a complete, trustworthy answer?
     ///
-    /// Three ways it can be false, and they are different facts: the run never
-    /// warmed up, so nothing was measured; every bar was refused; or the ladder
-    /// breached its candidate ceiling and stopped short. [`Self::census`] and
-    /// [`Sweep::halted`] say which.
+    /// Four ways it can be false, and they are different facts: the run never
+    /// warmed up, so nothing was measured; every bar was refused; the ladder
+    /// breached a budget and stopped short; or no ladder was walked at all.
+    /// [`Self::census`] and [`Sweep::halted`] say which.
+    ///
+    /// # The fourth clause, and why a `Sweep` alone cannot answer this
+    ///
+    /// [`Sweeper::auto`] returns `Sweep::default()` when its search kept no
+    /// rung. That value has `bars: 0`, no levels, and — because nothing ran to
+    /// breach anything — `halted: None`, which [`Sweep::completed`] reads as a
+    /// clean finish. Without `bars > 0` this method answered **true** for a
+    /// search that measured nothing, and `report::render` printed "trustworthy
+    /// as a whole answer: yes" underneath it.
+    ///
+    /// That is the fallback `CLAUDE.md` §4 bans outright — a failure wearing a
+    /// success's clothes — and it was found by an adversarial audit rather than
+    /// by any test here, because every test asked whether a real sweep reported
+    /// itself correctly and none asked what an absent one reported.
+    ///
+    /// The clause is `bars == census.swept`, not `bars > 0`. Both exclude the
+    /// fabricated value, and the equality also catches a sweep walked over a
+    /// column that is not the one this census describes — a mismatch nothing
+    /// else here would notice. `Sweeper::run` satisfies it by construction,
+    /// because it hands `Ladder::walk` the very column it took the census from.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.first_swept.is_some() && self.sweep.completed() && self.census.reconciles()
+        self.first_swept.is_some()
+            && self.sweep.bars == self.census.swept
+            && self.sweep.completed()
+            && self.census.reconciles()
     }
 }
 
@@ -132,7 +155,7 @@ impl Sweeper {
 ///
 /// A search parameter, not a result parameter. It is small on purpose: a probe
 /// only has to answer "is this threshold cheap", and a threshold that **finishes**
-/// inside four million pair iterations has finished — running it again under a
+/// inside `PROBE_PAIRS` iterations has finished — running it again under a
 /// larger budget cannot change its answer, because it never reached the smaller
 /// one. So the kept sweep is returned as measured and is never re-walked.
 ///
@@ -339,8 +362,12 @@ mod tests {
 
     /// A ladder bounded on both axes, for every test that walks a real column.
     ///
-    /// `min_hits` is 600 of 3,000 bars — 20% support, which is a frequency
-    /// rather than a memorisation threshold — and the ceiling refuses a level
+    /// `min_hits` is 600 of the 1,124 SWEPT bars — 53.4% support, which is a
+    /// frequency rather than a memorisation threshold. Not 600 of the 3,000
+    /// offered: `Ladder::walk` is handed `column.bits()`, so `Sweep::bars` is
+    /// the swept count and `report.rs` renders the ratio as "of swept bars".
+    /// This comment read "20%" against the offered count until an audit caught
+    /// the two denominators disagreeing across three files — and the ceiling refuses a level
     /// long before it can cost a gigabyte. See
     /// `a_warm_run_produces_a_complete_sweep` for why both are needed and what
     /// happened when neither was there.

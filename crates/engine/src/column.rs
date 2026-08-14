@@ -159,7 +159,9 @@ impl Column {
         // sweep. `CLAUDE.md` §3.4 requires a constant per-operation cost and gate
         // 11 rule 3 refuses an unsized collection on an O(1) path; an allocation
         // is neither constant nor sized. A fixed array indexed by `zip` is both,
-        // costs 1,536 bytes of stack, and cannot be larger because a mask cannot
+        // costs 3,072 bytes of stack -- 384 `usize`, not the 1,536 this comment
+        // claimed for months, which is the figure for `[u32; 384]` and not what
+        // is declared below -- and cannot be larger because a mask cannot
         // name more positions than it has bits.
         // BASE OFFSETS, DERIVED ONCE -- not a bitmap slice per (word, position).
         //

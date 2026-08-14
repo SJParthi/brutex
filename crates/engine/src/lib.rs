@@ -373,7 +373,7 @@ impl Sweep {
 ///
 /// It is deliberately far above anything a healthy sweep reaches. With all 238
 /// live positions frequent at k=1 — the worst case the vocabulary permits — the
-/// distinct-candidate counts are `C(238,2) = 28,203` and `C(238,3) = 2,215,180`,
+/// distinct-candidate counts are `C(238,2) = 28,203` and `C(238,3) = 2,218,636`,
 /// both under this. `C(238,4) = 130,344,865` is fifteen times over it, and that
 /// level is the one an adversarial audit measured at 4.69 years of support
 /// counting and 24.9 GB of peak memory. So the ceiling first bites exactly where
@@ -896,7 +896,13 @@ pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
 /// should visit and unequal for every pair it should not.
 ///
 /// O(1): the scan is over [`ConditionMask`]'s six words, a compile-time
-/// constant, not over the set bits.
+/// constant, not over the set bits — and it runs once per frontier entry per
+/// level, never once per pair, so it is off the join's hot path entirely.
+///
+/// **UNVERIFIED as a measured figure.** The bound is read off the loop's
+/// constant limit. That is sound as an argument and is not a measurement, and
+/// no row in `crates/engine/benches/ratio.rs` covers this function. Gate 12
+/// caught this block on the commit that introduced it.
 ///
 /// # The empty mask
 ///
@@ -924,14 +930,26 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 ///
 /// Walks the whole 384-bit width rather than the set bits, because
 /// [`ConditionMask`] exposes no bit iterator. The loop bound is
-/// Measured by `C-E-02`: the per-bar cost is flat from k=1 to k=8, which is what
-/// says walking the full width costs the same whatever the candidate requires.
-/// `crates/engine/benches/ratio.rs`.
-///
 /// [`ConditionMask::BITS`], a compile-time constant, so this is O(1) under
-/// §3.4 — but it is 384 probes where 5 would do, and that is a real cost stated
+/// §3.4 — but it is 384 probes where k would do, and that is a real cost stated
 /// rather than hidden. A `set_bits()` accessor on `ConditionMask` would make it
 /// O(k); it does not exist and adding one is a change to `crates/vocab`.
+///
+/// # The measurement this used to cite was of a different function
+///
+/// This block named `C-E-02` as its proof. `C-E-02` benches the free `support`
+/// function's per-bar cost and never calls this one — so the citation was for
+/// the wrong subject, and the only per-candidate loop in the sweep other than
+/// support counting had no bench row at all. Found by an adversarial audit.
+///
+/// **UNVERIFIED as a measured figure.** The O(1) bound above is read off the
+/// loop's constant limit, which is sound as an argument and is not a
+/// measurement. No row in `crates/engine/benches/ratio.rs` covers this function
+/// yet, and naming one that does not would be worse than admitting none does.
+///
+/// It also matters more since the prefix join landed: with the join no longer
+/// walking a million pairs, this 384-probe loop is now a materially larger
+/// share of what a level costs than it was when the citation was written.
 fn every_subset_is_frequent(cand: &ConditionMask, frequent: &HashSet<ConditionMask>) -> bool {
     let mut b: u32 = 0;
     while b < ConditionMask::BITS {
@@ -952,8 +970,18 @@ fn sort_canonically(v: &mut [Itemset]) {
     v.sort_unstable_by_key(|i| (i.mask.words(), i.hits));
 }
 
-/// `usize` count as `u64` without a cast lint or a panic.
-/// A collection's length, as a `u64`.
+/// A collection's length as a `u64`, without a cast lint or a panic.
+///
+/// Two summary lines sat stacked here since 6082bea — `usize count as u64
+/// without a cast lint or a panic.` above `A collection's length, as a u64.` —
+/// a merge artifact that rustdoc renders as one run-on sentence. Found by an
+/// adversarial audit; merged into the single line above.
+///
+/// **UNVERIFIED as a measured figure.** The 612,083 ns below was taken by an
+/// audit on one machine and is not reproduced by any bench in
+/// `crates/engine/benches/ratio.rs`, so it is recorded as what it is — an
+/// observation that motivated a change — rather than as a bound this file
+/// claims to hold.
 ///
 /// # This was a fold, and the fold was a rule breach
 ///
@@ -1937,7 +1965,15 @@ mod tests {
         // knew; a `const` block fails the BUILD if the ceiling is ever moved to a
         // value that puts C(238,3) outside it or C(238,4) inside it, which is the
         // arithmetic the doc block on `DEFAULT_CEILING` argues from.
-        const { assert!(2_215_180 < DEFAULT_CEILING, "C(238,3) must fit") };
+        const {
+            assert!(
+                2_218_636 < DEFAULT_CEILING,
+                "C(238,3) must fit. 238*237*236/6 = 2,218,636 -- the pin read \
+                 2,215,180 for months, which is 3,456 short and therefore a \
+                 guard that admitted values it advertised as rejected. Found by \
+                 an adversarial audit, not by this assertion."
+            );
+        };
         const { assert!(130_344_865 > DEFAULT_CEILING, "C(238,4) must not") };
     }
 
@@ -2271,6 +2307,163 @@ mod tests {
             );
             oracle = want;
         }
+    }
+
+    /// The sweep, at production SHAPE, against a brute force sharing no code.
+    ///
+    /// # Why the source-text pin was not enough
+    ///
+    /// `the_walk_has_exactly_three_early_exits_and_each_is_a_budget` counts exit
+    /// tokens per LINE and pins loop headers by prefix. An adversarial audit
+    /// defeated it **nine** ways without moving either number:
+    ///
+    /// | Truncation | Why the count did not move |
+    /// |---|---|
+    /// | `if halt.is_some() \|\| (bars > 100 && k >= 3)` | folded into the existing `break`'s condition |
+    /// | `frequent.len() > 4096 \|\|` in `every_subset_is_frequent` | folded into the existing `return false`'s condition |
+    /// | `.take(1024)` on the join's outer row loop | that header was not pinned at all |
+    /// | `.step_by(stride)` on the inner loop | the pin is `contains`, so any suffix passes |
+    /// | the `'join` loop wrapped in `if column.bars() <= 1000` | an `if` carries no exit token |
+    /// | `.then_some(())?` in an `Option` wrapper | `?` is a way out and is not one of the three words |
+    /// | a `Ladder { min_hits: self.min_hits * 8, ..self }` into the join | the join is untouched; its INPUT is not |
+    /// | `self.stride.min(4)` in `Column::support` | `column.rs`'s headers were not pinned |
+    /// | `out.truncate(925)` | `reconciles()` was asserted only where the widest level is 252 |
+    ///
+    /// Every one passed 45/45. Three also passed `--fail-under-regions 100`,
+    /// because a threshold no fixture crosses leaves no unexecuted region.
+    ///
+    /// The only thing that sees all nine is recomputing the answer at a scale
+    /// above every other fixture here, from the other layout. A counter cannot
+    /// catch a cap on the quantity the counter itself reports.
+    #[test]
+    fn a_production_shape_sweep_equals_its_brute_force() {
+        /// Sixteen co-occurring live positions: frontier width to 10,090, where
+        /// the parametric fixture stops at 924.
+        const DEEP: [u32; 16] = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        /// 1,200 bars — four times the largest column any other test builds.
+        const BARS: usize = 1_200;
+        /// Chosen so the ladder dies of `min_hits`, not of running out of bits.
+        const MIN_HITS: u64 = 700;
+
+        let column: Vec<ConditionMask> = (0..BARS)
+            .map(|i| {
+                DEEP.iter()
+                    .enumerate()
+                    .fold(ConditionMask::default(), |m, (j, &p)| {
+                        // Each position is absent on its own residue class, so the
+                        // sixteen supports differ and the lattice is not one block.
+                        if i % (j + 7) == 0 { m } else { m.with_bit(p) }
+                    })
+            })
+            .collect();
+        let live: Vec<u32> = DEEP.to_vec();
+        let sweep = Ladder::with_min_hits(MIN_HITS).walk(&column, &live);
+
+        // 1. IT DIED OF EXTINCTION. A cap reusing an existing `break` leaves a
+        //    NON-EMPTY top level behind and still reports `completed`.
+        assert!(sweep.halted.is_none(), "no budget may breach at this shape");
+        assert!(sweep.completed());
+        assert!(
+            sweep.levels.last().is_some_and(|l| l.frequent.is_empty()),
+            "a completed sweep must end on an EMPTY level: the ladder stopped \
+             because the frontier emptied, not because something told it to"
+        );
+
+        // 2. EVERY LEVEL ACCOUNTS FOR EVERY CANDIDATE, at a width of 10,090.
+        for level in &sweep.levels {
+            assert!(
+                level.reconciles(),
+                "level {} generated {} and accounts for {} + {} + {} + {} + {}",
+                level.k,
+                level.generated,
+                level.duplicates,
+                level.excluded,
+                level.pruned,
+                level.infrequent,
+                level.frequent.len()
+            );
+        }
+
+        // 3. THE KEPT SET IS THE BRUTE-FORCE SET. Counted with `support` over the
+        //    ROW-MAJOR column, the layout the sweep does NOT use -- so a
+        //    truncation inside `Column::support` is a disagreement and not a
+        //    shared mistake. All 65,535 non-empty subsets, no Apriori anywhere.
+        let mut brute: HashSet<ConditionMask> = HashSet::new();
+        for subset in 1_u32..(1 << 16) {
+            let mask = DEEP
+                .iter()
+                .enumerate()
+                .fold(ConditionMask::default(), |m, (i, &b)| {
+                    if subset & (1 << i) == 0 {
+                        m
+                    } else {
+                        m.with_bit(b)
+                    }
+                });
+            if support(&column, &mask) >= MIN_HITS {
+                brute.insert(mask);
+            }
+        }
+        let kept: HashSet<ConditionMask> = sweep.all_frequent().map(|i| i.mask).collect();
+        let dropped = brute.difference(&kept).count();
+        let invented = kept.difference(&brute).count();
+        assert_eq!(
+            (dropped, invented),
+            (0, 0),
+            "the ladder dropped {dropped} frequent sets the brute force found and \
+             invented {invented} it did not, out of {} -- a silent truncation",
+            brute.len()
+        );
+    }
+
+    /// A frontier holding the same mask twice is still counted once.
+    ///
+    /// # Why this reaches for `next_level` directly
+    ///
+    /// The prefix join reaches every k-set from exactly one pair, so no walk
+    /// this crate can perform will ever increment `duplicates` — which left the
+    /// duplicate arm as code no test could reach through `walk`. An unreachable
+    /// branch is not a safety net; it is an untested one, and the 100% floor in
+    /// `CLAUDE.md` §9 is right to refuse it.
+    ///
+    /// The arm is reachable, by the one input that should reach it: a MALFORMED
+    /// frontier. `{0,1}` twice plus `{0,2}` all share the prefix `{0}`, so the
+    /// block yields the pair `({0,1}, {0,2})` twice and the second is rejected
+    /// rather than evaluated against the bars a second time. That the join
+    /// survives a frontier it should never be handed is worth pinning on its own
+    /// -- it is the difference between wasted work and a double-counted level.
+    #[test]
+    fn the_same_mask_twice_in_a_frontier_is_still_evaluated_once() {
+        let b = bars(&[&[0, 1, 2], &[0, 1, 2], &[0, 1, 2], &[3]]);
+        let column = Column::transpose(&b);
+        let one = |bits: &[u32]| Itemset {
+            mask: bits
+                .iter()
+                .fold(ConditionMask::default(), |m, &x| m.with_bit(x)),
+            hits: 3,
+        };
+        // Deliberately malformed: {0,1} appears twice.
+        let prev = Frontier {
+            k: 2,
+            frequent: vec![one(&[0, 1]), one(&[0, 1]), one(&[0, 2])],
+            generated: 0,
+            duplicates: 0,
+            excluded: 0,
+            pruned: 0,
+            infrequent: 0,
+        };
+        let (level, halted, _, _) = Ladder::with_min_hits(1).next_level(&column, &prev, 3, 0, 0);
+
+        assert!(halted.is_none(), "the fixture must not breach a budget");
+        assert_eq!(
+            level.duplicates, 1,
+            "the repeated mask produces {{0,1,2}} twice and the second must be \
+             rejected, not evaluated against the bars again"
+        );
+        assert!(
+            level.reconciles(),
+            "and the level must still account for every candidate it generated"
+        );
     }
 
     #[test]
