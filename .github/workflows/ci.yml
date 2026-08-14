@@ -1553,7 +1553,46 @@ jobs:
             fi
             for f in $files; do
               scanned=$((scanned + 1))
-              hits=$( { grep -nE 'telemetry::|log::|println!|eprintln!' "$f" || true; } )
+              # COMMENTS STRIPPED FIRST, and this gate was RED for exactly the
+              # reason gate 19's manifest scan already documents: text in a
+              # comment is text. `crates/indicators/src/column.rs:57` reads
+              #
+              #   //! CI gate 17 forbids `telemetry::` in this crate outright
+              #
+              # -- a doc comment DESCRIBING THIS GATE -- and the gate failed the
+              # build on it. The crate does not depend on telemetry at all;
+              # `telemetry` appears nowhere in its Cargo.toml.
+              #
+              # The filter is the one gate 23 already uses: drop lines whose
+              # first non-blank token is `//` or `*`. It is conservative in the
+              # safe direction -- no Rust CALL can sit on a line that begins
+              # with `//`, so this cannot hide one.
+              #
+              # WHAT IT STILL CATCHES WRONGLY, stated rather than discovered,
+              # and both were REPRODUCED against a probe file rather than
+              # reasoned about:
+              #
+              #   1. a trailing comment on a line that also carries code --
+              #      `let n = 0; // no telemetry:: here` -- is scanned whole;
+              #   2. the OPENING line of a block comment, `/* ... println! ... */`,
+              #      does not start with `//` or `*` and is scanned whole.
+              #      Continuation lines beginning ` * ` are skipped.
+              #
+              # Both are false POSITIVES: they fail loudly and visibly, which is
+              # the direction this repository errs in, and neither can hide a
+              # real call. No file under the three swept crates trips either
+              # today -- 18 scanned, zero hits.
+              #
+              # A sound fix needs a Rust parser, not a regex, for the same
+              # reason brace-counting source is unsound: a `//` can sit inside a
+              # string literal.
+              # AWK RATHER THAN `grep -v | grep -n`, so the reported number is
+              # the line's number IN THE FILE. Stripping first and numbering
+              # after renumbers every line below the first comment, and a gate
+              # that points at the wrong line is worse than one that points at
+              # none.
+              hits=$( { awk '!/^[[:space:]]*(\/\/|\*)/ { print FNR": "$0 }' "$f" \
+                        | grep -E 'telemetry::|log::|println!|eprintln!' || true; } )
               if [ -n "$hits" ]; then
                 printf 'LOGGING INSIDE THE SWEEP: %s\n%s\n' "$f" "$hits"
                 bad=1
