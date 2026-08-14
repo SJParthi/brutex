@@ -803,13 +803,31 @@ jobs:
           # host on the internet.
           http_status='302 403'
 
+          # ---- group 24: THE WITHDRAWN-INDEX REGRESSION. nse.rs tests.
+          #
+          # `nifty-ipo` is a real index the exchange has COMMENTED OUT of its
+          # own thematic listing, copied into a test fixture from the live page
+          # on 14 Aug 2026 along with the markup around it. It is the regression
+          # that caught `without_comments`: a byte scanner reads inside an HTML
+          # comment where a browser does not, and the crawl found 62 index links
+          # on a page that lists 44. A withdrawn page answering 404 makes every
+          # pass incomplete, which makes a snapshot permanently unpublishable.
+          #
+          # It is the public name of a stock-market index on a public exchange
+          # site, it names no org, env, vendor or field, and it is on this list
+          # because the fixture must keep quoting it -- a regression test that
+          # stops naming the case it guards stops guarding it.
+          #
+          # `an-index` is the placeholder page name in the sibling test.
+          withdrawn_index='nifty-ipo an-index'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
@@ -2716,6 +2734,11 @@ jobs:
           crates/greeks/src/error.rs 17
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
+          crates/runner/src/significance.rs 7
+          #   significance.rs -- t-statistics and a normal quantile. CLAUDE.md §7
+          #   makes PRICES integers and in the same breath keeps statistical
+          #   values at full precision; no paisa figure reaches that module,
+          #   which consumes a trial COUNT and returns a THRESHOLD.
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
           crates/telemetry/src/value.rs 5

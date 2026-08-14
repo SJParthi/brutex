@@ -338,6 +338,61 @@ impl fmt::Display for NseError {
 
 impl core::error::Error for NseError {}
 
+/// `html` with every comment removed, so a scan cannot read a withdrawn link.
+///
+/// # MEASURED AGAINST THE REAL PAGE, and the first version of this module was
+/// wrong without it
+///
+/// `pull::nse`'s scanner was proved against fixtures written here, and it
+/// agreed with them. Run against the exchange's actual thematic listing on
+/// 14 Aug 2026 it found **62 index links where the page lists 44**. The extra
+/// eighteen are real-looking paths — `nifty-ipo`, `nifty-housing`,
+/// `nifty-ev-new-age-automotive` — sitting inside HTML comments:
+///
+/// ```text
+/// </li><!--   <li><a href="/indices/equity/thematic-indices/nifty-ipo" ...
+/// ```
+///
+/// A browser never sees them. A byte scanner does, and the consequence is not
+/// cosmetic: the crawl would fetch pages the exchange has **withdrawn from its
+/// own listing**, and a withdrawn page that answers 404 becomes an
+/// [`IndexFailure`](crate::resolve::IndexFailure) — which makes every pass
+/// incomplete, which makes `admits_publication` refuse, **permanently**. The
+/// pipeline would never publish anything and the reason would look like a
+/// network fault.
+///
+/// # Why removal rather than tracking a flag through the scan
+///
+/// The scan is looking for an anchored literal and nothing else; teaching it a
+/// second state would put the comment rule in two functions
+/// ([`hrefs_with_prefix`] and [`constituent_link`]) where one of them could
+/// drift. One pass, one allocation, and both callers read the same bytes.
+///
+/// An unterminated comment consumes the rest of the document. That is what a
+/// browser does with one, and inventing a different rule would make this scan
+/// disagree with the only reader whose interpretation matters.
+#[must_use]
+pub fn without_comments(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(at) = rest.find("<!--") {
+        if let Some(head) = rest.get(..at) {
+            out.push_str(head);
+        }
+        let Some(after) = rest.get(at.saturating_add(4)..) else {
+            return out;
+        };
+        match after.find("-->") {
+            // Unterminated: the rest of the document is comment, as a browser
+            // would also read it.
+            None => return out,
+            Some(end) => rest = after.get(end.saturating_add(3)..).unwrap_or(""),
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Every `href` in `html` that begins with `prefix`, in document order.
 ///
 /// # A scanner, not a parser, and the difference is deliberate
@@ -405,9 +460,13 @@ pub fn index_links(html: &str, category: Category) -> Vec<IndexRef> {
     // The prefix is the category's own path plus a separator, so a listing that
     // links a SIBLING category is not collected into this one.
     let prefix = format!("{}/", category.path());
+    // COMMENTS FIRST. The exchange comments out withdrawn indices in its own
+    // listing, and a byte scanner reads them where a browser does not — see
+    // `without_comments`, which carries the measurement.
+    let visible = without_comments(html);
     let mut seen: Vec<&str> = Vec::new();
     let mut out = Vec::new();
-    for href in hrefs_with_prefix(html, &prefix) {
+    for href in hrefs_with_prefix(&visible, &prefix) {
         // A trailing slash and no slug is the category page linking itself.
         if href.len() <= prefix.len() {
             continue;
@@ -443,7 +502,11 @@ pub const CONSTITUENT_DIR: &str = "/IndexConstituent/";
 /// match is on the directory segment rather than on the whole URL so that
 /// either spelling is found.
 pub fn constituent_link(html: &str, page: &str) -> Result<String, NseError> {
-    let mut rest = html;
+    // Same rule as `index_links`: a commented-out download link is one the page
+    // does not offer, and following it would fetch a file for an index the
+    // exchange has withdrawn.
+    let visible = without_comments(html);
+    let mut rest = visible.as_str();
     while let Some(at) = rest.find("href=") {
         let Some(after) = rest.get(at.saturating_add(5)..) else {
             break;
@@ -861,6 +924,65 @@ mod tests {
     }
 
     /// The exchange writes this link with a doubled slash after the host.
+    /// **THE REGRESSION, IN THE EXCHANGE'S OWN BYTES.**
+    ///
+    /// Copied from the live thematic listing on 14 Aug 2026. Two visible
+    /// indices, then a withdrawn one the exchange has commented out —
+    /// `sfref` attribute and all, because that is what the real markup carries.
+    ///
+    /// Before `without_comments`, the scanner returned 62 links on a page
+    /// listing 44. Every extra one would have been fetched, and a withdrawn
+    /// page answering 404 makes a pass incomplete, which makes
+    /// `Snapshot::admits_publication` refuse — permanently, and looking like a
+    /// network fault.
+    const REAL_LISTING: &str = "<li><a href=\"/indices/equity/thematic-indices/nifty-infrastructure\">\
+        NIFTY INFRASTRUCTURE</a></li>\
+        <li><a href=\"/indices/equity/thematic-indices/nifty-india-corporate-group-index---mahindra-group\">\
+        NIFTY INDIA CORPORATE GROUP INDEX - MAHINDRA GROUP</a></li>\
+        <!--   <li><a href=\"/indices/equity/thematic-indices/nifty-ipo\" \
+        sfref=\"[f669d9a7-009d-4d83-ddaa-000000000002]19C6B6EF\">NIFTY IPO</a></li> -->";
+
+    #[test]
+    fn a_link_the_exchange_commented_out_is_not_an_index_this_build_crawls() {
+        let found = index_links(REAL_LISTING, Category::Thematic);
+        assert_eq!(
+            found.len(),
+            2,
+            "the exchange withdrew the third from its own listing; a browser \
+             never sees it and neither may this: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|r| r.path.contains("nifty-ipo")),
+            "the commented link must not be crawled: {found:?}"
+        );
+    }
+
+    #[test]
+    fn a_commented_out_download_link_is_not_the_file_this_page_offers() {
+        let page = "<!-- <a href=\"/IndexConstituent/ind_withdrawn.csv\">old</a> -->\
+                    <a href=\"/IndexConstituent/ind_live.csv\">Download</a>";
+        assert_eq!(
+            constituent_link(page, "an-index").expect("the live link"),
+            "/IndexConstituent/ind_live.csv"
+        );
+    }
+
+    #[test]
+    fn an_unterminated_comment_consumes_the_rest_as_a_browser_would() {
+        let page = "<a href=\"/indices/equity/sectoral-indices/before\">a</a>\
+                    <!-- <a href=\"/indices/equity/sectoral-indices/after\">b</a>";
+        let found = index_links(page, Category::Sectoral);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.ends_with("before"));
+    }
+
+    #[test]
+    fn stripping_comments_leaves_a_document_that_has_none_untouched() {
+        let plain = "<a href=\"/x\">y</a>";
+        assert_eq!(without_comments(plain), plain);
+        assert_eq!(without_comments(""), "");
+    }
+
     #[test]
     fn the_constituent_link_is_read_from_the_page_and_never_composed() {
         let page = r#"<a href="https://www.niftyindices.com//IndexConstituent/ind_niftybanklist.csv">Download</a>"#;
