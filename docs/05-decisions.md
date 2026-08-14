@@ -13675,3 +13675,50 @@ carrying the universe resolution and the Zerodha integration, and all dirty at
 the time this was written. This entry is the shape, agreed before either session
 writes it, so the two do not land two answers to one question. The `web/` half —
 the archive cascade on `/ingest` — is the other session's to leave alone.
+
+## D-0142 — the forward outcome, and the four choices it required
+
+**Date:** 2026-08-14
+
+**Decision.** `crates/runner/src/outcome.rs` measures what the price did after a
+signal. Four choices were required and none is derivable; the operator's
+instruction was "you pick", so each is recorded here as a **stated assumption
+with a default**, not as a derivation. Overruling any one is a parameter change
+and a new entry, never a rewrite.
+
+| choice | value | why this and not another |
+|---|---|---|
+| horizon | **15 bars** | on 1-minute data a quarter of an hour: long enough for an intraday move to develop, short enough to stay inside a 375-bar session and leave a small tail |
+| measure | **close-to-close, paisa** | the only pair of prices knowable at bar N without assuming a fill this crate has no basis to assume |
+| entry | **close of the signal bar** | the last price that exists at N; an open or a midpoint would need an execution model `crates/costs` owns |
+| tail | **excluded, not zero** | the final H bars have no future in the data; zero is a measurement and absence is not |
+
+**Transaction costs are deliberately absent.** This measures the market's move,
+not a trade's profit. Putting a cost model inside a measurement would make the
+measurement untestable against anything.
+
+**Why this unblocks fourteen things.** Ranking, top-N retention, the Deflated
+Sharpe Ratio, the Probability of Backtest Overfitting, White's Reality Check,
+Hansen's SPA, Romano–Wolf, Benjamini–Hochberg, the Harvey–Liu haircut, Minimum
+Backtest Length, purging and embargo, Combinatorial Purged CV, walk-forward and
+regime checks all need one fact the engine did not have: what happened next.
+`Edge` supplies `n`, a mean and a **t-statistic**, and that t is what
+`crate::significance` already computes a bar for. The loop closes.
+
+**The look-ahead guard is structural, not reviewed.** §3 rule 7 says the mask at
+bar N reads bars 0..N. A forward return reads N+1..N+H and is therefore exactly
+what must never reach the condition bits. `Column::build` takes a slice and an
+evaluator — **there is no parameter through which an outcome could arrive**. The
+`Forward` is built in `crates/runner` and handed only to `edge`.
+
+**And it required a foundation that did not exist.** Pairing a signal with what
+followed it needs the bar index behind each column position. `first_swept + j`
+is not that map: refusals are counted, not removed, so from the first corrupt
+bar the offset runs one behind and every outcome after it is read off the wrong
+bar — silently, and only on data containing a refusal. `Column::sources` is the
+map, added in the commit before this one.
+
+**Proven by.** `runner::outcome::tests` — nine rows, including
+`the_return_is_close_to_close_and_the_tail_has_none`,
+`the_empty_mask_fires_on_every_bar_that_has_an_outcome` (which counts the tail
+exclusion exactly) and `an_identical_sample_reports_zero_rather_than_an_infinite_t`.

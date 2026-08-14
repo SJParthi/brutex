@@ -50,6 +50,7 @@
 #![deny(missing_docs)]
 
 pub mod identity;
+pub mod outcome;
 pub mod report;
 pub mod resample;
 pub mod significance;

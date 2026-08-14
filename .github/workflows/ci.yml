@@ -2733,6 +2733,11 @@ jobs:
           # 2's own title says both halves. No paisa figure reaches that module: it
           # consumes a trial COUNT and returns a t-THRESHOLD, and its module-scope
           # allow carries the same reason.
+          # `crates/runner/src/outcome.rs` is the same case one layer down: the
+          # forward RETURN is paisa i64 throughout, and only the mean and the
+          # t-statistic derived from it are floating. Transaction costs are
+          # deliberately absent from that module, so no rupee figure is being
+          # rounded -- `crates/costs` owns money and this owns a measurement.
           allow_float='
           crates/core/src/price.rs 4
           crates/greeks/src/bsm.rs 36
@@ -2741,6 +2746,7 @@ jobs:
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
           crates/runner/src/significance.rs 7
+          crates/runner/src/outcome.rs 5
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
           crates/telemetry/src/value.rs 5
