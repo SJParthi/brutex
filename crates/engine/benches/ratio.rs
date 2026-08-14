@@ -52,6 +52,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use engine::column::Column;
 use engine::{Ladder, support};
 use vocab::ConditionMask;
 
@@ -342,6 +343,49 @@ fn support_costs_the_same_whether_bars_match_or_not() -> bool {
     )
 }
 
+/// C-E-07 — the cost of the support the SWEEP ACTUALLY CALLS does not depend on
+/// the answer.
+///
+/// # Why C-E-03 was not enough, and was measuring nothing
+///
+/// `C-E-03` above asserts answer-independence of the free `support` function.
+/// Since 7461f57 wired the transposed layout into `Ladder::walk`, **the sweep does
+/// not call that function** — every support count in a real run goes through
+/// `Column::support`. So the row that guards the property was measuring dead code,
+/// and an adversarial audit measured the live function at **6.384x** against this
+/// same 3.0x ceiling while `C-E-03` printed 1.000x.
+///
+/// The cause was a `break` when the accumulator reached zero: a candidate that
+/// missed early cost less than one that matched, so the sweep's runtime tracked
+/// the market rather than the bar count. It is removed, and this row is what
+/// stops it coming back.
+fn transposed_support_costs_the_same_whether_bars_match_or_not() -> bool {
+    let n = 100_000;
+    let mask = candidate(DRAWN_FROM.len());
+    let all = Column::transpose(&column_all_set(n));
+    let none = Column::transpose(&vec![ConditionMask::ZERO; n]);
+
+    // Both extremes, confirmed, or the row prints a number that means nothing.
+    let hits_all = all.support(&mask);
+    let hits_none = none.support(&mask);
+    let want = u64::try_from(n).unwrap_or(u64::MAX);
+    if hits_all != want || hits_none != 0 {
+        refuse(&format!(
+            "the transposed columns are not the extremes they must be: \
+             {hits_all} of {n} and {hits_none} of {n}"
+        ));
+    }
+    let per_bar = |c: &Column| -> u128 {
+        let bars = u128::try_from(n).unwrap_or(1).max(1);
+        once_ps(|| black_box(c.support(black_box(&mask)))) / bars
+    };
+    ratio(
+        "C-E-07 Column::support: every bar matches -> no bar matches",
+        per_bar(&all),
+        per_bar(&none),
+    )
+}
+
 /// C-E-04 — a whole ladder walk costs the same per bar at every column length.
 ///
 /// The end-to-end row. `Ladder::walk` generates candidates, prunes subsets,
@@ -463,6 +507,7 @@ fn main() {
     ok &= support_costs_the_same_per_bar_at_every_column_length();
     ok &= support_costs_the_same_per_bar_at_every_depth();
     ok &= support_costs_the_same_whether_bars_match_or_not();
+    ok &= transposed_support_costs_the_same_whether_bars_match_or_not();
     ok &= a_ladder_walk_costs_the_same_per_bar_at_every_column_length();
     if ok {
         println!("all ratios within the ceiling");

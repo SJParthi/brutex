@@ -152,18 +152,53 @@ impl Column {
     /// `the_two_layouts_agree_on_every_candidate` covers it explicitly.
     #[must_use]
     pub fn support(&self, candidate: &ConditionMask) -> u64 {
-        let mut required = set_positions(candidate);
-        let Some(first) = required.next() else {
+        // THE EMPTY MASK, ANSWERED IN O(1) AND NOT BY FALLING THROUGH THE LOOP.
+        // A mask requiring nothing is matched by every bar; `popcount` is a
+        // register operation, so this costs nothing and it keeps the loop below
+        // able to assume at least one AND happens -- which is what makes the
+        // padding argument hold.
+        if candidate.popcount() == 0 {
             return self.bars;
-        };
-        let rest: Vec<u32> = required.collect();
+        }
+
+        // THE POSITIONS, DERIVED ONCE, ON THE STACK.
+        //
+        // This was `let rest: Vec<u32> = required.collect()` -- a HEAP ALLOCATION
+        // PER CALL, and since 7461f57 wired this function into `Ladder::walk` that
+        // is one allocation per candidate per level, which is billions in a real
+        // sweep. `CLAUDE.md` §3.4 requires a constant per-operation cost and gate
+        // 11 rule 3 refuses an unsized collection on an O(1) path; an allocation
+        // is neither constant nor sized. A fixed array indexed by `zip` is both,
+        // costs 1,536 bytes of stack, and cannot be larger because a mask cannot
+        // name more positions than it has bits.
+        let mut required = [0_u32; ConditionMask::BITS as usize];
+        let mut count = 0_usize;
+        for (slot, position) in required.iter_mut().zip(set_positions(candidate)) {
+            *slot = position;
+            count = count.saturating_add(1);
+        }
+
         let mut hits = 0_u32;
         for word in 0..self.stride {
-            let mut acc = self.bitmap(first).get(word).copied().unwrap_or(0);
-            for position in &rest {
-                if acc == 0 {
-                    break;
-                }
+            // NO SHORT-CIRCUIT, AND ITS REMOVAL IS THE POINT.
+            //
+            // This loop used to `break` when the accumulator reached zero, which
+            // made the cost of a support count depend on the ANSWER: a candidate
+            // that misses early was cheaper than one that matches. `C-E-03` is the
+            // row that exists to refuse exactly that -- "the per-bar cost does not
+            // depend on the answer" -- and an audit measured the live function at
+            // 6.384x against its 3.0x ceiling while `C-E-03` read 1.000x, because
+            // the row was still measuring the row-major function the sweep no
+            // longer calls. A sweep whose runtime tracks the market rather than
+            // the bar count cannot be budgeted, which is the whole reason the
+            // invariant is written down.
+            //
+            // Starting from the FIRST named bitmap rather than `u64::MAX` is what
+            // keeps padding zero: every real bitmap has zeroes in the tail bits, so
+            // an AND of real bitmaps does too. The `popcount == 0` guard above is
+            // what guarantees there is a first one.
+            let mut acc = u64::MAX;
+            for position in required.iter().take(count) {
                 acc &= self.bitmap(*position).get(word).copied().unwrap_or(0);
             }
             hits = hits.saturating_add(acc.count_ones());
