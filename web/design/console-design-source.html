@@ -1,0 +1,1884 @@
+<title>Brutex Console Design Source</title>
+
+<!--
+  THE DESIGN SOURCE THIS REPOSITORY NEVER HAD.
+
+  Reconstructed 2026-08-14 from web/src/lib/theme.css (tokens, verbatim), the
+  markup structure of web/src/routes/{ingest,db}/+page.svelte, and every
+  "the mockup draws X" statement surviving in those files' comments.
+
+  It is NOT the original approved mockup. That artefact never existed as a file
+  in this repository -- see the Provenance section. This is the honest
+  reconstruction that replaces it, and from here forward it is the reference a
+  gate can diff against.
+-->
+
+<style>
+  /* ========================================================================
+     DOCUMENT SHELL. Uses the product's own ramp so the reference renders in
+     the world it describes. Light is the bare :root; dark is redefined twice
+     so both the OS default and an explicit toggle resolve.
+     ===================================================================== */
+  :root {
+    --d-bg: #f5f7fb;
+    --d-surface: #ffffff;
+    --d-sunk: #e9edf5;
+    --d-line: #dee3ed;
+    --d-line-soft: #edf0f6;
+    --d-ink: #0d1220;
+    --d-ink-2: #38415a;
+    --d-dim: #5a6478;
+    --d-faint: #8b95a8;
+    --d-acc: #0e7f96;
+    --d-acc-soft: rgba(14, 127, 150, 0.1);
+    --d-warn: #a86a06;
+    --d-warn-soft: rgba(168, 106, 6, 0.13);
+    --d-down: #d3143f;
+    --d-down-soft: rgba(211, 20, 63, 0.11);
+    --d-up: #00875a;
+    --d-shadow: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --d-shadow-2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --d-bg: #0b0e14;
+      --d-surface: #141924;
+      --d-sunk: #070a11;
+      --d-line: #232a3a;
+      --d-line-soft: #1b212e;
+      --d-ink: #e6ebf5;
+      --d-ink-2: #b3bdd0;
+      --d-dim: #8a95ab;
+      --d-faint: #5c6679;
+      --d-acc: #22d3ee;
+      --d-acc-soft: rgba(34, 211, 238, 0.14);
+      --d-warn: #f0b429;
+      --d-warn-soft: rgba(240, 180, 41, 0.16);
+      --d-down: #ff4d6a;
+      --d-down-soft: rgba(255, 77, 106, 0.16);
+      --d-up: #00e19b;
+      --d-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --d-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    }
+  }
+  :root[data-theme='dark'] {
+    --d-bg: #0b0e14;
+    --d-surface: #141924;
+    --d-sunk: #070a11;
+    --d-line: #232a3a;
+    --d-line-soft: #1b212e;
+    --d-ink: #e6ebf5;
+    --d-ink-2: #b3bdd0;
+    --d-dim: #8a95ab;
+    --d-faint: #5c6679;
+    --d-acc: #22d3ee;
+    --d-acc-soft: rgba(34, 211, 238, 0.14);
+    --d-warn: #f0b429;
+    --d-warn-soft: rgba(240, 180, 41, 0.16);
+    --d-down: #ff4d6a;
+    --d-down-soft: rgba(255, 77, 106, 0.16);
+    --d-up: #00e19b;
+    --d-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --d-shadow-2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+
+  /* The product's faces, exactly. No webfont: theme.css links none, so linking
+     one here would make the reference disagree with the thing it documents. */
+  :root {
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+  }
+
+  body {
+    background: var(--d-bg);
+    color: var(--d-ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 56px 24px 120px;
+    display: flex;
+    flex-direction: column;
+    gap: 56px;
+  }
+
+  /* ---------------------------------------------------------------- masthead */
+  .mast {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding-bottom: 32px;
+    border-bottom: 2px solid var(--d-ink);
+  }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--d-acc);
+    font-weight: 600;
+  }
+  h1 {
+    font-size: clamp(30px, 4.6vw, 46px);
+    line-height: 1.05;
+    letter-spacing: -0.022em;
+    font-weight: 700;
+    text-wrap: balance;
+    margin: 0;
+  }
+  .standfirst {
+    font-size: 17px;
+    line-height: 1.5;
+    color: var(--d-ink-2);
+    max-width: 62ch;
+  }
+  .meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--d-dim);
+  }
+  .meta-row b {
+    color: var(--d-ink-2);
+    font-weight: 600;
+  }
+
+  /* ------------------------------------------------------------------ section */
+  section {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  h2 {
+    font-size: 25px;
+    letter-spacing: -0.014em;
+    font-weight: 700;
+    margin: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    text-wrap: balance;
+  }
+  h2 .num {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--d-acc);
+    letter-spacing: 0.06em;
+  }
+  h3 {
+    font-size: 15px;
+    font-weight: 700;
+    margin: 0;
+    letter-spacing: -0.005em;
+  }
+  p {
+    margin: 0;
+    max-width: 70ch;
+    color: var(--d-ink-2);
+  }
+  p.tight {
+    font-size: 14px;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.87em;
+    background: var(--d-sunk);
+    border: 1px solid var(--d-line-soft);
+    border-radius: 4px;
+    padding: 1px 5px;
+    color: var(--d-ink);
+  }
+  a {
+    color: var(--d-acc);
+  }
+
+  .note {
+    border-left: 3px solid var(--d-warn);
+    background: var(--d-warn-soft);
+    padding: 14px 18px;
+    border-radius: 0 6px 6px 0;
+    font-size: 14.5px;
+    color: var(--d-ink);
+    max-width: 74ch;
+  }
+  .note b {
+    font-weight: 700;
+  }
+
+  /* -------------------------------------------------------------- token plate */
+  .plate {
+    background: var(--d-surface);
+    border: 1px solid var(--d-line);
+    border-radius: 10px;
+    padding: 20px;
+    box-shadow: var(--d-shadow);
+  }
+  .ramp {
+    display: grid;
+    grid-template-columns: repeat(13, 1fr);
+    gap: 3px;
+    min-width: 620px;
+  }
+  .scroll-x {
+    overflow-x: auto;
+  }
+  .chip {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .chip i {
+    display: block;
+    height: 46px;
+    border-radius: 4px;
+    border: 1px solid var(--d-line);
+  }
+  .chip span {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    color: var(--d-faint);
+    text-align: center;
+    letter-spacing: 0.02em;
+  }
+
+  .semrow {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 10px;
+  }
+  .sem {
+    border: 1px solid var(--d-line);
+    border-radius: 7px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .sem b {
+    font-family: var(--mono);
+    font-size: 11.5px;
+  }
+  .sem span {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--d-faint);
+  }
+
+  table.spec {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    min-width: 480px;
+  }
+  table.spec th,
+  table.spec td {
+    text-align: left;
+    padding: 7px 12px 7px 0;
+    border-bottom: 1px solid var(--d-line-soft);
+    vertical-align: baseline;
+  }
+  table.spec th {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--d-faint);
+    font-weight: 600;
+    border-bottom-color: var(--d-line);
+  }
+  table.spec td.k {
+    font-family: var(--mono);
+    color: var(--d-acc);
+    white-space: nowrap;
+  }
+  table.spec td.v {
+    font-family: var(--mono);
+    color: var(--d-ink);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  table.spec td.d {
+    color: var(--d-dim);
+  }
+
+  /* ================================================================= THE MOCK
+     Everything below .mock is the PRODUCT, drawn at its real density. Its
+     tokens are scoped to the frame and stamped by data-mock-theme, so both
+     themes can sit on one page and neither inherits the document's.
+     ====================================================================== */
+  .frame {
+    border: 1px solid var(--d-line);
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: var(--d-shadow-2);
+  }
+  .frame-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--d-sunk);
+    border-bottom: 1px solid var(--d-line);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--d-dim);
+    flex-wrap: wrap;
+  }
+  .frame-bar .route {
+    color: var(--d-ink);
+    font-weight: 600;
+  }
+  .themetog {
+    display: inline-flex;
+    border: 1px solid var(--d-line);
+    border-radius: 999px;
+    overflow: hidden;
+    background: var(--d-surface);
+  }
+  .themetog button {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 4px 11px;
+    border: 0;
+    background: transparent;
+    color: var(--d-dim);
+    cursor: pointer;
+  }
+  .themetog button[aria-pressed='true'] {
+    background: var(--d-acc);
+    color: var(--d-bg);
+    font-weight: 700;
+  }
+  .themetog button:focus-visible {
+    outline: 2px solid var(--d-acc);
+    outline-offset: -2px;
+  }
+
+  .mock {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --on-acc: #ffffff;
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.11);
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+
+    --bg: var(--n1);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --ink-2: var(--n10);
+    --dim: var(--n9);
+    --faint: var(--n8);
+
+    --fs-micro: 9.5px;
+    --fs-mini: 10px;
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 17px;
+    --track-caps: 0.1em;
+    --s1: 2px;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --r1: 4px;
+    --r2: 6px;
+    --r: 8px;
+    --r4: 12px;
+    --r-full: 999px;
+    --row-h: 30px;
+    --topbar-h: 46px;
+
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-base);
+    line-height: 1.45;
+  }
+  .mock[data-mock-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+
+  /* ---- product chrome ---- */
+  .topbar {
+    height: var(--topbar-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s6);
+    padding: 0 var(--s5);
+    background: var(--n2);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: var(--fs-md);
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+  }
+  .brand em {
+    color: var(--acc);
+    font-style: normal;
+  }
+  .navs {
+    display: flex;
+    gap: var(--s1);
+  }
+  .navs a {
+    font-size: var(--fs-sm);
+    padding: var(--s2) var(--s5);
+    border-radius: var(--r-full);
+    color: var(--dim);
+    text-decoration: none;
+  }
+  .navs a.on {
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-weight: 600;
+  }
+  .topright {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+
+  .pane-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    padding: var(--s6) var(--s5) var(--s5);
+    flex-wrap: wrap;
+  }
+  .pane-head h1 {
+    font-size: var(--fs-lg);
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+  }
+  .pane-head .sub {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+
+  /* the query strip: one row of labelled dropdowns, which is what the design draws */
+  .strip {
+    display: flex;
+    gap: var(--s3);
+    padding: 0 var(--s5) var(--s5);
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    min-width: 0;
+  }
+  .cell > label {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+  }
+  .ctl {
+    height: var(--row-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: 0 var(--s4);
+    background: var(--n2);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    box-shadow: var(--e1);
+  }
+  .ctl .caret {
+    color: var(--faint);
+    font-size: 9px;
+    margin-left: auto;
+  }
+  .ctl.off {
+    background: var(--well);
+    color: var(--faint);
+    border-color: var(--line);
+    border-style: dashed;
+  }
+  .ctl.find {
+    min-width: 190px;
+    color: var(--faint);
+  }
+  .btn {
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-radius: var(--r2);
+    border: 1px solid var(--line-hard);
+    background: var(--n2);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-sm);
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    box-shadow: var(--e1);
+  }
+  .btn.primary {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--on-acc);
+  }
+  .btn.ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: var(--line);
+    color: var(--dim);
+    font-weight: 500;
+  }
+
+  .refusal {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    padding-top: var(--s1);
+  }
+
+  /* the anchor: the one big count, and what it is a count OF */
+  .anchor {
+    padding: var(--s5) var(--s5) var(--s4);
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line-soft);
+  }
+  .anchor .big {
+    font-family: var(--mono);
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+  .anchor .of {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .pill {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: var(--r-full);
+  }
+  .pill.mea {
+    background: var(--up-soft);
+    color: var(--up);
+  }
+  .pill.inf {
+    background: var(--info-soft);
+    color: var(--info);
+  }
+  .pill.abs {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .pill.no {
+    background: var(--down-soft);
+    color: var(--down);
+  }
+
+  .viewbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: 0 var(--s5) var(--s4);
+    flex-wrap: wrap;
+  }
+  .views {
+    display: inline-flex;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    padding: 2px;
+    gap: 2px;
+  }
+  .views span {
+    font-size: var(--fs-sm);
+    padding: var(--s2) var(--s5);
+    border-radius: var(--r1);
+    color: var(--dim);
+  }
+  .views span.on {
+    background: var(--n2);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--e1);
+  }
+
+  /* tables at true 30px rows */
+  .tbl-scroll {
+    overflow-x: auto;
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--n2);
+  }
+  table.grid {
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+  }
+  table.grid th {
+    position: sticky;
+    top: 0;
+    background: var(--n2);
+    text-align: left;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 600;
+    padding: var(--s3) var(--s4);
+    border-bottom: 1px solid var(--line-hard);
+  }
+  table.grid th.n,
+  table.grid td.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td {
+    height: var(--row-h);
+    padding: 0 var(--s4);
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--ink);
+  }
+  table.grid td.mono,
+  table.grid td.n {
+    font-family: var(--mono);
+  }
+  table.grid tr:nth-child(even) td {
+    background: color-mix(in srgb, var(--n4) 45%, transparent);
+  }
+  .nosrc {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    font-style: italic;
+  }
+  .sortmark {
+    color: var(--acc);
+  }
+
+  .cover {
+    display: inline-flex;
+    gap: 2px;
+    align-items: center;
+  }
+  .cover i {
+    width: 7px;
+    height: 12px;
+    border-radius: 1px;
+    background: var(--line-hard);
+    display: block;
+  }
+  .cover i.q1 {
+    background: var(--down);
+  }
+  .cover i.q2 {
+    background: var(--warn);
+  }
+  .cover i.q3 {
+    background: color-mix(in srgb, var(--up) 55%, var(--warn));
+  }
+  .cover i.q4 {
+    background: var(--up);
+  }
+
+  .pgbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s4) var(--s5);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    flex-wrap: wrap;
+  }
+  .pgbar .btn {
+    height: 24px;
+    padding: 0 var(--s4);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+  }
+
+  /* the instrument picker on /ingest */
+  .sel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    margin: 0 var(--s5) var(--s5);
+    overflow: hidden;
+  }
+  .sel-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-2);
+    flex-wrap: wrap;
+  }
+  .sel-h .ttl {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .sel-h .count {
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .sel-h .spacer {
+    margin-left: auto;
+  }
+  .picklist {
+    max-height: 216px;
+    overflow-y: auto;
+  }
+  .prow {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    font-size: var(--fs-sm);
+  }
+  .prow input {
+    accent-color: var(--acc);
+    width: 13px;
+    height: 13px;
+  }
+  .prow .sym {
+    font-family: var(--mono);
+    font-weight: 600;
+    min-width: 108px;
+    color: var(--ink);
+  }
+  .prow .nm {
+    color: var(--dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .prow .isin {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .prow.dead .sym,
+  .prow.dead .nm {
+    color: var(--faint);
+  }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    margin: 0 var(--s5) var(--s5);
+    padding: var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+  }
+  .card-h {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+  }
+  .card-h .ttl {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 700;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: var(--s4);
+  }
+  .fact {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--s4);
+    background: var(--well);
+    border-radius: var(--r1);
+  }
+  .fact b {
+    font-family: var(--mono);
+    font-size: var(--fs-md);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-hi);
+  }
+  .fact span {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  /* the blank / refused states -- the half a static mockup never carries */
+  .blank {
+    margin: 0 var(--s5) var(--s5);
+    border: 1px dashed var(--line-hard);
+    border-radius: var(--r);
+    padding: var(--s7) var(--s6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s4);
+    align-items: flex-start;
+    background: var(--panel);
+  }
+  .blank h2 {
+    font-size: var(--fs-md);
+    font-weight: 700;
+    color: var(--ink-hi);
+    margin: 0;
+  }
+  .blank p {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    margin: 0;
+    max-width: 58ch;
+  }
+  .blank.err {
+    border-style: solid;
+    border-color: var(--down);
+    background: var(--down-soft);
+  }
+
+  .stategrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(268px, 1fr));
+    gap: 14px;
+  }
+  .statecard {
+    border: 1px solid var(--d-line);
+    border-radius: 9px;
+    overflow: hidden;
+    background: var(--d-surface);
+  }
+  .statecard .cap {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--d-line);
+    background: var(--d-sunk);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--d-dim);
+    font-weight: 700;
+  }
+  .statecard .cap.bad {
+    color: var(--d-down);
+  }
+  .statecard .cap.ok {
+    color: var(--d-up);
+  }
+
+  .callouts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+  }
+  .callout {
+    border: 1px solid var(--d-line);
+    border-left: 3px solid var(--d-acc);
+    border-radius: 0 8px 8px 0;
+    padding: 12px 14px;
+    background: var(--d-surface);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .callout b {
+    font-size: 13.5px;
+  }
+  .callout span {
+    font-size: 13px;
+    color: var(--d-dim);
+  }
+  .callout code {
+    font-size: 11px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+
+<div class="wrap">
+  <header class="mast">
+    <div class="eyebrow">web/design · reconstructed 2026-08-14</div>
+    <h1>Brutex Console Design Source</h1>
+    <p class="standfirst">
+      The reference /ingest and /db are supposed to match — drawn at the product's real
+      density, in the product's real tokens, in both themes, including the states a
+      static mockup has never carried.
+    </p>
+    <div class="meta-row">
+      <span><b>Tokens</b> verbatim from web/src/lib/theme.css</span>
+      <span><b>Structure</b> from the two +page.svelte files</span>
+      <span><b>Data</b> fixture, shape-correct</span>
+      <span><b>Branch</b> feat/pull</span>
+    </div>
+  </header>
+
+  <!-- ================================================================ 1 -->
+  <section>
+    <h2><span class="num">01</span> Provenance, stated before anything is drawn</h2>
+    <div class="note">
+      <b>This is not the original approved mockup.</b> No mockup file exists anywhere in
+      this repository — every tracked and ignored path was searched. The phrase
+      “the mockup” survives only as prose in eight comments across the two page files,
+      plus the description in commit <code>6a58d7c</code>. This document is a
+      <b>reconstruction</b> from three sources that do exist: the tokens in
+      <code>theme.css</code>, the markup those pages declare, and those comments.
+      Where the original disagreed with what is drawn here, the original is
+      unrecoverable and this file wins by default — which is exactly the condition
+      that has to end.
+    </div>
+    <p>
+      That absence is the answer to “why does this area struggle.” Every other claim in
+      this repository is gated: a cost claim faces a bench, an invariant faces a named
+      test, a vendor fact faces a source in the charter. A <em>visual</em> claim has faced
+      nothing, because there has been no artefact to face. “The pages match their designs”
+      has been an assertion in a commit message, and an assertion is not a gate.
+    </p>
+  </section>
+
+  <!-- ================================================================ 2 -->
+  <section>
+    <h2><span class="num">02</span> Tokens</h2>
+    <p class="tight">
+      Copied from <code>theme.css</code> without alteration. A thirteen-step neutral ramp
+      carries every surface and every ink; the semantic four never carry structure, and
+      the accent never carries meaning. Both themes are defined as complete sets.
+    </p>
+
+    <div class="plate scroll-x">
+      <div class="ramp" aria-label="Neutral ramp, light">
+        <div class="chip"><i style="background:#e9edf5"></i><span>n0</span></div>
+        <div class="chip"><i style="background:#f5f7fb"></i><span>n1</span></div>
+        <div class="chip"><i style="background:#ffffff"></i><span>n2</span></div>
+        <div class="chip"><i style="background:#ffffff"></i><span>n3</span></div>
+        <div class="chip"><i style="background:#eef1f7"></i><span>n4</span></div>
+        <div class="chip"><i style="background:#edf0f6"></i><span>n5</span></div>
+        <div class="chip"><i style="background:#dee3ed"></i><span>n6</span></div>
+        <div class="chip"><i style="background:#c7cfdd"></i><span>n7</span></div>
+        <div class="chip"><i style="background:#8b95a8"></i><span>n8</span></div>
+        <div class="chip"><i style="background:#5a6478"></i><span>n9</span></div>
+        <div class="chip"><i style="background:#38415a"></i><span>n10</span></div>
+        <div class="chip"><i style="background:#0d1220"></i><span>n11</span></div>
+        <div class="chip"><i style="background:#000814"></i><span>n12</span></div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="ramp" aria-label="Neutral ramp, dark">
+        <div class="chip"><i style="background:#070a11"></i><span>n0</span></div>
+        <div class="chip"><i style="background:#0b0e14"></i><span>n1</span></div>
+        <div class="chip"><i style="background:#11151f"></i><span>n2</span></div>
+        <div class="chip"><i style="background:#141924"></i><span>n3</span></div>
+        <div class="chip"><i style="background:#1a2030"></i><span>n4</span></div>
+        <div class="chip"><i style="background:#1b212e"></i><span>n5</span></div>
+        <div class="chip"><i style="background:#232a3a"></i><span>n6</span></div>
+        <div class="chip"><i style="background:#333c51"></i><span>n7</span></div>
+        <div class="chip"><i style="background:#5c6679"></i><span>n8</span></div>
+        <div class="chip"><i style="background:#8a95ab"></i><span>n9</span></div>
+        <div class="chip"><i style="background:#b3bdd0"></i><span>n10</span></div>
+        <div class="chip"><i style="background:#e6ebf5"></i><span>n11</span></div>
+        <div class="chip"><i style="background:#fbfcff"></i><span>n12</span></div>
+      </div>
+    </div>
+
+    <div class="semrow">
+      <div class="sem" style="border-left:3px solid #00875a">
+        <b style="color:#00875a">up / measured</b><span>#00875a → #00e19b</span>
+      </div>
+      <div class="sem" style="border-left:3px solid #d3143f">
+        <b style="color:#d3143f">down / refused</b><span>#d3143f → #ff4d6a</span>
+      </div>
+      <div class="sem" style="border-left:3px solid #a86a06">
+        <b style="color:#a86a06">warn / absent</b><span>#a86a06 → #f0b429</span>
+      </div>
+      <div class="sem" style="border-left:3px solid #6d45d9">
+        <b style="color:#6d45d9">info / inferred</b><span>#6d45d9 → #9d7cf5</span>
+      </div>
+      <div class="sem" style="border-left:3px solid #0e7f96">
+        <b style="color:#0e7f96">accent</b><span>#0e7f96 → #22d3ee</span>
+      </div>
+    </div>
+
+    <div class="plate scroll-x">
+      <table class="spec">
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Value</th>
+            <th>What it is for</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="k">--sans</td>
+            <td class="v">-apple-system, Inter, system-ui</td>
+            <td class="d">All prose and control labels. No webfont is linked, by design.</td>
+          </tr>
+          <tr>
+            <td class="k">--mono</td>
+            <td class="v">ui-monospace, SF Mono, JetBrains Mono</td>
+            <td class="d">
+              Every number, symbol, date and micro-label. <b>Any component hardcoding a
+              different stack is a defect.</b>
+            </td>
+          </tr>
+          <tr>
+            <td class="k">--fs-base</td>
+            <td class="v">13px</td>
+            <td class="d">Body. The scale runs 9.5 · 10 · 11 · 12 · 13 · 14 · 17 · 22 · 28.</td>
+          </tr>
+          <tr>
+            <td class="k">--fs-micro</td>
+            <td class="v">9.5px</td>
+            <td class="d">Uppercase field labels, always with --track-caps 0.1em.</td>
+          </tr>
+          <tr>
+            <td class="k">--row-h</td>
+            <td class="v">30px</td>
+            <td class="d">Every table row and every control. One height, no exceptions.</td>
+          </tr>
+          <tr>
+            <td class="k">--topbar-h</td>
+            <td class="v">46px</td>
+            <td class="d">The one global bar. The feed is chosen here and nowhere else.</td>
+          </tr>
+          <tr>
+            <td class="k">--s1 … --s8</td>
+            <td class="v">2 · 4 · 6 · 8 · 12 · 16 · 24 · 32</td>
+            <td class="d">A 2px base, because a 30px row cannot afford an 8px grid.</td>
+          </tr>
+          <tr>
+            <td class="k">--r1 … --r4</td>
+            <td class="v">4 · 6 · 8 · 12</td>
+            <td class="d">Controls 6, panels 8, overlays 12. Pills are --r-full.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================================================================ 3 -->
+  <section>
+    <h2><span class="num">03</span> /ingest — the loaded state</h2>
+    <p class="tight">
+      One panel. Labelled dropdowns in a row. The feed comes from the top bar and is never
+      re-selected on the page. The instrument rung is a <em>picker</em>, not a counter:
+      checkboxes, search, select-all, and a census beneath it.
+    </p>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <span class="route">127.0.0.1:8080/ingest</span>
+        <span>loaded · feed ready · 1,813 tracked</span>
+        <span class="themetog" role="group" aria-label="Theme">
+          <button type="button" aria-pressed="true" data-t="light" data-for="m1">Light</button>
+          <button type="button" aria-pressed="false" data-t="dark" data-for="m1">Dark</button>
+        </span>
+      </div>
+      <div class="mock" id="m1" data-mock-theme="light">
+        <div class="topbar">
+          <span class="brand">brute<em>X</em></span>
+          <nav class="navs">
+            <a href="#m1">Markets</a><a class="on" href="#m1">Ingest</a><a href="#m1">DB</a
+            ><a href="#m1">Autopilot</a><a href="#m1">Audit</a>
+          </nav>
+          <span class="topright">
+            <span class="ctl" style="height:26px;font-size:11px"
+              >Groww <span class="caret">▾</span></span
+            >
+            <span>IST 15:31</span>
+          </span>
+        </div>
+
+        <div class="pane-head">
+          <h1>Ingest</h1>
+          <span class="sub">Ask a feed for bars and land them in the store.</span>
+        </div>
+
+        <div class="strip">
+          <div class="cell">
+            <label for="i-uni">Universe</label>
+            <span class="ctl" id="i-uni">NIFTY Total Market <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="i-seg">Segment</label>
+            <span class="ctl" id="i-seg">Spot <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="i-tf">Bar length</label>
+            <span class="ctl" id="i-tf">1 day <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="i-from">From</label>
+            <span class="ctl" id="i-from">2020-01-01 <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="i-to">To</label>
+            <span class="ctl" id="i-to">2026-08-13 <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="i-tick">Tick</label>
+            <span class="ctl off" id="i-tick">Tick ✕</span>
+            <span class="refusal">no feed serves it</span>
+          </div>
+          <div class="cell">
+            <label aria-hidden="true">&nbsp;</label>
+            <button class="btn primary" type="button">Pull selected</button>
+          </div>
+        </div>
+
+        <div class="sel">
+          <div class="sel-h">
+            <span class="ttl">Instruments</span>
+            <span class="count">6 selected of 1,813</span>
+            <span class="spacer"></span>
+            <span class="ctl find" style="height:26px">Search symbol or name…</span>
+            <button class="btn ghost" type="button" style="height:26px">Select all</button>
+            <button class="btn ghost" type="button" style="height:26px">Clear all</button>
+          </div>
+          <div class="picklist">
+            <div class="prow">
+              <input type="checkbox" checked aria-label="NIFTY 50" /><span class="sym"
+                >NIFTY50</span
+              ><span class="nm">NIFTY 50</span><span class="isin">no ISIN — index</span>
+            </div>
+            <div class="prow">
+              <input type="checkbox" checked aria-label="NIFTY BANK" /><span class="sym"
+                >BANKNIFTY</span
+              ><span class="nm">NIFTY BANK</span><span class="isin">no ISIN — index</span>
+            </div>
+            <div class="prow">
+              <input type="checkbox" checked aria-label="RELIANCE" /><span class="sym"
+                >RELIANCE</span
+              ><span class="nm">Reliance Industries Limited</span
+              ><span class="isin">INE···A01018</span>
+            </div>
+            <div class="prow">
+              <input type="checkbox" checked aria-label="HDFCBANK" /><span class="sym"
+                >HDFCBANK</span
+              ><span class="nm">HDFC Bank Limited</span><span class="isin">INE···A01026</span>
+            </div>
+            <div class="prow">
+              <input type="checkbox" checked aria-label="INFY" /><span class="sym">INFY</span
+              ><span class="nm">Infosys Limited</span><span class="isin">INE···A01030</span>
+            </div>
+            <div class="prow dead">
+              <input type="checkbox" disabled aria-label="AGL" /><span class="sym">AGL</span
+              ><span class="nm">Awaiting an exchange ISIN — the file carries GRINDWELL</span
+              ><span class="isin">withheld</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-h">
+            <span class="ttl">What this request will ask for</span>
+          </div>
+          <div class="facts">
+            <div class="fact"><b>80</b><span>month windows</span></div>
+            <div class="fact"><b>6</b><span>instruments</span></div>
+            <div class="fact"><b>480</b><span>requests</span></div>
+            <div class="fact"><b>2020-01-01</b><span>feed floor · operator</span></div>
+            <div class="fact"><b>2026-08-13</b><span>newest allowed · yesterday</span></div>
+          </div>
+          <p style="font-size:12px;color:var(--dim);margin:0;max-width:none">
+            Groww's own table narrows the one-minute rung to a rolling quarter. The operator's
+            fixed January 2020 outranks it and is what binds — the published quarter is kept
+            beside it, and whether this rung truly reaches 2020 is
+            <b style="color:var(--warn)">UNVERIFIED</b> until a request measures it.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="callouts">
+      <div class="callout">
+        <b>The feed is chosen once</b>
+        <span
+          >It lives in the 46px top bar. /ingest and /db each carried a second selector
+          writing the same state; both were deleted.</span
+        >
+      </div>
+      <div class="callout">
+        <b>A refusal names its reason</b>
+        <span
+          >Tick is drawn dead for every feed with its own sentence beneath the control. A
+          disabled control with no reason is the silent failure §4 bans.</span
+        >
+      </div>
+      <div class="callout">
+        <b>Every number is monospace and tabular</b>
+        <span>Counts, dates, ISINs and prices sit on <code>--mono</code> with
+          <code>tabular-nums</code>, so digits do not jitter between rows.</span
+        >
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ 4 -->
+  <section>
+    <h2><span class="num">04</span> /db — census view</h2>
+    <p class="tight">
+      Two strips: Query, then Contract. One anchor count with the pill that says how it was
+      arrived at. Then the grid, then the pager.
+    </p>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <span class="route">127.0.0.1:8080/db</span>
+        <span>census view · 1,813 rows · sorted by bars ▾</span>
+        <span class="themetog" role="group" aria-label="Theme">
+          <button type="button" aria-pressed="false" data-t="light" data-for="m2">Light</button>
+          <button type="button" aria-pressed="true" data-t="dark" data-for="m2">Dark</button>
+        </span>
+      </div>
+      <div class="mock" id="m2" data-mock-theme="dark">
+        <div class="topbar">
+          <span class="brand">brute<em>X</em></span>
+          <nav class="navs">
+            <a href="#m2">Markets</a><a href="#m2">Ingest</a><a class="on" href="#m2">DB</a
+            ><a href="#m2">Autopilot</a><a href="#m2">Audit</a>
+          </nav>
+          <span class="topright">
+            <span class="ctl" style="height:26px;font-size:11px"
+              >Groww <span class="caret">▾</span></span
+            >
+            <span>IST 15:31</span>
+          </span>
+        </div>
+
+        <div class="pane-head">
+          <h1>Store</h1><span class="sub">What is actually on disk, counted.</span>
+        </div>
+
+        <div class="strip">
+          <div class="cell">
+            <label for="d-uni">Universe</label>
+            <span class="ctl" id="d-uni">NIFTY Total Market <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="d-tf">Bar length</label>
+            <span class="ctl" id="d-tf">1 day <span class="caret">▾</span></span>
+          </div>
+          <div class="cell">
+            <label for="d-mo">Month</label>
+            <span class="ctl" id="d-mo">All months <span class="caret">▾</span></span>
+          </div>
+          <div class="cell" style="flex:1;min-width:180px">
+            <label for="d-find">Find</label>
+            <span class="ctl find" id="d-find" style="min-width:100%">Symbol or name…</span>
+          </div>
+          <div class="cell">
+            <label aria-hidden="true">&nbsp;</label>
+            <button class="btn" type="button">Refresh</button>
+          </div>
+        </div>
+        <div class="strip" style="padding-top:0">
+          <div class="cell">
+            <label for="d-exp">Expiry</label>
+            <span class="ctl off" id="d-exp">—</span>
+            <span class="refusal">spot has no expiry</span>
+          </div>
+          <div class="cell">
+            <label for="d-strike">Strike</label>
+            <span class="ctl off" id="d-strike">—</span>
+            <span class="refusal">spot has no strike</span>
+          </div>
+          <div class="cell">
+            <label for="d-mny">Moneyness</label>
+            <span class="ctl off" id="d-mny">—</span>
+            <span class="refusal">no spot reference on this wire</span>
+          </div>
+          <div class="cell">
+            <label for="d-side">Type</label>
+            <span class="ctl off" id="d-side">—</span>
+            <span class="refusal">spot is neither CE nor PE</span>
+          </div>
+        </div>
+
+        <div class="anchor">
+          <span class="big">4,812,375</span>
+          <span class="of">bars stored · Groww · 1 day · all months</span>
+          <span class="pill mea">measured</span>
+        </div>
+
+        <div class="viewbar">
+          <div class="views" role="tablist" aria-label="What one row is">
+            <span class="on" role="tab" aria-selected="true">Census — one row per instrument</span>
+            <span role="tab" aria-selected="false">Bars — one row per bar</span>
+          </div>
+        </div>
+
+        <div class="tbl-scroll">
+          <table class="grid" style="width:100%">
+            <thead>
+              <tr>
+                <th style="width:120px">Symbol</th>
+                <th>Name</th>
+                <th style="width:96px">Months</th>
+                <th class="n" style="width:110px">Bars <span class="sortmark">▾</span></th>
+                <th style="width:120px">Oldest</th>
+                <th style="width:120px">Newest</th>
+                <th style="width:96px">Coverage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="mono">NIFTY50</td>
+                <td>NIFTY 50</td>
+                <td class="mono">80</td>
+                <td class="n">1,631</td>
+                <td class="mono">2020-01-01</td>
+                <td class="mono">2026-08-13</td>
+                <td>
+                  <span class="cover"
+                    ><i class="q4"></i><i class="q4"></i><i class="q4"></i><i class="q4"></i
+                  ></span>
+                </td>
+              </tr>
+              <tr>
+                <td class="mono">BANKNIFTY</td>
+                <td>NIFTY BANK</td>
+                <td class="mono">80</td>
+                <td class="n">1,631</td>
+                <td class="mono">2020-01-01</td>
+                <td class="mono">2026-08-13</td>
+                <td>
+                  <span class="cover"
+                    ><i class="q4"></i><i class="q4"></i><i class="q4"></i><i class="q4"></i
+                  ></span>
+                </td>
+              </tr>
+              <tr>
+                <td class="mono">RELIANCE</td>
+                <td>Reliance Industries Limited</td>
+                <td class="mono">80</td>
+                <td class="n">1,628</td>
+                <td class="mono">2020-01-01</td>
+                <td class="mono">2026-08-13</td>
+                <td>
+                  <span class="cover"
+                    ><i class="q4"></i><i class="q4"></i><i class="q3"></i><i class="q4"></i
+                  ></span>
+                </td>
+              </tr>
+              <tr>
+                <td class="mono">HDFCBANK</td>
+                <td>HDFC Bank Limited</td>
+                <td class="mono">62</td>
+                <td class="n">1,204</td>
+                <td class="mono">2021-06-01</td>
+                <td class="mono">2026-08-13</td>
+                <td>
+                  <span class="cover"
+                    ><i class="q2"></i><i class="q3"></i><i class="q4"></i><i class="q4"></i
+                  ></span>
+                </td>
+              </tr>
+              <tr>
+                <td class="mono">TATAMOTORS</td>
+                <td>Tata Motors Limited</td>
+                <td class="mono">3</td>
+                <td class="n">61</td>
+                <td class="mono">2026-05-01</td>
+                <td class="mono">2026-08-13</td>
+                <td>
+                  <span class="cover"
+                    ><i class="q1"></i><i></i><i></i><i class="q2"></i
+                  ></span>
+                </td>
+              </tr>
+              <tr>
+                <td class="mono">AGL</td>
+                <td>Awaiting an exchange ISIN</td>
+                <td class="mono">0</td>
+                <td class="n">0</td>
+                <td class="nosrc">never pulled</td>
+                <td class="nosrc">never pulled</td>
+                <td><span class="cover"><i></i><i></i><i></i><i></i></span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="pgbar">
+          <button class="btn ghost" type="button">‹ Prev</button>
+          <span>Page 1 of 10</span>
+          <button class="btn ghost" type="button">Next ›</button>
+          <span style="margin-left:auto">Rows 1–200 of 1,813</span>
+          <span class="ctl" style="height:24px;font-size:11px"
+            >200 / page <span class="caret">▾</span></span
+          >
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>Zero is a number and “never pulled” is not.</b> AGL's row shows 0 bars in the
+      numeric columns and the words <em>never pulled</em> in the date columns. A store that
+      holds nothing and a store that was never asked must never render identically — that is
+      the distinction §4 exists to protect, and it is the one a mockup with invented data
+      can never exercise.
+    </div>
+  </section>
+
+  <!-- ================================================================ 5 -->
+  <section>
+    <h2><span class="num">05</span> /db — bars view, 24 columns</h2>
+    <p class="tight">
+      One row per bar. The declared column widths sum to <b>2,420px</b>, so on any laptop
+      this table must scroll inside its own container and never take the page body sideways
+      with it. Ten of the twenty-four have no source on this wire and say so rather than
+      showing a number nobody computed.
+    </p>
+
+    <div class="frame">
+      <div class="frame-bar">
+        <span class="route">127.0.0.1:8080/db · bars</span>
+        <span>375 rows · 24 cols · 14 sourced, 10 not</span>
+        <span class="themetog" role="group" aria-label="Theme">
+          <button type="button" aria-pressed="true" data-t="light" data-for="m3">Light</button>
+          <button type="button" aria-pressed="false" data-t="dark" data-for="m3">Dark</button>
+        </span>
+      </div>
+      <div class="mock" id="m3" data-mock-theme="light">
+        <div class="anchor" style="border-top:0">
+          <span class="big">375</span>
+          <span class="of">bars · RELIANCE · 1 min · 2026-08-13</span>
+          <span class="pill mea">measured</span>
+          <span class="pill abs">10 columns unsourced</span>
+        </div>
+        <div class="tbl-scroll">
+          <table class="grid" style="width:2420px">
+            <thead>
+              <tr>
+                <th style="width:172px">Date / time</th>
+                <th style="width:68px">TF</th>
+                <th class="n" style="width:104px">Open</th>
+                <th class="n" style="width:104px">High</th>
+                <th class="n" style="width:104px">Low</th>
+                <th class="n" style="width:108px">Close</th>
+                <th class="n" style="width:116px">Volume</th>
+                <th class="n" style="width:102px">Pre-mkt %</th>
+                <th class="n" style="width:102px">Change %</th>
+                <th class="n" style="width:124px">Open interest</th>
+                <th class="n" style="width:100px">OI chg %</th>
+                <th style="width:116px">Expiry</th>
+                <th class="n" style="width:106px">Days to exp</th>
+                <th style="width:72px">Type</th>
+                <th class="n" style="width:96px">Strike</th>
+                <th style="width:106px">Moneyness</th>
+                <th class="n" style="width:100px">Intrinsic</th>
+                <th class="n" style="width:100px">Extrinsic</th>
+                <th class="n" style="width:86px">IV %</th>
+                <th class="n" style="width:86px">Delta</th>
+                <th class="n" style="width:90px">Gamma</th>
+                <th class="n" style="width:88px">Theta</th>
+                <th class="n" style="width:86px">Vega</th>
+                <th class="n" style="width:84px">Rho</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="mono">2026-08-13 09:15:00</td>
+                <td class="mono">1min</td>
+                <td class="n">1,412.35</td>
+                <td class="n">1,414.80</td>
+                <td class="n">1,411.90</td>
+                <td class="n">1,414.05</td>
+                <td class="n">184,206</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n" style="color:var(--up)">+0.12</td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+              </tr>
+              <tr>
+                <td class="mono">2026-08-13 09:16:00</td>
+                <td class="mono">1min</td>
+                <td class="n">1,414.05</td>
+                <td class="n">1,415.60</td>
+                <td class="n">1,413.20</td>
+                <td class="n">1,413.45</td>
+                <td class="n">96,411</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n" style="color:var(--down)">−0.04</td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+              </tr>
+              <tr>
+                <td class="mono">2026-08-13 09:17:00</td>
+                <td class="mono">1min</td>
+                <td class="n">1,413.45</td>
+                <td class="n">1,413.95</td>
+                <td class="n">1,409.05</td>
+                <td class="n">1,409.70</td>
+                <td class="n">142,880</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n" style="color:var(--down)">−0.27</td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="n"><span class="nosrc">unknown</span></td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td class="nosrc">—</td>
+                <td class="n nosrc">—</td>
+                <td><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+                <td class="n"><span class="nosrc">no source</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pgbar">
+          <span>Scroll right for the option columns · 2,420px of declared width</span>
+          <span style="margin-left:auto">Rows 1–200 of 375</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="callouts">
+      <div class="callout">
+        <b>Three different absences, three different words</b>
+        <span
+          ><code>no source</code> = this wire never carries it. <code>unknown</code> = the
+          i64::MIN null sentinel arrived. <code>—</code> = not applicable to spot. Collapsing
+          them into one dash is the fallback that hides a failure.</span
+        >
+      </div>
+      <div class="callout">
+        <b>Prices are paisa integers</b>
+        <span
+          >1,414.05 is 141405 paisa formatted once, at the boundary. A float price anywhere
+          in the browser is a defect, not a rounding choice.</span
+        >
+      </div>
+      <div class="callout">
+        <b>Unsourced columns still hold their width</b>
+        <span
+          >They are not collapsed away — a column that vanishes when empty makes the grid
+          jump between instruments and hides that the field exists at all.</span
+        >
+      </div>
+    </div>
+  </section>
+
+  <!-- ================================================================ 6 -->
+  <section>
+    <h2><span class="num">06</span> The states — the half no mockup has carried</h2>
+    <p>
+      This is the section that answers “why does it look right in the mockup and wrong in
+      the live app.” A mockup is one state with invented data. The running page has at least
+      six, and fidelity work done against the happy path cannot reach any of the others.
+      Each of these is a design deliverable, not an error path.
+    </p>
+
+    <div class="stategrid">
+      <div class="statecard">
+        <div class="cap bad">A · the feed list could not be read</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank err">
+            <h2>The feed list could not be read</h2>
+            <p>
+              /feeds.json answered, but not with a list this build understands. Nothing was
+              assumed. Pick a feed once it answers.
+            </p>
+            <button class="btn" type="button">Try again</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="statecard">
+        <div class="cap">B · no feed selected</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank">
+            <h2>No feed is selected</h2>
+            <p>Every count on this page is per feed, so there is nothing to count yet.</p>
+            <span class="ctl">Choose a feed <span class="caret">▾</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="statecard">
+        <div class="cap">C · feed selected, store empty</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank">
+            <h2>Groww has nothing to ingest yet</h2>
+            <p>
+              The store holds no bars for this feed. That is not a failure — nothing has been
+              asked for. Choose instruments and a window.
+            </p>
+            <button class="btn primary" type="button">Choose instruments</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="statecard">
+        <div class="cap">D · feed not entitled</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank">
+            <h2>Dhan is not ready</h2>
+            <p>
+              Its token has not been refreshed since 2026-07-25 and this build never mints
+              one. Every control below stays disabled and says why.
+            </p>
+            <span class="pill no">not ready</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="statecard">
+        <div class="cap">E · loading</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank" style="border-style:solid;border-color:var(--line)">
+            <h2>Counting…</h2>
+            <p>
+              The census is being read. The previous feed's counts are not shown under this
+              feed's name while that happens.
+            </p>
+            <span class="cover"
+              ><i class="q4"></i><i class="q3"></i><i></i><i></i
+            ></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="statecard">
+        <div class="cap ok">F · stale, and saying so</div>
+        <div class="mock" data-mock-theme="light" style="padding:12px 0">
+          <div class="blank" style="border-color:var(--warn);border-style:solid">
+            <h2>These counters are older than the last pull</h2>
+            <p>
+              The census was committed at 15:02 and a pull landed at 15:29. The numbers below
+              are real, and they are behind.
+            </p>
+            <span class="pill abs">stale · 27 min</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>The rule this section encodes:</b> no two of the six may render identically, and
+      none of them may render as a bare zero. “Nothing here yet”, “this failed”, “you are
+      not entitled” and “still counting” are four different facts, and an operator who cannot
+      tell them apart cannot act on any of them.
+    </div>
+  </section>
+
+  <!-- ================================================================ 7 -->
+  <section>
+    <h2><span class="num">07</span> How this stops being an opinion</h2>
+    <p>
+      This file is only worth the disk it sits on if something checks against it. Three
+      checks make it binding, and all three live in the web-only CI job — the engine still
+      builds with no Node and no <code>web/</code> present, which CLAUDE.md §2 requires.
+    </p>
+    <div class="plate scroll-x">
+      <table class="spec">
+        <thead>
+          <tr>
+            <th>Check</th>
+            <th>Fails when</th>
+            <th>Would have caught</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="k">token integrity</td>
+            <td class="d">
+              a component reads <code>var(--x)</code> that theme.css never defines, or
+              hardcodes a font stack, colour or radius that a token already names
+            </td>
+            <td class="d">
+              the <code>--raise</code> / <code>--panel2</code> / <code>--accdeep</code> menus
+              rendering dark on a light page
+            </td>
+          </tr>
+          <tr>
+            <td class="k">wire contract</td>
+            <td class="d">
+              a page reads a field the server does not emit, or compares against a value that
+              can never be produced
+            </td>
+            <td class="d">
+              <code>catalogue.feed === feeds.active</code> — every list stuck at “0 shown of 0”
+            </td>
+          </tr>
+          <tr>
+            <td class="k">state matrix</td>
+            <td class="d">
+              any region renders identically in two of the six states in section 06
+            </td>
+            <td class="d">
+              a bare zero standing in for “never pulled”, and a spinner that never resolves
+            </td>
+          </tr>
+          <tr>
+            <td class="k">build freshness</td>
+            <td class="d">
+              <code>web/build</code> was not regenerated from the current <code>web/src</code>
+            </td>
+            <td class="d">
+              reviewing one page while running another — the whole class of “it looks
+              different live”
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+  // Per-frame theme stamping. Scoped to .mock so the document's own theme is
+  // untouched and both themes can be inspected on one page.
+  document.querySelectorAll('.themetog').forEach(function (group) {
+    group.addEventListener('click', function (event) {
+      var btn = event.target.closest('button[data-t]');
+      if (!btn) return;
+      var frame = document.getElementById(btn.dataset.for);
+      if (!frame) return;
+      frame.setAttribute('data-mock-theme', btn.dataset.t);
+      group.querySelectorAll('button').forEach(function (b) {
+        b.setAttribute('aria-pressed', String(b === btn));
+      });
+    });
+  });
+</script>
