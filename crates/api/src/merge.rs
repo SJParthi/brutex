@@ -357,13 +357,35 @@ pub fn merge(sources: &[Source]) -> Merged {
     // Counting it as a comparer makes every instrument in the tree read as
     // unconfirmed — a finding about a file with no contents, reported as a
     // disagreement between vendors.
-    let mut contributed: Vec<Vendor> = sources
+    // A SET, HELD AS A SET. This was a `collect` followed by a sort and a
+    // `dedup` — a uniqueness pass hand-rolled out of an ordering pass, when
+    // `VendorSet` is a u8 bitset whose whole job is this. It is imported at the
+    // top of this file already and is the type `Merged::vendors` already is, so
+    // removing the sort introduces nothing new.
+    //
+    // THE RESULT IS THE SAME VECTOR, ELEMENT FOR ELEMENT. `dedup` after a sort
+    // by `*v as u8` leaves the distinct vendors in ascending discriminant
+    // order, and `Vendor::ALL` IS that order — "APPENDED, NEVER INSERTED", the
+    // same property `Entry::ids` already indexes on with `vendor as usize`.
+    // Filtering `ALL` by membership reproduces it without comparing anything.
+    // This matters because the order is RENDERED: `single_vendor_members`
+    // walks `contributed` to build the `UNCHECKED IDENTITY` note on `/health`.
+    //
+    // AND THE COST STOPS DEPENDING ON THE CALLER. The sort was over one element
+    // per `Source`, and nothing in `&[Source]` bounds that count — only the
+    // fact that `server::universe`, the one production caller today, builds one
+    // per entry of `Vendor::MASTERED`. That is a caller's habit, not a bound,
+    // and CI gate 11 rule 4 exists to refuse exactly that kind of claim. The
+    // fold is one pass over `sources` the loop below already makes, and the
+    // filter walks a five-element const array. No caller can grow either.
+    let seen = sources
         .iter()
         .filter(|s| !s.kept.is_empty())
-        .map(|s| s.vendor)
+        .fold(VendorSet::EMPTY, |set, s| set.with(s.vendor));
+    let contributed: Vec<Vendor> = Vendor::ALL
+        .into_iter()
+        .filter(|&v| seen.contains(v))
         .collect();
-    contributed.sort_unstable_by_key(|v| *v as u8);
-    contributed.dedup();
     let mut out = Merged {
         by_key: HashMap::with_capacity(capacity),
         contributed,

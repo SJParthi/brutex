@@ -2893,9 +2893,30 @@ jobs:
           # reasoning: merge.rs::merge now reserves `asserted` from the same
           # `capacity` the map 33 lines below it already used, and
           # pull::work::Selection::of reserves from the iterator size hint.
+          #
+          # `crates/api/src/autopilot.rs` IS A THIRD SHAPE, AND IT IS NOT AN UNSIZED
+          # MAP AT ALL: THE SIZE IS KNOWN, AND IT IS ZERO. `SpotRequest::members` is
+          # documented as the instruments actually ticked, or EMPTY for the target's
+          # whole set -- empty is the SENTINEL and not a fallback. The autopilot names
+          # no member because it backfills the swept target entire, so the correct
+          # reservation for that set is nothing, and `HashSet::new()` allocates nothing.
+          # The incident behind this rule is a map reserved to exactly its load and then
+          # rehashing on the NEXT insert. Here there is no next insert: `asked` is bound
+          # with no `mut`, and its only use is `broker_run(&asked, site)`, which takes
+          # `&SpotRequest` and reads the field through `is_empty()` and `contains()` and
+          # nothing else. "Never inserted into" is therefore a fact the BORROW CHECKER
+          # enforces, not a promise this comment makes -- an auditor confirms it by
+          # looking for a `mut` on `asked` or a `members.insert` on that path and finding
+          # neither. The crate's one `members.insert` belongs to the OTHER construction
+          # site, in ingest.rs, which reserves `named.len()` because it does name members.
+          # This entry exempts the empty case only.
+          # DECLARED RATHER THAN REWORDED: `with_capacity(0)` is the same non-reservation
+          # and rule 3 matches it deliberately, so rewriting the line to dodge the grep
+          # would be the mute button this gate exists to refuse.
           allow_unsized='
           crates/api/src/catalog.rs 1
           crates/pull/src/manifest.rs 1
+          crates/api/src/autopilot.rs 1
           '
 
           # ---- rule 4. docs/07 layer 12: bounded page, never O(universe). ---
@@ -3042,16 +3063,52 @@ jobs:
           # against k/m*FWER, so "the k-th smallest" is the algorithm and not an
           # implementation convenience. Removing the sort does not make it cheaper, it
           # makes it a different and wrong procedure.
-          # WHAT IT IS BOUNDED BY, because that is what this rule actually asks: the slice
-          # is the p-values of the RETAINED findings, and retention is the bounded top-N
-          # heap in `rank.rs` two lines above -- `Ranked::top` is capped before this is
-          # ever called. It is NOT the frequent-itemset count and NOT the candidate count,
-          # so it does not grow with the sweep. The sweep measured 34,979,095 combinations
-          # at k=23 and this slice still sees only what the heap kept.
+          # WHAT IT IS BOUNDED BY, and THIS ENTRY WAS WRONG ONCE, so the correction is
+          # kept rather than quietly overwritten. It first read: "the slice is the
+          # p-values of the RETAINED findings, and retention is the bounded top-N heap
+          # in `rank.rs` -- `Ranked::top` is capped before this is ever called." It is
+          # never called. `benjamini_hochberg` has NO production caller: `report.rs`
+          # uses `trials`, `effective_trials`, `expected_max_bailey`, `expected_max_t`
+          # and `bonferroni_t`, and nothing in any crate references this function or
+          # `p_value` outside their own module. An adversarial verifier checked the
+          # bound instead of the arithmetic and found the caller chain was invented --
+          # which is the exact defect rule 4 exists to catch, written into the gate as
+          # an enforced claim.
+          # THE TRUE BOUND, stated as what it is: the slice is caller-supplied through a
+          # `pub fn` taking `&mut [f64]`, so TODAY nothing structural bounds it, and the
+          # only callers are this module's three tests, which pass at most six elements.
+          # The intended caller is the bounded top-N heap, and when it is wired the bound
+          # becomes real and this text must be re-derived rather than reused. UNVERIFIED
+          # as a measured figure; no bench covers it.
           # It is `sort_unstable_by(f64::total_cmp)` and not a comparator of its own: a
           # NaN p-value under a partial_cmp-based comparator is the ordering bug rule 4's
           # neighbour in `rank.rs` already carries a reason about.
+          # `crates/pull/src/folder.rs` ONE sort, and its bound is the constant archive.rs
+          # is ALREADY allowed for. `census_of` sorts the instrument NAMES of an
+          # already-decoded walk -- one `String` per `Member`, so `instruments.len() ==
+          # members.len()` at the sort. Those members reach it from `archive::descend`,
+          # which refuses with `ArchiveError::TooManyMembers` at `out.len() >= MAX_MEMBERS`
+          # BEFORE every push, so the length is capped at 50,000: a compile-time constant
+          # checked in one place, not a caller's habit. It is not the universe in any
+          # sense -- a `Member`'s name is a file STEM from `archive::instrument_name`, and
+          # these are CSVs an operator bought, never the instrument master. `read_census`
+          # is the only production caller; the other four are in crates/pull/tests/.
+          # IT IS PER REQUEST, declared rather than glossed: `GET /folder.json` reaches it
+          # through `api::folder::answer`, and that same call does one `fs::read`, one
+          # UTF-8 validation and one `csv::decode` PER MEMBER. The walk is the cost; a
+          # sort of at most 50,000 short strings is not.
+          # NOT FIXABLE BY DELETION. Names come off stems while the walk sorts by PATH, so
+          # walk order is not name order; `dedup` needs the ordered vector and
+          # `Census::collisions` is counted from it; and the order is what makes the body
+          # byte-identical between runs under CLAUDE.md section 3 rule 5. A `HashSet` would
+          # trade this entry for a rule-5 breach, which is the worse defect.
+          # STALE DOC, NAMED RATHER THAN LEFT: `docs/06-limits.md` section 65 still says of
+          # this walk "Nothing is sorted and nothing is collected". That was true of
+          # `read_reach`/`reach_of` and stopped being true of `read_census` at D-0141. The
+          # bound is archive.rs's cap, not that sentence. Section 65 also records that NO
+          # timing has been taken against a real purchased archive; none is claimed here.
           allow_sort='
+          crates/pull/src/folder.rs 1
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
           crates/engine/src/lib.rs 2
