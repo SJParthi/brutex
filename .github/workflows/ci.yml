@@ -2783,6 +2783,15 @@ jobs:
           # t-statistic derived from it are floating. Transaction costs are
           # deliberately absent from that module, so no rupee figure is being
           # rounded -- `crates/costs` owns money and this owns a measurement.
+          # `crates/runner/src/report.rs` needs its OWN reason and cannot borrow the
+          # one above: `paisa()` converts a float mean INTO the paisa integer, which
+          # is precisely the conversion rule 2 exists to watch. The reason it is
+          # allowed is the direction of travel -- a statistic arrives and money
+          # leaves, saturating at the i64 bounds rather than truncating, so the
+          # float is the input being discarded and never the value being kept.
+          # An adversarial audit proposed moving the function next to the other
+          # float-bearing module instead; that fails, because outcome.rs is pinned
+          # at exactly 5 and would then measure 8.
           allow_float='
           crates/core/src/price.rs 4
           crates/greeks/src/bsm.rs 36
@@ -2792,6 +2801,7 @@ jobs:
           crates/greeks/src/moneyness.rs 6
           crates/runner/src/significance.rs 7
           crates/runner/src/outcome.rs 5
+          crates/runner/src/report.rs 3
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
           crates/telemetry/src/value.rs 5

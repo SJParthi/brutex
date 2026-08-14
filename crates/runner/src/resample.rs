@@ -34,7 +34,11 @@
 //! where the slice happens to start: the same market data sliced from 09:16
 //! instead of 09:15 would produce different bars with the same identity, and
 //! §3 rule 5's byte-for-byte reproducibility would be false. The bucket is
-//! `ts_micros / period`, floored — so a bar's bucket is a property of the bar.
+//! `(ts_micros + IST offset) / period`, floored -- so a bar's bucket is a
+//! property of the bar, on the same IST grid `crates/pull/src/fold.rs` and
+//! `crates/store` use. Anchoring on the bare epoch puts every edge at UTC
+//! midnight; fold.rs shipped that once and the store held 20 records stamped on
+//! a SUNDAY.
 //!
 //! # Sessions need no special case, and that is the point
 //!
@@ -43,7 +47,7 @@
 //! calendar, no session table, no exchange rule — which means nothing here can
 //! disagree with `crates/pull`'s calendar, because it does not consult one.
 
-use indicators::{Candle, OI_NULL};
+use indicators::{Candle, IST_OFFSET_MICROS, OI_NULL};
 
 /// Microseconds in one minute — the resolution every stored bar is at.
 const MINUTE_MICROS: i64 = 60_000_000;
@@ -92,15 +96,45 @@ impl Period {
     }
 }
 
-/// Which bucket a timestamp belongs to.
+/// Which bucket a timestamp belongs to, on the **IST** grid.
 ///
 /// Floored division, and `div_euclid` rather than `/` so a negative timestamp
 /// floors downward instead of toward zero. No bar before 1970 exists in this
 /// store, but a truncating divide would silently merge the buckets either side
 /// of the epoch, and a bucket key that is wrong only for one input is worse than
 /// one that is wrong for all of them.
+///
+/// # The anchor, and the incident that names it
+///
+/// This was `ts_micros.div_euclid(..)` on the bare epoch, which anchors every
+/// edge at **UTC** midnight. `crates/pull/src/fold.rs` had exactly that bug and
+/// records what it cost: *every daily bar moved back one calendar day*, and the
+/// store held **20 records stamped on a SUNDAY** on an exchange that trades
+/// Monday to Friday. `store::path::Timeframe` states as fact that "the fold grid
+/// is anchored at IST midnight".
+///
+/// The two grids agree only when the period divides the 330-minute offset —
+/// 5, 15 and 30 minutes do, so the fixtures here never saw it. **60 does not**,
+/// and 60 is a `Timeframe::KNOWN` rung, so an hourly resample here would have
+/// disagreed with the store's own fold on the same bars. Found by an
+/// adversarial audit, not by a test.
+///
+/// [`indicators::IST_OFFSET_MICROS`] is used rather than a second copy of
+/// 19,800: one definition across three crates is what stops them drifting.
 const fn bucket_of(ts_micros: i64, period: Period) -> i64 {
-    ts_micros.div_euclid(period.micros())
+    ts_micros
+        .saturating_add(IST_OFFSET_MICROS)
+        .div_euclid(period.micros())
+}
+
+/// The UTC timestamp at which `bucket` begins.
+///
+/// The inverse of [`bucket_of`], and it must carry the same anchor or a bar
+/// would be stamped on a grid it was not bucketed on.
+const fn bucket_start(bucket: i64, period: Period) -> i64 {
+    bucket
+        .saturating_mul(period.micros())
+        .saturating_sub(IST_OFFSET_MICROS)
 }
 
 /// Folds one-minute `bars` into `period` bars.
@@ -171,7 +205,7 @@ pub fn resample(bars: &[Candle], period: Period) -> Vec<Candle> {
 /// the same market, and `data_digest` would disagree across them.
 fn opened(bar: &Candle, period: Period) -> Candle {
     Candle {
-        ts_micros: bucket_of(bar.ts_micros, period).saturating_mul(period.micros()),
+        ts_micros: bucket_start(bucket_of(bar.ts_micros, period), period),
         open: bar.open,
         high: bar.high,
         low: bar.low,
@@ -201,8 +235,8 @@ const fn fold_open_interest(accumulated: i64, incoming: i64) -> i64 {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{MINUTE_MICROS, Period, bucket_of, resample};
-    use indicators::{Candle, OI_NULL};
+    use super::{MINUTE_MICROS, Period, bucket_of, bucket_start, resample};
+    use indicators::{Candle, IST_OFFSET_MICROS, OI_NULL};
 
     /// A one-minute bar at `minute` past the epoch.
     fn bar(minute: i64, open: i64, high: i64, low: i64, close: i64, volume: i64) -> Candle {
@@ -358,13 +392,65 @@ mod tests {
 
     #[test]
     fn a_negative_timestamp_floors_downward_rather_than_toward_zero() {
-        // No bar before 1970 exists in this store. A truncating divide would put
-        // minute -1 and minute 0 in the same bucket, which is wrong for exactly
-        // one input and therefore the kind of thing nobody notices.
-        assert_eq!(bucket_of(-MINUTE_MICROS, five()), -1);
-        assert_eq!(bucket_of(0, five()), 0);
-        assert_eq!(bucket_of(-5 * MINUTE_MICROS, five()), -1);
-        assert_eq!(bucket_of(-6 * MINUTE_MICROS, five()), -2);
+        // Anchored, not bare: a timestamp is negative on the IST grid only below
+        // -19,800 s. There, `div_euclid` must floor DOWNWARD rather than toward
+        // zero, or the two buckets either side of IST midnight 1970 merge.
+        assert_eq!(
+            bucket_of(-IST_OFFSET_MICROS, five()),
+            0,
+            "IST midnight on 1 Jan 1970 is bucket zero"
+        );
+        assert_eq!(
+            bucket_of(-IST_OFFSET_MICROS - 1, five()),
+            -1,
+            "one microsecond earlier floors DOWN, not toward zero"
+        );
+        assert_eq!(
+            bucket_of(-IST_OFFSET_MICROS - 5 * MINUTE_MICROS, five()),
+            -1
+        );
+        assert_eq!(
+            bucket_of(-IST_OFFSET_MICROS - 6 * MINUTE_MICROS, five()),
+            -2
+        );
+    }
+
+    /// The grid is IST's, and an hourly fold is where that starts to matter.
+    ///
+    /// A UTC-anchored grid agrees with an IST one exactly when the period
+    /// divides the 330-minute offset. 5, 15 and 30 do — which is why every other
+    /// fixture in this file passed while the anchor was wrong. **60 does not**,
+    /// and 60 is a `Timeframe::KNOWN` store rung, so an hourly resample on the
+    /// bare epoch would have disagreed with `pull::fold` on the same bars.
+    #[test]
+    fn the_hourly_grid_is_anchored_on_ist_and_not_on_utc() {
+        let hour = Period::minutes(60).expect("sixty is a valid period");
+        // 09:15 IST on day zero, expressed in UTC micros.
+        let open_ist = 555 * MINUTE_MICROS - IST_OFFSET_MICROS;
+        let start = bucket_start(bucket_of(open_ist, hour), hour);
+
+        // On the IST grid an hourly bucket begins on the IST hour: 09:00 IST.
+        let ist_minutes_into_day = (start + IST_OFFSET_MICROS)
+            .div_euclid(MINUTE_MICROS)
+            .rem_euclid(1_440);
+        assert_eq!(
+            ist_minutes_into_day, 540,
+            "an hourly bucket containing 09:15 IST must begin at 09:00 IST \
+             (540 minutes), not at an offset thirty minutes away -- which is \
+             exactly what a UTC-anchored grid produces, because 330 is not a \
+             multiple of 60"
+        );
+
+        // And the five-minute grid is unaffected, because 5 divides 330 -- the
+        // reason this defect survived every other test in this file.
+        let five_start = bucket_start(bucket_of(open_ist, five()), five());
+        assert_eq!(
+            (five_start + IST_OFFSET_MICROS)
+                .div_euclid(MINUTE_MICROS)
+                .rem_euclid(1_440),
+            555,
+            "09:15 IST is itself a five-minute edge"
+        );
     }
 
     /// The saturating arms, which no market data reaches and which are therefore

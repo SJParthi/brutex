@@ -74,7 +74,13 @@ pub const CURDAY_FIRST: u16 = 121;
 pub const CURDAY_RUNGS: [i32; 11] = [0, 236, 382, 500, 618, 786, 1000, 1272, 1618, 2000, 2618];
 
 /// IST is UTC+05:30 exactly, and India observes no daylight saving.
-const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
+///
+/// `pub` so `crates/runner`'s resampler anchors its bucket grid on the SAME
+/// offset rather than a second copy of the number. `crates/pull/src/fold.rs`
+/// records what a UTC-anchored grid cost when it shipped: every daily bar moved
+/// back one calendar day, and the store held 20 records stamped on a SUNDAY on
+/// an exchange that trades Monday to Friday. One definition, three crates.
+pub const IST_OFFSET_MICROS: i64 = 19_800 * 1_000_000;
 const MICROS_PER_DAY: i64 = 86_400 * 1_000_000;
 
 /// The IST calendar-day number for a timestamp.
