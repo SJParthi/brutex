@@ -251,6 +251,9 @@ impl Sweeper {
 
         let mut attempts = 0_u32;
         let mut best: Option<(u64, Sweep)> = None;
+        // The highest rung known to FINISH, vacuous or not -- the bisection's
+        // upper bracket. Keyed on `best` instead, the bisection was dead code.
+        let mut last_completing: Option<u64> = None;
         let mut refused_below = None;
         // ONE BELOW THE COLUMN, NOT AT IT, AND THE DIFFERENCE IS A WRONG ANSWER.
         //
@@ -291,6 +294,15 @@ impl Sweeper {
                 // Starting one rung lower did NOT fix it: at 98,124 bars,
                 // `swept - 1` still demands 98,123 of 98,124 and is just as
                 // empty. Emptiness has to be tested for, not arithmetic'd around.
+                // TWO facts are recorded, and conflating them was a defect.
+                //
+                // `last_completing` is "this rung finished inside the probe
+                // budget", vacuous or not. `best` is the stronger "and it found
+                // something". The bisection below needs the FIRST to have a
+                // bracket at all -- an audit found that keying the bracket on
+                // `best` made the bisection dead code on precisely the columns it
+                // was written to repair.
+                last_completing = Some(threshold);
                 if sweep.depth() >= 1 {
                     best = Some((threshold, sweep));
                 }
@@ -337,9 +349,46 @@ impl Sweeper {
         //
         // The cost is `log2(bracket)` more walks on a column already folded, and
         // the bracket is at most the last rung's own width.
-        if let Some(refused) = refused_below {
+        // # THE PREDICATE IS NOT THE ONE THIS CODE FIRST BISECTED ON
+        //
+        // The first version bisected on `completed() && depth() >= 1` and argued
+        // monotonicity from cost alone. Two adversarial audits killed both halves
+        // of that:
+        //
+        // * **It was dead code.** The bracket's top was `best`, which is only set
+        //   by a NON-VACUOUS rung. `swept - 1` is vacuous by construction --
+        //   D-0080 excludes `support == bars` as AlwaysTrue -- so on any column
+        //   where the grid goes vacuous-then-refused, `best` stays `None`, `hi`
+        //   collapses onto `lo`, and the loop never runs. Measured: at ceiling
+        //   5,000 `auto` returned "nothing affordable, 0 combinations" while
+        //   4,722 combinations were affordable at t=592. The comment above this
+        //   block described that exact column as the thing being repaired.
+        //
+        // * **The conflated predicate is not monotone.** Two separate facts move
+        //   in OPPOSITE directions with the threshold:
+        //
+        //   | | low threshold | high threshold |
+        //   |---|---|---|
+        //   | completes inside the budget | no -- too many candidates | yes |
+        //   | finds anything (`depth >= 1`) | yes | no -- all excluded |
+        //
+        //   So `completed && depth>=1` is false, then true, then false again. A
+        //   bisection whose else-arm moves `lo` upward can step over the band
+        //   entirely and still answer `None`.
+        //
+        // Bisecting on `completed()` ALONE fixes both. That predicate is monotone
+        // in the threshold on its own -- cost falls as the threshold rises, full
+        // stop -- so the bracket `(refused, last_completing]` holds exactly one
+        // crossover and bisection converges on it. Vacuousness is then a question
+        // asked ABOUT the answer rather than a term inside the search: `best` is
+        // updated only when a completing probe also found something, so it ends
+        // holding the lowest threshold that both finished and measured anything.
+        // `zip` rather than a tuple pattern: the grid always completes the top
+        // rung before it can refuse anything, so `(Some, None)` cannot occur and
+        // matching on it would leave an arm no run reaches.
+        if let Some((refused, top)) = refused_below.zip(last_completing) {
             let mut lo = refused;
-            let mut hi = best.as_ref().map_or(refused, |&(t, _)| t);
+            let mut hi = top;
             while hi.saturating_sub(lo) > 1 {
                 let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
                 attempts = attempts.saturating_add(1);
@@ -347,12 +396,15 @@ impl Sweeper {
                     .with_ceiling(self.ladder.ceiling())
                     .with_pair_budget(PROBE_PAIRS)
                     .walk(column.bits(), &live);
-                // `depth() >= 1` for the same reason the halving loop tests it:
-                // a probe that found nothing is not an answer, and a vacuous rung
-                // must move the bracket rather than be kept.
-                if sweep.completed() && sweep.depth() >= 1 {
+                if sweep.completed() {
+                    let found = sweep.depth() >= 1;
                     hi = mid;
-                    best = Some((mid, sweep));
+                    // Lower thresholds admit more, so each accepted probe is a
+                    // better answer than the last -- and a vacuous one is not an
+                    // answer at all, so it narrows the bracket without being kept.
+                    if found {
+                        best = Some((mid, sweep));
+                    }
                 } else {
                     lo = mid;
                 }

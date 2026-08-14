@@ -643,6 +643,57 @@ mod tests {
     }
 
     #[test]
+    fn a_grid_that_ends_vacuous_then_refused_still_finds_the_band() {
+        // THE CASE THE FIRST BISECTION WAS DEAD CODE ON.
+        //
+        // The grid probes `swept - 1` first, and that rung is ALWAYS vacuous:
+        // D-0080 excludes `support == bars` as AlwaysTrue, so it completes with
+        // depth 0 and never sets `best`. When the next rung down REFUSES, a
+        // bracket keyed on `best` has `hi == lo` and the loop never runs --
+        // `auto` then reports "nothing affordable" with the answer sitting
+        // between the two probes it already took.
+        //
+        // Measured before the fix, this exact fixture: affordable=false,
+        // min_hits=None, attempts=2, 0 combinations -- while t=592 completes
+        // with 4,722 frequent sets at the same ceiling. Found by an adversarial
+        // audit; the existing bracket test below opens with `.expect()` on
+        // `min_hits`, so it can only ever exercise the path that already worked.
+        let bars = synthetic::sessions(8);
+        let tight = Ladder::with_min_hits(1).with_ceiling(5_000);
+        let auto = Sweeper::new(tight).auto(&bars, &mut evaluator());
+
+        assert!(
+            auto.affordable,
+            "a band exists at this ceiling and the search must reach it"
+        );
+        assert!(
+            auto.attempts > 2,
+            "attempts == 2 is the signature of the defect: two grid probes and \
+             zero bisection probes. got {}",
+            auto.attempts
+        );
+        assert!(
+            auto.outcome.sweep.all_frequent().count() > 0,
+            "and the kept sweep must actually contain combinations"
+        );
+
+        // A TIGHTER CEILING PUSHES THE BAND HIGHER, so the bisection's first
+        // midpoint lands in the VACUOUS region above it. That probe completes
+        // and finds nothing: it must narrow the bracket without being kept, and
+        // it is the only way the `found == false` arm is ever reached -- the
+        // wider fixture above takes the true arm on all 31 of its probes.
+        let tighter = Ladder::with_min_hits(1).with_ceiling(200);
+        let narrow = Sweeper::new(tighter).auto(&bars, &mut evaluator());
+        assert!(narrow.affordable, "a band exists here too");
+        let chosen = narrow.min_hits.unwrap_or(0);
+        assert!(
+            chosen > auto.min_hits.unwrap_or(0),
+            "a tighter ceiling can only afford a HIGHER threshold: {chosen} vs {:?}",
+            auto.min_hits
+        );
+    }
+
+    #[test]
     fn the_search_closes_the_bracket_the_halving_grid_leaves_open() {
         // The halving grid can only ever bracket the answer to a factor of two:
         // it probes swept-1, /2, /4 ... and stops at the first refusal, so the
