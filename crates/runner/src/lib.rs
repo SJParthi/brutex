@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod closed;
 pub mod identity;
 pub mod outcome;
 pub mod rank;
