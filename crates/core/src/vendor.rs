@@ -528,7 +528,35 @@ impl Vendor {
                 exchange: "EXCH_ID",
                 segment: "SEGMENT",
                 underlying: "UNDERLYING_SYMBOL",
-                trading_symbol: "SYMBOL_NAME",
+                // THE TICKER, WHICH IS NOT `SYMBOL_NAME`.
+                //
+                // `SYMBOL_NAME` holds the company's NAME, truncated to 24
+                // characters: `RELIANCE INDUSTRIES LTD`, `TATA CONSULTANCY
+                // SERV LT`, `HDFC BANK LTD`. `UNDERLYING_SYMBOL` holds
+                // `RELIANCE`, `TCS`, `HDFCBANK` — the NSE ticker, the same
+                // string Groww puts in `trading_symbol`.
+                //
+                // Measured over the 2,781 main-board NSE cash equities this
+                // vendor's own file yields:
+                //
+                //   UNDERLYING_SYMBOL  0 blank, 2,781 distinct of 2,781,
+                //                      and 2,733 of Groww's 2,740 tickers
+                //                      matched exactly.
+                //   SYMBOL_NAME        2 collisions (FUTURE ENTERPRISES LTD
+                //                      and GACM TECHNOLOGIES LIMITED, each two
+                //                      securities with distinct ISINs), and
+                //                      3 of 2,740 matched.
+                //
+                // So reading the wrong column MANUFACTURED the only duplicate
+                // symbols in the kept set, and made this vendor's rows fail to
+                // line up with the other's on every join that is not the ISIN.
+                //
+                // It also points at the same column as `underlying` above, and
+                // that is correct rather than a copy-paste: for a cash equity
+                // the underlying IS the instrument. Nothing requires these two
+                // to be different columns — `Columns::widest` folds a maximum
+                // over the indices and does not care that two of them agree.
+                trading_symbol: "UNDERLYING_SYMBOL",
                 // The real type is INSTRUMENT. `INSTRUMENT_TYPE` is a
                 // different column holding a vendor-minted paper class (ES,
                 // DEB, ETF); it is deliberately NOT read — see the

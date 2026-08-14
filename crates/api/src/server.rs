@@ -4598,6 +4598,25 @@ async fn fetch_chunks(
 /// reaches it.
 const THROTTLE_ATTEMPTS: u32 = 6;
 
+/// Attempts allowed for a **5xx**, which is fewer than a transport blip gets.
+///
+/// A 5xx is an ANSWER: the vendor was reached, its front door works, and its
+/// own side failed. That is worth re-asking — the same bytes may well be
+/// answered next time — but it is much weaker evidence of *transience* than a
+/// connection that never completed, because a broken backend usually stays
+/// broken for longer than a backoff ladder.
+///
+/// The full [`THROTTLE_ATTEMPTS`] ladder on the quadratic wait is
+/// `250 + 1000 + 2250 + 4000 + 6250 ms` — 13.75 s spent per instrument before
+/// giving up. A one-minute backfill is ~785 instruments, so a vendor having a
+/// bad hour would spend about three hours asleep discovering that, one
+/// instrument at a time, and the run would look hung rather than failing.
+///
+/// Three attempts cost at most `250 + 1000 ms`. That survives the blip this
+/// exists for and reports the outage in a length of time an operator will
+/// actually watch.
+const SERVER_ERROR_ATTEMPTS: u32 = 3;
+
 /// One chunk, retried on the failures that are worth retrying.
 ///
 /// # Which failures, and why not all of them
@@ -4654,7 +4673,125 @@ fn served(feed: pull::vendor::Feed, rung: pull::vendor::Granularity) -> Result<(
     ))
 }
 
-/// governor already handles *sustained* throttling; this handles the blip.
+/// What to do about one refusal — the whole retry policy, with no I/O in it.
+///
+/// # Why this is a function and not four `if`s inside the loop
+///
+/// It used to be four `if`s inside the loop, and the only test of it read this
+/// file as TEXT and asserted that certain string literals appeared before the
+/// word `sleep`. That test could not distinguish the policy from its wording:
+/// it passed for a build that returned on the first 5xx and would have passed
+/// for one that never retried anything, as long as the literals were in the
+/// right order. It also brace-counted Rust source to find the function body,
+/// which is unsound — braces live in string literals too.
+///
+/// Split out, every arm is reachable from a test with a `u16` and no socket,
+/// and the loop below keeps only the parts that genuinely need one.
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// The credential died mid-run. §8 forbids minting, so this stops.
+    CredentialDied,
+    /// The vendor gave a reason about the request. Asking again cannot change
+    /// it.
+    Answered,
+    /// The vendor's own side failed, and has now said so
+    /// [`SERVER_ERROR_ATTEMPTS`] times.
+    ServerDown,
+    /// Ask again in `wait_ms`. `throttled` is the governor's cue to take its
+    /// multiplicative decrease first.
+    Again { wait_ms: u64, throttled: bool },
+    /// Every attempt is spent.
+    Exhausted,
+}
+
+/// The policy in [`Step`]'s terms.
+///
+/// `status` is the one the vendor sent, carried on
+/// `pull::fetch::FetchError::VendorRefused`, or `None` when nothing was
+/// answered at all. `invalid_auth` is the body-level marker a vendor writes
+/// instead of a status.
+///
+/// Constant work — a handful of integer comparisons, no allocation.
+const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32) -> Step {
+    if invalid_auth {
+        return Step::CredentialDied;
+    }
+    match status {
+        // 401 and 403 are the same fact spelled two ways. §4z: Kite answers 403
+        // `TokenException` on expiry, on logout, and when the user logs into
+        // another Kite instance.
+        Some(401 | 403) => Step::CredentialDied,
+        // The one refusal that means LATER.
+        Some(429) => {
+            if attempt >= THROTTLE_ATTEMPTS {
+                return Step::Exhausted;
+            }
+            // Exponential, because the vendor is saying the arrival RATE is
+            // wrong and 250 ms twice does not change a rate. Capped so a long
+            // ladder cannot park a run for minutes.
+            Step::Again {
+                // `.min` is not const-callable, and this stays `const fn`
+                // so the whole policy is checkable without running it.
+                wait_ms: {
+                    let doubled = 1_000_u64 << (attempt - 1);
+                    if doubled > 30_000 { 30_000 } else { doubled }
+                },
+                throttled: true,
+            }
+        }
+        // The vendor's own side failed. Worth re-asking, on a shorter ladder
+        // than a blip gets, and the governor is not touched: a 500 names no
+        // budget.
+        Some(500..=599) => {
+            if attempt >= SERVER_ERROR_ATTEMPTS || attempt >= THROTTLE_ATTEMPTS {
+                return Step::ServerDown;
+            }
+            Step::Again {
+                wait_ms: 250 * attempt as u64 * attempt as u64,
+                throttled: false,
+            }
+        }
+        // Any other answer is a reason about the request.
+        Some(_) => Step::Answered,
+        // Nothing was answered, so it is a transport blip -- the case the
+        // quadratic backoff was originally sized for.
+        None => {
+            if attempt >= THROTTLE_ATTEMPTS {
+                return Step::Exhausted;
+            }
+            Step::Again {
+                wait_ms: 250 * attempt as u64 * attempt as u64,
+                throttled: false,
+            }
+        }
+    }
+}
+
+/// One window, re-asked while the reason to re-ask still stands.
+///
+/// The refusal decides, and it decides from the status the vendor actually
+/// sent rather than from this function's rendering of it:
+///
+/// * **401 / 403** — the credential died mid-run. Returned at once; §8 forbids
+///   minting, and the refreshed value is read on the next pull.
+/// * **429** — the one refusal that means *later*. The governor takes its
+///   multiplicative decrease and the wait is exponential, because the vendor is
+///   saying the arrival RATE is wrong and 250 ms twice does not change a rate.
+/// * **5xx** — the vendor's own side failed. Retried on the quadratic transport
+///   backoff, and the governor is not touched: a 500 names no budget. Capped at
+///   [`SERVER_ERROR_ATTEMPTS`], which is shorter than the blip ladder, because
+///   the vendor answered and a broken backend outlasts a backoff.
+/// * **any other status** — a reason about the request, which will not change
+///   because it was asked twice more. Returned at once.
+/// * **no status at all** — nothing was answered, so it is a transport blip and
+///   the quadratic backoff applies.
+///
+/// The governor already handles *sustained* throttling; this handles the blip.
+///
+/// # Errors
+///
+/// The last refusal, either returned early by the table above or after
+/// [`THROTTLE_ATTEMPTS`] attempts failed to get an answer.
 async fn with_retry(
     source: &pull::http::HttpSource,
     request: &pull::fetch::BarRequest,
@@ -4677,64 +4814,76 @@ async fn with_retry(
             }
             Err(why) => {
                 let text = why.to_string();
-                // A 401 MID-RUN IS THE TOKEN EXPIRING, AND IT IS CERTAIN.
+                // THE STATUS IS CARRIED, SO IT IS READ RATHER THAN RE-PARSED.
                 //
-                // A broker token lasts a day; the one-minute backfill is
-                // ~62,600 requests and no run of that size fits inside one.
-                // So the run WILL cross a reset, and every request after it
-                // answers 401 — 700 instruments lost to a credential that was
-                // refreshed in Parameter Store minutes earlier.
-                //
-                // Refused rather than re-read HERE, because `CLAUDE.md` §8 is
-                // explicit: this repository never mints. The value is read
-                // fresh from Parameter Store on the NEXT pull, and the message
-                // says so — an operator who re-runs gets the new token, and one
-                // who does not is told exactly what happened rather than
-                // reading 700 identical failures.
-                if text.contains("status 401") || text.contains("Invalid_Authentication") {
-                    return Err(format!(
-                        "{text} — the access token expired mid-run. This \
-                         repository never mints one (§8): the refreshed value is \
-                         read from Parameter Store on the next pull, and resume \
-                         means re-running costs only what is still missing."
-                    ));
-                }
-                // 429 IS THE ONE REFUSAL THAT MEANS "LATER", SO IT IS THE ONE
-                // THAT IS RETRIED.
-                //
-                // Measured: a 785-instrument, 3-chunk pull fired ~2,355
-                // requests in 365 s (~6.4/s) and 458 instruments died on
-                // `status 429`. The branch below used to return every
-                // `refused with status` immediately -- including 429 -- so the
-                // backoff never ran on the only error it was built for, and
-                // `Governor::record_throttled` was dead code in the entire
-                // workspace. AIMD that never observes a refusal is a constant.
-                let throttled = text.contains("status 429");
-                if throttled {
-                    // THE MULTIPLICATIVE DECREASE, on every span, because a
-                    // 429 names none of them. See `pull::rate::Governor`.
-                    if let Ok(mut budgets) = site.budgets.lock()
-                        && let Some(Some(g)) = budgets.get_mut(feed as usize)
-                    {
-                        g.record_throttled();
+                // `window_async` answers a `FetchError`, and `VendorRefused`
+                // holds `status: u16`. Every decision below used to be taken by
+                // searching this function's own rendering of that number for
+                // `"status 429"` — a formatter and a policy coupled through a
+                // string, with nothing testing them together, and one that
+                // silently answers "not a refusal" for any status whose text
+                // this file did not happen to spell out.
+                let status = match why {
+                    pull::fetch::FetchError::VendorRefused { status, .. } => Some(status),
+                    _ => None,
+                };
+                let invalid_auth = text.contains("Invalid_Authentication");
+                match step(status, invalid_auth, attempt) {
+                    Step::CredentialDied => {
+                        // A CREDENTIAL DEATH MID-RUN IS CERTAIN, NOT A BLIP.
+                        //
+                        // A broker token lasts a day; the one-minute backfill is
+                        // ~62,600 requests and no run of that size fits inside
+                        // one. So the run WILL cross a reset, and every request
+                        // after it is refused — 700 instruments lost to a
+                        // credential that was refreshed minutes earlier.
+                        //
+                        // Refused rather than re-read HERE, because §8 is
+                        // explicit: this repository never mints. The value is
+                        // read fresh on the NEXT pull, and the message says so.
+                        return Err(format!(
+                            "{text} — the access token is no longer valid mid-run \
+                             (expiry, a logout, or a login to another session of \
+                             the same vendor). This repository never mints one \
+                             (§8): the refreshed value is read from Parameter \
+                             Store on the next pull, and resume means re-running \
+                             costs only what is still missing."
+                        ));
                     }
-                } else if text.contains("refused with status") {
-                    // A VENDOR THAT ANSWERED FOR ANY OTHER REASON IS NOT
-                    // RETRIED. It gave a reason; the reason will not change
-                    // because it was asked twice more.
-                    return Err(text);
-                }
-                if attempt < THROTTLE_ATTEMPTS {
-                    // Exponential for a throttle -- the vendor is saying the
-                    // arrival rate is wrong, and 250 ms twice does not change
-                    // an arrival rate. Quadratic for a transport blip, which is
-                    // what the original attempts were sized for.
-                    let wait = if throttled {
-                        (1_000_u64 << (attempt - 1)).min(30_000)
-                    } else {
-                        250 * u64::from(attempt) * u64::from(attempt)
-                    };
-                    tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                    // It gave a reason; the reason will not change because it
+                    // was asked twice more.
+                    Step::Answered => return Err(text),
+                    Step::ServerDown => {
+                        return Err(format!(
+                            "{text} — and it answered that {SERVER_ERROR_ATTEMPTS} \
+                             times. The vendor is reachable and its own side is \
+                             failing, which is not a blip this run can wait out."
+                        ));
+                    }
+                    Step::Again { wait_ms, throttled } => {
+                        if throttled {
+                            // THE MULTIPLICATIVE DECREASE, on every span,
+                            // because a 429 names none of them. See
+                            // `pull::rate::Governor`.
+                            //
+                            // Measured: a 785-instrument, 3-chunk pull fired
+                            // ~2,355 requests in 365 s (~6.4/s) and 458
+                            // instruments died on `status 429`. This branch used
+                            // to be unreachable — every `refused with status`
+                            // returned at once, including 429 — so the backoff
+                            // never ran on the only error it was built for and
+                            // `record_throttled` was dead code workspace-wide.
+                            // AIMD that never observes a refusal is a constant.
+                            if let Ok(mut budgets) = site.budgets.lock()
+                                && let Some(Some(g)) = budgets.get_mut(feed as usize)
+                            {
+                                g.record_throttled();
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+                    }
+                    // The loop's own exit says it better than a branch here can.
+                    Step::Exhausted => {}
                 }
                 last = text;
             }
@@ -11259,53 +11408,109 @@ mod tests {
         );
     }
 
-    /// A transport blip is retried; a vendor's answer is not.
+    /// The retry POLICY, arm by arm, with no socket and no sleeping.
     ///
-    /// Read off the source, because driving three real timeouts would need a
-    /// vendor that fails on demand. What is pinned is the DISTINCTION, which is
-    /// the whole content of the function: a timeout may succeed on the second
-    /// attempt and a `DH-905 missing required fields` will not. Retrying a
-    /// refusal spends three times the rate budget to learn what the first
-    /// answer already said, and buries the real error behind two duplicates.
+    /// This replaces a test that read this file as TEXT and asserted that
+    /// certain string literals appeared before the word `sleep`. That test
+    /// could not tell the policy from its wording — it passed for a build that
+    /// returned on the first 5xx — and it brace-counted Rust source to find the
+    /// function body, which is unsound because braces live in string literals.
     #[test]
-    fn a_blip_is_retried_and_an_answered_refusal_is_not() {
-        // Compile-time, and first in the scope — one attempt is not a retry.
+    fn the_retry_policy_answers_each_class_of_refusal() {
         const _: () = assert!(THROTTLE_ATTEMPTS > 1);
+        const _: () = assert!(SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS);
 
-        let me = include_str!("server.rs");
-        let body = me
-            .split_once("async fn with_retry")
-            .expect("with_retry exists")
-            .1;
-        let body = &body[..body
-            .find("\n}\n")
-            .expect("its body ends at a column-0 brace")];
+        // A CREDENTIAL DEATH IS CERTAIN, so it never waits, at any attempt.
+        // 403 is the third broker's `TokenException` and 401 is the other two.
+        for attempt in 1..=THROTTLE_ATTEMPTS {
+            assert_eq!(step(Some(401), false, attempt), Step::CredentialDied);
+            assert_eq!(step(Some(403), false, attempt), Step::CredentialDied);
+            // And the body-level marker a vendor writes instead of a status,
+            // which outranks whatever the status happened to be.
+            assert_eq!(step(None, true, attempt), Step::CredentialDied);
+            assert_eq!(step(Some(200), true, attempt), Step::CredentialDied);
+        }
 
-        // The loop runs more than once, or nothing is retried at all.
+        // A REASON ABOUT THE REQUEST IS NOT RE-ASKED.
+        for code in [400, 404, 405, 410, 418, 422] {
+            assert_eq!(step(Some(code), false, 1), Step::Answered, "status {code}");
+        }
+
+        // 429 BACKS OFF EXPONENTIALLY AND TELLS THE GOVERNOR.
+        let mut waits = Vec::new();
+        for attempt in 1..THROTTLE_ATTEMPTS {
+            match step(Some(429), false, attempt) {
+                Step::Again { wait_ms, throttled } => {
+                    assert!(throttled, "a 429 is the governor's cue");
+                    waits.push(wait_ms);
+                }
+                other => panic!("attempt {attempt} of a 429 gave {other:?}"),
+            }
+        }
+        assert_eq!(waits, vec![1_000, 2_000, 4_000, 8_000, 16_000]);
         assert!(
-            body.contains("for attempt in 1..=THROTTLE_ATTEMPTS"),
-            "the attempt loop is what makes this a retry"
+            waits.windows(2).all(|w| w[1] > w[0]),
+            "each wait exceeds the last, or it is not a backoff"
         );
+        assert_eq!(step(Some(429), false, THROTTLE_ATTEMPTS), Step::Exhausted);
+        // The cap holds, so a long ladder cannot park a run for minutes.
+        assert!(matches!(
+            step(Some(429), false, 20),
+            Step::Exhausted
+                | Step::Again {
+                    wait_ms: 30_000,
+                    ..
+                }
+        ));
 
-        // AND IT STOPS EARLY on the two answers that will not change.
-        for (what, needle) in [
-            ("a vendor refusal", "refused with status"),
-            ("an expired token", "status 401"),
-        ] {
-            assert!(
-                body.contains(needle),
-                "{what} must be recognised and returned rather than retried"
+        // 5xx IS RETRIED -- THE BUG THIS CLASS EXISTS FOR -- ON THE SHORTER
+        // LADDER, QUADRATICALLY, AND WITHOUT TOUCHING THE GOVERNOR.
+        for code in [500, 502, 503, 504, 599] {
+            assert_eq!(
+                step(Some(code), false, 1),
+                Step::Again {
+                    wait_ms: 250,
+                    throttled: false
+                },
+                "status {code} is the vendor's own side failing, so it is re-asked"
             );
         }
-        // Both must return BEFORE the sleep, or they are retried anyway.
-        let sleep = body.find("sleep").expect("there is a backoff");
-        for needle in ["refused with status", "status 401"] {
-            assert!(
-                body.find(needle).is_some_and(|at| at < sleep),
-                "{needle} is checked before the backoff, or the early return \
-                 never happens and the budget is spent three times over"
-            );
-        }
+        assert_eq!(
+            step(Some(503), false, 2),
+            Step::Again {
+                wait_ms: 1_000,
+                throttled: false
+            }
+        );
+        // And it STOPS at its own cap rather than the throttle ladder's, so a
+        // vendor having a bad hour does not cost 13.75 s per instrument.
+        assert_eq!(
+            step(Some(503), false, SERVER_ERROR_ATTEMPTS),
+            Step::ServerDown
+        );
+        let spent: u64 = (1..SERVER_ERROR_ATTEMPTS)
+            .map(|a| 250 * u64::from(a) * u64::from(a))
+            .sum();
+        assert_eq!(spent, 1_250, "a dead vendor costs 1.25 s, not 13.75 s");
+
+        // NOTHING ANSWERED AT ALL IS THE TRANSPORT BLIP THE QUADRATIC WAIT WAS
+        // SIZED FOR, and it gets the full ladder because a lost packet is much
+        // weaker evidence of a broken vendor than a 500 is.
+        assert_eq!(
+            step(None, false, 1),
+            Step::Again {
+                wait_ms: 250,
+                throttled: false
+            }
+        );
+        assert_eq!(
+            step(None, false, THROTTLE_ATTEMPTS - 1),
+            Step::Again {
+                wait_ms: 250 * 25,
+                throttled: false
+            }
+        );
+        assert_eq!(step(None, false, THROTTLE_ATTEMPTS), Step::Exhausted);
     }
 
     /// The transport is checked before anything a refusal should not cost.

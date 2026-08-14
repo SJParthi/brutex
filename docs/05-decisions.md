@@ -13789,3 +13789,81 @@ a coupling between a formatter and a classifier that nothing tests together.
 Replacing the prose match with the carried `status` is the correct fix and is
 not in this change.
 
+## D-0144 — Dhan's ticker is `UNDERLYING_SYMBOL`, and reading `SYMBOL_NAME` manufactured duplicates
+
+**Decided.** `Vendor::Dhan`'s `MasterColumns::trading_symbol` moves from
+`SYMBOL_NAME` to `UNDERLYING_SYMBOL`.
+
+**What the two columns actually hold.** `SYMBOL_NAME` is the company's NAME,
+truncated to 24 characters — `RELIANCE INDUSTRIES LTD`, `TATA CONSULTANCY SERV
+LT`, `HDFC BANK LTD`. `UNDERLYING_SYMBOL` is the NSE ticker — `RELIANCE`,
+`TCS`, `HDFCBANK` — the same string the other vendor puts in `trading_symbol`.
+
+**Measured over this vendor's own 2,781 main-board NSE cash equities:**
+
+| column | blank | distinct | duplicate symbols | matched the other vendor's 2,740 tickers |
+|---|---|---|---|---|
+| `UNDERLYING_SYMBOL` | 0 | 2,781 of 2,781 | **0** | **2,733** |
+| `SYMBOL_NAME` | 0 | 2,779 of 2,781 | **2** | **3** |
+
+The two collisions were `FUTURE ENTERPRISES LTD` (`INE623B01027` and
+`IN9623B01058`, the second a partly paid-up line) and `GACM TECHNOLOGIES
+LIMITED` (`INE224E01028` and `INE224E01036`). Both are genuinely two securities
+sharing one company name, and both are distinct by ISIN.
+
+**So the duplicates were made here, not found here.** There is no duplicate ISIN
+anywhere in either vendor's file — the join key is sound. Every duplicate in the
+kept set came from keying an instrument by a name instead of a ticker, and the
+same mistake made this vendor's rows fail to line up with the other's on any
+join that is not the ISIN.
+
+**On `underlying` and `trading_symbol` naming the same column.** That is correct
+rather than a copy-paste: for a cash equity the underlying IS the instrument.
+`Columns::widest` folds a maximum over the indices and requires no distinctness.
+
+**Not changed here.** Six shared-ISIN rows still disagree on the ticker because
+the other vendor appends the series — `CLCIND-BE` against `CLCIND`,
+`HDFCLIQUID-EQ` against `HDFCLIQUID`. That is a normalisation question, not a
+duplicate, and it is recorded rather than fixed.
+
+## D-0145 — the retry policy reads the status the vendor sent, and 5xx is retried on a shorter ladder
+
+**Decided.** `with_retry`'s four inline `if`s become `step`, a `const fn` over
+`(Option<u16>, bool, u32)`, and 5xx joins the retried classes with its own
+attempt cap.
+
+**Three faults, one cause.** Every decision was taken by searching this
+function's own RENDERING of the error for `"status 429"` and `"refused with
+status"` — a formatter and a policy coupled through a string, with nothing
+testing them together. `pull::fetch::FetchError::VendorRefused` has carried
+`status: u16` the whole time and the server discarded it.
+
+1. **403 was not a credential fault.** §4z records the third broker's session
+   death as 403 `TokenException` — expiry, logout, or a login to another
+   session, so a human opening the web terminal ends a running backfill. Only
+   401 was recognised, so 403 fell to the "it gave a reason" arm and killed the
+   instrument silently.
+2. **5xx was not retried.** A 502 is the vendor saying its OWN side failed — not
+   a reason about the request — and one during a ~62,600-request backfill cost
+   that instrument its month, indistinguishable from a 404.
+3. **A status this file did not spell out read as "not a refusal" at all.**
+
+**Why 5xx gets its own cap.** The full ladder on the quadratic wait is
+`250 + 1000 + 2250 + 4000 + 6250 ms` — 13.75 s per instrument. Across ~785
+instruments a vendor having a bad hour would spend about three hours asleep
+discovering that, one instrument at a time, and the run would look hung rather
+than failing. `SERVER_ERROR_ATTEMPTS = 3` costs at most 1.25 s: enough to
+survive the blip, short enough to report the outage.
+
+A 5xx also leaves the governor alone. It names no budget, and
+`record_throttled` there would decrease an arrival rate that was never the
+complaint.
+
+**The test that had to go.** The only coverage was a test that read this file as
+TEXT and asserted that certain literals appeared before the word `sleep`. It
+could not distinguish the policy from its wording — it passed for the build that
+returned on the first 5xx, and would have passed for one that never retried
+anything — and it brace-counted Rust source to find the function body, which is
+unsound because braces live in string literals. Splitting the policy out made
+every arm reachable from a test with a `u16` and no socket.
+
