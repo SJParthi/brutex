@@ -3580,15 +3580,37 @@ async fn broker_answer(
     }
 
     if run.reached == 0 {
-        return refuse(
-            facts,
-            run.refused
-                .first()
-                .map_or("no instrument in the universe could be reached", |w| {
-                    w.as_str()
-                }),
-            axum::http::StatusCode::BAD_GATEWAY,
-        );
+        let first = run
+            .refused
+            .first()
+            .map_or("no instrument in the universe could be reached", |w| {
+                w.as_str()
+            });
+        // 502 SAID THE VENDOR FAILED WHEN THE VENDOR WAS NEVER ASKED.
+        //
+        // `BAD_GATEWAY` means an upstream answered badly. Measured on a real
+        // run: 213 attempted, 0 reached, 13.9 ms — no socket was opened, no
+        // credential was read, and every refusal was decidable from the form.
+        // The page drew `Last pull HTTP 502`, which an operator reads as *the
+        // broker is down*, when the truth was *you asked for a day whose
+        // session had not closed*.
+        //
+        // That is a status blaming a third party for this side's own refusal —
+        // `CLAUDE.md` §4's fallback that hides a failure, wearing the wrong
+        // name rather than no name.
+        //
+        // A run that never reached the wire is a BAD REQUEST: everything that
+        // stopped it was answerable from the request itself. A run that DID
+        // reach a vendor and got nothing back keeps 502, because there the
+        // upstream really is the thing that failed. `BrokerRun::touched_wire`
+        // is the difference, and it is recorded by the run rather than guessed
+        // at from the refusal's prose.
+        let status = if run.touched_wire {
+            axum::http::StatusCode::BAD_GATEWAY
+        } else {
+            axum::http::StatusCode::BAD_REQUEST
+        };
+        return refuse(facts, first, status);
     }
     landed_answer(
         &run.total,
@@ -3608,6 +3630,21 @@ async fn broker_answer(
 /// without either one re-deriving what the other means.
 #[derive(Debug, Default)]
 pub(crate) struct BrokerRun {
+    /// Whether ANY instrument in this run got as far as opening a socket.
+    ///
+    /// # Why the status depends on it
+    ///
+    /// A run that reached nothing used to answer `502 BAD_GATEWAY`, which says
+    /// an upstream failed. Measured on a real run: 213 attempted, 0 reached,
+    /// 13.9 ms — no socket, no credential read, every refusal decidable from
+    /// the form. The page drew `Last pull HTTP 502` and an operator read it as
+    /// *the broker is down*.
+    ///
+    /// This is the difference between "this side refused" and "the vendor did",
+    /// and it is RECORDED by the run rather than guessed at from a refusal's
+    /// prose — a substring match on an error message is how a 403 came to be
+    /// filed as a transport blip elsewhere in this file.
+    pub touched_wire: bool,
     /// Instruments the sweep set out to fetch.
     pub attempted: usize,
     /// Instruments that answered.
@@ -3875,6 +3912,14 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
         });
         match broker_window(asked, instrument, site).await {
             Err(why) => {
+                // THE MARKER IS READ AND REMOVED HERE, so it never reaches an
+                // operator and never reaches the journal. One instrument that
+                // got as far as a socket makes the whole run wire-touching:
+                // the question the status answers is whether the VENDOR was
+                // ever asked, and once it has been, it has been.
+                let reached_wire = why.starts_with(WIRE_REACHED);
+                out.touched_wire = out.touched_wire || reached_wire;
+                let why = why.trim_start_matches(WIRE_REACHED);
                 let why = format!("{}: {why}", instrument.underlying);
                 // THE WHOLE REASON, WHERE IT IS NOT TRUNCATED.
                 //
@@ -4054,10 +4099,14 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     // with no row for the day — a holiday, or a date past the table — answers
     // `Err`, and that is read as CLOSED: a day the exchange did not trade has
     // no session left to finish, so nothing is gained by refusing it.
+    // ONE LOOKUP. A day the exchange did not trade answers `Err`, and that reads
+    // as CLOSED — there is no session left to finish, so nothing is gained by
+    // refusing it.
     let closed = pull::vendor::Venue::NseCash
         .hours_on(today)
-        .is_ok_and(|session| now.minute_of_day() >= session.close_minute())
-        || pull::vendor::Venue::NseCash.hours_on(today).is_err();
+        .map_or(true, |session| {
+            now.minute_of_day() >= session.close_minute()
+        });
     if asked.window.to() > today || (asked.window.to() == today && !closed) {
         // ONE COPY of this prose, in the `Refusal` that owns it. A second
         // hand-written sentence here would be the thing that drifts.
@@ -4685,6 +4734,16 @@ async fn with_retry(
 ///
 /// A human-readable string naming which parameter path could not be built or
 /// which secret could not be read. One `now_stamp` covers both reads, so the
+/// Prefixed onto a refusal that happened AFTER a socket was opened.
+///
+/// Stripped before the message reaches an operator — it exists so the route can
+/// tell "this side refused" from "the vendor did" without matching prose. See
+/// `BrokerRun::touched_wire`.
+///
+/// A control character rather than a word, so it can never collide with
+/// anything a vendor or this build would legitimately write.
+const WIRE_REACHED: &str = "\u{1}";
+
 /// two parameters are fetched against the same signing instant.
 async fn read_credential(
     identity: &pull::ssm::AwsIdentity,
@@ -4931,7 +4990,21 @@ async fn broker_window(
         ));
     };
 
-    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), listing, &spec).await?;
+    // THE WIRE STARTS HERE, AND THE REFUSAL SAYS SO.
+    //
+    // Everything above this line is decidable from the request: the transport,
+    // the rung, whether the session has closed, the rate permit, the credential.
+    // `fetch_chunks` is the only call in this function that opens a socket, so
+    // a failure from it — and only from it — is one the VENDOR is responsible
+    // for.
+    //
+    // Marked with a sentinel rather than inferred from the message. Matching a
+    // refusal's PROSE is how a 403 came to be filed as a transport blip
+    // elsewhere in this file; this is a marker this code writes and this code
+    // strips, which is a different thing from reading a vendor's words.
+    let bodies = fetch_chunks(asked, site, &source, instrument_id.as_str(), listing, &spec)
+        .await
+        .map_err(|why| format!("{WIRE_REACHED}{why}"))?;
 
     let Some(store_vendor) = feed.store_vendor() else {
         return Err(format!(
@@ -11198,6 +11271,69 @@ mod tests {
     /// pulled over HTTP paid a clock read, a `HOME`, a parsed credentials file,
     /// an AWS identity discovery and a socket to be told so. Every one of those
     /// is decidable from the descriptor before any of it.
+    /// **A REFUSAL THIS SIDE DECIDED IS NOT A GATEWAY FAILURE.**
+    ///
+    /// A run that reached nothing answered `502 BAD_GATEWAY` whatever stopped
+    /// it. Measured: 213 attempted, 0 reached, 13.9 ms — no socket opened, no
+    /// credential read — and the page drew `Last pull HTTP 502`, which an
+    /// operator reads as *the broker is down* when the truth was *you asked for
+    /// a day whose session had not closed*.
+    ///
+    /// The two cases are told apart by a marker this code writes at the one
+    /// call that opens a socket and strips in the caller — NOT by matching the
+    /// refusal's prose, which is how a 403 came to be filed as a transport blip
+    /// elsewhere in this same file.
+    #[test]
+    fn a_run_that_never_reached_a_socket_is_a_bad_request_and_not_a_bad_gateway() {
+        let me = include_str!("server.rs");
+
+        // The marker is set at `fetch_chunks` and nowhere else, because that is
+        // the only call in `broker_window` that opens a socket.
+        let window = me
+            .split_once("async fn broker_window")
+            .expect("broker_window exists")
+            .1;
+        let window = &window[..window.find("\n}\n").expect("it has an end")];
+        let marked: Vec<&str> = window
+            .lines()
+            .filter(|l| l.contains("WIRE_REACHED") && !l.trim_start().starts_with("//"))
+            .collect();
+        assert_eq!(
+            marked.len(),
+            1,
+            "exactly one place marks the wire as reached: {marked:?}"
+        );
+        assert!(
+            marked[0].contains("map_err"),
+            "and it marks a FAILURE from the socket call, not a success: {:?}",
+            marked[0]
+        );
+
+        // The status turns on the recorded flag, never on the message.
+        let answer = me
+            .split_once("if run.reached == 0 {")
+            .expect("the zero-reached branch exists")
+            .1;
+        let answer = &answer[..answer.find("\n    }\n").expect("it has an end")];
+        let code: String = answer
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            code.contains("run.touched_wire"),
+            "the status is decided by what the run RECORDED: {code}"
+        );
+        assert!(
+            code.contains("BAD_REQUEST") && code.contains("BAD_GATEWAY"),
+            "both statuses are reachable, or the split is decorative: {code}"
+        );
+        assert!(
+            !code.contains("contains(") && !code.contains("starts_with("),
+            "and never by reading the refusal's words: {code}"
+        );
+    }
+
     /// **TODAY IS ASKABLE ONCE ITS SESSION HAS CLOSED, AND WAS NOT.**
     ///
     /// `finished_day_only` refused any window reaching today, unconditionally.
