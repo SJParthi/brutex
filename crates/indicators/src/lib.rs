@@ -45,6 +45,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod column;
 pub mod daily;
 pub mod evaluator;
 pub mod fib;
