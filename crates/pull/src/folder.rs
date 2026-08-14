@@ -305,6 +305,80 @@ impl Reach {
     }
 }
 
+/// WHAT A FOLDER HOLDS: how far it reaches, and **what it names**.
+///
+/// # Why the names had to become reachable
+///
+/// A folder feed publishes no instrument master. `Vendor::MASTERED` is the
+/// three REST feeds and nothing else, so the ISIN-keyed join in `crates/api`
+/// answers `lacks` for every name an archive is asked about — correctly, and
+/// about a master that does not exist rather than about the folder that does.
+///
+/// The file name is therefore **the only identity an archive has**. There is no
+/// ISIN in these files, no security id, and no ticker column: `Member` takes the
+/// instrument off the file name because that is where it lives. [`reach_of`]
+/// walked every one of them, counted them, and threw the names away — so the
+/// one fact that answers "what is in this feed" was read on every walk and
+/// reachable by nobody. `docs/05-decisions.md` D-0141.
+///
+/// # Why this is not a field on [`Reach`]
+///
+/// [`Reach`] is `Copy`, and [`Reach::files`], [`Reach::rows`] and
+/// [`Reach::is_empty`] are `const fn` taking `self` **by value**. A `Vec` ends
+/// all four of those at once. The reach is a bound and the census is a set;
+/// keeping them apart lets a caller that wants only the bound keep paying only
+/// for the bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Census {
+    /// How far the folder reaches — exactly what [`reach_of`] answers.
+    pub reach: Reach,
+    /// Every DISTINCT instrument the folder names, sorted.
+    ///
+    /// Sorted rather than left in walk order because `read_dir` order is the
+    /// filesystem's and is not stable between machines or between runs, and
+    /// `CLAUDE.md` §3 rule 5 makes the same input owe the same output. File
+    /// order is load-bearing for ROWS inside a member — it is the only order a
+    /// one-second feed has — and carries nothing at all across members.
+    pub instruments: Vec<String>,
+    /// How many members named an instrument some other member had already
+    /// named.
+    ///
+    /// **Reported rather than swallowed.** Deduplicating in silence is the
+    /// §4 shape: two members claiming one instrument is exactly the `ambiguous`
+    /// bucket D-0141 describes on the folder side — a GDFL stem that appears
+    /// under both `Options/` and `Futures/`, say — and a caller that sees only
+    /// the deduplicated list cannot tell a clean folder from a colliding one.
+    /// Zero on every folder where each file names its own instrument.
+    pub collisions: usize,
+}
+
+/// The census of an already-decoded walk.
+///
+/// One pass for the reach, then one pass to collect the names, then a sort. The
+/// sort is `O(members log members)` and is the only super-linear step in the
+/// walk; it is taken once per folder read, never per file or per row, and
+/// `docs/06-limits.md` records the walk's cost.
+///
+/// # Errors
+///
+/// Whatever [`reach_of`] refuses, unchanged — a census of a folder whose days
+/// cannot be read is not a smaller census, it is no answer at all.
+pub fn census_of(members: &[Member]) -> Result<Census, FolderError> {
+    let reach = reach_of(members)?;
+    let mut instruments: Vec<String> = members
+        .iter()
+        .map(|member| member.instrument.clone())
+        .collect();
+    instruments.sort_unstable();
+    let before = instruments.len();
+    instruments.dedup();
+    Ok(Census {
+        collisions: before - instruments.len(),
+        reach,
+        instruments,
+    })
+}
+
 /// The reach of an already-decoded walk.
 ///
 /// One pass over the rows, comparing two [`Day`]s and keeping the extremes.
@@ -403,6 +477,54 @@ fn note_refused(dir: &Path, feed: Feed, why: &FolderError) {
 /// unreadable, or holds a member that will not decode — loudly, and never as
 /// an empty reach. [`FolderError::Untimed`] from [`reach_of`].
 pub fn read_reach(dir: &Path, feed: Feed, columns: Columns) -> Result<Reach, FolderError> {
+    let members = walk(dir, feed, columns)?;
+    match reach_of(&members) {
+        Ok(reach) => {
+            note_read(dir, feed, reach);
+            Ok(reach)
+        }
+        Err(why) => {
+            note_refused(dir, feed, &why);
+            Err(why)
+        }
+    }
+}
+
+/// The folder's reach **and the instruments it names**, in ONE walk.
+///
+/// The route `crates/api/src/folder.rs` serves calls this rather than
+/// [`read_reach`], because a browser asking what a folder holds needs both and
+/// walking twice for them would double a cost `docs/06-limits.md` already
+/// records. [`read_reach`] stays for a caller that wants only the bound: it
+/// allocates no names, which is the whole reason the two are separate
+/// functions and not one with a discarded field.
+///
+/// # Errors
+///
+/// Exactly [`read_reach`]'s, unchanged: a REST feed has no folder, a walk that
+/// fails names the path, and a row whose timestamp is not on this calendar
+/// refuses rather than being skipped.
+pub fn read_census(dir: &Path, feed: Feed, columns: Columns) -> Result<Census, FolderError> {
+    let members = walk(dir, feed, columns)?;
+    match census_of(&members) {
+        Ok(census) => {
+            note_read(dir, feed, census.reach);
+            Ok(census)
+        }
+        Err(why) => {
+            note_refused(dir, feed, &why);
+            Err(why)
+        }
+    }
+}
+
+/// The two refusals that come BEFORE anything is decoded, shared by both
+/// readers so they cannot drift into refusing differently for the same folder.
+///
+/// A REST feed is refused first and without touching the disk — it has no
+/// folder to walk, and probing one would invent a path for a vendor that has
+/// none.
+fn walk(dir: &Path, feed: Feed, columns: Columns) -> Result<Vec<Member>, FolderError> {
     let refuse = |why: FolderError| {
         note_refused(dir, feed, &why);
         why
@@ -410,22 +532,12 @@ pub fn read_reach(dir: &Path, feed: Feed, columns: Columns) -> Result<Reach, Fol
     if !matches!(feed.source_kind(), crate::vendor::SourceKind::Folder) {
         return Err(refuse(FolderError::NotAFolderFeed { feed }));
     }
-    let members = match archive::read_dir(dir, columns) {
-        Ok(members) => members,
-        Err(why) => {
-            return Err(refuse(FolderError::Walk {
-                path: dir.to_path_buf(),
-                why,
-            }));
-        }
-    };
-    match reach_of(&members) {
-        Ok(reach) => {
-            note_read(dir, feed, reach);
-            Ok(reach)
-        }
-        Err(why) => Err(refuse(why)),
-    }
+    archive::read_dir(dir, columns).map_err(|why| {
+        refuse(FolderError::Walk {
+            path: dir.to_path_buf(),
+            why,
+        })
+    })
 }
 
 #[cfg(test)]

@@ -2212,7 +2212,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert_eq!(checked, 2, "both HTTP feeds were checked, not one twice");
+        assert_eq!(checked, 3, "every HTTP feed was checked, not one twice");
     }
 
     /// WHICH VENDOR IS WHICH, AND THE OFF-BY-ONE IS LOAD-BEARING.

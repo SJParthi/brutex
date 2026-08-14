@@ -166,8 +166,14 @@ fn answer(feed: Feed, shape: Columns, root: &std::path::Path) -> (axum::http::St
     };
     let path = dir.display().to_string();
 
-    match pull::folder::read_reach(&dir, feed, shape) {
-        Ok(reach) => (axum::http::StatusCode::OK, body(feed, kind, &path, reach)),
+    // `read_census`, NOT `read_reach` — ONE WALK, BOTH ANSWERS.
+    //
+    // A browser asking what a folder holds needs the bound AND the names, and
+    // walking twice would double a cost `docs/06-limits.md` records. The names
+    // are the only identity an archive has: no ISIN, no security id, no master.
+    // D-0141.
+    match pull::folder::read_census(&dir, feed, shape) {
+        Ok(census) => (axum::http::StatusCode::OK, body(feed, kind, &path, &census)),
         // MISSING, UNREADABLE, OR HOLDING SOMETHING THAT WILL NOT DECODE.
         // Loud, with the path, and never as an empty reach — `read_reach` has
         // already put the same sentence on the rolling log at `Error`.
@@ -269,8 +275,26 @@ fn shape_of(feed: Feed, asked: &str) -> Result<Columns, String> {
 /// `"earliest":null` is a folder that answers for NOTHING, which is an answer,
 /// and a caller that saw only a missing key would render it as an unknown
 /// bound. That is the same distinction `pull::folder::Reach::window` makes.
-fn body(feed: Feed, kind: SourceKind, path: &str, reach: pull::folder::Reach) -> String {
-    let (state, earliest, latest) = match reach {
+/// # `instruments` — the names, because they are the only identity there is
+///
+/// A folder feed publishes no instrument master, so the ISIN-keyed join in
+/// [`crate::constituents`] answers `lacks` for every name it is asked about —
+/// about a master that does not exist rather than about the folder that does.
+/// The file name is the whole of what an archive knows, and the walk has always
+/// had it: `pull::archive::Member` takes `instrument` off the file name, and
+/// `reach_of` counted the members and discarded it.
+///
+/// Emitted WHOLE, never truncated. A capped list with the true count beside it
+/// reads as a census and is a sample, which is the `CLAUDE.md` §4 shape — and a
+/// caller cannot tell which names were dropped. The array is `O(members)` bytes
+/// on a route that is already `O(members)` time and is asked once per feed
+/// selection, never per page load; `docs/06-limits.md` carries the cost.
+///
+/// `collisions` is beside it because deduplicating in silence hides exactly the
+/// `ambiguous` case D-0141 names on the folder side: two members claiming one
+/// instrument. Zero on a folder where each file names its own.
+fn body(feed: Feed, kind: SourceKind, path: &str, census: &pull::folder::Census) -> String {
+    let (state, earliest, latest) = match census.reach {
         pull::folder::Reach::Empty => ("empty", None, None),
         pull::folder::Reach::Blank { .. } => ("blank", None, None),
         pull::folder::Reach::Days {
@@ -278,10 +302,19 @@ fn body(feed: Feed, kind: SourceKind, path: &str, reach: pull::folder::Reach) ->
         } => ("days", Some(earliest.to_string()), Some(latest.to_string())),
     };
     let day = |d: Option<String>| d.map_or_else(|| "null".to_owned(), |d| render::json_string(&d));
+    let mut names = String::with_capacity(census.instruments.len() * 16);
+    names.push('[');
+    for (at, instrument) in census.instruments.iter().enumerate() {
+        if at > 0 {
+            names.push(',');
+        }
+        names.push_str(&render::json_string(instrument));
+    }
+    names.push(']');
     let mut out = String::new();
     let _ = write!(
         out,
-        r#"{{"feed":{},"kind":{},"verb":{},"path":{},"reach":{{"state":{},"earliest":{},"latest":{},"files":{},"rows":{}}}}}"#,
+        r#"{{"feed":{},"kind":{},"verb":{},"path":{},"reach":{{"state":{},"earliest":{},"latest":{},"files":{},"rows":{}}},"instruments":{names},"collisions":{}}}"#,
         render::json_string(feed.wire()),
         render::json_string(kind_wire(kind)),
         render::json_string(kind.verb()),
@@ -289,8 +322,9 @@ fn body(feed: Feed, kind: SourceKind, path: &str, reach: pull::folder::Reach) ->
         render::json_string(state),
         day(earliest),
         day(latest),
-        reach.files(),
-        reach.rows(),
+        census.reach.files(),
+        census.reach.rows(),
+        census.collisions,
     );
     out
 }
@@ -528,9 +562,68 @@ mod tests {
             pull::folder::Reach::Empty,
             pull::folder::Reach::Blank { files: 2 },
         ] {
-            let out = body(Feed::TrueData, SourceKind::Folder, "/p", reach);
+            let census = pull::folder::Census {
+                reach,
+                instruments: Vec::new(),
+                collisions: 0,
+            };
+            let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
             assert!(out.contains(r#""earliest":null"#), "{out}");
             assert!(out.contains(r#""latest":null"#), "{out}");
         }
+    }
+
+    /// AN EMPTY FOLDER EMITS AN EMPTY ARRAY, NEVER A MISSING KEY.
+    ///
+    /// The same argument the two `null` ends are asserted under, one field
+    /// along: a caller that saw no `instruments` key could not tell a folder
+    /// that names nothing from a server too old to answer, and those are the
+    /// two states this page distinguishes everywhere else.
+    #[test]
+    fn a_folder_that_names_nothing_emits_an_empty_array_and_not_a_missing_key() {
+        let census = pull::folder::Census {
+            reach: pull::folder::Reach::Empty,
+            instruments: Vec::new(),
+            collisions: 0,
+        };
+        let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
+        assert!(out.contains(r#""instruments":[]"#), "{out}");
+        assert!(out.contains(r#""collisions":0"#), "{out}");
+    }
+
+    /// THE NAMES ARE EMITTED WHOLE, IN ORDER, AND ESCAPED.
+    ///
+    /// Whole because a truncated list reads as a census and is a sample. In
+    /// order because the walk sorts them, and a route that re-ordered would
+    /// make two reads of one folder disagree — `CLAUDE.md` §3 rule 5. Escaped
+    /// through `render::json_string` like every other string on this route: a
+    /// file name is operator-supplied input and is the one field here that did
+    /// not exist before, so it is the one most worth proving cannot break the
+    /// document it sits in.
+    #[test]
+    fn every_instrument_is_emitted_in_order_and_escaped() {
+        let census = pull::folder::Census {
+            reach: pull::folder::Reach::Days {
+                earliest: pull::session::Day::new(2022, 10, 3).expect("a real day"),
+                latest: pull::session::Day::new(2022, 12, 30).expect("a real day"),
+                files: 3,
+                rows: 9,
+            },
+            instruments: vec![
+                "BANKNIFTY".to_owned(),
+                "NIFTY".to_owned(),
+                // A quote in a file name cannot be ruled out by this crate, and
+                // an unescaped one would end the string and the document.
+                "ODD\"NAME".to_owned(),
+            ],
+            collisions: 2,
+        };
+        let out = body(Feed::TrueData, SourceKind::Folder, "/p", &census);
+        assert!(
+            out.contains(r#""instruments":["BANKNIFTY","NIFTY","ODD\"NAME"]"#),
+            "{out}"
+        );
+        assert!(out.contains(r#""collisions":2"#), "{out}");
+        assert!(out.contains(r#""files":3"#), "{out}");
     }
 }

@@ -871,14 +871,34 @@ impl CredentialConfig {
             // question: it is one of four sites that each independently decided
             // what "is an API" meant, and four independent decisions are four
             // chances to disagree. `Transport::kind` is now the only one.
-            let authenticates = crate::vendor::Feed::ALL.into_iter().any(|feed| {
-                feed.store_vendor() == Some(vendor) && feed.source_kind().needs_credential()
-            });
-            if seen == 0 && authenticates {
-                return Err(ConfigError::MissingVendor {
-                    vendor: vendor.as_str(),
-                });
-            }
+            // AND AN ABSENT VENDOR IS NO LONGER A PARSE FAILURE, WHICH IS THE
+            // SECOND TIME THIS LOOP HAS BROKEN AN OPERATOR'S FILE BY GROWING.
+            //
+            // The paragraphs above record the first: requiring a credential of
+            // every `Vendor::ALL` broke every `credentials.toml` when the two
+            // archives were added, and `SourceKind` fixed it by asking whether a
+            // feed CAN authenticate. Adding Zerodha broke it again through the
+            // other door — a feed that CAN authenticate and that the operator
+            // has simply not signed up for. `authenticates` was true, `seen` was
+            // zero, and `parse` returned `MissingVendor`.
+            //
+            // The cost was total rather than proportional. This is the ONE
+            // function that loads the credential file, so a config refused here
+            // means no vendor resolves at all: Groww and Dhan stop pulling
+            // because a THIRD broker was named in a Rust file. An operator whose
+            // install worked yesterday gets a dead build and a message about a
+            // vendor they have never heard of.
+            //
+            // It also bought nothing. `fields` and `path_for` already refuse an
+            // unconfigured vendor BY NAME at the moment it is used, and
+            // `api::server::broker_window` surfaces that refusal per feed — so
+            // the only thing the parse-time check added was turning one feed's
+            // absence into every feed's outage. A vendor nobody configured is
+            // a vendor nobody can pull, which is exactly right, and it is now
+            // said where it is true.
+            //
+            // What is still refused here is a config that contradicts itself:
+            // the same vendor named twice, below.
             if seen > 1 {
                 return Err(ConfigError::DuplicateVendor {
                     vendor: vendor.as_str(),
@@ -904,12 +924,19 @@ impl CredentialConfig {
     ///
     /// # Errors
     ///
-    /// [`ConfigError::MissingVendor`] — unreachable through
-    /// [`CredentialConfig::parse`], which refuses a configuration missing any
-    /// vendor, and present because a future `Vendor` variant would reach it
-    /// before the parser was updated. It is a refusal rather than an empty
-    /// slice for exactly that reason: an empty slice would read as "this vendor
-    /// needs no credential".
+    /// [`ConfigError::MissingVendor`] for a vendor this configuration does not
+    /// name — which is now an **ordinary, reachable state** and is the one
+    /// place it is reported.
+    ///
+    /// It used to be unreachable, because [`CredentialConfig::parse`] refused
+    /// any config missing a vendor that can authenticate. That made adding a
+    /// third broker invalidate every operator's file and stop the other two
+    /// pulling; see the argument in `parse`. The check moved here, where the
+    /// absence actually costs something and can be attributed to one feed.
+    ///
+    /// A refusal rather than an empty slice, for the reason it always was: an
+    /// empty slice reads as *this vendor needs no credential*, which is a
+    /// different fact and belongs to the archives.
     pub fn fields(&self, vendor: Vendor) -> Result<&[String], ConfigError> {
         self.vendors
             .iter()

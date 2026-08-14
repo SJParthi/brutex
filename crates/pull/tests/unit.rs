@@ -121,13 +121,14 @@ fn credential_config_absent_halts() {
     // And there is no other entry point that would have supplied a default:
     // every field of the configuration is private and the only constructors
     // are `load` and `parse`.
+    // AN EMPTY FILE STILL HALTS, and the reason it gives is now the direct
+    // one. It was `MissingVendor { groww }` — a complaint about a vendor table
+    // in a file that has no org, no env and no region either. `parse` no longer
+    // demands a table per vendor (see its own argument: a third broker made
+    // that requirement invalidate every operator's file), so the first thing
+    // genuinely missing is what it names.
     let empty = CredentialConfig::parse("").expect_err("an empty file must halt");
-    assert_eq!(
-        empty,
-        ConfigError::MissingVendor {
-            vendor: Vendor::Groww.as_str()
-        }
-    );
+    assert_eq!(empty, ConfigError::MissingKey { key: "org" });
 }
 
 /// P-08 — the configuration supplies path segments only.
@@ -545,14 +546,36 @@ fn a_missing_table_or_key_is_a_halt() {
         CredentialConfig::parse(&config_without("region = \"ap-south-1\"", "")),
         Err(ConfigError::MissingKey { key: "region" })
     );
+    // A VENDOR THIS FILE DOES NOT NAME IS NO LONGER A PARSE FAILURE, and the
+    // change is the point rather than a relaxation.
+    //
+    // It used to be `MissingVendor { dhan }`, so a config listing one broker
+    // refused to load at all. That rule broke twice by growing: once when the
+    // two archives joined `Vendor::ALL` — fixed by asking whether a feed CAN
+    // authenticate — and again when a third BROKER did, which can. The second
+    // time the cost was total: this is the only function that loads the
+    // credential file, so refusing here stopped Groww and Dhan pulling because
+    // a vendor the operator had never signed up for was named in a Rust file.
+    //
+    // The absence is still reported, by `fields` and `path_for`, at the moment
+    // the vendor is actually used — where it costs one feed instead of all of
+    // them. Asserted here so that "it loads" is not mistaken for "the vendor is
+    // configured".
+    let one_broker = CredentialConfig::parse(&config_without(
+        "[vendor.dhan]\nvendor = \"vendortwo\"\nfields = [\"fieldthree\"]",
+        "",
+    ))
+    .expect("a config naming one broker is usable for that broker");
+    assert!(
+        one_broker.fields(Vendor::Groww).is_ok(),
+        "the vendor it does name resolves"
+    );
     assert_eq!(
-        CredentialConfig::parse(&config_without(
-            "[vendor.dhan]\nvendor = \"vendortwo\"\nfields = [\"fieldthree\"]",
-            ""
-        )),
+        one_broker.fields(Vendor::Dhan),
         Err(ConfigError::MissingVendor {
             vendor: Vendor::Dhan.as_str()
-        })
+        }),
+        "and the one it does not is refused BY NAME where it is used"
     );
     assert_eq!(
         CredentialConfig::parse(&config_without(

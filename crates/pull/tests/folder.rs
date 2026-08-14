@@ -619,3 +619,98 @@ fn an_unreadable_folder_halts_loudly_and_names_the_path() {
     );
     assert!(matches!(why, FolderError::Walk { .. }));
 }
+
+/// THE CENSUS NAMES WHAT THE WALK ALREADY KNEW, AND SORTS IT.
+///
+/// `Member::instrument` is taken off the file name because a file name is the
+/// ONLY identity an archive has — no ISIN, no security id, no master, and for
+/// `TrueData` not even a ticker column. `reach_of` walked every member, counted
+/// them, and discarded that name, so the one fact answering "what is in this
+/// feed" was read on every walk and reachable by nobody. D-0141.
+///
+/// SORTED, because `read_dir` order is the filesystem's: it is not stable
+/// between machines and `CLAUDE.md` §3 rule 5 makes the same input owe the same
+/// output. Asserted against a deliberately unsorted input so a walk that
+/// happened to arrive sorted could not pass this by luck.
+#[test]
+fn a_census_names_every_instrument_the_folder_holds_in_a_stable_order() {
+    let members = vec![
+        member("NIFTY", 1_664_768_701),
+        member("BANKNIFTY", 1_664_509_500),
+        member("MIDCPNIFTY", 1_664_768_701),
+    ];
+    let census = folder::census_of(&members).expect("all three are moments");
+    assert_eq!(
+        census.instruments,
+        vec!["BANKNIFTY".to_owned(), "MIDCPNIFTY".to_owned(), "NIFTY".to_owned()],
+        "sorted, not in walk order"
+    );
+    assert_eq!(census.collisions, 0, "each file names its own instrument");
+    assert_eq!(census.reach, folder::reach_of(&members).expect("same walk"));
+}
+
+/// TWO MEMBERS CLAIMING ONE INSTRUMENT ARE COUNTED, NEVER SWALLOWED.
+///
+/// GDFL nests `Options/` and `Futures/`, so one stem can appear twice. Silently
+/// deduplicating would leave a caller unable to tell a clean folder from a
+/// colliding one — and a collision here is exactly the `ambiguous` bucket
+/// D-0141 names on the folder side, which is the point of counting it.
+#[test]
+fn two_members_naming_one_instrument_are_counted_rather_than_hidden() {
+    let members = vec![
+        member("NIFTY", 1_664_768_701),
+        member("NIFTY", 1_664_509_500),
+        member("BANKNIFTY", 1_664_768_701),
+    ];
+    let census = folder::census_of(&members).expect("both are moments");
+    assert_eq!(
+        census.instruments,
+        vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()],
+        "the list is distinct"
+    );
+    assert_eq!(census.collisions, 1, "and the duplicate is REPORTED");
+}
+
+/// AN EMPTY FOLDER CENSUSES TO AN EMPTY LIST, NOT TO A REFUSAL.
+///
+/// The same distinction `Reach::Empty` exists for: a folder that is there and
+/// holds nothing is an ANSWER — the months have not been bought yet — and it
+/// must not arrive looking like a walk that failed.
+#[test]
+fn an_empty_folder_censuses_to_an_empty_list_and_an_empty_reach() {
+    let census = folder::census_of(&[]).expect("an empty folder is an answer");
+    assert_eq!(census.reach, Reach::Empty);
+    assert!(census.instruments.is_empty());
+    assert_eq!(census.collisions, 0);
+}
+
+/// A CENSUS REFUSES EXACTLY WHERE THE REACH DOES.
+///
+/// A census of a folder whose days cannot be read is not a smaller census, it
+/// is no answer at all — so the untimed row refuses the whole thing rather than
+/// yielding a name list beside a reach nobody could compute.
+#[test]
+fn a_census_refuses_wherever_the_reach_refuses() {
+    let broken = member("BANKNIFTY", i64::MIN);
+    let why = folder::census_of(std::slice::from_ref(&broken))
+        .expect_err("i64::MIN is not a moment on any calendar");
+    assert!(matches!(why, FolderError::Untimed { secs, .. } if secs == i64::MIN));
+    assert!(why.to_string().contains("BANKNIFTY"), "name the member");
+}
+
+/// One member holding one row at `stamp`, for the census tests above.
+fn member(instrument: &str, stamp: i64) -> Member {
+    Member {
+        path: PathBuf::from(format!("/bought/{instrument}.csv")),
+        instrument: instrument.to_owned(),
+        rows: vec![RawRow {
+            timestamp: stamp,
+            open: 1,
+            high: 1,
+            low: 1,
+            close: 1,
+            volume: 0,
+            open_interest: None,
+        }],
+    }
+}

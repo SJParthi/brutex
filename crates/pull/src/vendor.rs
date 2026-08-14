@@ -4938,14 +4938,43 @@ mod tests {
             let Transport::Http(spec) = feed.descriptor().transport else {
                 continue;
             };
-            let names_a_rung = spec
+            // A RUNG REACHES THE WIRE TWO WAYS NOW, AND THIS ONLY LOOKED AT ONE.
+            //
+            // The pairing rule is unchanged and still right: a request field
+            // spelled `Granularity` with an empty token table can never be
+            // filled, and a token table nothing reads is a vendor fact that
+            // reaches no wire. What changed is where the field can be. Kite
+            // carries its interval as a PATH SEGMENT
+            // (/instruments/historical/:instrument_token/:interval), so asking
+            // only `params` reported a populated table with no reader — and the
+            // rule would have been "fixed" by deleting the tokens that make the
+            // request work.
+            let named_in_query = spec
                 .params
                 .iter()
                 .any(|p| matches!(p.value, ParamValue::Granularity));
+            let named_in_path = spec.bars_path.iter().any(|segment| {
+                matches!(
+                    segment,
+                    PathSegment::Value {
+                        value: ParamValue::Granularity,
+                        ..
+                    }
+                )
+            });
             assert_eq!(
-                names_a_rung,
+                named_in_query || named_in_path,
                 !spec.granularity_tokens.is_empty(),
-                "{}: a rung field and a rung table exist together or not at all",
+                "{}: a rung field and a rung table exist together or not at all \
+                 — and the field may be a query parameter OR a path segment",
+                feed.display()
+            );
+            // AND NEVER BOTH. One rung, one place on the wire: a feed naming it
+            // twice would send two spellings of one fact, and nothing decides
+            // which the answer is filed under.
+            assert!(
+                !(named_in_query && named_in_path),
+                "{}: names its rung in the path AND in the query",
                 feed.display()
             );
             for (rung, word) in spec.granularity_tokens {
@@ -4955,13 +4984,34 @@ mod tests {
                     feed.display()
                 );
             }
-            // THE ONE-MINUTE CAP IS RECORDED. Both brokers, both in the charter.
-            assert!(
-                spec.window_cap_days(Granularity::Minute1)
-                    .is_some_and(|c| c > 0),
-                "{}: docs/00-charter.md §4 carries this feed's one-minute cap",
-                feed.display()
-            );
+            // THE ONE-MINUTE CAP IS RECORDED WHERE THE VENDOR PUBLISHES ONE,
+            // AND A WHOLE-TABLE ABSENCE IS ITS OWN FACT.
+            //
+            // This demanded a minute cap of every broker, which was true of the
+            // two that had one and became false the day a third was added whose
+            // page states no cap at any rung — docs/00-charter.md §4z, recorded
+            // UNVERIFIED. Encoding a number would be §3 rule 1's invention, and
+            // an empty table means the store's month boundary is the only bound.
+            //
+            // The distinction that still binds, and the one this test exists
+            // for: a POPULATED table missing the minute row is a number that
+            // went missing, and that is refused.
+            if spec.window_caps.is_empty() {
+                assert!(
+                    spec.window_cap_days(Granularity::Minute1).is_none(),
+                    "{}: an empty cap table cannot answer for a rung",
+                    feed.display()
+                );
+            } else {
+                assert!(
+                    spec.window_cap_days(Granularity::Minute1)
+                        .is_some_and(|c| c > 0),
+                    "{}: this feed publishes caps and none at ONE MINUTE — \
+                     docs/00-charter.md §4 carries it for every broker that has \
+                     one, so a gap here is a number that went missing",
+                    feed.display()
+                );
+            }
             // AND THE DAY-LEVEL ONE IS NOT, at either broker. A number here is
             // one somebody invented; `CLAUDE.md` §3 rule 1 forbids it, and an
             // absent cap is already correct — the store's month boundary binds
@@ -4987,16 +5037,29 @@ mod tests {
             // at all** (five params: securityId, exchangeSegment, instrument,
             // fromDate, toDate), so there is nothing to spell a rung with and
             // `granularity_tokens` is empty by construction. D-0076.
+            //
+            // ZERODHA IS THE SECOND SOURCE, and it spells the rung differently
+            // — which is the whole reason this table exists rather than a
+            // derivation. Groww's annexure says `1day`; Kite's published
+            // interval list says `day`. Both are read from the vendor's own
+            // page, neither is derivable from the other, and neither is
+            // `Granularity::dir`'s `1day` by coincidence or otherwise.
+            //
+            // NO CATCH-ALL. A sixth feed must be named here, because the
+            // failure this pins is somebody filling a word in from memory and
+            // nothing noticing — and a `_ => None` arm would let a new row
+            // carry any spelling at all.
             let expected_day_word = match feed {
                 Feed::Groww => Some("1day"),
-                _ => None,
+                Feed::Zerodha => Some("day"),
+                Feed::Dhan | Feed::TrueData | Feed::Gdfl => None,
             };
             assert_eq!(
                 spec.granularity_token(Granularity::Day1),
                 expected_day_word,
                 "{}: a daily interval word appears here only when a source \
-                 records it — Groww's annexure gives `1day`, and no other \
-                 feed's does",
+                 records it — Groww's annexure gives `1day` and Kite's interval \
+                 list gives `day`, and no other feed's page gives one",
                 feed.display()
             );
         }
@@ -5908,7 +5971,11 @@ mod tests {
                 archives += 1;
             }
         }
-        assert_eq!((http, archives), (2, 2), "two brokers, two archive vendors");
+        assert_eq!(
+            (http, archives),
+            (3, 2),
+            "three brokers, two archive vendors"
+        );
         assert_ne!(
             Feed::Dhan.descriptor().transport.label(),
             Feed::Gdfl.descriptor().transport.label()
@@ -6395,16 +6462,27 @@ mod tests {
              lands against"
         );
 
-        // Every row that displaced a claim says why, and every row that
-        // displaced nothing says nothing. An empty reason beside a contest
-        // would be a verdict with no argument behind it.
+        // EVERY ROW THAT DISPLACED A CLAIM SAYS WHY. An empty reason beside a
+        // contest is a verdict with no argument behind it.
+        //
+        // THE CONVERSE IS NOT REQUIRED, and it used to be — this was an
+        // `assert_eq!`, reading "a row that displaced nothing says nothing".
+        // That is a rule about the two brokers whose vendor tables disagree
+        // with the operator, and it is wrong about a third whose vendor page
+        // states no depth at all. Zerodha's floor is UNCONTESTED, which is not
+        // the same as agreed: nothing weighs against it and nothing confirms it
+        // either, and that is worth a sentence precisely because it makes the
+        // row different in kind from the two above it. Forcing the reason empty
+        // would have deleted the only place that distinction is written down.
+        //
+        // So: a contest implies a reason, one-directionally.
         let mut contested = 0;
         for feed in Feed::ALL {
             for row in feed.descriptor().history {
-                assert_eq!(
-                    row.contested.is_some(),
-                    !row.binds_because.is_empty(),
-                    "{feed} at {}: a contest and its reason travel together",
+                assert!(
+                    row.contested.is_none() || !row.binds_because.is_empty(),
+                    "{feed} at {}: a contest must carry the reason it was \
+                     decided by",
                     row.granularity
                 );
                 assert!(
