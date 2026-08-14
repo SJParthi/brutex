@@ -184,7 +184,8 @@ lane above applies only to the history depth, which that page still does not sta
 | Endpoint | `GET /instruments/historical/:instrument_token/:interval` | documented |
 | Auth | header `Authorization: token api_key:access_token`, plus `X-Kite-Version: 3` | documented |
 | Instrument identity | numeric `instrument_token`, from the instruments API — **not a symbol** | documented |
-| Intervals | `minute` `3minute` `5minute` `10minute` `15minute` `30minute` `60minute` `day` | documented |
+| Intervals published | `minute` `3minute` `5minute` `10minute` `15minute` `30minute` `60minute` `day` | documented |
+| Intervals THIS BUILD WILL ASK FOR | **`minute` and `day` only** — the same two rungs Groww and Dhan serve. The operator narrowed it on 14 Aug 2026: "one and only one day pull and one min pull". The other six are real and are not wired, so `Descriptor::granularities` carries two and the remaining six refuse by name like every other unfetched rung. | operator-stated 14 Aug 2026 |
 | Window params | `from` / `to`, `yyyy-mm-dd hh:mm:ss` | documented |
 | Extra params | `continuous` (0/1), `oi` (0/1) | documented |
 | Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
