@@ -217,6 +217,47 @@ pub enum FetchError {
         /// to amend is named rather than described.
         field: &'static str,
     },
+    /// The credential handed to a source does not match what its scheme names.
+    ///
+    /// A wiring fault, caught where the credential arrives rather than on the
+    /// wire. A two-secret scheme handed one secret would send
+    /// `token :access_token` — a syntactically valid header the vendor answers
+    /// **403** to, which is indistinguishable from an expired session and sends
+    /// an operator to re-login instead of to the descriptor row.
+    CredentialMismatch {
+        /// Whether the feed's scheme names two secrets.
+        names_two: bool,
+        /// Whether two were supplied. Never the secrets themselves — the two
+        /// booleans are the whole of what a diagnosis needs.
+        given_two: bool,
+    },
+    /// A value resolved into a URL **path segment** cannot sit in one.
+    ///
+    /// # Refused, never escaped, and the reason is a real symbol
+    ///
+    /// A feed whose instrument is a path segment
+    /// (`/instruments/historical/:instrument_token/:interval`) interpolates a
+    /// value this build read out of a vendor master. Kite's own quote examples
+    /// address the NIFTY index as `NSE:NIFTY 50` — **a tradingsymbol with a
+    /// space in it** — and a space, a `/`, a `?` or a `#` each change which
+    /// resource the URL names rather than merely looking untidy. A `/` is the
+    /// worst of them: it silently adds a segment, so
+    /// `/instruments/historical/A/B/minute` is a different endpoint that a
+    /// vendor may well answer.
+    ///
+    /// Percent-encoding would be a guess about what the vendor accepts back,
+    /// and this repository does not guess at a wire word — `CLAUDE.md` §3
+    /// rule 1, and the same argument [`Self::RungNotSpellable`] makes about an
+    /// unrecorded rung. So the request is not sent, the offending value is
+    /// named, and the descriptor row or the master column is the thing to fix.
+    PathSegmentUnusable {
+        /// The vendor's own name for the placeholder, so the row to look at is
+        /// named the way the vendor's page names it.
+        placeholder: &'static str,
+        /// What it resolved to. A vendor id or a wire word, never a credential:
+        /// nothing on this path can reach the token.
+        value: String,
+    },
 }
 
 impl core::fmt::Display for FetchError {
@@ -272,6 +313,34 @@ impl core::fmt::Display for FetchError {
                  with something, and that something would be filed as bars. \
                  UNVERIFIED — record the vendor's own word in that feed's \
                  listings row and this works the same day."
+            ),
+            Self::CredentialMismatch {
+                names_two,
+                given_two,
+            } => write!(
+                f,
+                "this feed's auth scheme names {} secret(s) and {} supplied. \
+                 Nothing was sent and no client was built: a two-secret header \
+                 missing half of itself is answered 403, which reads exactly \
+                 like an expired session and sends an operator to re-login \
+                 instead of to the descriptor row. Check the feed's \
+                 Auth::key_field against the fields its vendor is configured \
+                 with.",
+                if names_two { "two" } else { "one" },
+                if given_two { "two were" } else { "one was" }
+            ),
+            Self::PathSegmentUnusable {
+                placeholder,
+                ref value,
+            } => write!(
+                f,
+                "this feed carries {placeholder:?} as a URL path segment and it \
+                 resolved to {value:?}, which cannot be one. Nothing was sent: \
+                 a space, a slash, a question mark or a hash changes which \
+                 resource the URL names — a slash silently adds a segment, and \
+                 the vendor may answer that different endpoint. It is refused \
+                 rather than percent-encoded because what the vendor accepts \
+                 back is a vendor fact and there is no source for it here."
             ),
         }
     }
@@ -514,7 +583,25 @@ pub fn land(
         // were written to disk — the only fault in this pipeline that STORED a
         // wrong answer instead of refusing.
         let epoch_utc = match encoding {
-            TimestampEncoding::EpochSecondsUtc => row.timestamp,
+            // ALREADY UTC — AND THE THIRD SPELLING IS HERE FOR A REASON, NOT
+            // FOR TIDINESS.
+            //
+            // `IsoDateTimeOffset` carries its own zone (`…T09:15:00+0530`) and
+            // `crate::http::one_stamp` has already applied it, because that is
+            // the only place the offset is visible. Subtracting
+            // `IST_OFFSET_SECS` here as well — which is what the text arm below
+            // does, correctly, for a value that states no zone — would put
+            // every bar 5h30m early. 03:45 on a trading day passes every
+            // validation below this line and writes to disk looking exactly
+            // like a real bar: the **W1 fault** this module's header describes,
+            // the one class of timestamp error that stores instead of refusing.
+            //
+            // It sits WITH the epoch arms rather than below them because "the
+            // value already means UTC" is precisely what all three say, and one
+            // arm is one place to be wrong instead of two. D-0135.
+            TimestampEncoding::EpochSecondsUtc | TimestampEncoding::IsoDateTimeOffset => {
+                row.timestamp
+            }
             TimestampEncoding::EpochMillisUtc => row.timestamp.div_euclid(1_000),
             // The vendor's value is already IST-based, so the offset this
             // build would add has already been added by the vendor. Subtract it

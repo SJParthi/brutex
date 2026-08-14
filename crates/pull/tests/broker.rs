@@ -51,13 +51,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use brutex_core::vendor::Vendor;
 use pull::fetch::BarRequest;
-use pull::http::HttpSource;
+use pull::http::{Credential, HttpSource};
 use pull::ingest::{self, Ingested, Plan};
 use pull::manifest::{EntryKey, Manifest, manifest_path};
 use pull::session::{Day, Window};
 use pull::vendor::{
-    Auth, AuthScheme, DateFormat, FieldNames, HttpSpec, Method, Param, ParamValue, PriceScale,
-    RangeEnd, ResponseShape, TimestampEncoding,
+    Auth, AuthScheme, DateFormat, FieldNames, HttpSpec, Method, Param, ParamValue, PathSegment,
+    PriceScale, RangeEnd, ResponseShape, TimestampEncoding,
 };
 use store::path::{Timeframe, YearMonth};
 
@@ -176,11 +176,16 @@ fn spec(base_url: &'static str) -> HttpSpec {
         ],
         extra_headers: &[],
         base_url,
-        bars_path: "/v2/charts/historical",
+        bars_path: &[
+            PathSegment::Literal("v2"),
+            PathSegment::Literal("charts"),
+            PathSegment::Literal("historical"),
+        ],
         method: Method::Post,
         auth: Auth {
             header: "access-token",
             scheme: AuthScheme::Raw,
+            key_field: None,
         },
         date_format: DateFormat::DashedYmd,
         range_end: RangeEnd::Exclusive,
@@ -260,7 +265,7 @@ const BODY: &str = r#"{
 fn fetch(url: &str) -> pull::fetch::RawWindow {
     let source = HttpSource::new(
         spec(Box::leak(url.to_owned().into_boxed_str())),
-        "A-FAKE-TOKEN".to_owned(),
+        Credential::token("A-FAKE-TOKEN".to_owned()),
     )
     .expect("a client builds");
     tokio::runtime::Builder::new_current_thread()

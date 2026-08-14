@@ -4617,6 +4617,71 @@ async fn with_retry(
     ))
 }
 
+/// Every secret this feed's [`pull::vendor::AuthScheme`] names, read from
+/// Parameter Store and handed straight to the source.
+///
+/// # Why the DESCRIPTOR decides, never this function
+///
+/// Zerodha's header is `Authorization: token api_key:access_token` — a prefix
+/// and TWO secrets, the shape `docs/07-plan.md` §5 predicted no two-variant
+/// scheme could describe (D-0134). This asks `auth.key_field`, and never
+/// `feed == Zerodha`: a match on the feed here would be a second answer to "how
+/// many secrets does this vendor take", and the two would disagree the first
+/// time a vendor changed its scheme. `CLAUDE.md` §5 — adding a broker is a row
+/// in `pull::vendor`, not an edit here.
+///
+/// # What crosses this boundary
+///
+/// The field NAMES come from the descriptor; the VALUES come from Parameter
+/// Store and go into one header and nowhere else. Neither secret is logged,
+/// formatted into an error, or returned — `CLAUDE.md` §8, and the reason
+/// `pull::http::HttpSource` and `pull::http::Credential` both hand-write their
+/// `Debug`. The error strings below name the FIELD that could not be read and
+/// never what it holds.
+///
+/// # Extracted rather than inlined
+///
+/// `broker_window` is at the workspace's 100-line ceiling, and the same reason
+/// `pull::http::HttpSource::resolve_param` gives applies: the arms here are the
+/// vendor contract and they grow every time a broker is added.
+///
+/// # Errors
+///
+/// A human-readable string naming which parameter path could not be built or
+/// which secret could not be read. One `now_stamp` covers both reads, so the
+/// two parameters are fetched against the same signing instant.
+async fn read_credential(
+    identity: &pull::ssm::AwsIdentity,
+    config: &pull::config::CredentialConfig,
+    vendor: brutex_core::vendor::Vendor,
+    auth: pull::vendor::Auth,
+) -> Result<pull::http::Credential, String> {
+    let stamp = pull::ssm::now_stamp().map_err(|why| why.detail)?;
+    let read = async |field: &str| -> Result<String, String> {
+        let path = config
+            .path_for(vendor, field)
+            .map_err(|why| format!("the parameter path for {field:?} could not be built: {why}"))?;
+        pull::ssm::get_parameter(identity, config.region(), &path.to_string(), &stamp)
+            .await
+            .map_err(|why| {
+                format!(
+                    "this feed's credential field {field:?} could not be read: {}",
+                    why.detail
+                )
+            })
+    };
+
+    let token = read("access-token").await?;
+    match auth.key_field {
+        // One secret. Every feed in this build until a two-secret vendor lands.
+        None => Ok(pull::http::Credential::token(token)),
+        // Two. `Credential::pair` takes the key FIRST because that is the order
+        // it goes on the wire, so a transposition is visible at the call site
+        // rather than as a 403 that reads like an expired session.
+        Some(field) => Ok(pull::http::Credential::pair(read(field).await?, token)),
+    }
+}
+
 async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
@@ -4742,17 +4807,7 @@ async fn broker_window(
             feed.display()
         )
     })?;
-    let path = config
-        .path_for(vendor, "access-token")
-        .map_err(|why| format!("the parameter path could not be built: {why}"))?;
-    let stamp = pull::ssm::now_stamp().map_err(|why| why.detail)?;
-
-    // THE TOKEN NEVER TOUCHES A LOG, A FACT OR AN ERROR. It goes from here into
-    // one header and nowhere else — the whole reason `HttpSource`'s Debug is
-    // hand-written.
-    let token = pull::ssm::get_parameter(&identity, config.region(), &path.to_string(), &stamp)
-        .await
-        .map_err(|why| format!("the broker credential could not be read: {}", why.detail))?;
+    let credential = read_credential(&identity, &config, vendor, spec.auth).await?;
 
     // The descriptor is the single source of every vendor difference — URL,
     // auth header, date format, response shape, field names, timestamp
@@ -4760,8 +4815,13 @@ async fn broker_window(
     // `crate::vendor`, not an edit here, and this is the line that keeps that
     // true — Groww and Dhan differ in six of those fields and share every line
     // of code below.
-    let source = pull::http::HttpSource::new(spec, token).map_err(|why| why.to_string())?;
-    let origin = source.url();
+    let source = pull::http::HttpSource::new(spec, credential).map_err(|why| why.to_string())?;
+    // THE ENDPOINT, NOT ONE REQUEST'S URL. This receipt covers every window of
+    // one instrument, and a feed that carries its instrument or its rung as a
+    // path segment has a different URL per window — so the honest single value
+    // here is the endpoint with its placeholders left standing. It also cannot
+    // fail, which a receipt should not.
+    let origin = source.endpoint();
 
     // THE ID THE VENDOR ASKED FOR, RESOLVED IN ONE PROBE.
     //
@@ -11048,7 +11108,22 @@ mod tests {
             ),
             ("the credentials file", "CredentialConfig::load"),
             ("the AWS identity", "AwsIdentity::discover"),
-            ("Parameter Store", "ssm::get_parameter"),
+            // PARAMETER STORE MOVED, AND THIS TEST FOLLOWED IT — which is the
+            // instruction the panic below has always carried.
+            //
+            // `ssm::get_parameter` is no longer called from this function.
+            // D-0134 gave a feed's auth scheme a possible SECOND secret, so the
+            // read became two reads behind one `key_field` decision, and the
+            // block took `broker_window` past the workspace's 100-line ceiling.
+            // It is now `read_credential`, declared ABOVE this function and
+            // therefore outside the searched span — exactly the disappearance
+            // this test's own header describes `finished_day_only` causing.
+            //
+            // The needle is the CALL, and the assertion under this loop pins
+            // that the call still reaches Parameter Store. Both halves are
+            // needed: this one keeps the ordering honest, that one stops the
+            // needle being hollowed out into a function that costs nothing.
+            ("Parameter Store, through its reader", "read_credential("),
             ("the HTTP client and its socket", "HttpSource::new"),
         ] {
             let cost = body.find(needle).unwrap_or_else(|| {
@@ -11073,6 +11148,31 @@ mod tests {
                 );
             }
         }
+
+        // THE EXTRACTED READER STILL COSTS WHAT THE LOOP ASSUMES IT COSTS.
+        //
+        // Above, `read_credential(` stands in for "this is where Parameter
+        // Store is reached". That substitution is only sound while the function
+        // it names actually reaches it — otherwise the ordering assertions
+        // above would guard a call that spends nothing, and the real
+        // round-trip could move anywhere. So the needle the loop replaced is
+        // asserted to live in the replacement, bounded to that function's own
+        // body for the same reason the loop is bounded to this one.
+        let reader = me
+            .split_once("async fn read_credential")
+            .expect("read_credential exists")
+            .1;
+        let reader = &reader[..reader
+            .find("\n}\n")
+            .expect("read_credential's body ends at a column-0 brace")];
+        assert!(
+            reader.contains("ssm::get_parameter"),
+            "read_credential is what `broker_window` now pays Parameter Store \
+             through, and it does not name `ssm::get_parameter`. Either the \
+             read moved again — in which case follow it in BOTH places — or \
+             the ordering assertions above are guarding a call that costs \
+             nothing."
+        );
     }
 
     /// An ARCHIVE feed with no folder refuses by name, and asks for a folder.
@@ -12171,7 +12271,9 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..shipped
         };
-        let source = pull::http::HttpSource::new(spec, "shhh".to_owned()).expect("a client");
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
+                .expect("a client");
 
         let from = crate::emitted::mark();
         let answered = fetch_chunks(
@@ -12227,7 +12329,9 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..shipped
         };
-        let source = pull::http::HttpSource::new(spec, "shhh".to_owned()).expect("a client");
+        let source =
+            pull::http::HttpSource::new(spec, pull::http::Credential::token("shhh".to_owned()))
+                .expect("a client");
 
         let from = crate::emitted::mark();
         let window = fetch_chunks(

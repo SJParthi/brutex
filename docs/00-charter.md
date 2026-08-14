@@ -187,6 +187,7 @@ lane above applies only to the history depth, which that page still does not sta
 | Intervals published | `minute` `3minute` `5minute` `10minute` `15minute` `30minute` `60minute` `day` | documented |
 | Intervals THIS BUILD WILL ASK FOR | **`minute` and `day` only** — the same two rungs Groww and Dhan serve. The operator narrowed it on 14 Aug 2026: "one and only one day pull and one min pull". The other six are real and are not wired, so `Descriptor::granularities` carries two and the remaining six refuse by name like every other unfetched rung. | operator-stated 14 Aug 2026 |
 | Window params | `from` / `to`, `yyyy-mm-dd hh:mm:ss` | documented |
+| `to` inclusivity | **INCLUSIVE — read from the vendor's own example, because the page never states it in words.** `from=2017-12-15 09:15:00&to=2017-12-15 09:20:00` is answered with **six** candles, stamped 09:15, 09:16, 09:17, 09:18, 09:19 and **09:20**. Both endpoints are present. The OI example one section below repeats the same window and returns the same six. This is the third vendor and the third answer — Dhan's daily `toDate` is non-inclusive, Groww's is inclusive, and Kite's is inclusive by demonstration rather than by assertion. `pull::vendor::HttpSpec::range_end` therefore takes `Inclusive` with the example as its citation. Re-read 14 Aug 2026. | documented by example, not by prose |
 | Extra params | `continuous` (0/1), `oi` (0/1) | documented |
 | Response | `{status, data:{candles:[[ts,o,h,l,c,volume(,oi)]]}}` — an array of ARRAYS, positional | documented |
 | Timestamp | `2017-12-15T09:15:00+0530` — ISO **carrying an offset** | documented |
@@ -197,8 +198,9 @@ lane above applies only to the history depth, which that page still does not sta
 | Rate-limit refusal | HTTP **429** | documented |
 | Session expiry | **`TokenException`, HTTP 403.** Caused by logout, natural expiry, **or the user logging into another Kite instance.** Clear the session and re-login. | documented |
 | Other exceptions | `InputException` (bad params) · `NetworkException` (API↔OMS) · `DataException` (OMS response unparseable) · `GeneralException` | documented |
-| Other HTTP codes | 400 bad params · 404 not found · 410 gone permanently · 500 · 502 OMS down · 503 · 504 | documented |
-| History DEPTH per interval | **UNVERIFIED.** No page read states how far back any interval reaches. The operator's rolling 10 years is the only figure, and no vendor page confirms it. | unverified |
+| Other HTTP codes | 400 bad params · **405 method not allowed** · 404 not found · 410 gone permanently · 500 · 502 OMS down · 503 · 504 | documented |
+| Per-day quota | **NONE on this endpoint, and the only daily cap on the page is not ours.** `kite.trade/docs/connect/v3/exceptions/` publishes one daily figure — *"a single user/API key will not be able to place more than 5000 orders per day"* — and it is stated against ORDER PLACEMENT, alongside 400 orders/minute and 25 modifications per order. This build places no order and never will, so the figure is recorded as read and is **not** carried into `Budget::per_day`, which stays `None`. A `None` here means "no published bound on that span", which is the honest reading; copying the order cap across would be promoting a figure past the endpoint it was measured against, the same error the Dhan window-cap row names. Re-read 14 Aug 2026. | documented, and not applicable |
+| History DEPTH per interval | **UNVERIFIED, and re-checked 14 Aug 2026 rather than assumed still unread.** The page's opening sentence is the closest it comes: data *"spanning back several years"* — a phrase, not a figure, and it names no interval. Nothing else on the page bounds the depth at any rung. The operator's rolling 10 years remains the only number, and it stands **uncontested** rather than contested: a vendor page that declines to state a depth is not a second claim, so `ClaimStanding` has one row to weigh here and no tie to break. Contrast Groww and Dhan, where a vendor table gives a competing figure. | unverified |
 | Gap-filling / completeness | **UNVERIFIED, and no page claims it.** Nothing read states that a candle exists for every session minute, nor what a missing session returns. | unverified |
 
 **`TokenException` is the row to read twice.** It fires when the user logs into
@@ -210,6 +212,42 @@ invalidate whatever else holds the session.
 At 3 req/s the arithmetic for a 2020→yesterday backfill is 80 month-windows ×
 ~800 instruments ÷ 3 = **~5.9 hours of wall clock at the cap, per rung**, before
 any retry. That is arithmetic from a published limit, not a measurement.
+
+#### The instruments API — where a numeric token comes from, read 14 Aug 2026
+
+`https://kite.trade/docs/connect/v3/market-quotes/`. The historical endpoint is
+addressed by `instrument_token` and nothing else, so this page is the whole of
+how an instrument this repository already knows becomes a Kite request. It was
+not read when §4z was first written, and the fourth obstacle recorded below —
+"the instrument is a NUMERIC TOKEN … so the (exchange, symbol) key this
+repository joins on does not address a Kite request at all" — is **half right
+and the half that is wrong changes the design**.
+
+| Fact | Value | Lane |
+|---|---|---|
+| Endpoint | `GET /instruments` for every exchange, `GET /instruments/:exchange` for one | documented |
+| Response | a **gzipped CSV dump**, not JSON — the only endpoint on this vendor that is not JSON | documented |
+| Freshness | *"The dump is generated once everyday"*, and the page recommends requesting it once a day at around 08:30 AM and storing it | documented |
+| Columns, in order | `instrument_token`, `exchange_token`, `tradingsymbol`, `name`, `last_price`, `expiry`, `strike`, `tick_size`, `lot_size`, `instrument_type`, `segment`, `exchange` — twelve | documented |
+| **ISIN** | **ABSENT. There is no ISIN column.** D-0125 keyed the constituent join on NSE's own ISIN at both ends and D-0117 keys a tier to a vendor's ids on `(exchange, ISIN)`. Neither addresses a Kite row, because a Kite row does not carry one. | documented by absence |
+| The key the VENDOR names | *"For storage, it is recommended to use a combination of **exchange and tradingsymbol** as the unique key, **not** the numeric instrument token."* | documented |
+| Why not the token | *"Exchanges may reuse instrument tokens for different derivative instruments after each expiry."* A token is therefore stable for a spot index or a cash equity, which do not expire, and **unstable for F&O across an expiry boundary**. The engine surface is NSE spot (§1), so the reuse hazard does not reach it — and it binds the moment an F&O row is stored. | documented |
+| `instrument_type` alphabet | `EQ`, `FUT`, `CE`, `PE` — four words, and **no index word among them**. How an index row spells this column is **UNVERIFIED**; the page's own quote examples address one as `NSE:NIFTY 50`, so the tradingsymbol is known and the type and segment words are not. | documented (four) · unverified (index) |
+| An index tradingsymbol carries a SPACE | `NSE:NIFTY 50`, from this page's `/quote/ohlc` and `/quote/ltp` examples. Recorded because a value with a space cannot sit in a URL path segment unescaped, and `pull::http` refuses such a value by name rather than encoding it — see D-0134. | documented |
+| Rate limit | not the historical 3/s. The page's own table puts everything outside quote, historical and orders at **10 req/second**, and this call is one request per day. | documented |
+
+**So the token map is not a new kind of thing.** It is this vendor's instrument
+master, decoded into the `core::vendor::MasterRow` the other two brokers already
+decode into, keyed on `(exchange, tradingsymbol)` — which is the key **the vendor
+itself names**, and which `MasterRow::trading_symbol` already carries because
+Groww's CASH rows have always needed it. `core::vendor::VendorId` holds an opaque
+per-vendor id of up to 48 bytes and an `instrument_token` is at most eight
+digits, so the numeric token is a `VendorId` like any other and no second
+identity type is required.
+
+What is genuinely new is the **transport of the master**: gzipped CSV over HTTP,
+where the two existing masters are files on disk. That is a `pull::manifest`
+question and not a `pull::vendor::Descriptor` one.
 
 #### Why this vendor cannot be described by the current descriptor, and it is all three
 
@@ -229,11 +267,25 @@ vendor, and it trips **every one**:
 
 A fourth, not in §5 and found here: the instrument is a NUMERIC TOKEN from a
 separate instruments call, not a tradingsymbol, so the (exchange, symbol) key
-this repository joins on does not address a Kite request at all.
+this repository joins on does not address a Kite **request** at all.
+
+**That fourth row is half right, and the half that is wrong was corrected on 14
+Aug 2026 by reading the instruments page** (above). The REQUEST is addressed by
+the numeric token, which is the true half. The **master row** is keyed by
+`(exchange, tradingsymbol)` — and that is not this repository's choice, it is the
+vendor's own instruction: *"it is recommended to use a combination of exchange
+and tradingsymbol as the unique key, not the numeric instrument token."* So the
+key this repository joins on **does** address a Kite row; what it does not do is
+address a Kite request, and the master is exactly the table that carries you from
+one to the other. The `(exchange, ISIN)` key of D-0117 and D-0125 is the one that
+genuinely cannot be used here, because the CSV has no ISIN column.
 
 **So adding Zerodha is not a descriptor row.** It is three `pull::vendor` type
-changes plus an instrument-token map, and each needs its own decision entry. The
-prediction in §5 was right and this is the evidence that closed it.
+changes plus this vendor's instrument master, and each needs its own decision
+entry. The prediction in §5 was right and this is the evidence that closed it.
+The "instrument-token map" this line used to call for is **not** a new structure:
+it is `core::vendor::MasterRow` decoded from a gzipped CSV, with the numeric
+token living in the `VendorId` the other two brokers already populate.
 
 ### 4a. Instrument facts transcribed into source
 

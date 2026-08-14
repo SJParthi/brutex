@@ -2241,8 +2241,22 @@ mod tests {
         // A rung that IS on the ladder and has no directory parses here and is
         // refused at the write boundary instead. Two different questions, and
         // this parser answers only the first — see `pull::ingest::Plan`.
+        //
+        // THE RUNG THIS USED TO NAME WAS `5min`, AND IT WAS THE WRONG EXAMPLE.
+        // `crates/store` has shipped a `5min` directory since D-0054 widened
+        // `Timeframe::KNOWN` to seven; the rung read as unstorable only because
+        // `Granularity::store_timeframe` carried an underscore arm that
+        // answered `None` for every rung it had not been told about. So this
+        // line asserted the defect rather than the rule. `Week1` is the honest
+        // example: it is on the ladder, `Timeframe::KNOWN` genuinely holds no
+        // entry for it, and the two questions stay distinguishable.
         assert_eq!(parse_granularity("5min"), Some(Granularity::Minute5));
-        assert_eq!(Granularity::Minute5.store_timeframe(), None);
+        assert!(
+            Granularity::Minute5.store_timeframe().is_some(),
+            "crates/store ships a 5min directory and the parser reaches it"
+        );
+        assert_eq!(parse_granularity("1week"), Some(Granularity::Week1));
+        assert_eq!(Granularity::Week1.store_timeframe(), None);
     }
 
     #[test]

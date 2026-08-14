@@ -262,7 +262,31 @@ impl Granularity {
             Self::Minute5 => "5min",
             Self::Minute15 => "15min",
             Self::Minute30 => "30min",
-            Self::Hour1 => "1hr",
+            // `60min`, NOT `1hr`, AND THE RENAME IS THE POINT.
+            //
+            // This rung had two names. `store::path::Timeframe::MINUTE_60` has
+            // spelled its directory `60min` since D-0054 widened the store, in
+            // the same table that gives `15min` and `30min` — and this arm said
+            // `1hr`. Nothing caught it because the `const` assertions below
+            // tied only the two rungs that were reachable, and nothing could
+            // reach this one: `store_timeframe` answered `None` for it, so no
+            // bar could ever be written under either spelling.
+            //
+            // The browser had already noticed and was working around it.
+            // `web/src/routes/db/+page.svelte` carried an alias table whose own
+            // comment reads: "`1hr` is `pull::vendor::Granularity`'s spelling of
+            // the rung the store files under `60min`. Both name a length…" —
+            // a second answer to "what is this rung called", maintained by
+            // hand, in the one place `CLAUDE.md` §3 rule 1 says a vendor or
+            // store fact must not live.
+            //
+            // The store's word wins: it is the one that becomes a path, it is
+            // the one D-0054 recorded, and it is the one its five siblings
+            // already use. No history is rewritten because none exists — this
+            // rung has never had a directory to hold any. Every shared rung is
+            // now pinned by a `const` assertion below, so a third spelling is a
+            // build failure rather than a browser workaround.
+            Self::Hour1 => "60min",
             Self::Day1 => "1day",
             Self::Week1 => "1week",
         }
@@ -348,12 +372,52 @@ impl Granularity {
     /// A `None` is a **refusal at the write boundary**, never a substitution:
     /// filing a five-minute bar under `1min/` would corrupt a series that a
     /// reader has no way to tell apart from real one-minute data.
+    ///
+    /// # THE `_` ARM HID FIVE RUNGS THE STORE HAS ALWAYS BEEN ABLE TO FILE
+    ///
+    /// This function used to read:
+    ///
+    /// ```text
+    /// Self::Minute1 => Some(Timeframe::MINUTE_1),
+    /// Self::Day1    => Some(Timeframe::DAY_1),
+    /// _             => None,
+    /// ```
+    ///
+    /// and `Timeframe::KNOWN` has held **seven** entries since D-0054 widened
+    /// it — `1day 1min 3min 5min 15min 30min 60min`. So `Minute3`, `Minute5`,
+    /// `Minute15`, `Minute30` and `Hour1` each had a directory waiting for them
+    /// and answered "there is nowhere to put this". That answer is load
+    /// bearing: `api::render` gates the timeframe control on
+    /// `store_timeframe().is_some()`, so five rungs were drawn on the operator's
+    /// screen struck through and annotated **"no store dir"** — a claim about
+    /// `crates/store` that `crates/store` contradicts.
+    ///
+    /// Nothing detected it because the `_` arm answers for rungs that do not
+    /// exist yet as well as for rungs that do, and the two are not the same
+    /// fact. `CLAUDE.md` §4 bans a fallback that hides a failure; a catch-all
+    /// in the one function that decides whether a bar has anywhere to live is
+    /// exactly that shape, and it hid this for as long as it stood.
+    ///
+    /// **Every arm is now named.** An eighth rung is a compile error here
+    /// rather than a silent `None`, which is the only way this cannot happen a
+    /// second time. `Tick`, `Second1`, `Second5` and `Week1` answer `None`
+    /// because `Timeframe::KNOWN` genuinely holds nothing for them — a stated
+    /// absence, one arm each, rather than four rungs sharing an underscore
+    /// with five that were wrong.
     #[must_use]
     pub const fn store_timeframe(self) -> Option<Timeframe> {
         match self {
             Self::Minute1 => Some(Timeframe::MINUTE_1),
+            Self::Minute3 => Some(Timeframe::MINUTE_3),
+            Self::Minute5 => Some(Timeframe::MINUTE_5),
+            Self::Minute15 => Some(Timeframe::MINUTE_15),
+            Self::Minute30 => Some(Timeframe::MINUTE_30),
+            Self::Hour1 => Some(Timeframe::MINUTE_60),
             Self::Day1 => Some(Timeframe::DAY_1),
-            _ => None,
+            // NAMED, NOT CAUGHT. `Timeframe::KNOWN` holds no entry for any of
+            // these four, and saying so one rung at a time is what makes an
+            // eighth rung a compile error instead of an inherited `None`.
+            Self::Tick | Self::Second1 | Self::Second5 | Self::Week1 => None,
         }
     }
 
@@ -431,17 +495,49 @@ const _: () = {
     assert!(day1.coarseness() < week1.coarseness());
 };
 
-// The rungs the two spellings share, tied together by the compiler. If
-// `store::path::Timeframe::MINUTE_1` is ever renamed or re-timed, this stops
-// compiling instead of quietly writing bars into a directory nobody reads.
-const _: () = assert!(str_eq(
-    Granularity::Minute1.dir(),
-    Timeframe::MINUTE_1.as_str()
-));
-const _: () = assert!(match Granularity::Minute1.grid() {
-    Grid::Intraday(secs) => secs == Timeframe::MINUTE_1.secs(),
-    _ => false,
-});
+// EVERY RUNG THE TWO SPELLINGS SHARE, TIED TOGETHER BY THE COMPILER.
+//
+// This block used to tie ONE intraday rung — the minute — and that is how the
+// hour came to have two names. `Granularity::Hour1.dir()` said `1hr` while
+// `Timeframe::MINUTE_60` said `60min`, for as long as `store_timeframe`'s `_`
+// arm made the pair unreachable; the drift was invisible here and was being
+// absorbed by an alias table in the browser. See `Granularity::dir`.
+//
+// A macro rather than six copies, and NOT to save typing: six hand-written
+// pairs are six chances to assert a rung against the wrong constant, and that
+// mistake reads as a passing assertion. One expansion per rung, one argument
+// pair each, and a rung left out of this list is a rung with no assertion at
+// all — which is why the count is pinned underneath.
+macro_rules! rung_matches_store {
+    ($($rung:ident <=> $tf:ident),+ $(,)?) => {
+        $(
+            const _: () = assert!(str_eq(
+                Granularity::$rung.dir(),
+                Timeframe::$tf.as_str()
+            ));
+            const _: () = assert!(match Granularity::$rung.grid() {
+                Grid::Intraday(secs) => secs == Timeframe::$tf.secs(),
+                _ => false,
+            });
+        )+
+    };
+}
+
+rung_matches_store! {
+    Minute1  <=> MINUTE_1,
+    Minute3  <=> MINUTE_3,
+    Minute5  <=> MINUTE_5,
+    Minute15 <=> MINUTE_15,
+    Minute30 <=> MINUTE_30,
+    Hour1    <=> MINUTE_60,
+}
+
+// THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
+//
+// Without this, a rung added to `KNOWN` and forgotten in the macro would be a
+// store directory no `Granularity` names — the same silence in the other
+// direction, and the one the `_` arm produced.
+const _: () = assert!(Timeframe::KNOWN.len() == 7);
 
 // THE DAY RUNG, TIED THE SAME WAY — but only the NAME can be tied the same way.
 //
@@ -1282,16 +1378,59 @@ pub enum AuthScheme {
     Raw,
     /// The header value is `Bearer ` then the token.
     Bearer,
+    /// The header value is a prefix, a **first** secret, a separator, and a
+    /// **second** secret: `token api_key:access_token`.
+    ///
+    /// # Why a second secret is a variant and not a second field
+    ///
+    /// `docs/07-plan.md` §5 named this exact shape as one a two-variant scheme
+    /// "cannot be described": *"A scheme carrying a prefix and a **second**
+    /// secret cannot be described."* Zerodha is the vendor that proves it —
+    /// `Authorization: token api_key:access_token`, read from
+    /// `kite.trade/docs/connect/v3/historical/` and recorded in
+    /// `docs/00-charter.md` §4z.
+    ///
+    /// [`Self::Raw`] and [`Self::Bearer`] are not special cases of this one.
+    /// They name ONE secret, and a feed that needs two and is handed one must
+    /// refuse rather than send a half-formed header a vendor answers 403 to —
+    /// which is [`crate::http::Credential`]'s whole job, and it refuses at
+    /// CONSTRUCTION rather than per request.
+    ///
+    /// # Neither half is ever printed
+    ///
+    /// The prefix and the separator are punctuation the vendor chose and are
+    /// data like any other descriptor field. The two secrets are not in this
+    /// type, are not in [`Descriptor`], and are not in anything derived from
+    /// them — the same rule [`Auth`] already states.
+    PrefixedPair {
+        /// What precedes the first secret, trailing space included when the
+        /// vendor writes one — `"token "`.
+        prefix: &'static str,
+        /// What sits between the two secrets — `":"`.
+        separator: &'static str,
+    },
 }
 
 impl AuthScheme {
-    /// The prefix that goes before the token, `""` when there is none.
+    /// The prefix that goes before the first secret, `""` when there is none.
     #[must_use]
     pub const fn prefix(self) -> &'static str {
         match self {
             Self::Raw => "",
             Self::Bearer => "Bearer ",
+            Self::PrefixedPair { prefix, .. } => prefix,
         }
+    }
+
+    /// Whether this scheme names a **second** secret beside the token.
+    ///
+    /// The one question a credential reader has to ask, so it is asked of the
+    /// scheme rather than of the feed's name. A caller that branched on
+    /// `feed == Zerodha` would be a second answer to "how many secrets", and
+    /// the two would disagree the first time a vendor changed its scheme.
+    #[must_use]
+    pub const fn names_two_secrets(self) -> bool {
+        matches!(self, Self::PrefixedPair { .. })
     }
 }
 
@@ -1307,6 +1446,34 @@ pub struct Auth {
     pub header: &'static str,
     /// How the token is written into it.
     pub scheme: AuthScheme,
+    /// The credential FIELD the second secret is read from, for a scheme that
+    /// names two — the `<field>` of `/<org>/<env>/<vendor>/<field>`.
+    ///
+    /// `None` for every scheme that names one, which is every feed in this
+    /// build until a two-secret vendor is added.
+    ///
+    /// # Why the NAME lives here and the VALUE never can
+    ///
+    /// `CLAUDE.md` §8: "`crates/pull` holds the shape and the field names; it
+    /// holds no `org`, `env`, or `vendor` literal." A field name is not a
+    /// secret and not a path — it is the last component of a shape this file
+    /// already owns — and the alternative is a literal in `crates/api`, which
+    /// is where the *first* field name still sits and is the asymmetry this
+    /// field begins to close.
+    ///
+    /// The value is read from Parameter Store at runtime and reaches
+    /// [`crate::http::Credential`] and nowhere else. It is never an environment
+    /// variable, never a file, never a prompt, and it never travels back into
+    /// this type.
+    ///
+    /// # A scheme and a field cannot disagree
+    ///
+    /// A scheme that names two secrets with no field to read the second from
+    /// is a descriptor that cannot be satisfied, and a field named by a scheme
+    /// that takes one secret is a parameter nothing would read. Both are
+    /// refused by `pull::vendor::a_two_secret_scheme_names_the_field_its_second_
+    /// secret_comes_from`, which walks every feed.
+    pub key_field: Option<&'static str>,
 }
 
 /// Where one request parameter's value comes from.
@@ -1422,6 +1589,65 @@ pub struct Param {
     pub value: ParamValue,
 }
 
+/// One segment of a feed's bars path.
+///
+/// # Why a path is a LIST and no longer a string
+///
+/// [`HttpSpec::bars_path`] was a `&'static str` concatenated onto `base_url`,
+/// and `docs/07-plan.md` §5 predicted exactly the vendor that would break it:
+/// *"A vendor whose instrument and granularity are path segments cannot be
+/// described."* Zerodha is that vendor —
+/// `/instruments/historical/:instrument_token/:interval` carries BOTH, and
+/// neither is a query parameter this feed could name in [`HttpSpec::params`].
+///
+/// A string with `:placeholder` markers would have worked too, and is worse in
+/// the way this repository keeps rejecting: it is a grammar parsed at runtime,
+/// so a typo in a descriptor row becomes a request that goes out wrong rather
+/// than a build that does not compile. A list of these carries the same
+/// information with the compiler checking it, and reuses [`ParamValue`] — so
+/// the four things a path can interpolate are the same four a query string can,
+/// resolved by the same function, and a fifth source cannot appear in one place
+/// and not the other.
+///
+/// # Cost
+///
+/// The list is a `const` in this file with at most a handful of entries per
+/// feed, so building a URL walks a fixed number of segments and allocates one
+/// string. There is no `N` here that an input can grow — the same argument
+/// [`HttpSpec::window_cap_days`] makes about its own table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PathSegment {
+    /// A segment fixed for every request this feed makes, written exactly as
+    /// the vendor's own documentation writes it, with no slashes of its own.
+    Literal(&'static str),
+    /// A segment whose value comes from the request.
+    Value {
+        /// What the vendor's own page calls this placeholder —
+        /// `instrument_token`, `interval`. It is not sent anywhere; it exists
+        /// so a refusal names the segment the way the vendor's documentation
+        /// names it, exactly as [`Param::name`] does for a query field.
+        placeholder: &'static str,
+        /// Where the value comes from — the same table a query parameter uses.
+        value: ParamValue,
+    },
+}
+
+impl PathSegment {
+    /// The name a refusal about this segment should carry.
+    ///
+    /// A literal cannot be refused — it is in the descriptor and needs nothing
+    /// resolved — so this is the placeholder for a value segment and the
+    /// literal's own text otherwise. One function, so an error message cannot
+    /// be assembled two ways at two call sites.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Literal(word) => word,
+            Self::Value { placeholder, .. } => placeholder,
+        }
+    }
+}
+
 /// How a date is rendered on the wire, or read out of an archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DateFormat {
@@ -1520,6 +1746,41 @@ pub enum TimestampEncoding {
     /// field as `yyyy-MM-dd HH:mm:ss`. Trusting the annotation would fail to
     /// parse the vendor's own example. No zone is carried; the value is IST.
     IsoDateTimeText,
+    /// An ISO-8601 date and time that **carries its own UTC offset**:
+    /// `2017-12-15T09:15:00+0530`.
+    ///
+    /// # Why this cannot be [`Self::IsoDateTimeText`] with a longer string
+    ///
+    /// `docs/07-plan.md` §5 predicted this too: *"A vendor returning `+0530`
+    /// cannot be described."* The sibling variant's own documentation is the
+    /// reason — it says **"No zone is carried; the value is IST"**, and
+    /// `crate::fetch::land` acts on exactly that promise by subtracting
+    /// `IST_OFFSET_SECS` from every value it decodes. Feeding a zone-carrying
+    /// stamp through it would apply an offset the vendor had **already
+    /// applied**, putting every bar 5h30m early — and 03:45 on a trading day is
+    /// a plausible-looking timestamp, not an obviously broken one. That is the
+    /// W1 fault this module's header describes: a wrong answer that stores
+    /// cleanly and cannot be detected afterwards.
+    ///
+    /// So the offset is read from the value and applied **where it is read** —
+    /// `crate::http::one_stamp` returns true UTC seconds for this variant, and
+    /// `land` passes them through untouched. The conversion happens once, in
+    /// the one place that can see the zone.
+    ///
+    /// # The offset is honoured, not asserted
+    ///
+    /// Every Kite example on `kite.trade/docs/connect/v3/historical/` carries
+    /// `+0530`, and this build does not hardcode that: the value's own offset
+    /// is parsed and subtracted, so a vendor that ever answered `+0000` would
+    /// be read correctly rather than shifted by five and a half hours. Applying
+    /// a stated offset is arithmetic, not a guess — what would be a guess is
+    /// assuming a zone the vendor did not state, which is what the sibling
+    /// variant is for and why it says so in its own name.
+    ///
+    /// A malformed or absent offset is **refused by name**, never defaulted to
+    /// IST: a value this variant cannot read is a vendor that changed its
+    /// format, and defaulting would silently resurrect the 5h30m error.
+    IsoDateTimeOffset,
 }
 
 /// What unit a price arrives in.
@@ -2000,8 +2261,13 @@ pub enum Pooling {
 pub struct HttpSpec {
     /// Scheme and host, no trailing slash.
     pub base_url: &'static str,
-    /// The historical-bars path, leading slash included.
-    pub bars_path: &'static str,
+    /// The historical-bars path, one [`PathSegment`] per `/`-separated part,
+    /// with no leading slash of its own — the slash belongs to the join.
+    ///
+    /// A feed whose path is entirely fixed carries only
+    /// [`PathSegment::Literal`] rows and reads exactly as its old string did.
+    /// See [`PathSegment`] for why this is a list.
+    pub bars_path: &'static [PathSegment],
     /// The verb.
     pub method: Method,
     /// Which header carries the credential, and how.
@@ -2122,6 +2388,35 @@ pub struct HttpSpec {
 }
 
 impl HttpSpec {
+    /// The bars path with every value segment shown as its own placeholder —
+    /// `/instruments/historical/:instrument_token/:interval`.
+    ///
+    /// **This is for a HUMAN, never for a socket.** It answers "which endpoint
+    /// is this feed" without a request in hand, which is what a receipt and a
+    /// diagnostic need; the URL a request actually goes to is
+    /// [`crate::http::HttpSource::url`], which can refuse and therefore returns
+    /// a `Result`. Two functions because they answer two questions — a receipt
+    /// that could fail to render because an instrument had no id would be a
+    /// worse receipt.
+    ///
+    /// A fixed walk of the descriptor's own list. Nothing an operator supplies
+    /// changes its length.
+    #[must_use]
+    pub fn path_template(&self) -> String {
+        let mut out = String::new();
+        for segment in self.bars_path {
+            out.push('/');
+            match *segment {
+                PathSegment::Literal(word) => out.push_str(word),
+                PathSegment::Value { placeholder, .. } => {
+                    out.push(':');
+                    out.push_str(placeholder);
+                }
+            }
+        }
+        out
+    }
+
     /// How many days one request may name **at `rung`**, when the vendor
     /// published a figure for it.
     ///
@@ -2559,6 +2854,20 @@ impl fmt::Display for SourceKind {
 
 /// How a feed's bytes are obtained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the two variants differ by ~220 bytes and neither can be boxed. This type is \
+              `Copy` and every value of it lives inside a `const DESCRIPTOR` in this file, \
+              reached only through `&'static Descriptor` from `Feed::descriptor` — a `Box` \
+              needs an allocator, which a `const` does not have, and the lint's own note \
+              says boxing 'would require the type no longer be Copy'. Nothing moves one by \
+              value on any path: the sweep never sees a descriptor, and the pull reads \
+              fields through a reference. The size grew past the threshold when `Auth` \
+              gained `key_field` and `AuthScheme` gained a variant carrying two `&'static \
+              str` (D-0134), which is descriptor DATA — the thing this file exists to hold. \
+              Shrinking it by indirection would trade a compile-time table for a runtime \
+              one to satisfy a heuristic about values that are never moved."
+)]
 pub enum Transport {
     /// A network request.
     Http(HttpSpec),
@@ -3212,11 +3521,21 @@ const DHAN: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.dhan.co",
-        bars_path: "/v2/charts/historical",
+        // Every segment fixed — this vendor names its instrument and its rung
+        // in the BODY, not in the path, so nothing here is resolved per
+        // request. Reads as `/v2/charts/historical`, which is what the single
+        // string it replaced said.
+        bars_path: &[
+            PathSegment::Literal("v2"),
+            PathSegment::Literal("charts"),
+            PathSegment::Literal("historical"),
+        ],
         method: Method::Post,
         auth: Auth {
             header: "access-token",
             scheme: AuthScheme::Raw,
+            // One secret. This vendor's token IS the whole header value.
+            key_field: None,
         },
         date_format: DateFormat::DashedYmd,
         // Verified from the vendor: `toDate` is NOT inclusive. One field, one
@@ -3400,11 +3719,23 @@ const GROWW: Descriptor = Descriptor {
         // THE LIVE ENDPOINT. The vendor's own page says of the previous
         // one: "This API request is deprecated and will NOT work in the
         // future."
-        bars_path: "/v1/historical/candles",
+        //
+        // Every segment fixed: this vendor carries its instrument and its rung
+        // as QUERY parameters, which `params` below names. Reads as
+        // `/v1/historical/candles`.
+        bars_path: &[
+            PathSegment::Literal("v1"),
+            PathSegment::Literal("historical"),
+            PathSegment::Literal("candles"),
+        ],
         method: Method::Get,
         auth: Auth {
             header: "Authorization",
             scheme: AuthScheme::Bearer,
+            // One secret, behind a fixed prefix. The `api-key` this vendor
+            // also issues is spent by `pull::totp` to MINT the daily token and
+            // never travels in this header — see docs/00-charter.md §4, Auth.
+            key_field: None,
         },
         date_format: DateFormat::DashedYmdMidnight,
         range_end: RangeEnd::Inclusive,
@@ -4116,7 +4447,7 @@ mod tests {
     /// carries a timeframe at all, so a rename on either side fails here as
     /// well as at the `const` assertions beside `store_timeframe`.
     #[test]
-    fn the_minute_and_day_rungs_carry_a_store_timeframe_and_the_rest_refuse() {
+    fn every_rung_the_store_ships_carries_a_timeframe_and_the_rest_refuse() {
         let mut carried = Vec::new();
         for rung in Granularity::ALL {
             match rung.store_timeframe() {
@@ -4137,18 +4468,50 @@ mod tests {
                     }
                     carried.push(rung);
                 }
+                // A `None` MUST BE A RUNG `Timeframe::KNOWN` GENUINELY HAS NO
+                // ROW FOR, and that is asserted against the store's own table
+                // rather than against a list repeated here. A second list would
+                // be the same defect one layer up: the `_` arm this test now
+                // guards answered `None` for five rungs `KNOWN` has always
+                // held, and a hand-written expectation would have agreed with
+                // it.
                 None => assert!(
-                    !matches!(rung, Granularity::Minute1 | Granularity::Day1),
+                    !Timeframe::KNOWN
+                        .iter()
+                        .any(|known| known.as_str() == rung.dir()),
                     "a None is a refusal at the write boundary, never a \
-                     substitution — and {rung} is one of the two rungs \
-                     crates/store ships"
+                     substitution — and crates/store ships a directory for \
+                     {rung}, so refusing it strikes a rung off the operator's \
+                     form that the store can file"
                 ),
             }
         }
+        // EVERY ENTRY IN THE STORE'S TABLE IS REACHED, not merely "the ones
+        // this test happened to see". The two directions are different
+        // failures: a rung carrying no timeframe is a rung the operator cannot
+        // pull, and a timeframe no rung carries is a directory nothing can ever
+        // write into.
         assert_eq!(
-            carried,
-            vec![Granularity::Minute1, Granularity::Day1],
-            "crates/store ships exactly these two rungs, coarsest last"
+            carried.len(),
+            Timeframe::KNOWN.len(),
+            "every rung crates/store ships must be reachable from the ladder; \
+             carried {carried:?}"
+        );
+        for known in Timeframe::KNOWN {
+            assert!(
+                carried.iter().any(|rung| rung.dir() == known.as_str()),
+                "{} is a store directory no rung names",
+                known.as_str()
+            );
+        }
+        // Coarsest last, which is the order `Granularity::ALL` walks and the
+        // order a backfill lands them in.
+        assert!(
+            carried.windows(2).all(|pair| match pair {
+                [finer, coarser] => finer.is_finer_than(*coarser),
+                _ => false,
+            }),
+            "the carried rungs must ascend: {carried:?}"
         );
     }
 
@@ -5111,7 +5474,26 @@ mod tests {
                 assert!(transport.needs_credential());
                 assert!(!spec.auth.header.is_empty(), "{feed} names no auth header");
                 assert!(spec.base_url.starts_with("https://"), "{feed}");
-                assert!(spec.bars_path.starts_with('/'), "{feed}");
+                // EVERY SEGMENT NAMES SOMETHING, AND NONE OF THEM CARRIES A
+                // SLASH OF ITS OWN. The slash belongs to the join, so a
+                // literal spelled "/v2" or "charts/historical" would produce a
+                // doubled or a mis-split path — the shape the old
+                // `starts_with('/')` assertion existed to catch, asked of each
+                // part rather than of one string.
+                assert!(!spec.bars_path.is_empty(), "{feed} names no bars path");
+                for segment in spec.bars_path {
+                    let name = segment.name();
+                    assert!(!name.is_empty(), "{feed}: an unnamed path segment");
+                    assert!(
+                        !name.contains('/'),
+                        "{feed}: path segment {name:?} carries its own slash"
+                    );
+                }
+                assert!(
+                    spec.path_template().starts_with('/'),
+                    "{feed}: {}",
+                    spec.path_template()
+                );
                 http += 1;
             } else {
                 let spec =

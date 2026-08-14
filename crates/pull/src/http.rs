@@ -43,7 +43,7 @@
 
 use crate::fetch::{BarRequest, BarSource, FetchError, ParallelArrays, RawWindow};
 use crate::vendor::{
-    Auth, AuthScheme, DateFormat, HttpSpec, Method, PriceScale, RangeEnd, ResponseShape,
+    AuthScheme, DateFormat, HttpSpec, Method, PriceScale, RangeEnd, ResponseShape,
 };
 
 /// The most bytes a vendor answer may occupy.
@@ -60,10 +60,72 @@ pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 /// why, which is worse than a refusal: the operator has nothing to act on.
 pub const REQUEST_TIMEOUT_SECS: u64 = 30;
 
+/// The secrets one feed's [`AuthScheme`] names, and nothing else.
+///
+/// # Why a type and not two `String` arguments
+///
+/// Two adjacent `String` parameters transpose without a compiler complaint, and
+/// a key sent as a token is a 403 whose message says nothing about which way
+/// round they went. The two constructors name which is which at every call
+/// site, and there is no `Default`: a caller cannot inherit a silent empty
+/// secret.
+pub struct Credential {
+    /// The secret every scheme carries.
+    token: String,
+    /// The SECOND secret, for a scheme that names two. `None` otherwise.
+    key: Option<String>,
+}
+
+// The same argument `HttpSource`'s hand-written Debug makes, for the same
+// reason: a derived Debug on a struct holding a credential is one `dbg!` away
+// from a token in a log file. Both fields are replaced rather than omitted, so
+// a reader can still see that a second secret is held without seeing it.
+impl core::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Credential")
+            .field("token", &"<redacted>")
+            .field("key", &self.key.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
+impl Credential {
+    /// One secret, for [`AuthScheme::Raw`] and [`AuthScheme::Bearer`].
+    #[must_use]
+    pub const fn token(token: String) -> Self {
+        Self { token, key: None }
+    }
+
+    /// Two, for [`AuthScheme::PrefixedPair`] — the key FIRST, because that is
+    /// the order it goes on the wire: `token api_key:access_token`.
+    #[must_use]
+    pub const fn pair(key: String, token: String) -> Self {
+        Self {
+            token,
+            key: Some(key),
+        }
+    }
+}
+
 /// A vendor reached over HTTPS, driven entirely by its descriptor.
 pub struct HttpSource {
     spec: HttpSpec,
-    token: String,
+    /// The auth header's VALUE, assembled once in [`HttpSource::new`].
+    ///
+    /// # Assembled at construction, not per request
+    ///
+    /// Two reasons, and the second is the one that matters. It saves a
+    /// `format!` per window, which on an 80-window backfill across 800
+    /// instruments is 64,000 allocations that bought nothing. And it moves the
+    /// scheme/credential agreement check to the ONE place a credential arrives:
+    /// a feed whose scheme names two secrets and was handed one refuses before
+    /// a client exists, rather than sending a half-formed header that a vendor
+    /// answers 403 to and an operator reads as an expired token.
+    ///
+    /// Holding the assembled value is not a wider exposure than holding the
+    /// token was — it is the same secret, in the same struct, behind the same
+    /// hand-written `Debug`.
+    header_value: String,
     client: reqwest::Client,
 }
 
@@ -143,6 +205,32 @@ impl HttpSource {
         })
     }
 
+    /// The auth header's value, or the refusal that stops a source existing.
+    ///
+    /// # Errors
+    ///
+    /// [`FetchError::CredentialMismatch`] when the credential does not match
+    /// what the scheme names, in either direction. Both directions refuse:
+    /// a scheme naming two secrets handed one would send `token :access_token`,
+    /// which a vendor answers 403 to and an operator reads as an expired
+    /// session; a scheme naming one handed two means a caller resolved a
+    /// parameter the descriptor never asked for, and silently dropping it hides
+    /// which of the two it was. `CLAUDE.md` §4 — degrade loudly and name the
+    /// reason, never a fallback that hides a failure.
+    fn header_value(scheme: AuthScheme, held: Credential) -> Result<String, FetchError> {
+        match (scheme, held.key) {
+            (AuthScheme::Raw, None) => Ok(held.token),
+            (AuthScheme::Bearer, None) => Ok(format!("Bearer {}", held.token)),
+            (AuthScheme::PrefixedPair { prefix, separator }, Some(key)) => {
+                Ok(format!("{prefix}{key}{separator}{}", held.token))
+            }
+            (scheme, key) => Err(FetchError::CredentialMismatch {
+                names_two: scheme.names_two_secrets(),
+                given_two: key.is_some(),
+            }),
+        }
+    }
+
     /// Builds a source for one vendor.
     ///
     /// # Errors
@@ -150,7 +238,13 @@ impl HttpSource {
     /// [`FetchError::TransportFailed`] if the client cannot be constructed —
     /// which on this path means the TLS backend is unavailable, and is a
     /// deployment fault rather than a vendor one.
-    pub fn new(spec: HttpSpec, token: String) -> Result<Self, FetchError> {
+    /// [`FetchError::CredentialMismatch`] if the credential does not match the
+    /// scheme — see [`Self::header_value`].
+    pub fn new(spec: HttpSpec, credential: Credential) -> Result<Self, FetchError> {
+        // BEFORE THE CLIENT, deliberately. A mismatch is a wiring fault and
+        // costs nothing to find; building a TLS client first would spend that
+        // work to throw it away.
+        let header_value = Self::header_value(spec.auth.scheme, credential)?;
         let client = reqwest::Client::builder()
             .timeout(core::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             // ── REDIRECTS ARE NOT FOLLOWED, AND THE REASON IS THE CREDENTIAL ──
@@ -183,15 +277,59 @@ impl HttpSource {
             })?;
         Ok(Self {
             spec,
-            token,
+            header_value,
             client,
         })
     }
 
-    /// The URL one window is fetched from.
+    /// This feed's endpoint with every value segment left as its placeholder —
+    /// `https://api.kite.trade/instruments/historical/:instrument_token/:interval`.
+    ///
+    /// For a receipt, a log line and a diagnostic. It needs no request and
+    /// cannot fail, which is the whole reason it is separate from [`Self::url`]:
+    /// a receipt that failed to render because one instrument had no vendor id
+    /// would be a worse receipt than one naming the endpoint generically.
     #[must_use]
-    pub fn url(&self) -> String {
-        format!("{}{}", self.spec.base_url, self.spec.bars_path)
+    pub fn endpoint(&self) -> String {
+        format!("{}{}", self.spec.base_url, self.spec.path_template())
+    }
+
+    /// The URL **one particular request** is fetched from.
+    ///
+    /// For a feed whose path is all literals this is [`Self::endpoint`] and can
+    /// only succeed. For a feed that carries its instrument or its rung as a
+    /// PATH SEGMENT it resolves each one through the same table a query
+    /// parameter uses, so a rung with no recorded word refuses here exactly as
+    /// it would refuse in a query string — before the socket, rather than
+    /// fetching one bar length and filing it under another.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::resolve_param`] refuses — [`FetchError::RungNotSpellable`]
+    /// and [`FetchError::ListingNotSpellable`] — plus
+    /// [`FetchError::PathSegmentUnusable`] for a resolved value that cannot sit
+    /// in a URL path.
+    pub fn url(&self, request: &BarRequest, from: &str, to: &str) -> Result<String, FetchError> {
+        let mut out = String::from(self.spec.base_url);
+        for segment in self.spec.bars_path {
+            out.push('/');
+            match *segment {
+                crate::vendor::PathSegment::Literal(word) => out.push_str(word),
+                crate::vendor::PathSegment::Value { placeholder, value } => {
+                    // The placeholder IS the field name here — a value segment
+                    // and a query parameter are the same "named value from the
+                    // request", so they resolve through one function and a
+                    // fifth source cannot appear in one and not the other.
+                    let param = crate::vendor::Param {
+                        name: placeholder,
+                        value,
+                    };
+                    let resolved = self.resolve_param(&param, request, from, to)?;
+                    out.push_str(path_safe(&resolved, placeholder)?);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// A date as this vendor writes it on the wire.
@@ -254,13 +392,8 @@ impl HttpSource {
     ///
     /// Returned as a pair rather than applied inside, so a test can assert the
     /// NAME without ever seeing the value.
-    fn header(&self) -> (&'static str, String) {
-        let Auth { header, scheme } = self.spec.auth;
-        let value = match scheme {
-            AuthScheme::Raw => self.token.clone(),
-            AuthScheme::Bearer => format!("Bearer {}", self.token),
-        };
-        (header, value)
+    fn header(&self) -> (&'static str, &str) {
+        (self.spec.auth.header, &self.header_value)
     }
 }
 
@@ -810,7 +943,11 @@ impl HttpSource {
             self.spec.date_format,
         )?;
 
-        let url = self.url();
+        // RESOLVED AFTER `from` AND `to`, because a path segment can carry
+        // either. A feed whose window is in the path is not this build's today,
+        // and the resolver is the same one the query string uses precisely so
+        // that it could be tomorrow without a second grammar.
+        let url = self.url(request, &from, &to)?;
 
         // THE REQUEST IS BUILT FROM THE DESCRIPTOR ROW, NOT WRITTEN HERE.
         //
@@ -1069,6 +1206,113 @@ fn one_stamp(
                 ),
             })
         }
+        // THE ZONE IS APPLIED HERE, AND THAT IS WHY THIS ARM IS SEPARATE.
+        //
+        // The two arms above hand `land` a LOCAL time and `land` converts it.
+        // This one hands back true UTC, because only here is the offset
+        // visible — and `land` has a matching arm that passes it through. The
+        // pair is asserted by
+        // `pull::vendor::a_zone_carrying_stamp_is_converted_once`.
+        T::IsoDateTimeOffset => {
+            let text = v.as_str().ok_or_else(|| FetchError::TransportFailed {
+                detail: format!("bar {at} stamps {v}, and this feed spells its timestamps as text"),
+            })?;
+            let local = local_seconds(text).ok_or_else(|| FetchError::TransportFailed {
+                detail: format!(
+                    "bar {at} stamps {text:?}, which is not YYYY-MM-DD followed by HH:MM:SS"
+                ),
+            })?;
+            let offset = stated_offset(text).ok_or_else(|| FetchError::TransportFailed {
+                detail: format!(
+                    "bar {at} stamps {text:?}, and this feed's timestamps CARRY their own \
+                     UTC offset — expected a trailing +HHMM, -HHMM, +HH:MM, -HH:MM or Z. \
+                     Refused rather than read as IST: a missing offset defaulted to +0530 \
+                     would shift every bar of this window by five and a half hours and \
+                     store cleanly."
+                ),
+            })?;
+            local
+                .checked_sub(offset)
+                .ok_or_else(|| FetchError::TransportFailed {
+                    detail: format!("bar {at} stamps {text:?}, whose offset overflows the epoch"),
+                })
+        }
+    }
+}
+
+/// The UTC offset a timestamp states, in seconds, or `None` when it states none.
+///
+/// Accepts the four spellings a vendor may write and `Z` for zero. Kite writes
+/// `+0530`; the colon form and `Z` are the other shapes ISO-8601 permits for the
+/// same fact, and reading them costs nothing while refusing them would be a
+/// refusal of a correct value.
+///
+/// Returns `None` for anything else — including a bare local time with no
+/// offset at all, which is the case that must NOT silently become IST.
+///
+/// A fixed number of byte comparisons on a suffix. No allocation.
+fn stated_offset(text: &str) -> Option<i64> {
+    let tail = text.get(19..)?;
+    if tail == "Z" {
+        return Some(0);
+    }
+    let sign = match tail.as_bytes().first()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    // `+0530` and `+05:30` differ only by the colon, so the digits are read by
+    // position from a form with it stripped rather than by two parsers.
+    let digits: String = tail
+        .get(1..)?
+        .chars()
+        .filter(|c| *c != ':')
+        .collect::<String>();
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits.get(0..2)?.parse().ok()?;
+    let minutes: i64 = digits.get(2..4)?.parse().ok()?;
+    // A minutes field past 59 is not a zone, it is a malformed value, and
+    // reading it as an hour and a bit would invent an offset nobody stated.
+    if minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+/// A resolved value, borrowed back unchanged, if it can be a URL path segment.
+///
+/// # The allowlist is RFC 3986's unreserved set, and the choice is deliberate
+///
+/// `A-Z a-z 0-9 - . _ ~` are the characters that mean themselves in a path and
+/// need no escaping under any reading. Everything else refuses — including the
+/// sub-delims a permissive reading would allow, because "a vendor probably
+/// tolerates `$` in a path" is a claim about a vendor and there is no source
+/// for it. Kite's `instrument_token` is a run of digits and passes; its index
+/// tradingsymbol `NIFTY 50` has a space and does not, which is the case this
+/// exists for.
+///
+/// **Empty refuses too, and that is the important arm.** An empty segment
+/// collapses `/historical//minute` into a path the vendor may route somewhere
+/// else entirely, and it is exactly what an instrument with no vendor id would
+/// produce — the `DH-905 securityId is required` shape, one layer up.
+///
+/// A walk of one value whose length the master already bounds at
+/// `core::vendor::VENDOR_ID_CAPACITY`. No allocation: the happy path hands the
+/// caller its own borrow back.
+fn path_safe<'a>(value: &'a str, placeholder: &'static str) -> Result<&'a str, FetchError> {
+    let usable = !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~'));
+    if usable {
+        Ok(value)
+    } else {
+        Err(FetchError::PathSegmentUnusable {
+            placeholder,
+            value: value.to_owned(),
+        })
     }
 }
 
@@ -1150,11 +1394,12 @@ mod tests {
             ],
             extra_headers: &[],
             base_url: "https://vendor.invalid",
-            bars_path: "/bars",
+            bars_path: &[crate::vendor::PathSegment::Literal("bars")],
             method: Method::Post,
-            auth: Auth {
+            auth: crate::vendor::Auth {
                 header: "x-token",
                 scheme: AuthScheme::Raw,
+                key_field: None,
             },
             date_format: DateFormat::DashedYmd,
             range_end: RangeEnd::Exclusive,
@@ -1447,12 +1692,15 @@ mod tests {
     /// the credential never appears in a `Debug` rendering.
     #[test]
     fn the_sync_seam_refuses_and_the_token_is_never_printed() {
-        let source = HttpSource::new(spec(PriceScale::Rupees), "SUPERSECRET".to_owned())
-            .expect("a client builds");
+        let source = HttpSource::new(
+            spec(PriceScale::Rupees),
+            Credential::token("SUPERSECRET".to_owned()),
+        )
+        .expect("a client builds");
         let shown = format!("{source:?}");
         assert!(!shown.contains("SUPERSECRET"), "the token leaked: {shown}");
         assert!(shown.contains("<redacted>"), "and it says so: {shown}");
-        assert_eq!(source.url(), "https://vendor.invalid/bars");
+        assert_eq!(source.endpoint(), "https://vendor.invalid/bars");
     }
 
     /// A server on loopback that answers once and reports what it was sent.
@@ -1518,7 +1766,8 @@ mod tests {
             base_url: Box::leak(origin_url.into_boxed_str()),
             ..spec(PriceScale::Rupees)
         };
-        let source = HttpSource::new(spec, "SUPERSECRET".to_owned()).expect("a client builds");
+        let source = HttpSource::new(spec, Credential::token("SUPERSECRET".to_owned()))
+            .expect("a client builds");
         let request = BarRequest {
             instrument_id: String::new(),
             listing: crate::vendor::Listing::Equity,
@@ -1585,7 +1834,8 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..spec(PriceScale::Rupees)
         };
-        let source = HttpSource::new(spec, "SUPERSECRET".to_owned()).expect("a client builds");
+        let source = HttpSource::new(spec, Credential::token("SUPERSECRET".to_owned()))
+            .expect("a client builds");
         let request = BarRequest {
             instrument_id: String::new(),
             listing: crate::vendor::Listing::Equity,
@@ -1677,12 +1927,13 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             method: Method::Get,
             range_end: RangeEnd::Inclusive,
-            auth: Auth {
+            auth: crate::vendor::Auth {
                 // Spelled as `crate::vendor` spells Groww's, capital and all:
                 // this fixture is meant to be that descriptor's shape, and a
                 // lowercase copy would be a second spelling of one name.
                 header: "Authorization",
                 scheme: AuthScheme::Bearer,
+                key_field: None,
             },
             ..spec(PriceScale::Rupees)
         };
@@ -1800,8 +2051,11 @@ mod tests {
     /// The blocking seam refuses by name rather than spinning a runtime per call.
     #[test]
     fn the_blocking_seam_refuses_and_names_the_asynchronous_one() {
-        let source = HttpSource::new(spec(PriceScale::Rupees), "SUPERSECRET".to_owned())
-            .expect("a client builds");
+        let source = HttpSource::new(
+            spec(PriceScale::Rupees),
+            Credential::token("SUPERSECRET".to_owned()),
+        )
+        .expect("a client builds");
         let Err(FetchError::TransportFailed { detail }) = source.window(&one_day()) else {
             panic!("the sync seam cannot work and must say so")
         };
@@ -2054,7 +2308,7 @@ mod tests {
         reason = "a Copy descriptor row in a test helper; the copy is the point"
     )]
     fn source_of(spec: HttpSpec, token: &str) -> Driven {
-        Driven(HttpSource::new(spec, token.to_owned()).expect("a client builds"))
+        Driven(HttpSource::new(spec, Credential::token(token.to_owned())).expect("a client builds"))
     }
 
     struct Driven(HttpSource);

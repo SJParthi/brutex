@@ -810,7 +810,8 @@ fn drive_http(_scratch: &Scratch) {
         }
     };
     let source =
-        crate::http::HttpSource::new(spec, "shhh".to_owned()).expect("an HTTPS client builds");
+        crate::http::HttpSource::new(spec, crate::http::Credential::token("shhh".to_owned()))
+            .expect("an HTTPS client builds");
     let request = BarRequest {
         instrument_id: "13".to_owned(),
         listing: Listing::Index,
