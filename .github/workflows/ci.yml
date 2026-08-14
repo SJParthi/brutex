@@ -680,6 +680,7 @@ jobs:
           asked blank byte_len chars duplicate fault
           about census rows_read slices
           not-base32 too-long
+          at
           '
 
           # THE SECOND BATCH, and why each is not a path segment. The emit
@@ -731,6 +732,27 @@ jobs:
           #
           # Two counts and two filesystem paths. No org, no env, no vendor, no
           # field of a vendor's record.
+
+          # THE FOURTH BATCH — one word, `at`, from `resolve.rs`.
+          #
+          # `pull::resolve::note_refused` emits the six refusals `crawl` can
+          # record, and it names the document that refused with
+          # `.with("at", &at)` — the same word as `IndexFailure::at`, which is
+          # the field this event exists to make visible. Gate 19 refused all
+          # six sites for logging nothing at all; fixing that necessarily put a
+          # new bare lower-case word in the source, which is the shape gate 1d
+          # scans for. The two gates pulling in opposite directions is the
+          # system working: one demands the event, the other demands the event
+          # be accounted for.
+          #
+          # It is not a path segment. The RIGHT side is a URL the crawl built
+          # from `INDEX_HOST` plus a category path — an exchange address on
+          # the public internet, and the same value `url` already carries in
+          # this group. The LEFT side is a two-letter English preposition, and
+          # §8's shape has no `at` in it: the four segments are `org`, `env`,
+          # `vendor` and `field`, none of which this event carries. Nothing on
+          # this path reads Parameter Store, and `resolve.rs` holds no
+          # credential of any kind — it crawls a public index site.
 
           # ---- group 23: A YEAR-MONTH IN AN ASSERTION. D-0070.
           # `pull::unit::a_daily_bucket_is_an_ist_day_...` asserts the month a
