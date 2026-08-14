@@ -56,6 +56,7 @@ pub mod rank;
 pub mod report;
 pub mod resample;
 pub mod significance;
+pub mod split;
 pub mod synthetic;
 
 use engine::{Ladder, Sweep};
