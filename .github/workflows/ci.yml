@@ -792,13 +792,24 @@ jobs:
           # describe a family of stock-market indices.
           nav_word='sectoral-indices strategy'
 
+          # ---- group 23: TWO HTTP STATUS CODES, asserted to appear IN a
+          # refusal. crates/pull/src/resolve.rs tests.
+          #
+          # `302` and `403` are read back out of the message the document
+          # transport produces, so a refusal cannot stop naming the status it
+          # refused on -- the same device group 10's bounds use. A three-digit
+          # HTTP status names no account, no environment, no vendor and no
+          # field; it is defined by RFC 9110 and is the same number for every
+          # host on the internet.
+          http_status='302 403'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi

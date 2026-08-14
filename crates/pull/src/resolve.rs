@@ -31,6 +31,8 @@
 //! `CLAUDE.md` §3 rule 5, and it is what makes the append-only store safe to
 //! write a resolution into every day.
 
+use core::future::Future;
+
 use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 
@@ -53,7 +55,7 @@ pub trait DocumentSource {
     /// because this trait is the boundary: below it live sockets and TLS and
     /// redirect policy, and none of that belongs in a type this crate matches
     /// on.
-    fn get(&self, url: &str) -> Result<String, String>;
+    fn get(&self, url: &str) -> impl Future<Output = Result<String, String>>;
 }
 
 /// One index that did not resolve, and why.
@@ -248,8 +250,8 @@ impl Snapshot {
 /// for n indices, which is 300 for the 148 the exchange published on 14 Aug
 /// 2026. The join inside is [`crate::universe::resolve`]'s, which indexes the
 /// master **once** for the whole pass rather than per index.
-pub fn crawl(
-    source: &dyn DocumentSource,
+pub async fn crawl<S: DocumentSource>(
+    source: &S,
     host: &str,
     day: Day,
     feed: &str,
@@ -261,7 +263,7 @@ pub fn crawl(
 
     for category in Category::ALL {
         let listing_url = format!("{host}{}", category.path());
-        let listing = match source.get(&listing_url) {
+        let listing = match source.get(&listing_url).await {
             Ok(body) => body,
             Err(why) => {
                 failures.push(IndexFailure {
@@ -294,7 +296,7 @@ pub fn crawl(
 
         for link in links {
             let page_url = format!("{host}{}", link.path);
-            let page = match source.get(&page_url) {
+            let page = match source.get(&page_url).await {
                 Ok(body) => body,
                 Err(why) => {
                     failures.push(IndexFailure { at: page_url, why });
@@ -312,7 +314,7 @@ pub fn crawl(
                     continue;
                 }
             };
-            let body = match source.get(&csv_url) {
+            let body = match source.get(&csv_url).await {
                 Ok(body) => body,
                 Err(why) => {
                     failures.push(IndexFailure { at: csv_url, why });
@@ -337,6 +339,134 @@ pub fn crawl(
         key,
         resolutions,
         failures,
+    }
+}
+
+/// How long one document fetch may take before it is abandoned.
+///
+/// A hung socket with no timeout is a pass that never finishes and never says
+/// why, which is worse than a refusal: the operator has nothing to act on. The
+/// same argument [`crate::http::REQUEST_TIMEOUT_SECS`] makes, and the same
+/// number, because these documents are smaller than a bar window and there is
+/// no reason for a second figure.
+pub const DOCUMENT_TIMEOUT_SECS: u64 = 30;
+
+/// The real transport: HTTPS, bounded, following no redirect.
+///
+/// # This is the only thing in the pipeline that opens a socket
+///
+/// Every other stage — the crawl order, the parse, the join, the buckets, the
+/// snapshot — is a pure function proved against [`FakeDocuments`]. That is not
+/// an accident of testing convenience: it is what lets the whole resolution be
+/// exercised, and changed, without depending on a third party's uptime or on
+/// today's index membership.
+///
+/// # Redirects are not followed, and here the reason is not a credential
+///
+/// [`crate::http::HttpSource`] refuses them because a cross-origin hop can
+/// carry a broker token. Nothing here carries one — these are public exchange
+/// documents and this client sends no credential at all. The reason is the
+/// second half of that argument: a constituent file answering 3xx is a route
+/// change, and silently chasing it means parsing whatever the new location
+/// serves as though it were the index's membership. The 3xx comes back as a
+/// refusal naming the status instead.
+#[derive(Debug)]
+pub struct HttpDocuments {
+    client: reqwest::Client,
+}
+
+impl HttpDocuments {
+    /// Builds the client.
+    ///
+    /// # Errors
+    ///
+    /// A sentence when the client cannot be constructed, which on this path
+    /// means the TLS backend is unavailable — a deployment fault rather than an
+    /// exchange one, and worth distinguishing.
+    pub fn new() -> Result<Self, String> {
+        let client = reqwest::Client::builder()
+            .timeout(core::time::Duration::from_secs(DOCUMENT_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|why| format!("the HTTPS client could not be built: {why}"))?;
+        Ok(Self { client })
+    }
+
+    /// Fetches one document, bounded.
+    ///
+    /// # Errors
+    ///
+    /// A sentence naming the status for a non-success answer, the byte count
+    /// for one past [`crate::nse::MAX_DOCUMENT_BYTES`], and the transport's own
+    /// words when no answer arrived at all. Each is a different fault and each
+    /// sends an operator somewhere different, so none of them is flattened into
+    /// "it failed".
+    ///
+    /// **The size is checked against the declared length before the body is
+    /// read**, and against the body afterwards. The first is a courtesy the
+    /// host may decline to offer; the second is the one that binds, because a
+    /// `Content-Length` is a claim and the bytes are the fact.
+    pub async fn get_async(&self, url: &str) -> Result<String, String> {
+        let answer = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(|why| format!("{url} was not reached: {why}"))?;
+
+        let status = answer.status();
+        if !status.is_success() {
+            // A 3xx is a route change, and it is named as one rather than left
+            // to read as a server error — see this type's own documentation.
+            let hint = if status.is_redirection() {
+                answer
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+                    .map_or_else(String::new, |to| format!(" It points at {to}."))
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "{url} answered {}.{hint} Nothing was read: this pass does not \
+                 follow a redirect, because a constituent file answering 3xx is \
+                 a route change and parsing whatever the new location serves \
+                 would file it as the index's membership.",
+                status.as_u16()
+            ));
+        }
+
+        if let Some(declared) = answer.content_length() {
+            let cap = crate::nse::MAX_DOCUMENT_BYTES as u64;
+            if declared > cap {
+                return Err(format!(
+                    "{url} declares {declared} bytes and this build accepts at \
+                     most {cap}. Refused before the body was read."
+                ));
+            }
+        }
+
+        let body = answer
+            .text()
+            .await
+            .map_err(|why| format!("{url} answered, and the body could not be read: {why}"))?;
+
+        // THE BYTES ARE THE FACT. `Content-Length` is a claim the host makes and
+        // may omit or get wrong; this is the check that actually binds.
+        if body.len() > crate::nse::MAX_DOCUMENT_BYTES {
+            return Err(format!(
+                "{url} answered {} bytes and this build accepts at most {}",
+                body.len(),
+                crate::nse::MAX_DOCUMENT_BYTES
+            ));
+        }
+        Ok(body)
+    }
+}
+
+impl DocumentSource for HttpDocuments {
+    fn get(&self, url: &str) -> impl Future<Output = Result<String, String>> {
+        self.get_async(url)
     }
 }
 
@@ -387,7 +517,7 @@ impl FakeDocuments {
 }
 
 impl DocumentSource for FakeDocuments {
-    fn get(&self, url: &str) -> Result<String, String> {
+    async fn get(&self, url: &str) -> Result<String, String> {
         self.answers.iter().find(|(at, _)| at == url).map_or_else(
             || Err(format!("no fixture for {url}")),
             |(_, answer)| answer.clone(),
@@ -450,9 +580,9 @@ mod tests {
         Day::new(2026, 8, 14).expect("a real day")
     }
 
-    #[test]
-    fn a_clean_pass_resolves_every_index_and_is_publishable() {
-        let snap = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
+    #[tokio::test]
+    async fn a_clean_pass_resolves_every_index_and_is_publishable() {
+        let snap = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_eq!(snap.resolutions.len(), 4, "one index per category");
         assert!(snap.is_complete());
         assert!(snap.is_sound());
@@ -463,10 +593,10 @@ mod tests {
 
     /// **Same inputs, same day, same bytes.** The property that makes a re-run
     /// free and a diff meaningful.
-    #[test]
-    fn two_passes_over_the_same_documents_are_byte_identical() {
-        let once = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
-        let twice = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
+    #[tokio::test]
+    async fn two_passes_over_the_same_documents_are_byte_identical() {
+        let once = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
+        let twice = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_eq!(once.to_wire(), twice.to_wire());
         assert_eq!(once.digest(), twice.digest());
         assert!(
@@ -475,16 +605,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_changed_membership_changes_the_digest() {
-        let base = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
+    #[tokio::test]
+    async fn a_changed_membership_changes_the_digest() {
+        let base = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
         // One name leaves every index.
         let smaller = complete().with(
             &format!("{HOST}/IndexConstituent/ind_one.csv"),
             "Company Name,Industry,Symbol,Series,ISIN Code\n\
              A Ltd.,Fin,AAA,EQ,INE000A01001\n",
         );
-        let moved = crawl(&smaller, HOST, day(), "groww", JoinKey::Isin, &master());
+        let moved = crawl(&smaller, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_ne!(
             base.digest(),
             moved.digest(),
@@ -493,13 +623,13 @@ mod tests {
     }
 
     /// **Whole or not at all.** Four of five is an unknown universe.
-    #[test]
-    fn a_partial_pass_never_replaces_a_complete_one() {
+    #[tokio::test]
+    async fn a_partial_pass_never_replaces_a_complete_one() {
         let broken = complete().refusing(
             &format!("{HOST}{}", Category::Sectoral.path()),
             "503 from the exchange",
         );
-        let snap = crawl(&broken, HOST, day(), "groww", JoinKey::Isin, &master());
+        let snap = crawl(&broken, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert!(!snap.is_complete());
         assert_eq!(snap.resolutions.len(), 3, "the other three still resolved");
         let why = snap
@@ -514,13 +644,13 @@ mod tests {
 
     /// A listing that yields nothing is the page changing shape, never a family
     /// that emptied.
-    #[test]
-    fn an_empty_listing_is_a_failure_and_not_a_category_with_no_indices() {
+    #[tokio::test]
+    async fn an_empty_listing_is_a_failure_and_not_a_category_with_no_indices() {
         let blank = complete().with(
             &format!("{HOST}{}", Category::Strategy.path()),
             "<html></html>",
         );
-        let snap = crawl(&blank, HOST, day(), "groww", JoinKey::Isin, &master());
+        let snap = crawl(&blank, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert!(!snap.is_complete());
         let failure = snap
             .failures
@@ -534,21 +664,21 @@ mod tests {
         assert!(failure.why.contains("changed shape"));
     }
 
-    #[test]
-    fn one_unreachable_index_does_not_abort_the_other_three() {
+    #[tokio::test]
+    async fn one_unreachable_index_does_not_abort_the_other_three() {
         let one_gone = complete().refusing(
             &format!("{HOST}{}/one", Category::Thematic.path()),
             "connection reset",
         );
-        let snap = crawl(&one_gone, HOST, day(), "groww", JoinKey::Isin, &master());
+        let snap = crawl(&one_gone, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_eq!(snap.resolutions.len(), 3);
         assert_eq!(snap.failures.len(), 1);
         assert_eq!(snap.failures[0].why, "connection reset");
     }
 
     /// An interstitial served where a CSV was asked for.
-    #[test]
-    fn html_in_place_of_a_constituent_file_fails_that_index_by_name() {
+    #[tokio::test]
+    async fn html_in_place_of_a_constituent_file_fails_that_index_by_name() {
         let interstitial = complete().with(
             &format!("{HOST}/IndexConstituent/ind_one.csv"),
             "<!doctype html><title>Access Denied</title>",
@@ -560,7 +690,8 @@ mod tests {
             "groww",
             JoinKey::Isin,
             &master(),
-        );
+        )
+        .await;
         assert!(snap.resolutions.is_empty(), "every index used that file");
         assert_eq!(snap.failures.len(), 4);
         assert!(
@@ -570,27 +701,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_index_page_with_no_link_fails_rather_than_composing_a_filename() {
+    #[tokio::test]
+    async fn an_index_page_with_no_link_fails_rather_than_composing_a_filename() {
         let no_link = complete().with(
             &format!("{HOST}{}/one", Category::BroadBased.path()),
             "<a href=\"/somewhere/else\">not the file</a>",
         );
-        let snap = crawl(&no_link, HOST, day(), "groww", JoinKey::Isin, &master());
+        let snap = crawl(&no_link, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_eq!(snap.failures.len(), 1);
         assert!(snap.failures[0].why.contains("ind_niftybanklist"));
     }
 
-    #[test]
-    fn a_collapse_between_two_passes_halts_publication() {
-        let full = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
+    #[tokio::test]
+    async fn a_collapse_between_two_passes_halts_publication() {
+        let full = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
         // Every index down to one name: 8 published becomes 4, which is half.
         let halved = complete().with(
             &format!("{HOST}/IndexConstituent/ind_one.csv"),
             "Company Name,Industry,Symbol,Series,ISIN Code\n\
              A Ltd.,Fin,AAA,EQ,INE000A01001\n",
         );
-        let shrunk = crawl(&halved, HOST, day(), "groww", JoinKey::Isin, &master());
+        let shrunk = crawl(&halved, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert_eq!(shrunk.published(), 4);
         let why = shrunk
             .admits_publication(Some(&full))
@@ -602,9 +733,9 @@ mod tests {
             .expect("a first pass has nothing to collapse against");
     }
 
-    #[test]
-    fn the_wire_carries_the_day_the_feed_and_the_key_before_any_count() {
-        let snap = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master());
+    #[tokio::test]
+    async fn the_wire_carries_the_day_the_feed_and_the_key_before_any_count() {
+        let snap = crawl(&complete(), HOST, day(), "groww", JoinKey::Isin, &master()).await;
         let wire = snap.to_wire();
         let mut lines = wire.lines();
         assert_eq!(lines.next(), Some("day\t2026-08-14"));
@@ -618,8 +749,8 @@ mod tests {
     }
 
     /// The weaker key travels into the snapshot rather than being forgotten.
-    #[test]
-    fn a_symbol_keyed_pass_records_that_its_join_proves_less() {
+    #[tokio::test]
+    async fn a_symbol_keyed_pass_records_that_its_join_proves_less() {
         let snap = crawl(
             &complete(),
             HOST,
@@ -627,16 +758,122 @@ mod tests {
             "kite",
             JoinKey::TradingSymbol,
             &master(),
-        );
+        )
+        .await;
         assert!(!snap.key.is_identity());
         assert!(snap.to_wire().contains("key\tsymbol"));
         assert!(snap.is_sound());
     }
 
-    #[test]
-    fn a_source_with_no_fixture_refuses_by_name_rather_than_answering_empty() {
+    // -- the real transport, over a loopback socket ------------------------
+    //
+    // Raw sockets and hand-written HTTP, the same device `crate::http`'s tests
+    // use and for the same reason: this crate takes tokio WITHOUT the `net`
+    // feature, and a test is not a reason to widen a dependency.
+
+    /// A one-shot loopback server that answers `answer` and hangs up.
+    fn listener(answer: &str) -> String {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        let answer = answer.to_owned();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _read = stream.read(&mut buf).unwrap_or(0);
+            let _wrote = stream.write_all(answer.as_bytes());
+            let _flushed = stream.flush();
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn the_real_transport_reads_a_body_it_is_given() {
+        let body = csv();
+        let url = listener(&format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ));
+        let http = HttpDocuments::new().expect("a client builds");
+        let got = http.get_async(&url).await.expect("a 200 with a body");
+        assert_eq!(got, body);
+        // And it flows through the trait the crawl actually calls.
+        assert_eq!(
+            DocumentSource::get(&http, &url).await.unwrap_or_default(),
+            "",
+            "the socket answered once; a second request reaches a closed port \
+             and refuses rather than hanging"
+        );
+    }
+
+    /// **A 3xx IS A ROUTE CHANGE AND IS NEVER CHASED.** Nothing here carries a
+    /// credential — the reason is that parsing whatever the new location serves
+    /// would file it as the index's membership.
+    #[tokio::test]
+    async fn the_real_transport_refuses_a_redirect_and_names_where_it_pointed() {
+        let url = listener(
+            "HTTP/1.1 302 Found\r\nLocation: http://elsewhere.invalid/other\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+        let http = HttpDocuments::new().expect("a client builds");
+        let why = http
+            .get_async(&url)
+            .await
+            .expect_err("a redirect is refused");
+        assert!(why.contains("302"), "{why}");
+        assert!(
+            why.contains("elsewhere.invalid"),
+            "it names the target: {why}"
+        );
+        assert!(why.contains("route change"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn the_real_transport_names_a_refusal_status_without_calling_it_a_redirect() {
+        let url =
+            listener("HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        let http = HttpDocuments::new().expect("a client builds");
+        let why = http
+            .get_async(&url)
+            .await
+            .expect_err("403 is not a document");
+        assert!(why.contains("403"), "{why}");
+        assert!(
+            !why.contains("It points at"),
+            "a 403 has no Location and must not pretend to: {why}"
+        );
+    }
+
+    /// A declared length past the bound refuses **before** the body is read.
+    #[tokio::test]
+    async fn a_declared_length_past_the_bound_refuses_before_the_body_is_read() {
+        let url = listener(&format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            crate::nse::MAX_DOCUMENT_BYTES + 1
+        ));
+        let http = HttpDocuments::new().expect("a client builds");
+        let why = http.get_async(&url).await.expect_err("past the bound");
+        assert!(why.contains("declares"), "{why}");
+        assert!(why.contains("before the body was read"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_socket_that_never_answers_refuses_rather_than_hanging() {
+        // A port nothing is listening on: the connection is refused at once.
+        let http = HttpDocuments::new().expect("a client builds");
+        let why = http
+            .get_async("http://127.0.0.1:1/never")
+            .await
+            .expect_err("nothing is listening");
+        assert!(why.contains("was not reached"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_source_with_no_fixture_refuses_by_name_rather_than_answering_empty() {
         let empty = FakeDocuments::default();
-        let snap = crawl(&empty, HOST, day(), "groww", JoinKey::Isin, &master());
+        let snap = crawl(&empty, HOST, day(), "groww", JoinKey::Isin, &master()).await;
         assert!(snap.resolutions.is_empty());
         assert_eq!(snap.failures.len(), 4, "one per category");
         assert!(snap.failures[0].why.contains("no fixture"));
