@@ -462,6 +462,52 @@ mod tests {
         }
     }
 
+    /// The configuration an audit measured at over 1,500 seconds, now bounded.
+    ///
+    /// # What the audit actually found, and why the first fix was not enough
+    ///
+    /// A counting allocator and a watchdog were run across the whole threshold
+    /// range on this exact column (8 sessions, 1,124 swept bars):
+    ///
+    /// | `min_hits` | support | peak heap | wall | outcome |
+    /// |---|---|---|---|---|
+    /// | 600 | 53.4% | 0.9 MB | 0.006 s | extinct |
+    /// | 300 | 26.7% | 18.6 MB | 1.49 s | extinct |
+    /// | 125 | 11.1% | 314.7 MB | 495 s | last safe |
+    /// | 100 | 8.9% | 640 MB | **>1500 s** | killed, still in the k=10 join |
+    /// | 50 | 4.4% | 1,594 MB | **>1500 s** | killed |
+    ///
+    /// **Peak heap never exceeded 3.3% of that machine.** Memory was never the
+    /// binding constraint; time was, and the candidate ceiling could not see it —
+    /// it counts what a level HOLDS, and `popcount != k` rejects almost every pair
+    /// before it is ever counted.
+    ///
+    /// The pair budget counts what the join DOES. Under one, the same call that
+    /// ran for twenty-five minutes and was killed refuses in milliseconds and says
+    /// which budget it spent.
+    #[test]
+    fn a_threshold_that_used_to_run_for_ever_now_refuses_by_time() {
+        let bars = synthetic::sessions(8);
+        // The exact threshold the audit could not complete, under a pair budget
+        // small enough for a test. The DEFAULT budget bounds the same call at
+        // 2^34 pairs; this one only has to prove the mechanism fires.
+        let ladder = Ladder::with_min_hits(2).with_pair_budget(50_000);
+        let out = Sweeper::new(ladder).run(&bars, &mut evaluator());
+
+        let halt = out.sweep.halted.expect("it must refuse, not run for ever");
+        assert_eq!(
+            halt.breach,
+            engine::Breach::Pairs,
+            "TIME is what bound here -- the candidate ceiling was nowhere near spent"
+        );
+        assert!(
+            halt.candidates < engine::DEFAULT_CEILING,
+            "if the ceiling had bound, the pair budget would be the wrong fix"
+        );
+        assert!(!out.is_complete(), "and it must not read as a whole answer");
+        assert!(out.census.reconciles());
+    }
+
     #[test]
     fn is_complete_needs_all_three_conditions() {
         // The negative case, so the conjunction cannot rot into a constant.

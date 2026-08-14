@@ -232,6 +232,16 @@ impl Frontier {
 /// pathological. Before this type the only thing between that and the operator
 /// was the allocator, and the failure was a process abort with no message, no
 /// partial result and no event.
+///
+/// # Two budgets, because one measured the wrong thing
+///
+/// The first version bounded distinct candidates alone. An audit then measured
+/// the whole threshold range with a counting allocator and a watchdog and found
+/// **memory never binds**: peak heap topped out at 1.59 GB, 3.3% of the machine,
+/// while every run below 11% support was killed at 1,500 seconds still inside one
+/// join. The candidate ceiling counts what a level HOLDS, and `popcount != k`
+/// rejects almost every pair before it is counted — so it saw 38 million units of
+/// a four-hundred-billion-unit job. [`Breach`] says which budget was spent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Halt {
     /// The level that breached. Its [`Frontier`] is in [`Sweep::levels`] and is
@@ -253,6 +263,39 @@ pub struct Halt {
     pub candidates: usize,
     /// The ceiling that was in force, echoed so the result is self-describing.
     pub ceiling: usize,
+    /// Pairs the join had iterated when the walk stopped.
+    ///
+    /// # Why bytes were not enough
+    ///
+    /// [`Self::candidates`] bounds what a level HOLDS. This bounds what it DOES,
+    /// and an audit measured how far apart those are: at `min_hits = 2` and k=6
+    /// the frontier was 937,181 wide, so the join had `|F|²/2 ≈ 4.39 × 10¹¹`
+    /// pairs to walk — while `generated` reached only 38 million, because the
+    /// `popcount != k` filter rejects almost all of them before they are counted.
+    /// **Five orders of magnitude of work the candidate ceiling cannot see.**
+    ///
+    /// The same audit measured the consequence end to end: peak heap never
+    /// exceeded 1.59 GB — 3.3% of that machine — while runs below 11% support sat
+    /// for over 1,500 seconds and were killed. Memory was never what bound; time
+    /// was, and nothing was counting it.
+    pub pairs: u64,
+    /// The pair budget that was in force.
+    pub pair_budget: u64,
+    /// Which budget was spent.
+    pub breach: Breach,
+}
+
+/// Which of the two budgets a walk spent.
+///
+/// They measure different things and a sweep can hit either first: one bounds
+/// the bytes a level holds, the other the work it does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Breach {
+    /// Distinct candidates admitted reached the ceiling. Bounds memory.
+    #[default]
+    Candidates,
+    /// The join's pair iterations reached the budget. Bounds time.
+    Pairs,
 }
 
 /// The outcome of a whole sweep.
@@ -338,11 +381,34 @@ impl Sweep {
 /// than a comment, which is the whole of what CI gate 12 asks for.
 pub const DEFAULT_CEILING: usize = 1 << 23;
 
+/// Pairs one level's join may iterate before the walk refuses.
+///
+/// # This bounds TIME, and the ceiling above bounds bytes
+///
+/// They are not interchangeable and an audit measured how far apart they are. At
+/// `min_hits = 2` on a 1,124-bar column the frontier at k=6 was 937,181 wide, so
+/// the join had `|F|²/2 ≈ 4.39 × 10¹¹` pairs to walk. `generated` reached only
+/// 38 million, because `popcount != k` rejects almost every pair before it is
+/// counted — so the candidate ceiling saw 38 million units of a job that was four
+/// hundred billion. The walk sat in that one loop for 456 seconds.
+///
+/// The same audit ran the whole threshold range end to end with a counting
+/// allocator and a watchdog. **Peak heap never exceeded 1.59 GB — 3.3% of that
+/// machine — while every run below 11% support was killed at 1,500 seconds.**
+/// Memory was never the binding constraint. Time was, and nothing counted it.
+///
+/// `2^34` is 17.2 billion pair iterations. The per-pair cost is a mask union and
+/// a popcount, measured by `C-E-08` in `crates/engine/benches/ratio.rs`, so the
+/// budget is stated in the unit the bench measures rather than in seconds, which
+/// would be a claim about a machine rather than about the work.
+pub const DEFAULT_PAIR_BUDGET: u64 = 1 << 34;
+
 /// The ladder. **Carries no depth field**, by `CLAUDE.md` §6.
 #[derive(Clone, Copy, Debug)]
 pub struct Ladder {
     min_hits: u64,
     ceiling: usize,
+    pair_budget: u64,
 }
 
 impl Ladder {
@@ -372,6 +438,7 @@ impl Ladder {
         Self {
             min_hits: floor,
             ceiling: DEFAULT_CEILING,
+            pair_budget: DEFAULT_PAIR_BUDGET,
         }
     }
 
@@ -389,6 +456,7 @@ impl Ladder {
         Self {
             min_hits: self.min_hits,
             ceiling: if ceiling == 0 { 1 } else { ceiling },
+            pair_budget: self.pair_budget,
         }
     }
 
@@ -396,6 +464,29 @@ impl Ladder {
     #[must_use]
     pub const fn ceiling(&self) -> usize {
         self.ceiling
+    }
+
+    /// The same ladder with a different pair-iteration budget.
+    ///
+    /// Zero is raised to one, for the reason the other two knobs are: a budget of
+    /// zero refuses before doing anything, so every level past k=1 would report a
+    /// breach that describes the caller rather than the data.
+    ///
+    /// **Not a depth control either.** See [`Halt`]: it returns a refusal beside
+    /// the complete levels rather than a truncated answer that reads as whole.
+    #[must_use]
+    pub const fn with_pair_budget(self, pair_budget: u64) -> Self {
+        Self {
+            min_hits: self.min_hits,
+            ceiling: self.ceiling,
+            pair_budget: if pair_budget == 0 { 1 } else { pair_budget },
+        }
+    }
+
+    /// The pair-iteration budget this ladder will actually apply.
+    #[must_use]
+    pub const fn pair_budget(&self) -> u64 {
+        self.pair_budget
     }
 
     /// The threshold this ladder will actually apply.
@@ -622,8 +713,31 @@ impl Ladder {
         let mut infrequent: u64 = 0;
         let mut halted: Option<Halt> = None;
 
+        let mut pairs: u64 = 0;
         'join: for (a_idx, a) in prev.frequent.iter().enumerate() {
+            // THE PAIR BUDGET, CHECKED ONCE PER OUTER ROW so it costs nothing per
+            // pair. `a_idx` rows contribute `|F| - a_idx - 1` pairs each, and the
+            // count is exact rather than estimated because the inner loop below
+            // increments it.
+            //
+            // This is the budget that bounds TIME. The candidate ceiling bounds
+            // bytes, and the two are five orders of magnitude apart on a wide
+            // frontier -- see `Halt::pairs`. Without this, the only symptom of a
+            // `min_hits` set too low is a process that never returns, which is the
+            // opposite of the loud refusal `CLAUDE.md` §4 requires.
+            if pairs >= self.pair_budget {
+                halted = Some(Halt {
+                    k,
+                    candidates: admitted.saturating_add(seen.len()),
+                    ceiling: self.ceiling,
+                    pairs,
+                    pair_budget: self.pair_budget,
+                    breach: Breach::Pairs,
+                });
+                break 'join;
+            }
             for b in prev.frequent.iter().skip(a_idx.saturating_add(1)) {
+                pairs = pairs.saturating_add(1);
                 let cand = a.mask.union(&b.mask);
                 // A union of two distinct (k-1)-sets is a k-set only when they
                 // share exactly k-2 bits. Checking popcount is the same test and
@@ -651,6 +765,9 @@ impl Ladder {
                         k,
                         candidates: admitted.saturating_add(seen.len()),
                         ceiling: self.ceiling,
+                        pairs,
+                        pair_budget: self.pair_budget,
+                        breach: Breach::Candidates,
                     });
                     break 'join;
                 }
@@ -1139,7 +1256,9 @@ mod tests {
         // argued for in this comment before it can compile.
         assert_eq!(
             core::mem::size_of::<Ladder>(),
-            core::mem::size_of::<u64>() + core::mem::size_of::<usize>()
+            core::mem::size_of::<u64>()
+                + core::mem::size_of::<usize>()
+                + core::mem::size_of::<u64>()
         );
     }
 
@@ -1165,6 +1284,72 @@ mod tests {
         let wide: Vec<Itemset> = roomy.all_frequent().copied().collect();
         let narrow: Vec<Itemset> = tight.all_frequent().copied().collect();
         assert_eq!(wide, narrow, "and it changes no combination either");
+
+        // The PAIR BUDGET is held to the same rule. It bounds time where the
+        // ceiling bounds bytes, and neither may pick a depth.
+        let paired = Ladder::with_min_hits(2)
+            .with_pair_budget(1_000_000)
+            .walk(&b, &[0, 1, 2]);
+        assert!(paired.completed(), "a budget this roomy cannot bite");
+        assert_eq!(
+            paired.depth(),
+            roomy.depth(),
+            "a pair budget is not a depth"
+        );
+        let by_pairs: Vec<Itemset> = paired.all_frequent().copied().collect();
+        assert_eq!(wide, by_pairs, "nor does it change a combination");
+    }
+
+    /// The budget that bounds TIME, and the one the candidate ceiling cannot see.
+    ///
+    /// An audit measured the gap: at `min_hits = 2`, k=6, a 937,181-wide frontier
+    /// gives the join `4.39 × 10¹¹` pairs to walk while `generated` reaches only
+    /// 38 million — because `popcount != k` rejects almost every pair before it is
+    /// counted. The ceiling saw 38 million units of a four-hundred-billion-unit
+    /// job, and the walk sat in that loop for 456 seconds. Peak heap across the
+    /// whole threshold range never passed 1.59 GB, 3.3% of the machine: **memory
+    /// was never what bound.**
+    #[test]
+    fn the_pair_budget_refuses_where_the_ceiling_cannot() {
+        let deep: &[u32] = &[0, 1, 2, 3, 4, 5, 7, 8];
+        let b = bars(&[deep, deep, deep, &[9], &[9]]);
+        let live = [0, 1, 2, 3, 4, 5, 7, 8, 9];
+
+        // One pair is all it may walk, so the very first join row breaches.
+        let s = Ladder::with_min_hits(2).with_pair_budget(1).walk(&b, &live);
+        assert!(!s.completed(), "a one-pair budget cannot finish a join");
+        let halt = s.halted.unwrap_or_default();
+        assert_eq!(halt.breach, Breach::Pairs, "time, not bytes, was spent");
+        assert_eq!(halt.pair_budget, 1);
+        assert!(
+            halt.candidates < engine_ceiling(),
+            "the CANDIDATE ceiling was nowhere near spent -- that is the point"
+        );
+        for level in &s.levels {
+            assert!(level.reconciles(), "level {} lost a candidate", level.k);
+        }
+    }
+
+    /// The default ceiling, named once so the test above reads clearly.
+    fn engine_ceiling() -> usize {
+        DEFAULT_CEILING
+    }
+
+    #[test]
+    fn a_zero_pair_budget_is_raised_to_one() {
+        assert_eq!(
+            Ladder::with_min_hits(1).with_pair_budget(0).pair_budget(),
+            1
+        );
+        assert_eq!(
+            Ladder::with_min_hits(1).with_pair_budget(9).pair_budget(),
+            9
+        );
+        assert_eq!(
+            Ladder::with_min_hits(1).pair_budget(),
+            DEFAULT_PAIR_BUDGET,
+            "the default is the documented one"
+        );
     }
 
     /// The hole this closes: a frontier that never empties.
@@ -1232,12 +1417,17 @@ mod tests {
         assert_eq!(d.k, 0, "no level is k=0");
         assert_eq!(d.candidates, 0, "a breach admitted at least one candidate");
         assert_eq!(d.ceiling, 0, "and ran under a ceiling of at least one");
+        assert_eq!(d.pairs, 0, "and had iterated no pairs");
+        assert_eq!(d.breach, Breach::Candidates, "the default arm");
         assert_ne!(
             d,
             Halt {
                 k: 2,
                 candidates: 2,
-                ceiling: 2
+                ceiling: 2,
+                pairs: 2,
+                pair_budget: 2,
+                breach: Breach::Pairs,
             }
         );
     }
