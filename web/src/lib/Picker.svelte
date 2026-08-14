@@ -373,7 +373,7 @@
     font: inherit;
     font-size: 15px;
     font-weight: 600;
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono, ui-monospace, Menlo, monospace);
     padding: 11px 36px 11px 14px;
     cursor: pointer;
     background-image: linear-gradient(45deg, transparent 50%, var(--acc, #22d3ee) 50%),
@@ -443,7 +443,7 @@
     font: inherit;
     font-size: 15px;
     font-weight: 600;
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono, ui-monospace, Menlo, monospace);
     font-size: 17px;
     line-height: 1.2;
     padding: 18px 16px;
@@ -546,7 +546,7 @@
   .pnm {
     flex: 1;
     min-width: 0;
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono, ui-monospace, Menlo, monospace);
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -574,7 +574,7 @@
        ground, which is how a real answer ends up looking like a placeholder. */
     color: var(--dim, #95a0b6);
     font-size: 13px;
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono, ui-monospace, Menlo, monospace);
   }
   .pnone {
     padding: 16px 12px;
@@ -595,7 +595,7 @@
     border-top: 1px solid var(--line-soft, #edf0f6);
     background: transparent;
     color: var(--faint, #68738a);
-    font-family: ui-monospace, Menlo, monospace;
+    font-family: var(--mono, ui-monospace, Menlo, monospace);
     font-size: 11px;
     text-align: left;
     cursor: pointer;
