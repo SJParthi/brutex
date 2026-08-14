@@ -64,7 +64,8 @@ const PRICE: &str = include_str!("../src/price.rs");
 /// Listed by hand because `include_str!` takes a literal, and checked against
 /// `lib.rs` by [`the_module_list_is_the_whole_crate`] so the hand-written part
 /// cannot fall behind the crate.
-const OTHERS: [(&str, &str); 6] = [
+const OTHERS: [(&str, &str); 7] = [
+    ("blake3.rs", include_str!("../src/blake3.rs")),
     ("error.rs", include_str!("../src/error.rs")),
     ("instrument.rs", include_str!("../src/instrument.rs")),
     ("isin.rs", include_str!("../src/isin.rs")),
@@ -154,9 +155,40 @@ fn no_float_in_price() {
         //
         // Everything from the first `//` to the end of the line goes, which is exact here:
         // `core` has no string literal containing `//`.
-        let lines: Vec<&str> = text
+        // AND STRING LITERALS GO TOO, WHICH IS THE SAME LESSON ONE STEP FURTHER.
+        //
+        // The paragraph above records that text in a COMMENT is text. Text in a
+        // STRING is text for exactly the same reason, and it arrived exactly the
+        // same way: `blake3.rs` carries the published BLAKE3 vectors as 64-character
+        // hex literals, and the digest of the empty input ends `...cae41f3262`,
+        // which contains `f32`. That line named no float, performed no arithmetic
+        // and could never reach `from_rupees_half_up` -- there is nothing there to
+        // be on its way anywhere.
+        //
+        // Stripping is the fix rather than an exception list, because an exception
+        // list would have to name `blake3.rs` and would then stop scanning the very
+        // file it excused. This still refuses `let x: f32` anywhere; it only stops
+        // reading the inside of a quoted literal as code.
+        let lines: Vec<String> = text
             .lines()
             .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+            .map(|code| {
+                let mut out = String::with_capacity(code.len());
+                let mut inside = false;
+                let mut escaped = false;
+                for c in code.chars() {
+                    if escaped {
+                        escaped = false;
+                    } else if inside && c == '\\' {
+                        escaped = true;
+                    } else if c == '"' {
+                        inside = !inside;
+                    } else if !inside {
+                        out.push(c);
+                    }
+                }
+                out
+            })
             .collect();
         for (i, line) in lines.iter().enumerate() {
             if !line.contains("f64") && !line.contains("f32") {

@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod blake3;
 pub mod error;
 pub mod instrument;
 pub mod isin;
