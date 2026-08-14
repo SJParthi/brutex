@@ -1049,7 +1049,17 @@
    * can serve — a broker included. A default further down the list would leave
    * the form's first legal state illegal on the feed it opens with.
    */
-  let universe = $state('swept');
+  // THE DEFAULT IS A SET THIS MENU ACTUALLY OFFERS.
+  //
+  // It was `'swept'`, and 1c06dab removed the sweep pair from the menu at the
+  // operator's instruction — so the control kept DISPLAYING
+  // "NSE-NIFTY + NSE-BANKNIFTY" as its value while the list no longer contained
+  // it. Removing an option without moving the state off it leaves exactly that:
+  // a button showing a choice nobody can make.
+  //
+  // `n50` is the first row of the menu and it resolves to a real target
+  // (`target=n50`), so the page opens on something a request can name.
+  let universe = $state('n50');
   /**
    * Is the universe drawer open? Sets no request can name are folded behind one
    * line rather than listed dead above the ones that work — see the drawer in
