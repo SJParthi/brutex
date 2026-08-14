@@ -46,6 +46,7 @@
 #![deny(missing_docs)]
 
 pub mod identity;
+pub mod report;
 pub mod synthetic;
 
 use engine::{Ladder, Sweep};

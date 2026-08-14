@@ -191,11 +191,17 @@ pub struct Frontier {
 }
 
 impl Frontier {
-    /// Every candidate the join produced ended in exactly one of four places.
+    /// Every candidate the join produced ended in exactly one of five places.
     ///
-    /// `generated == duplicates + pruned + infrequent + frequent`. A level that
-    /// does not satisfy this has lost a candidate somewhere, and no report built
-    /// on it can be believed.
+    /// `generated == duplicates + excluded + pruned + infrequent + frequent`. A
+    /// level that does not satisfy this has lost a candidate somewhere, and no
+    /// report built on it can be believed.
+    ///
+    /// `excluded` is the one that surprises a reader, and it is why this list is
+    /// five long rather than four: at k=1 a position rejected by D-0080 as
+    /// always-true or always-false was still *generated*, so it must still be
+    /// accounted for. A summary that shows the other four and omits this one
+    /// reads as though the difference had vanished.
     #[must_use]
     pub fn reconciles(&self) -> bool {
         let accounted = self
