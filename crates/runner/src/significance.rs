@@ -210,6 +210,98 @@ pub fn bonferroni_t(n: u64) -> f64 {
     inverse_normal_cdf(1.0 - FWER / (2.0 * n_f))
 }
 
+/// Two-sided p-value for a t-statistic, under the normal approximation.
+///
+/// `2·(1 − Φ(|t|))`. The normal rather than Student's t because the samples
+/// here are hundreds to thousands of bars, where the two are indistinguishable
+/// to the precision anything downstream uses — and because a Student's t with
+/// per-combination degrees of freedom would need the sample size threaded
+/// through every caller for a correction smaller than the approximation already
+/// acknowledged in [`expected_max_t`].
+#[must_use]
+pub fn p_value(t: f64) -> f64 {
+    (2.0 * (1.0 - normal_cdf(t.abs()))).clamp(0.0, 1.0)
+}
+
+/// How many of `p_values` may be called findings at a false-discovery rate of
+/// [`FWER`], by **Benjamini–Hochberg**.
+///
+/// # Why this and not only Bonferroni
+///
+/// Bonferroni controls the chance of **even one** false positive. That is the
+/// right question for a handful of hypotheses and the wrong one for a sweep: at
+/// sixty-one million tests it sets a bar so high that a real effect must be
+/// enormous to clear it, and most real effects are not enormous.
+///
+/// Benjamini–Hochberg controls the **fraction** of the findings that are
+/// flukes. "Of these forty, at most two are noise" is both more useful and more
+/// powerful than "this one thing is beyond doubt", and it is what a search
+/// designed to look at everything actually wants. Harvey, Liu & Zhu report both
+/// for the same data, and their BHY cutoff (3.39) sits well below their
+/// Bonferroni one (3.78).
+///
+/// # The procedure, and the step that is easy to get wrong
+///
+/// Sort ascending, find the LARGEST `k` with `p(k) ≤ (k/m)·α`, and reject every
+/// hypothesis up to `k` — **including those whose own p-value exceeds their own
+/// threshold**. Stopping at the first failure instead is the common error and
+/// it makes the procedure conservative in a way that is no longer Benjamini–
+/// Hochberg.
+///
+/// Returns how many are rejected; the caller holds the ordering and can take
+/// that many from the front of its own sorted list.
+#[must_use]
+pub fn benjamini_hochberg(p_values: &mut [f64]) -> usize {
+    if p_values.is_empty() {
+        return 0;
+    }
+    p_values.sort_unstable_by(f64::total_cmp);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a finding count above 2^53 cannot be held in memory, let alone \
+                  ranked; the bounded heap caps it far below."
+    )]
+    let m = p_values.len() as f64;
+    let mut largest = 0_usize;
+    for (index, p) in p_values.iter().enumerate() {
+        let rank = index.saturating_add(1);
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "see above -- the rank is bounded by the slice length."
+        )]
+        let k = rank as f64;
+        if *p <= k / m * FWER {
+            // NOT a break. The largest passing rank is what counts, and a later
+            // one can pass after an earlier one fails -- stopping here is the
+            // classic misreading and it silently makes the test conservative.
+            largest = rank;
+        }
+    }
+    largest
+}
+
+/// Standard normal CDF, from the error function's rational approximation.
+///
+/// Abramowitz & Stegun 7.1.26 composed into `Φ(x) = ½(1 + erf(x/√2))`. Accurate
+/// to about 1.5e-7, which is far beyond what a p-value compared against a
+/// threshold needs — and the same order as the quantile below it, so the pair
+/// do not disagree at a precision either of them can support.
+fn normal_cdf(x: f64) -> f64 {
+    // Horner form with named coefficients, for the reason the quantile gives:
+    // `clippy::indexing_slicing` is denied and a coefficient table would need an
+    // exception this does not deserve.
+    let z = x / core::f64::consts::SQRT_2;
+    let sign = if z < 0.0 { -1.0 } else { 1.0 };
+    let a = z.abs();
+    let t = 1.0 / (1.0 + 0.327_591_1 * a);
+    let poly = ((((1.061_405_429 * t - 1.453_152_027) * t + 1.421_413_741) * t - 0.284_496_736)
+        * t
+        + 0.254_829_592)
+        * t;
+    let erf = sign * (1.0 - poly * (-a * a).exp());
+    0.5 * (1.0 + erf)
+}
+
 /// Standard normal quantile — Acklam's rational approximation.
 ///
 /// Accurate to about 1.15e-9 across the open interval, which is far beyond what
@@ -284,8 +376,8 @@ fn inverse_normal_cdf(p: f64) -> f64 {
 )]
 mod tests {
     use super::{
-        bonferroni_t, effective_trials, expected_max_bailey, expected_max_t, inverse_normal_cdf,
-        trials,
+        benjamini_hochberg, bonferroni_t, effective_trials, expected_max_bailey, expected_max_t,
+        inverse_normal_cdf, normal_cdf, p_value, trials,
     };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
@@ -448,6 +540,80 @@ mod tests {
         );
         // Never below the number of genuinely distinct tests.
         assert!(effective > 0);
+    }
+
+    #[test]
+    fn the_normal_cdf_and_its_quantile_agree_with_each_other() {
+        // Two independent approximations of inverse functions. If they disagree
+        // the p-values and the thresholds are on different scales, and every
+        // comparison between them is meaningless.
+        for p in [0.6_f64, 0.75, 0.9, 0.975, 0.99, 0.999] {
+            let q = inverse_normal_cdf(p);
+            let back = normal_cdf(q);
+            assert!(
+                (back - p).abs() < 1e-6,
+                "round trip failed at p={p}: quantile {q} came back as {back}"
+            );
+        }
+        // The textbook anchors.
+        assert!((normal_cdf(0.0) - 0.5).abs() < 1e-9);
+        assert!((normal_cdf(1.96) - 0.975).abs() < 1e-4);
+        assert!((normal_cdf(-1.96) - 0.025).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_p_value_is_two_sided_and_symmetric_in_the_sign_of_t() {
+        // A combination preceding a FALL is as real as one preceding a rise, so
+        // the p-value must not care which.
+        assert!((p_value(1.96) - 0.05).abs() < 1e-3);
+        assert!((p_value(-1.96) - 0.05).abs() < 1e-3);
+        // 1e-6, matching the CDF approximation's own 1.5e-7 accuracy -- a tighter
+        // tolerance would be asserting precision the function does not claim.
+        assert!((p_value(0.0) - 1.0).abs() < 1e-6, "no evidence at all");
+        assert!(p_value(6.0) < 1e-8, "six sigma is vanishingly unlikely");
+        // Bounded, whatever is handed in.
+        assert!((0.0..=1.0).contains(&p_value(f64::INFINITY)));
+        assert!((0.0..=1.0).contains(&p_value(-40.0)));
+    }
+
+    #[test]
+    fn benjamini_hochberg_takes_the_largest_passing_rank_not_the_first_failure() {
+        // THE STEP THAT IS EASY TO GET WRONG. p3 fails its own threshold while
+        // p4 passes; the procedure rejects FOUR, not two. Stopping at the first
+        // failure is the classic misreading and yields two.
+        // m = 5, alpha = 0.05, thresholds are 0.01, 0.02, 0.03, 0.04, 0.05.
+        let mut p = [0.001, 0.015, 0.035, 0.039, 0.9];
+        assert_eq!(
+            benjamini_hochberg(&mut p),
+            4,
+            "0.035 exceeds its own threshold of 0.03, but 0.039 clears 0.04 -- \
+             so everything up to rank four is rejected"
+        );
+    }
+
+    #[test]
+    fn benjamini_hochberg_is_more_permissive_than_bonferroni_and_that_is_the_point() {
+        // The same p-values under both. BH must reject at least as many, or it
+        // is not doing the job it exists for.
+        let mut p: Vec<f64> = (1..=100).map(|i| f64::from(i) * 0.0004).collect();
+        let bh = benjamini_hochberg(&mut p);
+        let bonferroni = p.iter().filter(|x| **x <= 0.05 / 100.0).count();
+        assert!(
+            bh > bonferroni,
+            "BH rejected {bh} and Bonferroni {bonferroni}; controlling the \
+             FRACTION of false findings must admit more than controlling the \
+             chance of any"
+        );
+    }
+
+    #[test]
+    fn benjamini_hochberg_rejects_nothing_when_nothing_deserves_it() {
+        assert_eq!(benjamini_hochberg(&mut []), 0, "no hypotheses, no findings");
+        let mut noise = [0.6_f64, 0.7, 0.8, 0.99];
+        assert_eq!(benjamini_hochberg(&mut noise), 0, "pure noise yields none");
+        // And everything, when everything deserves it.
+        let mut strong = [1e-12_f64; 20];
+        assert_eq!(benjamini_hochberg(&mut strong), 20);
     }
 
     #[test]
