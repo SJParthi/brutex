@@ -275,9 +275,31 @@ impl SpotTarget {
     ///   `(exchange, symbol)` pairs. Answering it with a symbol list would put a
     ///   third copy of §1 in a third crate.
     /// * [`Self::Indices`] is whatever the vendor master lists as an index
-    ///   series on this build. NSE publishes no file naming that set, so a
-    ///   hardcoded one would be invention and would go stale the day a vendor
-    ///   added a series.
+    ///   series on this build.
+    ///
+    ///   **THIS ROW USED TO CARRY A REASON THAT WAS FALSE.** It read: *"NSE
+    ///   publishes no file naming that set, so a hardcoded one would be
+    ///   invention and would go stale the day a vendor added a series."* The
+    ///   second half is right and the first half is not. NSE Indices Limited
+    ///   publishes a categorised directory of every equity index it computes —
+    ///   **148 of them**, across four category pages, each index's own page
+    ///   linking its constituent CSV under the same
+    ///   `Company Name,Industry,Symbol,Series,ISIN Code` header §4c already
+    ///   reads. Read 14 Aug 2026; `docs/00-charter.md` §4d.
+    ///
+    ///   So `None` here is still correct and its reason has changed. A
+    ///   published list exists and **this build has not resolved it**: the
+    ///   constituent URL is not derivable from an index's name
+    ///   (`ind_niftybanklist.csv` against `ind_niftytotalmarket_list.csv` —
+    ///   word-joined against underscore-separated, with no rule between them),
+    ///   so the directory has to be crawled rather than composed, and nothing
+    ///   crawls it yet. Answering with a transcribed 148-name array would be
+    ///   the same photograph-of-a-rebalancing-index this repository already
+    ///   holds for the constituent tiers, one level up.
+    ///
+    ///   Until the resolver exists, this target remains **per feed and
+    ///   unverified**: two feeds may legitimately answer differently and
+    ///   nothing here can say which is right.
     ///
     /// Membership is decided by [`Self::names`] for all seven either way. This
     /// is the roster, not the predicate, and nothing on the pull path reads it:

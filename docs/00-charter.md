@@ -316,6 +316,48 @@ from a downloaded CSV. `AGL` is **UNVERIFIED** — this repository does not know
 what instrument it is, and will not guess. D-0089 states the resolution and
 `docs/06-limits.md` §11 carries the cost.
 
+### 4d. The NSE index directory — read 14 Aug 2026, and it settles a claim this repository asserted the opposite of
+
+**`crates/api/src/ingest.rs` stated, as the justification for the whole shape of
+`SpotTarget::Indices`:** *"NSE publishes no file naming that set, so a hardcoded
+one would be invention and would go stale the day a vendor added a series."*
+
+**That is false, and it was read as false on 14 Aug 2026.** NSE Indices Limited
+— the company that computes the indices — publishes a categorised directory of
+every equity index it maintains, and each index's own page carries a link to its
+constituent CSV.
+
+| Category | Indices | Route |
+|---|---|---|
+| Broad-based | **22** | `niftyindices.com/indices/equity/broad-based-indices` |
+| Sectoral | **34** | `niftyindices.com/indices/equity/sectoral-indices` |
+| Strategy | **48** | `niftyindices.com/indices/equity/strategy-indices` |
+| Thematic | **44** | `niftyindices.com/indices/equity/thematic-indices` |
+| **Total** | **148** | four category pages, each listing its members |
+
+| Fact | Value | Lane |
+|---|---|---|
+| Directory exists | **Yes.** Four category pages, 148 equity indices between them, each linking its own page. | verified 14 Aug 2026 |
+| Constituent file | On each index's page, as `/IndexConstituent/ind_<name>list.csv` | verified |
+| CSV header | `Company Name,Industry,Symbol,Series,ISIN Code` — **identical to the five files §4c already reads**, and every row carries an ISIN | verified from a live body |
+| Measured example | `ind_niftybanklist.csv`, 916 bytes, header as above, first row `AU Small Finance Bank Ltd.,Financial Services,AUBANK,EQ,INE949L01017` | verified |
+| **The URL is NOT derivable from the index name** | `ind_niftybanklist.csv` against `ind_niftytotalmarket_list.csv` — one word-joined, one underscore-separated. There is no rule that turns "Nifty Bank" into the first and "Nifty Total Market" into the second. | verified, and it is the load-bearing row |
+
+**Why the last row decides the design.** A resolver that *derives* a CSV URL from
+an index's name is inventing a filename convention the exchange has not stated,
+and §3 rule 1 forbids exactly that — the two examples above already disagree
+with each other. So the directory must be **crawled**: category page → index
+page → the constituent link that page carries. Every step reads a URL the
+exchange published rather than one this repository composed.
+
+**What this does NOT settle.** Whether all 148 are instruments any vendor
+serves, and whether a vendor's "index series" set is a subset of these 148, is
+the cross-check the resolver exists to perform and has not performed. The count
+above is what the exchange publishes, not what is reachable. Nothing here
+widens `CLAUDE.md` §1: the sweep surface is still `NSE-NIFTY` and
+`NSE-BANKNIFTY`, and every one of the other 146 would be **stored, never
+swept**.
+
 ### 4b. Option-greek facts, measured from a live chain
 
 Golden rule 1 again. `crates/greeks` makes claims about what a vendor's option
