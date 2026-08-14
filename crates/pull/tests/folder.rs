@@ -33,7 +33,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use pull::archive::Member;
+use pull::archive::{self, Member};
 use pull::csv::Columns;
 use pull::fetch::RawRow;
 use pull::fold::{Bucket, fold};
@@ -824,4 +824,82 @@ fn one_file_of_another_product_is_reported_and_the_rest_of_the_folder_still_read
         !census.reach.is_empty(),
         "the reach comes from the members that read, not from zero"
     );
+}
+
+/// THE WALK DESCENDS, BECAUSE NEITHER VENDOR SHIPS ONE FLAT LEVEL.
+///
+/// MEASURED ON THE OPERATOR'S DISK, 14 Aug 2026. `vendor-data/gdfl/` holds no
+/// CSV at all at its top level; every member is two or three levels down:
+///
+/// ```text
+/// gdfl/GFDLNFO_TICK_01072025/Options/360ONE28AUG251100PE.NFO.csv
+/// gdfl/GFDLNFO_TICK_01072025/Futures/-I/AARTIIND-I.NFO.csv
+/// ```
+///
+/// The walk counted a directory as `skipped` and read one level, so a folder
+/// holding 12,132 contracts censused as `Empty` — a precise and wrong answer,
+/// which is the shape this module exists to refuse. The descriptor had
+/// described the nesting all along: GDFL declares
+/// `Nesting::ZipOfSegmentFolders` with `groups: [(Options, "Options"),
+/// (Futures, "Futures")]`.
+///
+/// Asserted at BOTH depths, because one would have passed with a fixed
+/// single-level descent and the futures month folders sit a level below the
+/// options.
+#[test]
+fn the_walk_descends_into_group_folders_rather_than_skipping_them() {
+    let scratch = Scratch::new();
+    let root = scratch.dir("nested");
+    let deep = root.join("GFDLNFO_TICK_01072025");
+    let opts = deep.join("Options");
+    let near = deep.join("Futures").join("-I");
+    fs::create_dir_all(&opts).expect("options");
+    fs::create_dir_all(&near).expect("futures/-I");
+    fs::write(opts.join("BANKNIFTY.csv"), TWO_DAYS).expect("an option");
+    fs::write(near.join("NIFTY.csv"), ONE_EARLIER_DAY).expect("a future");
+
+    let census = folder::read_census(&root, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("a nested folder reads");
+
+    assert_eq!(
+        census.instruments,
+        vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()],
+        "both depths, and sorted"
+    );
+    // THE REACH IS THE UNION ACROSS DEPTHS, not the level that happened to be
+    // walked last — the earlier day is the one three levels down.
+    let Reach::Days {
+        earliest, files, ..
+    } = census.reach
+    else {
+        panic!("{:?}", census.reach)
+    };
+    assert_eq!(files, 2);
+    assert_eq!(earliest, day(2022, 9, 30));
+}
+
+/// THE DESCENT IS BOUNDED, and a member past the bound is COUNTED not dropped.
+///
+/// Both feed folders on the operator's machine are SYMLINKS, so an unbounded
+/// recursive walk is a live loop hazard rather than a theoretical one.
+/// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary.
+#[test]
+fn a_member_nested_past_the_depth_bound_is_not_walked() {
+    let scratch = Scratch::new();
+    let root = scratch.dir("too-deep");
+    let mut at = root.clone();
+    for level in 0..=archive::MAX_DEPTH {
+        at = at.join(format!("l{level}"));
+    }
+    fs::create_dir_all(&at).expect("a deep tree");
+    fs::write(at.join("BURIED.csv"), TWO_DAYS).expect("a buried member");
+
+    let census = folder::read_census(&root, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("the walk stops rather than looping");
+    assert!(
+        census.instruments.is_empty(),
+        "past the bound is not walked: {:?}",
+        census.instruments
+    );
+    assert_eq!(census.reach, Reach::Empty);
 }

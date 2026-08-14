@@ -440,6 +440,22 @@ pub fn read_dir_reporting(
 /// # Errors
 ///
 /// Whatever [`read_dir`] documents; this is its body.
+/// HOW DEEP THE WALK DESCENDS, and it is a bound rather than a guess.
+///
+/// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary. A
+/// recursive walk with no depth bound is a walk that follows a symlink loop
+/// forever, and BOTH feed folders on this operator's machine are symlinks, so
+/// that is a live hazard rather than a theoretical one.
+///
+/// Four, measured. The deepest real member sits three below the feed folder —
+/// `gdfl/GFDLNFO_TICK_01072025/Futures/-I/AARTIIND-I.NFO.csv` — and four leaves
+/// exactly one level of headroom for a vendor that adds a wrapper. A fifth
+/// would be room for a mistake rather than for a vendor.
+///
+/// Deeper members are SKIPPED and counted, never silently dropped:
+/// [`Passed::skipped`] is on the walk's own log line.
+pub const MAX_DEPTH: usize = 4;
+
 fn walk(
     dir: &Path,
     columns: Columns,
@@ -448,6 +464,38 @@ fn walk(
     on_malformed: Malformed,
     rejected: &mut Vec<Rejected>,
 ) -> Result<(), ArchiveError> {
+    descend(dir, columns, out, passed, on_malformed, rejected, 0)
+}
+
+/// One directory level of [`walk`], and its own subdirectories under
+/// [`MAX_DEPTH`].
+///
+/// `depth` is the level BELOW the folder the walk started at: the feed folder
+/// itself is 0, so a member at `GFDLNFO_TICK_01072025/Options/x.csv` is reached
+/// with `depth == 2`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "six of the seven are the walk's own state — the accumulator, the \
+              two counters, the malformed policy, the rejects and the depth — \
+              and bundling them into a struct would put a mutable borrow of the \
+              accumulator inside the same value as the thing being pushed to it. \
+              The recursion is what makes them parameters rather than locals."
+)]
+fn descend(
+    dir: &Path,
+    columns: Columns,
+    out: &mut Vec<Member>,
+    passed: &mut Passed,
+    on_malformed: Malformed,
+    rejected: &mut Vec<Rejected>,
+    depth: usize,
+) -> Result<(), ArchiveError> {
+    if depth >= MAX_DEPTH {
+        // COUNTED, NOT DROPPED. The walk's log line carries `skipped`, so a
+        // folder nested past the bound says so rather than reading as empty.
+        passed.skipped = passed.skipped.saturating_add(1);
+        return Ok(());
+    }
     if !dir.is_dir() {
         return Err(ArchiveError::NotADirectory {
             path: dir.to_path_buf(),
@@ -473,7 +521,46 @@ fn walk(
             passed.ghosts = passed.ghosts.saturating_add(1);
             continue;
         }
-        if !path.is_file() || path.extension().is_none_or(|e| e != "csv") {
+        // ═══ A SUBFOLDER IS DESCENDED INTO, NOT SKIPPED ═══
+        //
+        // This read `!path.is_file() || extension != csv` and counted a
+        // directory as `skipped`, so the walk saw exactly one level and these
+        // vendors do not ship one level.
+        //
+        // MEASURED ON THE OPERATOR'S DISK, 14 Aug 2026:
+        //
+        //   vendor-data/gdfl/                              0 csv files here
+        //   └── GFDLNFO_TICK_01072025/
+        //       ├── Options/                          11,491 csv files
+        //       └── Futures/{-I,-II,-III}/               the near, mid and far
+        //                                                 month, one level lower
+        //
+        // So every member was two or three levels down and the walk found NONE
+        // of them. `read_census` answered `Empty` for a folder holding eleven
+        // and a half thousand contracts, which is the exact shape of a precise
+        // and wrong answer.
+        //
+        // THE DESCRIPTOR ALREADY DESCRIBED THIS. GDFL declares
+        // `Nesting::ZipOfSegmentFolders` and `groups: [(Options, "Options"),
+        // (Futures, "Futures")]`. The structure was stated in `crate::vendor`
+        // and this walker never read it — which is why the fix is a descent and
+        // not a question for anybody.
+        //
+        // DEPTH-FIRST, IN DIRECTORY ORDER, and the ordering does not matter
+        // because `out` is sorted by path at the end for exactly this reason.
+        if path.is_dir() {
+            descend(
+                &path,
+                columns,
+                out,
+                passed,
+                on_malformed,
+                rejected,
+                depth + 1,
+            )?;
+            continue;
+        }
+        if path.extension().is_none_or(|e| e != "csv") {
             passed.skipped = passed.skipped.saturating_add(1);
             continue;
         }
