@@ -100,6 +100,16 @@ impl Horizon {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Forward {
     horizon: Horizon,
+    /// How many bars the slice this was built from held.
+    ///
+    /// Carried so a MISMATCH is distinguishable from the tail. Both make
+    /// [`Self::at`] return `None`, and without this they are the same answer:
+    /// a `Forward` built from a five-minute slice, handed to a `Column` built
+    /// from one-minute bars, would silently produce a finite and plausible
+    /// `Edge` whose shortfall in `n` reads exactly like the documented tail.
+    /// `crates/runner/src/resample.rs` exists so a caller can build that second
+    /// slice, which is precisely the situation that produces the pairing.
+    bars_len: usize,
     /// `ret[i] = close[i + H] − close[i]`, in paisa. Length is
     /// `bars.len() − H`, so the tail is absent by construction rather than by a
     /// sentinel a caller could mistake for a measurement.
@@ -123,6 +133,16 @@ impl Forward {
     #[must_use]
     pub const fn horizon(&self) -> Horizon {
         self.horizon
+    }
+
+    /// Was caller-slice index `i` inside the slice this was built from?
+    ///
+    /// `false` means the caller paired this `Forward` with a `Column` built
+    /// from a DIFFERENT slice -- not that the bar is in the tail. [`Self::at`]
+    /// cannot tell those apart and this is what does.
+    #[must_use]
+    pub const fn covers(&self, i: usize) -> bool {
+        i < self.bars_len
     }
 }
 
@@ -150,7 +170,11 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         let now = bars.get(i).map_or(0, |b| b.close);
         ret.push(later.saturating_sub(now));
     }
-    Forward { horizon, ret }
+    Forward {
+        horizon,
+        bars_len: bars.len(),
+        ret,
+    }
 }
 
 /// What a combination's forward moves looked like.
@@ -166,6 +190,18 @@ pub struct Edge {
     pub n: u64,
     /// Mean forward move in paisa.
     pub mean_paisa: f64,
+    /// Bars whose source index lay OUTSIDE the slice the `Forward` came from.
+    ///
+    /// Non-zero means the caller paired a `Column` with a `Forward` built from a
+    /// different slice -- a five-minute `Forward` against a one-minute column,
+    /// say. Every other field is then measured over whatever overlap happened to
+    /// exist, so a non-zero value here makes the rest of this struct
+    /// meaningless rather than merely smaller.
+    ///
+    /// It is a COUNT and not a refusal because `edge` returns three numbers
+    /// about one mask and has nowhere to put an error; `CLAUDE.md` §4 asks for
+    /// the reason to be named beside the answer, and this names it.
+    pub mismatched: u64,
     /// The t-statistic of that mean against zero.
     ///
     /// `mean / (sd / √n)`. Zero when fewer than two observations exist, where a
@@ -189,6 +225,7 @@ pub struct Edge {
 #[must_use]
 pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut n: u64 = 0;
+    let mut mismatched: u64 = 0;
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
 
@@ -199,6 +236,13 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // THE PAIRING THAT MUST GO THROUGH `sources`. `first_swept + j` runs one
         // behind from the first refused bar onward, and every outcome after it
         // would be read off the wrong bar -- see `Column::sources`.
+        if !forward.covers(source) {
+            // NOT the tail. The caller paired this column with a `Forward`
+            // built from a different slice, and the shortfall would otherwise
+            // be indistinguishable from the documented tail exclusion.
+            mismatched = mismatched.saturating_add(1);
+            continue;
+        }
         let Some(r) = forward.at(source) else {
             continue; // in the tail: no future exists, so nothing is counted
         };
@@ -228,6 +272,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     if n < 2 {
         return Edge {
             n,
+            mismatched,
             mean_paisa: mean,
             t: 0.0,
         };
@@ -249,6 +294,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     };
     Edge {
         n,
+        mismatched,
         mean_paisa: mean,
         t,
     }
@@ -383,6 +429,41 @@ mod tests {
         assert!(
             e.t.is_finite(),
             "a zero standard error must not produce an infinite t"
+        );
+    }
+
+    #[test]
+    fn a_forward_from_a_different_slice_is_counted_as_a_mismatch_not_as_the_tail() {
+        // The situation `resample` makes reachable: a column built from
+        // one-minute bars, paired with forward returns built from the FIVE-minute
+        // fold of the same session. Every source index past the shorter slice
+        // returns None from `at`, which without `covers` is indistinguishable
+        // from the documented tail exclusion -- so the caller would get a finite,
+        // plausible Edge measured over whatever overlap happened to exist.
+        let minute = crate::synthetic::sessions(8);
+        let column = Column::build(&minute, &mut evaluator());
+        let five = crate::resample::Period::minutes(5).expect("five");
+        let coarse = crate::resample::resample(&minute, five);
+        assert!(
+            coarse.len() < minute.len(),
+            "the coarse slice must be shorter, or this proves nothing"
+        );
+
+        let wrong = forward(&coarse, Horizon::DEFAULT);
+        let e = edge(&column, &wrong, &ConditionMask::default());
+        assert!(
+            e.mismatched > 0,
+            "pairing a column with a Forward from a shorter slice must be \
+             COUNTED, not silently folded into the tail"
+        );
+
+        // And the correct pairing reports zero, so a non-zero value means what
+        // it says rather than being background noise.
+        let right = forward(&minute, Horizon::DEFAULT);
+        assert_eq!(
+            edge(&column, &right, &ConditionMask::default()).mismatched,
+            0,
+            "the matching pair must report no mismatch at all"
         );
     }
 

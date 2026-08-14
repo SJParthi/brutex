@@ -152,9 +152,16 @@ const fn bucket_start(bucket: i64, period: Period) -> i64 {
 /// and `crates/runner/benches/ratio.rs` would need a `C-R-04` to claim one.
 #[must_use]
 pub fn resample(bars: &[Candle], period: Period) -> Vec<Candle> {
-    // The output cannot be longer than the input divided by the period, plus one
-    // for a leading partial. Reserving the ceiling avoids the doubling growth
-    // gate 11 rule 3 is about.
+    // A HINT, not a bound, and the comment here used to claim otherwise.
+    //
+    // It said the output "cannot be longer than the input divided by the period,
+    // plus one" and then reserved no plus-one -- and the bound itself is false
+    // on any multi-session slice. Buckets are keyed on the clock, so an
+    // overnight gap splits a bucket WITHOUT consuming a full period of input
+    // bars; this module's own `an_overnight_gap_needs_no_calendar_to_split_a_bar`
+    // is a direct counterexample. Reserving the common case still avoids most of
+    // the doubling growth gate 11 rule 3 is about, and a `Vec` that grows past a
+    // hint is correct where a comment that lies is not.
     // `Period` refuses anything below two, so the divisor is never zero and
     // `div_ceil` cannot panic. A `checked_div(..).unwrap_or(..)` here left an
     // arm no input could reach, which is the coverage hole §9 refuses and,

@@ -20,8 +20,15 @@
 //! # What this does instead
 //!
 //! Keeps `k` and throws the rest away as it goes. Memory becomes a function of
-//! how many results you want to LOOK at, not of how many exist — 10,000 kept is
-//! 2.1 MB whether the sweep enumerated a million or a hundred billion.
+//! how many results you want to LOOK at, not of how many exist.
+//!
+//! **10,000 kept is 0.80 MB**, and briefly 1.6 MB. A `Scored` is 80 bytes --
+//! `ConditionMask` 48, `hits` 8, `Edge` 24 -- not the 212 the sweep spends per
+//! RETAINED itemset, and this header priced it at 212 until an audit caught the
+//! borrowed figure. The transient doubling is real and stated: the final
+//! `collect` is an `ExactSizeIterator`, so a second keep-sized buffer exists
+//! while the heap's own is still alive. Both are O(keep), which is the claim
+//! that matters, and 0.80 MB is the number.
 //!
 //! # Ranked by |t|, and why the absolute value
 //!
@@ -187,6 +194,7 @@ mod tests {
             hits: 1,
             edge: Edge {
                 n: 2,
+                mismatched: 0,
                 mean_paisa: t,
                 t,
             },
@@ -270,17 +278,32 @@ mod tests {
 
         // AND NOTHING DISCARDED WAS BETTER THAN WHAT WAS KEPT, which is the only
         // property that makes a bounded heap equivalent to sorting everything.
+        //
+        // The first form of this counted combinations strictly better than the
+        // worst kept and allowed up to `keep` of them. An audit showed that has
+        // a slot of slack BY CONSTRUCTION -- at most keep-1 kept rows can be
+        // strictly better than the worst kept row -- so it produced the same
+        // number on correct and defective code and proved nothing. The property
+        // is now asserted directly: every combination NOT kept must be no better
+        // than the weakest one that was.
         let worst_kept = r.top.last().map_or(0.0, |s: &Scored| s.edge.t.abs());
-        let better_than_worst = out
+        let kept: std::collections::HashSet<[u64; 6]> =
+            r.top.iter().map(|s| s.mask.words()).collect();
+        // A filter chain rather than a loop with an `if`: the increment inside
+        // that `if` is a line no CORRECT run executes, and an unexecuted line is
+        // the coverage hole §9 refuses. The predicate is evaluated on every
+        // discarded combination either way.
+        let discarded_better = out
             .sweep
             .all_frequent()
+            .filter(|i| !kept.contains(&i.mask.words()))
             .filter(|i| crate::outcome::edge(&column, &f, &i.mask).t.abs() > worst_kept)
             .count();
-        assert!(
-            better_than_worst <= keep,
-            "{better_than_worst} combinations beat the weakest kept one, but \
-             only {keep} were kept -- the heap dropped something it should have \
-             admitted"
+        assert_eq!(
+            discarded_better, 0,
+            "{discarded_better} DISCARDED combinations beat the weakest one kept \
+             -- a bounded heap that drops a qualifying entry is not equivalent \
+             to sorting everything, it is just a faster way to be wrong"
         );
     }
 

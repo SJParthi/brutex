@@ -862,6 +862,7 @@ mod tests {
             hits: 500,
             edge: crate::outcome::Edge {
                 n: 500,
+                mismatched: 0,
                 mean_paisa: 1.0,
                 t: 0.4,
             },
