@@ -304,6 +304,63 @@ impl Sweeper {
             threshold = threshold.checked_div(2).unwrap_or(1).max(1);
         }
 
+        // BISECT THE BRACKET THE HALVING LEFT BEHIND.
+        //
+        // # The factor of two the grid was throwing away
+        //
+        // Halving probes only powers of two below the column, so the answer was
+        // pinned to that grid while the true frontier sits anywhere between the
+        // last rung that completed and the first that refused. An adversarial
+        // audit measured the cost on one real column, at this search's own probe
+        // budget:
+        //
+        // | | chosen by the grid | deepest affordable | |
+        // |---|---|---|---|
+        // | `min_hits` | 48,374 (50.0%) | 30,961 (32.0%) | |
+        // | depth | 12 | 14 | +2 levels |
+        // | frequent sets | 6,631 | 51,778 | **7.8x** |
+        //
+        // The grid jumped 48,374 -> 24,187 and never tried 30,961, so 45,147
+        // combinations that this machine could afford in 0.55 s were reported as
+        // not existing. On a second column the grid jumped from a vacuous rung
+        // straight past 55,471 and returned "nothing affordable" one probe away
+        // from 60,383 combinations.
+        //
+        // # Why bisection is correct here and not merely closer
+        //
+        // The same monotonicity that makes stopping at the first refusal correct
+        // makes this correct: cost falls as the threshold rises, so the range
+        // holds exactly one crossover — every threshold above it completes and
+        // every one below refuses. Bisection finds that crossover. It cannot
+        // land on a threshold the halving would have accepted and this rejects,
+        // because both ask the same question of the same column.
+        //
+        // The cost is `log2(bracket)` more walks on a column already folded, and
+        // the bracket is at most the last rung's own width.
+        if let Some(refused) = refused_below {
+            let mut lo = refused;
+            let mut hi = best.as_ref().map_or(refused, |&(t, _)| t);
+            while hi.saturating_sub(lo) > 1 {
+                let mid = lo.saturating_add(hi.saturating_sub(lo) / 2);
+                attempts = attempts.saturating_add(1);
+                let sweep = Ladder::with_min_hits(mid)
+                    .with_ceiling(self.ladder.ceiling())
+                    .with_pair_budget(PROBE_PAIRS)
+                    .walk(column.bits(), &live);
+                // `depth() >= 1` for the same reason the halving loop tests it:
+                // a probe that found nothing is not an answer, and a vacuous rung
+                // must move the bracket rather than be kept.
+                if sweep.completed() && sweep.depth() >= 1 {
+                    hi = mid;
+                    best = Some((mid, sweep));
+                } else {
+                    lo = mid;
+                }
+            }
+            // The edge is now the tightest one measured, not the grid's.
+            refused_below = Some(lo);
+        }
+
         let (min_hits, sweep) = best.map_or((None, Sweep::default()), |(t, s)| (Some(t), s));
         Auto {
             affordable: min_hits.is_some(),

@@ -613,6 +613,38 @@ mod tests {
     }
 
     #[test]
+    fn the_search_closes_the_bracket_the_halving_grid_leaves_open() {
+        // The halving grid can only ever bracket the answer to a factor of two:
+        // it probes swept-1, /2, /4 ... and stops at the first refusal, so the
+        // true crossover is somewhere in (refused_below, chosen). An audit
+        // measured what that costs -- 6,631 combinations chosen where 51,778 were
+        // affordable at the same budget, because the grid jumped 48,374 -> 24,187
+        // and never tried 30,961.
+        //
+        // Bisection must close the bracket to a single threshold. Asserting the
+        // WIDTH rather than a particular value is what makes this scale-free:
+        // there is no fixture size to get wrong and no number to re-pin when the
+        // column changes.
+        let bars = synthetic::sessions(8);
+        let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
+
+        let chosen = auto.min_hits.expect("this fixture must find a threshold");
+        let refused = auto
+            .refused_below
+            .expect("and must find an edge, or the bracket below is vacuous");
+        assert!(
+            chosen > refused,
+            "the chosen threshold must sit above the refused one: {chosen} vs {refused}"
+        );
+        assert!(
+            chosen.saturating_sub(refused) <= 1,
+            "the bracket must be closed to one. chosen {chosen}, refused {refused} \
+             -- a gap wider than one means bisection did not converge and the \
+             search is still reporting a power-of-two grid point as the answer"
+        );
+    }
+
+    #[test]
     fn the_search_is_reported_for_a_tuned_run() {
         let bars = synthetic::sessions(8);
         let auto = Sweeper::new(bounded()).auto(&bars, &mut evaluator());
