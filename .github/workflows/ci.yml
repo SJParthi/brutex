@@ -2727,6 +2727,12 @@ jobs:
           # strike through a binary float. It parses the digits now, so the entry is removed
           # rather than left loose -- CI warned `no longer matches rule 2 -- tighten it`, and
           # a loose allowlist is a gate reading stronger than it is.
+          # `crates/runner/src/significance.rs` earns its line the same way greeks does.
+          # CLAUDE.md §7 makes PRICES paisa integers and in the same sentence keeps
+          # "statistical values (Sharpe, p-values, ratios) at full precision" -- rule
+          # 2's own title says both halves. No paisa figure reaches that module: it
+          # consumes a trial COUNT and returns a t-THRESHOLD, and its module-scope
+          # allow carries the same reason.
           allow_float='
           crates/core/src/price.rs 4
           crates/greeks/src/bsm.rs 36
@@ -2735,10 +2741,6 @@ jobs:
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
           crates/runner/src/significance.rs 7
-          #   significance.rs -- t-statistics and a normal quantile. CLAUDE.md §7
-          #   makes PRICES integers and in the same breath keeps statistical
-          #   values at full precision; no paisa figure reaches that module,
-          #   which consumes a trial COUNT and returns a THRESHOLD.
           crates/lake/src/bar.rs 9
           crates/lake/src/reader.rs 3
           crates/telemetry/src/value.rs 5
