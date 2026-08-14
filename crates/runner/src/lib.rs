@@ -139,7 +139,27 @@ impl Sweeper {
 /// more than this but less than the ladder's real budget is rejected, so the
 /// chosen threshold may be higher than strictly necessary. That is the safe
 /// direction, and it is stated rather than hidden.
-const PROBE_PAIRS: u64 = 1 << 22;
+///
+/// # The value is measured, not chosen
+///
+/// An audit found the first value — `1 << 22` — sitting **4096× below** the
+/// budget it tunes for, which rejects thresholds that would comfortably finish
+/// and pins the answer near 50% support. But probing at the real budget is not
+/// affordable either. Both ends were measured, same machine, same fixture, whole
+/// `auto` search end to end:
+///
+/// | probe budget | search time |
+/// |---|---|
+/// | `1 << 22` | 0.39 s |
+/// | `1 << 24` | 0.71 s |
+/// | `1 << 26` | 1.76 s |
+/// | **`1 << 28`** | **5.60 s** |
+/// | `1 << 34` (the real budget) | **319.84 s** |
+///
+/// `1 << 28` searches 64× deeper than the original for 5.6 seconds, and leaves
+/// the gap at 64× rather than 4096×. Past it the curve turns sharply: the last
+/// step costs 57× the time for 64× the reach.
+const PROBE_PAIRS: u64 = 1 << 28;
 
 /// A sweep the engine tuned for itself, and the search that got there.
 #[derive(Clone, Debug)]
