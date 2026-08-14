@@ -271,20 +271,54 @@
   --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
 
-  /* TYPE. A terminal is read at a distance of 50cm for eight hours; the scale
-     is tight because a big jump between two sizes reads as two documents. */
-  --fs-micro: 9.5px;
-  --fs-mini: 10px;
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-base: 13px;
-  --fs-md: 14px;
-  --fs-lg: 17px;
-  --fs-xl: 22px;
-  --fs-2xl: 28px;
+  /* TYPE — LIFTED, ON THE OWNER'S INSTRUCTION, 14 Aug 2026.
+     "this design needs to be extremely animated, visualised, superb,
+      attractive … with font size bigger and data size also bigger."
 
-  --lh-tight: 1.15;
-  --lh-base: 1.45;
+     WHAT THIS REPLACED, AND WHY THE OLD ARGUMENT LOSES. The block here read:
+     "a terminal is read at a distance of 50cm for eight hours; the scale is
+     tight because a big jump between two sizes reads as two documents." That
+     is a good argument about an OPERATOR'S console and it is the wrong
+     argument for this product: the screen is shown, demonstrated and sold, and
+     9.5px of micro-label is unreadable on a projector, in a screenshot, and to
+     anyone over forty. Density that only its author can read is not density.
+
+     LIFTED AS A SCALE, NOT AS A HANDFUL OF RULES. Every surface in this file
+     and in all four pages reads these nine tokens, so the ratios between sizes
+     survive the change and nothing has to be re-tuned rule by rule — which is
+     the whole reason the scale was tokenised. Roughly ×1.25 at the small end,
+     easing to ×1.35 at the display end so headline numbers gain the most.
+
+     THE STEPS STAY CLOSE for the reason the old comment gave: two adjacent
+     sizes that jump too far read as two documents. What changed is the floor,
+     not the spacing. */
+  --fs-micro: 11.5px;
+  --fs-mini: 12.5px;
+  --fs-xs: 13.5px;
+  --fs-sm: 15px;
+  --fs-base: 16px;
+  --fs-md: 18px;
+  --fs-lg: 22px;
+  --fs-xl: 30px;
+  --fs-2xl: 40px;
+
+  /* DATA — THE NUMBERS, AND THEY ARE THE POINT OF EVERY PAGE HERE.
+     "data size also bigger", stated in the same sentence as the font and
+     meaning something different by it: a bar count, a coverage percentage, a
+     row total and a date span are what an operator and a buyer both look AT,
+     while the labels around them are what they read once. So the data scale
+     runs one full step ahead of the prose scale rather than beside it.
+
+     Tabular figures are set with the numerals, not near them: a column of
+     counts whose digits are different widths cannot be scanned down, and that
+     is a property of the FONT rather than of the layout. */
+  --fs-data: 17px;
+  --fs-data-lg: 24px;
+  --fs-data-xl: 34px;
+  --num: 'SF Mono', ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+
+  --lh-tight: 1.2;
+  --lh-base: 1.5;
 
   --w-mid: 500;
   --w-semi: 600;
@@ -1569,5 +1603,165 @@ th.num .sort {
   }
   .status .ms {
     display: none;
+  }
+}
+
+/* ==========================================================================
+   7. THE DISPLAY LAYER — the numbers, at the size they are actually read at
+   --------------------------------------------------------------------------
+   THE OWNER'S INSTRUCTION, 14 Aug 2026: "extremely animated, visualised,
+   superb, attractive … font size bigger and data size also bigger."
+
+   Section 1's scale lifted the PROSE. This lifts the DATA, which is a
+   different job: a bar count, a coverage percentage and a date span are what
+   both an operator and a buyer look AT, while the labels around them are read
+   once and then skipped forever. So these run a step ahead of the prose scale
+   and they are set in tabular figures.
+
+   TABULAR FIGURES ARE NOT A FLOURISH. `font-variant-numeric: tabular-nums`
+   makes every digit the same width, so a column of counts can be scanned down
+   and 1,631 sits under 17,250 with its thousands separator in the same place.
+   Proportional digits make that column ragged and there is no layout fix for
+   it — the width lives in the font.
+
+   `text-wrap: nowrap` on a value, never on its label: a number that wraps
+   becomes two numbers for as long as it takes to re-read it.
+   ========================================================================== */
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+.stat > .k {
+  font-size: var(--fs-micro);
+  font-weight: var(--w-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.stat > .v,
+.num {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-data);
+  font-weight: var(--w-semi);
+  line-height: var(--lh-tight);
+  color: var(--ink-hi);
+  white-space: nowrap;
+}
+.stat.lg > .v {
+  font-size: var(--fs-data-lg);
+  font-weight: var(--w-bold);
+}
+.stat.xl > .v {
+  font-size: var(--fs-data-xl);
+  font-weight: var(--w-heavy);
+  letter-spacing: -0.02em;
+}
+.stat > .foot {
+  font-size: var(--fs-mini);
+  color: var(--faint);
+}
+
+/* A number carrying its own verdict. The hue is the semantic token and never
+   the accent, which is the rule the flash keyframes already follow. */
+.num.up {
+  color: var(--up);
+}
+.num.down {
+  color: var(--down);
+}
+.num.nil {
+  color: var(--faint);
+}
+
+/* THE HEADLINE. One per page at most — the figure a page exists to report.
+   It borrows the accent as a gradient rather than a fill so it reads as
+   emphasis rather than as a link, and it falls back to a flat colour wherever
+   `background-clip: text` is not honoured. */
+.headline {
+  font-family: var(--num);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-2xl);
+  font-weight: var(--w-heavy);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.03em;
+  color: var(--acc);
+  white-space: nowrap;
+}
+@supports (background-clip: text) or (-webkit-background-clip: text) {
+  .headline {
+    background: linear-gradient(100deg, var(--acc), var(--acc-hi) 60%, var(--acc));
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+@keyframes bx-sheen {
+  from {
+    background-position: 0% 50%;
+  }
+  to {
+    background-position: 200% 50%;
+  }
+}
+@keyframes bx-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  /* THE SHEEN, and it is slow on purpose. Eight seconds is below the rate at
+     which motion competes for attention with a number that just changed —
+     which is the one thing on these pages that MUST win the eye. A fast
+     gradient would make the page look alive and the data look ignorable. */
+  @supports (background-clip: text) or (-webkit-background-clip: text) {
+    .headline {
+      animation: bx-sheen 8s var(--ease-in-out) infinite alternate;
+    }
+  }
+
+  /* THE ENTRANCE STAGGER. Panels arrive in reading order rather than all at
+     once, which is what makes a page feel composed rather than dumped. Capped
+     at six: past that the last panel waits long enough to read as slow, and a
+     seventh is drawn immediately rather than joining the queue. `backwards`
+     so a staggered node is not painted at full opacity for the frames before
+     its own delay begins. */
+  .rise {
+    animation: bx-rise var(--d-panel) var(--ease-out) backwards;
+  }
+  .rise:nth-child(2) {
+    animation-delay: 60ms;
+  }
+  .rise:nth-child(3) {
+    animation-delay: 120ms;
+  }
+  .rise:nth-child(4) {
+    animation-delay: 180ms;
+  }
+  .rise:nth-child(5) {
+    animation-delay: 240ms;
+  }
+  .rise:nth-child(6) {
+    animation-delay: 300ms;
+  }
+
+  /* A VALUE THAT LANDS. Distinct from `.flash-up` / `.flash-down`, which say a
+     number MOVED and in which direction. This says a number ARRIVED, and it
+     carries no hue for exactly that reason. */
+  .stat > .v,
+  .num,
+  .headline {
+    transition: color var(--d-state) var(--ease-out);
   }
 }
