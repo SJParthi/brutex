@@ -113,6 +113,46 @@ pub fn expected_max_t(n: u64) -> f64 {
     (2.0 * n_f.ln()).sqrt()
 }
 
+/// Euler–Mascheroni, which is the constant the deflated-Sharpe expression uses.
+const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
+
+/// The expected maximum, by **Bailey & López de Prado's** expression.
+///
+/// `(1−γ)·Z⁻¹(1 − 1/N)  +  γ·Z⁻¹(1 − 1/(N·e))`
+///
+/// This is the quantity [`expected_max_t`] approximates. Both answer "what does
+/// the best of `n` worthless trials score", and they disagree by enough to
+/// matter:
+///
+/// | trials | `√(2·ln n)` | this |
+/// |---|---|---|
+/// | 3,689 | 4.05 | 3.60 |
+/// | 61,125,295 | 5.99 | 5.62 |
+/// | 100,000,000,000 | 7.12 | 6.80 |
+///
+/// **The simpler form OVERSTATES the noise floor**, which is the safe direction
+/// but not the accurate one — it would reject a real finding sitting between the
+/// two figures. This is the expression the literature actually publishes, so it
+/// is the one reported beside the Bonferroni bar; `expected_max_t` stays because
+/// the two together show how much the approximation costs, and a reader who has
+/// only seen `√(2 ln n)` quoted elsewhere can find it here.
+///
+/// Returns 0 for fewer than two trials, where a maximum is not a quantity.
+#[must_use]
+pub fn expected_max_bailey(n: u64) -> f64 {
+    if n < 2 {
+        return 0.0;
+    }
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "see expected_max_t: the walk cannot reach 2^53 candidates."
+    )]
+    let n_f = n as f64;
+    let a = inverse_normal_cdf(1.0 - 1.0 / n_f);
+    let b = inverse_normal_cdf(1.0 - 1.0 / (n_f * core::f64::consts::E));
+    (1.0 - EULER_MASCHERONI) * a + EULER_MASCHERONI * b
+}
+
 /// The two-sided Bonferroni t-threshold for `n` tests at [`FWER`].
 ///
 /// Each test is allowed `FWER / n` of the error budget, so the threshold is the
@@ -212,7 +252,7 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{bonferroni_t, expected_max_t, inverse_normal_cdf, trials};
+    use super::{bonferroni_t, expected_max_bailey, expected_max_t, inverse_normal_cdf, trials};
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
 
@@ -298,6 +338,40 @@ mod tests {
         // Fewer than two trials has no meaningful maximum.
         assert!(expected_max_t(1).abs() < f64::EPSILON);
         assert!(expected_max_t(0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_published_expression_and_the_approximation_disagree_by_enough_to_matter() {
+        // Both answer "what does the best of n worthless trials score". The
+        // simple form OVERSTATES, which is safe but not accurate -- a real
+        // finding sitting between the two would be rejected.
+        for n in [3_689_u64, 61_125_295, 100_000_000_000] {
+            let simple = expected_max_t(n);
+            let published = expected_max_bailey(n);
+            assert!(
+                published < simple,
+                "at {n} trials the published expression must sit BELOW the \
+                 sqrt(2 ln n) approximation: {published} vs {simple}"
+            );
+            assert!(
+                simple - published < 0.6,
+                "and not wildly below it -- they measure the same thing: \
+                 {published} vs {simple} at {n}"
+            );
+        }
+        // The documented figures, to two decimals.
+        assert!((expected_max_bailey(61_125_295) - 5.62).abs() < 0.02);
+        assert!((expected_max_bailey(3_689) - 3.60).abs() < 0.02);
+        // And it rises with the trial count, never falls.
+        let mut previous = 0.0_f64;
+        for n in [2_u64, 100, 10_000, 1_000_000, 1_000_000_000] {
+            let t = expected_max_bailey(n);
+            assert!(t > previous, "the noise floor fell from {previous} to {t}");
+            previous = t;
+        }
+        // Fewer than two trials has no maximum.
+        assert!(expected_max_bailey(1).abs() < f64::EPSILON);
+        assert!(expected_max_bailey(0).abs() < f64::EPSILON);
     }
 
     #[test]

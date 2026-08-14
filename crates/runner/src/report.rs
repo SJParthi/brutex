@@ -126,8 +126,14 @@ fn significance(out: &mut String, sweep: &Sweep) {
     row(
         out,
         "best t-stat by luck alone",
+        &format!("{:.2}", crate::significance::expected_max_bailey(n)),
+        "Bailey & Lopez de Prado, if every hypothesis were worthless",
+    );
+    row(
+        out,
+        "  the sqrt(2 ln N) approximation",
         &format!("{:.2}", crate::significance::expected_max_t(n)),
-        "if every hypothesis were worthless",
+        "the figure usually quoted -- it OVERSTATES the floor",
     );
     row(
         out,
