@@ -302,10 +302,19 @@ jobs:
           claim_standing='vendor_doc operator'
 
           # ---- group 3: invented configuration fixtures. Nonsense by
+          #   1 2 3 9 -- FOUR BARE DIGITS, and each was read before it was added.
+          #   "1", "2" and "9" are invented vendor_id values in resolve.rs and
+          #   universe.rs test rows beside invented ISINs (INE000A01001). "3" is
+          #   the VALUE of the X-Kite-Version header in vendor.rs -- a public API
+          #   version number, not a credential. Group 10's note explains why an
+          #   all-digit literal is scanned rather than waved through: a twelve-
+          #   digit account number is a perfectly ordinary <org> segment. These
+          #   four are one digit each and name no account.
           # construction — no operator's path reads `orgone/testenv/vendorone`.
           config_fixture='
           orgone testenv vendorone vendortwo fieldone fieldtwo fieldthree
           field-one_2 a-value
+          1 2 3 9
           '
 
           # ---- group 4: deliberately secret-SHAPED fixtures, which exist to
@@ -439,7 +448,7 @@ jobs:
           # perfectly ordinary `<org>` segment, and `253402281000` is twelve
           # digits. It is on this list because it was read, not because a
           # pattern let it past.
-          bound_number='10000 1970 9999 28 29 4294967295 253402281000
+          bound_number='10000 1970 9999 28 29 4294967295 253402281000 48 750
           0 1e300'
 
           # ---- group 11: FIELD LABELS IN A `Debug` RENDERING, not values.
