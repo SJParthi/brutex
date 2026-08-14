@@ -1400,6 +1400,29 @@ mod tests {
                 level.k, level.generated, expected
             );
         }
+
+        // AND EVERY LEVEL MUST RECONCILE, which catches the other half.
+        //
+        // The pair-recount above sees a join that STOPPED. It cannot see a cap on
+        // SURVIVORS -- `out.truncate(n)` after the join leaves `generated` exactly
+        // right while silently dropping frequent sets, so an audit reported it as
+        // invisible at every threshold. `Frontier::reconciles` is what sees it:
+        // `generated` must equal duplicates + excluded + pruned + infrequent +
+        // frequent, and a truncated survivor list makes that sum too small.
+        for level in &s.levels {
+            assert!(
+                level.reconciles(),
+                "level {} does not reconcile: {} generated against \
+                 {} duplicates + {} pruned + {} infrequent + {} frequent. A \
+                 survivor list was truncated after the join.",
+                level.k,
+                level.generated,
+                level.duplicates,
+                level.pruned,
+                level.infrequent,
+                level.frequent.len()
+            );
+        }
     }
 
     /// A cap keyed on ANY scale is caught, not just one keyed on `k`.
@@ -1479,22 +1502,59 @@ mod tests {
         // Code lines only: this file discusses `break` at length in prose, and
         // text in a comment is text -- the lesson four guards in this workspace
         // have already learnt the hard way.
-        let exits = src
-            .lines()
-            .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
-            .filter(|code| {
-                code.split_whitespace()
-                    .any(|w| w == "break" || w == "break;" || w.starts_with("break "))
-            })
-            .count();
+        // EVERY WAY OUT, not just `break`. An audit pointed out three the first
+        // draft could not see: an early `return` from `next_level`, a labelled
+        // `continue 'join` that skips the rest of a row, and anything at all in
+        // `column.rs` -- which the sweep calls per candidate and which the guard
+        // was not reading.
+        //
+        // `return` is counted only in the SHIPPING region: the test module below
+        // is full of ordinary returns and closures, and scanning it would pin a
+        // number that moves whenever a test is added.
+        let shipping = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let count_exits = |text: &str| -> usize {
+            text.lines()
+                .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+                .filter(|code| {
+                    code.split_whitespace().any(|w| {
+                        let w = w.trim_end_matches(';');
+                        w == "break" || w == "return" || w == "continue"
+                    })
+                })
+                .count()
+        };
+        let exits = count_exits(shipping);
+        // The transposed column is on the sweep's hot path and had no guard at
+        // all. Its only early exit is the empty-mask short answer.
+        let column_src = include_str!("column.rs");
+        let column_exits = count_exits(column_src.split("#[cfg(test)]").next().unwrap_or(""));
         assert_eq!(
-            exits, 3,
-            "the walk may leave a loop early in exactly three places, and each \
-             must record a `Halt`: the k-loop on a breach, the join's outer row \
-             on the pair budget, and the join's inner pair on the candidate \
-             ceiling. A fourth exit is how a silent depth cap arrives -- and a cap \
-             keyed above any fixture's scale (`live.len() > 200` survives all 44 \
-             behavioural tests) is invisible to everything except this count."
+            column_exits, 2,
+            "crates/engine/src/column.rs may leave early in exactly two places: \
+             `set_positions`' iterator returning `None` when a word is exhausted, \
+             which is how an iterator ends, and `support`'s `popcount == 0` short \
+             answer for the empty mask. Any THIRD exit truncates a support count, \
+             which silently changes every hit total the ladder reads and which no \
+             behavioural test can see -- the two layouts are answer-equivalent by \
+             construction."
+        );
+        assert_eq!(
+            exits, 9,
+            "the shipping region of this file may leave a loop early in exactly \
+             nine places, and every one is accounted for:\n\
+             \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
+             breach, the join's outer row on the pair budget, the join's inner \
+             pair on the candidate ceiling;\n\
+             \x20 5 FILTER SKIPS, which advance rather than truncate -- a \
+             duplicate position and a non-live one at k=1, the `popcount != k` \
+             test, a duplicate candidate, a subset-pruned candidate;\n\
+             \x20 1 PREDICATE RETURN -- `every_subset_is_frequent` answering false.\n\
+             A tenth is how a silent truncation arrives. `break` alone was not \
+             enough: an audit defeated the first draft with an early `return` and \
+             with a labelled `continue 'join`, neither of which carries the token \
+             it counted. And a cap keyed above any fixture's scale \
+             (`live.len() > 200` survives all 44 behavioural tests) is invisible \
+             to everything except a count like this one."
         );
 
         // AND THE LOOP CONDITIONS THEMSELVES, because an exit does not need a
