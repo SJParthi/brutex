@@ -60,7 +60,15 @@
   --n5: #edf0f6;   /* hairline, soft                            */
   --n6: #dee3ed;   /* hairline                                  */
   --n7: #c7cfdd;   /* hairline, strong / disabled edge          */
-  --n8: #8b95a8;   /* faint text — labels, units                */
+  /* MEASURED, NOT CHOSEN BY EYE. This was #8b95a8 and it failed WCAG AA on
+     every surface this app paints: 3.02:1 on --panel, 2.81:1 on --bg, 2.67:1 on
+     --panel-2 and 2.57:1 on --well, against a 4.5:1 floor. It is the console's
+     primary micro-label colour -- 16 declarations here, 19 in /ingest, 31 in
+     /db -- carried at 9.5px and 10px, so no large-text exemption applies.
+     #5f6a7c is the lightest value clearing 4.5:1 on the WORST of those four
+     surfaces (4.66:1 on --well). Two published candidates, #6b7688 and #656f81,
+     were rejected because they measure 3.91:1 and 4.32:1 there. */
+  --n8: #5f6a7c;   /* faint text — labels, units                */
   --n9: #5a6478;   /* dim text — secondary                      */
   --n10: #38415a;  /* ink, secondary emphasis                   */
   --n11: #0d1220;  /* ink                                       */
@@ -109,7 +117,7 @@
     --n5: #1b212e;
     --n6: #232a3a;
     --n7: #333c51;
-    --n8: #5c6679;
+    --n8: #828da4;
     --n9: #8a95ab;
     --n10: #b3bdd0;
     --n11: #e6ebf5;
@@ -152,7 +160,7 @@
   --n5: #1b212e;
   --n6: #232a3a;
   --n7: #333c51;
-  --n8: #5c6679;
+  --n8: #828da4;
   --n9: #8a95ab;
   --n10: #b3bdd0;
   --n11: #e6ebf5;
@@ -198,7 +206,7 @@
   --n5: #edf0f6;
   --n6: #dee3ed;
   --n7: #c7cfdd;
-  --n8: #8b95a8;
+  --n8: #5f6a7c;
   --n9: #5a6478;
   --n10: #38415a;
   --n11: #0d1220;

@@ -6280,7 +6280,11 @@
   }
   .lbl i {
     font-style: normal;
-    color: var(--n7);
+    /* --faint, not --n7. `--n7` is theme.css's "hairline, strong / disabled
+       edge" -- a BORDER step, 1.57:1 as text. The seven --n0..--n7 steps are
+       surfaces and rules; the four text tokens are --ink, --ink-2, --dim and
+       --faint. */
+    color: var(--faint);
     letter-spacing: 0;
     text-transform: none;
   }
@@ -6940,7 +6944,9 @@
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--n7);
+    /* --dim. This row was 1.57:1 AND its container carries aria-hidden="true",
+       so the weekday names reached neither the eye nor a screen reader. */
+    color: var(--dim);
     padding: var(--s1) 0 var(--s2);
   }
   .cday {
@@ -6969,11 +6975,20 @@
      they are drawn light — a different mark from the line-through below, which
      means a bound refused the day. */
   .cday.nos {
-    color: var(--n7);
+    /* --dim, and the distinction is now visible instead of promised.
+       `dayBlock()` never tests sessions, so these days are ENABLED and
+       clickable -- the WCAG exemption for inactive controls does not apply, and
+       at 1.57:1 the caption below ("Faint days hold no session") told the
+       operator to read something he could not see. Three ranks now: a session
+       day is --ink, a no-session day is --dim and clickable, an out-of-bounds
+       day is --faint with a line-through. */
+    color: var(--dim);
     font-weight: var(--w-mid);
   }
   .cday:disabled {
-    color: var(--n7);
+    /* --faint, which is now AA in its own right. Genuinely inactive, and the
+       line-through remains the primary mark rather than the colour. */
+    color: var(--faint);
     cursor: not-allowed;
     text-decoration: line-through;
     text-decoration-color: var(--down);
