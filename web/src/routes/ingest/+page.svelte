@@ -1025,6 +1025,13 @@
    * the form's first legal state illegal on the feed it opens with.
    */
   let universe = $state('swept');
+  /**
+   * Is the universe drawer open? Sets no request can name are folded behind one
+   * line rather than listed dead above the ones that work — see the drawer in
+   * the markup. Closed by default; nothing is deleted and every refusal is one
+   * click away.
+   */
+  let uniTuck = $state(false);
   let segSet = $state(new Set(['spot']));
   /**
    * THE TIMEFRAME IS A SET, NOT A VALUE.
@@ -1962,6 +1969,22 @@
     if (t === null || !LEGACY_BLIND.has(t)) return wire;
     return `${wire} MEMBERSHIP IS NOT THE GAP: ${n(have ?? 0)} name(s) in ${u.label} are counted here for ${feed}, off the universes array this server does send (D-0089/D-0090). This row is waiting on a fourth api::ingest::SpotTarget variant, which is a docs/05-decisions.md entry and a crates/api change — nothing in the browser closes it.`;
   }
+
+  /**
+   * THE SETS NO REQUEST CAN NAME, with the reason each one carries.
+   *
+   * Derived rather than an `{@const}` in the markup, which Svelte 5 permits
+   * only as the immediate child of a block — a `<div>` is not one, and the
+   * build says so rather than rendering something half-right.
+   *
+   * It is REACTIVE and must stay so: `universeRefusal` reads the catalogue and
+   * the master counts, so a set that is unreachable before `/instruments.json`
+   * answers becomes reachable after it, and the drawer has to empty itself
+   * when that happens.
+   */
+  const refusedUniverses = $derived(
+    UNIVERSES.map((u) => ({ u, why: universeRefusal(u) })).filter((x) => x.why !== null)
+  );
 
   /**
    * REACH, not intent. `target` is a choice and it survives everything; this is
@@ -4178,8 +4201,15 @@
                     >
                     {#if drop === 'uni'}
                       <div class="ddm" role="group" aria-label="Universe — the set to pull">
-                        {#each UNIVERSES as u (u.id)}
-                          {@const why = universeRefusal(u)}
+                        <!-- SAME RULE AS THE PICKERS: a set no request can name
+                             is folded behind one line rather than listed dead.
+                             `F&O underlyings` and `Everything` carry
+                             `target: null` because api::ingest::SpotTarget
+                             spells swept, indices and equities only — closing
+                             that is a Rust change, not a browser one, so until
+                             it lands these two can never be clicked. -->
+                        {#each UNIVERSES.filter((u) => universeRefusal(u) === null) as u (u.id)}
+                          {@const why = null}
                           <button
                             class="ddr"
                             type="button"
@@ -4200,6 +4230,34 @@
                             >
                           </button>
                         {/each}
+
+                        <!-- THE DRAWER, and it holds the refusals rather than
+                             deleting them. Every reason `universeRefusal`
+                             produces is still readable, and each one names
+                             whether the gap is membership or the wire. -->
+                        {#if refusedUniverses.length > 0}
+                          <button
+                            class="ddr tuck"
+                            type="button"
+                            aria-expanded={uniTuck}
+                            onclick={() => (uniTuck = !uniTuck)}
+                          >
+                            <span class="tk">{uniTuck ? '▾' : '▸'}</span>
+                            <span class="nm"
+                              >{n(refusedUniverses.length)} set(s) no request can name</span
+                            >
+                            <span class="ct">{uniTuck ? 'hide' : 'show why'}</span>
+                          </button>
+                          {#if uniTuck}
+                            {#each refusedUniverses as x (x.u.id)}
+                              <button class="ddr off" type="button" disabled title={x.why}>
+                                <span class="tk"></span>
+                                <span class="nm">{x.u.label}</span>
+                                <span class="ct warn">no target</span>
+                              </button>
+                            {/each}
+                          {/if}
+                        {/if}
                         <hr />
                         <button
                           class="ddr"
@@ -4391,7 +4449,14 @@
                     title="Bar lengths — the granularity field on the wire. Timeframe is the cascade's word for this rung and the word /db and /markets use for the same axis; bar length is what it means; granularity is what it is called on the wire. All three name one thing."
                     >Timeframe</span
                   >
+                  <!-- `tuck`: on Groww this menu opened with THREE struck-through
+                       rows — tick, 1s, 5s — above the first usable one, and no
+                       operator action turns any of them on because the vendor
+                       does not serve them. They are collapsed behind one line
+                       that states its own count; nothing is deleted and every
+                       reason is one click away. See Picker's `tuck` prop. -->
                   <Picker
+                    tuck
                     label="bar lengths"
                     summary={rungsChosen.length === 0
                       ? 'No timeframe ticked'
@@ -5908,7 +5973,11 @@
        control can be reached by a segment this build cannot fill. -->
   <div class="pk">
     <span class="plbl">Segments</span>
+    <!-- `tuck`: expired futures and expired options are `served: false` because
+         only POST /pull/spot exists — there is no expired-contract route in
+         this build at all. Two of the three rows were dead on every feed. -->
     <Picker
+      tuck
       label="segments"
       summary={segmentsReached.length > 0
         ? segmentsReached.map((s) => s.label).join(', ')

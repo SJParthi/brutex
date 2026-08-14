@@ -78,7 +78,34 @@
     add = null,
     /** Single-choice mode: ticking one unticks the rest. */
     single = false,
-    disabled = false
+    disabled = false,
+    /**
+     * TUCK THE ROWS THIS FEED CAN NEVER REACH BEHIND ONE LINE.
+     *
+     * # Why this is not "hide it"
+     *
+     * `CLAUDE.md` §4 bans the silent version and this repository already
+     * decided, for the FEED picker, that a dead row is "NOT HIDDEN, DISABLED,
+     * WITH THE REASON — a feed that vanishes teaches the operator nothing".
+     * That decision stands and this does not repeal it: nothing is removed, no
+     * reason is deleted, and one click still shows every refusal in full.
+     *
+     * What it fixes is a real defect the rule did not anticipate. On Groww the
+     * timeframe menu opens with THREE struck-through rows above the first
+     * usable one — tick, 1s and 5s, none of which any amount of operator action
+     * can turn on, because the vendor does not serve them. The live choice
+     * ends up below the fold, and a list whose first screenful is entirely
+     * unusable teaches the operator no more than a hidden row does. It teaches
+     * less: it reads as a broken build.
+     *
+     * So the rows are COLLAPSED, not dropped, and the collapsed line states its
+     * own count so the reader can see something is there before deciding
+     * whether to care.
+     *
+     * Off by default. `/db` does not pass it, so nothing about that page's
+     * menus changes.
+     */
+    tuck = false
   } = $props();
 
   const id = nextId();
@@ -141,6 +168,22 @@
   /** How many rows a bulk action can actually reach, in the whole list and in what is shown. */
   const freeAll = $derived(rows.length - blocked.size);
   const freeShown = $derived(shown.filter((r) => !r.disabled).length);
+
+  /**
+   * THE TWO HALVES OF WHAT IS SHOWN, and they are only two when `tuck` is on.
+   *
+   * `live` is what a click can reach. `dead` is what it cannot. With `tuck`
+   * false the split is not made at all and `live` is the whole list, so the
+   * default rendering is byte-for-byte the one every caller already gets.
+   *
+   * A FILTERED SEARCH OPENS THE DRAWER. Typing a query means the reader is
+   * looking for something by name, and a match that stayed folded away under a
+   * count would read as "no such rung" — the silent answer §4 bans. So while
+   * `q` is non-empty every match is listed, dead ones included.
+   */
+  const live = $derived(tuck && !q.trim() ? shown.filter((r) => !r.disabled) : shown);
+  const dead = $derived(tuck && !q.trim() ? shown.filter((r) => r.disabled) : []);
+  let openTuck = $state(false);
 
   const head = $derived(
     summary ??
@@ -259,7 +302,7 @@
       {/if}
 
       <div class="plist">
-        {#each shown as r (r.key)}
+        {#each live as r (r.key)}
           {@const p = parts(r.name ?? r.key)}
           <label class:pdis={r.disabled} title={r.title ?? r.why ?? undefined}>
             <input
@@ -278,6 +321,38 @@
             {q.trim() ? `Nothing matches “${q}”` : `No ${label} here yet`}
           </p>
         {/each}
+
+        <!-- THE DRAWER. One line, its own count, and every reason one click
+             away. It is a `button` and not a `summary` because the menu is
+             already a listbox-shaped thing and a nested disclosure widget
+             inside it confuses the keyboard order more than it helps. -->
+        {#if dead.length > 0}
+          <button
+            type="button"
+            class="ptuck"
+            aria-expanded={openTuck}
+            onclick={(e) => {
+              e.stopPropagation();
+              openTuck = !openTuck;
+            }}
+          >
+            <span class="pcar" class:on={openTuck}>▸</span>
+            {dead.length}
+            {dead.length === 1 ? 'row' : 'rows'} this feed cannot serve
+            <span class="pmore">{openTuck ? 'hide' : 'show why'}</span>
+          </button>
+          {#if openTuck}
+            {#each dead as r (r.key)}
+              {@const p = parts(r.name ?? r.key)}
+              <label class="pdis" title={r.title ?? r.why ?? undefined}>
+                <input type="checkbox" checked={false} disabled onclick={(e) => e.stopPropagation()} />
+                <span class="pnm">{p[0]}{#if p[1]}<mark>{p[1]}</mark>{/if}{p[2]}</span>
+                {#if r.detail}<span class="pct">{r.detail}</span>{/if}
+                {#if r.why}<span class="pwhy">{r.why}</span>{/if}
+              </label>
+            {/each}
+          {/if}
+        {/if}
       </div>
     </div>
   {/if}
@@ -507,6 +582,39 @@
     text-align: center;
     color: var(--faint, #68738a);
     font-size: 13px;
+  }
+  /* THE DRAWER LINE. Quiet on purpose — it is a signpost, not a choice, and it
+     must not compete with the rows above it that a click can actually reach. */
+  .ptuck {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    border-top: 1px solid var(--line-soft, #edf0f6);
+    background: transparent;
+    color: var(--faint, #68738a);
+    font-family: ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .ptuck:hover {
+    color: var(--ink, #0d1220);
+    background: var(--panel-2, #eef1f7);
+  }
+  .pcar {
+    display: inline-block;
+    font-size: 8px;
+    transition: transform 140ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+  .pcar.on {
+    transform: rotate(90deg);
+  }
+  .pmore {
+    margin-left: auto;
+    color: var(--acc, #0e7f96);
   }
   @media (prefers-reduced-motion: reduce) {
     * {
