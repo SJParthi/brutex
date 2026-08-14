@@ -1335,6 +1335,161 @@ mod tests {
         DEFAULT_CEILING
     }
 
+    /// Every pair the join reports having visited, it really visited.
+    ///
+    /// # The defect this exists for, which nothing else in the crate can see
+    ///
+    /// An audit injected `if generated >= 500 { break 'join; }` into the inner
+    /// join loop. It lost **55.7% of the frequent sets** — 454 of 1024 — and
+    /// still reported `completed() == true` with an empty final level, so it
+    /// satisfied even the strongest assertion in the depth guard. `cargo test -p
+    /// engine` passed 39/39 **and `cargo mutants` reported 3 caught, 0 missed**,
+    /// because the mutation tool generated only `>=` → `<` for the injected
+    /// threshold, which fires immediately and is caught.
+    ///
+    /// It is strictly worse than a depth cap: the walk does not stop, so every
+    /// level above the truncation is subset-pruned against a **partial** frontier
+    /// — which `walk`'s own comment says would "build k+1 from an incomplete
+    /// frontier and label the result complete". That is the predecessor's
+    /// `k = [1, 2]` failure wearing the disguise of a clean extinction.
+    ///
+    /// # Why this test can see it when nothing else can
+    ///
+    /// It is scale-free and self-consistent: `generated` is recomputed at each
+    /// level from the previous level **alone** — the number of unordered pairs
+    /// whose union has popcount k — and compared with what the level reported.
+    /// An early break out of the join makes the reported number strictly smaller.
+    /// Nothing else in the algorithm can, so there is no fixture size to get
+    /// wrong and no threshold to sit beneath.
+    #[test]
+    fn the_join_visits_every_pair_it_reports() {
+        // Ten co-occurring live bits plus one odd, so the ladder runs deep enough
+        // for a truncation to have somewhere to hide.
+        let deep: &[u32] = &[0, 1, 2, 3, 4, 5, 7, 8, 9, 10];
+        let b = bars(&[deep, deep, deep, &[11], &[11]]);
+        let s = Ladder::with_min_hits(2).walk(&b, &[0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11]);
+        assert!(s.completed(), "the fixture must not breach a budget");
+
+        // Level k's `generated` must equal the pairs of level k-1 whose union has
+        // popcount k. Recomputed here from the frontier, not from the counter.
+        for pair in s.levels.windows(2) {
+            let (Some(prev), Some(level)) = (pair.first(), pair.last()) else {
+                continue;
+            };
+            let mut expected: u64 = 0;
+            for (i, a) in prev.frequent.iter().enumerate() {
+                for c in prev.frequent.iter().skip(i.saturating_add(1)) {
+                    if a.mask.union(&c.mask).popcount() == level.k {
+                        expected = expected.saturating_add(1);
+                    }
+                }
+            }
+            assert_eq!(
+                level.generated, expected,
+                "level {} reported {} candidates but its own frontier yields {} \
+                 -- the join returned early and every level above it was pruned \
+                 against a partial frontier",
+                level.k, level.generated, expected
+            );
+        }
+    }
+
+    /// A cap keyed on ANY scale is caught, not just one keyed on `k`.
+    ///
+    /// # Why the single-point fixture was not enough
+    ///
+    /// `a_silently_capped_depth_would_be_caught` uses 5 bars, 9 offered positions,
+    /// a deepest level of k=8 and a widest frontier of `C(8,4) = 70`. An audit
+    /// binary-probed every boundary and found **five different caps that survive
+    /// 39/39**: `k > 8`, `frequent.len() > 100`, `bar_bits.len() > 5000`,
+    /// `live.len() > 200`, and `bar_bits.len() > 1000 && k >= 3`. Production is
+    /// 238 live positions over 1.2 million bars, where `C(238,2) = 28,203` — the
+    /// frontier margin alone is 400×.
+    ///
+    /// A single fixture can only ever see a cap below its own numbers. This one
+    /// is parametric: `P` co-occurring live positions for `P` in 4..=12 sweeps
+    /// `live.len()` across 5..13, frontier width across 6..924 and depth across
+    /// 4..12 — so a cap keyed on any of them fires at some `P` and not at others,
+    /// which is exactly what a single point cannot detect.
+    #[test]
+    fn a_cap_keyed_on_any_scale_would_be_caught() {
+        // Live positions only: 6 is a retired tombstone that D-0080 excludes.
+        const POOL: [u32; 12] = [0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12];
+        const ODD: u32 = 13;
+
+        for p in 4_usize..=12 {
+            let deep: Vec<u32> = POOL.iter().take(p).copied().collect();
+            let b = bars(&[&deep, &deep, &deep, &[ODD], &[ODD]]);
+            let mut live = deep.clone();
+            live.push(ODD);
+            let s = Ladder::with_min_hits(2).walk(&b, &live);
+
+            let width = u32::try_from(p).unwrap_or(0);
+            assert!(s.completed(), "P={p} must not breach a budget");
+            assert_eq!(s.depth(), p, "P={p}: extinction is at k={p}");
+            assert_eq!(
+                s.all_frequent().count(),
+                (1_usize << width).saturating_sub(1).saturating_add(1),
+                "P={p}: every non-empty subset of the {p}, plus the odd singleton"
+            );
+            assert!(
+                s.levels.last().is_some_and(|l| l.frequent.is_empty()),
+                "P={p}: the ladder must die of extinction, not of a cap"
+            );
+        }
+    }
+
+    /// The walk leaves a loop early in exactly three places, and each is a budget.
+    ///
+    /// # Why this has to be structural, and no test of behaviour will do
+    ///
+    /// `a_cap_keyed_on_any_scale_would_be_caught` sweeps `P` from 4 to 12, so it
+    /// catches a cap keyed on depth or on frontier width — both verified by
+    /// injection. It **cannot** catch one keyed above its own numbers:
+    /// `if live.len() > 200 { break; }` survives all 44 tests, because the
+    /// widest fixture offers 13 positions and production offers 238.
+    ///
+    /// That gap cannot be closed by a bigger fixture. A cap at any threshold a
+    /// fixture does not cross is invisible to every behavioural test, and running
+    /// the real 238 × 1.2 M shape in a unit test is the expense the whole design
+    /// exists to avoid. So the guard counts **exits** instead of observing
+    /// outcomes: an added `break` changes this number whatever it is keyed on.
+    ///
+    /// The three that are allowed, and why each is not a depth control:
+    ///
+    /// | Where | Leaves | Because |
+    /// |---|---|---|
+    /// | `walk`'s k-loop | the ladder | a level breached a budget; `Sweep::halted` names it |
+    /// | `next_level`, outer row | the join | the PAIR budget — bounds time |
+    /// | `next_level`, inner pair | the join | the CANDIDATE budget — bounds bytes |
+    ///
+    /// Every one records a [`Halt`], so none can truncate silently. A fourth exit
+    /// has to be argued for here before it can compile.
+    #[test]
+    fn the_walk_has_exactly_three_early_exits_and_each_is_a_budget() {
+        let src = include_str!("lib.rs");
+        // Code lines only: this file discusses `break` at length in prose, and
+        // text in a comment is text -- the lesson four guards in this workspace
+        // have already learnt the hard way.
+        let exits = src
+            .lines()
+            .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+            .filter(|code| {
+                code.split_whitespace()
+                    .any(|w| w == "break" || w == "break;" || w.starts_with("break "))
+            })
+            .count();
+        assert_eq!(
+            exits, 3,
+            "the walk may leave a loop early in exactly three places, and each \
+             must record a `Halt`: the k-loop on a breach, the join's outer row \
+             on the pair budget, and the join's inner pair on the candidate \
+             ceiling. A fourth exit is how a silent depth cap arrives -- and a cap \
+             keyed above any fixture's scale (`live.len() > 200` survives all 44 \
+             behavioural tests) is invisible to everything except this count."
+        );
+    }
+
     #[test]
     fn a_zero_pair_budget_is_raised_to_one() {
         assert_eq!(
