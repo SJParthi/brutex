@@ -230,6 +230,8 @@ fn verdict(out: &mut String, outcome: &Outcome) {
                 match halt.breach {
                     engine::Breach::Candidates => "candidates",
                     engine::Breach::Pairs => "pairs",
+                    // Not a budget anyone set. The machine refused.
+                    engine::Breach::Memory => "MEMORY",
                 },
                 "",
             );
@@ -538,6 +540,34 @@ mod tests {
              unconditional \"  candidates admitted\" row satisfies for a PAIR \
              breach too -- it could not fail either way"
         );
+    }
+
+    #[test]
+    fn a_machine_refusal_is_reported_as_memory_and_not_as_a_budget() {
+        // `Breach::Memory` is not a number anyone chose, and the report must not
+        // dress it as one. Built by hand because a genuine allocation failure is
+        // unreachable from a fixture -- the same reason `Ladder::exhausted` takes
+        // a growth amount.
+        let mut out = broken(Census::default(), Vec::new());
+        out.sweep.bars = 1;
+        out.sweep.halted = Some(engine::Halt {
+            k: 7,
+            candidates: 12_345,
+            ceiling: engine::DEFAULT_CEILING,
+            pairs: 99,
+            pair_budget: engine::DEFAULT_PAIR_BUDGET,
+            breach: engine::Breach::Memory,
+        });
+        let text = render(&out, None);
+
+        assert_eq!(cell(&text, "outcome"), "REFUSED");
+        assert_eq!(
+            cell(&text, "budget spent"),
+            "MEMORY",
+            "the machine refusing an allocation is not a budget being spent, and \
+             calling it `candidates` would name a ceiling that was never reached"
+        );
+        assert_eq!(cell(&text, "trustworthy as a whole answer"), "NO");
     }
 
     #[test]

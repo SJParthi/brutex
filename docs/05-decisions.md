@@ -13309,3 +13309,43 @@ corrected `store_timeframe`, and filtering rows does not remove it. The
 per-feed part of the ladder now comes from the wire; the per-rung part does not,
 and until `/feeds.json` carries a rung's label and session count the page has to
 hold them. Recorded as outstanding.
+
+## D-0138 — the candidate ceiling was capping depth, which is §6's job to prevent
+
+**Date:** 2026-08-14
+
+**Decision.** `DEFAULT_CEILING` moves from `1 << 23` to `1 << 26`, and a second
+bound — `Breach::Memory`, backed by `HashSet::try_reserve` — is added beside it.
+
+**Why.** §6 says depth is decided by extinction and never by a caller: there is no
+`k` parameter, not a default, not a token. The ceiling was reaching depth anyway,
+from the side. Measured on one 1,124-bar column at `min_hits = 50`:
+
+| ceiling | outcome | depth | combinations | wall | peak RSS |
+|---|---|---|---|---|---|
+| `1 << 23` | **HALTED** `Candidates` | 9 | capped | 4 s | ~0.4 GB |
+| `1 << 25` | **HALTED** `Candidates` | 14 | capped | 24 s | 4.9 GB |
+| `1 << 26` | **completed — extinct** | **23** | **34,979,095** | 26 s | 5.0 GB |
+
+At `1 << 23` the walk stopped at k=9 with the PAIR budget **99.95% unused**. The
+ladder was not extinct, it was capped, and every level from 10 to 23 —
+34.9 million combinations — was reported as not existing. A run that says "no
+combination was frequent" because a constant stopped it is the fallback §4 bans.
+
+**Why 2^26 and not a bigger constant.** Because a constant is the wrong kind of
+answer and `1 << 26` is only the *safety* bound now. The real bound is
+`cannot_grow`, which asks the allocator and therefore discovers the machine: it
+uses what a 4 GB machine has and what a 48 GB machine has, at runtime, asking
+nobody. `1 << 26` is where the operator set the appetite; on this column the
+sweep went extinct at 5.0 GB and never approached it.
+
+**The honest limit.** `try_reserve` reports what the ALLOCATOR refuses. macOS and
+Linux both overcommit, so a reservation can succeed and the process still be
+killed when the pages are touched. `cannot_grow` catches an honest refusal and
+does not catch an overcommit death — which is exactly why the ceiling stays as
+the bound that does. Two bounds, two different failure modes, neither claimed to
+be the other. Recorded in `docs/06-limits.md`.
+
+**Proven by.** `engine::tests::the_allocator_refusing_to_grow_is_a_halt_and_not_a_panic`
+covers both answers without a machine that is out of memory: `try_reserve(usize::MAX)`
+fails on capacity overflow without allocating.

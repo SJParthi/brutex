@@ -302,6 +302,21 @@ pub enum Breach {
     Candidates,
     /// The join's pair iterations reached the budget. Bounds time.
     Pairs,
+    /// **The machine refused the allocation.** Not a number anyone chose.
+    ///
+    /// The ceiling above is a constant, and a constant is a human input — the
+    /// thing `CLAUDE.md` §6 removes from depth and which was reaching depth
+    /// through the side door anyway. At `1 << 23` a real column halted at k=9
+    /// with the pair budget 99.95% unused; the ladder was not extinct, it was
+    /// capped, and raising the constant only moves the cap somewhere else a
+    /// person picked.
+    ///
+    /// This is the bound that needs no person. Every growth of the candidate
+    /// set goes through [`HashSet::try_reserve`], which returns rather than
+    /// aborts, so the sweep expands until the allocator genuinely refuses and
+    /// then halts naming that. It uses what a 4 GB machine has and what a 48 GB
+    /// machine has, discovers which at runtime, and asks nobody.
+    Memory,
 }
 
 /// The outcome of a whole sweep.
@@ -385,7 +400,7 @@ impl Sweep {
 /// puts `C(238,3)` outside it, or `C(238,4)` inside it, fails the **build** and
 /// not a test run. The paragraph above is therefore checked arithmetic rather
 /// than a comment, which is the whole of what CI gate 12 asks for.
-pub const DEFAULT_CEILING: usize = 1 << 23;
+pub const DEFAULT_CEILING: usize = 1 << 26;
 
 /// Pairs one level's join may iterate before the walk refuses.
 ///
@@ -689,6 +704,41 @@ impl Ladder {
     }
 
     /// Join the frontier with itself, subset-prune, evaluate what is left.
+    /// Which memory bound, if either, has been reached.
+    ///
+    /// Two bounds with different failure modes, asked as one question so the
+    /// halt they share is one block a test can reach:
+    ///
+    /// * the **ceiling**, a constant, which is what survives a system that
+    ///   overcommits — macOS and Linux both do, so a reservation can succeed and
+    ///   the process still be killed when the pages are touched;
+    /// * the **allocator**, via [`cannot_grow`], which is what needs no constant
+    ///   and therefore discovers the machine instead of being told about it.
+    ///
+    /// `grow_by` is a parameter for one reason: a genuine allocation failure is
+    /// unreachable from any fixture, and an unreachable arm is both a coverage
+    /// hole and a refusal path nobody has ever seen fire. A test passes
+    /// `usize::MAX`, `try_reserve` fails on capacity overflow without asking the
+    /// OS for anything, and the arm runs in microseconds on any machine.
+    ///
+    /// Order matters: the ceiling is checked first so a caller that set one gets
+    /// the breach it asked for, rather than a memory report from an allocator
+    /// that was never going to refuse.
+    fn exhausted(
+        &self,
+        seen: &mut HashSet<ConditionMask>,
+        admitted: usize,
+        grow_by: usize,
+    ) -> Option<Breach> {
+        if admitted.saturating_add(seen.len()) >= self.ceiling {
+            return Some(Breach::Candidates);
+        }
+        if cannot_grow(seen, grow_by) {
+            return Some(Breach::Memory);
+        }
+        None
+    }
+
     fn next_level(
         self,
         column: &Column,
@@ -824,14 +874,22 @@ impl Ladder {
                     // `ceiling` distinct candidates halts even if every remaining pair
                     // would have been a duplicate. That is conservative in the safe
                     // direction and it is stated rather than hidden.
-                    if admitted.saturating_add(seen.len()) >= self.ceiling {
+                    //
+                    // THE TWO MEMORY BOUNDS ARE ASKED AS ONE QUESTION, and that is
+                    // what makes the halt reachable from a test. Written as two
+                    // separate `if` blocks, the allocator arm was eleven regions
+                    // no fixture could execute -- a refusal path nobody had ever
+                    // seen fire, which is the shape of every defect an audit
+                    // found today. `exhausted` takes the growth amount, so a test
+                    // hands it `usize::MAX` and the whole arm runs.
+                    if let Some(breach) = self.exhausted(&mut seen, admitted, 1) {
                         halted = Some(Halt {
                             k,
                             candidates: admitted.saturating_add(seen.len()),
                             ceiling: self.ceiling,
                             pairs: pairs_walked.saturating_add(pairs),
                             pair_budget: self.pair_budget,
-                            breach: Breach::Candidates,
+                            breach,
                         });
                         break 'join;
                     }
@@ -887,6 +945,33 @@ pub fn support(bar_bits: &[ConditionMask], mask: &ConditionMask) -> u64 {
         0_u64,
         |n, b| if b.hits(mask) { n.saturating_add(1) } else { n },
     )
+}
+
+/// Would growing the candidate set by `by` be refused by the allocator?
+///
+/// # Why this is a function and not two lines at the call site
+///
+/// So it can be TESTED. A genuine out-of-memory branch is unreachable from any
+/// fixture — the machine has to actually run out — and an unreachable branch is
+/// the coverage hole `CLAUDE.md` §9 refuses and, worse, a refusal path nobody
+/// has ever seen fire. Taking `by` as a parameter makes both answers reachable:
+/// `try_reserve(usize::MAX)` fails on capacity overflow *without allocating*, so
+/// the failure arm is provable in a unit test on an empty set, in microseconds,
+/// on any machine.
+///
+/// # The honest limit, which is the operating system's and not this code's
+///
+/// `try_reserve` reports what the ALLOCATOR refuses. On a system that
+/// overcommits — macOS and Linux both do by default — a reservation can succeed
+/// and the process still be killed later when the pages are touched. So this
+/// catches an honest refusal and does not catch an overcommit death, and the
+/// candidate ceiling remains as the bound that does. Two bounds, different
+/// failure modes, and neither is claimed to be the other.
+///
+/// `len() == capacity()` first, so the reserve call is made only when growth is
+/// actually due rather than on every candidate.
+fn cannot_grow(seen: &mut HashSet<ConditionMask>, by: usize) -> bool {
+    seen.len() == seen.capacity() && seen.try_reserve(by).is_err()
 }
 
 /// The itemset minus its highest set position — the join's grouping key.
@@ -1664,12 +1749,14 @@ mod tests {
              construction."
         );
         assert_eq!(
-            exits, 8,
+            exits, 10,
             "the shipping region of this file may leave a loop early in exactly \
-             eight places, and every one is accounted for:\n\
+             ten places, and every one is accounted for:\n\
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
              breach, the join's outer row on the pair budget, the join's inner \
-             pair on the candidate ceiling;\n\
+             pair on whichever memory bound `exhausted` names;\n\
+             \x20 2 EXHAUSTION RETURNS inside `exhausted` -- the ceiling, which \
+             a caller set, and the allocator, which nobody set;\n\
              \x20 4 FILTER SKIPS, which advance rather than truncate -- a \
              duplicate position and a non-live one at k=1, a duplicate \
              candidate, a subset-pruned candidate;\n\
@@ -1961,7 +2048,15 @@ mod tests {
     #[test]
     fn the_default_ceiling_is_the_one_its_arithmetic_describes() {
         assert_eq!(Ladder::with_min_hits(1).ceiling(), DEFAULT_CEILING);
-        assert_eq!(DEFAULT_CEILING, 8_388_608, "2^23, one GiB at 128 B each");
+        assert_eq!(
+            DEFAULT_CEILING, 67_108_864,
+            "2^26. Was 2^23, and an audit measured what that cost: a real column \
+             halted at k=9 with the PAIR budget 99.95% unused, so the ladder was \
+             not extinct, it was capped -- and a cap on depth is what §6 exists \
+             to remove. Measured on this machine at 2^25: k=14, 24 s, 4.9 GB of \
+             48. 2^26 is the operator's stated appetite, and `cannot_grow` is \
+             the bound that needs no number at all."
+        );
         // The doc's claim that a healthy sweep never reaches the ceiling, pinned
         // at COMPILE time rather than run time. Both operands are constants, so a
         // runtime assertion would only ever restate what the compiler already
@@ -2469,6 +2564,60 @@ mod tests {
         assert!(
             level.reconciles(),
             "and the level must still account for every candidate it generated"
+        );
+    }
+
+    #[test]
+    fn exhausted_names_the_ceiling_first_and_the_allocator_second() {
+        let mut seen: HashSet<ConditionMask> = HashSet::new();
+        // Ceiling wins when both could fire: a caller that set one must get the
+        // breach it asked for, not a memory report from an allocator that was
+        // never going to refuse.
+        let tight = Ladder::with_min_hits(1).with_ceiling(1);
+        assert_eq!(
+            tight.exhausted(&mut seen, 1, usize::MAX),
+            Some(Breach::Candidates)
+        );
+        // With room in the ceiling, the allocator is what answers.
+        let roomy = Ladder::with_min_hits(1);
+        assert_eq!(
+            roomy.exhausted(&mut seen, 0, usize::MAX),
+            Some(Breach::Memory),
+            "an allocation the machine cannot satisfy is a halt naming MEMORY, \
+             and it is reachable here without a machine that is out of it"
+        );
+        // And an ordinary candidate passes both.
+        assert_eq!(roomy.exhausted(&mut seen, 0, 1), None);
+    }
+
+    #[test]
+    fn the_allocator_refusing_to_grow_is_a_halt_and_not_a_panic() {
+        // Both answers, on an empty set, in microseconds. `try_reserve(usize::MAX)`
+        // fails on CAPACITY OVERFLOW without asking the OS for anything, so the
+        // refusal arm is provable without a machine that is actually out of
+        // memory -- which is the only reason this is a function rather than two
+        // lines inlined at the call site.
+        let mut seen: HashSet<ConditionMask> = HashSet::new();
+        assert_eq!(
+            seen.len(),
+            seen.capacity(),
+            "a fresh set is exactly full at zero"
+        );
+        assert!(
+            cannot_grow(&mut seen, usize::MAX),
+            "a reservation the allocator cannot satisfy must REPORT, not abort -- \
+             `CLAUDE.md` §4 wants the reason named, and a panic names nothing a \
+             caller can read"
+        );
+        assert!(
+            !cannot_grow(&mut seen, 1),
+            "and an ordinary growth must be allowed through"
+        );
+        // Once it has room, the check costs a compare and reserves nothing.
+        assert!(seen.capacity() >= 1);
+        assert!(
+            !cannot_grow(&mut seen, 1),
+            "not full, so no reserve is attempted"
         );
     }
 
