@@ -237,8 +237,19 @@ pub struct Halt {
     /// The level that breached. Its [`Frontier`] is in [`Sweep::levels`] and is
     /// **partial** — it holds what was evaluated before the ceiling was reached.
     pub k: u32,
-    /// Distinct candidates admitted at that level before the walk stopped.
-    /// Equal to the ceiling that was in force.
+    /// Distinct candidates admitted across **every level so far**, not just the
+    /// one that breached.
+    ///
+    /// # This counted one level, and one level was the wrong thing to count
+    ///
+    /// The first version bounded `seen.len()` per level and this field held that
+    /// number. A per-level cap is not a total cap: `Sweep::levels` retains every
+    /// level, so the peak is `depth × ceiling` rather than `ceiling`. The gap was
+    /// not theoretical — `Ladder::with_min_hits(2)` over 3,000 synthetic bars
+    /// with 238 live positions **OOM-killed the process** on the first real
+    /// column anyone drove through it, while every per-level check passed.
+    ///
+    /// The budget is now cumulative, so one number bounds the whole run.
     pub candidates: usize,
     /// The ceiling that was in force, echoed so the result is self-describing.
     pub ceiling: usize,
@@ -292,7 +303,15 @@ impl Sweep {
     }
 }
 
-/// Distinct candidates one level may admit before the walk refuses.
+/// Distinct candidates a whole walk may admit before it refuses.
+///
+/// **This was per LEVEL and that was the defect.** `Sweep::levels` retains every
+/// level, so a per-level cap left the peak at `depth × ceiling` rather than
+/// `ceiling`, and the arithmetic below — which reads "one GiB" — described one
+/// level rather than the run. The gap was not theoretical: a first real column,
+/// 3,000 bars at `min_hits(2)`, OOM-killed the process while every per-level
+/// check passed. The budget is cumulative now, so the number below bounds the
+/// whole walk and means what it always claimed to.
 ///
 /// # Where the number comes from
 ///
@@ -532,6 +551,9 @@ impl Ladder {
         // needed. The empty level that ends the walk is recorded too — a reader
         // of the output can see that the ladder died rather than was stopped.
         let mut k: u32 = 1;
+        // Distinct candidates admitted across every level so far. The budget is
+        // cumulative because the peak is -- `sweep.levels` keeps them all.
+        let mut admitted: usize = 0;
         while !current.frequent.is_empty() {
             // `saturating_add`, not `checked_add`, and the difference is a branch
             // no test can reach. A level's masks all have `popcount == k` and a
@@ -541,7 +563,11 @@ impl Ladder {
             // `break` nothing can prove. Saturation agrees with `checked_add` on
             // every reachable value of `k` and adds no arm to defend.
             k = k.saturating_add(1);
-            let (next, halt) = self.next_level(&column, &current, k);
+            // The budget is CUMULATIVE across levels, not per level. See `Halt`:
+            // a per-level cap left the peak at `depth * ceiling`, and the process
+            // died rather than refused.
+            let (next, halt, added) = self.next_level(&column, &current, k, admitted);
+            admitted = admitted.saturating_add(added);
             sweep.levels.push(current);
             current = next;
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
@@ -560,7 +586,13 @@ impl Ladder {
     }
 
     /// Join the frontier with itself, subset-prune, evaluate what is left.
-    fn next_level(self, column: &Column, prev: &Frontier, k: u32) -> (Frontier, Option<Halt>) {
+    fn next_level(
+        self,
+        column: &Column,
+        prev: &Frontier,
+        k: u32,
+        admitted: usize,
+    ) -> (Frontier, Option<Halt>, usize) {
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
@@ -614,10 +646,10 @@ impl Ladder {
                 // `ceiling` distinct candidates halts even if every remaining pair
                 // would have been a duplicate. That is conservative in the safe
                 // direction and it is stated rather than hidden.
-                if seen.len() >= self.ceiling {
+                if admitted.saturating_add(seen.len()) >= self.ceiling {
                     halted = Some(Halt {
                         k,
-                        candidates: seen.len(),
+                        candidates: admitted.saturating_add(seen.len()),
                         ceiling: self.ceiling,
                     });
                     break 'join;
@@ -657,6 +689,7 @@ impl Ladder {
                 infrequent,
             },
             halted,
+            seen.len(),
         )
     }
 }
@@ -1281,6 +1314,49 @@ mod tests {
             src.contains(concat!("Column::", "transpose(bar_bits)")),
             "the walk must build the transposed layout once, before k=1"
         );
+    }
+
+    /// The budget spans the whole walk, and a per-level cap would not have.
+    ///
+    /// # The arithmetic that makes this test able to fail
+    ///
+    /// Eight co-occurring live bits plus a ninth that partitions them. The k=1
+    /// frontier is nine positions, so the join at k=2 admits `C(9,2) = 36`
+    /// distinct candidates — `seen` counts before the frequency test, so the
+    /// eight pairs containing the ninth position are admitted and then found
+    /// infrequent. 28 survive. k=3 admits `C(8,3) = 56`; k=4 would admit
+    /// `C(8,4) = 70`.
+    ///
+    /// **No single level reaches 100.** A per-level ceiling of 100 therefore
+    /// never fires, the walk runs to extinction at depth 8, and it holds 247
+    /// candidates in total on the way. That is precisely the shape that
+    /// OOM-killed a real 3,000-bar run while every per-level check passed.
+    ///
+    /// Cumulatively: 36 after k=2, 92 after k=3, and the budget is spent eight
+    /// candidates into k=4.
+    #[test]
+    fn the_budget_is_cumulative_and_a_per_level_cap_would_miss_it() {
+        let deep: &[u32] = &[0, 1, 2, 3, 4, 5, 7, 8];
+        let b = bars(&[deep, deep, deep, &[9], &[9]]);
+        let live = [0, 1, 2, 3, 4, 5, 7, 8, 9];
+
+        let capped = Ladder::with_min_hits(2).with_ceiling(100).walk(&b, &live);
+        assert!(
+            !capped.completed(),
+            "a per-level cap of 100 never fires here -- only a total one does"
+        );
+        let halt = capped.halted.unwrap_or_default();
+        assert_eq!(halt.ceiling, 100);
+        assert_eq!(halt.candidates, 100, "the TOTAL is what breached");
+        assert_eq!(halt.k, 4, "36 at k=2, 92 at k=3, spent early in k=4");
+
+        // And the same ladder with room runs to extinction, so the budget is a
+        // refusal and never a depth.
+        let roomy = Ladder::with_min_hits(2)
+            .with_ceiling(10_000)
+            .walk(&b, &live);
+        assert!(roomy.completed());
+        assert_eq!(roomy.depth(), 8);
     }
 
     #[test]

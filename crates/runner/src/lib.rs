@@ -357,6 +357,35 @@ mod tests {
         assert!(out.census.reconciles());
     }
 
+    /// The exact call that OOM-killed this process, now a loud refusal.
+    ///
+    /// `min_hits(2)` over eight sessions is 0.067% support: nearly all 238
+    /// computable positions are frequent, nearly every pair is, and the subset
+    /// prune never fires — the frontier grows as `C(238, k)`. This call used to
+    /// end in SIGKILL, and the per-level ceiling did not stop it because
+    /// `Sweep::levels` retains every level, so the peak was depth × ceiling.
+    ///
+    /// The budget is cumulative now, so the same call refuses instead of dying.
+    /// That difference — refusing versus being killed — is the whole of what
+    /// makes an unattended sweep safe to start.
+    #[test]
+    fn the_configuration_that_oom_killed_the_process_now_refuses() {
+        let bars = synthetic::sessions(8);
+        let ladder = Ladder::with_min_hits(2).with_ceiling(200_000);
+        let out = Sweeper::new(ladder).run(&bars, &mut evaluator());
+
+        let halt = out.sweep.halted;
+        assert!(halt.is_some(), "it must refuse, not run away");
+        assert!(!out.is_complete(), "and must not read as a complete answer");
+        assert!(
+            out.census.reconciles(),
+            "every bar still lands in one bucket"
+        );
+        // The levels below the breach are complete and are kept: a caller paid
+        // for them and §4 asks for a named degradation, not a discarded result.
+        assert!(!out.sweep.levels.is_empty());
+    }
+
     #[test]
     fn is_complete_needs_all_three_conditions() {
         // The negative case, so the conjunction cannot rot into a constant.
