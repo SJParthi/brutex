@@ -51,6 +51,7 @@
 
 pub mod identity;
 pub mod report;
+pub mod significance;
 pub mod synthetic;
 
 use engine::{Ladder, Sweep};

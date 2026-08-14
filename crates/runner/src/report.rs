@@ -89,8 +89,52 @@ pub fn render(outcome: &Outcome, id: Option<&RunId>) -> String {
 
     bars(&mut out, outcome.census);
     ladder(&mut out, &outcome.sweep);
+    significance(&mut out, &outcome.sweep);
     verdict(&mut out, outcome);
     out
+}
+
+/// How large a t-statistic must be before it beats the best of luck.
+///
+/// Printed beside the answer rather than left for a reader to look up, because
+/// the whole point of the number is that it is easy to forget: a sweep that
+/// tested sixty-one million hypotheses has a noise floor near t = 6, and every
+/// habit a reader brings from hand-built strategies says 2 or 3 is fine.
+///
+/// Derived entirely from this run's own counters — nobody is asked for a
+/// number, the same standard depth and memory are held to.
+fn significance(out: &mut String, sweep: &Sweep) {
+    let n = crate::significance::trials(sweep);
+    let _ = writeln!(out, "SIGNIFICANCE");
+    row(
+        out,
+        "hypotheses tested",
+        &n.to_string(),
+        "support counted against bars",
+    );
+    if n < 2 {
+        row(
+            out,
+            "threshold",
+            "-",
+            "too few hypotheses to have a noise floor",
+        );
+        let _ = writeln!(out);
+        return;
+    }
+    row(
+        out,
+        "best t-stat by luck alone",
+        &format!("{:.2}", crate::significance::expected_max_t(n)),
+        "if every hypothesis were worthless",
+    );
+    row(
+        out,
+        "t required (Bonferroni 5%)",
+        &format!("{:.2}", crate::significance::bonferroni_t(n)),
+        "Harvey, Liu & Zhu: their floor is 3.0 for a HANDFUL of trials",
+    );
+    let _ = writeln!(out);
 }
 
 /// Where every offered bar went.
@@ -568,6 +612,45 @@ mod tests {
              calling it `candidates` would name a ceiling that was never reached"
         );
         assert_eq!(cell(&text, "trustworthy as a whole answer"), "NO");
+    }
+
+    #[test]
+    fn the_report_states_the_bar_a_result_must_clear() {
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let text = render(&out, None);
+
+        assert!(text.contains("SIGNIFICANCE"));
+        let n: u64 = cell(&text, "hypotheses tested").parse().unwrap_or(0);
+        assert!(
+            n > 1_000,
+            "this fixture tests thousands of hypotheses, got {n}"
+        );
+        // The bar must be well above the t>3 a reader would bring from a
+        // hand-built strategy -- that is the entire reason it is printed.
+        let required: f64 = cell(&text, "t required (Bonferroni 5%)")
+            .parse()
+            .unwrap_or(0.0);
+        assert!(
+            required > 3.0,
+            "a sweep of {n} hypotheses cannot have a bar at or below the \
+             literature's floor for a handful of trials; got {required}"
+        );
+        let luck: f64 = cell(&text, "best t-stat by luck alone")
+            .parse()
+            .unwrap_or(0.0);
+        assert!(luck > 3.0, "and pure noise alone already clears 3.0 here");
+    }
+
+    #[test]
+    fn a_run_with_no_hypotheses_states_that_rather_than_a_threshold() {
+        // A cold column tested nothing, and "the noise floor of zero trials" is
+        // not a quantity. It must say so rather than print 0.00, which reads
+        // like an easy bar rather than an absent one.
+        let auto = Sweeper::new(bounded()).auto(&synthetic::sessions(1), &mut evaluator());
+        let text = render_auto(&auto, None);
+        assert_eq!(cell(&text, "hypotheses tested"), "0");
+        assert_eq!(cell(&text, "threshold"), "-");
     }
 
     #[test]
