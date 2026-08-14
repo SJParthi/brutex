@@ -70,7 +70,7 @@ pub mod column;
 use std::collections::HashSet;
 use vocab::ConditionMask;
 
-use crate::column::Column;
+use crate::column::{Column, set_positions};
 
 /// Fails the build if the vocabulary ever outgrows the mask.
 ///
@@ -928,12 +928,21 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 
 /// True when every (k−1)-subset of `cand` is in the previous frequent frontier.
 ///
-/// Walks the whole 384-bit width rather than the set bits, because
-/// [`ConditionMask`] exposes no bit iterator. The loop bound is
-/// [`ConditionMask::BITS`], a compile-time constant, so this is O(1) under
-/// §3.4 — but it is 384 probes where k would do, and that is a real cost stated
-/// rather than hidden. A `set_bits()` accessor on `ConditionMask` would make it
-/// O(k); it does not exist and adding one is a change to `crates/vocab`.
+/// Walks the SET bits, k of them, not the whole 384-bit width.
+///
+/// # What this actually bought, which is less than it looks
+///
+/// The previous form scanned all 384 positions as
+/// `if cand.get(b) && !frequent.contains(..)`. Its doc called that "384 probes
+/// where k would do" and a bench comparison was written expecting a large win.
+/// **It was 8%.** `&&` short-circuits, so the number of `HashSet` lookups was
+/// already k — the 384 were cheap bit tests, not probes, and the doc's own
+/// wording had oversold the cost of the thing it was complaining about.
+///
+/// Kept because 8% of the sweep is real and the code is strictly less work, not
+/// because the estimate was right. `crates/vocab` still exposes no bit
+/// iterator; `column::set_positions` is `crates/engine`'s own, which is why this
+/// needed no change outside the crate.
 ///
 /// # The measurement this used to cite was of a different function
 ///
@@ -951,14 +960,7 @@ fn without_highest(m: &ConditionMask) -> ConditionMask {
 /// walking a million pairs, this 384-probe loop is now a materially larger
 /// share of what a level costs than it was when the citation was written.
 fn every_subset_is_frequent(cand: &ConditionMask, frequent: &HashSet<ConditionMask>) -> bool {
-    let mut b: u32 = 0;
-    while b < ConditionMask::BITS {
-        if cand.get(b) && !frequent.contains(&cand.without_bit(b)) {
-            return false;
-        }
-        b = b.saturating_add(1);
-    }
-    true
+    set_positions(cand).all(|b| frequent.contains(&cand.without_bit(b)))
 }
 
 /// Order by the mask's words, then by hits.
@@ -1662,23 +1664,24 @@ mod tests {
              construction."
         );
         assert_eq!(
-            exits, 9,
+            exits, 8,
             "the shipping region of this file may leave a loop early in exactly \
-             nine places, and every one is accounted for:\n\
+             eight places, and every one is accounted for:\n\
              \x20 3 BUDGET EXITS, each recording a `Halt` -- the k-loop on a \
              breach, the join's outer row on the pair budget, the join's inner \
              pair on the candidate ceiling;\n\
              \x20 4 FILTER SKIPS, which advance rather than truncate -- a \
              duplicate position and a non-live one at k=1, a duplicate \
              candidate, a subset-pruned candidate;\n\
-             \x20 1 PREDICATE RETURN -- `every_subset_is_frequent` answering false;\n\
              \x20 1 KEY RETURN -- `without_highest` handing back the join's \
              grouping key once it has found the top word.\n\
-             The count did not move when the prefix join landed, and that is a \
-             coincidence worth naming: the `popcount != k` skip it deleted and \
-             the `without_highest` return it added cancel exactly. A count that \
-             holds for a changed reason is only honest if the reason is \
-             rewritten with it.\n\
+             It was NINE until `every_subset_is_frequent` became a one-line \
+             `set_positions(cand).all(..)`, which deleted its `return false`. \
+             Before that it was nine for a changed reason: the prefix join \
+             removed the `popcount != k` skip and added the `without_highest` \
+             return, and the two cancelled exactly. A count that holds for a new \
+             reason is only honest if the reason is rewritten with it, and a \
+             count that MOVES is only safe if the exit it lost is named.\n\
              A tenth is how a silent truncation arrives. `break` alone was not \
              enough: an audit defeated the first draft with an early `return` and \
              with a labelled `continue 'join`, neither of which carries the token \
@@ -2371,16 +2374,19 @@ mod tests {
 
         // 2. EVERY LEVEL ACCOUNTS FOR EVERY CANDIDATE, at a width of 10,090.
         for level in &sweep.levels {
+            // The counters are read into locals rather than passed as lazy format
+            // arguments: an argument only evaluated when the assertion FAILS is a
+            // region no passing run executes, and the 100% floor counts it.
+            let kept = level.frequent.len();
             assert!(
                 level.reconciles(),
-                "level {} generated {} and accounts for {} + {} + {} + {} + {}",
+                "level {} generated {} and accounts for {} + {} + {} + {} + {kept}",
                 level.k,
                 level.generated,
                 level.duplicates,
                 level.excluded,
                 level.pruned,
                 level.infrequent,
-                level.frequent.len()
             );
         }
 
@@ -2407,12 +2413,12 @@ mod tests {
         let kept: HashSet<ConditionMask> = sweep.all_frequent().map(|i| i.mask).collect();
         let dropped = brute.difference(&kept).count();
         let invented = kept.difference(&brute).count();
+        let total = brute.len();
         assert_eq!(
             (dropped, invented),
             (0, 0),
             "the ladder dropped {dropped} frequent sets the brute force found and \
-             invented {invented} it did not, out of {} -- a silent truncation",
-            brute.len()
+             invented {invented} it did not, out of {total} -- a silent truncation"
         );
     }
 

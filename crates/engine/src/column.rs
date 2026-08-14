@@ -48,7 +48,7 @@ const BARS_PER_WORD: usize = 64;
 /// the lowest set bit each step, so it costs one iteration per SET bit rather than
 /// one per possible bit. It lives here rather than in `crates/vocab` because
 /// `words()` is already public and this needs no new API surface there.
-fn set_positions(mask: &ConditionMask) -> impl Iterator<Item = u32> {
+pub(crate) fn set_positions(mask: &ConditionMask) -> impl Iterator<Item = u32> {
     mask.words()
         .into_iter()
         .enumerate()
