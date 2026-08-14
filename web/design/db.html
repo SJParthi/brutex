@@ -1,0 +1,1056 @@
+<title>Brutex Store Page</title>
+
+<!--
+  /db — THE DESIGN REFERENCE, DRAWN AS THE PAGE ITSELF.
+
+  Standalone. Reconstructed 2026-08-14 from web/src/lib/theme.css (tokens,
+  verbatim), the markup web/src/routes/db/+page.svelte declares, and the
+  design requirements stranded in that file's comments.
+
+  The bars grid's 24 column widths are BAR_COLS' own, read off
+  db/+page.svelte:2715. They sum to 2,420px, which is why that table scrolls
+  inside its own container and never takes the page body sideways with it.
+
+  Fixture data is shape-correct and is not a claim about any vendor.
+-->
+
+<style>
+  /* ======================================================================
+     1. THE RAMP — copied from web/src/lib/theme.css without alteration.
+     ================================================================== */
+  :root {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --acc-hi: #1c58c8;
+    --on-acc: #ffffff;
+
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.11);
+
+    --focus: #0b6376;
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11;
+      --n1: #0b0e14;
+      --n2: #11151f;
+      --n3: #141924;
+      --n4: #1a2030;
+      --n5: #1b212e;
+      --n6: #232a3a;
+      --n7: #333c51;
+      --n8: #5c6679;
+      --n9: #8a95ab;
+      --n10: #b3bdd0;
+      --n11: #e6ebf5;
+      --n12: #fbfcff;
+      --up: #00e19b;
+      --down: #ff4d6a;
+      --warn: #f0b429;
+      --info: #9d7cf5;
+      --acc: #22d3ee;
+      --acc-hi: #7aa7ff;
+      --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --info-soft: rgba(157, 124, 245, 0.16);
+      --focus: #67e8f9;
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    }
+  }
+  :root[data-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --acc-hi: #7aa7ff;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+    --focus: #67e8f9;
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+
+  /* ================================================= 2. MAPPING + SCALES */
+  :root {
+    --bg: var(--n1);
+    --bg-2: var(--n2);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --ink-2: var(--n10);
+    --dim: var(--n9);
+    --faint: var(--n8);
+
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+    --fs-micro: 9.5px;
+    --fs-mini: 10px;
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 17px;
+    --fs-2xl: 28px;
+    --lh-base: 1.45;
+    --w-mid: 500;
+    --w-semi: 600;
+    --w-bold: 700;
+    --track-caps: 0.1em;
+
+    --s1: 2px;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --s8: 32px;
+    --r1: 4px;
+    --r2: 6px;
+    --r: 8px;
+    --r4: 12px;
+    --r-full: 999px;
+    --row-h: 30px;
+    --topbar-h: 46px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-base);
+    line-height: var(--lh-base);
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  /* ================================================== 3. THE GLOBAL BAR */
+  .topbar {
+    height: var(--topbar-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s6);
+    padding: 0 var(--s5);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    font-size: var(--fs-md);
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+  }
+  .brand em {
+    color: var(--acc);
+    font-style: normal;
+  }
+  .navs {
+    display: flex;
+    gap: var(--s1);
+  }
+  .navs a {
+    font-size: var(--fs-sm);
+    padding: var(--s2) var(--s5);
+    border-radius: var(--r-full);
+    color: var(--dim);
+    text-decoration: none;
+  }
+  .navs a.on {
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-weight: var(--w-semi);
+  }
+  .topright {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .tog {
+    display: inline-flex;
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r-full);
+    overflow: hidden;
+  }
+  .tog button {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .tog button[aria-pressed='true'] {
+    background: var(--acc);
+    color: var(--on-acc);
+    font-weight: var(--w-bold);
+  }
+
+  /* ======================================================= 4. PANE HEAD */
+  .pane-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    padding: var(--s6) var(--s5) var(--s5);
+    flex-wrap: wrap;
+  }
+  .pane-head h1 {
+    font-size: var(--fs-lg);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+    margin: 0;
+  }
+  .pane-head .sub {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+
+  /* ============================================= 5. TWO STRIPS, LABELLED */
+  .strip {
+    display: flex;
+    gap: var(--s3);
+    padding: 0 var(--s5) var(--s5);
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .strip.sub {
+    padding-top: 0;
+  }
+  .strip-lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-bold);
+    align-self: center;
+    padding-top: 14px;
+    min-width: 62px;
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    min-width: 0;
+  }
+  .cell > .lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-semi);
+  }
+  .ctl {
+    height: var(--row-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: 0 var(--s4);
+    background: var(--bg-2);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    box-shadow: var(--e1);
+    cursor: default;
+  }
+  .ctl .caret {
+    color: var(--faint);
+    font-size: 9px;
+    margin-left: auto;
+    padding-left: var(--s4);
+  }
+  .ctl.off {
+    background: var(--well);
+    color: var(--faint);
+    border-color: var(--line);
+    border-style: dashed;
+    box-shadow: none;
+  }
+  .ctl.find {
+    min-width: 220px;
+    color: var(--faint);
+  }
+  .refusal {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    padding-top: var(--s1);
+    max-width: 150px;
+    white-space: normal;
+    line-height: 1.3;
+  }
+  .btn {
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-radius: var(--r2);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    box-shadow: var(--e1);
+    cursor: pointer;
+  }
+  .btn.ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: var(--line);
+    color: var(--dim);
+    font-weight: var(--w-mid);
+  }
+  .btn.sm {
+    height: 26px;
+    padding: 0 var(--s4);
+    font-size: var(--fs-xs);
+  }
+
+  /* ================================== 6. THE ANCHOR — ONE COUNT, SOURCED */
+  .anchor {
+    padding: var(--s5) var(--s5) var(--s4);
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    flex-wrap: wrap;
+    border-top: 1px solid var(--line-soft);
+  }
+  .anchor .big {
+    font-family: var(--mono);
+    font-size: var(--fs-2xl);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.02em;
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+    line-height: 1.15;
+  }
+  .anchor .of {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .pill {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-weight: var(--w-bold);
+    padding: 2px 8px;
+    border-radius: var(--r-full);
+  }
+  .pill.mea {
+    background: var(--up-soft);
+    color: var(--up);
+  }
+  .pill.inf {
+    background: var(--info-soft);
+    color: var(--info);
+  }
+  .pill.abs {
+    background: var(--warn-soft);
+    color: var(--warn);
+  }
+  .pill.no {
+    background: var(--down-soft);
+    color: var(--down);
+  }
+
+  /* =========================== 7. THE VIEW BAR — WHAT ONE ROW OF THE GRID IS */
+  .viewbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: 0 var(--s5) var(--s5);
+    flex-wrap: wrap;
+  }
+  .views {
+    display: inline-flex;
+    background: var(--well);
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    padding: 2px;
+    gap: 2px;
+  }
+  .vtab {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0;
+    padding: var(--s2) var(--s5);
+    border: 0;
+    border-radius: var(--r1);
+    background: transparent;
+    font-family: var(--sans);
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    cursor: pointer;
+    line-height: 1.2;
+  }
+  .vtab i {
+    font-style: normal;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .vtab[aria-selected='true'] {
+    background: var(--bg-2);
+    color: var(--ink);
+    font-weight: var(--w-semi);
+    box-shadow: var(--e1);
+  }
+  .vsay {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+  .vsay b {
+    color: var(--ink);
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .vbudget {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .vbudget select {
+    height: 26px;
+    border-radius: var(--r1);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    padding: 0 var(--s3);
+  }
+  .vsum {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+  }
+  .vsum b {
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ============================================================ 8. GRIDS */
+  .tbl {
+    margin: 0 var(--s5) var(--s5);
+  }
+  .tbl-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--bg-2);
+    max-width: 100%;
+  }
+  table.grid {
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+  }
+  table.grid.full {
+    width: 100%;
+  }
+  table.grid th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-2);
+    text-align: left;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-semi);
+    padding: var(--s3) var(--s4);
+    border-bottom: 1px solid var(--line-hard);
+    cursor: pointer;
+  }
+  table.grid th.dead {
+    cursor: not-allowed;
+    color: var(--line-hard);
+  }
+  table.grid th.n,
+  table.grid td.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td {
+    height: var(--row-h);
+    padding: 0 var(--s4);
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--ink);
+  }
+  table.grid td.mono,
+  table.grid td.n {
+    font-family: var(--mono);
+  }
+  table.grid tbody tr:hover td {
+    background: var(--panel-2);
+  }
+  .sortmark {
+    color: var(--acc);
+  }
+  .nosrc {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    font-style: italic;
+  }
+  .na {
+    color: var(--line-hard);
+  }
+  .up {
+    color: var(--up);
+  }
+  .down {
+    color: var(--down);
+  }
+
+  .cover {
+    display: inline-flex;
+    gap: 2px;
+    align-items: center;
+  }
+  .cover i {
+    width: 7px;
+    height: 12px;
+    border-radius: 1px;
+    background: var(--line-hard);
+    display: block;
+  }
+  .cover i.q1 {
+    background: var(--down);
+  }
+  .cover i.q2 {
+    background: var(--warn);
+  }
+  .cover i.q3 {
+    background: color-mix(in srgb, var(--up) 55%, var(--warn));
+  }
+  .cover i.q4 {
+    background: var(--up);
+  }
+
+  .pgbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s4) var(--s5) var(--s6);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    flex-wrap: wrap;
+  }
+  .pgbar .spacer {
+    margin-left: auto;
+  }
+  .pgbar select {
+    height: 24px;
+    border-radius: var(--r1);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+  }
+
+  footer.legend {
+    margin: var(--s7) var(--s5) var(--s8);
+    padding-top: var(--s5);
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    display: flex;
+    gap: var(--s6);
+    flex-wrap: wrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+
+<header class="topbar">
+  <span class="brand">brute<em>X</em></span>
+  <nav class="navs">
+    <a href="#top">Markets</a><a href="#top">Ingest</a><a class="on" href="#top">DB</a
+    ><a href="#top">Autopilot</a><a href="#top">Audit</a>
+  </nav>
+  <span class="topright">
+    <span class="ctl sm" style="height:26px;font-size:var(--fs-xs)"
+      >Groww <span class="caret">▾</span></span
+    >
+    <span>IST 15:31</span>
+    <span class="tog" role="group" aria-label="Theme">
+      <button type="button" data-t="light" aria-pressed="true">Light</button>
+      <button type="button" data-t="dark" aria-pressed="false">Dark</button>
+    </span>
+  </span>
+</header>
+
+<main id="top">
+  <div class="pane-head">
+    <h1>Store</h1>
+    <span class="sub">What is actually on disk, counted — never estimated.</span>
+  </div>
+
+  <!-- STRIP ONE: QUERY. -->
+  <section class="strip" aria-label="Query">
+    <span class="strip-lab">Query</span>
+    <div class="cell">
+      <span class="lab" id="q-uni">Universe</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="q-uni"
+        >NIFTY Total Market <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="q-tf">Bar length</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="q-tf"
+        >1 minute <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="q-mo">Month</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="q-mo"
+        >2026-08 <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell" style="flex:1">
+      <span class="lab" id="q-find">Find</span>
+      <span class="ctl find" role="button" tabindex="0" aria-labelledby="q-find"
+        >RELIANCE <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab">&nbsp;</span>
+      <button class="btn" type="button">Refresh</button>
+    </div>
+  </section>
+
+  <!-- STRIP TWO: CONTRACT. Every control refuses with its own sentence when
+       the segment cannot carry it. A disabled control that says nothing is
+       the silent failure CLAUDE.md §4 bans. -->
+  <section class="strip sub" aria-label="Contract">
+    <span class="strip-lab">Contract</span>
+    <div class="cell">
+      <span class="lab" id="c-exp">Expiry</span>
+      <span class="ctl off" aria-labelledby="c-exp" aria-disabled="true">—</span>
+      <span class="refusal">spot has no expiry</span>
+    </div>
+    <div class="cell">
+      <span class="lab" id="c-str">Strike</span>
+      <span class="ctl off" aria-labelledby="c-str" aria-disabled="true">—</span>
+      <span class="refusal">spot has no strike</span>
+    </div>
+    <div class="cell">
+      <span class="lab" id="c-mny">Moneyness</span>
+      <span class="ctl off" aria-labelledby="c-mny" aria-disabled="true">—</span>
+      <span class="refusal">no spot reference on this wire</span>
+    </div>
+    <div class="cell">
+      <span class="lab" id="c-side">Type</span>
+      <span class="ctl off" aria-labelledby="c-side" aria-disabled="true">—</span>
+      <span class="refusal">spot is neither CE nor PE</span>
+    </div>
+  </section>
+
+  <!-- THE ANCHOR: the one count, what it counts, and how it was arrived at. -->
+  <div class="anchor">
+    <span class="big">375</span>
+    <span class="of">bars · RELIANCE · 1 minute · 2026-08-13 · Groww</span>
+    <span class="pill mea">measured</span>
+    <span class="pill abs">10 of 24 columns unsourced</span>
+  </div>
+
+  <!-- WHAT ONE ROW OF THE GRID IS. -->
+  <div class="viewbar">
+    <div class="views" role="tablist" aria-label="What one row of the grid is">
+      <button class="vtab" type="button" role="tab" aria-selected="false">
+        Census<i>one row per instrument</i>
+      </button>
+      <button class="vtab" type="button" role="tab" aria-selected="true">
+        Bars<i>one row per bar</i>
+      </button>
+    </div>
+    <span class="vsay">Showing <b>375</b> bars from <b>1</b> instrument-month</span>
+    <label class="vbudget">
+      <span>Instrument-months to read</span>
+      <select aria-label="Instrument-months to read">
+        <option>1 newest</option>
+        <option selected>4 newest</option>
+        <option>16 newest</option>
+        <option>every match — 80</option>
+      </select>
+    </label>
+    <!-- A PARTITION, AND IT SUMS ON SCREEN. read + held back = matched. -->
+    <span class="vsum"><b>4</b> read + <b>76</b> over budget = <b>80</b> matched</span>
+  </div>
+
+  <!-- THE BARS GRID. 24 columns at BAR_COLS' own declared widths, 2,420px in
+       total, scrolling inside its own container. -->
+  <div class="tbl">
+    <div class="tbl-scroll">
+      <table class="grid" style="width:2420px">
+        <thead>
+          <tr>
+            <th style="width:172px">Date / time <span class="sortmark">▾</span></th>
+            <th style="width:68px">TF</th>
+            <th class="n" style="width:104px">Open</th>
+            <th class="n" style="width:104px">High</th>
+            <th class="n" style="width:104px">Low</th>
+            <th class="n" style="width:108px">Close</th>
+            <th class="n" style="width:116px">Volume</th>
+            <th class="n dead" style="width:102px" title="no source, so there is nothing to order">
+              Pre-mkt %
+            </th>
+            <th class="n" style="width:102px">Change %</th>
+            <th class="n" style="width:124px">Open interest</th>
+            <th class="n" style="width:100px">OI chg %</th>
+            <th style="width:116px">Expiry</th>
+            <th class="n" style="width:106px">Days to exp</th>
+            <th style="width:72px">Type</th>
+            <th class="n" style="width:96px">Strike</th>
+            <th class="dead" style="width:106px">Moneyness</th>
+            <th class="n dead" style="width:100px">Intrinsic</th>
+            <th class="n dead" style="width:100px">Extrinsic</th>
+            <th class="n dead" style="width:86px">IV %</th>
+            <th class="n dead" style="width:86px">Delta</th>
+            <th class="n dead" style="width:90px">Gamma</th>
+            <th class="n dead" style="width:88px">Theta</th>
+            <th class="n dead" style="width:86px">Vega</th>
+            <th class="n dead" style="width:84px">Rho</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">2026-08-13 09:15:00</td>
+            <td class="mono">1min</td>
+            <td class="n">1,412.35</td>
+            <td class="n">1,414.80</td>
+            <td class="n">1,411.90</td>
+            <td class="n">1,414.05</td>
+            <td class="n">184,206</td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n up">+0.12</td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+          </tr>
+          <tr>
+            <td class="mono">2026-08-13 09:16:00</td>
+            <td class="mono">1min</td>
+            <td class="n">1,414.05</td>
+            <td class="n">1,415.60</td>
+            <td class="n">1,413.20</td>
+            <td class="n">1,413.45</td>
+            <td class="n">96,411</td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n down">−0.04</td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+          </tr>
+          <tr>
+            <td class="mono">2026-08-13 09:17:00</td>
+            <td class="mono">1min</td>
+            <td class="n">1,413.45</td>
+            <td class="n">1,413.95</td>
+            <td class="n">1,409.05</td>
+            <td class="n">1,409.70</td>
+            <td class="n">142,880</td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n down">−0.27</td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+          </tr>
+          <tr>
+            <td class="mono">2026-08-13 09:18:00</td>
+            <td class="mono">1min</td>
+            <td class="n">1,409.70</td>
+            <td class="n">1,411.15</td>
+            <td class="n">1,409.05</td>
+            <td class="n">1,410.90</td>
+            <td class="n">78,332</td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n up">+0.09</td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="n"><span class="nosrc">unknown</span></td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td class="mono na">—</td>
+            <td class="n na">—</td>
+            <td><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+            <td class="n"><span class="nosrc">no source</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="pgbar">
+    <button class="btn ghost sm" type="button">‹ Prev</button>
+    <span>Page 1 of 2</span>
+    <button class="btn ghost sm" type="button">Next ›</button>
+    <span class="spacer">Rows 1–200 of 375</span>
+    <select aria-label="Rows per page">
+      <option selected>200 / page</option>
+      <option>500 / page</option>
+    </select>
+  </div>
+
+  <!-- THE CENSUS VIEW — the other thing one row can be. -->
+  <div class="pane-head" style="padding-top:var(--s7)">
+    <h1 style="font-size:var(--fs-md)">Census view</h1>
+    <span class="sub">The same page with the other tab selected: one row per instrument.</span>
+  </div>
+
+  <div class="anchor" style="border-top:0">
+    <span class="big">4,812,375</span>
+    <span class="of">bars stored · Groww · 1 day · all months</span>
+    <span class="pill mea">measured</span>
+  </div>
+
+  <div class="tbl">
+    <div class="tbl-scroll">
+      <table class="grid full">
+        <thead>
+          <tr>
+            <th style="width:132px">Symbol</th>
+            <th>Name</th>
+            <th class="n" style="width:88px">Months</th>
+            <th class="n" style="width:112px">Bars <span class="sortmark">▾</span></th>
+            <th style="width:118px">Oldest</th>
+            <th style="width:118px">Newest</th>
+            <th style="width:104px">Coverage</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">NIFTY50</td>
+            <td>NIFTY 50</td>
+            <td class="n">80</td>
+            <td class="n">1,631</td>
+            <td class="mono">2020-01-01</td>
+            <td class="mono">2026-08-13</td>
+            <td>
+              <span class="cover"
+                ><i class="q4"></i><i class="q4"></i><i class="q4"></i><i class="q4"></i
+              ></span>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">BANKNIFTY</td>
+            <td>NIFTY BANK</td>
+            <td class="n">80</td>
+            <td class="n">1,631</td>
+            <td class="mono">2020-01-01</td>
+            <td class="mono">2026-08-13</td>
+            <td>
+              <span class="cover"
+                ><i class="q4"></i><i class="q4"></i><i class="q4"></i><i class="q4"></i
+              ></span>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">RELIANCE</td>
+            <td>Reliance Industries Limited</td>
+            <td class="n">80</td>
+            <td class="n">1,628</td>
+            <td class="mono">2020-01-01</td>
+            <td class="mono">2026-08-13</td>
+            <td>
+              <span class="cover"
+                ><i class="q4"></i><i class="q4"></i><i class="q3"></i><i class="q4"></i
+              ></span>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">HDFCBANK</td>
+            <td>HDFC Bank Limited</td>
+            <td class="n">62</td>
+            <td class="n">1,204</td>
+            <td class="mono">2021-06-01</td>
+            <td class="mono">2026-08-13</td>
+            <td>
+              <span class="cover"
+                ><i class="q2"></i><i class="q3"></i><i class="q4"></i><i class="q4"></i
+              ></span>
+            </td>
+          </tr>
+          <tr>
+            <td class="mono">TATAMOTORS</td>
+            <td>Tata Motors Limited</td>
+            <td class="n">3</td>
+            <td class="n">61</td>
+            <td class="mono">2026-05-01</td>
+            <td class="mono">2026-08-13</td>
+            <td>
+              <span class="cover"><i class="q1"></i><i></i><i></i><i class="q2"></i></span>
+            </td>
+          </tr>
+          <!-- ZERO IS A NUMBER. "NEVER PULLED" IS NOT. The two must never
+               render identically, and this row is why. -->
+          <tr>
+            <td class="mono">AGL</td>
+            <td>No exchange ISIN — withheld, not guessed</td>
+            <td class="n">0</td>
+            <td class="n">0</td>
+            <td><span class="nosrc">never pulled</span></td>
+            <td><span class="nosrc">never pulled</span></td>
+            <td><span class="cover"><i></i><i></i><i></i><i></i></span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="pgbar">
+    <button class="btn ghost sm" type="button">‹ Prev</button>
+    <span>Page 1 of 10</span>
+    <button class="btn ghost sm" type="button">Next ›</button>
+    <span class="spacer">Rows 1–200 of 1,813</span>
+    <select aria-label="Rows per page">
+      <option selected>200 / page</option>
+      <option>500 / page</option>
+    </select>
+  </div>
+
+  <footer class="legend">
+    <span>24 bar columns · 14 sourced · 10 not · 2,420px declared, scrolling in its own container</span>
+    <span>no source ≠ unknown ≠ — · three absences, three words</span>
+    <span>Prices are paisa integers formatted once, at the boundary</span>
+  </footer>
+</main>
+
+<script>
+  document.querySelector('.tog').addEventListener('click', function (event) {
+    var btn = event.target.closest('button[data-t]');
+    if (!btn) return;
+    document.documentElement.setAttribute('data-theme', btn.dataset.t);
+    this.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+  });
+</script>

@@ -1,0 +1,1101 @@
+<title>Brutex Ingest Page</title>
+
+<!--
+  /ingest — THE DESIGN REFERENCE, DRAWN AS THE PAGE ITSELF.
+
+  Standalone. Reconstructed 2026-08-14 from web/src/lib/theme.css (tokens,
+  verbatim), the markup web/src/routes/ingest/+page.svelte declares, and the
+  design requirements stranded in that file's comments.
+
+  The theming mechanism is the PRODUCT'S, not a mockup's: bare :root carries
+  the light ramp, prefers-color-scheme carries dark for an unset toggle, and
+  :root[data-theme] wins in both directions. The toggle in the corner stamps
+  the attribute exactly as the app shell does.
+
+  Fixture data is shape-correct and is not a claim about any vendor.
+-->
+
+<style>
+  /* ======================================================================
+     1. THE RAMP — copied from web/src/lib/theme.css without alteration.
+     ================================================================== */
+  :root {
+    --n0: #e9edf5;
+    --n1: #f5f7fb;
+    --n2: #ffffff;
+    --n3: #ffffff;
+    --n4: #eef1f7;
+    --n5: #edf0f6;
+    --n6: #dee3ed;
+    --n7: #c7cfdd;
+    --n8: #8b95a8;
+    --n9: #5a6478;
+    --n10: #38415a;
+    --n11: #0d1220;
+    --n12: #000814;
+
+    --up: #00875a;
+    --down: #d3143f;
+    --warn: #a86a06;
+    --info: #6d45d9;
+    --acc: #0e7f96;
+    --acc-hi: #1c58c8;
+    --on-acc: #ffffff;
+
+    --acc-soft: rgba(14, 127, 150, 0.1);
+    --up-soft: rgba(0, 135, 90, 0.12);
+    --down-soft: rgba(211, 20, 63, 0.11);
+    --warn-soft: rgba(168, 106, 6, 0.13);
+    --info-soft: rgba(109, 69, 217, 0.11);
+
+    --focus: #0b6376;
+    --e1: 0 1px 2px rgba(16, 24, 40, 0.07);
+    --e2: 0 6px 16px rgba(16, 24, 40, 0.1), 0 0 0 1px rgba(16, 24, 40, 0.05);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme='light']) {
+      --n0: #070a11;
+      --n1: #0b0e14;
+      --n2: #11151f;
+      --n3: #141924;
+      --n4: #1a2030;
+      --n5: #1b212e;
+      --n6: #232a3a;
+      --n7: #333c51;
+      --n8: #5c6679;
+      --n9: #8a95ab;
+      --n10: #b3bdd0;
+      --n11: #e6ebf5;
+      --n12: #fbfcff;
+      --up: #00e19b;
+      --down: #ff4d6a;
+      --warn: #f0b429;
+      --info: #9d7cf5;
+      --acc: #22d3ee;
+      --acc-hi: #7aa7ff;
+      --on-acc: #04060c;
+      --acc-soft: rgba(34, 211, 238, 0.14);
+      --up-soft: rgba(0, 225, 155, 0.16);
+      --down-soft: rgba(255, 77, 106, 0.16);
+      --warn-soft: rgba(240, 180, 41, 0.16);
+      --info-soft: rgba(157, 124, 245, 0.16);
+      --focus: #67e8f9;
+      --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+      --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+    }
+  }
+  :root[data-theme='dark'] {
+    --n0: #070a11;
+    --n1: #0b0e14;
+    --n2: #11151f;
+    --n3: #141924;
+    --n4: #1a2030;
+    --n5: #1b212e;
+    --n6: #232a3a;
+    --n7: #333c51;
+    --n8: #5c6679;
+    --n9: #8a95ab;
+    --n10: #b3bdd0;
+    --n11: #e6ebf5;
+    --n12: #fbfcff;
+    --up: #00e19b;
+    --down: #ff4d6a;
+    --warn: #f0b429;
+    --info: #9d7cf5;
+    --acc: #22d3ee;
+    --acc-hi: #7aa7ff;
+    --on-acc: #04060c;
+    --acc-soft: rgba(34, 211, 238, 0.14);
+    --up-soft: rgba(0, 225, 155, 0.16);
+    --down-soft: rgba(255, 77, 106, 0.16);
+    --warn-soft: rgba(240, 180, 41, 0.16);
+    --info-soft: rgba(157, 124, 245, 0.16);
+    --focus: #67e8f9;
+    --e1: 0 1px 2px rgba(0, 0, 0, 0.5);
+    --e2: 0 4px 14px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  }
+
+  /* ================================================= 2. MAPPING + SCALES */
+  :root {
+    --bg: var(--n1);
+    --bg-2: var(--n2);
+    --panel: var(--n3);
+    --panel-2: var(--n4);
+    --line: var(--n6);
+    --line-soft: var(--n5);
+    --line-hard: var(--n7);
+    --well: var(--n0);
+    --ink: var(--n11);
+    --ink-hi: var(--n12);
+    --ink-2: var(--n10);
+    --dim: var(--n9);
+    --faint: var(--n8);
+
+    --mono: ui-monospace, 'SF Mono', SFMono-Regular, 'JetBrains Mono', Menlo, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;
+
+    --fs-micro: 9.5px;
+    --fs-mini: 10px;
+    --fs-xs: 11px;
+    --fs-sm: 12px;
+    --fs-base: 13px;
+    --fs-md: 14px;
+    --fs-lg: 17px;
+    --fs-xl: 22px;
+    --fs-2xl: 28px;
+    --lh-tight: 1.15;
+    --lh-base: 1.45;
+    --w-mid: 500;
+    --w-semi: 600;
+    --w-bold: 700;
+    --track-caps: 0.1em;
+
+    --s1: 2px;
+    --s2: 4px;
+    --s3: 6px;
+    --s4: 8px;
+    --s5: 12px;
+    --s6: 16px;
+    --s7: 24px;
+    --s8: 32px;
+    --r1: 4px;
+    --r2: 6px;
+    --r: 8px;
+    --r4: 12px;
+    --r-full: 999px;
+    --row-h: 30px;
+    --topbar-h: 46px;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-base);
+    line-height: var(--lh-base);
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+  }
+
+  /* ================================================== 3. THE GLOBAL BAR */
+  .topbar {
+    height: var(--topbar-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s6);
+    padding: 0 var(--s5);
+    background: var(--bg-2);
+    border-bottom: 1px solid var(--line);
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+  .brand {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    font-size: var(--fs-md);
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+  }
+  .brand em {
+    color: var(--acc);
+    font-style: normal;
+  }
+  .navs {
+    display: flex;
+    gap: var(--s1);
+  }
+  .navs a {
+    font-size: var(--fs-sm);
+    padding: var(--s2) var(--s5);
+    border-radius: var(--r-full);
+    color: var(--dim);
+    text-decoration: none;
+  }
+  .navs a.on {
+    background: var(--acc-soft);
+    color: var(--acc);
+    font-weight: var(--w-semi);
+  }
+  .topright {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+  }
+  .tog {
+    display: inline-flex;
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r-full);
+    overflow: hidden;
+  }
+  .tog button {
+    font-family: var(--mono);
+    font-size: var(--fs-mini);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border: 0;
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+  }
+  .tog button[aria-pressed='true'] {
+    background: var(--acc);
+    color: var(--on-acc);
+    font-weight: var(--w-bold);
+  }
+
+  /* ======================================================= 4. PANE HEAD */
+  .pane-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s5);
+    padding: var(--s6) var(--s5) var(--s5);
+    flex-wrap: wrap;
+  }
+  .pane-head h1 {
+    font-size: var(--fs-lg);
+    font-weight: var(--w-bold);
+    letter-spacing: -0.01em;
+    color: var(--ink-hi);
+    margin: 0;
+  }
+  .pane-head .sub {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+  }
+
+  /* ===================================== 5. THE STRIP — ONE ROW, LABELLED */
+  .strip {
+    display: flex;
+    gap: var(--s3);
+    padding: 0 var(--s5) var(--s5);
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
+    min-width: 0;
+  }
+  .cell > label,
+  .cell > .lab {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-semi);
+  }
+  .ctl {
+    height: var(--row-h);
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: 0 var(--s4);
+    background: var(--bg-2);
+    border: 1px solid var(--line-hard);
+    border-radius: var(--r2);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    white-space: nowrap;
+    box-shadow: var(--e1);
+    cursor: default;
+  }
+  .ctl .caret {
+    color: var(--faint);
+    font-size: 9px;
+    margin-left: auto;
+    padding-left: var(--s4);
+  }
+  .ctl.off {
+    background: var(--well);
+    color: var(--faint);
+    border-color: var(--line);
+    border-style: dashed;
+    box-shadow: none;
+  }
+  .ctl.find {
+    min-width: 200px;
+    color: var(--faint);
+  }
+  .refusal {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--warn);
+    padding-top: var(--s1);
+    max-width: 168px;
+    white-space: normal;
+    line-height: 1.3;
+  }
+  .btn {
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-radius: var(--r2);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--fs-sm);
+    font-weight: var(--w-semi);
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    box-shadow: var(--e1);
+    cursor: pointer;
+  }
+  .btn.primary {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--on-acc);
+  }
+  .btn.ghost {
+    background: transparent;
+    box-shadow: none;
+    border-color: var(--line);
+    color: var(--dim);
+    font-weight: var(--w-mid);
+  }
+  .btn.sm {
+    height: 26px;
+    padding: 0 var(--s4);
+    font-size: var(--fs-xs);
+  }
+
+  /* ============================================ 6. THE INSTRUMENT PICKER */
+  .sel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    margin: 0 var(--s5) var(--s5);
+    overflow: hidden;
+    box-shadow: var(--e1);
+  }
+  .sel-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    padding: var(--s4) var(--s5);
+    border-bottom: 1px solid var(--line);
+    background: var(--panel-2);
+    flex-wrap: wrap;
+  }
+  .ttl {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-bold);
+  }
+  .sel-h .count {
+    font-family: var(--mono);
+    font-size: var(--fs-sm);
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .spacer {
+    margin-left: auto;
+  }
+  .picklist {
+    max-height: 246px;
+    overflow-y: auto;
+  }
+  .prow {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    height: var(--row-h);
+    padding: 0 var(--s5);
+    border-bottom: 1px solid var(--line-soft);
+    font-size: var(--fs-sm);
+  }
+  .prow:hover {
+    background: var(--panel-2);
+  }
+  .prow input {
+    accent-color: var(--acc);
+    width: 13px;
+    height: 13px;
+  }
+  .prow .sym {
+    font-family: var(--mono);
+    font-weight: var(--w-semi);
+    min-width: 112px;
+    color: var(--ink);
+  }
+  .prow .nm {
+    color: var(--dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .prow .isin {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  .prow.dead .sym,
+  .prow.dead .nm {
+    color: var(--faint);
+  }
+
+  /* ===================================================== 7. CARDS + FACTS */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    margin: 0 var(--s5) var(--s5);
+    padding: var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+    box-shadow: var(--e1);
+  }
+  .card-h {
+    display: flex;
+    align-items: center;
+    gap: var(--s4);
+    flex-wrap: wrap;
+  }
+  .tag {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    background: var(--well);
+    border-radius: var(--r-full);
+    padding: 2px 9px;
+    font-variant-numeric: tabular-nums;
+  }
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+    gap: var(--s4);
+  }
+  .fact {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: var(--s4) var(--s5);
+    background: var(--well);
+    border-radius: var(--r1);
+  }
+  .fact b {
+    font-family: var(--mono);
+    font-size: var(--fs-md);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-hi);
+  }
+  .fact span {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+  .said {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    margin: 0;
+  }
+  .said b.warn {
+    color: var(--warn);
+  }
+
+  /* ================================================= 8. THE VERDICT STRIP
+     One sentence, the judgement under it, the non-zero counts as filters,
+     the total they must reach, and the one bulk action.
+     ================================================================== */
+  .lstrip {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    flex-wrap: wrap;
+    padding: var(--s5);
+    border-radius: var(--r2);
+    background: var(--well);
+    border-left: 3px solid var(--line-hard);
+  }
+  .lstrip.up {
+    background: var(--up-soft);
+    border-left-color: var(--up);
+  }
+  .lstrip.warn {
+    background: var(--warn-soft);
+    border-left-color: var(--warn);
+  }
+  .lstrip.down {
+    background: var(--down-soft);
+    border-left-color: var(--down);
+  }
+  .lq {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 210px;
+  }
+  .lq b {
+    font-size: var(--fs-md);
+    color: var(--ink-hi);
+    font-weight: var(--w-bold);
+  }
+  .lq span {
+    font-size: var(--fs-sm);
+    color: var(--dim);
+    max-width: 62ch;
+  }
+  .lpills {
+    display: flex;
+    gap: var(--s3);
+    flex-wrap: wrap;
+  }
+  .lp {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    height: 26px;
+    padding: 0 var(--s4);
+    border-radius: var(--r-full);
+    border: 1px solid var(--line-hard);
+    background: var(--bg-2);
+    font-family: var(--sans);
+    font-size: var(--fs-xs);
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .lp[aria-pressed='true'] {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 1px var(--acc);
+  }
+  .lp .n {
+    font-family: var(--mono);
+    font-weight: var(--w-bold);
+    color: var(--ink-hi);
+    font-variant-numeric: tabular-nums;
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--line-hard);
+  }
+  .dot.up {
+    background: var(--up);
+  }
+  .dot.down {
+    background: var(--down);
+  }
+  .dot.warn {
+    background: var(--warn);
+  }
+  .dot.acc {
+    background: var(--info);
+  }
+  .ltot {
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .ltot.bad {
+    color: var(--down);
+    font-weight: var(--w-bold);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .lact {
+    margin-left: auto;
+  }
+
+  /* ============================================================ 9. GRIDS */
+  .tbl-scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: var(--r2);
+    background: var(--bg-2);
+  }
+  table.grid {
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+    white-space: nowrap;
+    width: 100%;
+  }
+  table.grid th {
+    position: sticky;
+    top: 0;
+    background: var(--bg-2);
+    text-align: left;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: var(--w-semi);
+    padding: var(--s3) var(--s4);
+    border-bottom: 1px solid var(--line-hard);
+    cursor: pointer;
+  }
+  table.grid th.n,
+  table.grid td.n {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  table.grid td {
+    height: var(--row-h);
+    padding: 0 var(--s4);
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--ink);
+  }
+  table.grid td.mono,
+  table.grid td.n {
+    font-family: var(--mono);
+  }
+  table.grid tbody tr:hover td {
+    background: var(--panel-2);
+  }
+  .sortmark {
+    color: var(--acc);
+  }
+  .vd {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s3);
+    font-size: var(--fs-xs);
+  }
+  .nosrc {
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    color: var(--faint);
+    font-style: italic;
+  }
+
+  .census {
+    margin: 0 var(--s5) var(--s5);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s5);
+  }
+  h2.sec {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    font-size: var(--fs-md);
+    font-weight: var(--w-bold);
+    color: var(--ink-hi);
+    margin: 0;
+  }
+  h2.sec .cnt {
+    font-family: var(--mono);
+    color: var(--acc);
+    font-variant-numeric: tabular-nums;
+  }
+  h2.sec em {
+    font-style: normal;
+    font-size: var(--fs-sm);
+    font-weight: var(--w-mid);
+    color: var(--dim);
+  }
+
+  .pgbar {
+    display: flex;
+    align-items: center;
+    gap: var(--s5);
+    padding: var(--s4) 0;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--dim);
+    flex-wrap: wrap;
+  }
+  footer.legend {
+    margin: var(--s7) var(--s5) var(--s8);
+    padding-top: var(--s5);
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    color: var(--faint);
+    display: flex;
+    gap: var(--s6);
+    flex-wrap: wrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      animation: none !important;
+      transition: none !important;
+    }
+  }
+</style>
+
+<header class="topbar">
+  <span class="brand">brute<em>X</em></span>
+  <nav class="navs">
+    <a href="#top">Markets</a><a class="on" href="#top">Ingest</a><a href="#top">DB</a
+    ><a href="#top">Autopilot</a><a href="#top">Audit</a>
+  </nav>
+  <span class="topright">
+    <span class="ctl sm" style="height:26px;font-size:var(--fs-xs)"
+      >Groww <span class="caret">▾</span></span
+    >
+    <span>IST 15:31</span>
+    <span class="tog" role="group" aria-label="Theme">
+      <button type="button" data-t="light" aria-pressed="true">Light</button>
+      <button type="button" data-t="dark" aria-pressed="false">Dark</button>
+    </span>
+  </span>
+</header>
+
+<main id="top">
+  <div class="pane-head">
+    <h1>Ingest</h1>
+    <span class="sub">Ask a feed for bars, and land them in the store.</span>
+  </div>
+
+  <!-- THE STRIP. One row of labelled dropdowns spanning the top, and the feed
+       is NOT among them — it is chosen once, in the bar above. -->
+  <section class="strip" aria-label="What to ask for">
+    <div class="cell">
+      <span class="lab" id="l-uni">Universe</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-uni"
+        >NIFTY Total Market <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="l-seg">Segment</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-seg"
+        >Spot <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="l-tf">Bar length</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-tf"
+        >1 day <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="l-from">From</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-from"
+        >2020-01-01 <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="l-to">To</span>
+      <span class="ctl" role="button" tabindex="0" aria-labelledby="l-to"
+        >2026-08-13 <span class="caret">▾</span></span
+      >
+    </div>
+    <div class="cell">
+      <span class="lab" id="l-tick">Tick</span>
+      <span class="ctl off" aria-labelledby="l-tick" aria-disabled="true">Tick ✕</span>
+      <span class="refusal">refused before the feed is consulted — no feed serves it</span>
+    </div>
+    <div class="cell">
+      <span class="lab">&nbsp;</span>
+      <button class="btn primary" type="button">Pull selected</button>
+    </div>
+  </section>
+
+  <!-- THE INSTRUMENT RUNG IS A PICKER, NOT A COUNTER. -->
+  <section class="sel" aria-label="Instruments">
+    <div class="sel-h">
+      <span class="ttl">Instruments</span>
+      <span class="count">6 selected of 1,813</span>
+      <span class="spacer"></span>
+      <span class="ctl find sm">Search symbol or name…</span>
+      <button class="btn ghost sm" type="button">Select all</button>
+      <button class="btn ghost sm" type="button">Clear all</button>
+    </div>
+    <div class="picklist">
+      <div class="prow">
+        <input type="checkbox" checked aria-label="NIFTY 50" /><span class="sym">NIFTY50</span
+        ><span class="nm">NIFTY 50</span><span class="isin">no ISIN — index</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" checked aria-label="NIFTY BANK" /><span class="sym">BANKNIFTY</span
+        ><span class="nm">NIFTY BANK</span><span class="isin">no ISIN — index</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" checked aria-label="RELIANCE" /><span class="sym">RELIANCE</span
+        ><span class="nm">Reliance Industries Limited</span><span class="isin">INE···A01018</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" checked aria-label="HDFCBANK" /><span class="sym">HDFCBANK</span
+        ><span class="nm">HDFC Bank Limited</span><span class="isin">INE···A01026</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" checked aria-label="INFY" /><span class="sym">INFY</span
+        ><span class="nm">Infosys Limited</span><span class="isin">INE···A01030</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" checked aria-label="TATAMOTORS" /><span class="sym">TATAMOTORS</span
+        ><span class="nm">Tata Motors Limited</span><span class="isin">INE···A01037</span>
+      </div>
+      <div class="prow dead">
+        <input type="checkbox" disabled aria-label="AGL — no exchange ISIN" /><span class="sym"
+          >AGL</span
+        ><span class="nm">No exchange ISIN — the published file carries GRINDWELL's</span
+        ><span class="isin">withheld, not guessed</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- WHAT THE REQUEST COSTS, BEFORE IT IS SENT. -->
+  <section class="card" aria-label="What this request will ask for">
+    <div class="card-h"><span class="ttl">What this request will ask for</span></div>
+    <div class="facts">
+      <div class="fact"><b>80</b><span>month windows</span></div>
+      <div class="fact"><b>6</b><span>instruments</span></div>
+      <div class="fact"><b>480</b><span>requests</span></div>
+      <div class="fact"><b>2020-01-01</b><span>feed floor · operator</span></div>
+      <div class="fact"><b>2026-08-13</b><span>newest allowed · yesterday</span></div>
+    </div>
+    <p class="said">
+      The floor is the operator's fixed January 2020, restated 12 Aug 2026. Groww's own interval
+      table narrows the one-minute rung to a rolling quarter and is kept beside it as the contested
+      claim. Whether this rung truly reaches 2020 is
+      <b class="warn">UNVERIFIED</b> until a request measures it.
+    </p>
+  </section>
+
+  <!-- EVERY INSTRUMENT THE REQUEST NAMED, WITH ITS VERDICT. -->
+  <section class="card" aria-label="Every instrument this request named">
+    <div class="card-h">
+      <span class="ttl">Every instrument this request named</span>
+      <span class="spacer"></span>
+      <span class="tag">6 shown of 6</span>
+    </div>
+
+    <div class="lstrip warn">
+      <div class="lq">
+        <b>The window landed for four of six</b>
+        <span
+          >Two series are short of what the NSE calendar expects. Nothing failed — a pull is
+          warranted and will very likely settle both.</span
+        >
+      </div>
+      <div class="lpills">
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot up"></span><span class="n">4</span> verified
+        </button>
+        <button class="lp" type="button" aria-pressed="true">
+          <span class="dot warn"></span><span class="n">1</span> short
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot warn"></span><span class="n">1</span> never pulled
+        </button>
+      </div>
+      <span class="ltot">of 6 series</span>
+      <span class="lact"><button class="btn sm" type="button">Pull the 2 outstanding</button></span>
+    </div>
+
+    <div class="tbl-scroll">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th style="width:132px">Symbol</th>
+            <th>Name</th>
+            <th class="n" style="width:104px">Bars before</th>
+            <th class="n" style="width:104px">Bars after</th>
+            <th class="n" style="width:96px">Gained</th>
+            <th style="width:150px">Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">NIFTY50</td>
+            <td>NIFTY 50</td>
+            <td class="n">1,592</td>
+            <td class="n">1,631</td>
+            <td class="n" style="color:var(--up)">+39</td>
+            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+          </tr>
+          <tr>
+            <td class="mono">BANKNIFTY</td>
+            <td>NIFTY BANK</td>
+            <td class="n">1,592</td>
+            <td class="n">1,631</td>
+            <td class="n" style="color:var(--up)">+39</td>
+            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+          </tr>
+          <tr>
+            <td class="mono">RELIANCE</td>
+            <td>Reliance Industries Limited</td>
+            <td class="n">1,589</td>
+            <td class="n">1,628</td>
+            <td class="n" style="color:var(--up)">+39</td>
+            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+          </tr>
+          <tr>
+            <td class="mono">HDFCBANK</td>
+            <td>HDFC Bank Limited</td>
+            <td class="n">1,165</td>
+            <td class="n">1,204</td>
+            <td class="n" style="color:var(--up)">+39</td>
+            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+          </tr>
+          <tr>
+            <td class="mono">INFY</td>
+            <td>Infosys Limited</td>
+            <td class="n">1,204</td>
+            <td class="n">1,229</td>
+            <td class="n" style="color:var(--warn)">+25</td>
+            <td><span class="vd"><span class="dot warn"></span>short</span></td>
+          </tr>
+          <tr>
+            <td class="mono">TATAMOTORS</td>
+            <td>Tata Motors Limited</td>
+            <td class="n">0</td>
+            <td class="n">0</td>
+            <td class="n nosrc">none</td>
+            <td><span class="vd"><span class="dot warn"></span>never pulled</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- EVERY SERIES IN THE WINDOW, MEASURED PER MONTH FILE. -->
+  <section class="census" aria-label="Every series in that window">
+    <h2 class="sec">
+      Every series in that window
+      <span class="cnt">480</span>
+      <em>6 instruments × 80 month files · Groww · 1 day</em>
+    </h2>
+
+    <div class="lstrip down">
+      <div class="lq">
+        <b>The ladder has halted, and 3 series are still short</b>
+        <span
+          >Attempts have stopped. A retry on its own will not help — the halt reason is the feed's
+          token, and this build never mints one.</span
+        >
+      </div>
+      <div class="lpills">
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot down"></span><span class="n">3</span> failed
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot warn"></span><span class="n">80</span> never pulled
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot warn"></span><span class="n">12</span> short
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot acc"></span><span class="n">2</span> retrying
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot acc"></span><span class="n">36</span> out of reach
+        </button>
+        <button class="lp" type="button" aria-pressed="false">
+          <span class="dot up"></span><span class="n">347</span> verified
+        </button>
+      </div>
+      <span class="ltot">of 480 series</span>
+    </div>
+
+    <div class="tbl-scroll">
+      <table class="grid">
+        <thead>
+          <tr>
+            <th style="width:132px">Symbol</th>
+            <th style="width:96px">Month</th>
+            <th style="width:80px">TF</th>
+            <th class="n" style="width:104px">Held</th>
+            <th class="n" style="width:104px">Expected</th>
+            <th class="n" style="width:88px">Short by</th>
+            <th style="width:160px">Verdict</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">TATAMOTORS</td>
+            <td class="mono">2020-01</td>
+            <td class="mono">1day</td>
+            <td class="n">0</td>
+            <td class="n">21</td>
+            <td class="n" style="color:var(--warn)">21</td>
+            <td><span class="vd"><span class="dot warn"></span>never pulled</span></td>
+          </tr>
+          <tr>
+            <td class="mono">INFY</td>
+            <td class="mono">2026-07</td>
+            <td class="mono">1day</td>
+            <td class="n">18</td>
+            <td class="n">23</td>
+            <td class="n" style="color:var(--warn)">5</td>
+            <td><span class="vd"><span class="dot warn"></span>short</span></td>
+          </tr>
+          <tr>
+            <td class="mono">HDFCBANK</td>
+            <td class="mono">2020-03</td>
+            <td class="mono">1day</td>
+            <td class="n nosrc">—</td>
+            <td class="n nosrc">—</td>
+            <td class="n nosrc">—</td>
+            <td><span class="vd"><span class="dot acc"></span>out of reach</span></td>
+          </tr>
+          <tr>
+            <td class="mono">RELIANCE</td>
+            <td class="mono">2026-08</td>
+            <td class="mono">1day</td>
+            <td class="n">9</td>
+            <td class="n">9</td>
+            <td class="n">0</td>
+            <td><span class="vd"><span class="dot acc"></span>retrying</span></td>
+          </tr>
+          <tr>
+            <td class="mono">NIFTY50</td>
+            <td class="mono">2026-08</td>
+            <td class="mono">1day</td>
+            <td class="n">9</td>
+            <td class="n">9</td>
+            <td class="n">0</td>
+            <td><span class="vd"><span class="dot up"></span>verified</span></td>
+          </tr>
+          <tr>
+            <td class="mono">BANKNIFTY</td>
+            <td class="mono">2025-11</td>
+            <td class="mono">1day</td>
+            <td class="n">20</td>
+            <td class="n nosrc">no yardstick</td>
+            <td class="n nosrc">—</td>
+            <td><span class="vd"><span class="dot acc"></span>no yardstick</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pgbar">
+      <button class="btn ghost sm" type="button">‹ Prev</button>
+      <span>Page 1 of 3</span>
+      <button class="btn ghost sm" type="button">Next ›</button>
+      <span class="spacer">Rows 1–200 of 480</span>
+    </div>
+  </section>
+
+  <footer class="legend">
+    <span>7 verdicts, worst first: failed · never pulled · short · retrying · no yardstick · out of reach · verified</span>
+    <span>Every number monospace, tabular, right-aligned</span>
+    <span>Row 30px · base 13px · labels 9.5px at 0.1em</span>
+  </footer>
+</main>
+
+<script>
+  // The app shell's own mechanism: stamp data-theme for an explicit choice.
+  document.querySelector('.tog').addEventListener('click', function (event) {
+    var btn = event.target.closest('button[data-t]');
+    if (!btn) return;
+    document.documentElement.setAttribute('data-theme', btn.dataset.t);
+    this.querySelectorAll('button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+  });
+</script>
