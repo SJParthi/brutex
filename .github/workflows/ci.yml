@@ -357,8 +357,28 @@ jobs:
           # about a spelling lands here exactly as a constant would -- which is
           # the correct behaviour, because a real segment pasted into a doc
           # comment publishes it just as effectively.
+          #
+          # `60min` REPLACED `1hr` ON 14 AUG 2026, AND THE PARAGRAPH ABOVE IS
+          # WHY THAT NEEDED AN ARGUMENT RATHER THAN AN EDIT.
+          #
+          # It says these are the stable on-disk directory names and that §3
+          # rule 8 forbids renaming one. `1hr` was NOT one. It was
+          # `Granularity::dir`'s word for the hour rung, and the directory is
+          # created from `store::path::Timeframe`, whose word for that rung has
+          # been `60min` since the store was widened. The two disagreed, and
+          # nothing noticed because `Granularity::store_timeframe` answered
+          # `None` for the rung -- so no bar could ever be written under either
+          # spelling and `1hr` never named a directory on any disk.
+          #
+          # Rule 8 protects HISTORY. There is none here to protect: the rename
+          # orphans nothing, because nothing was ever filed. What it removes is
+          # a second name for one rung, which `web/src/routes/db/+page.svelte`
+          # had been absorbing by hand in an alias table. `1hr` stays on this
+          # list -- the doc comment recording the rename quotes it, and a word
+          # this gate has already seen must not start failing because the code
+          # explaining it was written. D-0132.
           timeframe='
-          tick 1s 5s 1min 3min 5min 15min 30min 1hr 1day 1week continuous
+          tick 1s 5s 1min 3min 5min 15min 30min 60min 1hr 1day 1week continuous
           1d day
           '
 

@@ -291,12 +291,19 @@
    * between them — a rung this table has no second count for is not given a
    * guessed one.
    *
-   * `1m` and `1hr` are ALIASES AND ARE MARKED AS SUCH. `1m` is what the server
-   * stamped on every census row before it learned to write the real rung, and
-   * it may still be in a cached response; `1hr` is `pull::vendor::Granularity`'s
-   * spelling of the rung the store files under `60min`. Both name a length this
-   * table already knows, so both get that length rather than falling off the
-   * end of the ladder.
+   * `1m` IS AN ALIAS AND IS MARKED AS SUCH. It is what the server stamped on
+   * every census row before it learned to write the real rung, and it may still
+   * be in a cached response, so it gets the length this table already knows
+   * rather than falling off the end of the ladder.
+   *
+   * `1hr` WAS A SECOND ALIAS AND IS GONE. This comment used to read: *"`1hr` is
+   * `pull::vendor::Granularity`'s spelling of the rung the store files under
+   * `60min`"* — a plain statement that one rung had two names, absorbed here by
+   * hand because the two crates disagreed. D-0132 made them one word: the
+   * store's, `60min`, which is the one that becomes a path. Nothing emits `1hr`
+   * any more, and the server refuses it by name as an unknown rung, so keeping
+   * a row for it would map a spelling nothing sends onto a length — a workaround
+   * outliving the defect it worked around.
    *
    * # Why this exists at all
    *
@@ -315,7 +322,6 @@
     ['15min', 900],
     ['30min', 1800],
     ['60min', 3600],
-    ['1hr', 3600],
     ['1day', 86400]
   ]);
 
@@ -340,8 +346,13 @@
    * directions at once, and a comparator that contradicts itself leaves the
    * order of those elements unspecified — the same store could render its
    * rungs in a different order on the next pass. Equal lengths fall through to
-   * `txt`, which is itself three-way, so `1hr` beside `60min` is ordered and
-   * stays ordered.
+   * `txt`, which is itself three-way, so two spellings of one length are
+   * ordered and stay ordered.
+   *
+   * The example this used to give was `1hr` beside `60min`, and D-0132 removed
+   * it: they were one rung with two names and there is now one. The rule is
+   * kept because `1m` beside `1min` is still a live pair, and because a
+   * comparator that only happens to be consistent is not one.
    *
    * @param {string} a
    * @param {string} b

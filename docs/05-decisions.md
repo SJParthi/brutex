@@ -12881,17 +12881,55 @@ live.
    added to the store and forgotten in the ladder fails the build too — the same
    silence in the other direction.
 
+### THREE rungs are enabled, not five — and the stub is refused, not deferred
+
+The first draft of this entry enabled all five and recorded the stub as an open
+question. **That was wrong, and an adversarial pass over the write path caught
+it before it shipped.** Recorded rather than quietly corrected, because the
+reasoning is the point.
+
+`pull::fold`'s grid is anchored at IST midnight and the NSE open is 555 minutes
+past it, so a rung files a correct opening bar exactly when its length divides
+555:
+
+| rung | 555 ÷ length | opening bar |
+|---|---|---|
+| 3min | 185 | full |
+| 5min | 111 | full |
+| 15min | 37 | full |
+| **30min** | **18.5** | **09:15–09:29 filed as [09:00, 09:30)** |
+| **60min** | **9.25** | **09:15–09:59 filed as [09:00, 10:00)** |
+
+Replaying the fold's arithmetic over a 09:15–15:29 session: at 1,800 seconds it
+yields 13 records, the first stamped **09:00 IST** holding fifteen minutes of
+trade, in a file whose header says 1,800 seconds. Every later reader takes that
+record as the whole half-hour; its `open` is the 09:15 print presented as the
+09:00 print, and its high and low are drawn from half an interval. At 3,600 it
+is a 45-minute first bar and a 30-minute last one. The bar is also stamped
+**before the exchange session**, which no intraday rung has ever done here.
+
+That is silent wrong data in an append-only store — well formed, correct
+checksum, accurate count, and a month that cannot be prepended or rewritten.
+`CLAUDE.md` §4 ranks a loud refusal above exactly this, so `store_timeframe`
+refuses both.
+
+**The predicate already existed and had no caller.**
+`store::path::Timeframe::aligns_with_the_open` has shipped since D-0077, whose
+text says it exposes the stub *"so a caller can refuse rather than discover
+it"* — and a search finds it only in its own definition, two doc lines and one
+test. `store_timeframe` is the caller D-0077 meant, and it is now that caller.
+Asking the predicate rather than listing the two rungs by hand means a rung
+added later is judged by the arithmetic instead of by whoever remembers this
+entry, and a `const` block pins the six alignment answers so a change to the
+fold anchor fails the build instead of leaving two rungs refused for a reason
+that had stopped being true.
+
 ### What this does NOT claim
 
-It does not claim the five rungs now *work*. It claims they are no longer
-mislabelled as having nowhere to be written. Whether the fold produces a correct
-bar at `Minute30` and `Hour1` is a **separate and open question**:
-`Timeframe::MINUTE_3`'s own documentation records that 555 — the minutes from
-IST midnight to the 09:15 open — is divisible by 1, 3, 5 and 15 and **not** by
-30 or 60, so those two rungs begin the session with a stub bar. A stub written
-as though it were a full bar is precisely the silent-wrong-data failure this
-repository ranks above a refusal. That is recorded here as outstanding and is
-not closed by this entry.
+Restoring 30min and 60min is not a table edit. It needs the fold grid anchored
+at the **session open** rather than at IST midnight, which changes what a bar IS
+at every rung and is a decision of its own. Recorded here as outstanding and not
+closed.
 
 ### Cost
 

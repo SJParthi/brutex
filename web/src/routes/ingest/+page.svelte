@@ -83,11 +83,26 @@
     { dir: '1s', label: '1 second', note: 'one-second grid', stored: false, per: null },
     { dir: '5s', label: '5 seconds', note: 'five-second grid', stored: false, per: null },
     { dir: '1min', label: '1 minute', note: 'what the engine sweeps', stored: true, per: 375 },
-    { dir: '3min', label: '3 minutes', note: 'three-minute grid', stored: false, per: null },
-    { dir: '5min', label: '5 minutes', note: 'five-minute grid', stored: false, per: null },
-    { dir: '15min', label: '15 minutes', note: 'fifteen-minute grid', stored: false, per: null },
-    { dir: '30min', label: '30 minutes', note: 'thirty-minute grid', stored: false, per: null },
-    { dir: '1hr', label: '1 hour', note: 'hourly grid', stored: false, per: null },
+    // 555 IS WHY THESE FIVE ROWS SPLIT THREE-TWO, AND IT IS NOT A UI CHOICE.
+    //
+    // `crates/store` ships a directory for all five. The NSE open is 555
+    // minutes past IST midnight and `pull::fold`'s grid is anchored at IST
+    // midnight, so a rung files a correct opening bar exactly when its length
+    // divides 555. Three, five and fifteen do. Thirty (18.5) and sixty (9.25)
+    // do not — their first bar of the day is a 15- and a 45-minute stub that
+    // would be filed as a full one — so `Granularity::store_timeframe` refuses
+    // them and `stored` is false HERE for the same reason it is false there.
+    // D-0132, and `store::path::Timeframe::aligns_with_the_open` is the
+    // predicate both sides ask.
+    { dir: '3min', label: '3 minutes', note: 'three-minute grid', stored: true, per: 125 },
+    { dir: '5min', label: '5 minutes', note: 'five-minute grid', stored: true, per: 75 },
+    { dir: '15min', label: '15 minutes', note: 'fifteen-minute grid', stored: true, per: 25 },
+    { dir: '30min', label: '30 minutes', note: 'thirty-minute grid — 555/30 is 18.5, so the session opens on a 15-minute stub', stored: false, per: null },
+    // `60min`, NOT `1hr`. The store has always spelled this rung `60min` and
+    // `Granularity::dir` said `1hr`; D-0132 made them one word. This row sent
+    // `granularity=1hr`, which the server now refuses BY NAME as an unknown
+    // rung — so the spelling here is not cosmetic, it is whether the row works.
+    { dir: '60min', label: '1 hour', note: 'hourly grid — 555/60 is 9.25, so the session opens on a 45-minute stub', stored: false, per: null },
     { dir: '1day', label: '1 day', note: 'one bar per session', stored: true, per: 1 },
     { dir: '1week', label: '1 week', note: 'one bar per trading week', stored: false, per: null }
   ];

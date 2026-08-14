@@ -405,14 +405,67 @@ impl Granularity {
     /// absence, one arm each, rather than four rungs sharing an underscore
     /// with five that were wrong.
     #[must_use]
+    #[allow(
+        clippy::match_same_arms,
+        reason = "the two `None` arms return the same value and state DIFFERENT facts, which \
+                  is the whole point of naming every arm. `Minute30 | Hour1` is 'crates/store \
+                  ships a directory and the fold would file a stub into it'; `Tick | Second1 \
+                  | Second5 | Week1` is 'crates/store ships no directory at all'. Merging them \
+                  would put a rung refused for arithmetic beside four refused for absence, and \
+                  the next reader deciding whether a rung can be enabled would have to \
+                  re-derive which kind each one is — the exact question the `_` arm this \
+                  function replaced made unanswerable. D-0132."
+    )]
     pub const fn store_timeframe(self) -> Option<Timeframe> {
         match self {
             Self::Minute1 => Some(Timeframe::MINUTE_1),
             Self::Minute3 => Some(Timeframe::MINUTE_3),
             Self::Minute5 => Some(Timeframe::MINUTE_5),
             Self::Minute15 => Some(Timeframe::MINUTE_15),
-            Self::Minute30 => Some(Timeframe::MINUTE_30),
-            Self::Hour1 => Some(Timeframe::MINUTE_60),
+            // THIRTY AND SIXTY ARE REFUSED, AND IT IS THE STUB, NOT THE
+            // DIRECTORY.
+            //
+            // Both have a directory. What they do not have is a bar that means
+            // what its stamp says. `crate::fold`'s grid is anchored at IST
+            // MIDNIGHT (`fold.rs`, `IST_ANCHOR_MICROS`) and the NSE open is 555
+            // minutes past it. 555 is divisible by 1, 3, 5 and 15 and not by 30
+            // (18.5) or 60 (9.25) — so a 30-minute session folds to a first
+            // record stamped **09:00**, holding only 09:15–09:29: fifteen
+            // minutes of trade, filed in a file whose header says 1,800
+            // seconds, which every later reader takes as the whole
+            // [09:00, 09:30) bar. Its `open` is the 09:15 print presented as
+            // the 09:00 print. At sixty it is worse — a 45-minute first bar and
+            // a 30-minute last one.
+            //
+            // That is silent wrong data in an append-only store: the file is
+            // well formed, the checksum is right, the count is accurate, and
+            // the month cannot be prepended or rewritten. `CLAUDE.md` §4 ranks
+            // a loud refusal above exactly this.
+            //
+            // THE PREDICATE IS THE STORE'S OWN AND THIS IS ITS FIRST CALLER.
+            // `Timeframe::aligns_with_the_open` has existed since D-0077, which
+            // says in as many words that it exposes the stub "so a caller can
+            // refuse rather than discover it" — and it had no production caller
+            // at all. Asking it here rather than listing the two rungs by hand
+            // means a rung added to the ladder is judged by the arithmetic
+            // instead of by whoever remembers this comment.
+            //
+            // Restoring them is not a table edit: it needs the fold grid
+            // anchored at the session open rather than at IST midnight, which
+            // changes what a bar IS at every rung and is a D-entry of its own.
+            Self::Minute30 if Timeframe::MINUTE_30.aligns_with_the_open() => {
+                Some(Timeframe::MINUTE_30)
+            }
+            Self::Hour1 if Timeframe::MINUTE_60.aligns_with_the_open() => {
+                Some(Timeframe::MINUTE_60)
+            }
+            Self::Minute30 | Self::Hour1 => None,
+            // NOT ASKED OF THE DAY RUNG, deliberately. `aligns_with_the_open`
+            // divides 555 by a number of minutes, which is a question about an
+            // INTRADAY grid; a daily bar aggregates a whole session and is
+            // exempt from the session filter already (`Granularity::cadence`).
+            // Asking it here would refuse `1day`, which has been filing bars
+            // correctly since D-0054.
             Self::Day1 => Some(Timeframe::DAY_1),
             // NAMED, NOT CAUGHT. `Timeframe::KNOWN` holds no entry for any of
             // these four, and saying so one rung at a time is what makes an
@@ -531,6 +584,24 @@ rung_matches_store! {
     Minute30 <=> MINUTE_30,
     Hour1    <=> MINUTE_60,
 }
+
+// THE NAMES AGREE FOR ALL SIX ABOVE. WHETHER A RUNG IS WRITABLE IS A DIFFERENT
+// QUESTION, AND THIS PINS THE ANSWER SO IT CANNOT DRIFT EITHER WAY.
+//
+// `store_timeframe` refuses `Minute30` and `Hour1` because their opening bar is
+// a stub — see that function. The arithmetic behind the refusal is asserted here
+// rather than left implicit, so a change to the fold anchor that made them align
+// would fail this block and force the refusal to be revisited, instead of
+// leaving two rungs refused for a reason that had stopped being true.
+const _: () = {
+    assert!(Timeframe::MINUTE_1.aligns_with_the_open());
+    assert!(Timeframe::MINUTE_3.aligns_with_the_open());
+    assert!(Timeframe::MINUTE_5.aligns_with_the_open());
+    assert!(Timeframe::MINUTE_15.aligns_with_the_open());
+    // 555 / 30 = 18.5 and 555 / 60 = 9.25.
+    assert!(!Timeframe::MINUTE_30.aligns_with_the_open());
+    assert!(!Timeframe::MINUTE_60.aligns_with_the_open());
+};
 
 // THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
 //
@@ -4475,35 +4546,76 @@ mod tests {
                 // guards answered `None` for five rungs `KNOWN` has always
                 // held, and a hand-written expectation would have agreed with
                 // it.
-                None => assert!(
-                    !Timeframe::KNOWN
+                // A `None` IS ONE OF EXACTLY TWO THINGS, AND BOTH ARE CHECKED
+                // AGAINST THE STORE'S OWN TABLES RATHER THAN A LIST REPEATED
+                // HERE. A second list would be the same defect one layer up:
+                // the `_` arm this test now guards answered `None` for five
+                // rungs `KNOWN` has always held, and a hand-written expectation
+                // would have agreed with it.
+                //
+                //   1. `Timeframe::KNOWN` holds no directory for the rung, or
+                //   2. it does, and the rung's opening bar would be a STUB —
+                //      `aligns_with_the_open` is false, so a fold anchored at
+                //      IST midnight would file 15 minutes of trade as the
+                //      [09:00, 09:30) bar.
+                //
+                // The second arm is asserted through the store's predicate, not
+                // by naming 30min and 60min, so a change to the fold anchor
+                // that made them align turns this into a failure that says so.
+                None => {
+                    if let Some(known) = Timeframe::KNOWN
                         .iter()
-                        .any(|known| known.as_str() == rung.dir()),
-                    "a None is a refusal at the write boundary, never a \
-                     substitution — and crates/store ships a directory for \
-                     {rung}, so refusing it strikes a rung off the operator's \
-                     form that the store can file"
-                ),
+                        .find(|known| known.as_str() == rung.dir())
+                    {
+                        assert!(
+                            !known.aligns_with_the_open(),
+                            "a None is a refusal at the write boundary, never a \
+                             substitution — and crates/store ships a directory \
+                             for {rung} whose bars DO align with the 09:15 open, \
+                             so refusing it strikes a rung off the operator's \
+                             form that the store can file correctly"
+                        );
+                    }
+                }
             }
         }
-        // EVERY ENTRY IN THE STORE'S TABLE IS REACHED, not merely "the ones
-        // this test happened to see". The two directions are different
-        // failures: a rung carrying no timeframe is a rung the operator cannot
-        // pull, and a timeframe no rung carries is a directory nothing can ever
-        // write into.
+        // EVERY ALIGNED ENTRY IN THE STORE'S TABLE IS REACHED, not merely "the
+        // ones this test happened to see". The two directions are different
+        // failures: an aligned rung carrying no timeframe is a rung the
+        // operator cannot pull, and a timeframe no rung carries is a directory
+        // nothing can ever write into.
+        //
+        // `1day` is counted as aligned: `aligns_with_the_open` divides 555 by a
+        // number of MINUTES and is a question about an intraday grid, so it is
+        // asked only of the rungs that sit on one. `store_timeframe` makes the
+        // same exemption and says why.
+        let expected: Vec<&str> = Timeframe::KNOWN
+            .iter()
+            .filter(|known| known.aligns_with_the_open() || known.secs() == 86_400)
+            .map(|known| known.as_str())
+            .collect();
         assert_eq!(
             carried.len(),
-            Timeframe::KNOWN.len(),
-            "every rung crates/store ships must be reachable from the ladder; \
-             carried {carried:?}"
+            expected.len(),
+            "every rung crates/store ships and can file correctly must be \
+             reachable from the ladder; carried {carried:?}, expected \
+             {expected:?}"
         );
-        for known in Timeframe::KNOWN {
+        for name in &expected {
             assert!(
-                carried.iter().any(|rung| rung.dir() == known.as_str()),
-                "{} is a store directory no rung names",
-                known.as_str()
+                carried.iter().any(|rung| &rung.dir() == name),
+                "{name} is a store directory no rung names"
             );
         }
+        // THE STUB RUNGS ARE REFUSED, AND THE COUNT IS PINNED so this test
+        // cannot pass by refusing everything.
+        assert_eq!(
+            Timeframe::KNOWN.len() - expected.len(),
+            2,
+            "30min and 60min are the two rungs the store ships that the fold \
+             cannot align with the open; if that changed, store_timeframe's \
+             refusal must be revisited"
+        );
         // Coarsest last, which is the order `Granularity::ALL` walks and the
         // order a backfill lands them in.
         assert!(

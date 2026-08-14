@@ -1302,6 +1302,25 @@ fn stated_offset(text: &str) -> Option<i64> {
 /// `core::vendor::VENDOR_ID_CAPACITY`. No allocation: the happy path hands the
 /// caller its own borrow back.
 fn path_safe<'a>(value: &'a str, placeholder: &'static str) -> Result<&'a str, FetchError> {
+    // THE DOT-SEGMENTS ARE REFUSED, AND THE UNRESERVED SET ALONE DOES NOT DO
+    // IT. `.` is unreserved, so a character-wise allowlist admits both `.` and
+    // `..` — and RFC 3986 §5.2.4 says those two are not ordinary segments at
+    // all. `..` REMOVES the segment before it, so an instrument id resolving to
+    // `..` turns `/instruments/historical/../minute` into
+    // `/instruments/minute`: a different endpoint, requested with a live
+    // credential, whose answer would be filed as bars for the instrument that
+    // was asked for. `.` merely elides itself, which is quieter and no more
+    // correct.
+    //
+    // Refused as WHOLE segments rather than by banning the character, because
+    // a dot inside a symbol is ordinary and refusing `BAJAJ.NS` would be a
+    // refusal of a correct value.
+    if value == "." || value == ".." {
+        return Err(FetchError::PathSegmentUnusable {
+            placeholder,
+            value: value.to_owned(),
+        });
+    }
     let usable = !value.is_empty()
         && value
             .bytes()
