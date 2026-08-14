@@ -1729,6 +1729,12 @@ mod tests {
     /// SHIPPED descriptor rather than a fixture.
     #[test]
     fn a_zone_carrying_stamp_is_converted_once_and_the_two_arms_must_agree() {
+        // Computed independently of the code under test: 17,515 days since the
+        // epoch, plus 9h15m, minus the stated 5h30m. Declared first because an
+        // item after a statement reads as though it were scoped to what came
+        // before it, and it is not.
+        const TRUE_UTC: i64 = 17_515 * 86_400 + 9 * 3_600 + 15 * 60 - 19_800;
+
         let crate::vendor::Transport::Http(zerodha) =
             crate::vendor::Feed::Zerodha.descriptor().transport
         else {
@@ -1739,9 +1745,6 @@ mod tests {
             ["2017-12-15T09:15:00+0530",1704.5,1705,1699.25,1702.8,2499]]}}"#;
         let raw = decode_body(body, &zerodha).expect("the vendor's own example decodes");
 
-        // Computed independently of the code under test: 17,515 days since the
-        // epoch, plus 9h15m, minus the stated 5h30m.
-        const TRUE_UTC: i64 = 17_515 * 86_400 + 9 * 3_600 + 15 * 60 - 19_800;
         assert_eq!(TRUE_UTC, 1_513_309_500, "the hand computation");
 
         let request = BarRequest {
@@ -1878,8 +1881,7 @@ mod tests {
         // answers 403 to — indistinguishable from an expired session.
         assert_eq!(
             HttpSource::new(zerodha, Credential::token("TOKEN".to_owned()))
-                .err()
-                .expect("a two-secret scheme refuses one secret"),
+                .expect_err("a two-secret scheme refuses one secret"),
             FetchError::CredentialMismatch {
                 names_two: true,
                 given_two: false
@@ -1887,8 +1889,7 @@ mod tests {
         );
         assert_eq!(
             HttpSource::new(groww, Credential::pair("K".to_owned(), "T".to_owned()))
-                .err()
-                .expect("a one-secret scheme refuses two"),
+                .expect_err("a one-secret scheme refuses two"),
             FetchError::CredentialMismatch {
                 names_two: false,
                 given_two: true
