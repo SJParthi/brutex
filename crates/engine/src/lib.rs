@@ -70,6 +70,8 @@ pub mod column;
 use std::collections::HashSet;
 use vocab::ConditionMask;
 
+use crate::column::Column;
+
 /// Fails the build if the vocabulary ever outgrows the mask.
 ///
 /// This is the guard that the predecessor repository did not have. There, the
@@ -416,6 +418,28 @@ impl Ladder {
             ..Sweep::default()
         };
 
+        // ── the layout, chosen ONCE for the whole walk ───────────────────────
+        //
+        // `column.rs` has existed since b4220b6 and NOTHING CALLED IT. This
+        // function took the row-major slice and counted support against it at
+        // both of its call sites, so every candidate re-read the entire column
+        // -- 58.7 MB at 1,222,791 bars -- while a transposed copy that reads only
+        // the `k` bitmaps a candidate names sat one module away, benchmarked and
+        // unreachable. `C-E-06` measured the two layouts at 94x, 19x and 9x apart
+        // at k=1, k=4 and k=8 and the faster one was never on the path it was
+        // written for. That is the same defect as the vocabulary and the ladder
+        // never having been joined, one layer down.
+        //
+        // The transpose is paid once, before k=1. It costs one pass over the bars
+        // setting at most `ConditionMask::BITS` bits each -- a constant per bar,
+        // so it cannot change the per-bar bound `C-E-04` pins -- and it is repaid
+        // by the very first level, which counts support once per live position.
+        //
+        // The signature still takes the row-major slice: that is what a caller
+        // has, and which layout the sweep counts against is this function's
+        // business rather than its caller's.
+        let column = Column::transpose(bar_bits);
+
         // ── k=1, and the D-0080 exclusion guard ──────────────────────────────
         // Every position is measured BEFORE the ladder starts, and one at
         // support 0 or at support == bars is named in the output rather than
@@ -461,7 +485,7 @@ impl Ladder {
                 continue;
             }
             let m = ConditionMask::default().with_bit(p);
-            let hits = support(bar_bits, &m);
+            let hits = column.support(&m);
             if hits == 0 {
                 sweep.excluded.push(Excluded {
                     position: p,
@@ -517,7 +541,7 @@ impl Ladder {
             // `break` nothing can prove. Saturation agrees with `checked_add` on
             // every reachable value of `k` and adds no arm to defend.
             k = k.saturating_add(1);
-            let (next, halt) = self.next_level(bar_bits, &current, k);
+            let (next, halt) = self.next_level(&column, &current, k);
             sweep.levels.push(current);
             current = next;
             // A HALTED LEVEL IS PARTIAL, so climbing off it would build k+1 from
@@ -536,12 +560,7 @@ impl Ladder {
     }
 
     /// Join the frontier with itself, subset-prune, evaluate what is left.
-    fn next_level(
-        self,
-        bar_bits: &[ConditionMask],
-        prev: &Frontier,
-        k: u32,
-    ) -> (Frontier, Option<Halt>) {
+    fn next_level(self, column: &Column, prev: &Frontier, k: u32) -> (Frontier, Option<Halt>) {
         // O(1) membership for the subset prune, and O(1) duplicate rejection.
         // `ConditionMask` derives `Hash + Eq`, so the key is the mask itself and
         // no separate index is needed.
@@ -607,7 +626,7 @@ impl Ladder {
                     pruned = pruned.saturating_add(1);
                     continue;
                 }
-                let hits = support(bar_bits, &cand);
+                let hits = column.support(&cand);
                 if hits >= self.min_hits {
                     out.push(Itemset { mask: cand, hits });
                 } else {
