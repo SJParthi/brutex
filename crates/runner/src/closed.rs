@@ -65,6 +65,33 @@ impl Closed {
     }
 }
 
+/// How many frequent itemsets are redundant, WITHOUT building the kept list.
+///
+/// [`crate::significance::effective_trials`] needs only this count, and calling
+/// [`closed`] for it allocated a whole `Vec<Itemset>` of the answer and dropped
+/// it. An audit measured the render that does so at 978,542 ns on the twelve-
+/// level fixture, effectively all of it here.
+///
+/// The walk is the same and so is the cost in lookups; what is gone is the
+/// allocation of a result nobody reads.
+#[must_use]
+pub fn redundant_count(sweep: &Sweep) -> u64 {
+    let mut redundant: HashSet<ConditionMask> = HashSet::new();
+    for (lower, upper) in sweep.levels.iter().zip(sweep.levels.iter().skip(1)) {
+        let below: HashMap<ConditionMask, u64> =
+            lower.frequent.iter().map(|i| (i.mask, i.hits)).collect();
+        for larger in &upper.frequent {
+            for bit in set_positions(&larger.mask) {
+                let smaller = larger.mask.without_bit(bit);
+                if below.get(&smaller) == Some(&larger.hits) {
+                    redundant.insert(smaller);
+                }
+            }
+        }
+    }
+    u64::try_from(redundant.len()).unwrap_or(u64::MAX)
+}
+
 /// The closed frequent itemsets of a sweep.
 ///
 /// # Cost

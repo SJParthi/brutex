@@ -30,15 +30,31 @@
 //!
 //! # Cost
 //!
-//! One `String` per run, sized once and written once. The render is linear in
-//! the number of LEVELS — twelve on the fixture — and touches no bar and no
-//! candidate, which is the whole reason it may exist outside gate 17's silence.
+//! One `String` per run, and it **touches no bar** -- which is the whole reason
+//! it may exist outside gate 17's silence. It does touch every frequent
+//! COMBINATION, and this paragraph claimed otherwise until an audit measured it.
 //!
-//! Measured by `C-R-02` in `crates/runner/benches/ratio.rs`, with both ladders
-//! neutered to a single level so the level count is held equal and only the
-//! column varies: 1,124 against 10,124 swept bars, 0.914x. The row began as a
-//! per-LEVEL cost and read 0.197x, which is the fixed prologue amortising over
-//! a deeper ladder and says nothing whatever about bars.
+//! The SIGNIFICANCE section deflates the trial count by the redundancy
+//! `crate::closed` finds, and finding it means walking the answer. Measured on
+//! the twelve-level fixture, same column, only `min_hits` varied:
+//!
+//! | frequent sets | levels | render |
+//! |---|---|---|
+//! | 0 | 1 | 2,041 ns |
+//! | 456 | 9 | 88,875 ns |
+//! | 3,689 | 12 | 978,542 ns |
+//!
+//! Levels grew 1.33x and the render grew 7.2x: **the cost is O(frequent sets),
+//! not O(levels)**, and effectively all of it is the deflation.
+//!
+//! `C-R-02` in `crates/runner/benches/ratio.rs` cannot see that. It neuters both
+//! ladders to `min_hits = u64::MAX`, which yields ZERO frequent sets, so the
+//! deflation is a no-op inside the timed region. The row is honest about what it
+//! measures -- cost per level as the COLUMN grows -- and was cited here as proof
+//! of a bound it structurally cannot cover. That citation is withdrawn.
+//!
+//! This is a once-per-run boundary, so O(answer) is affordable. It is stated
+//! rather than claimed away.
 
 use core::fmt::Write as _;
 
@@ -47,6 +63,19 @@ use crate::rank::Ranked;
 use crate::{Auto, Outcome};
 use engine::Sweep;
 use indicators::column::Census;
+
+/// Observations below which a normal-quantile bar cannot rule on a t-statistic.
+///
+/// `Edge::t` is Student-t with `n - 1` degrees of freedom; every threshold in
+/// `crate::significance` is a NORMAL quantile. They converge as `n` grows and
+/// diverge sharply below about thirty: an audit measured the bar understated by
+/// 4.89 at `n = 13`, which spends 729x the family-wise budget on one row.
+///
+/// Thirty is the conventional crossing point and it is a stated convention, not
+/// a derivation. Below it the report refuses a verdict rather than issuing one
+/// across two distributions -- `CLAUDE.md` §4 prefers a named refusal to a
+/// confident wrong answer.
+const MIN_OBSERVATIONS: u64 = 30;
 
 /// Column width for the label side of every row.
 const LABEL: usize = 34;
@@ -210,7 +239,11 @@ fn paisa(mean: f64) -> i64 {
 #[must_use]
 pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
     let mut out = String::with_capacity(1_024);
-    let n = crate::significance::trials(sweep);
+    // THE SAME BAR THE SIGNIFICANCE SECTION PRINTS. It used `trials` while that
+    // section used `effective_trials`, so one report carried two different
+    // Bonferroni figures for one sweep and the per-row verdict used the harsher
+    // one -- rejecting findings the page above had already said were allowed.
+    let n = crate::significance::effective_trials(sweep);
     let bar = crate::significance::bonferroni_t(n);
 
     let _ = writeln!(out, "FINDINGS");
@@ -246,7 +279,14 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
         "rank", "hits", "n", "mean paisa", "t"
     );
     for (index, s) in ranked.top.iter().enumerate() {
-        let clears = s.edge.t.abs() >= bar;
+        // A t-statistic from n observations is Student-t, and the bar is a
+        // NORMAL quantile. The two converge as n grows and diverge sharply
+        // below about thirty -- an audit measured the bar understated by 4.89
+        // at n = 13, which is 729 times the family-wise budget. Rather than
+        // compare across distributions, a row with too few observations is not
+        // judged at all.
+        let judgeable = s.edge.n >= MIN_OBSERVATIONS;
+        let clears = judgeable && s.edge.t.abs() >= bar;
         let _ = writeln!(
             out,
             "  {:<6}{:>10}{:>10}{:>14}{:>9.2}  {}",
@@ -260,7 +300,9 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
             // rather than refuse.
             paisa(s.edge.mean_paisa),
             s.edge.t,
-            if clears {
+            if !judgeable {
+                "TOO FEW OBSERVATIONS to judge -- a normal bar cannot rule on a t"
+            } else if clears {
                 "clears"
             } else {
                 "BELOW THE BAR — indistinguishable from luck"
@@ -916,6 +958,69 @@ mod tests {
             "and named in words a reader cannot misread as 'weak but real'"
         );
         assert!(!text.contains("  clears"), "nothing here clears");
+    }
+
+    #[test]
+    fn one_sweep_prints_one_bar_and_the_rows_are_judged_against_it() {
+        // The FINDINGS section computed its bar from `trials` while SIGNIFICANCE
+        // computed one from `effective_trials`. A single report carried two
+        // different Bonferroni figures and the per-row verdict used the harsher,
+        // rejecting rows the page above had already said were allowed.
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let column = indicators::column::Column::build(&bars, &mut evaluator());
+        let f = crate::outcome::forward(&bars, crate::outcome::Horizon::DEFAULT);
+        let ranked = crate::rank::rank(&out.sweep, &column, &f, 10);
+
+        let stats = render(&out, None);
+        let findings = crate::report::render_findings(&ranked, &out.sweep);
+        let from_significance: f64 = cell(&stats, "t required (Bonferroni 5%)")
+            .parse()
+            .unwrap_or(0.0);
+        let from_findings: f64 = cell(&findings, "bar every row must clear")
+            .parse()
+            .unwrap_or(-1.0);
+        assert!(from_significance > 0.0);
+        assert!(
+            (from_significance - from_findings).abs() < 1e-9,
+            "two sections of one report printed different bars: {from_significance} \
+             and {from_findings}"
+        );
+    }
+
+    #[test]
+    fn a_row_with_too_few_observations_is_refused_rather_than_judged() {
+        // `Edge::t` is Student-t; every bar here is a NORMAL quantile. They
+        // diverge sharply below thirty observations -- an audit measured the bar
+        // understated by 4.89 at n = 13. Comparing across distributions produces
+        // a confident wrong answer, which §4 ranks below a named refusal.
+        let bars = synthetic::sessions(8);
+        let out = Sweeper::new(bounded()).run(&bars, &mut evaluator());
+        let thin = crate::rank::Scored {
+            mask: vocab::ConditionMask::default().with_bit(7),
+            hits: 13,
+            edge: crate::outcome::Edge {
+                n: 13,
+                mismatched: 0,
+                mean_paisa: 50.0,
+                // Enormous, and it must STILL not be called a finding.
+                t: 40.0,
+            },
+        };
+        let ranked = crate::rank::Ranked {
+            top: vec![thin],
+            considered: 3_689,
+        };
+        let text = crate::report::render_findings(&ranked, &out.sweep);
+        assert!(
+            text.contains("TOO FEW OBSERVATIONS"),
+            "thirteen observations cannot be ruled on by a normal bar, however \
+             large the statistic"
+        );
+        assert!(
+            !text.contains("  clears"),
+            "and it must not read as a finding"
+        );
     }
 
     #[test]

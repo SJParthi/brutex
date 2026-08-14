@@ -141,7 +141,10 @@ pub fn expected_max_t(n: u64) -> f64 {
 /// clears it has cleared a real hurdle.
 #[must_use]
 pub fn effective_trials(sweep: &Sweep) -> u64 {
-    trials(sweep).saturating_sub(crate::closed::closed(sweep).redundant())
+    // `redundant_count` rather than `closed(..).redundant()`: the latter built a
+    // whole Vec of the kept answer and dropped it, which an audit measured as
+    // effectively the entire cost of a report render.
+    trials(sweep).saturating_sub(crate::closed::redundant_count(sweep))
 }
 
 /// Euler–Mascheroni, which is the constant the deflated-Sharpe expression uses.
@@ -157,9 +160,9 @@ const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
 ///
 /// | trials | `√(2·ln n)` | this |
 /// |---|---|---|
-/// | 3,689 | 4.05 | 3.60 |
-/// | 61,125,295 | 5.99 | 5.62 |
-/// | 100,000,000,000 | 7.12 | 6.80 |
+/// | 3,689 | 4.05 | 3.61 |
+/// | 61,125,295 | 5.99 | 5.63 |
+/// | 100,000,000,000 | 7.12 | 6.81 |
 ///
 /// **The simpler form OVERSTATES the noise floor**, which is the safe direction
 /// but not the accurate one — it would reject a real finding sitting between the
@@ -486,8 +489,11 @@ mod tests {
             );
         }
         // The documented figures, to two decimals.
-        assert!((expected_max_bailey(61_125_295) - 5.62).abs() < 0.02);
-        assert!((expected_max_bailey(3_689) - 3.60).abs() < 0.02);
+        // Pinned to what the function COMPUTES, not to a rounding of it: an
+        // audit found the docstring table and the code disagreeing in the last
+        // digit on all three rows.
+        assert!((expected_max_bailey(61_125_295) - 5.63).abs() < 0.01);
+        assert!((expected_max_bailey(3_689) - 3.61).abs() < 0.01);
         // And it rises with the trial count, never falls.
         let mut previous = 0.0_f64;
         for n in [2_u64, 100, 10_000, 1_000_000, 1_000_000_000] {
