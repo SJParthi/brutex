@@ -659,6 +659,30 @@ pub fn param(raw: &str, name: &str) -> String {
     String::new()
 }
 
+/// EVERY value a repeated field carries, in the order they were sent.
+///
+/// # Why a second reader and not a wider `param`
+///
+/// [`param`] answers "what did they say for this field", which is the right
+/// question for a field that appears once — a target, a window, a feed. A
+/// repeated field asks a different question and must not be answered by the
+/// first match: `member=NIFTY&member=BANKNIFTY` read through `param` is
+/// `NIFTY`, and a request for two instruments silently becomes a request for
+/// one.
+///
+/// One pass over the query string, one allocation per value returned. The
+/// caller bounds how many it will accept — an unbounded repeated field is
+/// unbounded input, and `docs/07-o1-architecture.md` law 5 says bound it at the
+/// boundary.
+#[must_use]
+pub fn params(raw: &str, name: &str) -> Vec<String> {
+    let prefix = format!("{name}=");
+    raw.split('&')
+        .filter_map(|pair| pair.strip_prefix(prefix.as_str()))
+        .map(percent_decode)
+        .collect()
+}
+
 /// The zero-based page number a query string asks for.
 ///
 /// Anything unparseable is page one. This is the one parameter that is
@@ -3383,7 +3407,7 @@ async fn spot_answer(
                     }
                     facts.push(("Source", format!("local folder · {folder}")));
                     facts.push(("Store root", site.store_root.display().to_string()));
-                    local_answer(asked, &folder, now, site, &journal, facts)
+                    local_answer(&asked, &folder, now, site, &journal, facts)
                 }
             }
         }
@@ -3855,6 +3879,26 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
         .filter(|(key, entry)| {
             crate::catalog::tracked(entry.universe) && asked.target.names(key, entry.universe)
         })
+        // AND THE INSTRUMENTS ACTUALLY TICKED, WHICH THIS DID NOT ASK.
+        //
+        // The page draws a per-instrument picker, says `1 of 213 ticked` and
+        // prints `ASKED 1 instrument(s)`. The request carried only the target,
+        // so this loop expanded it to all 213 — measured: an operator ticked
+        // NIFTY alone and the store came back holding GLENMARK, IOC,
+        // ASIANPAINT, BHEL and two hundred more across 430 files. The button,
+        // the receipt and the run were three answers to one question.
+        //
+        // ONE HASH PROBE PER CANDIDATE. `members` is a `HashSet`, so narrowing
+        // costs the same against 750 names as against one, and the bound does
+        // not move when either side grows.
+        //
+        // AN EMPTY SET IS THE WHOLE TARGET, not nothing. A request naming no
+        // member is asking for the set — which is what `target=` means alone,
+        // and is what the autopilot sends. The dangerous direction is the other
+        // one, and it cannot happen: members that resolve to nothing leave an
+        // empty list, and `broker_run` reports zero attempted rather than
+        // quietly widening back to everything.
+        .filter(|(key, _)| asked.members.is_empty() || asked.members.contains(&key.underlying))
         .map(|(key, _)| *key)
         .collect();
     // Sorted so a run is reproducible: `HashMap` order is not stable between
@@ -5115,7 +5159,7 @@ fn landed_answer(
 /// Split out of [`spot_answer`] to stay under clippy's line ceiling; the split
 /// is a lint, not a design.
 fn local_answer(
-    asked: ingest::SpotRequest,
+    asked: &ingest::SpotRequest,
     folder: &str,
     now: std::time::SystemTime,
     site: &Site,

@@ -2053,6 +2053,29 @@
     p.set('from', a);
     p.set('to', b);
     p.set('granularity', dir);
+
+    // THE TICKED INSTRUMENTS, WHICH THIS FORM USED TO DRAW AND NEVER SEND.
+    //
+    // The picker above says `1 of 213 ticked` and the line under the form says
+    // `ASKED 1 instrument(s)`. Neither reached the wire: the body carried the
+    // TARGET alone, so the server expanded it to the whole set. Measured — an
+    // operator ticked NIFTY and the store came back holding GLENMARK, IOC,
+    // ASIANPAINT, BHEL and two hundred more, in 430 files. The count on the
+    // button, the count on the receipt and the run were three answers to one
+    // question.
+    //
+    // REPEATED `member=`, one per tick, which `api::server::params` reads whole
+    // — `param` takes the first match and would silently turn a selection into
+    // its first element.
+    //
+    // ALL TICKED SENDS NOTHING, deliberately. Naming every member and naming
+    // none ask for the same set, and the empty form is the one the autopilot
+    // already sends and the one every stored bookmark carries. It also keeps a
+    // 750-name selection from putting 750 fields on a query string to say
+    // "everything".
+    if (ticked.length > 0 && ticked.length < insPool.length) {
+      for (const m of ticked) p.append('member', m.symbol ?? m.key);
+    }
     if (isFolderFeed) p.set('folder', folder);
     return p.toString();
   }

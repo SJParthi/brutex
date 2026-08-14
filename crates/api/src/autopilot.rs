@@ -2774,6 +2774,10 @@ async fn tick(
     series: &[Series],
 ) -> TickOutcome {
     let asked = ingest::SpotRequest {
+        // THE AUTOPILOT NAMES NO MEMBER, which is how it asks for the whole
+        // target. It backfills a set rather than a selection, and an empty set
+        // is that request rather than a narrowing of it.
+        members: std::collections::HashSet::new(),
         // SWEPT, AND IT MEANS ALL OF THEM. `broker_run` iterates
         // `catalog::tracked`; `broker_window` refuses any other target
         // outright. Anything else here fetches nothing at all.

@@ -70,6 +70,19 @@ use crate::server::param;
 /// operator who legitimately needs more is told what to raise.
 pub const MAX_WINDOW_DAYS: u32 = 3_653;
 
+/// The most instruments one request may name.
+///
+/// `docs/07-o1-architecture.md` law 5 — bound every input at the boundary, and
+/// a repeated query field is unbounded input arriving from outside. The widest
+/// set this build offers is the NIFTY Total Market at 750, and a caller may
+/// legitimately tick all of it; this is comfortably past that and still refuses
+/// a query string built to exhaust memory.
+///
+/// It is a bound on the REQUEST, never on the target: `target=equities` with no
+/// members still runs 750 instruments, because naming none means the whole set
+/// and the set's own size is the exchange's business rather than a caller's.
+pub const MAX_MEMBERS: usize = 2_000;
+
 /// Which instruments a spot pull covers.
 ///
 /// Seven fixed sets, not a free list. `CLAUDE.md` §1 fixes the engine surface
@@ -647,6 +660,22 @@ pub enum Refusal {
         /// The feed that was named, for the message.
         feed: &'static str,
     },
+    /// A named member is not a symbol this build can hold.
+    ///
+    /// Refused rather than dropped: silently skipping one turns a request for
+    /// three instruments into a request for two, and the receipt would count
+    /// the two and say nothing about the third.
+    MemberNotASymbol {
+        /// What arrived.
+        got: String,
+    },
+    /// More members than [`MAX_MEMBERS`].
+    TooManyMembers {
+        /// How many were named.
+        got: usize,
+        /// The bound.
+        cap: usize,
+    },
     /// The spot form's target is not one of [`SpotTarget::ALL`].
     UnknownTarget {
         /// What arrived.
@@ -709,11 +738,48 @@ pub enum Refusal {
     },
 }
 
+impl Refusal {
+    /// The two refusals the instrument picker produces.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the formatter refuses.
+    fn write_member_refusal(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match *self {
+            Self::MemberNotASymbol { ref got } => write!(
+                f,
+                "REFUSED · {got:?} is not a symbol this build can hold. Nothing \
+                 was run: dropping it would turn your selection into a smaller \
+                 one, and the receipt would count what ran rather than what you \
+                 asked for."
+            ),
+            Self::TooManyMembers { got, cap } => write!(
+                f,
+                "REFUSED · this request names {got} instrument(s) and at most \
+                 {cap} may be named. The widest set this build offers is 750, \
+                 so a request past this is a query string built to exhaust \
+                 memory rather than a selection. Ask for the target itself \
+                 instead: naming no member runs the whole set."
+            ),
+            // UNREACHABLE BY CONSTRUCTION and refused rather than defaulted:
+            // the one caller matches the two arms above before delegating, so a
+            // third arriving here is a caller that forgot to.
+            _ => write!(f, "REFUSED · a member field this build cannot describe"),
+        }
+    }
+}
+
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Self::FieldMissing { field } => {
                 write!(f, "REFUSED · {field} was not filled in")
+            }
+            // SPLIT OUT to stay under the line ceiling. The arms below are the
+            // operator's vocabulary and they grow every time a control is
+            // added; the split is a lint, not a design.
+            Self::MemberNotASymbol { .. } | Self::TooManyMembers { .. } => {
+                self.write_member_refusal(f)
             }
             Self::DateNotIso { field, ref got } => write!(
                 f,
@@ -810,10 +876,46 @@ impl fmt::Display for Refusal {
 impl std::error::Error for Refusal {}
 
 /// One spot pull, validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// NO LONGER `Copy`, and the reason is the members set.
+//
+// Every other field is a small value the compiler can duplicate for free. A set
+// cannot be, and making one `Copy` would mean bounding it inline at
+// `MAX_MEMBERS` — 2,000 symbols of 24 bytes on every stack frame that touches a
+// request, to save a clone that happens a handful of times per run. The clones
+// are at route boundaries, not in the per-instrument loop, which reads the set
+// by reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpotRequest {
     /// Which set of instruments.
     pub target: SpotTarget,
+    /// The instruments actually ticked, or EMPTY for the target's whole set.
+    ///
+    /// # The defect this removes
+    ///
+    /// There was no such field. The page draws a per-instrument picker, reports
+    /// `1 of 213 ticked` and prints `ASKED 1 instrument(s)` — and the request
+    /// carried only the TARGET, so the server expanded it to all 213 and pulled
+    /// every one. Measured on a real run: an operator ticked NIFTY alone and
+    /// the store came back holding GLENMARK, IOC, ASIANPAINT, BHEL and two
+    /// hundred more, in 430 files. The count on the button, the count on the
+    /// receipt and the run were three different answers to one question — the
+    /// same shape `SpotTarget::names` was added to remove one layer up.
+    ///
+    /// # Empty means the whole target, and that is not a fallback
+    ///
+    /// A request that names no member is asking for the set, which is exactly
+    /// what `target=` means on its own. It is the state every existing caller
+    /// is already in, and it is distinguishable from "named members, none of
+    /// which resolved" — that refuses by name rather than quietly widening to
+    /// everything, which is the one direction this must never fail in.
+    ///
+    /// # A set, because membership is asked once per instrument
+    ///
+    /// `broker_run` walks the merged universe and asks this of every candidate.
+    /// A `Vec` would make that a scan per instrument — 213 × 2,795 at the sizes
+    /// this build already carries. A hash probe is O(1) and the cost does not
+    /// move when either side grows. `docs/07-o1-architecture.md` law 1.
+    pub members: std::collections::HashSet<Symbol>,
     /// The operator's inclusive range.
     pub window: Window,
     /// Which feed to ask — broker or archive.
@@ -1041,6 +1143,9 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
         // The pair is wrong, not either end of it. Naming one would be a guess
         // about which of the two the operator meant to change.
         Refusal::WindowBackwards { .. } | Refusal::WindowTooLong { .. } => Some("window"),
+        // The instrument picker is the control that produced these, and it is
+        // the one to send the reader back to.
+        Refusal::MemberNotASymbol { .. } | Refusal::TooManyMembers { .. } => Some("member"),
         // These three are about the END, and only the end: the start is legal
         // in every one of them.
         Refusal::WindowInFuture { .. }
@@ -1130,8 +1235,36 @@ fn parse_spot_inner(body: &str, today: Day) -> Result<SpotRequest, Refusal> {
         return Err(Refusal::FieldMissing { field: "target" });
     }
     let target = SpotTarget::from_slug(&raw).ok_or(Refusal::UnknownTarget { got: raw })?;
+
+    // THE TICKED INSTRUMENTS, WHICH THE REQUEST USED TO THROW AWAY.
+    //
+    // Read through `params` and not `param`: the first match answers "what did
+    // they say", and a repeated field needs every value. Reading it with
+    // `param` would turn a request for three instruments into a request for the
+    // first one, silently.
+    //
+    // BOUNDED BEFORE IT IS PARSED. The count is the length of a query string a
+    // caller controls, so it is checked before 2,000 symbols are allocated.
+    let named = crate::server::params(body, "member");
+    if named.len() > MAX_MEMBERS {
+        return Err(Refusal::TooManyMembers {
+            got: named.len(),
+            cap: MAX_MEMBERS,
+        });
+    }
+    // REFUSED, NEVER SKIPPED. Dropping an unparseable member turns a request
+    // for three into a request for two, and the receipt would count the two and
+    // say nothing about the third.
+    let mut members = std::collections::HashSet::with_capacity(named.len());
+    for one in named {
+        let symbol =
+            Symbol::new(one.trim()).map_err(|_| Refusal::MemberNotASymbol { got: one.clone() })?;
+        members.insert(symbol);
+    }
+
     Ok(SpotRequest {
         target,
+        members,
         window: parse_window(body, today)?,
         feed: {
             let raw = param(body, "vendor");
@@ -2331,6 +2464,102 @@ mod tests {
     /// and the empty field, because a parser that started accepting `nifty50`
     /// would have two names for one set and no way to say which the store filed
     /// under. `CLAUDE.md` §4.
+    /// **WHAT IS TICKED IS WHAT IS ASKED FOR.**
+    ///
+    /// The page draws a per-instrument picker, reports `1 of 213 ticked` and
+    /// prints `ASKED 1 instrument(s)`. `SpotRequest` had no member field, so
+    /// the tick never left the browser and `broker_run` expanded the target to
+    /// all 213. Measured: an operator ticked NIFTY alone and the store came
+    /// back holding GLENMARK, IOC, ASIANPAINT, BHEL and two hundred more, in
+    /// 430 files.
+    #[test]
+    fn the_instruments_named_by_a_request_are_the_ones_it_runs() {
+        let one = parse_spot(
+            "target=fno&member=NIFTY&from=2026-08-03&to=2026-08-13",
+            TEST_TODAY,
+        )
+        .expect("one member is a legal request");
+        assert_eq!(one.members.len(), 1);
+        assert!(
+            one.members
+                .contains(&Symbol::new("NIFTY").expect("a symbol"))
+        );
+
+        // REPEATED, and every value is read. Through `param` this would have
+        // been NIFTY alone and a request for two would silently be one.
+        let two = parse_spot(
+            "target=fno&member=NIFTY&member=BANKNIFTY&from=2026-08-03&to=2026-08-13",
+            TEST_TODAY,
+        )
+        .expect("two members");
+        assert_eq!(two.members.len(), 2);
+        assert!(
+            two.members
+                .contains(&Symbol::new("BANKNIFTY").expect("a symbol"))
+        );
+
+        // NAMING NONE IS THE WHOLE TARGET, which is what every existing caller
+        // sends and what the autopilot sends. It is not "nothing".
+        let all = parse_spot("target=fno&from=2026-08-03&to=2026-08-13", TEST_TODAY)
+            .expect("no member names the set");
+        assert!(all.members.is_empty());
+
+        // A DUPLICATE TICK IS ONE INSTRUMENT. The set makes that true by
+        // construction rather than by a de-duplicating pass somebody has to
+        // remember to run — O(1) uniqueness, at the boundary.
+        let dup = parse_spot(
+            "target=fno&member=NIFTY&member=NIFTY&from=2026-08-03&to=2026-08-13",
+            TEST_TODAY,
+        )
+        .expect("a repeat is not an error");
+        assert_eq!(dup.members.len(), 1, "ticking twice is ticking once");
+    }
+
+    /// A member that is not a symbol REFUSES, and is never skipped.
+    #[test]
+    fn an_unparseable_member_refuses_rather_than_shrinking_the_selection() {
+        let why = parse_spot(
+            "target=fno&member=NIFTY&member=&from=2026-08-03&to=2026-08-13",
+            TEST_TODAY,
+        )
+        .expect_err("an empty member is not a symbol");
+        assert!(
+            matches!(why, Refusal::MemberNotASymbol { .. }),
+            "got {why:?}"
+        );
+        assert!(
+            why.to_string().contains("smaller one"),
+            "the refusal says what skipping it would have cost: {why}"
+        );
+    }
+
+    /// The count is bounded at the boundary, because a repeated query field is
+    /// unbounded input arriving from outside.
+    #[test]
+    fn a_request_naming_more_members_than_the_bound_refuses_before_it_allocates() {
+        let many = (0..=MAX_MEMBERS)
+            .map(|n| format!("member=SYM{n}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let why = parse_spot(
+            &format!("target=fno&{many}&from=2026-08-03&to=2026-08-13"),
+            TEST_TODAY,
+        )
+        .expect_err("past the bound");
+        assert_eq!(
+            why,
+            Refusal::TooManyMembers {
+                got: MAX_MEMBERS + 1,
+                cap: MAX_MEMBERS,
+            }
+        );
+        assert!(
+            why.to_string()
+                .contains("naming no member runs the whole set"),
+            "and it names the alternative: {why}"
+        );
+    }
+
     #[test]
     fn a_slug_that_is_not_a_target_is_refused_by_name_after_the_tiers_were_added() {
         // `fno` AND `all` LEFT THIS LIST ON 14 AUG 2026, and they left it in
