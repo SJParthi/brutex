@@ -129,6 +129,39 @@
    *   performs for nothing — which is the owner's second sentence, and it is
    *   why "add a timeframe" is not a control that is missing.
    *
+   * THREE NAMES FOR ONE RUNG, AND EACH ONE ANSWERS A DIFFERENT QUESTION.
+   *
+   *   `dir`     THE WIRE, THE PATH AND THE PARSER. `Granularity::dir()` emits
+   *             it, `api::ingest::parse_granularity` matches it, and the store
+   *             writes a directory of that name. `CLAUDE.md` §3 rule 8 makes it
+   *             append-only history: it is never reworded, and the detail column
+   *             prints it beside every row so the operator can always see what
+   *             his tick actually sends.
+   *   `label`   THE WORD ON THE BUTTON, and it is the OPERATOR'S vocabulary.
+   *   `phrase`  THE RUNG INSIDE A SENTENCE, and it is the MEASURED vocabulary.
+   *
+   * THE OWNER'S RULE, 14 Aug 2026: *"anyhow inside the CSV files the downloaded
+   * data will be marked as ticks, right — so let us just keep it as ticks.
+   * Meanwhile internally let us make it as seconds and minutes."* That is
+   * exactly this split, and it is the split `crates/pull` already makes:
+   * `Granularity::label` is "prose and may be reworded freely" while
+   * `Granularity::dir` "may not". So the second rung is labelled **Ticks**,
+   * because that is what the vendor marks the files he bought and what he calls
+   * them — and nothing about the request, the path or the store moves an inch:
+   * `dir` is still `1s`, the fold is still one-second buckets, and what lands is
+   * still minutes.
+   *
+   * `phrase` EXISTS SO THE BUTTON WORD NEVER GETS READ AS A MEASUREMENT. Four
+   * sentences on this page name a rung mid-clause — "it serves ___ and
+   * coarser", "the store has no directory for ___", "___ is this feed's finest
+   * rung", "one record at ___ is a ___". Dropping the button word into those
+   * writes *"one record at Ticks is a conflated snapshot"*, which reads as this
+   * page calling a snapshot a tick — the one claim `/feeds.json`'s `finest` was
+   * built to stop, and the thing `server.rs`'s own
+   * `feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick`
+   * asserts on the other side. The button says what he bought; the sentence says
+   * what is in it. Both are true, and neither is allowed to answer for the other.
+   *
    * WHY `tick` IS NOT ONE OF THE THREE, AND WHY `1s` CARRIES THE WORD INSTEAD.
    * `Granularity::is_requestable` is `false` for `Tick` and true for every other
    * rung, for every feed (D-0118) — so a `tick` row is a row that could never be
@@ -170,9 +203,9 @@
    * `CLAUDE.md` §3 rule 6.
    */
   const RUNGS = [
-    { dir: '1s', label: '1 second', stored: false, per: null },
-    { dir: '1min', label: '1 minute', stored: true, per: 375 },
-    { dir: '1day', label: '1 day', stored: true, per: 1 }
+    { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
+    { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
+    { dir: '1day', label: '1 day', phrase: 'one day', stored: true, per: 1 }
   ];
 
   // ───────────────────── HOW FINE EACH FEED CAN EVER ANSWER ─────────────────
@@ -262,9 +295,14 @@
    *
    * Not a transcription and not prose about a vendor: every noun in it is a
    * field off `/feeds.json` — the feed's own `display`, `kind_label`, which is
-   * `pull::vendor::SourceKind`'s own words, and the rung's label off the
+   * `pull::vendor::SourceKind`'s own words, and the rung's phrase off the
    * ladder. This file supplies the grammar and nothing else, so a vendor whose
    * floor moves moves this sentence with no edit here.
+   *
+   * `phrase`, NOT `label`. This is a SENTENCE about what the vendor publishes,
+   * and the button word is the operator's — "it serves ticks and coarser" is a
+   * claim about the vendor's records that `/feeds.json` contradicts on the very
+   * next line. See `RUNGS` for the three-name split and why it exists.
    *
    * `''` when the row carries no floor, and the caller states the absence
    * rather than printing an empty sentence.
@@ -273,9 +311,9 @@
     const floor = finestByWire.get(wire);
     if (!floor) return '';
     const feed = feeds.all.find((f) => f.wire === wire);
-    const label = RUNGS.find((r) => r.dir === floor.rung)?.label ?? floor.rung;
+    const phrase = RUNGS.find((r) => r.dir === floor.rung)?.phrase ?? floor.rung;
     const kind = feed?.kind_label ? ` — ${feed.kind_label}` : '';
-    return `${feed?.display ?? wire}${kind}. It serves ${label.toLowerCase()} and coarser.`;
+    return `${feed?.display ?? wire}${kind}. It serves ${phrase} and coarser.`;
   }
 
   /**
@@ -1413,14 +1451,24 @@
     const wire = feeds.active ?? '';
     const f = finestByWire.get(wire);
     if (!f) return null;
-    // `rungLabel`, NOT `label`. The wire's `label` is the KIND's sentence —
-    // "conflated snapshot — best bid, best ask, best last price" — and spelling
-    // the rung's display name into the same key would have silently replaced
-    // it, leaving the page printing "one record at 1 second is a 1 second".
+    // `rungPhrase`, NOT `label` AND NOT THE WIRE'S `label`. Three names collide
+    // on this one line and each would be wrong in its own way:
+    //
+    //   the wire's `label`  is the KIND's sentence — "conflated snapshot — best
+    //                       bid, best ask, best last price" — and it is the
+    //                       right half of "is a ___". Spelling the rung into
+    //                       this key would have printed "one record at 1 second
+    //                       is a 1 second".
+    //   the rung's `label`  is the BUTTON word, so this would read "one record
+    //                       at Ticks is a conflated snapshot" — this page
+    //                       calling a snapshot a tick, in the one sentence
+    //                       written to say it is not one.
+    //   the rung's `phrase` is the measured name, and it is the only one that
+    //                       belongs in a clause: "one record at one second".
     return {
       ...f,
       short: shortFloor(wire),
-      rungLabel: RUNGS.find((r) => r.dir === f.rung)?.label ?? f.rung
+      rungPhrase: RUNGS.find((r) => r.dir === f.rung)?.phrase ?? f.rung
     };
   });
 
@@ -1664,7 +1712,16 @@
     }
     return { ...worst.f, rung: worst.r };
   });
-  /** The refusal, naming the FEED, the TIMEFRAME and the day it starts at. */
+  /**
+   * The refusal, naming the FEED, the TIMEFRAME and the day it starts at.
+   *
+   * `label` HERE, NOT `phrase`, AND IT IS THE ONE SENTENCE THAT GOES THAT WAY.
+   * The `·` makes this a breadcrumb rather than a clause — FEED · TIMEFRAME —
+   * and a refusal must name the control the operator TOUCHED, with the word
+   * that is printed on it. Telling him "one second is out of reach" when he
+   * ticked a box marked Ticks sends him looking for a control he does not have.
+   * Every other rung-in-a-sentence takes `phrase`; see `RUNGS`.
+   */
   const floorSentence = $derived.by(() => {
     if (!feedFloor.at) return null;
     const r = feedFloor.rung ?? RUNGS.find((x) => x.dir === rung);
@@ -1852,14 +1909,24 @@
     if (unstored.length > 0) {
       const many = unstored.length > 1;
       out.push(
-        `The store has no directory for ${unstored.map((x) => x.label.toLowerCase()).join(', ')}. pull::vendor::Granularity::store_timeframe answers for 1 minute and 1 day only, so ${many ? 'these rungs are' : 'this rung is'} refused at the WRITE boundary — expect a refusal rather than bars. That is a store-format limit and not a vendor one: the feed answers, and nothing here can file what it answers with.`
+        // `phrase`, NOT `label` — see `RUNGS`. "The store has no directory for
+        // ticks" is a sentence about the STORE, and the store has never heard
+        // the word: what it has no directory for is one second.
+        //
+        // AND THE RUNG LIST IS THE STORE'S OWN, NOT TWO OF SEVEN. This read
+        // "answers for 1 minute and 1 day only", which D-0132 made false —
+        // `Timeframe::KNOWN` has held seven entries since D-0054 and
+        // `store_timeframe` answers for five of them. The true fact for the one
+        // rung that can reach this line is that nothing below a minute is filed.
+        `The store has no directory for ${unstored.map((x) => x.phrase).join(', ')}. store::path::Timeframe::KNOWN ships 1min, 3min, 5min, 15min, 30min, 60min and 1day, and nothing below a minute, so ${many ? 'these rungs are' : 'this rung is'} refused at the WRITE boundary by pull::ingest::Plan::timeframe — expect a refusal rather than bars. That is a store-format limit and not a vendor one: the feed answers, and nothing here can file what it answers with. The fold that makes these same one-second records storable already exists (pull::fold, one-second buckets); it runs when this feed is asked for 1 minute.`
       );
     }
     const unfetched = rungsChosen.filter((x) => feedFetches(x.dir) === false);
     if (unfetched.length > 0 && active) {
       const many = unfetched.length > 1;
       out.push(
-        `${active.display} does not declare ${unfetched.map((x) => x.label.toLowerCase()).join(', ')}. crates/api's served() refuses a POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would come back with a DIFFERENT bar length filed under the one you asked for. ${many ? 'Those requests' : 'That request'} will be refused whole. Fixable, and not from here: record the endpoint in pull::vendor.`
+        // `phrase` again: what a VENDOR declares is a rung, never a button word.
+        `${active.display} does not declare ${unfetched.map((x) => x.phrase).join(', ')}. crates/api's served() refuses a POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would come back with a DIFFERENT bar length filed under the one you asked for. ${many ? 'Those requests' : 'That request'} will be refused whole. Fixable, and not from here: record the endpoint in pull::vendor.`
       );
     }
     // WHAT A RECORD AT THE FINEST RUNG ACTUALLY IS, said where an operator is
@@ -1885,7 +1952,13 @@
         // this repository's reader does with a shared second — SK-08 in
         // `docs/04-invariants.md`. Nobody published it, so nothing on
         // `/feeds.json` could carry it.
-        `${snap.map((x) => x.label.toLowerCase()).join(', ')} is ${active.display}'s finest rung and one record there is a ${snapFloor.label ?? 'conflated snapshot'}. It is not a tick and must never be read as one. ${snapFloor.because} — ${snapFloor.source} THE TIMESTAMP IS KEYED TO THE SECOND, so two rows sharing one second is EXPECTED INPUT and not corruption. They are folded into one record at that second: the first in file order is its open, the extremes are its high and low, the volumes sum, and the LAST in file order is its close — last wins for the price, and nothing is dropped or refused. File order is the only order there is, so nothing is sorted: a sort would invent a tiebreaker and quietly change which price became the open.`
+        // `phrase`, AND THIS IS THE SENTENCE THE SPLIT WAS BUILT FOR. The
+        // control above says TICKS, because that is what the operator bought and
+        // what the vendor marked the files. This says what is inside them, and
+        // it must not borrow the button word to do it — "ticks is TrueData's
+        // finest rung and one record there is a conflated snapshot. It is not a
+        // tick" is a sentence that argues with itself.
+        `${snap.map((x) => x.phrase).join(', ')} is ${active.display}'s finest rung and one record there is a ${snapFloor.label ?? 'conflated snapshot'}. The archive is MARKED as ticks — the file name says so and the invoice says so — and it does not hold them; it is not a print stream and must never be read as one. ${snapFloor.because} — ${snapFloor.source} THE TIMESTAMP IS KEYED TO THE SECOND, so two rows sharing one second is EXPECTED INPUT and not corruption. They are folded into one record at that second: the first in file order is its open, the extremes are its high and low, the volumes sum, and the LAST in file order is its close — last wins for the price, and nothing is dropped or refused. File order is the only order there is, so nothing is sorted: a sort would invent a tiebreaker and quietly change which price became the open.`
       );
     }
     // THE FORM'S SHAPE IS UNDECIDED, AND THAT IS SAID BEFORE THE CLOCK STARTS.
@@ -1938,7 +2011,7 @@
       from < addDays(istToday, -365)
     ) {
       out.push(
-        `No history depth is stated for ${active.display} at ${RUNGS.find((r) => r.dir === rung)?.label ?? rung}, so nothing here refuses an old day for it and this window reaches back past a year. That is an absence of evidence, not a reach: the vendor will answer for how far back it actually goes. A floor belongs on pull::vendor::Descriptor beside granularities, not in a browser.`
+        `No history depth is stated for ${active.display} at ${RUNGS.find((r) => r.dir === rung)?.phrase ?? rung}, so nothing here refuses an old day for it and this window reaches back past a year. That is an absence of evidence, not a reach: the vendor will answer for how far back it actually goes. A floor belongs on pull::vendor::Descriptor beside granularities, not in a browser.`
       );
     }
     // A FOLDER FEED'S REACH IS THE FILES, AND THE WINDOW IS CHECKED AGAINST
@@ -4809,7 +4882,7 @@
                        above. -->
                   {#if feedFinest}
                     <span class="pknote wrap" title={`${feedFinest.because} — ${feedFinest.source}`}>
-                      {feedFinest.short} One record at {feedFinest.rungLabel} is a
+                      {feedFinest.short} One record at {feedFinest.rungPhrase} is a
                       {feedFinest.label}.
                     </span>
                   {:else if feeds.active}

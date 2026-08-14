@@ -13479,3 +13479,81 @@ stays where it was already answered: on the row, from `history[].served`.
 count. Those are three per-rung facts `crates/pull` and `crates/store` own, and
 `/feeds.json` carries none of them, so the browser holds them. Three rows of it
 now instead of eleven, and the same copy D-0137 recorded as outstanding.
+
+## D-0140 · 2026-08-14 · The second rung is labelled **Ticks** because that is what the vendor marks the files, and every sentence that names it still says "one second" because that is what is in them
+
+### The rule
+
+The owner, 14 Aug 2026, after D-0139 landed:
+
+> "Anyhow inside the CSV files the downloaded data will be marked as ticks,
+> right — so let us just keep it as ticks. Meanwhile internally let us make it
+> as seconds and minutes."
+
+### Both halves are true and neither may answer for the other
+
+The archives ARE marked as ticks. `pull::vendor`'s own `ArchiveName` consts spell
+the file names `NSE_<seg>_TICK_<date>.zip` and `GFDLNFO_TICK_<date>.zip`; the
+vendors sell them under that word and invoice them under it. Refusing to print
+the word anywhere leaves the operator matching a control labelled *"1 second"*
+against a folder full of files with `TICK` in the name, which is a translation he
+has to perform every time and this page exists to spare him.
+
+And the files do not hold ticks. `docs/08-vendor-samples.md` measured every
+timestamp resolving to a whole second, no sub-second field in either layout,
+22,426 rows across a 22,500-second session, and up to four rows sharing a second
+with no tiebreaker. A record is a conflated snapshot of the best bid, the best
+ask and the best last price. D-0118 is the decision that says so and it is not
+reversed here.
+
+### Three names for one rung
+
+`RUNGS` in `web/src/routes/ingest/+page.svelte` now carries three, and each
+answers a different question:
+
+| field | answers | example |
+|---|---|---|
+| `dir` | the WIRE, the PATH and the PARSER | `1s` |
+| `label` | the word on the BUTTON — the OPERATOR'S vocabulary | `Ticks` |
+| `phrase` | the rung inside a SENTENCE — the MEASURED vocabulary | `one second` |
+
+This is the split `crates/pull` already makes and it is quoted in
+`Granularity::label`'s own doc: that name is "prose and may be reworded freely"
+while `Granularity::dir` "may not" — `CLAUDE.md` §3 rule 8 protects the path
+segment. Nothing about the request, the fold or the store moves: `dir` is still
+`1s`, `parse_granularity` still matches `1s`, `pull::fold` still buckets at one
+second, and what lands in the store is still minutes.
+
+**The detail column prints `dir` beside every row**, so the operator can always
+see that the box marked Ticks sends `1s`. The button word never hides the wire.
+
+### Why `phrase` exists at all, rather than lowercasing the button word
+
+Five sentences on this page name a rung mid-clause. Dropping the button word into
+them produces claims this repository has spent three decisions refusing:
+
+* *"one record at Ticks is a conflated snapshot"* — the page calling a snapshot a
+  tick, in the very sentence written to say it is not one, and the thing
+  `server.rs`'s `feeds_json_carries_the_granularity_floor_and_never_calls_a_snapshot_a_tick`
+  asserts from the other side.
+* *"it serves ticks and coarser"* — a claim about what the VENDOR publishes,
+  contradicted by `/feeds.json`'s own `finest` on the next line.
+* *"the store has no directory for ticks"* — a sentence about `crates/store`,
+  which has never heard the word; what it has no directory for is one second.
+* *"TrueData does not declare ticks"* — what a vendor declares is a rung.
+
+`phrase` is used at all four, plus the history-depth caution. **One sentence
+keeps the button word on purpose:** `floorSentence` reads `FEED · TIMEFRAME`,
+which is a breadcrumb rather than a clause, and a refusal must name the control
+the operator TOUCHED with the word printed on it — telling him *"one second is
+out of reach"* when he ticked a box marked Ticks sends him looking for a control
+he does not have. The comment there says so, so the next reader does not "fix" it.
+
+### Also corrected here
+
+The unstored caution read *"store_timeframe answers for 1 minute and 1 day
+only"*. D-0132 made that false — `Timeframe::KNOWN` has held seven entries since
+D-0054 and `store_timeframe` answers for five of them. It was the same stale
+sentence D-0139 corrected on the row-level hover and missed on this one. It now
+states the fact that actually bears on the only rung which can reach it: nothing
+below a minute is filed, and `pull::ingest::Plan::timeframe` is what refuses it.
