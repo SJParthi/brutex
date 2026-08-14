@@ -123,8 +123,8 @@
 
   // ───────────────────── HOW FINE EACH FEED CAN EVER ANSWER ─────────────────
   //
-  // A SECOND FLOOR, AND IT IS NOT THE FIRST ONE. The `FLOOR_OPERATOR` /
-  // `FLOOR_DOC` table further down answers HOW FAR BACK. This one answers HOW
+  // A SECOND FLOOR, AND IT IS NOT THE FIRST ONE. `pairFloor` further down
+  // answers HOW FAR BACK, off the wire's `history` rows. This one answers HOW
   // FINE, and the two refusals share nothing but the word:
   //
   //   below the HISTORY floor    another DAY is refused. The rung is not — the
@@ -596,113 +596,97 @@
   // for the last three months. A floor keyed on the vendor alone is wrong for
   // one of that vendor's own two rungs, so the key is (feed, timeframe).
   //
-  // ══════════════ THIS TABLE IS IN THE WRONG PROCESS AND SAYS SO ══════════════
+  // ════════════ THE LAST SECOND COPY IS GONE, AND THIS IS WHAT IT WAS ═══════
   //
-  // AND IT IS NOW THE LAST ONE LEFT. `GET /feeds.json` emits `wire`, `display`,
-  // `kind`, `kind_label`, `verb`, `ready`, `why`, `finest` and `history`
-  // (`crates/api/src/server.rs`), and `history` is exactly this fact: one row
-  // per rung, carrying the binding claim, the contested one, the resolved
-  // oldest day and the source of each — read off `pull::vendor::Descriptor`,
-  // which HAS carried a per-rung history floor since D-0110.
+  // `GET /feeds.json` emits `wire`, `display`, `kind`, `kind_label`, `verb`,
+  // `ready`, `why`, `finest` and `history` (`crates/api/src/server.rs`), and
+  // `history` is exactly this fact: one row per rung carrying the binding
+  // claim, the contested one, the RESOLVED oldest day and the source of each,
+  // read off `pull::vendor::Descriptor`, which has carried a per-rung history
+  // floor since D-0110.
   //
-  // So the two tables below are a SECOND COPY of an emitted fact, which is the
-  // defect the granularity table above was deleted for, still standing. They
-  // are not wired to `/feeds.json` yet and this file does not pretend they are.
-  // The drift is already visible: `FLOOR_OPERATOR` carries a `zerodha` row for
-  // a feed no descriptor in this build names, and neither table has a row for
-  // `truedata` or `gdfl`, which the wire answers for. Moving `feedFloor` onto
-  // `active.history` is the remaining half of this change and is not done here.
+  // Until now this file also held its own copy — `FLOOR_OPERATOR` and
+  // `FLOOR_DOC`, two hardcoded tables — and its own comment admitted they were
+  // a second copy and that wiring them to the emitted fact "is not done here".
+  // They are deleted. `pairFloor` below is a lookup into `feeds.all`.
   //
-  // THREE SHAPES, AND THEY BEHAVE DIFFERENTLY:
-  //   rolling — N years/months back from TODAY. It moves every single day, so it
-  //             is COMPUTED and can never be stored. A window answerable
-  //             yesterday can be refused today: a fact about the vendor, not a
-  //             bug here.
+  // THE DRIFT WAS NOT HYPOTHETICAL, WHICH IS WHY THIS IS A FIX AND NOT TIDYING:
+  //
+  //   * `FLOOR_OPERATOR` carried a `zerodha` row for a feed no descriptor in
+  //     this build names, and NEITHER table had a row for `truedata` or `gdfl`,
+  //     which the wire answers for.
+  //   * D-0131 reversed Groww's one-minute rung from a rolling three months to
+  //     the operator's fixed 2020-01-01. The wire moved. These tables did not.
+  //     The page was refusing January 2020 through May 2026 on a rung the
+  //     server says answers for it.
+  //
+  // AND THE CLIENT-SIDE CLOCK WENT WITH THEM. A rolling floor was recomputed
+  // here with `Date.UTC(y - years, ...)` and compared against an IST day — two
+  // clocks in one comparison, off by a day for part of every day on any machine
+  // west of IST. `oldest` arrives resolved, so there is nothing left to be
+  // wrong: a server-named day is compared against a server-named day.
+  //
+  // FOUR SHAPES, AND THE WIRE'S OWN WORD FOR EACH:
+  //   rolling — N years/months back from today. It moves every single day, so a
+  //             window answerable yesterday can be refused today: a fact about
+  //             the vendor, not a bug here. The SERVER resolves it.
   //   fixed   — a real calendar date that does not move.
   //   none    — the vendor states there is no floor. NOT the same as unknown.
-  //   absent  — nothing states anything, and the page then claims NOTHING.
-  //
-  // PROVENANCE, because §3 rule 1 requires it and the two sources disagree.
-  // `OPERATOR` is what the owner stated on 11 Aug 2026, dated and used as his
-  // claim. `DOC` is read out of the vendor documentation in his own working
-  // directories, cited line by line. WHERE THEY DISAGREE THE STRICTER WINS and
-  // both are named — averaging them, or preferring the newer, would claim reach
-  // the strictest source does not support, which is the fallback §4 bans.
-  const FLOOR_OPERATOR = {
-    zerodha: { kind: 'rolling', unit: 'y', n: 10, say: 'the last 10 years' },
-    dhan: { kind: 'rolling', unit: 'y', n: 5, say: 'a rolling last 5 years' },
-    groww: { kind: 'fixed', from: '2020-01-01', say: 'from January 2020' }
-  };
-  const FLOOR_DOC = {
-    'dhan|1day': {
-      kind: 'none',
-      say: 'daily: “available back upto the date of its inception”',
-      src: 'Dhan Docs / 12-historical-data.md — Get Daily Historical Data'
-    },
-    'dhan|1min': {
-      kind: 'rolling',
-      unit: 'y',
-      n: 5,
-      say: 'intraday: “for last 5 years”',
-      src: 'Dhan Docs / 12-historical-data.md — Get Intraday Historical Data'
-    },
-    'groww|1day': {
-      kind: 'none',
-      say: 'daily: “Full history”',
-      src: 'Groww Docs / 08-historical-data.md — interval table, 1 day row'
-    },
-    'groww|1min': {
-      kind: 'rolling',
-      unit: 'm',
-      n: 3,
-      say: '1 minute: “Last 3 months”',
-      src: 'Groww Docs / 08-historical-data.md — interval table, 1 min row'
-    }
-  };
-  /** A rolling floor resolved against a day. Never stored, never cached past that day. */
-  function rollFloor(unit, count, today) {
-    const { y, m, d } = parts(today);
-    return new Date(Date.UTC(y - (unit === 'y' ? count : 0), m - 1 - (unit === 'm' ? count : 0), d))
-      .toISOString()
-      .slice(0, 10);
-  }
-  function floorIso(spec, today) {
-    if (!spec) return null;
-    if (spec.kind === 'rolling') return rollFloor(spec.unit, spec.n, today);
-    if (spec.kind === 'fixed') return spec.from;
-    return null; // 'none' — stated, and states no floor.
-  }
+  //   unknown — nothing states anything, and the page then claims NOTHING.
   /**
-   * The oldest day (feed, timeframe) answers for, with everything needed to say
-   * WHO refuses and FROM WHEN.
+   * The oldest day (feed, timeframe) answers for, READ OFF THE WIRE.
    *
-   * `iso` is `null` when no floor is claimed, and `known` is what tells a stated
-   * "no floor" from a vendor nothing has been read for. A caller may never treat
-   * the two the same: one is a fact, the other is an absence of one.
+   * `/feeds.json` emits `history` as one row per rung, each carrying the
+   * binding claim, the contested one, the resolved oldest day and the source of
+   * each — `crates/api/src/server.rs`, built from
+   * `pull::vendor::Descriptor::history`. This function is now a lookup into
+   * that, and it holds no vendor fact of its own.
+   *
+   * # THE DAY IS THE SERVER'S, AND THAT DELETES A WHOLE CLASS OF BUG
+   *
+   * `oldest` arrives already resolved. The browser used to recompute a rolling
+   * floor itself with `Date.UTC(y - years, ...)` and compare the result against
+   * an IST day — two clocks in one comparison, wrong by a day for part of every
+   * day on any machine west of IST. There is nothing left here to be wrong: the
+   * page compares a day the server named against a day the server named.
+   *
+   * # `at` VERSUS `known`, AND WHY A CALLER MAY NEVER COLLAPSE THEM
+   *
+   * `at` is null both when the vendor states it holds everything and when
+   * nobody has stated anything. `known` is what tells those apart, and it comes
+   * from the wire's own word: `kind: "unknown"` is nobody having said anything,
+   * `kind: "none"` is the vendor stating there is no floor. Emitting null for
+   * both and letting the reader guess is exactly the fallback §4 bans.
    */
-  function pairFloor(wire, rungDir, today) {
-    const op = FLOOR_OPERATOR[wire];
-    const doc = FLOOR_DOC[`${wire}|${rungDir}`];
-    const a = floorIso(op, today);
-    const b = floorIso(doc, today);
-    // The stricter of two floors is the LATER day. A stated 'none' does not
-    // widen the other source's floor — it merely fails to narrow it.
-    const at = a && b ? (a > b ? a : b) : (a || b);
+  function pairFloor(wire, rungDir) {
+    const feed = feeds.all.find((f) => f.wire === wire);
+    const row = feed?.history?.find((h) => h.rung === rungDir);
+    // NO ROW IS NOT NO FLOOR. A rung the wire says nothing about is `unknown`,
+    // and `known: false` is what the caller reads to say so out loud.
+    if (!row) return { at: null, known: false, rolling: false, src: [] };
+
     const src = [];
-    if (op) {
+    if (row.source) {
+      src.push(`${row.source}${row.oldest ? ` → ${dayLabel(row.oldest)}` : ' → no floor'}`);
+    }
+    // THE DISPLACED CLAIM TRAVELS WITH THE BINDING ONE. Deleting it would leave
+    // a number no reader could argue with, and this repository has two sources
+    // that disagree on three of its four recorded rows.
+    if (row.contested?.source) {
       src.push(
-        `operator, 11 Aug 2026: ${op.say}${a ? ` → ${dayLabel(a)}` : ''}${op.kind === 'rolling' ? ' (rolling — it moves every day)' : ''}`
+        `contested — ${row.contested.source}${
+          row.contested.oldest ? ` → ${dayLabel(row.contested.oldest)}` : ' → no floor'
+        }`
       );
     }
-    if (doc) src.push(`${doc.src}: ${doc.say}${b ? ` → ${dayLabel(b)}` : ' → no floor'}`);
+    if (row.binds_because) src.push(row.binds_because);
+
     return {
-      at,
-      known: Boolean(op || doc),
-      conflict: Boolean(op && doc) && a !== b,
-      binding: a && b ? (a > b ? 'operator' : 'vendor doc') : op && a ? 'operator' : doc && b ? 'vendor doc' : null,
-      rolling:
-        (Boolean(a) && a === at && op?.kind === 'rolling') ||
-        (Boolean(b) && b === at && doc?.kind === 'rolling'),
+      at: row.oldest ?? null,
+      known: row.kind !== 'unknown',
+      // A ROLLING FLOOR MOVES EVERY DAY, and the sentence says so. The word is
+      // the wire's, not a shape this file infers from the numbers.
+      rolling: row.kind === 'rolling',
       src
     };
   }
@@ -1462,10 +1446,10 @@
    */
   const feedFloor = $derived.by(() => {
     const wire = feeds.active ?? '';
-    if (rungsChosen.length === 0) return pairFloor(wire, rung, istToday);
+    if (rungsChosen.length === 0) return pairFloor(wire, rung);
     let worst = null;
     for (const r of rungsChosen) {
-      const f = pairFloor(wire, r.dir, istToday);
+      const f = pairFloor(wire, r.dir);
       if (!worst || (f.at && (!worst.f.at || f.at > worst.f.at))) worst = { r, f };
     }
     return { ...worst.f, rung: worst.r };
