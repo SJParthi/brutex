@@ -1189,13 +1189,24 @@
     }
     const r = folderReach.body?.reach;
     if (!r || typeof r.state !== 'string') return null;
+    // THE NAMES, AND `null` RATHER THAN `[]` WHEN THE SERVER SENT NONE.
+    //
+    // An empty array is a folder that names nothing — an ANSWER, and the one
+    // `Reach::Empty` exists for. A missing key is a RUNNING BINARY THAT
+    // PREDATES THE FIELD, which names a different fix: restart on a newer
+    // build. Collapsing the two would print "0 instruments" at a server that
+    // was never asked, which is the §4 shape and the same discipline
+    // `rungServed` and `finestByWire` already read their fields under.
+    const named = folderReach.body?.instruments;
     return {
       state: r.state,
       path: folderReach.body?.path ?? null,
       earliest: r.earliest ?? null,
       latest: r.latest ?? null,
       files: Number(r.files ?? 0),
-      rows: Number(r.rows ?? 0)
+      rows: Number(r.rows ?? 0),
+      instruments: Array.isArray(named) ? named : null,
+      collisions: Number(folderReach.body?.collisions ?? 0)
     };
   });
 
@@ -4850,22 +4861,56 @@
                         an ANSWER, not a failure: the months have not been bought and put there yet.
                       </span>
                     {/if}
-                    <!-- THE MISSING FIELD, NAMED RATHER THAN RECONSTRUCTED.
-                         `pull::archive::Member` already carries `instrument`,
-                         taken off the file name, and `pull::folder::reach_of`
-                         counts the members and discards their names. So the
-                         walk HAS the list and the wire does not carry it. A
-                         browser deriving instrument names from a file COUNT
-                         would be inventing the only identity an archive has,
-                         which is exactly what this page refuses to do with a
-                         vendor floor or a served flag. -->
-                    <span
-                      class="pknote wrap"
-                      title="pull::archive::Member carries `instrument` — the file name with its extensions removed — and pull::folder::reach_of counts the members and discards their names, so /folder.json emits files and rows but no member list. The names are the ONLY identity an archive has: there is no ISIN, no security id and no master. This page will not synthesise them from a count."
-                    >
-                      the instrument names are not on the wire — /folder.json counts the files and
-                      does not list them, so the picker below cannot name what is in this folder
-                    </span>
+                    <!-- THE NAMES. `/folder.json` carries `instruments` since
+                         D-0141: `pull::folder::read_census` collects what
+                         `pull::archive::Member` already took off each file
+                         name, sorted, whole, never truncated.
+
+                         THREE STATES AND THEY ARE NOT TWO. `null` is a server
+                         that sent no such field — a running binary that
+                         predates it, which names its own fix. `[]` is a folder
+                         that names nothing, which is an ANSWER. A list is a
+                         list. Collapsing the first two would print "0
+                         instruments" at a server that was never asked. -->
+                    {#if c.instruments === null}
+                      <span
+                        class="pknote wrap warn"
+                        title="GET /folder.json emits `instruments` — every distinct name pull::archive::Member took off a file name in that folder, sorted. This server sent no such field, so this page cannot name what is in the folder and does not guess: the file names are the ONLY identity an archive has, and there is no ISIN, no security id and no master to fall back on. Restart the API on a build that emits it."
+                      >
+                        this server sends no instrument list for the folder — what is in it is not
+                        known here, and this page will not synthesise names from a file count
+                      </span>
+                    {:else if c.instruments.length > 0}
+                      <span
+                        class="pknote wrap"
+                        title={`${c.instruments.length} distinct name(s), read off the file names in ${c.path ?? 'the folder'} and sorted. This is the whole identity an archive has — there is no ISIN, no security id and no master — so it is also the whole of what a universe could mean for this feed. First twenty: ${c.instruments.slice(0, 20).join(', ')}`}
+                      >
+                        {n(c.instruments.length)} instrument(s) named — {c.instruments
+                          .slice(0, 6)
+                          .join(', ')}{c.instruments.length > 6
+                          ? ` and ${n(c.instruments.length - 6)} more`
+                          : ''}
+                      </span>
+                      <!-- TWO FILES CLAIMING ONE NAME, SAID RATHER THAN
+                           DEDUPLICATED IN SILENCE. It is the `ambiguous` bucket
+                           of D-0141 on the folder side, and a reader who saw
+                           only the distinct list could not tell a clean folder
+                           from a colliding one. -->
+                      {#if c.collisions > 0}
+                        <span
+                          class="pknote wrap warn"
+                          title="pull::folder::census_of counts the members whose instrument name a previous member had already claimed, rather than deduplicating in silence. GDFL nests Options/ and Futures/, so one stem can appear under both. Two files claiming one instrument is the `ambiguous` case D-0141 names on the folder side: it is not resolved by whichever was walked first."
+                        >
+                          {n(c.collisions)} file(s) name an instrument another file already named —
+                          two members claiming one name are not resolved by walk order
+                        </span>
+                      {/if}
+                    {:else}
+                      <span class="pknote wrap warn">
+                        the folder names no instrument at all — this is the list being EMPTY, which
+                        the server answered, and not a list it failed to send
+                      </span>
+                    {/if}
                   {/if}
                 </div>
               {/if}

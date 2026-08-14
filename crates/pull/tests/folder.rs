@@ -642,7 +642,11 @@ fn a_census_names_every_instrument_the_folder_holds_in_a_stable_order() {
     let census = folder::census_of(&members).expect("all three are moments");
     assert_eq!(
         census.instruments,
-        vec!["BANKNIFTY".to_owned(), "MIDCPNIFTY".to_owned(), "NIFTY".to_owned()],
+        vec![
+            "BANKNIFTY".to_owned(),
+            "MIDCPNIFTY".to_owned(),
+            "NIFTY".to_owned()
+        ],
         "sorted, not in walk order"
     );
     assert_eq!(census.collisions, 0, "each file names its own instrument");
@@ -713,4 +717,47 @@ fn member(instrument: &str, stamp: i64) -> Member {
             open_interest: None,
         }],
     }
+}
+
+/// READING A REAL FOLDER ANSWERS THE BOUND AND THE NAMES IN ONE WALK.
+///
+/// The route `crates/api/src/folder.rs` serves calls `read_census` rather than
+/// `read_reach` because a browser asking what a folder holds needs both, and
+/// walking twice would double a cost `docs/06-limits.md` records. This asserts
+/// the two halves agree with the two functions that answer them separately, so
+/// the shared walk cannot drift from either.
+#[test]
+fn reading_a_folder_answers_its_bound_and_its_names_in_one_walk() {
+    let scratch = Scratch::new();
+    let dir = scratch.folder(
+        "censused",
+        &[("BANKNIFTY", TWO_DAYS), ("NIFTY", ONE_EARLIER_DAY)],
+    );
+
+    let census = folder::read_census(&dir, Feed::TrueData, Columns::TrueDataIndex)
+        .expect("the folder is there and decodes");
+
+    assert_eq!(
+        census.instruments,
+        vec!["BANKNIFTY".to_owned(), "NIFTY".to_owned()],
+        "the names off the file names, sorted"
+    );
+    assert_eq!(census.collisions, 0);
+    assert_eq!(
+        census.reach,
+        folder::read_reach(&dir, Feed::TrueData, Columns::TrueDataIndex).expect("same folder"),
+        "the bound is the one read_reach answers, unchanged"
+    );
+}
+
+/// A REST FEED IS REFUSED BY THE CENSUS EXACTLY AS BY THE REACH, and without
+/// touching the disk: it has no folder, and probing one would invent a path for
+/// a vendor that has none. The shared `walk` is what makes the two refusals one.
+#[test]
+fn a_rest_feed_cannot_be_asked_to_census_a_folder_either() {
+    let scratch = Scratch::new();
+    let dir = scratch.folder("broker", &[("BANKNIFTY", TWO_DAYS)]);
+    let why = folder::read_census(&dir, Feed::Groww, Columns::TrueDataIndex)
+        .expect_err("a broker has no folder");
+    assert!(matches!(why, FolderError::NotAFolderFeed { .. }), "{why:?}");
 }
