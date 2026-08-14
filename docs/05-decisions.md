@@ -13125,3 +13125,119 @@ shapes ISO-8601 permits for the one fact — and refuses a minutes field past 59
 because reading `+0575` as an hour and a bit would invent an offset nobody
 stated. Defaulting instead would silently resurrect the 5h30m error the variant
 exists to prevent.
+
+---
+
+## D-0136 · 2026-08-14 · `SpotTarget` gains F&O and Everything, and the guard that refused every set but the swept pair is deleted because every clause of its reason had become false
+
+### The line that made `/ingest` useless
+
+```rust
+if asked.target != ingest::SpotTarget::Swept {
+    return Err("the broker path can address ONE instrument today and {target}
+                names a set. pull::vendor::HttpSpec has no request-parameter
+                map, so no instrument is put on the wire at all ...")
+}
+```
+
+Both clauses were untrue by the time this was removed:
+
+* **`HttpSpec::params` exists and both broker descriptors populate it** — Dhan
+  names `securityId` and `exchangeSegment`, Groww `groww_symbol` and `segment` —
+  and `HttpSource::resolve_param` puts them on the wire. That map is what closed
+  `DH-905 securityId is required`.
+* **`broker_window` takes `instrument` as an ARGUMENT**, and `broker_run` filters
+  the merged universe by the chosen target, sorts it for reproducibility, and
+  calls `broker_window` once per member. The loop the guard said did not exist
+  is the loop that called the guard.
+
+And it sat **after** `await_budget`, which WAITS rather than refuses. An operator
+choosing NIFTY Total Market got 750 iterations each queueing for a rate permit
+and then refusing: minutes of governor waiting, a live in-flight status per
+instrument, zero sockets, zero bars — and 750 error strings each stating the
+false reason.
+
+What still bounds a run is what always did, and none of it is a target check:
+`served` refuses a rung the feed does not declare, `finished_day_only` refuses an
+unfinished day, the governor bounds the rate, and
+`catalog::tracked(..) && target.names(..)` bounds the set.
+
+### The two new targets
+
+| | `Fno` | `Everything` |
+|---|---|---|
+| slug | `fno` — **the wire's own word**, bit 1 of `UNIVERSE_TOKENS` | `all` — **invented**, see below |
+| `names` | `universe.contains(Universe::FNO)` | `catalog::tracked(universe)` |
+| `members` | `Some(&FNO_UNDERLYINGS)` — 213 | `None` |
+| `tier` | `Some(Tier::FnoUnderlyings)` | `None` |
+| `universe` | `Universe::FNO` | `Universe::NONE` |
+
+**`Fno`'s join was already built and reached from nothing.**
+`constituents::Tier::FnoUnderlyings` has always been in `Tier::ALL`, borrowed
+`universe::FNO_UNDERLYINGS`, declared `published() == 213`, and `Join::build`
+resolved it per vendor — with no `SpotTarget` pointing at it, so only
+`Join::notes` consumed it. Left at `None` the target would route through
+`from_master`: the 213-name denominator disappears and the five index
+underlyings that legitimately have no ISIN get reported as *"this feed's master
+lists no id for it"* — blaming a vendor for a cell NSE never filled.
+
+**`Everything`'s predicate is `catalog::tracked`, borrowed, never `true`.**
+`Site::new` counts a target with `names` alone while `broker_run` builds the run
+list with `tracked && names`. For every other target `names` is already a subset
+of `tracked`, so the two agree. `true` would break that: the form would count
+~2,795 merged rows — futures, options, BSE listings that `of_instrument` gives
+`Universe::NONE` — while the run attempted 765. That is precisely the defect
+`names` was added to remove: *the label, the counter and the run being three
+different answers to one question.*
+
+**`all` is the one slug this repository chose rather than borrowed.** D-0105's
+rule is that the slugs are the wire's own words, and there is no
+`/instruments.json` token for "everything" — the browser's `token: '*'` is a
+LOCAL sentinel that `namedByUniverse` short-circuits on. Recorded as an
+invention rather than presented as a borrowing.
+
+### Appended at 7 and 8, not where the browser draws them
+
+`Coverage::per` is a flat array read as `vendor * ALL.len() + slot`. The browser
+lists `fno` sixth, between the Total Market row and the index row; mirroring
+that reading order in `ALL` would insert `Fno` at slot 3 and shift all four
+NIFTY tiers down one, handing each its neighbour's counter on the form and on
+the receipt. The array's order is a contract with itself; the page's order is a
+reading order, and they are allowed to differ.
+
+Nothing target-indexed is persisted — the audit journal stores the target as
+TEXT and `/universes.json` carries the slug on every row — so appending
+relabels no byte on disk.
+
+### Both new targets NAME the swept pair, and that is legal
+
+`NIFTY` and `BANKNIFTY` are F&O underlyings and are tracked index series, so
+each new target covers them. `CLAUDE.md` §1 permits storing what is never swept
+and `Indices` has always done exactly this. Their `note()` is therefore worded
+like `Indices` and not like `Equities`: "stored, never swept" reads as *this set
+excludes the swept pair*, which would be false.
+`every_target_is_requestable_and_none_of_them_widens_the_sweep` pins that
+`InstrumentKey::SWEPT` is still two.
+
+### The last catch-all on a `SpotTarget` is gone
+
+`coverage::target_json` was the only `match` on this enum with a `_` arm, and
+`names`, `members`, `universe` and `tier` each refuse one by design so a new
+variant is a compile error. `Everything`'s universe is two bits, and
+`universe_token_of` answers `""` for any bitset that is not exactly one named
+bit — so `_` would have shipped `{"target":"all",…,"universe":""}` and a page
+filtering by that token would draw "0 in this feed's master" beside a set of
+765. Every arm is now named.
+
+### What the browser needed, and what it did not
+
+Adding the variants in Rust does not un-grey the rows: the page holds a second,
+hand-maintained `UNIVERSES` table and `universeRefusal` greys any row whose
+`target` is `null`. Both rows now carry their slug. **Three operator-facing
+strings that counted the enum by hand** — *"`SpotTarget` spells swept, indices
+and equities only"* — were already wrong at seven and are rewritten to state the
+condition (`u.target === null`) without a count the page cannot see.
+
+**The `/ingest` CAUTION banner is deleted, not reworded.** It rendered the
+guard's false claim in a yellow box. A caution has to name something that will
+happen, and this one named a refusal that no longer exists.

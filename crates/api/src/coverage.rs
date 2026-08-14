@@ -477,11 +477,28 @@ fn target_json(covered: Option<&Covered>, target: SpotTarget) -> String {
         // THE BIT, NOT THE SET. `Swept` is `is_sweepable` — two pairs — and its
         // universe accessor answers `INDEX`, which is a wider set than the
         // target names. Emitting that token would tell a page these two rows
-        // count the same instruments, so the one whose definition is not a bit
-        // says so with a null.
+        // count the same instruments, so a target whose definition is not a
+        // single bit says so with a null.
+        //
+        // EVERY ARM IS NAMED, AND THIS WAS THE LAST `_` ON A `SpotTarget` IN
+        // THE WORKSPACE. `names`, `members`, `universe` and `tier` each refuse
+        // a catch-all by design so that a new variant is a compile error; this
+        // one arm was the hole they were written to close, and it stayed open
+        // long enough to matter. `Everything` is `TOTAL_MARKET | INDEX` — two
+        // bits — and `universe_token_of` answers `""` for any bitset that is
+        // not exactly one named bit. So `_` would have shipped
+        // `{"target":"all",…,"universe":""}`, and a page filtering
+        // `/instruments.json` rows by that token would draw "0 in this feed's
+        // master" beside a set holding 765 instruments. D-0136.
         match target {
-            SpotTarget::Swept => "null".to_owned(),
-            _ => render::json_string(&universe_token(target)),
+            SpotTarget::Swept | SpotTarget::Everything => "null".to_owned(),
+            SpotTarget::Indices
+            | SpotTarget::Equities
+            | SpotTarget::Nifty500
+            | SpotTarget::Nifty200
+            | SpotTarget::Nifty100
+            | SpotTarget::Nifty50
+            | SpotTarget::Fno => render::json_string(&universe_token(target)),
         },
     );
     match covered {
@@ -677,8 +694,12 @@ mod tests {
         }
         assert_eq!(
             SpotTarget::ALL.len(),
-            7,
-            "seven targets, and the index knows"
+            9,
+            "nine targets, and the index knows. D-0105 took this from three to \
+             seven and D-0136 appended `fno` and `all` at 7 and 8 — AFTER the \
+             four NIFTY tiers, deliberately, because the browser draws `fno` \
+             sixth and mirroring that reading order here would shift every \
+             tier's slot and hand each one its neighbour's counter"
         );
     }
 

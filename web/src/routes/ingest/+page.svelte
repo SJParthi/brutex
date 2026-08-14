@@ -336,7 +336,14 @@
     { id: 'n200', label: 'NIFTY 200', field: 'n200', token: null, target: 'n200' },
     { id: 'n500', label: 'NIFTY 500', field: 'n500', token: null, target: 'n500' },
     { id: 'ntm', label: 'NIFTY Total Market', field: null, token: 'ntm', target: 'equities' },
-    { id: 'fno', label: 'F&O underlyings', field: null, token: 'fno', target: null },
+    // REQUESTABLE SINCE D-0136, and it is the row whose join was built first
+    // and reached last. `constituents::Tier::FnoUnderlyings` has always
+    // existed, declares `published() == 213`, and had no `SpotTarget` pointing
+    // at it — so this row said `no target` while the machinery that answers it
+    // sat complete one crate away. `SpotTarget::Fno` now maps to that tier, so
+    // the count beside this row is a MEASURED join per feed, not a roster
+    // length.
+    { id: 'fno', label: 'F&O underlyings', field: null, token: 'fno', target: 'fno' },
     // NOT AN NSE CONSTITUENT FILE, AND THE LABEL MUST NOT IMPLY ONE.
     //
     // The four NIFTY tiers and the Total Market each come from a published NSE
@@ -363,7 +370,20 @@
       target: 'indices',
       note: 'this feed’s own index series — NSE publishes no list of them, so the set is the vendor’s and two feeds may differ'
     },
-    { id: 'all', label: 'Everything', field: null, token: '*', target: null }
+    // REQUESTABLE SINCE D-0136, and the ONE row whose slug this repository
+    // chose rather than borrowed.
+    //
+    // `token: '*'` is a BROWSER SENTINEL and has never been a wire word —
+    // `namedByUniverse` short-circuits on it and `masterCount` returns every
+    // row. So there is no `/instruments.json` token to lift, which is the one
+    // place D-0105's "the slugs are the wire's own words" rule has no answer.
+    // `all` is invented, and D-0136 records that it is.
+    //
+    // The set is `catalog::tracked` — the union the pull path already filters
+    // by — so the count on this row and the number of instruments a run
+    // attempts are the same number by construction, which is the property
+    // `SpotTarget::names` exists to hold.
+    { id: 'all', label: 'Everything', field: null, token: '*', target: 'all' }
   ];
 
   /**
@@ -1790,11 +1810,21 @@
     if (sourceKindUnstated) {
       out.push(SOURCE_KIND_UNSTATED);
     }
-    if (isBroker && universe !== 'swept') {
-      out.push(
-        `The broker path in this build addresses ONE instrument. pull::vendor::HttpSpec carries no request-parameter map, so a target naming a set has been refused rather than fetching one series and filing it under a name you did not ask for.`
-      );
-    }
+    // THE ONE-INSTRUMENT CAUTION IS GONE, AND IT WAS A FALSE STATEMENT ABOUT
+    // THIS REPOSITORY'S OWN CODE, RENDERED IN A YELLOW BOX.
+    //
+    // It read: "The broker path in this build addresses ONE instrument.
+    // pull::vendor::HttpSpec carries no request-parameter map, so a target
+    // naming a set has been refused..." Both clauses were untrue:
+    // `HttpSpec::params` exists and both broker descriptors populate it, and
+    // `api::server::broker_run` builds the chosen target's instrument list and
+    // calls `broker_window` once per member. The guard it described was removed
+    // in D-0136 for exactly that reason.
+    //
+    // Nothing replaces it. A caution has to name a thing that will happen, and
+    // this one named a refusal that no longer exists. The counts beside the
+    // universe control already say how many instruments a run will attempt, and
+    // they are measured rather than asserted.
     if (rung !== '1min') {
       out.push(
         `Live progress below is measured from /store.json, which stamps every row "1m" regardless of rung. Growth shown while this run is going may belong to another rung — it cannot be separated from the wire.`
@@ -2061,8 +2091,16 @@
 
     // ---- 3: the set is answerable. Can a request name it?
     if (u.target !== null) return null;
+    // THE SENTENCE NO LONGER COUNTS THE ENUM, AND THAT IS THE FIX.
+    //
+    // It read "api::ingest::SpotTarget spells swept, indices and equities
+    // only" — a hand-maintained count that had been wrong since D-0105 took
+    // the enum to seven, and wrong again at nine. This page cannot see the
+    // enum, so any number it states is a number that goes stale silently.
+    // `u.target === null` is the WHOLE condition, and it is the only thing
+    // said here.
     const wire =
-      'api::ingest::SpotRequest carries ONE target, and api::ingest::SpotTarget spells swept, indices and equities only. No target names this set, so a pull for it cannot be put on the wire.';
+      'No target names this set, so a pull for it cannot be put on the wire. The set is counted here from the universes array this server sends; what is missing is a request that can ask for it.';
     if (t === null || !LEGACY_BLIND.has(t)) return wire;
     return `${wire} MEMBERSHIP IS NOT THE GAP: ${n(have ?? 0)} name(s) in ${u.label} are counted here for ${feed}, off the universes array this server does send (D-0089/D-0090). This row is waiting on a fourth api::ingest::SpotTarget variant, which is a docs/05-decisions.md entry and a crates/api change — nothing in the browser closes it.`;
   }
@@ -2169,7 +2207,7 @@
       : `The set this feed is asked for. ${universeSpec.label} — not counted: ${reachWhy}`;
     if (!refusalSummary) return head;
     const un = refusalSummary.anyUnspellable
-      ? ` Counted here, not requestable: ${refusalSummary.unspellable} — membership is measured off the universes array this server sends, and what is missing is a target. api::ingest::SpotTarget spells swept, indices and equities and nothing else, so a rebuild does not close it: a docs/05-decisions.md entry and a crates/api change do.`
+      ? ` Counted here, not requestable: ${refusalSummary.unspellable} — membership is measured off the universes array this server sends, and what is missing is a target that can ask for it. A rebuild does not close it: a docs/05-decisions.md entry and a crates/api change do.`
       : '';
     const em = refusalSummary.anyEmpty
       ? ` 0 in this feed's master: ${refusalSummary.empty} — ${feedName(feeds.active)} lists no instrument in these, counted over all ${n((catalogue.rows ?? []).length)} row(s) /instruments.json?feed=${feeds.active ?? ''} returned. An empty set, not a missing endpoint.`
@@ -4344,13 +4382,19 @@
                     >
                     {#if drop === 'uni'}
                       <div class="ddm" role="group" aria-label="Universe — the set to pull">
-                        <!-- SAME RULE AS THE PICKERS: a set no request can name
-                             is folded behind one line rather than listed dead.
-                             `F&O underlyings` and `Everything` carry
-                             `target: null` because api::ingest::SpotTarget
-                             spells swept, indices and equities only — closing
-                             that is a Rust change, not a browser one, so until
-                             it lands these two can never be clicked. -->
+                        <!-- SAME RULE AS THE PICKERS: a set no request can
+                             name is folded behind one line rather than listed
+                             dead.
+                             This comment used to name `F&O underlyings` and
+                             `Everything` as the two rows that could never be
+                             clicked, "because api::ingest::SpotTarget spells
+                             swept, indices and equities only". Both are
+                             requestable as of D-0136, and the enum has nine
+                             variants rather than three. The rule stays because
+                             a future row may still arrive without a target;
+                             the two examples are gone, and no count of the
+                             enum is stated here — this page cannot see it, so
+                             any number it gives goes stale in silence. -->
                         {#each UNIVERSES.filter((u) => universeRefusal(u) === null) as u (u.id)}
                           {@const why = null}
                           <button
@@ -5313,48 +5357,26 @@
                 appends, so two in flight would interleave two answers into one month file.
               </p>
             {/if}
-            <p class="hint">
-              Every field the server reads is here. <span class="mono">granularity</span> is a
-              field <span class="mono">api::ingest::parse_spot</span> has always parsed; the
-              server's own form never emitted one, so an absent value has meant
-              <span class="mono">1min</span> by omission.
-            </p>
-            <!-- WHAT IS ABSENT IS AS INFORMATIVE AS WHAT IS PRESENT. Two of
-                 the controls above are readings, not fields, and the body is
-                 where that is provable rather than asserted. -->
-            <p class="hint">
-              Two things above are NOT on this line and cannot be. There is no member field, so
-              the instrument list is what <span class="mono">target=</span> resolves to on the
-              server rather than something this form sends. There is no segment field either —
-              the route IS the segment: <span class="mono">/pull/spot</span> is spot, and an
-              expired contract goes to <span class="mono">/pull/fno</span> one expiry at a time.
-            </p>
-            <!-- NO UNIT CHANGES ANYWHERE ON THIS LINE, and that is the point
-                 of the day control. What the reader picked is what is sent,
-                 character for character. The MONTH is still real — it is the
-                 store's file — and it appears as the set the window touches,
-                 never as something the request was widened to. -->
-            <p class="hint">
-              <span class="mono">from</span> and <span class="mono">to</span> are the two days
-              above, verbatim: {isValidIso(fromDay) ? dayLabel(fromDay) : 'the from date'} is
-              <span class="mono">{fromDay || 'unset'}</span> and
-              {isValidIso(toDay) ? dayLabel(toDay) : 'the to date'} is
-              <span class="mono">{toDay || 'unset'}</span>. Nothing is rounded to a month
-              boundary and nothing is clamped behind you — a day past
-              <span class="mono">{dayLabel(maxDay)}</span> is refused with its reason instead.
-            </p>
-            <!-- A REQUEST-ENCODING RULE FOR crates/pull, STATED WHERE IT
-                 PRODUCES ITS SYMPTOM. It is not this page's bound and no
-                 ceiling fixes it: a pull that forwards `to` verbatim to a
-                 vendor documenting it as non-inclusive loses exactly the last
-                 day, silently — which looks identical to a short window. -->
-            <p class="hint">
-              Both ends are inclusive HERE. On the wire, Dhan documents the daily endpoint's
-              <span class="mono">toDate</span> as NON-INCLUSIVE (Dhan Docs /
-              12-historical-data.md), so the request must send the day after — a rule for
-              <span class="mono">crates/pull</span>, and the reason a window can come back one
-              session short with nothing on this page able to see it.
-            </p>
+            <!-- FIVE PROSE PARAGRAPHS LEFT THIS FOLD ON 14 AUG 2026, at the
+                 operator's instruction, and what stays is the part that is
+                 DATA.
+
+                 The request bodies above are a value nothing else on this page
+                 shows: the exact line this form will POST, one per ticked
+                 rung, with a count beside them saying how many go out and in
+                 what order.
+
+                 What went was explanation — why `granularity` defaults to
+                 1min by omission, which controls are readings rather than
+                 fields, that the two dates are forwarded verbatim, and a
+                 paragraph on Dhan's non-inclusive `toDate`. Each is a fact
+                 about `crates/api` or `crates/pull` and belongs in those
+                 crates, where it is versioned with the code it describes.
+                 Restated here it was a second copy free to go stale on its
+                 own — and one already had: the `toDate` paragraph gave one
+                 vendor's rule as though it were the wire's, when
+                 `HttpSpec::range_end` has been per-vendor since D-0113 and
+                 Kite's is INCLUSIVE (docs/00-charter.md §4z). -->
           </details>
         </div>
       </div>

@@ -4751,16 +4751,35 @@ async fn broker_window(
     // wait a fifth of a second for it.
     await_budget(asked.feed, site).await?;
 
-    if asked.target != ingest::SpotTarget::Swept {
-        return Err(format!(
-            "the broker path can address ONE instrument today and {} names a \
-             set. pull::vendor::HttpSpec has no request-parameter map, so no \
-             instrument is put on the wire at all — the vendor replies that a \
-             security id is required. Refused rather than fetching one series \
-             and filing it under a name you did not ask for.",
-            asked.target.label()
-        ));
-    }
+    // THE TARGET GUARD IS GONE, AND IT HAD BEEN FALSE FOR SOME TIME.
+    //
+    // It read: "the broker path can address ONE instrument today and {target}
+    // names a set. pull::vendor::HttpSpec has no request-parameter map, so no
+    // instrument is put on the wire at all." Every clause of that was untrue by
+    // the time it was removed:
+    //
+    //   * `HttpSpec::params` exists and BOTH broker descriptors populate it —
+    //     Dhan names `securityId`/`exchangeSegment`, Groww `groww_symbol`/
+    //     `segment` — and `HttpSource::resolve_param` puts them on the wire.
+    //     That map is what closed `DH-905 securityId is required`.
+    //   * this function takes `instrument` as an ARGUMENT, and `broker_run`
+    //     above builds the target's whole instrument list, sorts it for
+    //     reproducibility, and calls this once per member. The loop the guard
+    //     said did not exist is the loop that called the guard.
+    //
+    // So it refused every target but `Swept` for a reason that had stopped
+    // being a reason, and did it AFTER `await_budget` — which WAITS rather than
+    // refuses. An operator picking NIFTY Total Market got 750 iterations each
+    // queueing for a rate permit and then refusing: minutes of governor waiting,
+    // a live in-flight status per instrument, zero sockets and zero bars. The
+    // page said "no target" and the receipt said the vendor was the problem.
+    //
+    // What still limits a run is what always did and is enforced elsewhere:
+    // `served` refuses a rung the feed does not declare, `finished_day_only`
+    // refuses an unfinished day, the governor bounds the rate, and
+    // `catalog::tracked && target.names(..)` in `broker_run` bounds the set.
+    // None of those is a target check, and none of them is weakened here.
+    // D-0136.
 
     let Some(home) = std::env::var_os("HOME") else {
         return Err("HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned());
@@ -9258,6 +9277,38 @@ mod tests {
             1,
             "1 of 50 — 49 cannot be named by Dhan",
         ),
+        // NIFTY and RELIANCE are both F&O underlyings; INDIAVIX is not. So this
+        // row is 2 where its four neighbours are 1, which is what makes it
+        // mutant-visible rather than a copy of the row above.
+        // TWO COVERED, ONE REACHABLE, AND THE GAP IS THE POINT.
+        //
+        // NIFTY and RELIANCE both carry `Universe::FNO`, so the merged universe
+        // counts 2. The JOIN is keyed on `(exchange, ISIN)` (D-0125) and an
+        // INDEX has no ISIN — NSE never issues one — so only RELIANCE resolves
+        // to a Dhan id. This is the only row in the table where the two numbers
+        // differ, which is exactly what makes a positional mix-up visible here.
+        // `F&amp;O`, NOT `F&O`, AND THAT IS THE ASSERTION WORKING.
+        //
+        // This column is matched against RENDERED HTML, and `render::escape`
+        // turns the ampersand in the label into an entity. Writing the raw
+        // label here would fail, and "fixing" it by loosening the assertion
+        // would drop the only row in this table that exercises escaping on a
+        // target name at all.
+        (
+            "fno",
+            "F&amp;O underlyings",
+            2,
+            "1 of 213 — 212 cannot be named by Dhan",
+        ),
+        // ALL THREE, and it is the only counter in this table that is 3. It is
+        // master-counted rather than joined — `Everything` has no published
+        // list — so its receipt reads like `indices`, not like a tier.
+        (
+            "all",
+            "Everything tracked",
+            3,
+            "3 — every name this target holds, by Dhan id",
+        ),
     ];
 
     #[tokio::test]
@@ -9293,9 +9344,11 @@ mod tests {
         // are the ones a mutant would have to move.
         assert_eq!(
             built.targets,
-            [1, 2, 1, 1, 1, 1, 1],
-            "one swept, two index series, one Total Market constituent, and \
-             RELIANCE once in each of the 500, 200, 100 and 50"
+            [1, 2, 1, 1, 1, 1, 1, 2, 3],
+            "one swept, two index series, one Total Market constituent, \
+             RELIANCE once in each of the 500, 200, 100 and 50, TWO F&O \
+             underlyings (NIFTY and RELIANCE, not INDIAVIX) and all three \
+             tracked"
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -13032,23 +13085,23 @@ mod tests {
 mod broker_target_tests {
     use super::*;
 
-    /// **A TARGET THIS PATH CANNOT SERVE IS REFUSED BEFORE A SOCKET OPENS.**
+    /// **THE TARGET GUARD IS GONE, AND IT MUST NOT COME BACK ON THE OLD
+    /// PREMISE.**
     ///
-    /// `broker_window` fetched one window and returned it labelled `NIFTY`,
-    /// filed under `NSE/INDEX/NIFTY`, whatever the operator picked — including
-    /// `NIFTY Total Market equities`, which names 750 symbols. The receipt then
-    /// reported success against the target they had chosen.
+    /// `broker_window` used to refuse every target but `Swept`, on the stated
+    /// ground that *"`pull::vendor::HttpSpec` has no request-parameter map, so no
+    /// instrument is put on the wire at all"*. Both halves were false by the
+    /// time it was removed, and this test pins the facts that make them false
+    /// rather than the absence of a line — an absence is trivially satisfied by
+    /// deleting the test.
     ///
-    /// The refusal is placed as the FIRST statement of `broker_window`, ahead of
-    /// the credential read and the socket, because refusing afterwards spends a
-    /// vendor request and a slice of the rate budget to arrive at "no".
-    ///
-    /// This test asserts the POSITION, not the message. Driving the function
-    /// itself needs AWS and a live broker; what can be checked without either is
-    /// that the guard precedes the two things that cost something — and that is
-    /// the half that was wrong when the check was first written.
+    /// The predecessor asserted the guard's POSITION and was correct to; it is
+    /// replaced rather than deleted because the ordering it protected still
+    /// matters and is now covered by
+    /// `the_transport_is_checked_before_any_vendor_facing_cost`, which walks
+    /// every costly call in the same body.
     #[test]
-    fn the_unservable_target_guard_precedes_the_credential_and_the_socket() {
+    fn the_broker_path_addresses_a_set_and_no_target_guard_stands_in_its_way() {
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server.rs"),
         )
@@ -13061,61 +13114,98 @@ mod broker_target_tests {
         let end = body.find("\n}\n").expect("it has an end");
         let body = &body[..end];
 
-        let guard = body
-            .find("asked.target != ingest::SpotTarget::Swept")
-            .expect("the guard is still there");
-        // THE SOCKET IS NAMED BY ITS CALLER NOW, not by `window_async`.
-        //
-        // The fetch loop moved into `fetch_chunks` when `broker_window` crossed
-        // the 100-line lint, taking `window_async` with it — and this test
-        // failed loudly saying so, rather than passing because the needle had
-        // left the span it was searching. That is the behaviour two tests I
-        // wrote today did NOT have, and the reason this one is trustworthy.
-        //
-        // `fetch_chunks(` is the call site, still inside `broker_window`, and
-        // it is what the guard must precede: everything the socket costs is
-        // behind it.
-        for (what, needle) in [
-            ("the credential read", "CredentialConfig::load"),
-            ("the AWS identity", "AwsIdentity::discover"),
-            ("the socket", "fetch_chunks("),
-        ] {
-            let at = body.find(needle).unwrap_or_else(|| {
-                panic!("{what} moved; this test pins an ordering it can no longer see")
-            });
+        // 1. THE GUARD IS ABSENT. Written as a substring of the comparison
+        //    itself, so re-adding it in any spelling that compares the target
+        //    to a single variant trips this.
+        assert!(
+            !body.contains("asked.target != ingest::SpotTarget::"),
+            "broker_window refuses a target again. Before restoring this, read \
+             the two facts below — the guard's stated reason was false when it \
+             was removed, and nothing has narrowed since."
+        );
+
+        // 2. THE INSTRUMENT IS AN ARGUMENT, so this function was never
+        //    single-instrument by construction — its CALLER decides the set.
+        let signature = src
+            .split_once("async fn broker_window(")
+            .expect("broker_window exists")
+            .1;
+        let signature = &signature[..signature.find(") -> ").expect("it has a return type")];
+        assert!(
+            signature.contains("instrument: &brutex_core::instrument::InstrumentKey"),
+            "broker_window takes ONE instrument as an argument; the set is the \
+             caller's business: {signature}"
+        );
+
+        // 3. THE CALLER LOOPS. `broker_run` filters the merged universe by the
+        //    chosen target, sorts it for reproducibility, and calls this once
+        //    per member.
+        let run = src
+            .split_once("pub(crate) async fn broker_run")
+            .expect("broker_run exists")
+            .1;
+        let run = &run[..run.find("\n}\n").expect("it has an end")];
+        assert!(
+            run.contains("asked.target.names(key, entry.universe)"),
+            "broker_run builds its instrument list from the chosen target"
+        );
+        assert!(
+            run.contains("for (index, instrument) in targets.iter().enumerate()"),
+            "broker_run loops the list it built"
+        );
+
+        // 4. THE PARAMETER MAP EXISTS AND BOTH BROKERS FILL IT. This is the
+        //    clause the guard's message named, and it is checked against the
+        //    descriptors rather than against source text — a populated `params`
+        //    table is what puts an instrument id on the wire and what closed
+        //    `DH-905 securityId is required`.
+        for feed in [pull::vendor::Feed::Dhan, pull::vendor::Feed::Groww] {
+            let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                panic!("{feed} is an HTTP broker");
+            };
             assert!(
-                guard < at,
-                "the unservable-target refusal must come BEFORE {what}, or a \
-                 request and a slice of the rate budget are spent to reach a \
-                 refusal that was decidable from the form alone"
+                spec.params
+                    .iter()
+                    .any(|p| p.value == pull::vendor::ParamValue::InstrumentId),
+                "{feed} must name the instrument on its wire, or the guard's \
+                 reason becomes true again"
             );
         }
     }
 
-    /// The seven targets, and which of them this build can actually address.
+    /// Every target is REQUESTABLE on the broker path, and none of them widens
+    /// the sweep.
+    ///
+    /// The predecessor asserted that exactly ONE of seven was servable and
+    /// called that "the reminder to widen the guard rather than delete it when
+    /// the parameter map lands". The map landed, the guard is deleted, and this
+    /// is the assertion that replaces it: what a target selects is a SET TO
+    /// STORE, and `CLAUDE.md` §1's two-instrument sweep surface is untouched by
+    /// any of them.
     #[test]
-    fn only_the_swept_target_names_a_single_instrument_this_path_can_reach() {
-        // Swept is the two engine-surface indices; the guard lets it through
-        // and `broker_window` fetches the first. The other SIX name sets whose
-        // members cannot be addressed at all without a parameter map.
-        //
-        // D-0105 took this from three to seven and moved nothing else here.
-        // That is the point: the four NIFTY tiers are REQUESTABLE and, on the
-        // broker path, refused by name for the same reason `equities` always
-        // was — one instrument per request, and no parameter map to name it.
-        // A new target does not widen what this path can reach and does not
-        // widen what the engine sweeps.
-        assert_eq!(ingest::SpotTarget::ALL.len(), 7);
-        let served: Vec<_> = ingest::SpotTarget::ALL
-            .into_iter()
-            .filter(|t| *t == ingest::SpotTarget::Swept)
-            .collect();
+    fn every_target_is_requestable_and_none_of_them_widens_the_sweep() {
+        assert_eq!(ingest::SpotTarget::ALL.len(), 9);
         assert_eq!(
-            served.len(),
-            1,
-            "exactly one target is servable today; when the parameter map lands \
-             this test is the reminder to widen the guard rather than delete it"
+            brutex_core::instrument::InstrumentKey::SWEPT.len(),
+            2,
+            "CLAUDE.md §1: the engine surface is NSE-NIFTY and NSE-BANKNIFTY, \
+             and widening it is a docs/05-decisions.md entry — never a \
+             side-effect of adding a target that STORES more"
         );
+        // Several targets legitimately NAME the swept pair — `Indices` always
+        // has, and `Fno` and `Everything` now do. Naming is STORING; sweeping
+        // is `is_sweepable`, and no target can reach it. `SWEPT` is a table of
+        // `(Exchange, &str)` pairs rather than of keys, so the predicate is
+        // asked of a key BUILT from each pair — which is also the only way to
+        // prove the table and the predicate still agree.
+        for (exchange, symbol) in brutex_core::instrument::InstrumentKey::SWEPT {
+            let key = brutex_core::instrument::InstrumentKey::index(exchange, symbol)
+                .expect("a swept pair is a valid key");
+            assert!(
+                key.is_sweepable(),
+                "{exchange:?}-{symbol} is the surface itself"
+            );
+        }
     }
 }
 

@@ -128,6 +128,34 @@ pub enum SpotTarget {
     /// it. The two sets share a word and no member, which is precisely why both
     /// are spelled out on the form rather than left to be inferred.
     Nifty50,
+    /// The 213 F&O underlyings. Stored, never swept.
+    ///
+    /// Defined by a list this repository has already transcribed —
+    /// `core::universe::FNO_UNDERLYINGS`, derived from the derivative rows of
+    /// both vendor masters, which agree exactly at 213 (`docs/00-charter.md`
+    /// §4a). It is the one target whose join was already built and reachable
+    /// from nothing: `constituents::Tier::FnoUnderlyings` has always existed,
+    /// declared `published() == 213`, and no `SpotTarget` pointed at it.
+    ///
+    /// **It NAMES the swept pair, and that is legal.** `NIFTY` and `BANKNIFTY`
+    /// are both F&O underlyings, so pulling this set stores them — which
+    /// `CLAUDE.md` §1 permits and [`Self::Indices`] has always done. What it
+    /// does not do is widen the sweep: `InstrumentKey::SWEPT` is still two
+    /// pairs and this target cannot add to it.
+    Fno,
+    /// Every instrument this build tracks — the reference index series and the
+    /// NIFTY Total Market constituents together. Stored, never swept.
+    ///
+    /// # The one target defined by a PREDICATE and not by a file
+    ///
+    /// Every other target answers to a published list or to a single named
+    /// universe bit. This one is `catalog::tracked` — the union the pull path
+    /// already filters by — and it has neither. That is not a gap to be filled:
+    /// NSE publishes no file naming "everything this build tracks", so a roster
+    /// here would be invented (`CLAUDE.md` §3 rule 1) and would go stale the day
+    /// a vendor added a series. [`Self::members`], [`Self::tier`] and
+    /// [`Self::universe`] each say so rather than guessing.
+    Everything,
 }
 
 impl SpotTarget {
@@ -139,7 +167,7 @@ impl SpotTarget {
     /// go on the end, widest first, which is also the order
     /// `server::UNIVERSE_TOKENS` lists them in — one reading order for the two
     /// tables that name the same sets.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Swept,
         Self::Indices,
         Self::Equities,
@@ -147,6 +175,18 @@ impl SpotTarget {
         Self::Nifty200,
         Self::Nifty100,
         Self::Nifty50,
+        // APPENDED AT 7 AND 8, AND NOT WHERE THE BROWSER DRAWS THEM.
+        //
+        // `web/src/routes/ingest/+page.svelte` lists `fno` sixth, between the
+        // Total Market row and the index row. Mirroring that reading order here
+        // would insert `Fno` at slot 3 and shift all four NIFTY tiers down one —
+        // and `Coverage::per` is a flat array read as
+        // `vendor * ALL.len() + slot`, so every tier would be handed its
+        // neighbour's counter on the form and on the receipt. The array's order
+        // is a wire contract with itself; the page's order is a reading order,
+        // and they are allowed to differ. D-0136.
+        Self::Fno,
+        Self::Everything,
     ];
 
     /// Whether this target names `key`, given the universes it belongs to.
@@ -192,6 +232,26 @@ impl SpotTarget {
             Self::Nifty200 => universe.contains(Universe::NIFTY_200),
             Self::Nifty100 => universe.contains(Universe::NIFTY_100),
             Self::Nifty50 => universe.contains(Universe::NIFTY_50),
+            // ONE BIT, exactly like the four tiers above it.
+            Self::Fno => universe.contains(Universe::FNO),
+            // THE PULL PATH'S OWN PREDICATE, BORROWED — never `true`.
+            //
+            // `Site::new` counts a target's population with `names` alone, and
+            // `broker_run` builds the run list with
+            // `catalog::tracked(..) && names(..)`. For every other target
+            // `names` is already a subset of `tracked`, so the two agree.
+            // `true` here would break that: the form would count
+            // `merged.by_key.len()` — ~2,795 rows including futures, options and
+            // BSE listings that `of_instrument` gives `Universe::NONE` — while
+            // the run attempted 765. That is exactly the defect `names` was
+            // added to remove: the label, the counter and the run being three
+            // different answers to one question.
+            //
+            // Borrowed rather than copied, the same discipline
+            // `Self::Swept => key.is_sweepable()` follows, so the `tracked &&`
+            // in `broker_run` is idempotent for this target instead of a
+            // second, invisible filter.
+            Self::Everything => crate::catalog::tracked(universe),
         }
     }
 
@@ -226,8 +286,18 @@ impl SpotTarget {
     #[must_use]
     pub const fn members(self) -> Option<&'static [&'static str]> {
         match self {
-            Self::Swept | Self::Indices => None,
+            // THREE TARGETS HAVE NO PUBLISHED LIST, AND THEY LACK ONE FOR THREE
+            // DIFFERENT REASONS. `Swept` is the engine surface, two
+            // `(exchange, symbol)` pairs. `Indices` is whatever a vendor's
+            // master calls an index series, which NSE publishes no file for.
+            // `Everything` is a PREDICATE over the tracked union — see its own
+            // documentation.
+            Self::Swept | Self::Indices | Self::Everything => None,
             Self::Equities => Some(&universe::NIFTY_TOTAL_MARKET),
+            // THE LIST WAS ALREADY TRANSCRIBED AND HAD NO TARGET POINTING AT
+            // IT. 213 names, derived from both vendors' derivative rows, which
+            // agree exactly — docs/00-charter.md §4a.
+            Self::Fno => Some(&universe::FNO_UNDERLYINGS),
             Self::Nifty500 => Some(&universe::NIFTY_500),
             Self::Nifty200 => Some(&universe::NIFTY_200),
             Self::Nifty100 => Some(&universe::NIFTY_100),
@@ -249,6 +319,16 @@ impl SpotTarget {
             Self::Nifty200 => "n200",
             Self::Nifty100 => "n100",
             Self::Nifty50 => "n50",
+            // THE WIRE'S OWN WORD AGAIN: `fno` is bit 1 in
+            // `server::UNIVERSE_TOKENS` and is what `/instruments.json` already
+            // counts this set by. D-0105's rule leaves no other spelling legal.
+            Self::Fno => "fno",
+            // AND THE ONE PLACE THAT RULE HAS NO ANSWER. There is no
+            // `/instruments.json` token for "everything": the browser has used
+            // `*` as a LOCAL sentinel, not a wire word, and `*` is not a slug a
+            // query string should carry. `all` is chosen here rather than
+            // borrowed, and saying so is the point — D-0136.
+            Self::Everything => "all",
         }
     }
 
@@ -263,6 +343,12 @@ impl SpotTarget {
             Self::Nifty200 => "NIFTY 200 equities",
             Self::Nifty100 => "NIFTY 100 equities",
             Self::Nifty50 => "NIFTY 50 equities",
+            Self::Fno => "F&O underlyings",
+            // UNDER 64 BYTES ON PURPOSE. Every spot record writes
+            // `target.label()` into `audit::Record`'s fixed-stride 64-byte
+            // `source` field, and the stride is a shipped format §3 rule 8
+            // forbids mutating. A descriptive label would be cut to a prefix.
+            Self::Everything => "Everything tracked",
         }
     }
 
@@ -283,6 +369,19 @@ impl SpotTarget {
                 "the published 50 constituents — stored, never swept; these are the \
                  companies, not the NIFTY index"
             }
+            // BOTH WORDED LIKE `Indices`, NOT LIKE `Equities`, AND THE
+            // DIFFERENCE IS FACTUAL.
+            //
+            // Each of these sets CONTAINS NSE-NIFTY and NSE-BANKNIFTY — both
+            // are F&O underlyings and both are tracked index series. "Stored,
+            // never swept" is true of the SET but reads as "this set excludes
+            // the swept pair", which is false. So they say what `Indices`
+            // says: the pull stores them, and the sweep surface is unchanged.
+            Self::Fno => "the 213 F&O underlyings — stored; the sweep surface is never swept",
+            Self::Everything => {
+                "every tracked series and constituent — stored; the sweep surface \
+                 is unchanged and never swept"
+            }
         }
     }
 
@@ -300,6 +399,22 @@ impl SpotTarget {
             Self::Nifty200 => Universe::NIFTY_200,
             Self::Nifty100 => Universe::NIFTY_100,
             Self::Nifty50 => Universe::NIFTY_50,
+            Self::Fno => Universe::FNO,
+            // NO BIT, AND THE HONEST ANSWER IS THE EMPTY ONE.
+            //
+            // `Everything` is `TOTAL_MARKET | INDEX` and `Universe` has no bit
+            // for the union. Inventing one would be wrong in kind: these bits
+            // name PUBLISHED universes, one file each, and `tracked` is a union
+            // rather than a file. Answering `INDEX` or `TOTAL_MARKET` would be
+            // worse than empty — `/universes.json` would then tell a page that
+            // this row and the `indices` row count the same instruments, which
+            // is the exact confusion the `Swept => null` arm exists to prevent.
+            //
+            // `Universe::NONE` is only honest while its CONSUMER says so:
+            // `coverage::target_json` emits `null` for this target rather than
+            // letting the empty bitset become an empty token. The two are a
+            // pair. D-0136.
+            Self::Everything => Universe::NONE,
         }
     }
 
@@ -334,8 +449,21 @@ impl SpotTarget {
     pub const fn tier(self) -> Option<crate::constituents::Tier> {
         use crate::constituents::Tier;
         match self {
-            Self::Swept | Self::Indices => None,
+            Self::Swept | Self::Indices | Self::Everything => None,
             Self::Equities => Some(Tier::TotalMarket),
+            // THE JOIN WAS ALREADY BUILT AND NOTHING REACHED IT.
+            //
+            // `Tier::FnoUnderlyings` is in `Tier::ALL`, borrows
+            // `universe::FNO_UNDERLYINGS`, declares `published() == 213` and
+            // `universe() == Universe::FNO`, and `Join::build` has always
+            // resolved it per vendor — with no `SpotTarget` mapping to it, so
+            // only `Join::notes` consumed it. Leaving this `None` would route
+            // the target through `from_master`: the 213-name denominator
+            // disappears, the wire says `counted_from: master`, and the five
+            // index underlyings that legitimately have no ISIN get reported as
+            // "this feed's master lists no id for it" — blaming the vendor for
+            // a cell NSE never filled.
+            Self::Fno => Some(Tier::FnoUnderlyings),
             Self::Nifty500 => Some(Tier::Nifty500),
             Self::Nifty200 => Some(Tier::Nifty200),
             Self::Nifty100 => Some(Tier::Nifty100),
@@ -2068,20 +2196,37 @@ mod tests {
     /// would be a third copy of §1 and a snapshot that goes stale on the next
     /// vendor addition.
     #[test]
-    fn the_two_targets_with_no_published_list_return_none_rather_than_an_invented_one() {
+    fn the_three_targets_with_no_published_list_return_none_rather_than_an_invented_one() {
+        // THREE, AND EACH LACKS A LIST FOR A DIFFERENT REASON — which is why
+        // they are named one at a time rather than counted.
+        //
+        // `Swept` is the engine surface: two `(exchange, symbol)` pairs from
+        // `InstrumentKey::SWEPT`, not a file. `Indices` is whatever a vendor's
+        // master calls an index series, and NSE publishes no file naming that
+        // set. `Everything` is a PREDICATE — `catalog::tracked`, a union of two
+        // bits — and a union is not a publication either.
         assert_eq!(SpotTarget::Swept.members(), None);
         assert_eq!(SpotTarget::Indices.members(), None);
+        assert_eq!(SpotTarget::Everything.members(), None);
         // Every other target has one, and the Total Market's is core's too.
         assert_eq!(
             SpotTarget::Equities.members(),
             Some(&universe::NIFTY_TOTAL_MARKET[..])
         );
+        // The F&O roster was transcribed long before any target pointed at it.
+        assert_eq!(
+            SpotTarget::Fno.members(),
+            Some(&universe::FNO_UNDERLYINGS[..])
+        );
         for target in SpotTarget::ALL {
             let published = target.members().is_some();
             assert_eq!(
                 published,
-                !matches!(target, SpotTarget::Swept | SpotTarget::Indices),
-                "{} either has a published list or is one of the two that do not",
+                !matches!(
+                    target,
+                    SpotTarget::Swept | SpotTarget::Indices | SpotTarget::Everything
+                ),
+                "{} either has a published list or is one of the three that do not",
                 target.slug()
             );
         }
@@ -2150,9 +2295,34 @@ mod tests {
     /// under. `CLAUDE.md` §4.
     #[test]
     fn a_slug_that_is_not_a_target_is_refused_by_name_after_the_tiers_were_added() {
+        // `fno` AND `all` LEFT THIS LIST ON 14 AUG 2026, and they left it in
+        // opposite ways. `fno` became a real slug because
+        // `server::UNIVERSE_TOKENS` already spells that bit `fno` and D-0105's
+        // rule leaves no other spelling legal. `all` is the one slug this
+        // repository CHOSE rather than borrowed — there is no
+        // `/instruments.json` token for "everything" — and D-0136 says so.
+        //
+        // `ntm`, `index` and `*` stay. Each is a near-miss for a set that has a
+        // different real name (`equities`, `indices`, and a browser-local
+        // sentinel that is not a wire word), and accepting any of them would
+        // give one set two names with no way to say which the store filed
+        // under.
         for got in [
-            "n25", "n1000", "nifty50", "nifty-50", "N50", "n 50", "n50 ", "50", "ntm", "fno",
-            "index", "*", "all", "mcx", "bse",
+            "n25",
+            "n1000",
+            "nifty50",
+            "nifty-50",
+            "N50",
+            "n 50",
+            "n50 ",
+            "50",
+            "ntm",
+            "index",
+            "*",
+            "mcx",
+            "bse",
+            "fno_underlyings",
+            "everything",
         ] {
             assert_eq!(SpotTarget::from_slug(got), None, "{got:?} is not a target");
             let body = format!("target={got}&from=2022-01-08&to=2022-02-08");
