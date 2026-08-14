@@ -451,6 +451,144 @@ fn note_parsed(path: &std::path::Path, vendor: Vendor, out: &Loaded) {
     );
 }
 
+/// A Kite instrument dump, decoded through the same path as every other master.
+///
+/// # Why this is a TEST and not a module
+///
+/// There is nothing to write. `Vendor::Zerodha`'s `MasterColumns` already names
+/// the twelve headers, `Columns::locate` already maps the three it does not
+/// publish to `None`, and `load` already walks any CSV. What was missing was
+/// the evidence that those three pieces agree on a real body — and they did not
+/// until 14 Aug 2026, when every equity row was declined for a series column
+/// this vendor has never had.
+///
+/// The rows below are the vendor's own documented sample, from
+/// `docs/00-charter.md` §4d.
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod zerodha_master_tests {
+    use super::*;
+
+    const DUMP: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,expiry,\
+strike,tick_size,lot_size,instrument_type,segment,exchange\n\
+408065,1594,INFY,INFOSYS,0,,0,0.05,1,EQ,NSE,NSE\n\
+738561,2885,RELIANCE,RELIANCE INDUSTRIES,0,,0,0.05,1,EQ,NSE,NSE\n\
+5720322,22345,NIFTY15DECFUT,,78.0,2015-12-31,0,0.05,75,FUT,NFO-FUT,NFO\n\
+5720578,22346,NIFTY159500CE,,23.0,2015-12-31,9500,0.05,75,CE,NFO-OPT,NFO\n";
+
+    /// NAMED PER TEST, because these run in parallel and shared a directory.
+    /// One test's write raced another's read and the loser saw "file is empty"
+    /// — a fixture defect that reads exactly like a decoder defect.
+    fn decode(name: &str, body: &str) -> Loaded {
+        let dir = crate::scratch::path(&format!("zerodha-master-{name}"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let at = dir.join(Vendor::Zerodha.master_file());
+        std::fs::write(&at, body).expect("write");
+        load(&at, Vendor::Zerodha).expect("the dump decodes")
+    }
+
+    /// **THE REGRESSION.** Measured before the fix: `kept = 0`, every equity
+    /// declined as `UnrecognisedListingClass` — because the gate wanted an NSE
+    /// board series and this master has no series column at all.
+    #[test]
+    fn an_equity_row_is_kept_although_this_vendor_publishes_no_series_column() {
+        let got = decode("kept", DUMP);
+        let kept: Vec<&str> = got.kept.iter().map(|l| l.key.underlying.as_str()).collect();
+        assert!(
+            kept.contains(&"INFY") && kept.contains(&"RELIANCE"),
+            "both NSE equities are kept; got {kept:?}"
+        );
+        assert_eq!(kept.len(), 2, "and the two derivatives are declined");
+    }
+
+    /// The numeric token is the id a request is addressed by — not the
+    /// `exchange_token` beside it, and not the `tradingsymbol`.
+    #[test]
+    fn the_vendor_id_is_the_instrument_token_and_not_its_neighbour() {
+        let got = decode("vendorid", DUMP);
+        let infy = got
+            .kept
+            .iter()
+            .find(|l| l.key.underlying.as_str() == "INFY")
+            .expect("INFY is kept");
+        assert_eq!(
+            infy.vendor_id.as_str(),
+            "408065",
+            "instrument_token, not exchange_token 1594 and not the symbol"
+        );
+    }
+
+    /// **NO ISIN, AND THAT IS A STATE RATHER THAN A GAP.**
+    ///
+    /// Twelve columns and not one of them is an ISIN, so every row decodes with
+    /// none. `Columns::locate` maps the absent header to `None` — before that,
+    /// it looked for a column literally named `""` and refused the whole file
+    /// with `no column ""`.
+    #[test]
+    fn every_row_decodes_with_no_isin_because_the_vendor_publishes_none() {
+        let got = decode("noisin", DUMP);
+        assert!(
+            got.kept.iter().all(|l| l.isin.is_none()),
+            "this master carries no ISIN column, so no row can carry one"
+        );
+        assert!(
+            got.errors.is_empty(),
+            "an absent column is not a malformed file: {:?}",
+            got.errors
+        );
+    }
+
+    /// The company name is not read as the underlying. `name` is `INFOSYS` for
+    /// an equity and blank on a derivative; reading it as the underlying would
+    /// put INFOSYS where INFY belongs.
+    #[test]
+    fn the_company_name_column_never_becomes_the_underlying() {
+        let got = decode("company", DUMP);
+        assert!(
+            got.kept
+                .iter()
+                .all(|l| l.key.underlying.as_str() != "INFOSYS"),
+            "`name` is the company, and this master has no underlying column"
+        );
+    }
+
+    /// The two derivative rows are accounted for BY NAME, not dropped.
+    ///
+    /// They are on `NFO` and this engine stores NSE only (D-0017), so they are
+    /// skipped as a foreign exchange — before their instrument type is ever
+    /// consulted. That is the right order: a venue this build does not store is
+    /// not a row it needs to understand.
+    #[test]
+    fn a_row_on_another_exchange_is_named_rather_than_kept_or_lost() {
+        let got = decode("buckets", DUMP);
+        let skipped: usize = got.skipped_by_reason().iter().map(|(_, n)| n).sum();
+        assert_eq!(
+            got.kept.len() + got.declined.len() + skipped + got.errors.len(),
+            4,
+            "every row lands in exactly one bucket: kept {} declined {} \
+             skipped {skipped} errors {:?}",
+            got.kept.len(),
+            got.declined.len(),
+            got.errors
+        );
+        assert_eq!(
+            got.skipped_by_reason(),
+            vec![("foreign exchange", 2)],
+            "the two NFO rows, named by the venue rather than by the type"
+        );
+        assert!(
+            got.errors.is_empty(),
+            "and nothing is malformed: {:?}",
+            got.errors
+        );
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,

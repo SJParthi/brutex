@@ -1303,8 +1303,26 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // 2,726 Groww and 2,774 Dhan main-board rows carries one, so a missing or
     // malformed value means the row is not what we think it is, and that is an
     // error rather than a quiet `None`.
+    //
+    // AND IT IS REQUIRED OF A VENDOR THAT PUBLISHES THE COLUMN, which is the
+    // clause that was missing. The sentence above counts Groww's and Dhan's
+    // main-board rows, and both of those masters HAVE an isin column; Kite's
+    // has twelve columns and not one of them is an ISIN. So `Isin::new("")`
+    // refused, `?` turned it into `Malformed`, and every ordinary NSE equity in
+    // that master came back as a malformed instrument identifier — measured,
+    // kept = 0, alongside the board-series gate above which failed for exactly
+    // the same reason one field earlier.
+    //
+    // A vendor that publishes no ISIN cannot be asked for one. The row is kept
+    // with `None`, which is the honest value and is precisely what
+    // `pull::universe::JoinKey::TradingSymbol` exists to join on — the design
+    // already accounts for this feed having no ISIN; this line did not.
+    //
+    // Nothing is weakened for the two vendors that DO publish it: the arm turns
+    // on `master_columns()`, a property of the VENDOR, so a missing or
+    // malformed value in a column that exists is still the error it always was.
     let isin = match kind {
-        Kind::Equity => Some(Isin::new(row.isin)?),
+        Kind::Equity if !vendor.master_columns().isin.is_empty() => Some(Isin::new(row.isin)?),
         _ => None,
     };
 

@@ -113,6 +113,37 @@ pub fn expected_max_t(n: u64) -> f64 {
     (2.0 * n_f.ln()).sqrt()
 }
 
+/// Hypotheses that were **distinct tests**, not merely distinct masks.
+///
+/// # Two masks with identical support are one hypothesis, not two
+///
+/// [`trials`] counts every support evaluation. But if `{A,B}` and `{A,B,C}` fire
+/// on exactly the same bars, they are not two chances to get lucky — they are
+/// the *same* chance, counted twice. Every statistic derived from them is
+/// identical, so a multiple-testing correction that treats them as independent
+/// charges for a trial nobody ran.
+///
+/// This is stronger than the usual correlation argument and it is why it can be
+/// computed exactly. The literature deflates for strategies that are *similar*,
+/// which needs a correlation matrix and an eigenvalue count. A non-closed
+/// itemset is not similar to its closed superset; it is **the same test**, and
+/// `crate::closed` identifies those by construction.
+///
+/// # This is still an upper bound, and saying so is the point
+///
+/// It removes only exact duplicates. Two combinations that overlap on 99% of
+/// their bars remain two trials here, and genuinely are two *near*-identical
+/// ones — so the true effective count sits below this figure. What has been
+/// removed is the part that can be removed **without estimating anything**.
+///
+/// The direction is safe: a bar computed from this is lower than one computed
+/// from [`trials`] and higher than the unknowable truth, so a finding that
+/// clears it has cleared a real hurdle.
+#[must_use]
+pub fn effective_trials(sweep: &Sweep) -> u64 {
+    trials(sweep).saturating_sub(crate::closed::closed(sweep).redundant())
+}
+
 /// Euler–Mascheroni, which is the constant the deflated-Sharpe expression uses.
 const EULER_MASCHERONI: f64 = 0.577_215_664_901_532_9;
 
@@ -252,7 +283,10 @@ fn inverse_normal_cdf(p: f64) -> f64 {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{bonferroni_t, expected_max_bailey, expected_max_t, inverse_normal_cdf, trials};
+    use super::{
+        bonferroni_t, effective_trials, expected_max_bailey, expected_max_t, inverse_normal_cdf,
+        trials,
+    };
     use engine::{Frontier, Itemset, Sweep};
     use vocab::ConditionMask;
 
@@ -372,6 +406,48 @@ mod tests {
         // Fewer than two trials has no maximum.
         assert!(expected_max_bailey(1).abs() < f64::EPSILON);
         assert!(expected_max_bailey(0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_effective_count_removes_exact_duplicates_and_nothing_else() {
+        use crate::{Sweeper, synthetic};
+        use engine::Ladder;
+        use indicators::evaluator::{Evaluator, Widths};
+        use indicators::pattern::Thresholds;
+        use indicators::vwap::Availability;
+
+        let bars = synthetic::sessions(8);
+        let mut ev = Evaluator::new(
+            Widths::pinned().expect("pinned"),
+            Availability::Absent,
+            Thresholds::CLASSICAL,
+        );
+        let sweep = Sweeper::new(Ladder::with_min_hits(600).with_ceiling(50_000))
+            .run(&bars, &mut ev)
+            .sweep;
+
+        let raw = trials(&sweep);
+        let effective = effective_trials(&sweep);
+        assert!(raw > 1_000, "the fixture must test thousands");
+        assert!(
+            effective < raw,
+            "this fixture has redundant combinations, so the effective count \
+             must be strictly smaller: {effective} vs {raw}"
+        );
+        // Exactly the redundancy closure found, and nothing beyond it.
+        assert_eq!(
+            raw - effective,
+            crate::closed::closed(&sweep).redundant(),
+            "the deflation must be exactly the exact-duplicate count -- anything \
+             more would be an estimate this function does not make"
+        );
+        // And the bar moves the right way: fewer trials, a lower hurdle.
+        assert!(
+            bonferroni_t(effective) < bonferroni_t(raw),
+            "removing duplicated tests must LOWER the bar, never raise it"
+        );
+        // Never below the number of genuinely distinct tests.
+        assert!(effective > 0);
     }
 
     #[test]

@@ -39,7 +39,24 @@ export async function loadCatalogue(feed) {
     // instruments, so "every instrument" is a different set per feed and the
     // index has to be rebuilt when the selection changes.
     const r = await fetch(`/instruments.json?feed=${encodeURIComponent(feed ?? '')}`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      // THE SERVER ALREADY SAID WHY, AND THIS THREW IT AWAY.
+      //
+      // D-0124 added `x-brutex-master-state` and `x-brutex-master-note` to this
+      // exact response so a page could tell a vendor whose master was never
+      // READ from one whose master lists nothing — two states that produce the
+      // same empty screen and need opposite actions. This line reported
+      // `HTTP 503` and dropped both.
+      //
+      // Measured: selecting a broker whose instrument file is not on disk drew
+      // "/instruments.json could not be read, so no name is counted here:
+      // Error: HTTP 503" — a status code, about a file, with no mention of the
+      // file. The note says which one and what to do about it.
+      const note = r.headers.get('x-brutex-master-note');
+      const state = r.headers.get('x-brutex-master-state');
+      if (note) throw new Error(state ? `${state} — ${note}` : note);
+      throw new Error(`HTTP ${r.status}`);
+    }
     const rows = await r.json();
     const next = new Map();
     for (const row of rows) {
