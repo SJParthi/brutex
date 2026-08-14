@@ -105,13 +105,23 @@ pub fn render(outcome: &Outcome, id: Option<&RunId>) -> String {
 /// Derived entirely from this run's own counters — nobody is asked for a
 /// number, the same standard depth and memory are held to.
 fn significance(out: &mut String, sweep: &Sweep) {
-    let n = crate::significance::trials(sweep);
+    let raw = crate::significance::trials(sweep);
+    // The EFFECTIVE count is what the bar is computed from. Two masks with
+    // identical support are one hypothesis counted twice, and charging for a
+    // trial nobody ran raises the bar against real findings.
+    let n = crate::significance::effective_trials(sweep);
     let _ = writeln!(out, "SIGNIFICANCE");
     row(
         out,
         "hypotheses tested",
-        &n.to_string(),
+        &raw.to_string(),
         "support counted against bars",
+    );
+    row(
+        out,
+        "  distinct tests among them",
+        &n.to_string(),
+        "exact duplicates removed -- same support, same test",
     );
     if n < 2 {
         row(
@@ -763,7 +773,24 @@ mod tests {
         let luck: f64 = cell(&text, "best t-stat by luck alone")
             .parse()
             .unwrap_or(0.0);
-        assert!(luck > 3.0, "and pure noise alone already clears 3.0 here");
+        assert!(
+            luck > 0.0 && luck < required,
+            "the noise floor must be positive and sit BELOW the Bonferroni bar: \
+             {luck} against {required}"
+        );
+        // THE DEFLATION IS ON THE PAGE. This fixture is 94% exact duplicates --
+        // 3,591 of 3,798 are masks whose support is identical to a superset's --
+        // so the distinct-test count must be far below the raw one. Asserting
+        // the relationship rather than a fixed number, because the fixture's
+        // redundancy is a property of the vocabulary and will move.
+        let distinct: u64 = cell(&text, "distinct tests among them")
+            .parse()
+            .unwrap_or(0);
+        assert!(
+            distinct > 0 && distinct < n,
+            "distinct tests must be positive and below the raw count: \
+             {distinct} of {n}"
+        );
     }
 
     #[test]
