@@ -1141,6 +1141,64 @@
     return `${active.display} · the folder is there and holds nothing${at}`;
   });
 
+  /**
+   * THE ARCHIVE CENSUS — the folder described as a set, not as a sentence.
+   *
+   * # Why this exists beside `folderReachSentence` rather than instead of it
+   *
+   * `/folder.json` answers six facts — `path`, `state`, `earliest`, `latest`,
+   * `files`, `rows` — and every one of them was being spent on ONE line at the
+   * foot of a calendar popover. That line is the right thing in the place it
+   * sits; it is the wrong thing to be the only place the six exist, because
+   * they are the closest thing an archive feed HAS to a universe.
+   *
+   * # An archive has no universe to pick, and this is what it has instead
+   *
+   * A broker is asked for a SET and answers it: `SpotTarget` names one, the
+   * master resolves it, and `/universes.json?feed=` counts what the feed
+   * reaches. An archive is asked for nothing. Its instruments are the FILES the
+   * operator bought, so the only true answer to "what is in this feed" is a
+   * walk — which is what this is. `crates/api/src/constituents.rs` states the
+   * other half from the join's side: a vendor with no master `lacks` every
+   * name, which is a fact about a master that does not exist rather than about
+   * a folder that does.
+   *
+   * # `null` FOR A REST FEED, ALWAYS
+   *
+   * Not an empty census — `null`. A broker has a history floor and a master,
+   * and rendering "0 files" for one would be this page inventing a folder for a
+   * vendor that has none. The two must never share a renderer.
+   *
+   * # WHAT IS NOT HERE, AND IT IS NAMED RATHER THAN OMITTED
+   *
+   * THE INSTRUMENT LIST. `pull::archive::Member` already carries `instrument`,
+   * taken from the file name with its extensions removed, and
+   * `pull::folder::reach_of` counts the members and discards their names. So
+   * the walk HAS them and the wire does not carry them. That is a server field
+   * that does not exist yet, not a fact this page may reconstruct: the file
+   * names are the only identity an archive has, and a browser guessing them
+   * from a count would be inventing the one thing it cannot check.
+   *
+   * O(1) — six field reads off a body fetched once per feed change.
+   */
+  const archiveCensus = $derived.by(() => {
+    if (!isFolderFeed || !active) return null;
+    if (folderReach.state === 'reading') return { state: 'reading' };
+    if (folderReach.state === 'halted') {
+      return { state: 'halted', path: folderReach.body?.path ?? null, why: folderReach.why };
+    }
+    const r = folderReach.body?.reach;
+    if (!r || typeof r.state !== 'string') return null;
+    return {
+      state: r.state,
+      path: folderReach.body?.path ?? null,
+      earliest: r.earliest ?? null,
+      latest: r.latest ?? null,
+      files: Number(r.files ?? 0),
+      rows: Number(r.rows ?? 0)
+    };
+  });
+
   // ---------------------------------------------------------------- the form
 
   /**
@@ -1752,6 +1810,54 @@
    * refusal below names the fault; the tiles must not quietly contradict it.
    */
   const windowOk = $derived(windowDays > 0);
+
+  /**
+   * THE WINDOW ASKED FOR, AGAINST THE DAYS THE FOLDER ACTUALLY HOLDS.
+   *
+   * `null` unless there is something to say — a REST feed, an unread folder, a
+   * folder with no span, or a window sitting wholly inside the measured one all
+   * answer nothing.
+   *
+   * # Why this is a caution and not a refusal
+   *
+   * The calendar deliberately does NOT strike days outside the folder's span,
+   * and its own comment says why: those days are askable and come back empty
+   * rather than refused, so striking them would claim a refusal nobody made.
+   * That reasoning is right and it is not the whole job. A read of a folder for
+   * days that hold no file was always going to land nothing, and `cautions`
+   * exists precisely so an operator sees a known blocker BEFORE the clock
+   * starts rather than on the receipt.
+   *
+   * So the day stays pickable and the outcome stops being a surprise.
+   *
+   * # Why a folder may be compared this way when a vendor may not
+   *
+   * A REST feed's history floor is a CLAIM — the vendor's own words about how
+   * far back it will answer, which this repository does not get to check. A
+   * folder's span is a MEASUREMENT taken by walking it. Comparing a window
+   * against a measurement is arithmetic; comparing it against a claim is what
+   * `pairFloor` already does, separately, with the source printed beside it.
+   *
+   * Two shapes, because they are two different mistakes:
+   *   past      the whole window is outside the span — nothing can land at all
+   *   partial   one end is outside — the run is shorter than it looks
+   *
+   * Placed here rather than beside `archiveCensus` because it reads `from`,
+   * `to` and `windowOk`, all declared above this line. A `$derived` is lazy and
+   * would have resolved either way; standing above its own inputs is a thing
+   * the next reader has to verify, and it does not have to be.
+   */
+  const windowVsFolder = $derived.by(() => {
+    const c = archiveCensus;
+    if (!c || !from || !to || !windowOk) return null;
+    // AN EMPTY OR BLANK FOLDER IS ITS OWN SENTENCE AND NOT THIS ONE. There is
+    // no span to compare a window against, and "outside 0 days" reads as a
+    // range rather than as an absence.
+    if (c.state !== 'days' || !c.earliest || !c.latest) return null;
+    if (to < c.earliest || from > c.latest) return { shape: 'past', ...c };
+    if (from < c.earliest || to > c.latest) return { shape: 'partial', ...c };
+    return null;
+  });
   const windowMonths = $derived(windowOk ? monthsBetween(from, to) : []);
 
   /**
@@ -1927,6 +2033,29 @@
       out.push(
         // `phrase` again: what a VENDOR declares is a rung, never a button word.
         `${active.display} does not declare ${unfetched.map((x) => x.phrase).join(', ')}. crates/api's served() refuses a POST for a rung pull::vendor::Descriptor::granularities does not carry — by name, and before it reads a credential — because this feed's bars path is pinned to one rung and a request for another would come back with a DIFFERENT bar length filed under the one you asked for. ${many ? 'Those requests' : 'That request'} will be refused whole. Fixable, and not from here: record the endpoint in pull::vendor.`
+      );
+    }
+    // ══ THE WINDOW AGAINST THE FILES THAT ARE ACTUALLY THERE ══
+    //
+    // A folder feed has no history floor to refuse an old day with — TrueData
+    // and GDFL both declare `history: &[]`, because no vendor page states a
+    // floor for a directory on this machine — so nothing above this line stops
+    // a window that names days the operator never bought. The calendar says as
+    // much and leaves the day pickable, correctly: an unbought day comes back
+    // EMPTY, which is not a refusal and must not be drawn as one.
+    //
+    // What was missing is that it said so only in a popover, after the fact.
+    // This is the same fact where a run is about to be started. It is a
+    // MEASUREMENT, not a vendor claim: the span was read by walking the folder,
+    // so comparing a window against it is arithmetic rather than an opinion.
+    if (windowVsFolder && active) {
+      const w = windowVsFolder;
+      const span = `${dayLabel(w.earliest)} – ${dayLabel(w.latest)}`;
+      const at = w.path ? ` The folder is ${w.path}.` : '';
+      out.push(
+        w.shape === 'past'
+          ? `Not one day of this window is in ${active.display}'s folder, which holds ${span} across ${n(w.files)} file(s). The read will not be refused — an archive answers with whatever files are present, and for these days that is none — so expect a clean run that lands ZERO bars. Move the window inside that span, or buy the months first.${at}`
+          : `Part of this window is outside ${active.display}'s folder. It holds ${span} across ${n(w.files)} file(s), and the days either side of that hold no file at all: they come back empty rather than refused, so the run will be shorter than the window says and the census will read short without anything having failed.${at}`
       );
     }
     // WHAT A RECORD AT THE FINEST RUNG ACTUALLY IS, said where an operator is
@@ -4670,6 +4799,74 @@
                   >
                     {reachKnown ? `${n(reach)} reachable · target=${target}` : reachWhy}
                   </span>
+
+                  <!-- ═══════ WHAT AN ARCHIVE HAS INSTEAD OF A UNIVERSE ═══════
+
+                       The line above counts what a MASTER reaches, and the two
+                       archive feeds publish none — `Vendor::MASTERED` is the
+                       three REST feeds and nothing else, so every tier resolves
+                       to nothing for TrueData and GDFL and the count above is
+                       an honest zero about the wrong question.
+
+                       The right question for a folder is what is IN it, and the
+                       only way to answer it is to walk it. `/folder.json` did
+                       that walk the moment this feed was chosen, and its six
+                       facts were being spent on one line at the foot of a
+                       calendar popover. They are the closest thing this feed
+                       HAS to a universe, so they belong on the universe control.
+
+                       NOTHING HERE IS DECLARED. Every number is off the wire,
+                       and the state a folder is in decides which sentence gets
+                       drawn — empty, blank and days are three different answers
+                       and a halt is not an answer at all. D-0141. -->
+                  {#if archiveCensus}
+                    {@const c = archiveCensus}
+                    {#if c.state === 'reading'}
+                      <span class="pknote">reading {active.display}'s folder…</span>
+                    {:else if c.state === 'halted'}
+                      <span class="pknote wrap warn" title={c.why}>
+                        the folder could not be read{c.path ? ` — ${c.path}` : ''}. This is a HALT
+                        and not an empty folder: nothing was counted, so nothing below is a census
+                        of anything.
+                      </span>
+                    {:else if c.state === 'days'}
+                      <span
+                        class="pknote wrap"
+                        title={`Walked by GET /folder.json?feed=${feeds.active ?? ''} when this feed was selected — pull::folder::read_reach, O(members). ${c.path ?? ''}`}
+                      >
+                        {n(c.files)} file(s) · {n(c.rows)} row(s) · {dayLabel(c.earliest)} – {dayLabel(
+                          c.latest
+                        )} — this feed's universe is the folder, read from it
+                      </span>
+                    {:else if c.state === 'blank'}
+                      <span class="pknote wrap warn">
+                        {n(c.files)} file(s) are there and not one carries a row. They were bought
+                        and they are blank — which is a different thing from not having bought them,
+                        and this is the only place the two are told apart.
+                      </span>
+                    {:else}
+                      <span class="pknote wrap warn">
+                        the folder is there and holds nothing{c.path ? ` — ${c.path}` : ''}. That is
+                        an ANSWER, not a failure: the months have not been bought and put there yet.
+                      </span>
+                    {/if}
+                    <!-- THE MISSING FIELD, NAMED RATHER THAN RECONSTRUCTED.
+                         `pull::archive::Member` already carries `instrument`,
+                         taken off the file name, and `pull::folder::reach_of`
+                         counts the members and discards their names. So the
+                         walk HAS the list and the wire does not carry it. A
+                         browser deriving instrument names from a file COUNT
+                         would be inventing the only identity an archive has,
+                         which is exactly what this page refuses to do with a
+                         vendor floor or a served flag. -->
+                    <span
+                      class="pknote wrap"
+                      title="pull::archive::Member carries `instrument` — the file name with its extensions removed — and pull::folder::reach_of counts the members and discards their names, so /folder.json emits files and rows but no member list. The names are the ONLY identity an archive has: there is no ISIN, no security id and no master. This page will not synthesise them from a count."
+                    >
+                      the instrument names are not on the wire — /folder.json counts the files and
+                      does not list them, so the picker below cannot name what is in this folder
+                    </span>
+                  {/if}
                 </div>
               {/if}
 
