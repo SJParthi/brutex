@@ -180,6 +180,9 @@ impl Grid {
 enum Ended {
     Stop,
     Target,
+    /// A trailing stop, which fills at `peak - distance` rather than at a fixed
+    /// distance from entry -- so it carries the peak it was measured against.
+    Trail(i64),
     Time,
 }
 
@@ -321,7 +324,7 @@ pub fn evaluate(
                 cells.push(one_variant(
                     bars,
                     &candidates,
-                    (stops.rungs(), targets.rungs()),
+                    (stops.rungs(), targets.rungs(), trails.rungs()),
                     Variant {
                         stop,
                         target,
@@ -355,11 +358,11 @@ struct Variant {
 fn one_variant(
     bars: &[Candle],
     candidates: &[Candidate],
-    rungs: (&[Ppm], &[Ppm]),
+    rungs: (&[Ppm], &[Ppm], &[Ppm]),
     v: Variant,
     side: Side,
 ) -> Cell {
-    let (stops_rungs, targets_rungs) = rungs;
+    let (stops_rungs, targets_rungs, trails_rungs) = rungs;
     let Variant {
         stop,
         target,
@@ -385,6 +388,7 @@ fn one_variant(
         // The trailing exit competes with the other two: whichever fires first
         // ends the position, and a trail that never fires is NEVER.
         let trail_at = trail.map_or(NEVER, |r| c.cross.trail_at(r));
+        let trail_peak = trail.and_then(|r| c.cross.trail_peak_at(r));
 
         // ONE EXIT BAR, TWO ATTRIBUTIONS.
         //
@@ -402,13 +406,14 @@ fn one_variant(
         // PESSIMISTIC resolves an ambiguous bar as the STOP, so the stop is
         // tested first. OPTIMISTIC resolves it as the TARGET, so the target is.
         // That ordering is the entire difference between the two readings.
-        let pess_by = ended_by(stop_at, target_at, trail_at, pess_off, true);
-        let opt_by = ended_by(stop_at, target_at, trail_at, opt_off, false);
+        let pess_by = ended_by(stop_at, target_at, trail_at, trail_peak, pess_off, true);
+        let opt_by = ended_by(stop_at, target_at, trail_at, trail_peak, opt_off, false);
         let ended = pess_by;
 
         let entry_price = bars.get(c.entry).map_or(0, |b| b.open);
         let stop_ppm = stop.and_then(|r| stops_rungs.get(r).copied());
         let target_ppm = target.and_then(|r| targets_rungs.get(r).copied());
+        let trail_ppm = trail.and_then(|r| trails_rungs.get(r).copied());
         let pess = realised(
             bars,
             c.entry,
@@ -416,7 +421,7 @@ fn one_variant(
             entry_price,
             side,
             pess_by,
-            level_for(pess_by, stop_ppm, target_ppm),
+            level_for(pess_by, stop_ppm, target_ppm, trail_ppm),
         );
         let opt = realised(
             bars,
@@ -425,7 +430,7 @@ fn one_variant(
             entry_price,
             side,
             opt_by,
-            level_for(opt_by, stop_ppm, target_ppm),
+            level_for(opt_by, stop_ppm, target_ppm, trail_ppm),
         );
 
         cell.trades = cell.trades.saturating_add(1);
@@ -435,7 +440,11 @@ fn one_variant(
             .ambiguous_bars
             .saturating_add(u64::try_from(c.cross.ambiguous().len()).unwrap_or(0));
         match ended {
-            Ended::Stop => cell.stopped = cell.stopped.saturating_add(1),
+            // A trailing exit IS a stop -- it gives back part of a gain to
+            // protect the rest -- so it is counted as one. Reporting it as a
+            // timeout would make a strategy that was stopped out look like one
+            // that ran its course.
+            Ended::Stop | Ended::Trail(_) => cell.stopped = cell.stopped.saturating_add(1),
             Ended::Target => cell.targeted = cell.targeted.saturating_add(1),
             Ended::Time => cell.timed_out = cell.timed_out.saturating_add(1),
         }
@@ -493,11 +502,32 @@ fn realised(
     match (by, level_ppm) {
         (Ended::Stop, Some(ppm)) => -paisa_of(ppm, entry_price),
         (Ended::Target, Some(ppm)) => paisa_of(ppm, entry_price),
-        // A trailing exit's level moves with the peak, so it is not a fixed
-        // distance from entry and cannot be derived from the rung alone. The
-        // bar's close stands in, and that is an ADMISSION rather than a model:
-        // it is the one exit here whose fill price is approximate.
-        // UNVERIFIED how far it differs; no measurement has been taken.
+        // A TRAILING EXIT FILLS AT `peak - distance`, and this used to fall
+        // back to the bar's close because the peak was not recorded.
+        //
+        // The level follows the best price seen, so the rung alone cannot price
+        // it the way a fixed stop's can. `Crossings` now records the peak AS IT
+        // STOOD when the rung was crossed -- reading it at the end of the walk
+        // would price the exit against a high the position never saw, because
+        // the peak only ever improves.
+        //
+        // The distance is measured off the PEAK and not off entry, which is the
+        // whole difference between a trailing stop and a fixed one: give back
+        // `d` of what you made, rather than lose `d` of what you started with.
+        (Ended::Trail(peak), Some(ppm)) if peak > 0 => {
+            let give_back = paisa_of(ppm, peak);
+            let exit = match side {
+                Side::Long => peak.saturating_sub(give_back),
+                Side::Short => peak.saturating_add(give_back),
+            };
+            match side {
+                Side::Long => exit.saturating_sub(entry_price),
+                Side::Short => entry_price.saturating_sub(exit),
+            }
+        }
+        // Everything else -- a time exit, or a trailing exit whose peak was not
+        // recorded -- fills at the bar's close, which is correct for a position
+        // squared off by the clock.
         _ => {
             let exit = bars
                 .get(entry.saturating_add(offset))
@@ -516,10 +546,11 @@ fn realised(
 /// target were both reachable on the same bar, minute data cannot say which
 /// came first, so the pessimistic reading takes the stop and the optimistic one
 /// takes the target.
-const fn ended_by(
+fn ended_by(
     stop_at: usize,
     target_at: usize,
     trail_at: usize,
+    trail_peak: Option<i64>,
     chosen: usize,
     stop_wins: bool,
 ) -> Ended {
@@ -538,20 +569,30 @@ const fn ended_by(
     } else if target_fired {
         Ended::Target
     } else if trail_fired {
-        // A trailing exit is a stop by nature -- it gives back part of a gain --
-        // but it is priced from the peak rather than from entry, so it is
-        // reported as a Time exit and priced at the close. See `realised`.
-        Ended::Time
+        // Priced from the PEAK it was measured against, which the crossings
+        // recorded at the moment the rung was crossed. Reading the peak at the
+        // end of the walk instead would price the exit against a high the
+        // position never saw, because `peak` only ever improves.
+        Ended::Trail(trail_peak.unwrap_or(0))
     } else {
         Ended::Time
     }
 }
 
 /// The level a given exit reason fills at, in parts per million from entry.
-const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) -> Option<Ppm> {
+const fn level_for(
+    by: Ended,
+    stop_ppm: Option<Ppm>,
+    target_ppm: Option<Ppm>,
+    trail_ppm: Option<Ppm>,
+) -> Option<Ppm> {
     match by {
         Ended::Stop => stop_ppm,
         Ended::Target => target_ppm,
+        // A trailing exit DOES carry a level -- the trail rung -- and it is
+        // needed to price the give-back from the peak. Only a time exit has
+        // no level at all.
+        Ended::Trail(_) => trail_ppm,
         Ended::Time => None,
     }
 }

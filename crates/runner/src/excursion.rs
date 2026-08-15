@@ -184,6 +184,13 @@ pub struct Crossings {
     /// for the same reason -- the largest retreat so far is monotone even though
     /// the retreat itself is not.
     trailing: Vec<usize>,
+    /// The running peak at the moment each trailing rung was crossed.
+    ///
+    /// A trailing stop fills at `peak - distance`, and the peak MOVES -- so the
+    /// rung alone cannot price the exit the way a fixed stop's can. Without
+    /// this the fill fell back to the bar's close, which on a bar that ran far
+    /// past the level is not the price the order got.
+    trail_peak: Vec<i64>,
     /// Offsets on which BOTH a stop and a target rung were newly reached, so
     /// the bar's own order decides and one-minute data does not carry it.
     ambiguous: Vec<usize>,
@@ -220,6 +227,20 @@ impl Crossings {
     #[must_use]
     pub fn trail_at(&self, rung: usize) -> usize {
         self.trailing.get(rung).copied().unwrap_or(NEVER)
+    }
+
+    /// The running peak when trailing rung `i` was crossed, or `None`.
+    ///
+    /// What a trailing exit actually fills at: `peak - distance` for a long,
+    /// `peak + distance` for a short. The rung alone cannot say, because the
+    /// level follows the best price seen rather than sitting a fixed distance
+    /// from entry.
+    #[must_use]
+    pub fn trail_peak_at(&self, rung: usize) -> Option<i64> {
+        if self.trail_at(rung) == NEVER {
+            return None;
+        }
+        self.trail_peak.get(rung).copied()
     }
 
     /// Offsets where a stop and a target were both newly reached on one bar.
@@ -284,6 +305,7 @@ pub fn crossings(
         adverse: vec![NEVER; stops.len()],
         favourable: vec![NEVER; targets.len()],
         trailing: vec![NEVER; trails.len()],
+        trail_peak: vec![0; trails.len()],
         ambiguous: Vec::new(),
         last: 0,
     };
@@ -353,6 +375,13 @@ pub fn crossings(
         {
             if let Some(slot) = out.trailing.get_mut(trail_cursor) {
                 *slot = offset;
+            }
+            // The peak AS IT STOOD when this rung was crossed. Recorded here
+            // rather than derived later because `peak` only improves -- reading
+            // it at the end of the walk would price the exit against a peak the
+            // position never saw.
+            if let Some(slot) = out.trail_peak.get_mut(trail_cursor) {
+                *slot = peak;
             }
             trail_cursor = trail_cursor.saturating_add(1);
         }
@@ -536,6 +565,76 @@ mod tests {
             c.ambiguous(),
             &[0],
             "a bar reaching both a stop and a target must be flagged"
+        );
+    }
+
+    #[test]
+    fn a_trailing_rung_records_the_peak_it_was_measured_against() {
+        // A trailing stop fills at `peak - distance`, and the peak MOVES. The
+        // rung alone cannot price it, so the crossing has to carry the peak AS
+        // IT STOOD when the rung was crossed -- reading it at the end of the
+        // walk would price the exit against a high the position never saw,
+        // because the peak only ever improves.
+        let entry = 100_000_i64;
+        // FLAT bars where each peak is set, so the retreat is measured ACROSS
+        // bars rather than inside one. Within a single bar the high and the low
+        // carry no order, and this walk assumes the HIGH came first for a long
+        // -- the pessimistic reading, and the same assumption the ambiguous-bar
+        // rule makes. A fixture whose first bar spanned the whole move would be
+        // testing that assumption rather than the peak recording.
+        let bars = vec![
+            bar(0, entry + 2_000, entry + 2_000), // peak set at 102,000
+            bar(1, entry + 1_000, entry + 1_500), // retreat of 1,000 from it
+            bar(2, entry + 5_000, entry + 5_000), // a LATER, higher peak
+        ];
+        // 1,000 paisa off a 100,000 entry is 10,000 ppm.
+        let trails = ladder(&[10_000]);
+        let other = ladder(&[500_000]);
+        let c = crossings(
+            &bars,
+            0,
+            2,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &other,
+                targets: &other,
+                trails: &trails,
+            },
+        );
+
+        assert_eq!(c.trail_at(0), 1, "the give-back happened on bar 1");
+        assert_eq!(
+            c.trail_peak_at(0),
+            Some(entry + 2_000),
+            "the peak recorded must be the one at the CROSSING (102,000), not \
+             the higher peak the path reached afterwards (105,000)"
+        );
+    }
+
+    #[test]
+    fn a_trailing_rung_never_reached_carries_no_peak() {
+        let entry = 100_000_i64;
+        let bars = vec![bar(0, entry, entry + 100)];
+        let trails = ladder(&[500_000]);
+        let c = crossings(
+            &bars,
+            0,
+            0,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &trails,
+                targets: &trails,
+                trails: &trails,
+            },
+        );
+        assert_eq!(c.trail_at(0), NEVER);
+        assert_eq!(
+            c.trail_peak_at(0),
+            None,
+            "a peak for a crossing that never happened would price an exit that \
+             never happened"
         );
     }
 
