@@ -9216,6 +9216,51 @@
     /* The header's figures sit on the same grid as the column's. */
     font-variant-numeric: tabular-nums;
   }
+
+  /* ------------------------------------------------------------------
+     THE HEADING LANDS ON THE SAME PIXEL AS THE DIGITS UNDER IT.
+
+     Every heading in this grid is a `<button class="sortbtn">`, and that button
+     is `display: inline-flex; width: 100%`. `text-align: right` on the `th`
+     therefore reaches the BUTTON and stops: the label is a flex item, and a
+     flex item is placed by `justify-content`, which defaulted to the start. So
+     every numeric heading sat at the LEFT of a column whose data is at the
+     RIGHT -- measured across the ten drawn columns, gaps of 34px to 92px, on
+     every one.
+
+     A rule for exactly this already existed and had never once applied. It was
+     written `.th.numh .sortbtn`, which needs a class literally named `th`; the
+     census grid above builds its headings as `<div class="th numh">` and gets
+     it, while this grid builds real `<th class="numh">` elements and never
+     matched. The comment over that rule promises "the header text lands on the
+     same pixel as the digits under it" -- a promise the selector could not
+     keep, in a file where the promise had been read as done.
+
+     Measured after: gap 0 on all ten.
+     ------------------------------------------------------------------ */
+  .bgrid thead th.numh .sortbtn {
+    justify-content: flex-end;
+  }
+  .bgrid thead th:not(.numh) .sortbtn {
+    justify-content: flex-start;
+  }
+
+  /* AND THE CARET MOVES TO THE OTHER SIDE OF THE LABEL.
+   *
+   * The button is `<span>Open</span><span class="caret">`: a 7px caret plus the
+   * flex `gap`. Reserved whether or not the column is the sorted one, which is
+   * what stops the heading jumping sideways when you click it -- so it cannot
+   * simply be removed. Left after the label it holds the heading 11px short of
+   * the column's right edge while the digits sit flush against it, which is a
+   * gap the eye reads on all eight numeric columns at once.
+   *
+   * `order: -1` puts it before the label, so the label itself ends on the
+   * right edge -- the same pixel the digits end on. This is what the older
+   * `.th.numh .sortbtn` comment described and what that selector never
+   * delivered. */
+  .bgrid thead th.numh .caret {
+    order: -1;
+  }
   /* THE STATS LINE KEEPS ITS FIGURES AND HIDES ITS CLAUSES. See the comment
      at the `<p class="count terse">` for the sentence this replaced. The `.u`
      spans still render into the accessibility tree and still carry their
