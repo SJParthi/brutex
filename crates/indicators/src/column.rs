@@ -291,6 +291,36 @@ impl Column {
         &self.source
     }
 
+    /// Blank every row whose source bar is before `from`, keeping the shape.
+    ///
+    /// # Why blanked and not cut
+    ///
+    /// A walk-forward has to evaluate a combination on a TEST window while
+    /// letting the indicators hold what they legitimately held — an EMA at the
+    /// first test bar really did see the training bars, and restarting it cold
+    /// there would under-report its state.
+    ///
+    /// Cutting the column to the test range would renumber [`Self::sources`],
+    /// and that renumbering is the exact defect `sources` was added to remove:
+    /// `first_swept + j` runs one behind from the first refused bar onward, so
+    /// every outcome after it is read off the wrong bar. Clearing the bits
+    /// preserves every source index while making the row unable to fire.
+    ///
+    /// A zeroed row fails `hits` for every mask carrying at least one bit. The
+    /// EMPTY mask still hits it, because `(0 & 0) == 0` — that mask has no
+    /// conditions, fires on every bar by construction, and is not a strategy.
+    ///
+    /// # Cost
+    ///
+    /// One pass over the column, one compare and at most one 384-bit store per
+    /// row. Called once per fold, never per bar of a sweep.
+    pub fn clear_before(&mut self, from: usize) {
+        for (bits, &source) in self.bits.iter_mut().zip(self.source.iter()) {
+            if source < from {
+                *bits = ConditionMask::ZERO;
+            }
+        }
+    }
     /// The column, as `engine::Ladder::walk` wants it.
     #[must_use]
     pub fn bits(&self) -> &[ConditionMask] {
