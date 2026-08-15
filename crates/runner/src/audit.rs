@@ -138,7 +138,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     let _ = writeln!(
         out,
         "  {:<10}{:>8}{:>8}{:>8}{:>10}{:>10}{:>12}{:>10}",
-        "exit", "trades", "won", "stopped", "pess", "opt", "winner MAE", "ratio"
+        "exit", "trades", "won", "stopped", "worst", "unknown", "winner MAE", "ratio"
     );
 
     // The baseline first, always, then the rest by pessimistic total. A reader
@@ -169,7 +169,7 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
             c.wins,
             c.stopped,
             c.pessimistic,
-            c.optimistic,
+            c.uncertainty(),
             c.winner_mae,
             c.edge_ratio()
         );
@@ -180,6 +180,31 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
             "  ... {} further variant(s) NOT SHOWN. The grid is complete; this \
              table is not.",
             ordered.len().saturating_sub(shown)
+        );
+    }
+    let _ = writeln!(out);
+
+    // THE UNCERTAINTY COLUMN IS NOT AN OPTIMISTIC ESTIMATE. It is the width
+    // of what minute bars cannot settle -- the gap between resolving an
+    // ambiguous bar as the stop and as the target. Two variants with the same
+    // worst-case total and different spreads are not equally trustworthy.
+    let unresolved = g
+        .cells
+        .iter()
+        .filter(|c| c.depends_on_unknowable_ordering())
+        .count();
+    if unresolved > 0 {
+        let _ = writeln!(
+            out,
+            "  {unresolved} variant(s) depend on intra-bar ordering this data \
+             cannot settle. The `unknown` column is how much -- it is a
+             MEASUREMENT ERROR, not an upside. Only second-level data closes it."
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "  No variant depends on intra-bar ordering: every exit was
+           unambiguous, so second-level data would change nothing here."
         );
     }
     let _ = writeln!(out);

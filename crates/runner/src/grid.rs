@@ -123,6 +123,45 @@ impl Cell {
     pub const fn survives(&self) -> bool {
         self.pessimistic > 0
     }
+
+    /// The width of what minute bars cannot tell you, in paisa.
+    ///
+    /// # This is the only job the optimistic figure has
+    ///
+    /// A one-minute bar carries a high and a low and no order between them, so
+    /// when a bar reaches both a stop and a target the fill is genuinely
+    /// unknowable from this data. [`Self::pessimistic`] resolves that as the
+    /// stop and [`Self::optimistic`] as the target, and **the gap between them
+    /// is the measurement error**, not an estimate to prefer.
+    ///
+    /// Reporting only the worst case would lose it. Two setups with the same
+    /// pessimistic total, one with a spread of 200 paisa and one with 8,000,
+    /// are not equally trustworthy — the second is telling you it rests on a
+    /// coin flip inside every bar, and that is a fact about the data rather
+    /// than about the strategy.
+    ///
+    /// Zero means no bar was ever ambiguous, so the two readings agree exactly
+    /// and second-level data would change nothing.
+    ///
+    /// **Nothing selects on it, and nothing selects on
+    /// [`Self::optimistic`].** [`Grid::best`] and [`Grid::sharpest`] both rank
+    /// on the pessimistic figure, and
+    /// `runner::grid::no_selector_can_be_moved_by_the_optimistic_figure` holds
+    /// that as a property rather than a habit.
+    #[must_use]
+    pub const fn uncertainty(&self) -> i64 {
+        self.optimistic.saturating_sub(self.pessimistic)
+    }
+
+    /// Does this result depend on fill assumptions the data cannot settle?
+    ///
+    /// True when the two readings disagree at all. A caller acting on a
+    /// variant that answers `true` is acting on something one-minute bars
+    /// cannot resolve, and second-level data would be needed to close it.
+    #[must_use]
+    pub const fn depends_on_unknowable_ordering(&self) -> bool {
+        self.uncertainty() != 0
+    }
 }
 
 /// Every variant of one combination.
@@ -639,7 +678,7 @@ fn peak(bars: &[Candle], from: usize, to: usize, entry: i64, side: Side, adverse
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::evaluate;
+    use super::{Cell, Grid, evaluate};
     use crate::excursion::Side;
     use crate::outcome::Horizon;
     use indicators::column::Column;
@@ -714,6 +753,90 @@ mod tests {
                 "levels exit earlier, which frees the next signal, so a variant \
                  can never take FEWER trades than the time-only baseline"
             );
+        }
+    }
+
+    #[test]
+    fn no_selector_can_be_moved_by_the_optimistic_figure() {
+        // THE PROPERTY, NOT THE HABIT. The optimistic reading exists to size the
+        // uncertainty and must never influence a choice -- an engine that
+        // selected on it would pick whatever the unknowable intra-bar ordering
+        // flattered most, which is the failure the two-case model exists to
+        // expose rather than to commit.
+        //
+        // Asserted by MUTATION: take a real grid, inflate every optimistic
+        // total to absurdity, and require that both selectors return the same
+        // cell. If either read `optimistic`, the winner would move.
+        let (bars, column) = swept();
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            4,
+        );
+        assert!(g.cells.len() > 1, "the grid must hold several variants");
+
+        let before_best = g.best().map(|c| (c.stop, c.target, c.trail));
+        let before_sharp = g.sharpest().map(|c| (c.stop, c.target, c.trail));
+
+        let mutated = Grid {
+            cells: g
+                .cells
+                .iter()
+                .enumerate()
+                .map(|(i, c)| Cell {
+                    // A different absurd value per cell, so the mutation cannot
+                    // accidentally preserve the ordering it is trying to break.
+                    optimistic: i64::MAX.saturating_sub(i64::try_from(i).unwrap_or(0)),
+                    ..*c
+                })
+                .collect(),
+            ..g.clone()
+        };
+
+        assert_eq!(
+            mutated.best().map(|c| (c.stop, c.target, c.trail)),
+            before_best,
+            "`best` moved when only the optimistic totals changed, so it reads \
+             a figure it must not"
+        );
+        assert_eq!(
+            mutated.sharpest().map(|c| (c.stop, c.target, c.trail)),
+            before_sharp,
+            "`sharpest` moved when only the optimistic totals changed"
+        );
+    }
+
+    #[test]
+    fn the_uncertainty_is_zero_exactly_when_no_bar_was_ambiguous() {
+        // The spread between the two readings IS the measurement error from
+        // having only minute bars. Where nothing was ambiguous there is nothing
+        // second-level data could settle, and the two must agree exactly.
+        let (bars, column) = swept();
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            4,
+        );
+        for c in &g.cells {
+            assert_eq!(
+                c.uncertainty() == 0,
+                !c.depends_on_unknowable_ordering(),
+                "the two accessors must agree about the same fact"
+            );
+            if c.ambiguous_bars == 0 {
+                assert_eq!(
+                    c.uncertainty(),
+                    0,
+                    "no ambiguous bar, so nothing for the readings to disagree \
+                     about"
+                );
+            }
         }
     }
 
