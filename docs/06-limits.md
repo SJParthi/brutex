@@ -4220,3 +4220,50 @@ to a public function.
 
 **Found by** an independent fleet pointed at this session's own fixes, which
 reverted the change and observed the suite stay green.
+
+---
+
+## 75. The two-case fill model has never been exercised where the two cases differ
+
+`crates/runner/src/grid.rs` prices every variant twice. When one bar reaches
+both the stop and the target, minute data cannot say which came first:
+`Cell::pessimistic` resolves it as the stop, `Cell::optimistic` as the target,
+and `Cell::uncertainty()` is the gap. That gap is the measurement error the
+design exists to expose, and `Cell::depends_on_unknowable_ordering()` is how a
+caller is meant to see it.
+
+**Measured on `synthetic::sessions(12)`, 300 combinations, 19,300 cells:**
+
+| | |
+|---|---|
+| cells with `ambiguous_bars > 0` | **0** |
+| cells with `uncertainty() != 0` | **0** |
+
+So `pessimistic == optimistic` on every cell this repository's fixtures produce.
+
+**Three consequences, none of them small.**
+
+The ambiguity machinery is **untested where it matters**. Every test that
+exercises it does so on data where the two readings agree, so a defect in the
+pessimistic resolution would be invisible.
+
+Selection cannot be proven to use the pessimistic reading. Substituting
+`cell.optimistic` for `cell.pessimistic` in `validate`'s ranking key leaves the
+whole suite green — not because the test is weak, but because the substitution
+is a genuine **no-op on this data**. No test on these fixtures can hold that
+property. (`runner::grid::no_selector_can_be_moved_by_the_optimistic_figure`
+does hold it for `Grid::best` and `Grid::sharpest`, by inflating the optimistic
+totals directly rather than relying on the data.)
+
+And any figure quoted from these fixtures understates real uncertainty. On real
+minute bars, wicks reach both levels and the two readings separate; here they
+never do, so every measured spread in this repository is a floor.
+
+**What would close it.** A hand-built fixture whose bars are wide enough that a
+single bar spans both a stop and a target rung — then `uncertainty()` is
+non-zero, the pessimistic resolution is observable, and the ranking key becomes
+provable.
+
+**Found by** measuring the ambiguity counters directly, after an independent
+fleet reported that an `optimistic`-for-`pessimistic` substitution left the
+suite green.
