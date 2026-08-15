@@ -4809,7 +4809,7 @@
                broker window splitting  -> the Days to pull label's `title`
              ============================================================== -->
         <section class="sel">
-          <form onsubmit={start} class="form">
+          <form onsubmit={start} class="form rise">
             <!-- THE GRID IS THE FIELDSET. A wrapper between the two would take
                  the grid's tracks for itself and leave the controls stacked
                  inside one column, which is the shape this page is being
@@ -5731,7 +5731,7 @@
              `reset` is the only thing that takes it off again, and that is a
              press. -->
         {#if phase !== 'idle'}
-        <section class="card">
+        <section class="card rise">
           <header class="card-h">
             <span class="pane-title">The run</span>
             <span class="spacer"></span>
@@ -6040,7 +6040,7 @@
            reading is outstanding, and the diagnostic when a finished run
            produced no rows at all. -->
       {#if phase !== 'idle'}
-      <section class="card wide">
+      <section class="card wide rise">
         <header class="card-h">
           <span class="pane-title">Every instrument this request named</span>
           <span class="spacer"></span>
@@ -7445,7 +7445,7 @@
     border-radius: 9px;
     color: var(--ink);
     font: inherit;
-    font-size: 15px;
+    font-size: var(--fs-base);
     font-weight: var(--w-semi);
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
@@ -7600,12 +7600,12 @@
      strip read as two rows of different controls. Two class names deep so it
      beats the base `.din` wherever that rule sits in the file. */
   .dates .din {
-    font-size: 15px;
+    font-size: var(--fs-base);
     padding: 11px 13px;
     border-radius: 9px;
   }
   .dates .dbtn {
-    font-size: 15px;
+    font-size: var(--fs-base);
     padding: 11px 10px;
     border-radius: 9px;
   }

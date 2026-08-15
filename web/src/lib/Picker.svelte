@@ -371,7 +371,7 @@
     border-radius: 9px;
     color: var(--ink, #f0f4fb);
     font: inherit;
-    font-size: 15px;
+    font-size: var(--fs-base);
     font-weight: 600;
     font-family: var(--mono, ui-monospace, Menlo, monospace);
     padding: 11px 36px 11px 14px;
@@ -441,10 +441,10 @@
     border-radius: 9px;
     color: var(--ink, #f0f4fb);
     font: inherit;
-    font-size: 15px;
+    font-size: var(--fs-base);
     font-weight: 600;
     font-family: var(--mono, ui-monospace, Menlo, monospace);
-    font-size: 17px;
+    font-size: var(--fs-lg);
     line-height: 1.2;
     padding: 18px 16px;
     outline: none;
@@ -455,7 +455,7 @@
   }
   .phint {
     margin: 6px 5px 2px;
-    font-size: 12px;
+    font-size: var(--fs-mini);
     color: var(--faint, #414b60);
   }
   .pact {
@@ -470,7 +470,7 @@
     background: var(--panel, #0f1724);
     color: var(--dim, #95a0b6);
     font: inherit;
-    font-size: 13px;
+    font-size: var(--fs-xs);
     font-weight: 600;
     padding: 8px;
     border-radius: 7px;
@@ -497,7 +497,7 @@
     min-height: 38px;
     border-radius: 7px;
     cursor: pointer;
-    font-size: 14px;
+    font-size: var(--fs-sm);
     transition: background 0.12s;
   }
   .plist label:hover {
@@ -529,7 +529,7 @@
   .pwhy {
     flex: 0 0 100%;
     padding-left: 45px;
-    font-size: 12px;
+    font-size: var(--fs-mini);
     line-height: 1.45;
     color: var(--dim, #95a0b6);
     white-space: normal;
@@ -573,7 +573,7 @@
        "derived from 1min". At --faint it was barely legible on the panel
        ground, which is how a real answer ends up looking like a placeholder. */
     color: var(--dim, #95a0b6);
-    font-size: 13px;
+    font-size: var(--fs-xs);
     font-family: var(--mono, ui-monospace, Menlo, monospace);
   }
   .pnone {
@@ -581,7 +581,7 @@
     margin: 0;
     text-align: center;
     color: var(--faint, #68738a);
-    font-size: 13px;
+    font-size: var(--fs-xs);
   }
   /* THE DRAWER LINE. Quiet on purpose — it is a signpost, not a choice, and it
      must not compete with the rows above it that a click can actually reach. */
@@ -596,7 +596,7 @@
     background: transparent;
     color: var(--faint, #68738a);
     font-family: var(--mono, ui-monospace, Menlo, monospace);
-    font-size: 11px;
+    font-size: var(--fs-micro);
     text-align: left;
     cursor: pointer;
   }
