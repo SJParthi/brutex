@@ -1494,6 +1494,7 @@ mod tests {
 
     fn run() -> Ingested {
         Ingested {
+            derived_files: 0,
             members: 194,
             rows_read: 354_675,
             bars_stored: 62_978,

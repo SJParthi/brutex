@@ -45,6 +45,7 @@ pub mod constituents;
 pub mod coverage;
 pub mod folder;
 pub mod ingest;
+pub mod ladder;
 pub mod logs;
 pub mod master;
 pub mod merge;

@@ -1678,9 +1678,27 @@ fn granularity_select() -> String {
         } else {
             "one bar per session \u{b7} a finer feed is folded into it"
         };
+        // THE MINUTE IS `selected`, AND IT IS NOT THE FIRST OPTION ANY MORE.
+        //
+        // A browser selects the first option with no user input, and
+        // `ingest::parse_granularity` falls back to `Minute1` when the field is
+        // absent. Those two agreed only because the minute HAPPENED to be first
+        // in `Granularity::ALL`'s finest-first order among the storable rungs.
+        // `Timeframe::SECOND_1` landed above it and the agreement broke
+        // silently: submitting this form untouched would have sent `1s` while
+        // replaying a body with no field meant `1min`, so the same form filed
+        // into two different directories depending on how it was sent.
+        //
+        // Stated rather than positional. The default is now a property of the
+        // rung, so a rung inserted anywhere in the ladder cannot move it.
+        let default = if rung == pull::vendor::Granularity::Minute1 {
+            " selected"
+        } else {
+            ""
+        };
         let _ = write!(
             choices,
-            "<option value=\"{}\">{} \u{2014} {}</option>",
+            "<option value=\"{}\"{default}>{} \u{2014} {}</option>",
             escape(rung.dir()),
             escape(rung.dir()),
             note
@@ -3655,7 +3673,11 @@ mod tests {
                 .into_iter()
                 .any(|feed| feed.descriptor().granularities.contains(rung));
             let storable = rung.store_timeframe().is_some();
-            let option = format!("<option value=\"{}\">", rung.dir());
+            // MATCHED ON THE VALUE, NOT ON THE CLOSING BRACKET. One option now
+            // carries ` selected` between the two, so a probe that assumed the
+            // tag ended right after the value reported the DEFAULT rung as
+            // absent — the one option guaranteed to be there.
+            let option = format!("<option value=\"{}\"", rung.dir());
             assert_eq!(
                 html.contains(&option),
                 declared && storable,
@@ -3664,14 +3686,26 @@ mod tests {
             );
         }
 
-        // The two the intersection currently is, named so a change to either
+        // The three the intersection currently is, named so a change to either
         // table shows up as a diff here rather than as a silently longer list.
-        assert!(html.contains("<option value=\"1min\">"));
+        // Value-only again — the minute carries ` selected`, so a probe ending
+        // at the bracket misses the very option it is checking for.
+        assert!(html.contains("<option value=\"1min\""));
         assert!(html.contains("<option value=\"1day\">"));
+        // `1s` IS OFFERED NOW, and the change is the point.
+        //
+        // This asserted its ABSENCE, on the ground that both archive feeds
+        // serve it and `crates/store` had no directory — so the option "could
+        // only ever refuse". That was true and it was the defect: the rung the
+        // two archives' files actually hold could be asked for and nothing
+        // could file it. `Timeframe::SECOND_1` exists, so the intersection this
+        // form draws — declared by some feed AND storable — now includes it,
+        // and the loop above already proves the rule. This line pins the
+        // consequence.
         assert!(
-            !html.contains("<option value=\"1s\">"),
-            "1s is served by both archive feeds and has no store directory — \
-             offering it would be a control that can only ever refuse"
+            html.contains("<option value=\"1s\">"),
+            "1s is served by both archive feeds and now has a store directory, \
+             so the intersection includes it"
         );
 
         // AND THE FIRST OPTION IS THE MINUTE, which is what a browser selects
@@ -3683,10 +3717,24 @@ mod tests {
             .split_once("name=\"granularity\"")
             .map(|(_, rest)| rest)
             .unwrap_or_default();
+        // THE DEFAULT IS STATED, NOT POSITIONAL, and this assertion changed with
+        // it. It required the minute to be the FIRST option, which was true only
+        // while the minute happened to be first among the storable rungs in
+        // `Granularity::ALL`'s finest-first order. `Timeframe::SECOND_1` landed
+        // above it, the position moved, and the agreement between this form and
+        // `parse_granularity` would have broken silently — the same form filing
+        // into two different directories depending on whether the field was
+        // sent. `selected` is now on the rung itself, so no future insertion can
+        // move it.
         assert!(
-            list.trim_start().starts_with("><option value=\"1min\">"),
-            "the minute is the default option: {}",
-            list.get(..120).unwrap_or(list)
+            list.contains("<option value=\"1min\" selected>"),
+            "the minute is the selected option: {}",
+            list.get(..160).unwrap_or(list)
+        );
+        assert_eq!(
+            list.matches(" selected>").count(),
+            1,
+            "exactly one option is selected, so the browser has no choice to make"
         );
         assert_eq!(
             crate::ingest::parse_granularity(""),
