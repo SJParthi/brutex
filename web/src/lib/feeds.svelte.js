@@ -14,7 +14,38 @@ import { survey, surveyStores } from '$lib/store.svelte.js';
 
 export const feeds = $state({ all: [], active: null, error: null });
 
-export async function loadFeeds() {
+/* ONE FLIGHT, AND ONE ANSWER PER PAGE LIFE.
+ *
+ * `/feeds.json` carries no parameter — every call asks the identical question —
+ * and it was answered FIVE times on a single load, measured with
+ * `performance.getEntriesByType`. Two call sites in the layout and a navigation
+ * apiece is all it takes, because nothing here checked whether the answer was
+ * already in hand or already on its way.
+ *
+ * `flight` de-duplicates the concurrent case; the `feeds.all.length` check
+ * de-duplicates the sequential one. `force` is the escape, and `retryFeeds` in
+ * the layout is why it exists — a retry after an error must actually re-ask.
+ *
+ * The same shape `surveyStores` already uses in `store.svelte.js`; this file
+ * simply never got it. */
+/** @type {Promise<void> | null} */
+let flight = null;
+
+/** @param {boolean} [force] */
+export async function loadFeeds(force = false) {
+  if (!force) {
+    if (flight) return flight;
+    if (feeds.all.length > 0 && !feeds.error) return;
+  }
+  flight = loadFeedsNow();
+  try {
+    await flight;
+  } finally {
+    flight = null;
+  }
+}
+
+async function loadFeedsNow() {
   try {
     const r = await fetch('/feeds.json');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);

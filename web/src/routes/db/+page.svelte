@@ -3869,6 +3869,39 @@
    * one print — and a row with no mark at all reads as a rendering fault. */
   const MIN_SPINE = 0.08;
 
+  /* A SELECTION THE CASCADE HAS SINCE ELIMINATED, NAMED RATHER THAN CLEARED.
+   *
+   * Every rung offers only what the rungs above it leave, so widening one above
+   * can strand a choice below: pick NIFTY, switch the universe to one NIFTY is
+   * not in, and the instrument stays selected while its own menu no longer
+   * lists it. The table empties — correctly — and NOTHING SAYS WHY. That is the
+   * one hole the cascade left, and an empty grid with no reason is the shape §4
+   * calls a silent failure.
+   *
+   * NAMED, NOT CLEARED. Dropping the selection silently is the other half of
+   * the same fault: the reader asked for something and the page decided on
+   * their behalf that they no longer want it, invisibly. This states the fact
+   * and offers the button. */
+  const stranded = $derived.by(() => {
+    const out = [];
+    if (picked && !instrumentKeys.has(picked)) {
+      out.push({ rung: 'Instrument', value: picked, clear: () => (filter = '') });
+    }
+    if (kind && !kinds.some(([k]) => k === kind)) {
+      out.push({ rung: 'Segment', value: kind, clear: () => (kind = '') });
+    }
+    if (timeframe && !tfAll.some(([t]) => t === timeframe)) {
+      out.push({ rung: 'Timeframe', value: timeframe, clear: () => (timeframe = '') });
+    }
+    if (expiry && !expiryOffered.includes(expiry)) {
+      out.push({ rung: 'Expiry', value: expiry, clear: () => (expiry = '') });
+    }
+    if (side && !sideOffered.includes(side)) {
+      out.push({ rung: 'Side', value: side, clear: () => (side = '') });
+    }
+    return out;
+  });
+
   const chgFullByTf = $derived.by(() => {
     /** @type {Map<string, number>} */
     const top = new Map();
@@ -4871,6 +4904,8 @@
          the mockup's spot/futures/options taxonomy. Relabelling it would rename
          three sets into three other sets that do not have the same members.
          ================================================================== -->
+      <!-- DRAWN ONLY WHEN THERE IS SOMETHING TO CHOOSE — one segment is not a choice between segments. -->
+      {#if kinds.length > 1}
       <div class="cell">
         <span title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
         <!-- A PICKER, NOT A TAB ROW. It was the only rung drawn as tabs, which
@@ -4896,6 +4931,7 @@
         />
         <span class="count">{fmt(segmented.length)} instrument-month(s) here</span>
       </div>
+      {/if}
 
       <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
            approved design draws as `<select id="tf">` beside the others.
@@ -4911,6 +4947,8 @@
            `5min` because the ladder names it, on a store that holds no
            five-minute bar, would be a control promising a set that does not
            exist. The rows are counted off the rows. -->
+      <!-- DRAWN ONLY WHEN THERE IS SOMETHING TO CHOOSE — a rung list with nothing in it offers no choice. -->
+      {#if tfAll.length > 0}
       <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
         <span title="Bar length — the rung each row is stored at.">Timeframe</span>
         <!-- SEARCHABLE, LIKE THE REST. Nine rungs today and ten in
@@ -4952,6 +4990,7 @@
           {/if}
         </span>
       </div>
+      {/if}
       <!-- ==================================================================
            THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
            A spot series runs forever, so "show me the 12th" is a real question.
@@ -5799,7 +5838,19 @@
            every one of them says so, on the header and in every cell.
            `CLAUDE.md` §4: degrade loudly and name the reason.
            ================================================================== -->
-      <div class="tbl">
+      {#if stranded.length > 0}
+      <p class="stranded" role="status">
+        {#each stranded as st (st.rung)}
+          <span class="sitem">
+            <b>{st.rung}</b> is set to <b>{st.value}</b>, which the rungs above it no longer offer —
+            so no row can match.
+            <button class="btn ghost sm" type="button" onclick={st.clear}>Clear {st.rung}</button>
+          </span>
+        {/each}
+      </p>
+    {/if}
+
+    <div class="tbl">
         <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
         <div
           class="tbl-scroll bscroll"
@@ -8661,6 +8712,27 @@
      registered property (theme.css) so the number the gradient is built from is
      what animates, and it does.
      --------------------------------------------------------------------- */
+  /* THE STRANDED CLAUSE. Warm, not red: nothing is broken — a choice has simply
+     been overtaken by one above it. */
+  .stranded {
+    margin: 0 0 var(--s3);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    padding: var(--s3) var(--s4);
+    border: 1px solid var(--warn);
+    border-left-width: 3px;
+    border-radius: var(--r3);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    font-size: var(--fs-xs);
+  }
+  .stranded .sitem {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+  }
+
   .bpc {
     --mag: 0%;
     position: relative;

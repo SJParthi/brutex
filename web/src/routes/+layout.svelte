@@ -299,7 +299,7 @@
   function retryFeeds() {
     feeds.error = null;
     feedsTried = false;
-    loadFeeds().finally(() => (feedsTried = true));
+    loadFeeds(true).finally(() => (feedsTried = true));
   }
 
   /* ====================================================================
