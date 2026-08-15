@@ -171,6 +171,14 @@ pub struct FoldResult {
     /// the test window is look-ahead, and a stop fitted to the future looks
     /// spectacular and is trivially findable.
     pub chosen_exit: Option<(Option<usize>, Option<usize>, Option<usize>)>,
+    /// What the CHOSEN exit variant scored in sample, pessimistically.
+    ///
+    /// This is the ranking key the combination was selected on, so it is the
+    /// number the choice was actually made by. `in_sample` beside it is the
+    /// same combination walked with NO levels, kept because the comparison
+    /// "with these levels versus without them" is the whole question the exit
+    /// grid exists to answer.
+    pub chosen_exit_total: Option<i64>,
     /// The combination with the best in-sample worst-case total, if any.
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound. That selection
@@ -229,6 +237,20 @@ pub const DEFAULT_RUNGS: usize = 4;
 /// other: `costs::fill::Direction` is about which leg fills first, and
 /// `excursion::Side` is about which extreme of a bar hurts. Converting here
 /// rather than making one depend on the other keeps the graph acyclic.
+/// The exit variant a candidate's own grid picked, and what it scored.
+///
+/// Carried through the ranking so the combination and its exit are decided in
+/// ONE evaluation. They used to be two: the combination was chosen on a
+/// level-less walk and a second grid pass then ran on the winner, which is how
+/// the search became `1 x 125` instead of `N x 125`.
+#[derive(Clone, Copy, Debug)]
+struct ExitPick {
+    /// `(stop, target, trail)` rung indices. All `None` is the baseline row.
+    rungs: (Option<usize>, Option<usize>, Option<usize>),
+    /// The cell's pessimistic total. This is the ranking key.
+    pessimistic: i64,
+}
+
 const fn side_of(d: Direction) -> crate::excursion::Side {
     match d {
         Direction::Long => crate::excursion::Side::Long,
@@ -342,53 +364,84 @@ pub fn walk_forward(
         // silent tie-break that selects among 495 equals is a coin toss wearing
         // an argmax's clothes.
         let train_column = Column::build(train, &mut evaluator());
-        let mut best: Option<(ConditionMask, Summary)> = None;
+        // SELECTION IS JOINT: every candidate is ranked on the best it can do
+        // WITH exit levels, not on what it does without them.
+        //
+        // # What this replaces, and how large the defect was
+        //
+        // The combination was chosen first, on a level-less walk, and the
+        // 125-cell exit grid then ran on that single winner. So the search was
+        // 1 x 125 rather than N x 125, and a combination that is mediocre
+        // unstopped but excellent with a tight stop could not be found -- it
+        // was eliminated in round one, before any stop existed to save it.
+        //
+        // MEASURED on `synthetic::sessions`, the true joint optimum against
+        // what the two-stage rule actually returned: 64% better ranked 79th of
+        // 85; 222% better ranked 616th of 651; on a real fold, 617% better
+        // ranked 10,534th of 10,575.
+        //
+        // Worse than a ranking error: at `min_hits = 1500`, ZERO of 85
+        // candidates had a positive level-less total while ALL 85 had a
+        // profitable grid cell. Stage one was picking the least-bad member of a
+        // set in which nothing made money, and the two orderings were 87.6%
+        // discordant.
+        //
+        // # Why this is affordable, measured rather than assumed
+        //
+        // A grid costs 4.2x a bare walk, NOT 125x -- 77,815 ns against 18,389 ns
+        // per candidate on `sessions(12)`. `crate::grid`'s header explains why:
+        // the path crossings are cached once per candidate entry and each
+        // variant's exit is then three integer compares, so the 125 variants
+        // share one walk. A whole fold at 11,013 candidates goes from 0.20 s to
+        // 0.86 s.
+        //
+        // `sharpest().or(best())` is the same rule the exit selection already
+        // used, moved up so it decides the combination too: the aim is the
+        // setup whose winners went least against you, which is the one that
+        // survives the tightest stop.
+        let mut best: Option<(ConditionMask, Summary, ExitPick)> = None;
         let mut priced: u64 = 0;
         for item in &closed.kept {
             priced = priced.saturating_add(1);
-            let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
-            if s.trades == 0 {
-                continue;
-            }
-            if best.as_ref().is_none_or(|(_, b)| s.worst > b.worst) {
-                best = Some((item.mask, s));
-            }
-        }
-
-        // THE EXIT IS CHOSEN IN SAMPLE TOO, and that is not a detail.
-        //
-        // A stop level picked by looking at the test window is the same
-        // look-ahead as a combination picked that way -- worse, because a stop
-        // fitted to the future looks spectacular and is trivially findable.
-        // `grid::evaluate` derives the ladders from the TRAINING trades and
-        // ranks the variants on them, so the exit travels to the test window
-        // already decided.
-        //
-        // `sharpest` and not `best`: the aim is the setup whose winners went
-        // least against you, which is the one that survives the tightest stop.
-        // Ranking on total profit alone would prefer a variant that made more
-        // money by risking more, and that is the opposite of what is wanted.
-        let chosen_exit = best.as_ref().and_then(|(mask, _)| {
             let g = crate::grid::evaluate(
                 train,
                 &train_column,
-                mask,
+                &item.mask,
                 horizon,
                 side_of(direction),
                 DEFAULT_RUNGS,
             );
-            // `or` and not `or_else`: `best` is a max over at most 125 cells, so
-            // evaluating it eagerly costs nothing measurable, and the closure
-            // form leaves a branch that only runs when nothing survived -- a
-            // state this fixture cannot reach, so it could never be covered.
-            g.sharpest()
-                .or(g.best())
-                .map(|c| (c.stop, c.target, c.trail))
-        });
+            let Some(cell) = g.sharpest().or_else(|| g.best()) else {
+                continue;
+            };
+            if cell.trades == 0 {
+                continue;
+            }
+            let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, pick)| cell.pessimistic > pick.pessimistic)
+            {
+                best = Some((
+                    item.mask,
+                    s,
+                    ExitPick {
+                        rungs: (cell.stop, cell.target, cell.trail),
+                        pessimistic: cell.pessimistic,
+                    },
+                ));
+            }
+        }
 
-        let (chosen, in_sample) = match best {
-            Some((mask, s)) => (Some(mask), s),
-            None => (None, Summary::default()),
+        // The exit came out of the SAME evaluation that chose the combination,
+        // so there is no second grid pass and no chance of the two disagreeing.
+        // It is derived from the TRAINING trades alone -- a stop fitted to the
+        // test window is the same look-ahead as a combination fitted to it, and
+        // worse, because a stop fitted to the future looks spectacular and is
+        // trivially findable.
+        let (chosen, in_sample, chosen_exit, chosen_exit_total) = match best {
+            Some((mask, s, pick)) => (Some(mask), s, Some(pick.rungs), Some(pick.pessimistic)),
+            None => (None, Summary::default(), None, None),
         };
 
         // OUT OF SAMPLE. The column runs from bar zero so the indicators hold
@@ -414,6 +467,7 @@ pub fn walk_forward(
             halted: swept.sweep.halted,
             chosen,
             chosen_exit,
+            chosen_exit_total,
             in_sample,
             out_of_sample,
         });
@@ -450,7 +504,7 @@ fn restricted(column: &Column, from: usize) -> Column {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Summary, Validated, walk, walk_forward};
+    use super::{Validated, walk_forward};
     use crate::Sweeper;
     use crate::outcome::Horizon;
     use costs::fill::Direction;
@@ -733,16 +787,29 @@ mod tests {
             let closed = crate::closed::closed(&swept.sweep);
             let column = Column::build(train, &mut evaluator());
 
-            // Same rule as the pricing loop, including the strict `>` so the
-            // first candidate to reach the maximum keeps it.
+            // THE SAME JOINT RULE THE PRICING LOOP USES: each candidate is
+            // ranked on the best its own exit grid can do, not on a level-less
+            // walk. This test compared the level-less argmax until selection
+            // became joint, and it failed the moment it did -- correctly, and
+            // that failure is the proof the selection rule actually moved.
             let mut top: Option<(ConditionMask, i64)> = None;
             for item in &closed.kept {
-                let s = Summary::of(&walk(train, &column, &item.mask, h(15), Direction::Long));
-                if s.trades == 0 {
+                let g = crate::grid::evaluate(
+                    train,
+                    &column,
+                    &item.mask,
+                    h(15),
+                    crate::excursion::Side::Long,
+                    super::DEFAULT_RUNGS,
+                );
+                let Some(cell) = g.sharpest().or_else(|| g.best()) else {
+                    continue;
+                };
+                if cell.trades == 0 {
                     continue;
                 }
-                if top.is_none_or(|(_, best)| s.worst > best) {
-                    top = Some((item.mask, s.worst));
+                if top.is_none_or(|(_, best)| cell.pessimistic > best) {
+                    top = Some((item.mask, cell.pessimistic));
                 }
             }
 
@@ -755,9 +822,10 @@ mod tests {
                 f.considered
             );
             assert_eq!(
-                Some(f.in_sample.worst),
+                f.chosen_exit_total,
                 top.map(|(_, w)| w),
-                "fold {} reported a different total than the independent argmax",
+                "fold {} reported a different chosen-exit total than the \
+                 independent joint argmax",
                 f.index
             );
         }

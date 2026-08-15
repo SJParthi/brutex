@@ -806,6 +806,7 @@ mod tests {
                     priced: 207,
                     halted: None,
                     chosen_exit: Some((Some(0), None, None)),
+                    chosen_exit_total: Some(1_000),
                     chosen: Some(vocab::ConditionMask::default()),
                     in_sample: crate::validate::Summary {
                         trades: 30,
@@ -829,6 +830,7 @@ mod tests {
                     priced: 311,
                     halted: None,
                     chosen_exit: Some((Some(1), Some(2), None)),
+                    chosen_exit_total: Some(2_000),
                     chosen: Some(vocab::ConditionMask::default()),
                     in_sample: crate::validate::Summary {
                         trades: 55,

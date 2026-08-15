@@ -14411,3 +14411,45 @@ at fold 1's maximum, so on that fold the tie-break decides what is reported.
 is still chosen with no exit levels and the 125-cell grid still runs on that one
 winner afterwards. That is a separate and larger defect, recorded in
 `docs/06-limits.md` rather than fixed here.
+
+## D-0157 · 2026-08-15 · The combination and its exit are chosen together
+
+`crates/runner/src/validate.rs`.
+
+`walk_forward` ranks every candidate on the best its OWN exit grid can do.
+Previously the combination was chosen on a level-less walk and a second grid
+pass ran on that single winner.
+
+**Why.** The search was `1 x 125`, not `N x 125`. A combination that is
+mediocre without a stop but excellent with a tight one was eliminated in round
+one, before any stop existed to save it — which is precisely the setup the
+operator asked the engine to find.
+
+Measured on `synthetic::sessions`, true joint optimum against what the
+two-stage rule returned: 64% better ranked 79th of 85; 222% better ranked 616th
+of 651; on a real fold, **617% better ranked 10,534th of 10,575**.
+
+Worse than a ranking error. At `min_hits = 1500`, **zero** of 85 candidates had
+a positive level-less total while **all 85** had a profitable grid cell. Stage
+one was picking the least-bad member of a set in which nothing made money, and
+the two orderings were 87.6% discordant.
+
+**Cost, measured rather than feared.** A grid is **4.2x** a bare walk, not 125x:
+77,815 ns against 18,389 ns per candidate on `sessions(12)`. `crates/runner/src/grid.rs`
+explains why — the path crossings are cached once per candidate entry and each
+variant's exit is then three integer compares, so 125 variants share one walk. A
+fold at 11,013 candidates goes from 0.20 s to 0.86 s. The whole suite went from
+29.7 s to 27.1 s wall clock, inside the noise.
+
+**`FoldResult` gains `chosen_exit_total`**, the cell's pessimistic total. That
+is the key the choice was made on, so it is the number the choice is reported
+by. `in_sample` stays beside it as the same combination with NO levels, because
+"with these levels versus without them" is the comparison the grid exists to
+answer.
+
+**What this does NOT fix.** `out_of_sample` is still a level-less walk:
+`trade::walk` takes no stop, target or trail, so the chosen exit cannot be
+applied to the test window. The selection is now joint; the out-of-sample
+VALIDATION still measures the time-exit strategy. Recorded in
+`docs/06-limits.md` rather than implied away, and closing it means giving
+`walk` the levels.
