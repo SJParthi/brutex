@@ -39,7 +39,7 @@
 //! places the rungs at **quantiles of the excursions the instrument actually
 //! produced**, so the grid is a property of the data rather than of an opinion.
 //!
-//! Held in **basis points of the entry price**, not in paisa, for the same
+//! Held in **parts per million of the entry price**, not in paisa, for the same
 //! reason: a basis point means the same thing on both indices, and a paisa does
 //! not.
 //!
@@ -57,20 +57,20 @@
 
 use indicators::Candle;
 
-/// Basis points, as an integer. One hundredth of one percent.
+/// Parts per million of the entry price, as an integer.
 ///
 /// Integer because `CLAUDE.md` §7 keeps prices in integers and a threshold
 /// compared against a price is a price. Basis points rather than paisa because
 /// a rung must mean the same thing on NIFTY and BANKNIFTY.
-pub type Bps = i64;
+pub type Ppm = i64;
 
-/// Ten thousand: the basis-point denominator.
-const BPS_ONE: i64 = 10_000;
+/// One million: the parts-per-million denominator.
+const PPM_ONE: i64 = 1_000_000;
 
-/// A sorted ladder of thresholds, in basis points.
+/// A sorted ladder of thresholds, in parts per million.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ladder {
-    rungs: Vec<Bps>,
+    rungs: Vec<Ppm>,
 }
 
 impl Ladder {
@@ -81,7 +81,7 @@ impl Ladder {
     /// means the caller computed it wrongly, and quietly fixing it would hide
     /// that.
     #[must_use]
-    pub fn new(rungs: Vec<Bps>) -> Option<Self> {
+    pub fn new(rungs: Vec<Ppm>) -> Option<Self> {
         if rungs.is_empty() || rungs.first().is_some_and(|&r| r <= 0) {
             return None;
         }
@@ -109,12 +109,12 @@ impl Ladder {
     /// an instrument that never moved has no ladder, and inventing one would be
     /// inventing a distribution.
     #[must_use]
-    pub fn from_excursions(observed: &mut [Bps], count: usize) -> Option<Self> {
+    pub fn from_excursions(observed: &mut [Ppm], count: usize) -> Option<Self> {
         if observed.is_empty() || count == 0 {
             return None;
         }
         observed.sort_unstable();
-        let mut rungs: Vec<Bps> = Vec::with_capacity(count);
+        let mut rungs: Vec<Ppm> = Vec::with_capacity(count);
         for i in 1..=count {
             // The i-th of `count+1` quantiles, so the ladder spans the body of
             // the distribution and never places a rung at its maximum — a rung
@@ -132,7 +132,7 @@ impl Ladder {
 
     /// The rungs, ascending.
     #[must_use]
-    pub fn rungs(&self) -> &[Bps] {
+    pub fn rungs(&self) -> &[Ppm] {
         &self.rungs
     }
 
@@ -253,8 +253,8 @@ pub fn crossings(
     // it stays crossed, because MAE and MFE are running maxima.
     let mut stop_cursor = 0_usize;
     let mut target_cursor = 0_usize;
-    let mut mae: Bps = 0;
-    let mut mfe: Bps = 0;
+    let mut mae: Ppm = 0;
+    let mut mfe: Ppm = 0;
 
     for offset in 0..=to.saturating_sub(from) {
         let Some(bar) = bars.get(from.saturating_add(offset)) else {
@@ -312,16 +312,16 @@ pub fn crossings(
     out
 }
 
-/// A price move as basis points of the entry price.
+/// A price move as parts per million of the entry price.
 ///
 /// Integer arithmetic at `i128` width and narrowed once: a paisa move times
 /// 10,000 leaves `i64` for a large enough move, and a wrapped threshold would
 /// compare a huge adverse excursion as a tiny one.
-fn bps_of(move_paisa: i64, entry: i64) -> Bps {
+fn bps_of(move_paisa: i64, entry: i64) -> Ppm {
     if move_paisa <= 0 || entry <= 0 {
         return 0;
     }
-    let scaled = i128::from(move_paisa).saturating_mul(i128::from(BPS_ONE)) / i128::from(entry);
+    let scaled = i128::from(move_paisa).saturating_mul(i128::from(PPM_ONE)) / i128::from(entry);
     i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
@@ -331,7 +331,7 @@ fn bps_of(move_paisa: i64, entry: i64) -> Bps {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Bps, Ladder, NEVER, Side, crossings};
+    use super::{Ladder, NEVER, Ppm, Side, crossings};
     use indicators::{Candle, OI_NULL};
 
     fn bar(minute: i64, low: i64, high: i64) -> Candle {
@@ -346,7 +346,7 @@ mod tests {
         )
     }
 
-    fn ladder(rungs: &[Bps]) -> Ladder {
+    fn ladder(rungs: &[Ppm]) -> Ladder {
         Ladder::new(rungs.to_vec()).expect("an ascending ladder")
     }
 
@@ -374,13 +374,13 @@ mod tests {
             bar(1, entry - 1_500, entry), // 150 bps adverse
             bar(2, entry - 2_000, entry), // 200 bps adverse
         ];
-        let stops = ladder(&[50, 150, 300]);
-        let targets = ladder(&[50]);
+        let stops = ladder(&[5_000, 15_000, 30_000]);
+        let targets = ladder(&[5_000]);
         let c = crossings(&bars, 0, 2, entry, Side::Long, &stops, &targets);
 
-        assert_eq!(c.stop_at(0), 0, "50 bps was reached on the first bar");
-        assert_eq!(c.stop_at(1), 1, "150 bps on the second");
-        assert_eq!(c.stop_at(2), NEVER, "300 bps was never reached");
+        assert_eq!(c.stop_at(0), 0, "5,000 ppm was reached on the first bar");
+        assert_eq!(c.stop_at(1), 1, "15,000 ppm on the second");
+        assert_eq!(c.stop_at(2), NEVER, "30,000 ppm was never reached");
         assert_eq!(c.target_at(0), NEVER, "the path never went favourable");
     }
 
@@ -390,7 +390,7 @@ mod tests {
         // short's stop and target swap, which no aggregate would reveal.
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry - 1_000, entry + 1_000)];
-        let rungs = ladder(&[50]);
+        let rungs = ladder(&[5_000]);
         let long = crossings(&bars, 0, 0, entry, Side::Long, &rungs, &rungs);
         let short = crossings(&bars, 0, 0, entry, Side::Short, &rungs, &rungs);
 
@@ -407,7 +407,7 @@ mod tests {
         // first would flatter every strategy, systematically and invisibly.
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry - 1_000, entry + 1_000)];
-        let rungs = ladder(&[50]);
+        let rungs = ladder(&[5_000]);
         let c = crossings(&bars, 0, 0, entry, Side::Long, &rungs, &rungs);
 
         assert_eq!(
@@ -421,7 +421,7 @@ mod tests {
     fn a_path_that_only_goes_one_way_leaves_nothing_ambiguous() {
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry, entry + 1_000), bar(1, entry, entry + 2_000)];
-        let rungs = ladder(&[50]);
+        let rungs = ladder(&[5_000]);
         let c = crossings(&bars, 0, 1, entry, Side::Long, &rungs, &rungs);
         assert!(c.ambiguous().is_empty(), "nothing went adverse at all");
         assert_eq!(c.stop_at(0), NEVER);
@@ -433,7 +433,7 @@ mod tests {
         // Ten observed excursions, four rungs requested. Every rung must be one
         // of the observed values -- a rung nobody's move ever reached is a
         // threshold measured against nothing.
-        let mut observed: Vec<Bps> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
+        let mut observed: Vec<Ppm> = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
         let l = Ladder::from_excursions(&mut observed, 4).expect("a ladder from ten moves");
         assert!(l.len() <= 4);
         for rung in l.rungs() {
@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn an_empty_window_or_a_zero_entry_records_nothing_rather_than_panicking() {
-        let rungs = ladder(&[50]);
+        let rungs = ladder(&[5_000]);
         let bars = vec![bar(0, 90_000, 110_000)];
         let c = crossings(&bars, 0, 0, 0, Side::Long, &rungs, &rungs);
         assert_eq!(c.stop_at(0), NEVER, "a zero entry price divides nothing");

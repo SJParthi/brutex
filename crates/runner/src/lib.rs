@@ -51,6 +51,7 @@
 
 pub mod closed;
 pub mod excursion;
+pub mod grid;
 pub mod identity;
 pub mod outcome;
 pub mod rank;
