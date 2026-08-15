@@ -558,11 +558,21 @@ jobs:
           # `13` is the securityId of NIFTY in Dhan's OWN worked example, used
           # in a test so the request can be asserted against a value the vendor
           # published rather than one invented here.
+          #
+          # `expiries`, `contracts`, `underlying_symbol`, `expiry_date`, `year`
+          # and `month` are Groww's expired-F&O contract lookup -- two path
+          # segments and four query fields, read from
+          # groww.in/trade-api/docs/curl/backtesting. An expired option is in no
+          # instrument master, so its name has to be discovered before its bars
+          # can be asked for; `pull::vendor::FnoDiscovery` is the shape that
+          # records how. Six ordinary English words a vendor chose. They name no
+          # org, no env and no account, which is what section 8 is about.
           request_field='
           securityId exchangeSegment instrument
           exchange segment trading_symbol start_time end_time
           13
           groww_symbol candle_interval 1minute
+          expiries contracts underlying_symbol expiry_date year month
           '
 
           # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
