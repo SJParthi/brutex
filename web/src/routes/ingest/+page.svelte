@@ -5804,246 +5804,10 @@
              receipt, the facts table and the elapsed clock are never hidden —
              `reset` is the only thing that takes it off again, and that is a
              press. -->
-        {#if phase !== 'idle'}
-        <section class="card rise">
-          <header class="card-h">
-            <span class="pane-title">The run</span>
-            <span class="spacer"></span>
-            {#if phase === 'running'}
-              <span class="tag acc">in flight</span>
-            {:else if phase === 'done'}
-              <span class="tag" class:up={receipt?.good} class:down={receipt && !receipt.good}>
-                {receipt?.verdict ?? (netError ? 'no answer' : 'finished')}
-              </span>
-            {:else}
-              <span class="tag">idle</span>
-            {/if}
-          </header>
-
-            <div class="run">
-              <div class="runrow">
-                <span class="lbl">Elapsed</span>
-                <span class="mono big">{clockOf(elapsedMs)}</span>
-                <span class="hint">measured from the moment the request left this browser</span>
-              </div>
-
-              <div class="runrow">
-                <span class="lbl">Store growth <i>measured</i></span>
-                <span class="mono big" class:up={rowsGained > 0}>{n(rowsGained)}</span>
-                <span class="hint">
-                  bar(s) across {n(unitsDone)} new instrument-month(s), read from
-                  <span class="mono">/store.json</span> every 5 s
-                </span>
-              </div>
-
-              <!-- THE BAR IS DETERMINATE ONLY WHERE THERE IS SOMETHING TO
-                   DETERMINE IT. Before the store has grown there is no
-                   measurement, so the bar says "unknown" by being
-                   indeterminate rather than by inching along on a timer. -->
-              {#if expectedUnits > 0 && unitsDone > 0}
-                <div class="meter" role="progressbar" aria-valuenow={Math.round(share * 100)} aria-valuemin="0" aria-valuemax="100" aria-label="Estimated share of the request filled">
-                  <i style="width:{(share * 100).toFixed(2)}%"></i>
-                </div>
-                <p class="hint">
-                  <b class="mono">{(share * 100).toFixed(1)}%</b> of
-                  <span class="mono">{n(expectedUnits)}</span> instrument-months are now held.
-                  <b class="warn">This share is an estimate.</b> The denominator is names × months
-                  from your own request — the server states no total, and a name the vendor has no
-                  history for will never fill.
-                  <!-- BOTH SIDES OVER ONE POPULATION, AND WHAT FELL OUTSIDE IT
-                       IS STILL NAMED. The numerator counted every row in these
-                       months — every instrument, every rung — against a
-                       denominator that counted only this request, so one
-                       unrelated backfill in the window pinned this bar at
-                       100.0% with half the request outstanding. `askScope` is
-                       what both readings are taken through now. -->
-                  {#if live && live.outside > 0}
-                    <span class="mono">{n(live.outside)}</span> instrument-month(s) in these months
-                    are outside this request — other instruments, or other rungs — and are counted
-                    in neither half of this ratio.
-                  {/if}
-                </p>
-              {:else if phase === 'running'}
-                <div class="meter indet"><i></i></div>
-                <p class="hint">
-                  No growth measured yet, so there is no share to show. The bar is indeterminate on
-                  purpose: a number here would be invented.
-                </p>
-              {/if}
-
-              <!-- GUARDED ON `rate` ITSELF, not only on `etaSecs`. The two are
-                   separate `$derived`s and `etaSecs` is `rate && …`, so today a
-                   non-null eta does imply a non-null rate — but that is a
-                   correlation a reader has to chase across two definitions and
-                   an edit to `etaSecs` would silently break. The dereference
-                   guards on the value it dereferences. -->
-              {#if etaSecs !== null && rate !== null}
-                <p class="hint">
-                  <span class="tag info">extrapolation</span>
-                  About <b class="mono">{clockOf(etaSecs * 1000)}</b> left, from a measured
-                  <span class="mono">{rate.toFixed(2)}</span> instrument-months/s over the last
-                  {samples.length} readings and {n(unitsLeft)} still to fill. It is a straight-line
-                  projection of the recent past and nothing more.
-                </p>
-              {/if}
-
-              <!-- THE GOVERNOR, AS FAR AS IT CAN HONESTLY BE SEEN — AND ONLY
-                   WHILE THERE IS SOMETHING TO SEE.
-                   Its fourth branch said "not observable" and then explained, on
-                   the finished receipt, that no route reports the governor's
-                   state. True, and about an endpoint that does not exist rather
-                   than about the run he had just read the verdict of. Once the
-                   POST has answered nothing here is measured, so the row is not
-                   drawn. It returns for the whole of the next run, carrying the
-                   three readings that ARE measured: stalled, landing, or nothing
-                   yet. -->
-              {#if phase === 'running'}
-              <div class="gov" class:hot={stalled}>
-                <span
-                  class="dot live"
-                  class:warn={stalled}
-                  class:up={!stalled && everGrew}
-                  class:acc={!stalled && !everGrew}
-                ></span>
-                <div>
-                  {#if stalled}
-                    <b class="warn">
-                      {everGrew
-                        ? `Nothing has landed for ${n(stalledSecs)}s`
-                        : `Nothing has landed at all, ${n(stalledSecs)}s in`}
-                    </b>
-                    <span class="hint">
-                      That is what a governor waiting for its next permit looks like from outside —
-                      and also what a slow vendor, a long window split into chunks, or a credential
-                      round-trip looks like. They cannot be told apart from the browser: there is no
-                      status route. The request is still open, so this is not yet a hang.
-                    </span>
-                  {:else if everGrew}
-                    <b class="up">Bars are landing</b>
-                    <span class="hint">
-                      Last growth {n(stalledSecs)}s ago. The governor is inside the request and
-                      cannot be read directly; a store that keeps growing is the evidence that it is
-                      admitting requests.
-                    </span>
-                  {:else}
-                    <b>Nothing has landed yet</b>
-                    <span class="hint">
-                      {n(stalledSecs)}s in and the store has not grown. Early in a run that is
-                      normal — the credential, the identity and the first chunk all come before the
-                      first bar. Nothing is claimed either way until the store moves.
-                    </span>
-                  {/if}
-                </div>
-              </div>
-              {/if}
-
-              {#if pollError}
-                <p class="caution">
-                  <span class="tag down">watcher</span>
-                  <span class="msg">
-                    The progress reading failed and is not being silently retried into a frozen
-                    display: {pollError}
-                  </span>
-                </p>
-              {/if}
-
-              {#if phase === 'running'}
-                <div class="actions">
-                  <button class="btn danger" type="button" onclick={stopWatching}>Stop watching</button>
-                  <span class="hint">
-                    This aborts the browser's request only. There is no cancel route — a pull is one
-                    synchronous POST, and the server keeps going until it is done.
-                  </span>
-                </div>
-              {/if}
-
-              {#if aborted}
-                <p class="caution">
-                  <span class="tag warn">abandoned</span>
-                  <span class="msg">
-                    You stopped watching. The server was not told, so the run is most likely still
-                    going; the outcome list below is a difference against whatever had landed when
-                    you stopped. <a class="link" href="/audit">The audit record</a> is where the
-                    finished run will appear.
-                  </span>
-                </p>
-              {/if}
-
-              {#if netError}
-                <p class="caution">
-                  <span class="tag down">no answer</span><span class="msg">{netError}</span>
-                </p>
-              {/if}
-
-              <!-- ONE RUN, N REQUESTS, AND THE COUNT IS ON SCREEN. A run over
-                   two ticked timeframes is two POSTs; showing one receipt with
-                   nothing beside it would report half of what happened as if it
-                   were all of it. The verdict card below shows the FIRST bad
-                   one — a later success must not paint over a rung that
-                   refused — and this strip carries every one of them. -->
-              {#if sent.of > 1}
-                <p class="hint">
-                  <span class="tag acc">{n(sent.done)} of {n(sent.of)}</span>
-                  One request per ticked timeframe, sent in the ladder's order.
-                  {#each receipts as r, i (r.rung + i)}
-                    <span class="tag" class:up={r.good} class:down={!r.good}>{r.rung}: {r.verdict}</span>
-                  {/each}
-                  {#if phase === 'running'}
-                    <span class="mono">{sent.label}</span> is on the wire now.
-                  {/if}
-                </p>
-              {/if}
-
-              {#if receipt}
-                <div class="verdict" class:bad={!receipt.good}>
-                  <b>{receipt.verdict}{receipts.length > 1 ? ` — ${receipt.rung}` : ''}</b>
-                  <span>{receipt.reason}</span>
-                </div>
-                <!-- ══ THE VERDICT IS THE ANSWER; THE TWENTY ROWS ARE THE
-                     EVIDENCE, AND EVIDENCE FOLDS ══
-
-                     This drew a `kv` table of every fact the receipt carries —
-                     target, instruments covered, which names the feed cannot
-                     say, window, from, to, calendar days, toDate on the wire,
-                     timeframe, feed, bar length, source, store root, attempted,
-                     reached, refused, refused because, recorded, status —
-                     twenty rows, unfolded, under every run. The verdict line
-                     above already says what happened and why in two sentences.
-
-                     Folded. Open it when a run did something you did not
-                     expect, which is the only time twenty facts are the answer
-                     to anything. -->
-                <details class="wire">
-                  <summary>Every field the server understood ({n(receipt.facts.length)})</summary>
-                  <table class="kv">
-                    <tbody>
-                      {#each receipt.facts as f, i (f.k + i)}
-                        <tr>
-                          <th>{f.k}</th>
-                          <td class:mono={/^[\d.,\s]+$/.test(f.v)}>{f.v}</td>
-                        </tr>
-                      {/each}
-                    </tbody>
-                  </table>
-                </details>
-
-                <!-- THE IFRAME IS GONE, AND IT WAS THE WORST THING ON THIS
-                     PAGE. It rendered the server's OWN receipt page inside this
-                     one — a second brutex, with its own nav bar, its own purple
-                     gradient hero reading "Asked, read, answered", and its own
-                     footer — nested in a scroll box in the middle of the
-                     outcome. Two applications on one screen, one inside the
-                     other, and no reader could tell which one they were looking
-                     at.
-
-                     It existed to compare what the server drew against what was
-                     read out of it. Everything it carried is in the fold above,
-                     parsed, in this page's own type. The server's page is still
-                     one link away for anyone who wants the original. -->
-              {/if}
-            </div>
-        </section>
-        {/if}
+        <!-- REMOVED: THE RUN card — elapsed, store growth, the share estimate,
+             the request ladder and the per-rung outcome box. Every one of those
+             is narrative about the run; the outcome per instrument is a COLUMN
+             in the results table below, which is where it belongs. -->
 
         <!-- ══════════════════ BELOW THE PANEL, NOT INSIDE IT ══════════════════
              THE CONTROL PANEL CARRIES CONTROLS. A caution box, a fold of wire
@@ -6092,63 +5856,9 @@
                away. Nothing is lost, nothing is summarised, and the disclosure
                opens itself when there is exactly one — a single caution has
                nothing to fold and hiding it would only add a click. -->
-          {#if cautions.length > 0}
-            <details class="cautions" open={cautions.length === 1}>
-              <summary>
-                <span class="tag warn">caution</span>
-                {n(cautions.length)}
-                {cautions.length === 1 ? 'thing' : 'things'} to know before this run
-              </summary>
-              {#each cautions as c (c)}
-                <p class="caution">
-                  <span class="msg">{c}</span>
-                </p>
-              {/each}
-            </details>
-          {/if}
+          <!-- REMOVED: the caution disclosure. Not a control and not a column. -->
 
-          <details class="wire">
-            <summary>What goes on the wire</summary>
-            <!-- ONE LINE PER TICKED RUNG, because one POST carries one
-                 `granularity`. A single line here while two rungs were ticked
-                 would be the page describing a request it does not send. -->
-            {#each wireBodies as w (w.dir)}
-              <p class="mono wirebody">POST /pull/spot<br />{w.body}</p>
-            {/each}
-            {#if wireBodies.length === 0}
-              <p class="mono wirebody">
-                Nothing would be sent: no timeframe is ticked, and `granularity` is not an
-                optional field on a request this form builds.
-              </p>
-            {:else if wireBodies.length > 1}
-              <p class="hint">
-                {n(wireBodies.length)} requests, sent one after another in the ladder's order —
-                <span class="mono">{wireBodies.map((w) => w.dir).join(', ')}</span>. They are not
-                sent in parallel: <span class="mono">/pull/spot</span> is synchronous and the store
-                appends, so two in flight would interleave two answers into one month file.
-              </p>
-            {/if}
-            <!-- FIVE PROSE PARAGRAPHS LEFT THIS FOLD ON 14 AUG 2026, at the
-                 operator's instruction, and what stays is the part that is
-                 DATA.
-
-                 The request bodies above are a value nothing else on this page
-                 shows: the exact line this form will POST, one per ticked
-                 rung, with a count beside them saying how many go out and in
-                 what order.
-
-                 What went was explanation — why `granularity` defaults to
-                 1min by omission, which controls are readings rather than
-                 fields, that the two dates are forwarded verbatim, and a
-                 paragraph on Dhan's non-inclusive `toDate`. Each is a fact
-                 about `crates/api` or `crates/pull` and belongs in those
-                 crates, where it is versioned with the code it describes.
-                 Restated here it was a second copy free to go stale on its
-                 own — and one already had: the `toDate` paragraph gave one
-                 vendor's rule as though it were the wire's, when
-                 `HttpSpec::range_end` has been per-vendor since D-0113 and
-                 Kite's is INCLUSIVE (docs/00-charter.md §4z). -->
-          </details>
+      <!-- REMOVED: "What goes on the wire" — the request body, collapsed. Not a control and not a column. -->
         </div>
       </div>
 
@@ -6197,10 +5907,7 @@
                ============================================================ -->
           <div class="lstrip {landed?.tone ?? ''}">
             {#if landed}
-              <div class="lq">
-                <b>{landed.title}</b>
-                <span>{landed.why}</span>
-              </div>
+              <!-- REMOVED: the landed sentence. The Outcome COLUMN carries it. -->
             {/if}
 
             <!-- NON-ZERO ONLY. `groups` is built from rows that exist, so a
@@ -6339,13 +6046,7 @@
             {/if}
           </div>
 
-          <p class="hint foot">
-            "Bars gained" is the difference between two readings of
-            <span class="mono">/store.json</span> across the {n(windowMonths.length)} month file(s)
-            {dayLabel(from)} – {dayLabel(to)} touches — measured, not reported by the run. The store
-            reports a month file whole, so a window that asks for part of one is compared against
-            all of it. A reason in the run's own words appears wherever the server sent one.
-          </p>
+      <!-- REMOVED: the "Bars gained is the difference between two readings" paragraph. Not a control and not a column. -->
         {/if}
       </section>
       {/if}
@@ -6393,10 +6094,8 @@
                it, the non-zero counts as filters, the total they must reach,
                and the one bulk action. -->
           <div class="lstrip {censusVerdict.tone}">
-            <div class="lq">
-              <b>{censusVerdict.title}</b>
-              <span>{censusVerdict.why}</span>
-            </div>
+            <!-- REMOVED: the verdict sentence. The Verdict COLUMN in the table
+                 below carries the same classification, per row. -->
 
             {#if censusPills.length > 0}
               <div class="lpills">
@@ -6768,29 +6467,7 @@
              table, because there the second paragraph stops being a definition
              and becomes a caveat on a number that is on screen. A limit that
              applies right now is not something to make somebody hunt for. -->
-        <details class="foothold" open={outsideHolidayTable}>
-          <summary class:warn={outsideHolidayTable}>
-            {outsideHolidayTable
-              ? 'This window reaches outside the holiday table — what the counts mean'
-              : 'What stored and expected mean'}
-          </summary>
-          <p class="hint foot">
-            Stored is <span class="mono">/store.json?feed={feeds.active}</span> — one row per
-            instrument-month-timeframe, read once per feed and again after every pull. Expected is
-            the NSE sessions INSIDE {windowOk ? `${dayLabel(from)} – ${dayLabel(to)}` : 'the window'},
-            not the whole month file, times the rung's bars per session. A month with no row at all
-            is <b>never pulled</b>, which is not a zero and is never drawn as one. <b>retrying</b>
-            and <b>failed</b> are <span class="mono">/ingest/status.json</span>'s evidence — the
-            sweep's own ladder — and appear only where that route names them.
-          </p>
-          <p class="hint foot" class:warn={outsideHolidayTable}>
-            The expected counts exclude weekends and the {n(HOLIDAY_COUNT)} NSE holidays this page
-            carries, which cover {dayLabel(HOL_FROM)} – {dayLabel(HOL_THRU)}. Outside those dates a
-            weekday is ASSUMED to be a session, so an expectation there can be one session too high
-            and a month that is actually complete can read as short. That is a limit of this page's
-            table, not a finding about the store.
-          </p>
-        </details>
+      <!-- REMOVED: "What stored and expected mean" — a glossary under the table. Not a control and not a column. -->
       </section>
       {/if}
     </div>
