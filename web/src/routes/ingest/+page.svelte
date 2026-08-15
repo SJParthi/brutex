@@ -4992,13 +4992,18 @@
                       </div>
                     {/if}
                   </div>
-                  <span
-                    class="pknote"
-                    class:warn={!reachKnown}
-                    title={reachKnown ? `${n(reach)} reachable · target=${target}` : reachWhy}
-                  >
-                    {reachKnown ? `${n(reach)} reachable · target=${target}` : reachWhy}
-                  </span>
+                  <!-- NARRATION CUT, REFUSAL KEPT. This drew
+                       "N reachable · target=n50" on every load — a count the
+                       control's own face already carries and a wire slug the
+                       operator did not ask about. It is a REMARK, not a
+                       refusal: it names nothing anybody could act on and it
+                       cost a line under every field on the strip.
+                       `reachWhy` is the other half and it stays, because that
+                       one IS a refusal — §4 requires it named, and it is drawn
+                       only when there is something to name. -->
+                  {#if !reachKnown}
+                    <span class="pknote warn" title={reachWhy}>{reachWhy}</span>
+                  {/if}
 
                   <!-- ═══════ WHAT AN ARCHIVE HAS INSTEAD OF A UNIVERSE ═══════
 
@@ -5379,26 +5384,32 @@
                        the second rung on the two archive feeds and nowhere
                        else. The rungs drawn WHILE refused are the ones a person
                        could close: unfetched, or unstored. -->
-                  <span
-                    class="pknote"
-                    class:warn={rungsChosen.length === 0}
-                    title="Three rungs are offered — one minute, one day, and the archives' one second — because they are the whole of what the four descriptors in pull::vendor declare between them, and because everything coarser is folded from bars this repository already holds. A rung the active vendor cannot publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. Rungs this build does not fetch yet, and rungs the store has no directory for, ARE drawn — each names work a person could do. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
-                  >
-                    {#if rungsChosen.length === 0}
+                  <!-- NARRATION CUT, AND THE ELEMENT GOES WITH IT.
+                       The `{n} ticked of {n} offered · {n} with a store
+                       directory · {n} request(s) per read` tail drew on EVERY
+                       load and every clause of it was already on screen: the
+                       ticked set is the control's own face, and the store
+                       directory and the request count are on the rows
+                       themselves. Three counts restating three visible things
+                       is the running commentary that made this strip unreadable.
+
+                       THE `{#if}` IS OUTSIDE THE SPAN, not inside it. A
+                       `.pknote` carries its marker as `::before`, so an empty
+                       one is not invisible — it is a bare `·` sitting under a
+                       control with nothing after it. Emptying the element and
+                       keeping the element is how a cut leaves litter.
+
+                       The empty state stays: that one is not narration, it says
+                       the form cannot be submitted and why, which is the §4
+                       case, and it appears only when it is true. -->
+                  {#if rungsChosen.length === 0}
+                    <span
+                      class="pknote warn"
+                      title="Three rungs are offered — one minute, one day, and the archives' one second — because they are the whole of what the four descriptors in pull::vendor declare between them, and because everything coarser is folded from bars this repository already holds. A rung the active vendor cannot publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
+                    >
                       no timeframe ticked — nothing below can be counted
-                    {:else}
-                      <!-- "offered", NOT "this feed serves". `rungTally.live` is
-                           what is DRAWN, and a drawn row may still be one this
-                           build does not fetch — TrueData is offered 1 day and
-                           declares none. The old wording read the drawn count
-                           as a served count and overstated every archive feed
-                           by one. The per-row `not fetched by this build` is
-                           where that is answered. -->
-                      {n(rungsChosen.length)} ticked of {n(rungTally.live)} offered ·
-                      {n(rungsChosen.filter((r) => r.stored).length)} with a store directory ·
-                      {n(rungsChosen.length)} request(s) per {verb}
-                    {/if}
-                  </span>
+                    </span>
+                  {/if}
                   <!-- WHAT THE SERVER DID NOT SAY, SAID. `history[].served` is
                        the bit `crates/api`'s `served()` gates the POST on; a
                        binary that predates the field answers nothing, and the
@@ -7288,12 +7299,24 @@
      is now the first sentence of its control's `title`, which is where §4 sends
      a fact that does not fit; the label is held to one line here so the rule
      cannot be broken by a longer word later. */
+  /* THE REFERENCE'S `.lab`, AND IT IS THE SAME RULE RATHER THAN A COPY OF IT.
+     `web/design/ingest.html` drew this label in MONO at `--fs-micro` with the
+     caps tracking, and this drew it in the sans face at `--fs-xs` — so the two
+     were different labels for the same control and "why does the app not look
+     like the mockup" was partly this line. theme.css section 8 now carries the
+     reference's version under `.lab`; every property below is that rule, and a
+     page that adopts the class name outright loses nothing.
+
+     `line-height: var(--lab-h)` is what makes a label occupy the strip's label
+     ROW exactly, which is the height the grid reserves for it. */
   .plbl {
-    font-size: var(--fs-xs);
-    font-weight: var(--w-bold);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    font-weight: var(--w-semi);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--dim);
+    color: var(--faint);
+    line-height: var(--lab-h);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -7320,15 +7343,39 @@
      to be a paragraph now lives, and a clause that can grow to three lines
      would reflow the whole strip the moment a feed answered slowly. The full
      sentence is on the control's `title`. */
+  /* THE REFERENCE'S `.note`, MARKER AND ALL — theme.css section 8.
+     A note carries `▲` when it needs attention and `·` when it merely is, so a
+     refusal is distinguishable from a remark BEFORE it is read. That is the
+     difference between a strip a reader scans and a strip a reader has to
+     parse, and it is most of what made the mockup look calmer than the page:
+     the mockup had two kinds of note and this had one grey line for both. */
+  /* THE MARKER IS `::before` AND THE NOTE STAYS A BLOCK, deliberately.
+     A flex row would have made the text an anonymous flex item, and an
+     anonymous item cannot be selected — so `text-overflow: ellipsis` would
+     have had nothing to apply to and every one-line note would have lost its
+     clip. The reference uses flex because its notes are short by construction;
+     these are generated and are not, so the marker is inline here and the
+     clip stays where it was. Same two glyphs, same two meanings. */
   .pknote {
-    font-size: var(--fs-xs);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    line-height: 1.35;
     color: var(--faint);
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .pknote::before {
+    content: '· ';
+    color: var(--faint);
+  }
   .pknote.warn {
+    color: var(--warn);
+  }
+  .pknote.warn::before {
+    content: '▲ ';
+    font-size: 8px;
     color: var(--warn);
   }
   /* A `pknote` is a one-line tail by default — nowrap, clipped, ellipsed. A
