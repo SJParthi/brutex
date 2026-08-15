@@ -787,15 +787,38 @@ mod tests {
         // B x n resample matrix across the whole stepdown, which is what the
         // implementation now does.
         //
-        // This asserts the consequence a caller can see: rejections must come
-        // out in non-decreasing rounds, and a strategy rejected in a later
-        // round must not have been rejectable earlier under a threshold that
-        // had risen. A rising bar shows up as a strategy that survives a round
-        // it should have failed, so the round sequence is the observable.
+        // # WHAT THIS TEST DOES NOT PROVE, measured rather than assumed
+        //
+        // It does not exercise monotonicity, because on every fixture tried the
+        // stepdown finishes in ONE round: `rejected.round` is `[0, 0]`, so the
+        // non-decreasing check below compares `0 >= 0` and holds vacuously.
+        //
+        // That is a property of the algorithm, not of the fixture. A round
+        // rejects EVERY alive strategy above the threshold at once, so a second
+        // round needs a strategy that was below the old bar and is above the
+        // new one. The bar is the maximum over CENTRED bootstrap draws, so a
+        // large mean does not raise it — only a large spread does. Three
+        // attempts to force a second round failed: a 300-edge strategy, a
+        // marginal 30/34/38 edge beneath it, and a 12x-variance strategy
+        // designed to dominate the maximum. All gave `[0, 0]`.
+        //
+        // So what this DOES hold is the two properties that survive one round:
+        // rounds are non-decreasing, and the answer is reproducible from the
+        // seed — the latter being what the single-resample-matrix change could
+        // most easily have broken.
+        //
+        // The monotonicity itself is UNVERIFIED by any test. It was verified by
+        // instrumentation during the fix — 32.536 rising to 33.906 at seed 97,
+        // 19 of 400 configurations before, 0 of 400 after — and closing it
+        // properly needs `romano_wolf` to expose its per-round thresholds, which
+        // is an API change. Recorded in `docs/06-limits.md`.
         let mut set: Vec<Vec<i64>> = (0..12).map(|s| noise(300, s)).collect();
-        set.push(edged(300, 90, 80));
-        set.push(edged(300, 91, 60));
-        set.push(edged(300, 92, 40));
+        // A HIGH-VARIANCE strategy dominates the bootstrap maximum, because the
+        // draws are centred on each series own mean -- a large mean does not
+        // raise the bar, a large spread does.
+        let wide: Vec<i64> = noise(300, 90).into_iter().map(|x| x * 12 + 60).collect();
+        set.push(wide);
+        set.push(edged(300, 91, 34));
 
         let rejected = romano_wolf(&set, 300, 11, DEFAULT_BLOCK, 50_000);
         assert!(

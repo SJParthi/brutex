@@ -4190,3 +4190,33 @@ the winners, which is the tightest stop that would not have killed them.
 peak-to-trough equity drawdown, neither of which exists anywhere in the crate
 (§71) — and then a deliberate choice of key measured against it, rather than a
 proxy standing in for one.
+
+---
+
+## 74. The Romano–Wolf monotonicity is unverified by any test
+
+`the_stepdown_threshold_never_rises_as_the_surviving_set_shrinks` does not
+exercise the property it is named for. Measured: on every fixture tried the
+stepdown finishes in ONE round — `Rejected::round` is `[0, 0]` — so the
+non-decreasing assertion compares `0 >= 0` and holds vacuously.
+
+That is a property of the algorithm, not a bad fixture. A round rejects EVERY
+alive strategy above the threshold at once, so a second round needs a strategy
+that sat below the old bar and is above the new one. The bar is the maximum over
+CENTRED bootstrap draws, so a large mean cannot raise it — only a large spread
+can. Three attempts failed: a 300-edge strategy, marginal 30/34/38 edges beneath
+it, and a 12x-variance series built specifically to dominate the maximum. All
+gave `[0, 0]`.
+
+**What the fix rests on instead.** The monotonicity was verified by
+instrumentation while the change was made: the threshold rose from 32.536 to
+33.906 at seed 97 under per-round resampling, in 19 of 400 configurations, and
+in 0 of 400 with one matrix held across the stepdown. That is a real
+measurement and it is not a regression test — nothing would catch the revert.
+
+**What would close it.** `romano_wolf` returning its per-round thresholds, so a
+test can assert the sequence is non-increasing directly. That is an API change
+to a public function.
+
+**Found by** an independent fleet pointed at this session's own fixes, which
+reverted the change and observed the suite stay green.
