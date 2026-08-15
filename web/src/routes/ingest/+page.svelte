@@ -48,6 +48,259 @@
   import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
   import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
 
+  // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
+  //
+  // THE SHAPES ARE WRITTEN DOWN ONCE, AND EVERY ONE OF THEM WAS READ OFF A
+  // LIVE RESPONSE OR OFF THE RUST THAT WRITES IT — never guessed from the
+  // reader. `/feeds.json`, `/folder.json?feed=truedata&segment=INDEX`,
+  // `/instruments.json?feed=dhan` and `/ingest/status.json` were each fetched
+  // from the running binary on 15 Aug 2026, and the two shapes that came back
+  // empty on a paused autopilot (`in_flight`, `waiting_on`) are transcribed
+  // from the `write!` that emits them in `crates/api/src/ingest.rs` rather than
+  // from what this file happens to read. §3 rule 1.
+  //
+  // WHY THEY EXIST AT ALL is the argument `$lib/feeds.svelte.js` already makes
+  // for its own `Feed`: an unannotated `$state(null)` infers `never` and an
+  // unannotated `$state([])` infers `never[]`, so every read of a field off one
+  // is an error reported at the READER — dozens of them, none where the fix is.
+  // One annotation at the declaration clears the lot, and it also records where
+  // the shape came from, which a checker cannot.
+
+  /**
+   * ONE RUNG OF ONE FEED'S HISTORY CLAIM, as `/feeds.json` sends it.
+   *
+   * `crates/api/src/server.rs` builds the array from
+   * `pull::vendor::Descriptor::history` — one row per rung the feed either
+   * serves or has a recorded claim for. `contested` is the DISPLACED claim and
+   * travels with the binding one; three of this repository's four recorded rows
+   * have two sources that disagree, which is why it is a field and not a
+   * footnote. `pairFloor` below reads exactly these names.
+   *
+   * @typedef {{
+   *   rung: string,
+   *   served: boolean,
+   *   kind: string,
+   *   unit: string | null,
+   *   n: number | null,
+   *   from: string | null,
+   *   oldest: string | null,
+   *   source: string,
+   *   standing: string,
+   *   binds_because: string,
+   *   contested: {
+   *     kind: string, unit: string | null, n: number | null,
+   *     from: string | null, oldest: string | null,
+   *     source: string, standing: string
+   *   } | null
+   * }} HistoryRow
+   */
+
+  /**
+   * A `/feeds.json` ROW AS THIS PAGE READS IT — `Feed`, plus the one field
+   * `$lib/feeds.svelte.js` does not spell.
+   *
+   * `Feed` IS IMPORTED, NEVER RESTATED. Two definitions of one shape is the
+   * drift this repository is written against, so the eight fields that module
+   * already names stay its own and move when it moves. `history` is added by
+   * INTERSECTION rather than by copying them out: the same handler emits it on
+   * every row, and this page is its only reader — `pairFloor` and `rungServed`
+   * — so widening the shared typedef would edit a file three other routes
+   * import for a fact only this one asks about.
+   *
+   * OPTIONAL, AND THAT IS THE HONEST ARITY. `rungServed` treats an absent array
+   * as "this server states nothing" rather than as "nothing is served", which
+   * is the running-binary-predates-the-field case its own comment names. A
+   * required field here would type away the very state it reports.
+   *
+   * @typedef {import('$lib/feeds.svelte.js').Feed & { history?: HistoryRow[] }} FeedRow
+   */
+
+  /**
+   * `GET /folder.json?feed=…` — the walk of an archive feed's directory.
+   *
+   * Read from the live answer for `truedata&segment=INDEX`: a `path`, a `reach`
+   * of `{state, earliest, latest, files, rows}`, 8,632 `instruments`, a
+   * `collisions` count and 123 `rejected` rows each carrying the decoder's own
+   * words. A REFUSAL comes back through the same fetch carrying `refused` and
+   * nothing else — which is why every field but that one is optional. The page
+   * tells the two apart by `r.ok`, never by probing for a key.
+   *
+   * THE THREE STATES ARE THE WHOLE SET AND THE TWO ENDS ARE DISCRIMINATED BY
+   * THEM. `crates/api/src/folder.rs` maps `pull::folder::Reach` to exactly
+   * `empty`, `blank` and `days`, and its own comment states the rule this union
+   * encodes: the two ends are `null` on the arms that have none and NEVER
+   * absent, because a missing key and a null key read alike in a browser and
+   * mean different things here.
+   *
+   * @typedef {{
+   *   feed?: string,
+   *   kind?: string,
+   *   verb?: string,
+   *   path?: string,
+   *   reach?: {
+   *     state: 'days', earliest: string, latest: string,
+   *     files: number, rows: number
+   *   } | {
+   *     state: 'empty' | 'blank', earliest: null, latest: null,
+   *     files: number, rows: number
+   *   },
+   *   instruments?: string[],
+   *   collisions?: number,
+   *   rejected?: { path: string, why: string }[],
+   *   refused?: string
+   * }} FolderBody
+   */
+
+  /**
+   * ONE ROW OF `/instruments.json?feed=…`, read from the live answer for Dhan.
+   *
+   * `universes` IS OPTIONAL AND THE OPTIONALITY IS THE POINT. D-0089/D-0090
+   * added the full array beside the frozen `universe` string, and
+   * `membershipTokens` reads the array when a row carries one and splits the
+   * string when it does not. A required field here would erase the very
+   * distinction `carriesArray` exists to measure.
+   *
+   * @typedef {{
+   *   symbol: string,
+   *   key: string,
+   *   kind: string,
+   *   exchange: string,
+   *   segment: string,
+   *   universe: string,
+   *   universes?: string[],
+   *   bars: number,
+   *   href: string
+   * }} CatalogueRow
+   */
+
+  /**
+   * `/ingest/status.json` — the cell in flight, transcribed from the `write!`
+   * in `crates/api/src/ingest.rs` that emits it. The live answer was `null`
+   * because the autopilot is paused, so the field names come from the Rust and
+   * not from a body this page happened to see.
+   *
+   * @typedef {{ instrument: string, month: string, index: number, of: number }} PilotFlight
+   */
+
+  /**
+   * ONE FEED'S RUNG OF THE SWEEP LADDER — `waiting_on[]` of the same answer,
+   * from the same `write!`. The live array was empty for the same reason.
+   *
+   * This page reads three of the thirteen — `feed`, `vendor` and `halted` — and
+   * all thirteen are named anyway, because a typedef that lists only what today
+   * happens to be read is one that has to be edited before the next field can
+   * be looked at.
+   *
+   * @typedef {{
+   *   feed: string, vendor: string, month: string, window: string,
+   *   behind: number, done: boolean, attempts: number, attempts_max: number,
+   *   months_done: number, months_total: number, stalled_months: number,
+   *   last_reason: string, halted: string
+   * }} PilotFeed
+   */
+
+  /**
+   * WHAT `foldMonths` HANDS BACK, AND IT IS THAT MODULE'S OWN TYPE.
+   *
+   * AN ALIAS, NOT A COPY. `$lib/store.svelte.js` declares `WindowFold` beside
+   * the function that returns it — the fold's arithmetic plus the two fields
+   * that module stamps on — and restating those seven names here would be a
+   * second definition of one shape, which is the drift this repository is
+   * written against. The local name exists only so the sites below read as
+   * prose; the fields are the store's and move when it moves.
+   *
+   * `at` IS NULLABLE THERE AND STAYS NULLABLE HERE: it is `null` until a read
+   * succeeds and `Date.now()` from that moment on. Both folds in this file are
+   * taken only after `store.state === 'ready'`, and the one line that needs a
+   * number out of it narrows in the open rather than defaulting.
+   *
+   * @typedef {import('$lib/store.svelte.js').WindowFold} StoreFold
+   */
+
+  /**
+   * A UNIVERSE ROW — a DISPLAY SET, and `target` is what it can spell on the
+   * wire. `null` there is the whole refusal; see `UNIVERSES`.
+   *
+   * @typedef {{
+   *   id: string, label: string, field: string | null, token: string | null,
+   *   target: string | null, note?: string
+   * }} Universe
+   */
+
+  /**
+   * A RUNG OF THE CONTROL — three names for one bar length. See `RUNGS` for why
+   * `dir`, `label` and `phrase` are three fields and never one.
+   *
+   * @typedef {{
+   *   dir: string, label: string, phrase: string, stored: boolean,
+   *   per: number | null
+   * }} Rung
+   */
+
+  /**
+   * A SEGMENT ROW. `served` is a statement about the ROUTE, not about the
+   * vendor; `short` is the visible refusal and `null` where there is none.
+   *
+   * @typedef {{
+   *   key: string, label: string, note: string, served: boolean,
+   *   short: string | null, why: string
+   * }} Segment
+   */
+
+  /**
+   * THE SEVEN VERDICTS, AS A TYPE. It is the key of `VERDICT`, the member of
+   * `VORDER`, the field a census row and a census month each carry, and the
+   * value the pill filter holds — one name for all five, so a verdict added to
+   * the table and forgotten in the order is a build failure rather than a row
+   * that silently sorts last.
+   *
+   * @typedef {'fail' | 'never' | 'short' | 'retry' | 'unknown' | 'beyond' | 'ok'} Verdict
+   */
+
+  /**
+   * ONE SERIES IN THE WINDOW — instrument × segment × rung, with its month
+   * files resolved. Built by `censusRows`, read by the table, the sort, the
+   * pills and the row-level pull.
+   *
+   * @typedef {{
+   *   id: string, key: string, mkey: string, sym: string, kind: string,
+   *   seg: string, segLabel: string, tf: string, tfLabel: string,
+   *   per: number | null,
+   *   months: {
+   *     month: string, sessions: number, exp: number | null,
+   *     got: number | null, k: Verdict
+   *   }[],
+   *   got: number, exp: number, unproved: number, missing: number,
+   *   state: Verdict
+   * }} CensusRow
+   */
+
+  /**
+   * ONE INSTRUMENT'S OUTCOME FROM ONE RUN. `group` is a `GROUP` label — prose,
+   * ranked by `GROUP_ORDER` and never by the alphabet.
+   *
+   * @typedef {{
+   *   key: string, symbol: string, kind: string, gained: number,
+   *   before: number, group: string, reason: string, tone: string
+   * }} OutcomeRow
+   */
+
+  /**
+   * THE SERVER'S OWN ANSWER TO A PULL, read out of the returned document.
+   *
+   * ONE SHAPE FOR BOTH DOORS. `readReceipt` builds it from the parsed receipt,
+   * and `$lib/receipt.js`'s `refusal()` builds the identical shape for a
+   * document that is not a receipt at all — same fields, `good: false`, and the
+   * reason spelled out. A second shape for the refusal is how a caller learns
+   * to check which one it got.
+   *
+   * @typedef {{
+   *   ok: boolean, status: number, verdict: string, good: boolean,
+   *   scope: string, reason: string, facts: { k: string, v: string }[],
+   *   raw: string
+   * }} Receipt
+   */
+
   // ---------------------------------------------------------------- constants
 
   /**
@@ -96,6 +349,7 @@
    * answer: an unplaceable rung is not finer and is not coarser, and returning
    * either would be an ordering claim about a name this page cannot place.
    */
+  /** @param {string} a @param {string} b */
   function finerThan(a, b) {
     const x = RUNG_RANK.get(a);
     const y = RUNG_RANK.get(b);
@@ -202,6 +456,7 @@
    * bar that either exists or is missing and no yardstick divides it —
    * `CLAUDE.md` §3 rule 6.
    */
+  /** @type {Rung[]} */
   const RUNGS = [
     { dir: '1s', label: 'Ticks', phrase: 'one second', stored: false, per: null },
     { dir: '1min', label: '1 minute', phrase: 'one minute', stored: true, per: 375 },
@@ -307,6 +562,7 @@
    * `''` when the row carries no floor, and the caller states the absence
    * rather than printing an empty sentence.
    */
+  /** @param {string} wire */
   function shortFloor(wire) {
     const floor = finestByWire.get(wire);
     if (!floor) return '';
@@ -346,6 +602,7 @@
    * below is where an operator now reads it — on the two archive feeds, on the
    * rung their tick files actually hold.
    */
+  /** @param {string} wire @param {string} dir */
   function floorVerdict(wire, dir) {
     const floor = finestByWire.get(wire);
     if (!floor) return { state: 'unstated', permanent: false, floor: null };
@@ -363,11 +620,13 @@
    * rows in a different sequence rank differently and a stable second key never
    * gets to break the tie it exists for.
    */
+  /** @param {unknown} a @param {unknown} b */
   function cmpStr(a, b) {
     const x = String(a ?? '');
     const y = String(b ?? '');
     return x < y ? -1 : x > y ? 1 : 0;
   }
+  /** @param {unknown} a @param {unknown} b */
   function cmpNum(a, b) {
     const x = Number(a ?? 0);
     const y = Number(b ?? 0);
@@ -398,6 +657,7 @@
    *
    * `target: null` is the whole refusal: it disables the row and it is why.
    */
+  /** @type {Universe[]} */
   const UNIVERSES = [
     // THE FOUR TIERS ARE REQUESTABLE. They carried `target: null` because
     // nothing turned (feed, universe) into a request: `SpotTarget::names`
@@ -484,6 +744,7 @@
    * unrecognised id, and a fallback that can be `undefined` needs a guard at
    * every reader.
    */
+  /** @type {Universe} */
   const SWEPT = {
     id: 'swept',
     label: 'NSE-NIFTY + NSE-BANKNIFTY',
@@ -538,6 +799,7 @@
    * `title`. Both, because a refusal only a hover reveals is one most readers
    * never meet.
    */
+  /** @type {Segment[]} */
   const SEGMENTS = [
     {
       key: 'spot',
@@ -611,33 +873,41 @@
   function istDay(ms = Date.now()) {
     return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
   }
+  /** @param {number | string} n @param {number} [w] */
   function pad(n, w = 2) {
     return String(n).padStart(w, '0');
   }
+  /** @param {number} y @param {number} m @param {number} d */
   function iso(y, m, d) {
     return `${pad(y, 4)}-${pad(m)}-${pad(d)}`;
   }
+  /** @param {string} isoDay */
   function parts(isoDay) {
     const [y, m, d] = isoDay.split('-').map(Number);
     return { y, m, d };
   }
   /** Days since the epoch, so two dates can be compared and subtracted. */
+  /** @param {string} isoDay */
   function dayNum(isoDay) {
     const { y, m, d } = parts(isoDay);
     return Math.round(Date.UTC(y, m - 1, d) / DAY_MS);
   }
+  /** @param {string} isoDay @param {number} n */
   function addDays(isoDay, n) {
     return new Date((dayNum(isoDay) + n) * DAY_MS).toISOString().slice(0, 10);
   }
+  /** @param {number} y @param {number} m */
   function daysInMonth(y, m) {
     return new Date(Date.UTC(y, m, 0)).getUTCDate();
   }
+  /** @param {string} s */
   function isValidIso(s) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
     const { y, m, d } = parts(s);
     return m >= 1 && m <= 12 && d >= 1 && d <= daysInMonth(y, m);
   }
   /** Every `YYYY-MM` the window touches, inclusive at both ends. */
+  /** @param {string} a @param {string} b @returns {string[]} */
   function monthsBetween(a, b) {
     if (!isValidIso(a) || !isValidIso(b)) return [];
     const from = parts(a);
@@ -696,17 +966,20 @@
 
   const DAYNAME = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   /** 0 = Sunday. Built at UTC midnight like every other date here, so no zone moves it. */
+  /** @param {string} isoDay */
   function weekdayOf(isoDay) {
     const { y, m, d } = parts(isoDay);
     return new Date(Date.UTC(y, m - 1, d)).getUTCDay();
   }
   /** Whether the NSE traded that day, as far as this page can honestly say. */
+  /** @param {string} isoDay */
   function isSession(isoDay) {
     const w = weekdayOf(isoDay);
     if (w === 0 || w === 6) return false;
     return !HOLIDAYS.has(isoDay);
   }
   /** Why a day holds no bars, or `null` when it is a session. */
+  /** @param {string} isoDay */
   function noSessionWhy(isoDay) {
     const w = weekdayOf(isoDay);
     if (w === 0 || w === 6) return `${DAYNAME[w]}, no session`;
@@ -714,6 +987,7 @@
     return null;
   }
   /** Whether the holiday table actually covers a day, or is only guessing weekends. */
+  /** @param {string} isoDay */
   function holidaysKnownFor(isoDay) {
     return isoDay >= HOL_FROM && isoDay <= HOL_THRU;
   }
@@ -797,8 +1071,16 @@
    * `kind: "none"` is the vendor stating there is no floor. Emitting null for
    * both and letting the reader guess is exactly the fallback §4 bans.
    */
+  /**
+   * @param {string} wire
+   * @param {string} rungDir
+   * @returns {{ at: string | null, known: boolean, rolling: boolean, src: string[] }}
+   */
   function pairFloor(wire, rungDir) {
-    const feed = feeds.all.find((f) => f.wire === wire);
+    // `FeedRow`, NOT `Feed`, AND THE CAST IS THE WHOLE DIFFERENCE. `history` is
+    // on the wire and not in the shared typedef; see `FeedRow` for why it is
+    // added here by intersection rather than by widening that module.
+    const feed = /** @type {FeedRow | undefined} */ (feeds.all.find((f) => f.wire === wire));
     const row = feed?.history?.find((h) => h.rung === rungDir);
     // NO ROW IS NOT NO FLOOR. A rung the wire says nothing about is `unknown`,
     // and `known: false` is what the caller reads to say so out loud.
@@ -844,13 +1126,16 @@
   // is an identity change wearing a presentation change's clothes.
 
   /** Months since year 0, so two months can be compared and subtracted. */
+  /** @param {string} ym */
   function monthNum(ym) {
     const [y, m] = ym.split('-').map(Number);
     return y * 12 + (m - 1);
   }
+  /** @param {number} num */
   function monthFromNum(num) {
     return `${pad(Math.floor(num / 12), 4)}-${pad((num % 12) + 1)}`;
   }
+  /** @param {string} ym @param {number} n */
   function addMonths(ym, n) {
     return monthFromNum(monthNum(ym) + n);
   }
@@ -880,6 +1165,7 @@
    * `{ iso }` on success, `{ iso: '' }` for a field cleared on purpose — which
    * is "not set", not a failure — and `{ err }` otherwise. Never a guess.
    */
+  /** @param {string} raw @returns {{ iso?: string, err?: string }} */
   function parseDay(raw) {
     const s = String(raw ?? '').trim().replace(/\s+/g, ' ');
     if (!s) return { iso: '' };
@@ -929,10 +1215,12 @@
   }
 
   /** The last day of a month file — the calendar's `End` key, and nothing else. */
+  /** @param {string} ym */
   function monthLastDay(ym) {
     const [y, m] = ym.split('-').map(Number);
     return iso(y, m, daysInMonth(y, m));
   }
+  /** @param {number} ms */
   function clockOf(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
     const h = Math.floor(s / 3600);
@@ -958,6 +1246,7 @@
    * locale data on every one of them.
    */
   const IN = new Intl.NumberFormat('en-IN');
+  /** @param {unknown} x */
   function n(x) {
     return IN.format(Number(x ?? 0));
   }
@@ -1081,6 +1370,15 @@
   //           one thing an operator needs next and the one thing a run that
   //           produced no bars never used to say. `CLAUDE.md` §4 bans the
   //           version of this that reads as "no data yet".
+  /**
+   * @type {{
+   *   wire: string | null,
+   *   state: 'idle' | 'reading' | 'read' | 'halted',
+   *   body: FolderBody | null,
+   *   why: string | null,
+   *   segment?: string | null
+   * }}
+   */
   let folderReach = $state({ wire: null, state: 'idle', body: null, why: null });
 
   $effect(() => {
@@ -1183,7 +1481,9 @@
    * — never the last segment's refusal, which would name whichever this list
    * happened to end on and read as a finding about that segment.
    */
+  /** @param {string} wire */
   async function readFolder(wire) {
+    /** @param {string | null} segment */
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
       const r = await fetch(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
@@ -1375,13 +1675,13 @@
   // tick, and the drawer holds only what is NOT chosen. Pick a NIFTY family and
   // the sweep pair folds away; pick the sweep pair and it rides up beside them.
   const sweptIsChosen = $derived(universe === SWEPT.id);
-  const uniTucked = $derived(refusedUniverses.map((x) => x.u));
-  const uniOpen = $derived(uniTuck);
-  const uniTuckLabel = $derived(
-    uniTucked.length === 1
-      ? `1 set ${sweptIsChosen ? 'no request can name' : 'more'}`
-      : `${n(uniTucked.length)} set(s) not offered here`
-  );
+  // THE THREE THAT READ `refusedUniverses` NOW SIT BELOW IT. They stood here,
+  // above its declaration, and worked only because a `$derived` body does not
+  // run until something reads it — the drawer's own markup, long after the
+  // module has finished evaluating. That is true and it is an argument nobody
+  // reading this line can check, and the checker calls it what it is: a
+  // block-scoped binding used before its declaration. Moving the readers below
+  // the thing they read costs nothing and makes the order visible.
   let segSet = $state(new Set(['spot']));
   /**
    * THE TIMEFRAME IS A SET, NOT A VALUE.
@@ -1463,13 +1763,15 @@
    * — the same discipline `membershipTokens` reads the `universes` array under.
    */
   const rungServed = $derived.by(() => {
-    const rows = active?.history;
+    // THE SAME CAST `pairFloor` MAKES, AND FOR THE SAME REASON — see `FeedRow`.
+    const rows = /** @type {FeedRow | undefined} */ (active)?.history;
     if (!Array.isArray(rows)) return null;
     const m = new Map();
     for (const h of rows) if (h && typeof h.rung === 'string') m.set(h.rung, h.served === true);
     return m;
   });
   /** `true`, `false`, or `null` when this server states nothing about it. */
+  /** @param {string} dir */
   function feedFetches(dir) {
     if (!rungServed) return null;
     return rungServed.get(dir) ?? false;
@@ -1756,11 +2058,23 @@
     });
   });
 
+  /**
+   * WHAT THE LAST FEED CHANGE TOOK, or `null` when it took nothing. See the
+   * effect below: it is retired by the next change rather than left standing.
+   *
+   * @type {{
+   *   feed: string,
+   *   kept: number,
+   *   rows: { dir: string, label: string, why: string }[]
+   * } | null}
+   */
   let droppedRungs = $state(null);
   $effect(() => {
     const wire = feeds.active ?? '';
     untrack(() => {
+      /** @type {Rung[]} */
       const gone = [];
+      /** @type {Rung[]} */
       const kept = [];
       for (const r of RUNGS) {
         if (!rungSet.has(r.dir)) continue;
@@ -1817,6 +2131,7 @@
   let fromText = $state('');
   let toText = $state('');
   /** The refusal a typed string earned, per field. Cleared the moment one takes. */
+  /** @type {{ from: string | null, to: string | null }} */
   let typedErr = $state({ from: null, to: null });
   let folder = $state('');
   let showProblems = $state(false);
@@ -1845,6 +2160,7 @@
    * routes that own one (FEED_OWNED there), which keeps the count at exactly
    * one on every route rather than at one page-wide.
    */
+  /** @type {'feed' | 'uni' | 'ins' | null} */
   let drop = $state(null);
 
   /**
@@ -1932,6 +2248,15 @@
    * window and it is asked for at each of them. Taking the first rung's floor
    * would offer a day that the second rung's feed refuses, and the refusal
    * would arrive from the vendor rather than from the control.
+   */
+  /**
+   * THE RUNG IS OPTIONAL BECAUSE ONE ARM CANNOT NAME ONE. With nothing ticked
+   * there is no rung the floor belongs to, and inventing one would put a bar
+   * length in a refusal the operator never chose. `floorSentence` falls back to
+   * the header's own rung when it is absent, which is the only other rung on
+   * screen.
+   *
+   * @type {{ at: string | null, known: boolean, rolling: boolean, src: string[], rung?: Rung }}
    */
   const feedFloor = $derived.by(() => {
     const wire = feeds.active ?? '';
@@ -2068,6 +2393,7 @@
    * rung, and there is exactly one place in this file that knows what a request
    * looks like.
    */
+  /** @param {string} dir @param {string} a @param {string} b */
   function wireBodyFor(dir, a, b) {
     const p = new URLSearchParams();
     p.set('target', target);
@@ -2126,10 +2452,14 @@
     // handed an unparseable value would either echo it anyway or replace it
     // with a dash. The reader has to see the characters that are actually in
     // the field, not a tidied version of them.
-    for (const [field, text, day] of [
+    // THE PAIR IS A TUPLE, NOT TWO STRINGS AND A THIRD. `field` keys `typedErr`
+    // and is handed to `openCal`, both of which take the two names and no other
+    // — so the literal type is carried through the loop rather than widened to
+    // `string` and asserted back at each use.
+    for (const [field, text, day] of /** @type {Array<['from' | 'to', string, string]>} */ ([
       ['from', fromText, fromDay],
       ['to', toText, toDay]
-    ]) {
+    ])) {
       const Name = field === 'from' ? 'From' : 'To';
       // A STRING THE PARSER ALREADY REFUSED IS QUOTED BACK IN ITS OWN WORDS.
       // `parseDay` names which of six ways it failed — an ambiguous 02/09/2024,
@@ -2427,7 +2757,24 @@
    */
   const catalogueIsThisFeed = $derived(catalogue.ready && catalogue.feed === feeds.active);
 
+  /**
+   * THE CATALOGUE'S ROWS, GIVEN THEIR SHAPE ONCE.
+   *
+   * `$lib/index.svelte.js` declares `catalogue` as `$state({ rows: [], … })`,
+   * which infers `never[]` — so every read of `row.universes`, `row.key` or
+   * `row.symbol` on this page is an error reported at the READER. That module
+   * belongs to another surface and the shape is `/instruments.json`'s, not
+   * this page's, so it is named here as `CatalogueRow` (read off the live
+   * answer for Dhan) and applied at ONE place rather than at each of the six
+   * that walk the list.
+   *
+   * `?? []` is kept verbatim from the sites it replaces: `rows` is always an
+   * array today, and the coalesce is what those sites said, so it stays said.
+   */
+  const catRows = $derived(/** @type {CatalogueRow[]} */ (catalogue.rows ?? []));
+
   /** A feed's own name for itself, out of `/feeds.json`, never a wire string. */
+  /** @param {string | null | undefined} wire */
   function feedName(wire) {
     return feeds.all.find((f) => f.wire === wire)?.display ?? wire ?? 'no feed';
   }
@@ -2461,6 +2808,7 @@
    * cannot share a module without one of them importing the other's state, but
    * the field precedence is deliberately identical.
    */
+  /** @param {CatalogueRow} row @returns {string[]} */
   function membershipTokens(row) {
     return Array.isArray(row?.universes)
       ? row.universes.map(String)
@@ -2470,6 +2818,7 @@
   }
 
   /** The token a universe row is COUNTED from, whichever field names it. */
+  /** @param {Universe | null | undefined} u @returns {string | null} */
   function membershipToken(u) {
     return u?.field ?? u?.token ?? null;
   }
@@ -2505,7 +2854,7 @@
   const tokenCount = $derived.by(() => {
     const m = new Map();
     if (!catalogueIsThisFeed) return m;
-    for (const row of catalogue.rows ?? []) {
+    for (const row of catRows) {
       for (const t of membershipTokens(row)) m.set(t, (m.get(t) ?? 0) + 1);
     }
     return m;
@@ -2520,7 +2869,7 @@
    */
   const carriesArray = $derived.by(() => {
     if (!catalogueIsThisFeed) return false;
-    for (const r of catalogue.rows ?? []) if (Array.isArray(r?.universes)) return true;
+    for (const r of catRows) if (Array.isArray(r?.universes)) return true;
     return false;
   });
 
@@ -2529,9 +2878,10 @@
    * cannot be measured yet. `null` is NOT zero and no caller may treat it as
    * zero: one means "nobody counted" and the other is a finding.
    */
+  /** @param {Universe} u @returns {number | null} */
   function masterCount(u) {
     if (!catalogueIsThisFeed) return null;
-    const rows = catalogue.rows ?? [];
+    const rows = catRows;
     if (u.token === '*') return rows.length;
     if (u.id === 'swept') return rows.filter((r) => namedByUniverse(r, u)).length;
     const t = membershipToken(u);
@@ -2556,6 +2906,7 @@
    * Market arrives in alphabetical order, and slicing its first fifty names
    * would print 360ONE as a NIFTY 50 constituent and call it a fact.
    */
+  /** @param {CatalogueRow} row @param {Universe | null | undefined} u */
   function namedByUniverse(row, u) {
     if (!u) return false;
     if (u.id === 'swept') {
@@ -2570,7 +2921,7 @@
   /** Which instruments the chosen universe names, out of THIS feed's catalogue. */
   const members = $derived.by(() => {
     if (!catalogueIsThisFeed) return [];
-    return (catalogue.rows ?? []).filter((r) => namedByUniverse(r, universeSpec));
+    return catRows.filter((r) => namedByUniverse(r, universeSpec));
   });
 
   /**
@@ -2597,10 +2948,11 @@
    * wire sentence rather than accusing a feed of listing nothing — the ladder
    * above already refuses everything for the uncounted reason.
    */
+  /** @param {Universe} u @returns {string | null} */
   function universeRefusal(u) {
     const t = membershipToken(u);
     const have = masterCount(u);
-    const rows = (catalogue.rows ?? []).length;
+    const rows = catRows.length;
     const feed = feedName(feeds.active);
 
     // ---- 1 and 2: is this set answerable from THIS feed's master at all?
@@ -2640,6 +2992,18 @@
    */
   const refusedUniverses = $derived(
     UNIVERSES.map((u) => ({ u, why: universeRefusal(u) })).filter((x) => x.why !== null)
+  );
+
+  /* THE DRAWER'S OWN THREE, moved down from beside `sweptIsChosen` so they sit
+     below `refusedUniverses` rather than above it. Nothing about them changed;
+     see the note at the old site for why the old order was legal and still
+     wrong to read. */
+  const uniTucked = $derived(refusedUniverses.map((x) => x.u));
+  const uniOpen = $derived(uniTuck);
+  const uniTuckLabel = $derived(
+    uniTucked.length === 1
+      ? `1 set ${sweptIsChosen ? 'no request can name' : 'more'}`
+      : `${n(uniTucked.length)} set(s) not offered here`
   );
 
   /**
@@ -2731,12 +3095,13 @@
       ? ` Counted here, not requestable: ${refusalSummary.unspellable} — membership is measured off the universes array this server sends, and what is missing is a target that can ask for it. A rebuild does not close it: a docs/05-decisions.md entry and a crates/api change do.`
       : '';
     const em = refusalSummary.anyEmpty
-      ? ` 0 in this feed's master: ${refusalSummary.empty} — ${feedName(feeds.active)} lists no instrument in these, counted over all ${n((catalogue.rows ?? []).length)} row(s) /instruments.json?feed=${feeds.active ?? ''} returned. An empty set, not a missing endpoint.`
+      ? ` 0 in this feed's master: ${refusalSummary.empty} — ${feedName(feeds.active)} lists no instrument in these, counted over all ${n(catRows.length)} row(s) /instruments.json?feed=${feeds.active ?? ''} returned. An empty set, not a missing endpoint.`
       : '';
     return head + un + em;
   });
 
   /** The census spells an instrument `EXCHANGE-SEGMENT-SYMBOL`. */
+  /** @param {CatalogueRow} row */
   function censusKey(row) {
     return `${row.exchange}-${row.segment}-${row.symbol}`;
   }
@@ -2758,6 +3123,19 @@
   // requests rebuilds the census server-side. A page that quietly fires one per
   // feed every time it opens is paying that cost for a panel nobody asked for.
 
+  /**
+   * `byKey` IS EVERY FEED'S MASTER MERGED, one entry per key, each carrying the
+   * displays of the feeds that listed it. `feeds` is the only field this page
+   * adds to a `/instruments.json` row.
+   *
+   * @type {{
+   *   at: number,
+   *   key: string,
+   *   byKey: Map<string, CatalogueRow & { feeds: string[] }>,
+   *   error: string | null,
+   *   busy: boolean
+   * }}
+   */
   let roster = $state({ at: 0, key: '', byKey: new Map(), error: null, busy: false });
 
   /** Which feeds a roster reading would be ABOUT. A change makes it stale. */
@@ -2907,7 +3285,10 @@
       key: m.key,
       sym: m.symbol,
       detail: m.kind ? String(m.kind).toLowerCase() : 'in this master',
-      off: null
+      // `null` IS THE TICKABLE ROW AND A SENTENCE IS THE REFUSAL — the second
+      // loop below pushes one. Typed here so the two arms of one list are one
+      // shape rather than two the reader has to reconcile.
+      off: /** @type {string | null} */ (null)
     }));
     for (const r of missingHere ?? []) {
       rows.push({
@@ -2965,6 +3346,7 @@
   });
 
   /** Sets are replaced, never mutated: an in-place add is not a state change. */
+  /** @param {string} key */
   function toggleIns(key) {
     const next = new Set(insOff);
     if (next.has(key)) next.delete(key);
@@ -3048,6 +3430,7 @@
    * LOUDLY and by name — §4's requirement is that a failure is named, not that
    * it is made unreachable — and the reason still sits on the row.
    */
+  /** @param {Segment} _s */
   const segServed = (_s) => true;
   const segmentsReached = $derived(SEGMENTS.filter((s) => segSet.has(s.key) && segServed(s)));
   const segmentsUnserved = $derived(SEGMENTS.filter((s) => !segServed(s)));
@@ -3230,6 +3613,16 @@
   });
 
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
+  /**
+   * @type {{
+   *   at: number,
+   *   inFlight: PilotFlight | null,
+   *   feeds: PilotFeed[],
+   *   state: string,
+   *   error: string | null,
+   *   busy: boolean
+   * }}
+   */
   let pilot = $state({ at: 0, inFlight: null, feeds: [], state: '', error: null, busy: false });
   let pilotAsked = false;
 
@@ -3296,6 +3689,7 @@
    * here moves its own rank with it rather than dropping silently to the bottom
    * of a table that still carries the old spelling.
    */
+  /** @type {Record<Verdict, [string, string, string]>} */
   const VERDICT = {
     fail: [
       'down',
@@ -3334,6 +3728,7 @@
     ]
   };
   /** Worst first, and the order is a claim about what the reader has to DO. */
+  /** @type {Verdict[]} */
   const VORDER = ['fail', 'never', 'short', 'retry', 'unknown', 'beyond', 'ok'];
   const VRANK = new Map(VORDER.map((k, i) => [k, i]));
 
@@ -3343,6 +3738,7 @@
    * store, the calendar and the feed's floor.
    */
   const censusRows = $derived.by(() => {
+    /** @type {CensusRow[]} */
     const out = [];
     if (!reachKnown || !windowOk || windowMonths.length === 0) return out;
     const flight = pilot.inFlight;
@@ -3365,7 +3761,15 @@
             const bars = held === undefined ? null : held;
             // A MONTH THE FEED CANNOT REACH IS NOT A GAP. The floor is the
             // same one the date control refuses a day with.
-            const beyond = Boolean(feedFloor.at) && monthLastDay(ym) < feedFloor.at;
+            // ONE READ, ONE NAME. `feedFloor.at` is `string | null`, and
+            // `Boolean(x) && … < x` reads the property TWICE — the checker
+            // cannot know the second read is the same value, and on a `$derived`
+            // getter that is not merely pedantry. The ternary is what
+            // `Boolean(…) &&` already meant for a string: empty and null both
+            // answer false, and nothing else changes.
+            const floorAt = feedFloor.at;
+            const beyond = floorAt ? monthLastDay(ym) < floorAt : false;
+            /** @type {Verdict} */
             let k;
             if (beyond) k = 'beyond';
             else if (bars === null) k = 'never';
@@ -3382,6 +3786,7 @@
           // The series verdict, worst first, and every branch has evidence
           // behind it: a halt from the ladder route, a flight from the same
           // route, a missing row from the store, a floor from the feed.
+          /** @type {Verdict} */
           let state;
           if (seen.beyond === months.length) state = 'beyond';
           else if (named) state = 'retry';
@@ -3528,9 +3933,11 @@
   // ---- sort, filter, page
 
   let cSort = $state({ key: 'sym', dir: 1 });
+  /** @type {Verdict | null} */
   let cBucket = $state(null);
   let cPage = $state(1);
 
+  /** @param {string} key */
   function sortCensus(key) {
     if (cSort.key === key) cSort = { key, dir: -cSort.dir };
     // A count sorts biggest-first on the first press; a name sorts A→Z.
@@ -3576,12 +3983,14 @@
   const censusSlice = $derived(censusSorted.slice((censusPage - 1) * PAGE_SIZE, censusPage * PAGE_SIZE));
 
   /** 1 … 7 pages in full; beyond that the ends, the middle and a gap. */
+  /** @param {number} cur @param {number} total @returns {(number | string)[]} */
   function pageList(cur, total) {
     if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
     const s = new Set([1, total, cur, cur - 1, cur + 1]);
     if (cur <= 3) [2, 3, 4].forEach((x) => s.add(x));
     if (cur >= total - 2) [total - 1, total - 2, total - 3].forEach((x) => s.add(x));
     const l = [...s].filter((p) => p >= 1 && p <= total).sort((a, b) => cmpNum(a, b));
+    /** @type {(number | string)[]} */
     const out = [];
     l.forEach((p, i) => {
       if (i && p - l[i - 1] > 1) out.push('gap' + p);
@@ -3598,6 +4007,7 @@
    * range `parse_spot` reads — never wider than the chosen window, and never
    * older than the first unsettled month.
    */
+  /** @param {CensusRow} row */
   function shortSpan(row) {
     const open = row.months.filter((x) => x.k !== 'ok' && x.k !== 'beyond');
     if (open.length === 0) return null;
@@ -3617,6 +4027,7 @@
    * narrows is the WINDOW and the RUNG, which is real work saved, and the row
    * is what the outcome list is then built for.
    */
+  /** @param {CensusRow} row */
   async function pullRow(row) {
     if (phase === 'running') return;
     const span = shortSpan(row);
@@ -3636,13 +4047,37 @@
   let phase = $state('idle');
   let startedAt = $state(0);
   let finishedAt = $state(0);
-  let receipt = $state(null);
+  /**
+   * THE ONE THE CARD SHOWS. `rung` is added by `runPull` and is optional on the
+   * type for the same reason it is absent on `null`: the shape a request comes
+   * back with is the server's, and the rung it was sent for is this page's.
+   *
+   */
+  // ═══ WHY THESE THREE CARRY THE TYPE ON THE VALUE AND NOT ON THE `let` ═══
+  //
+  // A `@type` above the declaration states what the variable MAY hold. It does
+  // not state what it holds AT THIS POINT, and the checker tracks the second
+  // one: a `let` whose initialiser is `null` is narrowed to `null` for every
+  // read that the flow reaches without an assignment in between — which, at the
+  // top level of a component, is every `$derived(expr)` written below it.
+  // `baseline && live ? live.units : 0` then type-checks its own live branch
+  // against `never` and reports six errors about a field that is plainly there.
+  //
+  // Putting the type on the VALUE makes the initial flow type the union itself,
+  // so a `$derived` reading it sees what a reader sees. It matters for exactly
+  // the ones read from a top-level `$derived(…)` — a `$derived.by(() => …)` and
+  // the markup are function bodies, where the flow starts from the declared
+  // type again — but the three that need it are written the same way, because a
+  // rule that applies at some declarations and not others is one nobody can
+  // apply.
+  let receipt = $state(/** @type {(Receipt & { rung?: string }) | null} */ (null));
   /**
    * ONE RECEIPT PER REQUEST, because a run is now one request PER TICKED RUNG.
    * `receipt` stays the one the card renders — the first that came back bad, or
    * the last — and this is the list, so a run that answered three times is not
    * reported as if it answered once.
    */
+  /** @type {(Receipt & { rung: string })[]} */
   let receipts = $state([]);
   /** How far through the requests this run is. Counted, never estimated. */
   let sent = $state({ done: 0, of: 0, label: '' });
@@ -3652,16 +4087,20 @@
    * reporting a result about instruments nobody asked for in that press.
    */
   let askedKeys = $state(new Set());
+  /** @type {string | null} */
   let netError = $state(null);
   let aborted = $state(false);
+  /** @type {AbortController | null} */
   let controller = null;
 
   /** Where the store stood the moment the request left, and where it stands now. */
-  let baseline = $state(null);
-  let live = $state(null);
+  let baseline = $state(/** @type {StoreFold | null} */ (null));
+  let live = $state(/** @type {StoreFold | null} */ (null));
+  /** @type {string | null} */
   let pollError = $state(null);
   let lastGrowthAt = $state(0);
   /** {t, units, rows} samples, newest last. Bounded — only the tail is kept. */
+  /** @type {{ t: number, units: number, rows: number }[]} */
   let samples = $state([]);
 
   const elapsedMs = $derived(
@@ -3755,6 +4194,7 @@
     rungs: new Set(rungsChosen.map((r) => r.dir))
   });
 
+  /** @returns {Promise<StoreFold>} */
   async function snapshot() {
     await refreshStore();
     // REFUSED, NOT ZEROED. Every outcome on this page is a difference against
@@ -3775,6 +4215,7 @@
    * The awaited poll still cannot stack requests on top of each other; that
    * rule moved into the shared clock with the timer.
    */
+  /** @type {(() => void) | null} */
   let releaseWatch = null;
   /** The last landed read this page has already folded into `live`. */
   let seenRead = 0;
@@ -3795,10 +4236,20 @@
       if (state !== 'ready' || reads === seenRead) return;
       seenRead = reads;
       const shot = foldMonths(windowMonths, askScope);
+      // THE READING'S OWN CLOCK, AND IT IS A NUMBER ON THIS LINE.
+      //
+      // `store.at` is `null` until a read SUCCEEDS and `Date.now()` from that
+      // moment on — `$lib/store.svelte.js` sets it beside `state = 'ready'` and
+      // clears it beside every other state. The guard four lines up returned
+      // unless the state IS `ready`, so the null arm is unreachable here and
+      // the assertion records that argument where a reader can check it. A
+      // `?? 0` would be a different thing entirely: a default standing in for a
+      // measurement, which is the §4 shape.
+      const at = /** @type {number} */ (shot.at);
       pollError = null;
-      if (!live || shot.units > live.units || shot.rows > live.rows) lastGrowthAt = shot.at;
+      if (!live || shot.units > live.units || shot.rows > live.rows) lastGrowthAt = at;
       live = shot;
-      samples = [...samples, { t: shot.at, units: shot.units, rows: shot.rows }].slice(-12);
+      samples = [...samples, { t: at, units: shot.units, rows: shot.rows }].slice(-12);
     });
   });
 
@@ -3812,6 +4263,14 @@
    * as `textContent`, so a symbol carrying `&` — M&M, M&MFIN are real
    * instruments — is a string and never markup. Nothing on this page is ever
    * assigned through `innerHTML`.
+   */
+  /**
+   * @param {string} html
+   * @param {boolean} ok
+   * @param {number} status
+   * @param {string | null} ctype
+   * @param {string | null} marker
+   * @returns {Receipt}
    */
   function readReceipt(html, ok, status, ctype, marker) {
     // A PAGE IS NOT A RECEIPT. See `$lib/receipt.js`: the content-type is
@@ -3937,11 +4396,15 @@
    * decision about where it belongs, and burying it at the top would be the
    * fallback that hides the omission.
    */
+  /** @param {string} label */
   function groupRank(label) {
     return GROUP_RANK.get(label) ?? GROUP_ORDER.length;
   }
 
+  /** @type {OutcomeRow[]} */
   let outcomes = $state([]);
+  /** The prefix index — 1..`MAX_PREFIX` characters to the rows that start with them.
+   *  @type {Map<string, OutcomeRow[]>} */
   let outcomeIndex = new Map();
 
   function classifyBuild() {
@@ -3975,6 +4438,7 @@
       ? refused
       : (refused ?? (receipt && !receipt.good ? receipt.reason : null));
 
+    /** @type {OutcomeRow[]} */
     const rows = [];
     const seen = new Set();
     for (const m of members) {
@@ -4043,6 +4507,7 @@
     // O(1) PER KEYSTROKE, the same prefix index `$lib/index.svelte.js` uses.
     // Built once per run — O(n) and paid a single time — so the search box is a
     // Map probe rather than a scan of 750.
+    /** @type {Map<string, OutcomeRow[]>} */
     const next = new Map();
     for (const row of rows) {
       const s = row.symbol.toUpperCase();
@@ -4092,6 +4557,7 @@
   );
   /** Counts by group, off the same pass. `0` for a group no row is in. */
   const countOf = $derived(new Map(groups.map((g) => [g.group, g.count])));
+  /** @param {string} label */
   const countIn = (label) => countOf.get(label) ?? 0;
   /**
    * The instruments this window did not land for: named failures, wholesale
@@ -4172,6 +4638,7 @@
   });
 
   let q = $state('');
+  /** @type {string | null} */
   let pickedGroup = $state(null);
   let sortKey = $state('group');
   let sortDir = $state(1);
@@ -4199,6 +4666,7 @@
     return sorted;
   });
 
+  /** @param {string} key */
   function sortBy(key) {
     if (sortKey === key) sortDir = -sortDir;
     else {
@@ -4213,6 +4681,7 @@
   // ~93,776 census rows and a target list that grows with it. A spacer carries
   // the full height so the scrollbar is honest.
 
+  /** @type {HTMLDivElement | null} */
   let vEl = $state(null);
   let vTop = $state(0);
   let vH = $state(420);
@@ -4273,7 +4742,9 @@
   // upward when there is no room below, retracting with its rung, and the whole
   // keyboard.
 
+  /** @type {{ field: 'from' | 'to' | null, cursor: string, view: string, up: boolean }} */
   let cal = $state({ field: null, cursor: '', view: '', up: false });
+  /** @type {HTMLDivElement | null} */
   let calEl = $state(null);
 
   /** Tall enough for the header, six week rows and the footer. */
@@ -4316,6 +4787,7 @@
     calDays.every((d) => d.slice(0, 7) !== calView || dayBlock(d) !== null)
   );
 
+  /** @param {'from' | 'to'} field */
   function openCal(field) {
     if (cal.field === field) {
       cal = { ...cal, field: null };
@@ -4353,6 +4825,7 @@
    * reading `02 Sep 2024` over a window that starts in March, and the screen
    * would look right the whole time.
    */
+  /** @param {'from' | 'to'} field @param {string} isoDay */
   function setDay(field, isoDay) {
     if (field === 'from') {
       fromDay = isoDay;
@@ -4364,9 +4837,16 @@
     // A VALUE THAT TOOK CLEARS THE COMPLAINT ABOUT THE ONE THAT DID NOT.
     typedErr = { ...typedErr, [field]: null };
   }
+  /** @param {string} isoDay */
   function commit(isoDay) {
     if (dayBlock(isoDay)) return;
-    setDay(cal.field, isoDay);
+    // THE LATCH HOLDS A FIELD WHENEVER THIS RUNS. `commit` is reachable from
+    // the open panel and from nowhere else — `openCal` sets `cal.field` to one
+    // of the two names before the panel mounts, and `shutCal` clears it
+    // together with the button that calls this. The assertion records that
+    // argument; widening `setDay` instead would give it a third case it has no
+    // branch for, and `typedErr` no key to clear.
+    setDay(/** @type {'from' | 'to'} */ (cal.field), isoDay);
     showProblems = true;
     shutCal();
   }
@@ -4384,6 +4864,7 @@
    * be absurd. The feed's floor comes before the page's own, because it is the
    * fact the reader can act on.
    */
+  /** @param {string} isoDay */
   function dayBlock(isoDay) {
     if (dayNum(isoDay) > dayNum(maxDay)) {
       return `${dayLabel(isoDay)} is after ${dayLabel(maxDay)}. ${ceilReason}`;
@@ -4403,6 +4884,7 @@
    * error and must not be drawn as one; it is a day that will return no bars,
    * and the reader is owed that before he counts a shortfall.
    */
+  /** @param {string} isoDay */
   function dayNote(isoDay) {
     const ns = noSessionWhy(isoDay);
     const approx = holidaysKnownFor(isoDay)
@@ -4436,6 +4918,7 @@
    * The FEED's floor clamps it too, and that is deliberate: a cursor sitting on
    * a day this feed refuses is a cursor Enter cannot commit.
    */
+  /** @param {string} isoDay */
   function clampDay(isoDay) {
     if (!isValidIso(isoDay)) return maxDay;
     const lo = feedFloor.at && feedFloor.at > minDay ? feedFloor.at : minDay;
@@ -4443,10 +4926,12 @@
     if (dayNum(isoDay) > dayNum(maxDay)) return maxDay;
     return isoDay;
   }
+  /** @param {string} isoDay */
   function placeCursor(isoDay) {
     const at = clampDay(isoDay);
     cal = { ...cal, cursor: at, view: at.slice(0, 7) };
   }
+  /** @param {number} days */
   function moveCursor(days) {
     placeCursor(addDays(cal.cursor || maxDay, days));
   }
@@ -4465,14 +4950,17 @@
    * month he asked for, forty-two refusals each naming the feed, and the
    * footer's one line saying the same thing once.
    */
+  /** @param {string} ym */
   function clampView(ym) {
     if (ym < minMonth) return minMonth;
     if (ym > maxMonth) return maxMonth;
     return ym;
   }
+  /** @param {string} ym */
   function pickView(ym) {
     cal = { ...cal, view: clampView(ym) };
   }
+  /** @param {KeyboardEvent} e */
   function onCalKey(e) {
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -4483,7 +4971,13 @@
     // panel, so every keydown inside it arrives here — including the ones aimed
     // at the month and year <select>, where the block below would
     // preventDefault them and leave a select that cannot be walked.
-    if (e.target !== e.currentTarget && e.target?.tagName === 'SELECT') return;
+    if (e.target !== e.currentTarget && /** @type {Element | null} */ (e.target)?.tagName === 'SELECT')
+      return;
+    // KEYED BY THE KEY NAME, WHICH IS A STRING. The four names are the whole
+    // table and `e.key in map` is the membership test right below it; declaring
+    // the record is what lets the lookup on the next line be the same lookup
+    // the test just made.
+    /** @type {Record<string, number>} */
     const map = {
       ArrowLeft: -1,
       ArrowRight: 1,
@@ -4522,7 +5016,14 @@
   let enterOnOpen = false;
   $effect(() => {
     if (!cal.field || !calEl) return;
-    const el = calEl.querySelector(`[data-day="${cal.cursor}"]`);
+    // `HTMLElement`, BECAUSE THE THING BEING LOOKED FOR IS A BUTTON.
+    // `querySelector` promises only `Element`, which has no `focus` — and focus
+    // is the entire reason this effect exists. Every `[data-day]` node in the
+    // grid below is a `<button class="cday">`, so the narrowing is a statement
+    // about this page's own markup and not about the DOM in general.
+    const el = /** @type {HTMLElement | null} */ (
+      calEl.querySelector(`[data-day="${cal.cursor}"]`)
+    );
     // THE CURSOR IS NOT IN THE MONTH ON SCREEN — which happens the moment the
     // panel opens on a day a bound has since refused. Focus still has to enter
     // the panel or its keydown handler never fires and the picker is dead to
@@ -4557,6 +5058,7 @@
    * and `problems` would have nothing to complain about. The refusal
    * `parseDay` wrote is kept beside the characters that earned it.
    */
+  /** @param {'from' | 'to'} field @param {string} text */
   function typeDay(field, text) {
     const r = parseDay(text);
     if (field === 'from') {
@@ -4588,6 +5090,7 @@
    * month file — so the rungs are sent one after another and the card counts
    * them.
    */
+  /** @param {Event} [e] */
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
@@ -4595,6 +5098,10 @@
     await runPull(wireBodies, new Set(ticked.map((m) => m.key)));
   }
 
+  /**
+   * @param {{ dir: string, label: string, body: string }[]} bodies
+   * @param {Set<string>} asked
+   */
   async function runPull(bodies, asked) {
     if (bodies.length === 0 || phase === 'running') return;
 
@@ -4714,13 +5221,19 @@
 
   onMount(() => {
     const tick = setInterval(() => (nowMs = Date.now()), 500);
+    /** @param {PointerEvent} e */
     const away = (e) => {
-      if (cal.field && calEl && !calEl.contains(e.target) && !e.target.closest?.('.cal-open')) shutCal(false);
+      // THE PRESS LANDED ON AN ELEMENT. `EventTarget` is what the DOM types
+      // promise and `Element` is what a pointerdown in a document delivers;
+      // both reads below need the narrower one, and naming it once keeps the
+      // two tests reading the same value rather than asserting twice.
+      const t = /** @type {Element} */ (e.target);
+      if (cal.field && calEl && !calEl.contains(t) && !t.closest?.('.cal-open')) shutCal(false);
       // THE SAME PRESS CLOSES THE STRIP’S OWN MENU. `.dd` is the whole
       // control — the button and the panel it opens — so a press inside the
       // open one is not away, and a press on any other control, a Picker
       // included, is. One value, so two can never be open at once.
-      if (drop !== null && !e.target.closest?.('.dd')) drop = null;
+      if (drop !== null && !t.closest?.('.dd')) drop = null;
     };
     document.addEventListener('pointerdown', away, true);
     return () => {
@@ -5340,7 +5853,7 @@
                         : rungsChosen.map((r) => r.label).join(', ')}
                     rows={rungRows}
                     selected={rungSet}
-                    onchange={(sel) => {
+                    onchange={(/** @type {Set<string>} */ sel) => {
                       rungSet = sel;
                       // FROM HERE THE TIMEFRAME IS HIS, and the default stops
                       // following the feed. See `rungTouched`.
@@ -6739,18 +7252,26 @@
         // the expired contracts are exactly what the bought CSVs hold. See
         // `segServed`.
         //
-        // `skipBulk` IS THE PART THAT WAS MISSING. `POST /pull/fno` parses a
-        // request in full and then answers 503 — "expired F&O has no
-        // local-archive path and no HTTP transport in this build" — so a bulk
-        // action that ticked these picked a refusal nobody chose, which is the
-        // same defect the timeframe control had on Dhan. The row stays
-        // individually clickable for an operator who means it.
-        skipBulk: s.short !== null,
+        // AND NOT `skipBulk` EITHER — the operator's rule, 15 Aug 2026, after
+        // watching the control tick one box under a button that says three.
+        //
+        // It WAS `skipBulk: s.short !== null`, so "Select all 3" skipped the
+        // two segments that answer 503 today. The reasoning was the timeframe
+        // control's — do not pick a refusal on somebody's behalf — and it does
+        // not carry here, for a reason the label makes plain: a button that
+        // says "Select all 3" and selects one is not protecting anyone, it is
+        // lying about what it did. The rung case had no such promise on its
+        // face.
+        //
+        // The refusal is not hidden by this. Each row still carries `why` on
+        // its own face, the receipt still names the 503, and a segment whose
+        // transport lands stops refusing without this line changing.
+        skipBulk: false,
         why: s.short,
         title: s.why
       }))}
       selected={segSet}
-      onchange={(sel) => (segSet = sel)}
+      onchange={(/** @type {Set<string>} */ sel) => (segSet = sel)}
     />
     <span
       class="pknote"
