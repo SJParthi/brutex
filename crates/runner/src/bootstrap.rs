@@ -629,6 +629,72 @@ mod tests {
     }
 
     #[test]
+    fn the_spa_statistic_is_hansens_scale_and_not_root_n_times_it() {
+        // THE FIX FOR THIS HAD NO DETECTING COVERAGE. An independent audit
+        // reverted the whole SPA correction -- `root_n` restored, both `max(.,0)`
+        // floors deleted -- and the suite stayed at 185 passed, 0 failed. A fix
+        // nothing can fail is not a fix, it is a hope with a commit message.
+        //
+        // Hansen's statistic is `sqrt(n) * mean / sigma`, and `summarise` sets
+        // `standard_error = sqrt(variance / n)` = `sigma / sqrt(n)`. So the
+        // statistic IS `mean / standard_error` and multiplying by `root_n`
+        // first gives `n * mean / sigma` -- too large by exactly `sqrt(n)`,
+        // growing without bound in the sample size.
+        //
+        // That is the scale this pins. One strategy, so the max is that
+        // strategy, and the expected value is computed here from the series
+        // rather than copied from a run.
+        let series = edged(400, 11, 40);
+        let n = series.len();
+        let mean = series.iter().fold(0.0_f64, |a, &x| a + x as f64) / n as f64;
+        let variance = series
+            .iter()
+            .fold(0.0_f64, |a, &x| a + (x as f64 - mean).powi(2))
+            / (n as f64 - 1.0);
+        let expected = mean / (variance / n as f64).sqrt();
+        assert!(
+            expected > 1.0,
+            "the fixture must have a real edge or the scale test is degenerate"
+        );
+
+        let v = spa(&[series], 200, 5, DEFAULT_BLOCK).expect("a verdict");
+        let ratio = v.statistic / expected;
+        assert!(
+            (ratio - 1.0).abs() < 1e-9,
+            "SPA reported {} where Hansen's statistic is {expected}; ratio {ratio}. \
+             A ratio near sqrt(n) = {} is the root_n inflation returning",
+            v.statistic,
+            (n as f64).sqrt()
+        );
+    }
+
+    #[test]
+    fn the_spa_statistic_is_floored_at_zero_on_a_hopeless_set() {
+        // The other half of the same revert: Hansen's `T_SPA = max_k max(., 0)`.
+        // Without the floor a set where every strategy loses reports a NEGATIVE
+        // statistic, which the test does not define. A verdict printing a
+        // negative statistic beside a p-value is a number that looks like a
+        // measurement and is not one.
+        let losing: Vec<Vec<i64>> = (0..4).map(|s| edged(300, 40 + s, -80)).collect();
+        let v = spa(&losing, 200, 5, DEFAULT_BLOCK).expect("a verdict");
+        assert!(
+            v.statistic >= 0.0,
+            "SPA reported a negative statistic {}; Hansen's T_SPA is floored at zero",
+            v.statistic
+        );
+        // And the floor must not have been applied to the observed statistic
+        // alone: if the draws were left unfloored their maximum would sit below
+        // an observed zero on nearly every draw, driving the p-value to zero and
+        // calling a set of pure losers significant.
+        assert!(
+            v.p_value > 0.05,
+            "a set in which every strategy loses cleared 5%: p = {}. The floor is \
+             on the observed statistic but not on the bootstrap draws",
+            v.p_value
+        );
+    }
+
+    #[test]
     fn the_same_seed_gives_the_same_p_value_every_time() {
         // CLAUDE.md section 3 rule 5. A resampling test seeded from the clock
         // would make a rerun disagree with the run it repeats, which is the
