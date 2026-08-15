@@ -180,7 +180,7 @@ impl Validated {
 ///
 /// Whatever it drops is counted in [`Validated::not_considered`] and never
 /// silently discarded.
-pub const DEFAULT_CANDIDATES: usize = 512;
+pub const DEFAULT_CANDIDATES: usize = 20_000;
 
 /// How many rungs each exit ladder gets when a fold picks its exit.
 ///
