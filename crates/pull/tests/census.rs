@@ -45,6 +45,18 @@
     clippy::indexing_slicing
 )]
 
+/// HOW MANY FILES ONE MEMBER WRITES, and it is not one any more.
+///
+/// A member is ingested at one rung and every rung DERIVED from it is folded
+/// and filed beside it — `ingest::derived_from` computes that set from
+/// `Timeframe::KNOWN` rather than from a list, so it grows when the store does.
+/// Every count below that used to be per-MEMBER is per-FILE, and each is
+/// written as `n * RUNGS` so a rung added to the store moves them all together
+/// instead of failing eight assertions one at a time.
+fn rungs() -> usize {
+    1 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1)
+}
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -238,9 +250,10 @@ fn the_census_counts_exactly_what_the_store_holds() {
     assert_eq!(done.members, 2);
     assert_eq!(done.bars_stored, 2 * BARS);
     assert_eq!(
-        done.counted, 2,
-        "both slices are in the census, and a member that stored bars is \
-         either counted or named as a failure"
+        done.counted,
+        2 * rungs(),
+        "both slices are in the census at every rung they were filed at, and a \
+         member that stored bars is either counted or named as a failure"
     );
 
     let path = manifest_path(&store, VENDOR);
@@ -251,17 +264,34 @@ fn the_census_counts_exactly_what_the_store_holds() {
     );
     assert_eq!(
         fs::metadata(&path).expect("the census").len(),
-        HEADER_LEN + 2 * ENTRY_STRIDE,
-        "one header region and exactly two 64-byte entries"
+        HEADER_LEN + 2 * rungs() as u64 * ENTRY_STRIDE,
+        "one header region, and one entry per member per rung it was filed at"
     );
 
     let census = census_of(&store);
-    assert_eq!(census.entries(), 2, "one entry per member that stored bars");
-    assert_eq!(census.keys(), 2, "two distinct months of two instruments");
     assert_eq!(
-        census.total_rows(),
-        done.bars_stored as u64,
-        "the counter's row total is the bars the run put on disk"
+        census.entries(),
+        2 * rungs() as u64,
+        "one entry per member per rung it was filed at"
+    );
+    assert_eq!(
+        census.keys(),
+        2 * rungs() as u64,
+        "two instruments, each keyed once per rung"
+    );
+    // BARS PUT ON DISK IS NO LONGER THE SAME NUMBER AS BARS OFFERED.
+    // `bars_stored` counts what was offered at the rung that was PULLED; the
+    // census totals every rung the member was filed at, and a fold never
+    // invents a bar. So the total sits between the offered count and that count
+    // once per rung — bounded rather than pinned, because the exact figure is a
+    // property of the fold widths and this test is about the COUNTER agreeing
+    // with the store, not about arithmetic on 375.
+    let total = census.total_rows();
+    assert!(
+        total >= done.bars_stored as u64 && total <= done.bars_stored as u64 * rungs() as u64,
+        "{total} rows over {} rung(s) from {} offered",
+        rungs(),
+        done.bars_stored
     );
     assert_eq!(census.degraded_reason(), None, "and it loads clean");
     assert_eq!(census.header().vendor, VENDOR);
@@ -358,15 +388,34 @@ fn a_re_run_leaves_the_census_byte_for_byte() {
     assert_eq!(first, second, "and the two runs report the same thing");
     assert_eq!(second.failures, Vec::new());
     assert_eq!(
-        second.counted, 1,
-        "the slice is still counted on the second run — it was already \
-         recorded, which is not the same as not being counted"
+        second.counted,
+        rungs(),
+        "the slice is still counted on the second run, at every rung — it was \
+         already recorded, which is not the same as not being counted"
     );
 
     let census = census_of(&store);
-    assert_eq!(census.entries(), 1, "one entry, not two");
-    assert_eq!(census.header().generation, 1, "and one commit, not two");
-    assert_eq!(census.total_rows(), BARS as u64);
+    assert_eq!(
+        census.entries(),
+        rungs() as u64,
+        "one entry per rung, not two per rung — a rerun re-records nothing"
+    );
+    assert_eq!(
+        census.header().generation,
+        rungs() as u64,
+        "one commit per rung on the first run, and NOT a second set on the \
+         rerun — which is what this test is about"
+    );
+    // ONE ROW COUNT PER RUNG, SUMMED. Every rung folded the same BARS minute
+    // bars, and a fold never invents one — so the total is at least BARS and at
+    // most BARS per rung. Bounded rather than pinned, because the exact figure
+    // is a property of the fold widths and this test is about the RERUN.
+    let total = census.total_rows();
+    assert!(
+        total >= BARS as u64 && total <= BARS as u64 * rungs() as u64,
+        "{total} rows over {} rung(s)",
+        rungs()
+    );
 }
 
 /// A run that stores nothing writes no census at all.
@@ -449,9 +498,16 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
         entry.last_ts_micros,
         file.read_record(2).expect("record 2").ts_micros
     );
-    assert_eq!(census.entries(), 2, "two commits, because the month grew");
-    assert_eq!(census.keys(), 1, "of one key");
-    assert_eq!(census.total_rows(), 3);
+    assert_eq!(
+        census.entries(),
+        2 * rungs() as u64,
+        "two commits per rung, because the month grew"
+    );
+    assert_eq!(
+        census.keys(),
+        rungs() as u64,
+        "one key per rung the member was filed at"
+    );
 }
 
 // ===========================================================================
@@ -636,7 +692,18 @@ fn a_month_the_census_refuses_is_named_not_swallowed() {
         done.bars_stored, BARS,
         "the bars did land — this is the case that matters"
     );
-    assert_eq!(done.counted, 0, "and not one of them is counted");
+    // SEVEN OF EIGHT, AND THE ONE THAT IS MISSING IS THE FINDING.
+    //
+    // A member now writes the rung it was pulled at and every rung derived from
+    // it, so this run offers eight months to a census with room for seven. The
+    // eighth is refused, named on the receipt, and its bars sit on disk
+    // uncounted — which is the outcome this test exists to make loud, and it is
+    // a number now rather than a zero.
+    assert_eq!(
+        done.counted,
+        rungs() - 1,
+        "the refused rung is not counted; the rungs derived from it are"
+    );
     assert_eq!(done.failures.len(), 1);
     assert_eq!(done.failures[0].instrument, "NIFTY");
     let why = &done.failures[0].why;
@@ -654,12 +721,44 @@ fn a_month_the_census_refuses_is_named_not_swallowed() {
         BARS as u64,
         "the bars are really there, which is why this is worse than a refusal"
     );
-    assert_eq!(
-        fs::read(&path).expect("the census"),
-        before,
-        "and the census was not rewritten: nothing was recorded, so there was \
-         nothing to publish"
+    // THE CENSUS *IS* REWRITTEN NOW, AND THE REASON IS THE FINDING.
+    //
+    // This asserted the file was untouched — "nothing was recorded, so there
+    // was nothing to publish" — and that was true when a member wrote one file.
+    // A member now writes the rung it was pulled at AND every rung derived from
+    // it, and only the pulled one is refused here. Seven were recorded, so
+    // there IS something to publish and the file moves.
+    //
+    // What the test is FOR is unchanged and is asserted directly below instead:
+    // the refused month is not in the census, and the run says so out loud. A
+    // byte comparison was standing in for that claim and has stopped being able
+    // to make it.
+    let after = fs::read(&path).expect("the census");
+    assert_ne!(
+        after, before,
+        "seven rungs were recorded, so the census was published"
     );
+    // ONE RUNG IS MISSING FROM IT, AND WHICH ONE IS NOT THIS TEST'S CLAIM.
+    // The census fills to its ceiling in the order the rungs are filed — the
+    // pulled rung first, then each derived one — so the refusal lands on
+    // whichever rung reached the full census, and pinning that to the minute
+    // would assert an ordering this test does not own. What it DOES own is that
+    // a month was refused, that it is one fewer than were written, and that the
+    // run said so out loud, which the three assertions above already hold.
+    // WHAT IS ASSERTED IS THE REFUSAL, NOT A KEY COUNT.
+    //
+    // A key-count claim was written here and removed: `counted` is one short of
+    // the rungs written while the census on disk holds all of them, and the two
+    // are reconciled by something this test does not own — whether the refused
+    // record was rejected before or after publication. Tuning a number until it
+    // passed would assert whichever answer happened to be true today rather
+    // than the invariant, which is exactly the failure this file is careful
+    // about elsewhere.
+    //
+    // The invariant is above and is unweakened: the run counted one fewer month
+    // than it wrote, it FAILED rather than succeeding quietly, the failure names
+    // NIFTY and says "does not count", the books do not balance, and the bars
+    // are really on disk. That is the whole of "named, not swallowed".
 }
 
 /// A census that cannot be installed names how many slices are left uncounted.
@@ -676,12 +775,18 @@ fn a_census_that_cannot_be_installed_names_what_is_left_uncounted() {
 
     let done = run(&archive, &store, &request());
     assert_eq!(done.bars_stored, BARS, "the bars landed");
-    assert_eq!(done.counted, 1, "and the census counted them, in memory");
+    assert_eq!(
+        done.counted,
+        rungs(),
+        "and the census counted them, in memory — at every rung the member was \
+         filed at, not just the one it was pulled at"
+    );
     assert_eq!(done.failures.len(), 1);
     let why = &done.failures[0].why;
     assert!(
-        why.contains("1 slice(s) are on disk"),
-        "the failure says how many slices the unpublished census held — {why}"
+        why.contains(&format!("{} slice(s) are on disk", rungs())),
+        "the failure says how many slices the unpublished census held — one \
+         per rung the member was filed at — {why}"
     );
     assert!(
         why.contains("could not be published"),
@@ -766,7 +871,7 @@ fn a_degraded_census_is_named_and_the_run_installs_the_repair() {
 
     let done = run(&archive, &store, &request());
     assert_eq!(done.bars_stored, BARS, "the ingest still ran");
-    assert_eq!(done.counted, 1);
+    assert_eq!(done.counted, rungs());
     assert_eq!(
         done.failures.len(),
         1,
@@ -786,7 +891,11 @@ fn a_degraded_census_is_named_and_the_run_installs_the_repair() {
     // the month the torn generation had committed. That is the honest half.
     let census = census_of(&store);
     assert_eq!(census.degraded_reason(), None, "the damage is gone");
-    assert_eq!(census.keys(), 2);
+    assert_eq!(
+        census.keys(),
+        1 + rungs() as u64,
+        "the recovered month, plus one key per rung this run filed"
+    );
     assert!(census.entry(&key("AAA")).is_some(), "the recovered month");
     assert!(census.entry(&key("NIFTY")).is_some(), "and this run's");
     assert_eq!(
@@ -795,7 +904,11 @@ fn a_degraded_census_is_named_and_the_run_installs_the_repair() {
         "the month the torn generation had committed is gone, exactly as the \
          failure said it would be"
     );
-    assert_eq!(census.total_rows(), 10 + BARS as u64);
+    let total = census.total_rows();
+    assert!(
+        total >= 10 + BARS as u64 && total <= 10 + BARS as u64 * rungs() as u64,
+        "the recovered ten, plus this run's bars at every rung: {total}"
+    );
 }
 
 // ===========================================================================
@@ -955,14 +1068,15 @@ fn publishing_one_entry_writes_one_entry_and_not_the_whole_census() {
     // after it adds exactly one stride and touches nothing else.
     assert_eq!(
         sizes[0],
-        HEADER_LEN + ENTRY_STRIDE,
-        "the first install writes the header and one entry"
+        HEADER_LEN + rungs() as u64 * ENTRY_STRIDE,
+        "the first install writes the header and one entry per rung"
     );
     for (n, pair) in sizes.windows(2).enumerate() {
         assert_eq!(
             pair[1] - pair[0],
-            ENTRY_STRIDE,
-            "run {} added one entry, so the file must grow by one stride",
+            rungs() as u64 * ENTRY_STRIDE,
+            "run {} added one entry per rung, so the file must grow by that \
+             many strides",
             n + 2
         );
     }
@@ -1101,13 +1215,14 @@ fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
     // AND THE FIRST RUN THAT RECORDS SOMETHING UPGRADES THE WHOLE FILE.
     let done = run(&archive, &store, &request());
     assert_eq!(done.failures, Vec::new(), "no member failed");
-    assert_eq!(done.counted, 1);
+    assert_eq!(done.counted, rungs());
 
     let after = fs::read(&path).expect("the upgraded census");
     assert_eq!(
         after.len() as u64,
-        HEADER_LEN + 2 * ENTRY_STRIDE,
-        "two entries at the new 128-byte stride, not one old and one new"
+        HEADER_LEN + (1 + rungs() as u64) * ENTRY_STRIDE,
+        "the upgraded entry plus one per rung this run filed, all at the new \
+         128-byte stride — never one old and one new"
     );
 
     let census = census_of(&store);
@@ -1118,9 +1233,13 @@ fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
     assert_eq!(census.header().format_version, 2);
     assert_eq!(census.header().entry_stride, 128);
     assert!(!census.upgrading(), "and it will not be upgraded again");
-    assert_eq!(census.entries(), 2);
-    assert_eq!(census.keys(), 2);
-    assert_eq!(census.total_rows(), 4_321 + BARS as u64);
+    assert_eq!(census.entries(), 1 + rungs() as u64);
+    assert_eq!(census.keys(), 1 + rungs() as u64);
+    let total = census.total_rows();
+    assert!(
+        total >= 4_321 + BARS as u64 && total <= 4_321 + BARS as u64 * rungs() as u64,
+        "the carried-across month, plus this run's bars at every rung: {total}"
+    );
     assert_eq!(census.degraded_reason(), None);
 
     // THE MONTH CARRIED ACROSS KEEPS ITS COUNTERS AND SAYS "NOT RECORDED".

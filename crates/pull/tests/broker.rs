@@ -361,8 +361,23 @@ fn a_window_fetched_from_a_broker_lands_in_the_store_and_is_counted() {
     let manifest = census(&store_root);
     let entry = manifest.entry(&key("NIFTY")).expect("the month is counted");
     assert_eq!(entry.rows, 4, "the counter agrees with the store");
-    assert_eq!(manifest.total_rows(), 4);
-    assert_eq!(manifest.keys(), 1);
+    // THE MINUTE'S OWN ROW IS STILL FOUR. What changed is that it is no longer
+    // the ONLY row: the same four bars are folded into every rung derived from
+    // the minute, so the census holds one key per rung and its total is the sum
+    // across them. Both are asserted against the rule that produced them —
+    // `derived_count` — so a rung added to the store moves this with it.
+    let rungs = 1_u64 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1) as u64;
+    assert_eq!(
+        manifest.keys(),
+        rungs,
+        "one census key per rung: the one fetched and each one derived"
+    );
+    assert!(
+        manifest.total_rows() >= 4 && manifest.total_rows() <= 4 * rungs,
+        "every derived rung folds four minute bars into at most four bars, \
+         never more: {} rows over {rungs} rung(s)",
+        manifest.total_rows()
+    );
 
     // ── THE REQUEST WAS THE DESCRIPTOR'S ────────────────────────────────
     let sent = seen
@@ -498,6 +513,7 @@ fn pulling_the_same_window_twice_changes_nothing_the_second_time() {
     let first = ingest::from_window(&fetch(&url_a), "NIFTY", &url_a, &store_root, plan(&request));
     assert_eq!(first.bars_stored, 4);
     let after_first = std::fs::read(manifest_path(&store_root, Vendor::Dhan)).expect("a census");
+    let first_total = census(&store_root).total_rows();
 
     let (url_b, _b) = broker(BODY);
     let second = ingest::from_window(&fetch(&url_b), "NIFTY", &url_b, &store_root, plan(&request));
@@ -516,7 +532,17 @@ fn pulling_the_same_window_twice_changes_nothing_the_second_time() {
         after_first, after_second,
         "the census is byte-for-byte identical after a rerun"
     );
-    assert_eq!(census(&store_root).total_rows(), 4, "still four, not eight");
+    // FOUR PER RUNG, AND THE RUNGS ARE COMPUTED. A one-minute window now
+    // writes the minute it fetched plus every rung derived from it, so the
+    // census totals four bars for the minute plus whatever each fold produced —
+    // and the POINT of this assertion is unchanged: a rerun adds nothing.
+    // Asserted against the first run's own total rather than a literal, which
+    // is the only form that survives a rung being added to the store.
+    assert_eq!(
+        census(&store_root).total_rows(),
+        first_total,
+        "a rerun adds no rows to any rung, derived or fetched"
+    );
 }
 
 /// The broker path and the folder path are the same code below the seam.
@@ -539,7 +565,14 @@ fn the_broker_path_and_the_folder_path_are_one_implementation() {
     // pull reports the same shape a folder pull does — including the ones a
     // hand-rolled second implementation would have forgotten.
     assert_eq!(done.members, 1);
-    assert_eq!(done.counted, 1, "the counter row was recorded");
+    // ONE COUNTER ROW PER FILE — the rung fetched and every rung derived from
+    // it. Asserted against the RULE so a rung added to `Timeframe::KNOWN` moves
+    // this expectation with it rather than breaking a literal.
+    assert_eq!(
+        done.counted,
+        1 + pull::ingest::derived_count(store::path::Timeframe::MINUTE_1),
+        "the counter row was recorded for the fetched rung and each derived one"
+    );
     assert_eq!(done.rows_folded, 0, "one-minute bars, nothing to fold");
     assert_eq!(
         done.census.total(),

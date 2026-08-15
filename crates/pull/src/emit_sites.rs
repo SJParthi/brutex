@@ -304,6 +304,17 @@ enum Says {
     /// allowance — and that distinction is worth asserting rather than
     /// stepping around.
     Signs(i64),
+    /// The field is an integer and is **strictly positive**.
+    ///
+    /// For a count whose exact value is a consequence of a RULE rather than a
+    /// constant. `census image built` says how many entries the image holds,
+    /// and a member now writes one file per rung derived from the one it
+    /// pulled — a set `ingest::derived_from` computes from `Timeframe::KNOWN`.
+    /// Pinning that to a literal would make a rung added to the store fail this
+    /// site for having done exactly what it was added to do, while pinning it to
+    /// zero-or-more would let a census that imaged nothing pass. Positive is the
+    /// claim that survives both.
+    Positive,
     /// The field is a flag and is exactly this.
     Flags(bool),
 }
@@ -314,6 +325,7 @@ impl Says {
         match self {
             Self::Holds(want) => value.as_str().is_some_and(|got| got.contains(want)),
             Self::Signs(want) => value.as_i64() == Some(want),
+            Self::Positive => value.as_i64().is_some_and(|got| got > 0),
             Self::Flags(want) => value.as_bool() == Some(want),
         }
     }
@@ -405,7 +417,7 @@ static SITES: &[Site] = &[
         at: "crates/pull/src/manifest.rs:3036",
         target: "pull.manifest",
         message: "census image built",
-        says: ("entries", Says::Signs(1)),
+        says: ("entries", Says::Positive),
         drive: drive_census_imaged,
     },
     Site {
@@ -618,7 +630,24 @@ fn drive_census_imaged(scratch: &Scratch) {
         Vec::new(),
         "no member failed, so the census this run images is a real one"
     );
-    assert_eq!(done.counted, 1, "one instrument-month reached the counter");
+    // EIGHT, NOT ONE, AND THE EIGHT ARE THE POINT. This asserted one — the
+    // rung that was pulled — and a one-minute member now writes that rung plus
+    // every rung derived from it: `crate::ingest::derived_from` answers the set
+    // from `Timeframe::KNOWN` rather than from a list, so it is 2, 3, 5, 10, 15,
+    // 30 and 60 minutes today and whatever the store ships tomorrow.
+    //
+    // Asserted against the RULE rather than against 8, so a rung added to the
+    // store moves this test's expectation with it instead of breaking it.
+    let derived = crate::ingest::derived_count(store::path::Timeframe::MINUTE_1);
+    assert_eq!(
+        done.counted,
+        1 + derived,
+        "the pulled rung and every rung derived from it each reach the counter"
+    );
+    assert_eq!(
+        done.derived_files, derived,
+        "and the receipt says how many were built rather than fetched"
+    );
 }
 
 /// A CSV body of three rows in the shape it was written in.

@@ -905,6 +905,7 @@ fn a_run_balances_only_when_every_row_is_accounted_for() {
     census.count(DropReason::AfterWindow);
 
     let balanced = Ingested {
+        derived_files: 0,
         members: 1,
         rows_read: 5,
         bars_stored: 3,

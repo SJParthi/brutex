@@ -185,6 +185,17 @@ pub struct Ingested {
     pub rows_read: usize,
     /// Bars written to the store.
     pub bars_stored: usize,
+    /// Month files written for a rung NOBODY ASKED FOR, folded from the minute
+    /// bars this run landed.
+    ///
+    /// A one-minute pull writes eight files per member: the minute it was asked
+    /// for and the seven coarser rungs derived from it. This counts the seven,
+    /// so a receipt can say what a run built as well as what it fetched — and
+    /// so `bars_stored` is never mistaken for the number of bars a vendor sent.
+    ///
+    /// Zero on every rung that is not the minute, because nothing is derived
+    /// from a day and nothing is derived from a second.
+    pub derived_files: usize,
     /// Rows folded into a bar that was already open.
     ///
     /// **Consumed, not discarded, and not bars.** Both archive vendors ship
@@ -228,6 +239,10 @@ impl Ingested {
         self.members += other.members;
         self.rows_read += other.rows_read;
         self.bars_stored += other.bars_stored;
+        // A FIELD ADDED TO THE RECEIPT AND NOT TO THIS LINE IS A COUNT THAT
+        // SILENTLY RESETS on every window after the first — the whole reason
+        // `absorb` exists is that a run is many calls and the receipt is one.
+        self.derived_files += other.derived_files;
         self.rows_folded += other.rows_folded;
         self.counted += other.counted;
         self.census.absorb(other.census);
@@ -457,6 +472,23 @@ fn note_not_landed(member: &Member, why: &str) {
     );
 }
 
+/// A DERIVED RUNG THAT WOULD NOT FILE, at `warn` and never silently.
+///
+/// The minute bars are already committed when this fires, so the member did not
+/// fail — a copy of it did. That distinction is the whole reason this is a log
+/// line rather than a `Failure` on the receipt: a run that stored every minute
+/// it was asked for and could not fold one of them into thirty is not a run
+/// that failed, and reporting it as one would send an operator to re-pull data
+/// he already has. `CLAUDE.md` §4 still requires it NAMED, which is this.
+fn note_not_derived(instrument: &str, rung: Timeframe, why: &str) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("pull.derive", "rung not derived")
+            .with("instrument", telemetry::Value::Str(instrument))
+            .with("timeframe", telemetry::Value::Str(rung.as_str()))
+            .with("why", telemetry::Value::Str(why)),
+    );
+}
+
 /// [`from_members`]'s body, split only so the two `note_*` helpers can sit
 /// beside it rather than between its documentation and its signature.
 fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> Ingested {
@@ -558,7 +590,13 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                         done.census.count(reason);
                     }
                 }
-                if let Some(held) = landed.entry {
+                // ONE COUNT PER FILE THIS MEMBER WROTE — the rung that was
+                // pulled and every rung derived from it. A derived bar with no
+                // census row is a bar `/store.json` cannot see, which is the
+                // store disagreeing with its own counter in the direction that
+                // makes a later run refetch a month already on disk.
+                done.derived_files += landed.derived;
+                for held in landed.entries {
                     match count(&mut census, held) {
                         Ok(changed) => {
                             done.counted += 1;
@@ -735,8 +773,18 @@ struct Landed {
     folded: usize,
     /// Why rows were declined.
     census: DropCensus,
-    /// The counter row for the month file, `None` when nothing was stored.
-    entry: Option<Held>,
+    /// The counter rows for every month file this member wrote — one for the
+    /// rung that was pulled, and one for each rung DERIVED from it.
+    ///
+    /// Empty when nothing was stored. A `Vec` rather than an `Option` because
+    /// a one-minute member now writes eight files: the minute it was asked for
+    /// and the seven coarser rungs folded from it. Each needs its own census
+    /// row, keyed on its own timeframe — without one, the bars are on disk and
+    /// `/store.json` cannot see them, which is the store disagreeing with its
+    /// own counter.
+    entries: Vec<Held>,
+    /// How many of `entries` were derived rather than pulled.
+    derived: usize,
 }
 
 /// The month's two closes, when the batch just appended **is** the whole file.
@@ -864,7 +912,8 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             bars: 0,
             folded: 0,
             census: landed.census,
-            entry: None,
+            entries: Vec::new(),
+            derived: 0,
         });
     }
 
@@ -906,50 +955,19 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             bars: 0,
             folded,
             census: landed.census,
-            entry: None,
+            entries: Vec::new(),
+            derived: 0,
         });
     };
-    let at = crate::session::IstMoment::from_epoch_secs(first.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let ym = at.day().year_month().map_err(|why| why.to_string())?;
-    let end = crate::session::IstMoment::from_epoch_secs(last.ts_micros.div_euclid(1_000_000))
-        .map_err(|why| why.to_string())?;
-    let end_ym = end.day().year_month().map_err(|why| why.to_string())?;
-    if end_ym != ym {
-        return Err(format!(
-            "bars span {ym} to {end_ym}; the store addresses one month per \
-             file and splitting is the caller's decision, not this one's"
-        ));
-    }
-
-    let symbol = brutex_core::symbol::Symbol::new(&member.instrument)
-        .map_err(|why| format!("{}: {why}", member.instrument))?;
-
-    // THE VENUE IS PARSED BEFORE THE BAR FILE IS OPENED, and that order is the
-    // point. `StorePath` accepts any upper-case segment, so a plan naming one
-    // the census cannot key would write bars under a directory `/store` can
-    // never report on. Refusing here means such a member stores nothing,
-    // rather than storing bars nobody counts.
-    let exchange = Exchange::parse(exchange)
-        .map_err(|why| format!("{}: exchange {exchange:?}: {why}", member.instrument))?;
-    let segment = Segment::parse(segment)
-        .map_err(|why| format!("{}: segment {segment:?}: {why}", member.instrument))?;
-
-    // The symbol id is a CROSS-CHECK the store stamps into the header and
-    // verifies on every reopen -- never the index, which is arithmetic. Derived
-    // from the name so the same instrument always yields the same id, because a
-    // counter would give a different one on a rerun and CLAUDE.md §3 rule 5
-    // requires the same inputs to give the same bytes.
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the id is a CROSS-CHECK the store stamps in the header and \
-                  verifies on reopen, never an index — any 32 bits of the hash \
-                  serve, and taking the low half of a 64-bit FNV-1a is the \
-                  standard folding. Derived from the name so a rerun yields the \
-                  same id; a counter would not, and CLAUDE.md §3 rule 5 requires \
-                  the same inputs to give the same bytes."
-    )]
-    let symbol_id = brutex_core::universe::fnv1a(symbol.as_str()) as u32;
+    // THE MONTH, AND THE REFUSAL IF THE BARS CROSS ONE. See `month_of`.
+    let ym = month_of(first, last)?;
+    // THE MEMBER'S IDENTITY, PARSED BEFORE ANY FILE IS OPENED. See `identify`.
+    let Identity {
+        symbol,
+        exchange,
+        segment,
+        symbol_id,
+    } = identify(&member.instrument, exchange, segment)?;
 
     // THE PATH IS RENDERED FROM THE VALUES THE KEY IS BUILT FROM, not from the
     // plan's strings a second time. `exchange.as_str()` is the parsed
@@ -973,45 +991,328 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         month: ym,
         file: FileKind::Bars,
     };
-    let path = StorePath::new(parts).map_err(|why| format!("{}: {why}", member.instrument))?;
+    let mut entries = vec![
+        write_and_count(
+            &landed.bars,
+            store_root,
+            symbol_id,
+            parts,
+            EntryKey {
+                exchange,
+                segment,
+                symbol,
+                timeframe,
+                month: ym,
+            },
+        )
+        .map_err(|why| format!("{}: {why}", member.instrument))?,
+    ];
 
-    let mut file =
-        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
-    file.append(&landed.bars).map_err(|why| why.to_string())?;
+    // THE SEVEN THAT WERE NEVER PULLED. Split into its own function only to
+    // stay under clippy's 100-line ceiling for `one`; the argument for it is
+    // there.
+    // NO `if timeframe == MINUTE_1` GATE. Whatever rung was pulled, everything
+    // derivable FROM it is derived — the rule decides, not a condition here. A
+    // daily pull derives nothing because nothing coarser is a whole multiple of
+    // it that is not itself the day; a one-second pull would derive the whole
+    // ladder the day `Timeframe::KNOWN` gains a second. Neither case needs a
+    // line changed. See `derived_from`.
+    derive_all(
+        &landed.bars,
+        &member.instrument,
+        store_root,
+        symbol_id,
+        timeframe,
+        DeriveInto {
+            vendor,
+            exchange,
+            segment,
+            symbol,
+            month: ym,
+        },
+        &mut entries,
+    );
 
-    // THE COUNTER ROW DESCRIBES THE FILE, NOT THE BATCH. Read back off the
-    // header the append just committed, so a second window into a month that
-    // already held bars records the whole month rather than the suffix that
-    // was offered — and an `AlreadyPresent` append records what is there
-    // rather than counting it twice.
-    let header = file.header();
-
-    // THE CLOSES DESCRIBE THE FILE TOO. Free when the batch is the whole file —
-    // three header comparisons and no read — and two O(1) positional reads when
-    // it is not. See `closes_in_hand` for why the second case cannot be skipped.
-    let closes = month_closes(&file, &header, &landed.bars)
-        .map_err(|why| format!("{}: {why}", member.instrument))?;
-
+    let derived = entries.len().saturating_sub(1);
     Ok(Landed {
         bars: landed.bars.len(),
         folded,
         census: landed.census,
-        entry: Some(Held::new(
-            Entry {
-                key: EntryKey {
-                    exchange,
-                    segment,
-                    symbol,
-                    timeframe,
-                    month: ym,
-                },
-                rows: header.n_valid,
-                first_ts_micros: header.first_ts_micros,
-                last_ts_micros: header.last_ts_micros,
-            },
-            closes,
-        )),
+        entries,
+        derived,
     })
+}
+
+/// The month a batch of bars belongs to, or a refusal if they span two.
+///
+/// The month comes from the FIRST surviving bar. A member whose bars cross a
+/// month boundary would need two files, and that split is a decision about
+/// paths rather than about bars — so it is refused here by name rather than
+/// silently filing December into November.
+///
+/// # Errors
+///
+/// A timestamp that is not a moment on this calendar, or a batch that spans two
+/// months, naming both.
+fn month_of(
+    first: &store::format::Bar,
+    last: &store::format::Bar,
+) -> Result<store::path::YearMonth, String> {
+    let at = crate::session::IstMoment::from_epoch_secs(first.ts_micros.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?;
+    let ym = at.day().year_month().map_err(|why| why.to_string())?;
+    let end = crate::session::IstMoment::from_epoch_secs(last.ts_micros.div_euclid(1_000_000))
+        .map_err(|why| why.to_string())?;
+    let end_ym = end.day().year_month().map_err(|why| why.to_string())?;
+    if end_ym != ym {
+        return Err(format!(
+            "bars span {ym} to {end_ym}; the store addresses one month per \
+             file and splitting is the caller's decision, not this one's"
+        ));
+    }
+    Ok(ym)
+}
+
+/// A member's identity, parsed once and used by every file it writes.
+struct Identity {
+    symbol: brutex_core::symbol::Symbol,
+    exchange: Exchange,
+    segment: Segment,
+    symbol_id: u32,
+}
+
+/// Parses a member's symbol and venue, and derives the id the store stamps.
+///
+/// # Why this happens BEFORE a bar file is opened
+///
+/// `StorePath` accepts any upper-case segment, so a plan naming one the census
+/// cannot key would write bars under a directory `/store` can never report on.
+/// Refusing here means such a member stores nothing, rather than storing bars
+/// nobody counts.
+///
+/// # Errors
+///
+/// The symbol's refusal or the venue's, each naming the instrument.
+fn identify(instrument: &str, exchange: &str, segment: &str) -> Result<Identity, String> {
+    let symbol = brutex_core::symbol::Symbol::new(instrument)
+        .map_err(|why| format!("{instrument}: {why}"))?;
+    let exchange = Exchange::parse(exchange)
+        .map_err(|why| format!("{instrument}: exchange {exchange:?}: {why}"))?;
+    let segment = Segment::parse(segment)
+        .map_err(|why| format!("{instrument}: segment {segment:?}: {why}"))?;
+    // The symbol id is a CROSS-CHECK the store stamps into the header and
+    // verifies on every reopen -- never the index, which is arithmetic. Derived
+    // from the name so the same instrument always yields the same id, because a
+    // counter would give a different one on a rerun and CLAUDE.md §3 rule 5
+    // requires the same inputs to give the same bytes.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the id is a CROSS-CHECK the store stamps in the header and \
+                  verifies on reopen, never an index — any 32 bits of the hash \
+                  serve, and taking the low half of a 64-bit FNV-1a is the \
+                  standard folding. Derived from the name so a rerun yields the \
+                  same id; a counter would not, and CLAUDE.md §3 rule 5 requires \
+                  the same inputs to give the same bytes."
+    )]
+    let symbol_id = brutex_core::universe::fnv1a(symbol.as_str()) as u32;
+    Ok(Identity {
+        symbol,
+        exchange,
+        segment,
+        symbol_id,
+    })
+}
+
+/// Where a derived rung lands: everything about the member except its rung.
+///
+/// A struct rather than six parameters, because clippy's argument ceiling is
+/// the same kind of rule as its line ceiling and six of these travel together
+/// everywhere they go.
+#[derive(Clone, Copy)]
+struct DeriveInto {
+    vendor: Vendor,
+    exchange: Exchange,
+    segment: Segment,
+    symbol: brutex_core::symbol::Symbol,
+    month: store::path::YearMonth,
+}
+
+/// Folds the minute bars into every rung derived from them and appends each.
+///
+/// # THE OPERATOR'S REQUIREMENT, stated from his first message
+///
+/// One minute is what gets bought and pulled, and 2, 3, 5, 10, 15, 30 and 60
+/// minutes are DERIVED from it internally so `/db` shows every one. Until this,
+/// a one-minute pull wrote `1min/` and stopped — the store shipped directories
+/// for the coarser rungs and nothing ever put a bar in one.
+///
+/// # Why it is sound, and none of these three is an assumption
+///
+/// **The arithmetic.** [`crate::fold`] already aggregates OHLCV correctly: open
+/// is the first, close the last, high and low the extremes, volume the SUM and
+/// open interest the LAST non-null. Volume is a flow and open interest is a
+/// level — summing the second would report 187 million where 500,177 is true —
+/// and the fold has had that right all along.
+///
+/// **The alignment.** Every intraday rung is anchored at the SESSION OPEN, so
+/// each derived bar begins the day at 09:15 exactly. That is what made 2, 10,
+/// 30 and 60 filable at all; see [`crate::fold`] and `pull::tests::anchor`.
+///
+/// **The multiple.** Every rung here is a whole multiple of one minute, so no
+/// bucket ever straddles a source bar.
+///
+/// # Always from the minute, never from a coarser derived rung
+///
+/// Folding 5min into 15min gives the same answer today and makes every rung
+/// depend on the one before it: an error compounds, and no rung can be rebuilt
+/// without rebuilding its ancestors. One step from the source, every time.
+///
+/// # A derived rung that fails does not fail the member
+///
+/// The minute bars are already committed and are the ones that were paid for.
+/// Refusing the whole member because a fold could not be filed would throw away
+/// the pull to protect a copy of it. Each refusal is NAMED on the log instead —
+/// `CLAUDE.md` §4 requires it said, not that it be fatal.
+fn derive_all(
+    source_bars: &[store::format::Bar],
+    instrument: &str,
+    store_root: &Path,
+    symbol_id: u32,
+    source: Timeframe,
+    into: DeriveInto,
+    entries: &mut Vec<Held>,
+) {
+    for rung in derived_from(source) {
+        let parts = PathParts {
+            vendor: into.vendor,
+            exchange: into.exchange.as_str(),
+            segment: into.segment.as_str(),
+            symbol: into.symbol.as_str(),
+            timeframe: rung,
+            month: into.month,
+            file: FileKind::Bars,
+        };
+        let key = EntryKey {
+            exchange: into.exchange,
+            segment: into.segment,
+            symbol: into.symbol,
+            timeframe: rung,
+            month: into.month,
+        };
+        match derive(source_bars, rung, store_root, symbol_id, parts, key) {
+            Ok(held) => entries.push(held),
+            Err(why) => note_not_derived(instrument, rung, &why),
+        }
+    }
+}
+
+/// How many rungs a file at `source` is folded into — COMPUTED, never listed.
+///
+/// # Why this is a rule and not an array
+///
+/// It was `[MINUTE_2, MINUTE_3, MINUTE_5, MINUTE_10, MINUTE_15, MINUTE_30,
+/// MINUTE_60]`, and a hardcoded list is a second place to remember: a rung
+/// added to `Timeframe::KNOWN` and forgotten here is a directory the store can
+/// file and nothing ever writes to, silently, with no test able to see the
+/// omission because both sides agree with themselves.
+///
+/// The operator's requirement is that the ladder scales — seconds today,
+/// whatever is needed later — **without anyone editing a list**. So the set is
+/// derived from `KNOWN` on the two properties that make a fold correct, and
+/// adding a rung to the store is the whole of adding it to the ladder.
+///
+/// # The two conditions, and there are only two
+///
+/// **Strictly coarser.** A rung cannot be folded into itself or into anything
+/// finer — the information is not there.
+///
+/// **A whole multiple.** `target.secs % source.secs == 0`, so no bucket ever
+/// straddles a source bar. Ten minutes from one minute is ten whole bars; ten
+/// minutes from three would be three and a third, and the third bar would be
+/// split between two buckets with no way to divide its volume or decide which
+/// one owns its high.
+///
+/// # The day is excluded, and that is D-0077 rather than arithmetic
+///
+/// `DAY_1` passes both tests — 86,400 is a whole multiple of 60 — and is still
+/// not derived. A daily bar is what a VENDOR serves under its own convention:
+/// Dhan opens it at the session's first print, Groww at the previous session's
+/// close, measured 181 points apart on one instrument on one day. Folding one
+/// from minutes would silently pick a convention and file it beside the other
+/// vendor's. The day is served, never derived.
+#[must_use]
+pub fn derived_count(source: Timeframe) -> usize {
+    derived_from(source).count()
+}
+
+/// [`derived_count`]'s set. Private because the rungs themselves are this
+/// module's business; the COUNT is what a caller can meaningfully assert on.
+fn derived_from(source: Timeframe) -> impl Iterator<Item = Timeframe> {
+    Timeframe::KNOWN.iter().copied().filter(move |target| {
+        target.secs() > source.secs()
+            && target.secs().is_multiple_of(source.secs())
+            && target.secs() != Timeframe::DAY_1.secs()
+    })
+}
+
+/// Folds one month of minute bars into `rung` and appends them under its own
+/// directory, answering the census row for what the file now holds.
+///
+/// # Errors
+///
+/// The fold's own refusal, the path's, or the store's — each in its own words,
+/// and none of them fails the minute bars that are already committed.
+fn derive(
+    minutes: &[store::format::Bar],
+    rung: Timeframe,
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+    key: EntryKey,
+) -> Result<Held, String> {
+    let bucket = crate::fold::Bucket::of_secs(rung.secs())
+        .ok_or("a timeframe of zero seconds has no bucket to fold into")?;
+    let bars = crate::fold::fold(minutes, bucket).map_err(|why| why.to_string())?;
+    if bars.is_empty() {
+        return Err(format!("{} folded to no bars", rung.as_str()));
+    }
+    write_and_count(&bars, store_root, symbol_id, parts, key)
+}
+
+/// Appends `bars` under `parts` and answers the census row for what the FILE
+/// now holds — not for the batch that was offered.
+///
+/// The one place a bar reaches the disk, shared by the rung that was pulled and
+/// every rung derived from it. Two copies of this would be two chances for the
+/// counter row to describe something different from the file it names, and the
+/// `rows`, both timestamps and both closes are all read back off the header the
+/// append just committed for exactly that reason.
+///
+/// # Errors
+///
+/// The path's refusal or the store's, in its own words.
+fn write_and_count(
+    bars: &[store::format::Bar],
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+    key: EntryKey,
+) -> Result<Held, String> {
+    let path = StorePath::new(parts).map_err(|why| why.to_string())?;
+    let mut file =
+        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    file.append(bars).map_err(|why| why.to_string())?;
+    let header = file.header();
+    let closes = month_closes(&file, &header, bars)?;
+    Ok(Held::new(
+        Entry {
+            key,
+            rows: header.n_valid,
+            first_ts_micros: header.first_ts_micros,
+            last_ts_micros: header.last_ts_micros,
+        },
+        closes,
+    ))
 }
 
 /// Records one month in the census, unless it is already recorded exactly.
