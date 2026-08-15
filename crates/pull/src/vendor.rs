@@ -1729,6 +1729,16 @@ pub enum ParamValue {
     /// `exchangeSegment: "IDX_I"`. Fixed here so it is reviewable beside the
     /// rest of the row rather than buried in a request builder.
     Fixed(&'static str),
+    /// The UNDERLYING's plain symbol — `NIFTY`, not a contract and not a
+    /// vendor id. What Groww's expiry and contract lookups are keyed on.
+    Underlying,
+    /// The calendar year a discovery request is scoped to.
+    Year,
+    /// The calendar month a discovery request is scoped to, 1..=12.
+    Month,
+    /// One expiry date, in this feed's [`DateFormat`] — the answer from an
+    /// expiry lookup, fed into the contract lookup that follows it.
+    ExpiryDate,
     /// The rung being asked for, in **this feed's own spelling** — resolved
     /// through [`HttpSpec::granularity_token`].
     ///
@@ -2432,6 +2442,48 @@ pub enum Pooling {
     PerRequestKind,
 }
 
+/// How a feed is asked WHICH expired contracts exist.
+///
+/// # Why discovery is its own shape and not another `bars_path`
+///
+/// A bars request names an instrument this build already knows. An expired
+/// option does not exist in any instrument master — the contract expired, and
+/// the master lists what is tradable now. So the contract has to be DISCOVERED,
+/// and the vendor answers a list of names rather than a series of bars.
+///
+/// Groww publishes exactly that, in two steps: `/v1/historical/expiries` gives
+/// the expiry dates for an underlying in a year and month, and
+/// `/v1/historical/contracts` gives every contract symbol for one of those
+/// expiries. The second is fed by the first, and the bars call that follows
+/// takes the contract symbol as its `groww_symbol` like any other instrument.
+///
+/// `None` for a feed that publishes no such lookup. Dhan is `None` and the
+/// absence is a fact about the vendor: `/v2/charts/rollingoption` answers an
+/// ATM-RELATIVE series — `strike: "ATM+10"`, `expiryFlag: WEEK` — whose
+/// underlying contract changes every week. It is not a contract lookup and
+/// there is no contract name in it to discover.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FnoDiscovery {
+    /// Endpoint listing the expiry dates for an underlying.
+    pub expiries_path: &'static [PathSegment],
+    /// What that request carries.
+    pub expiries_params: &'static [Param],
+    /// The response field holding the dates.
+    pub expiries_field: &'static str,
+    /// Endpoint listing the contracts for one expiry.
+    pub contracts_path: &'static [PathSegment],
+    /// What that request carries.
+    pub contracts_params: &'static [Param],
+    /// The response field holding the contract symbols.
+    pub contracts_field: &'static str,
+    /// The earliest year this lookup answers for.
+    ///
+    /// Groww's own page: "Data of FNO instruments are available from 2020."
+    /// A request below it is refused here rather than sent and answered empty,
+    /// because an empty answer and an out-of-range one read identically.
+    pub from_year: u16,
+}
+
 /// One rung served from its own endpoint, with whatever that endpoint needs.
 ///
 /// A vendor that publishes daily and intraday bars at two URLs is the case this
@@ -2499,6 +2551,8 @@ pub struct HttpSpec {
     /// lives in the PATH here and not in the row. A rung that fails loudly is
     /// recoverable; that one did not fail at all.
     pub rung_routes: &'static [RungRoute],
+    /// How this feed is asked which expired contracts exist, if it can be.
+    pub fno: Option<FnoDiscovery>,
     /// The verb.
     pub method: Method,
     /// Which header carries the credential, and how.
@@ -3811,6 +3865,11 @@ const DHAN: Descriptor = Descriptor {
         // "POST /charts/historical — Get OHLC for daily timeframe" and
         // "POST /charts/intraday — Get OHLC for minute timeframe", and
         // `interval` appears in the intraday parameter table and in no other.
+        // NO CONTRACT LOOKUP, and it is the vendor's shape rather than a gap.
+        // `/v2/charts/rollingoption` answers an ATM-RELATIVE series —
+        // `strike: "ATM+10"`, `expiryFlag: WEEK` — whose underlying contract
+        // changes every week. There is no contract name in it to discover.
+        fno: None,
         rung_routes: &[RungRoute {
             rung: Granularity::Minute1,
             path: &[
@@ -4017,9 +4076,61 @@ const GROWW: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.groww.in",
-        // NO OVERRIDE, and that is a property of the vendor rather than an
-        // omission: `/v1/historical/candles` takes `candle_interval` and serves
-        // every rung this feed declares from the one endpoint.
+        // THE TWO-STEP CONTRACT LOOKUP, read first-hand from
+        // groww.in/trade-api/docs/curl/backtesting. An expired option is in no
+        // instrument master — it expired — so its name has to be discovered
+        // before its bars can be asked for.
+        fno: Some(FnoDiscovery {
+            expiries_path: &[
+                PathSegment::Literal("v1"),
+                PathSegment::Literal("historical"),
+                PathSegment::Literal("expiries"),
+            ],
+            expiries_params: &[
+                Param {
+                    name: "exchange",
+                    value: ParamValue::Fixed("NSE"),
+                },
+                Param {
+                    name: "underlying_symbol",
+                    value: ParamValue::Underlying,
+                },
+                Param {
+                    name: "year",
+                    value: ParamValue::Year,
+                },
+                Param {
+                    name: "month",
+                    value: ParamValue::Month,
+                },
+            ],
+            expiries_field: "expiries",
+            contracts_path: &[
+                PathSegment::Literal("v1"),
+                PathSegment::Literal("historical"),
+                PathSegment::Literal("contracts"),
+            ],
+            contracts_params: &[
+                Param {
+                    name: "exchange",
+                    value: ParamValue::Fixed("NSE"),
+                },
+                Param {
+                    name: "underlying_symbol",
+                    value: ParamValue::Underlying,
+                },
+                Param {
+                    name: "expiry_date",
+                    value: ParamValue::ExpiryDate,
+                },
+            ],
+            contracts_field: "contracts",
+            // The vendor's own sentence, on both lookups: "Data of FNO
+            // instruments are available from 2020."
+            from_year: 2020,
+        }),
+        // NO RUNG OVERRIDE: `/v1/historical/candles` takes `candle_interval`
+        // and serves every rung this feed declares from the one endpoint.
         rung_routes: &[],
         // THE LIVE ENDPOINT. The vendor's own page says of the previous
         // one: "This API request is deprecated and will NOT work in the
@@ -4505,6 +4616,8 @@ const ZERODHA: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.kite.trade",
+        // No contract lookup recorded for this vendor.
+        fno: None,
         // NO OVERRIDE: this vendor puts the rung in `bars_path` itself as a
         // PathSegment — D-0133 — so the endpoint already varies with the rung
         // and there is nothing for a route table to add.

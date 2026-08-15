@@ -210,6 +210,20 @@ pub enum FetchError {
         /// What went wrong, in the transport's own words.
         detail: String,
     },
+    /// A DISCOVERY parameter appeared in a BARS request, where it has no value.
+    ///
+    /// `Underlying`, `Year`, `Month` and `ExpiryDate` belong to the expired-F&O
+    /// contract lookup — [`crate::vendor::FnoDiscovery`] — which is asked a
+    /// different question and answers a list of names rather than a series of
+    /// bars. A `BarRequest` carries none of them.
+    ///
+    /// **Nothing was sent.** Substituting anything here would put a field on
+    /// the wire whose value this build invented, and the answer would be filed
+    /// as bars. Refused by name so the descriptor row is what gets fixed.
+    NotABarsParam {
+        /// The field that could not be resolved.
+        field: &'static str,
+    },
     /// This feed's request carries a rung field and no word for the rung asked
     /// has ever been recorded.
     ///
@@ -324,6 +338,14 @@ impl core::fmt::Display for FetchError {
             Self::TransportFailed { ref detail } => {
                 write!(f, "the vendor was not reached: {detail}")
             }
+            Self::NotABarsParam { field } => write!(
+                f,
+                "the request field {field:?} belongs to the expired-F&O \
+                 contract lookup and has no value in a bars request. Nothing \
+                 was sent: a value invented for it would go on the wire and its \
+                 answer would be filed as bars. Move the field to the \
+                 descriptor's `fno` block, or off the bars request."
+            ),
             Self::RungNotSpellable { rung, field } => write!(
                 f,
                 "this feed names its bar length in the request field {field:?} \

@@ -169,6 +169,13 @@ impl HttpSource {
             crate::vendor::ParamValue::To => to.to_owned(),
             crate::vendor::ParamValue::InstrumentId => request.instrument_id.clone(),
             crate::vendor::ParamValue::Fixed(word) => word.to_owned(),
+            // A DISCOVERY FIELD IN A BARS REQUEST. See `FetchError::NotABarsParam`.
+            crate::vendor::ParamValue::Underlying
+            | crate::vendor::ParamValue::Year
+            | crate::vendor::ParamValue::Month
+            | crate::vendor::ParamValue::ExpiryDate => {
+                return Err(FetchError::NotABarsParam { field: p.name });
+            }
             crate::vendor::ParamValue::Granularity => self
                 .spec
                 .granularity_token(request.granularity)
@@ -1546,6 +1553,7 @@ mod tests {
             base_url: "https://vendor.invalid",
             bars_path: &[crate::vendor::PathSegment::Literal("bars")],
             rung_routes: &[],
+            fno: None,
             method: Method::Post,
             auth: crate::vendor::Auth {
                 header: "x-token",

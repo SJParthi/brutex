@@ -134,6 +134,11 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // `http::tests::dhan_serves_the_two_rungs_from_two_endpoints_and_only_one_takes_an_interval`,
         // where it can be checked against the vendor's own pages.
         rung_routes: &[],
+        // NO CONTRACT LOOKUP IN THIS FIXTURE. Groww's is exercised against the
+        // shipped descriptor in
+        // `groww_declares_the_expired_fno_lookup_and_the_others_declare_none`,
+        // where it can be checked against the vendor's own pages.
+        fno: None,
         // DHAN'S REAL REQUIRED FIELDS, read first-hand from
         // dhanhq.co/docs/v2/historical-data. This is what `DH-905 securityId
         // is required` was reporting the absence of.
@@ -803,4 +808,93 @@ fn a_rung_the_store_cannot_carry_is_refused_and_the_refusal_names_it() {
         !manifest_path(&store_root, Vendor::Dhan).exists(),
         "and no census was published"
     );
+}
+
+/// GROWW DECLARES THE TWO-STEP CONTRACT LOOKUP; NOBODY ELSE DOES.
+///
+/// Read against the SHIPPED descriptor, because the thing under test is what
+/// this build would put on a socket. The endpoints and field names are quoted
+/// from groww.in/trade-api/docs/curl/backtesting.
+#[test]
+fn groww_declares_the_expired_fno_lookup_and_the_others_declare_none() {
+    use pull::vendor::{Feed, PathSegment, Transport};
+
+    let joined = |segs: &[PathSegment]| {
+        segs.iter()
+            .map(|s| match *s {
+                PathSegment::Literal(w) => w,
+                PathSegment::Value { placeholder, .. } => placeholder,
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
+        panic!("Groww is an HTTP broker");
+    };
+    let fno = groww.fno.expect("Groww publishes the contract lookup");
+    assert_eq!(joined(fno.expiries_path), "v1/historical/expiries");
+    assert_eq!(joined(fno.contracts_path), "v1/historical/contracts");
+    assert_eq!(fno.expiries_field, "expiries");
+    assert_eq!(fno.contracts_field, "contracts");
+    assert_eq!(
+        fno.from_year, 2020,
+        "the vendor's own sentence: FNO data is available from 2020"
+    );
+
+    // THE CONTRACT LOOKUP IS FED BY THE EXPIRY LOOKUP, so it must carry an
+    // expiry date and the expiry lookup must not.
+    let names = |ps: &[pull::vendor::Param]| ps.iter().map(|p| p.name).collect::<Vec<_>>();
+    assert_eq!(
+        names(fno.expiries_params),
+        vec!["exchange", "underlying_symbol", "year", "month"]
+    );
+    assert_eq!(
+        names(fno.contracts_params),
+        vec!["exchange", "underlying_symbol", "expiry_date"]
+    );
+
+    // AND DHAN DECLARES NONE, which is a fact about the vendor rather than a
+    // gap in this build: `/v2/charts/rollingoption` answers an ATM-relative
+    // series whose underlying contract changes every week, so there is no
+    // contract name in it to discover.
+    let Transport::Http(dhan) = Feed::Dhan.descriptor().transport else {
+        panic!("Dhan is an HTTP broker");
+    };
+    assert!(dhan.fno.is_none(), "no contract lookup at this vendor");
+}
+
+/// A DISCOVERY FIELD CANNOT REACH A BARS REQUEST.
+///
+/// The four discovery values have no meaning in a `BarRequest`, and the one
+/// thing that must never happen is a value being invented for them — the field
+/// would go on the wire and the answer would be filed as bars.
+#[test]
+fn a_discovery_parameter_in_a_bars_request_is_refused_by_name() {
+    use pull::vendor::{Feed, Transport};
+
+    // NO SHIPPED FEED CARRIES ONE, which is the invariant. The refusal exists
+    // for the descriptor row somebody writes next.
+    for feed in Feed::ALL {
+        let Transport::Http(spec) = feed.descriptor().transport else {
+            continue;
+        };
+        for p in spec
+            .params
+            .iter()
+            .chain(spec.rung_routes.iter().flat_map(|r| r.params))
+        {
+            assert!(
+                !matches!(
+                    p.value,
+                    pull::vendor::ParamValue::Underlying
+                        | pull::vendor::ParamValue::Year
+                        | pull::vendor::ParamValue::Month
+                        | pull::vendor::ParamValue::ExpiryDate
+                ),
+                "{feed}'s bars request carries the discovery field {:?}",
+                p.name
+            );
+        }
+    }
 }
