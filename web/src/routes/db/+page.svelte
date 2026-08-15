@@ -148,6 +148,29 @@
   let fromMonth = $state('');
   let toMonth = $state('');
 
+  /* ---- THE DAY WINDOW, AND IT BELONGS TO SPOT ONLY ---------------------
+   *
+   * A spot series runs forever, so "show me this week" is a real question and
+   * a calendar is the only way to ask it. A CONTRACT is different: it is
+   * defined BY its expiry, and its bars run from listing to that expiry and
+   * stop. Narrowing a contract by a second date range asks a question the
+   * contract has already answered, and a reader who set a window on spot and
+   * then chose an expiry would be silently filtering a series whose extent was
+   * never theirs to choose.
+   *
+   * So the pair is applied and drawn only while no expiry is chosen. Not
+   * disabled — absent. A control that cannot change the answer is not a
+   * control, and the page's other rungs already follow that rule.
+   *
+   * `YYYY-MM-DD`, the same shape `b.day` carries, so the compare is a string
+   * compare and never a Date. Empty means unbounded on that side.
+   */
+  let fromDay = $state('');
+  let toDay = $state('');
+
+  /** Whether the day window is live: spot only, and only if a side is set. */
+  const dayWindowApplies = $derived(expiry === '');
+
   /* ---- THE BAR-LENGTH RUNG, WHICH THIS PAGE PRINTED AND COULD NOT CHOOSE
      The rung has been a COLUMN since the server stopped stamping `"1m"` on
      every row, and it has never been a CONTROL: an operator could see that a
@@ -3078,10 +3101,22 @@
   let barSortKey = $state('ts');
   let barDesc = $state(true);
 
+  /* THE DAY WINDOW, APPLIED TO BARS AND NOT TO INSTRUMENT-MONTHS.
+   *
+   * `scoped` and everything above it counts instrument-MONTHS; a day window
+   * over those could only ever narrow to whole months. The question is "show me
+   * the 12th", so it is answered where days exist, which is here. */
+  const barWindowed = $derived.by(() => {
+    if (!dayWindowApplies || (!fromDay && !toDay)) return barRows;
+    return barRows.filter(
+      (b) => (!fromDay || b.day >= fromDay) && (!toDay || b.day <= toDay)
+    );
+  });
+
   const barSorted = $derived.by(() => {
     const k = barSortKey;
     const dir = barDesc ? -1 : 1;
-    return [...barRows].sort((a, b) => {
+    return [...barWindowed].sort((a, b) => {
       const A = a[k];
       const B = b[k];
       let d = 0;
@@ -4986,6 +5021,44 @@
           {/if}
         </span>
       </div>
+
+      <!-- ==================================================================
+           THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
+           A spot series runs forever, so "show me the 12th" is a real question.
+           A CONTRACT is defined by its expiry and its bars stop there, so a
+           second date range asks something the contract has already answered.
+           Gated on `dayWindowApplies`, which is simply "no expiry chosen".
+           ================================================================== -->
+      {#if dayWindowApplies}
+        <div class="cell">
+          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
+            >From date</span
+          >
+          <input
+            class="tin"
+            type="date"
+            bind:value={fromDay}
+            max={toDay || undefined}
+            aria-label="First day to show"
+          />
+          <span class="count"
+            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
+          >
+        </div>
+
+        <div class="cell">
+          <span title="Only bars on or before this day. Spot only.">To date</span>
+          <input
+            class="tin"
+            type="date"
+            bind:value={toDay}
+            min={fromDay || undefined}
+            aria-label="Last day to show"
+          />
+          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+        </div>
+      {/if}
+
 
       <!-- THE MONTH WINDOW — two ends, so it is TWO `.cell`s, exactly as the
            design draws a From and a To. The product's OWN calendar, never the
