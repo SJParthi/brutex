@@ -2377,14 +2377,24 @@
      this chain supports — never a label and never a constant. An empty
      selection says what it MEANS rather than what it holds: no join at all, the
      same sentence the `Everything` universe row carries. */
+  /* SINGLE SELECT, SO THERE IS NO PLURAL ARM.
+   *
+   * `Picker` has carried a `single` prop all along — it emits `new Set([key])`
+   * and never grows — and these two call sites were the only ones on the page
+   * that had not switched it on. The instrument picker already had it. So the
+   * page offered single select on one control and multi on two, which is the
+   * inconsistency rather than a design.
+   *
+   * The `size > 1` arm is gone rather than left standing: a branch no input can
+   * reach is a branch no test can cover and a mutant that deletes it survives.
+   * The Set stays as the storage because that is what `Picker` emits; it now
+   * holds at most one key. */
   const strikeSummary = $derived(
     chainAll.length === 0
       ? 'No strike stored'
       : strikePick.size === 0
         ? `Any strike · ${fmt(chainAll.length)} listed`
-        : strikePick.size === 1
-          ? `${strikeText(Number([...strikePick][0]))} only`
-          : `${fmt(strikePick.size)} of ${fmt(chainAll.length)} strikes`
+        : `${strikeText(Number([...strikePick][0]))} only`
   );
 
   const mnySummary = $derived(
@@ -2392,9 +2402,7 @@
       ? 'No ladder'
       : mnyPick.size === 0
         ? `Any rung · ${fmt(ladderRungs.length)} on the ladder`
-        : mnyPick.size === 1
-          ? `${[...mnyPick][0]} only`
-          : `${fmt(mnyPick.size)} of ${fmt(ladderRungs.length)} rungs`
+        : `${[...mnyPick][0]} only`
   );
 
   /**
@@ -3582,9 +3590,7 @@
         ? {
             k: 'strike',
             text:
-              strikePick.size === 1
-                ? `strike ${strikeText(Number([...strikePick][0]))}`
-                : `${fmt(strikePick.size)} strikes`,
+              `strike ${strikeText(Number([...strikePick][0]))}`,
             key: [...strikePick].join(' · ')
           }
         : null,
@@ -3592,7 +3598,7 @@
         ? {
             k: 'moneyness',
             text:
-              mnyPick.size === 1 ? `moneyness ${[...mnyPick][0]}` : `${fmt(mnyPick.size)} rungs`
+              `moneyness ${[...mnyPick][0]}`
           }
         : null,
       side ? { k: 'side', text: `option type ${side}`, key: side } : null,
@@ -5524,6 +5530,7 @@
       <div class="cell mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
         <span title="An absolute price on the chain.">Strike</span>
         <Picker
+          single
           filter
           label="strikes"
           disabled={chainAll.length === 0}
@@ -5561,6 +5568,7 @@
           >Moneyness</span
         >
         <Picker
+          single
           filter
           label="rungs"
           disabled={moneyRefusal !== null}
