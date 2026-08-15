@@ -50,6 +50,7 @@
 #![deny(missing_docs)]
 
 pub mod closed;
+pub mod excursion;
 pub mod identity;
 pub mod outcome;
 pub mod rank;

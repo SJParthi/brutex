@@ -3155,7 +3155,24 @@ jobs:
           # `read_reach`/`reach_of` and stopped being true of `read_census` at D-0141. The
           # bound is archive.rs's cap, not that sentence. Section 65 also records that NO
           # timing has been taken against a real purchased archive; none is claimed here.
+          # `crates/runner/src/excursion.rs` ONE sort, and a quantile IS an order
+          # statistic -- the same argument the significance.rs entry above makes
+          # about Benjamini-Hochberg. `Ladder::from_excursions` places its rungs at
+          # quantiles of the excursions the instrument actually produced, so that a
+          # stop level is "the level a fifth of moves reached" rather than a number
+          # somebody typed. Removing the sort does not make it cheaper; it makes it
+          # a different and wrong procedure.
+          # WHAT BOUNDS IT: one entry per TRADE on the training bars, and
+          # `crate::trade` takes non-overlapping positions with a minimum hold of one
+          # bar, so the slice is at most the bar count and is usually far smaller --
+          # 68 trades against 1,124 signals at the default horizon. It is NOT the
+          # candidate count and NOT the frequent-itemset count, so it does not grow
+          # with the sweep. Called once per fold at a `crate::validate` boundary,
+          # never per bar and never on a request path.
+          # `sort_unstable` on `i64` and not a comparator: these are integer basis
+          # points, so there is no NaN and no partial order to get wrong.
           allow_sort='
+          crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
           crates/api/src/constituents.rs 2
           crates/api/src/coverage.rs 1
