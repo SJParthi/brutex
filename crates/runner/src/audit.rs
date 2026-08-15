@@ -64,6 +64,89 @@ fn permille(part: u64, whole: u64) -> String {
     format!("{}.{}%", tenths / 10, tenths % 10)
 }
 
+/// Everything, in one call.
+///
+/// # Why a single entry point exists
+///
+/// The sections below are separately callable because a caller may hold only
+/// some of the inputs. But an operator asking "how did this run go" wants the
+/// whole thing, and making them assemble six calls in the right order is how a
+/// section quietly stops being printed — the failure this module was written to
+/// remove in the first place.
+///
+/// Every argument is optional and an absent one is REPORTED rather than
+/// skipped. A run with no walk-forward and a run whose walk-forward was omitted
+/// from the render must not look the same.
+///
+/// # What is NOT in these figures, for a spot run
+///
+/// Nothing. On a spot index there is no brokerage, no STT, no stamp duty and no
+/// GST, because a spot index is not tradeable and no order is placed —
+/// `costs::scope::is_cost_free` returns true for `IndexSpot` and says so. The
+/// only cost that exists is slippage, and it is applied: two ticks per round
+/// trip through `costs::fill::worst_case_fills`.
+///
+/// **That changes when options land.** An option leg carries the whole charge
+/// stack, and the figures here would then be gross of it until
+/// `costs::trip::price` is wired. This paragraph is the record of which of
+/// those two worlds a reader is in.
+#[must_use]
+pub fn render(
+    taken: Option<&Trades>,
+    exits: Option<&Grid>,
+    folds: Option<&Validated>,
+    overfit: Option<&Pbo>,
+    boot: Option<(Option<&Verdict>, Option<&Verdict>, usize)>,
+    rows: usize,
+) -> String {
+    let mut out = String::with_capacity(4_096);
+    let _ = writeln!(out, "AUDIT");
+    let _ = writeln!(
+        out,
+        "  spot run: slippage IS in these figures (two ticks a round trip).\n  \
+         There is no brokerage, STT, stamp or GST on a spot index because no\n  \
+         order is placed. That changes when options land."
+    );
+    let _ = writeln!(out);
+
+    match taken {
+        Some(x) => trades(&mut out, x),
+        None => absent(&mut out, "TRADES"),
+    }
+    match exits {
+        Some(x) => grid(&mut out, x, rows),
+        None => absent(&mut out, "EXIT GRID"),
+    }
+    match folds {
+        Some(x) => walk_forward(&mut out, x),
+        None => absent(&mut out, "WALK-FORWARD"),
+    }
+    match overfit {
+        Some(x) => overfitting(&mut out, x),
+        None => absent(&mut out, "OVERFITTING"),
+    }
+    match boot {
+        Some((rc, spa, named)) => bootstrap(&mut out, rc, spa, named),
+        None => absent(&mut out, "BOOTSTRAP"),
+    }
+    out
+}
+
+/// A section whose input the caller did not hold.
+///
+/// Printed rather than skipped. A run that HAD no walk-forward and a render
+/// that was not GIVEN one are different facts, and a silently missing section
+/// reads as the first.
+fn absent(out: &mut String, section: &str) {
+    let _ = writeln!(out, "{section}");
+    let _ = writeln!(
+        out,
+        "  NOT SUPPLIED to this render. Absent from the report is not the same \
+         as absent from the run."
+    );
+    let _ = writeln!(out);
+}
+
 /// How the signals of one combination became trades.
 ///
 /// # What this section is for
@@ -528,6 +611,49 @@ mod tests {
         let mut g = String::new();
         grid(&mut g, &crate::grid::Grid::default(), 10);
         assert!(g.contains("took no trades"));
+    }
+
+    #[test]
+    fn one_call_renders_every_section_and_names_the_ones_it_was_not_given() {
+        // A section that is silently missing reads as "the run did not do this".
+        // A run that HAD no walk-forward and a render that was not GIVEN one are
+        // different facts, and only one of them is a finding.
+        let out = super::render(None, None, None, None, None, 10);
+        for section in [
+            "TRADES",
+            "EXIT GRID",
+            "WALK-FORWARD",
+            "OVERFITTING",
+            "BOOTSTRAP",
+        ] {
+            assert!(
+                out.contains(section),
+                "{section} is missing from the render"
+            );
+        }
+        assert_eq!(
+            out.matches("NOT SUPPLIED").count(),
+            5,
+            "every absent section must say it was absent from the RENDER rather \
+             than from the run"
+        );
+    }
+
+    #[test]
+    fn a_spot_run_states_that_slippage_is_in_and_charges_do_not_exist() {
+        // The caveat I carried for most of a session was WRONG for spot: a spot
+        // index is not tradeable, so no order is placed and there is no
+        // brokerage, STT, stamp or GST to be gross of. `costs::scope` says so.
+        // The header records which of the two worlds a reader is in, because
+        // the answer changes the moment options land.
+        let out = super::render(None, None, None, None, None, 10);
+        assert!(out.contains("slippage IS in these figures"));
+        assert!(out.contains("no brokerage"));
+        assert!(
+            out.contains("changes when options land"),
+            "the header must say the answer is scoped to spot, or it becomes \
+             wrong silently the day options arrive"
+        );
     }
 
     #[test]
