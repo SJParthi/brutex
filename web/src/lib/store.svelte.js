@@ -77,9 +77,28 @@ import { foldWindow, foldKey } from '$lib/fold.js';
    seconds a bar covers draws a convincing chart of the wrong buckets.
    ====================================================================== */
 export const RUNG_SECONDS = new Map([
+  // TEN RUNGS, WHICH IS WHAT `store::path::Timeframe::KNOWN` DECLARES.
+  //
+  // This carried seven. `1s`, `2min` and `10min` were absent, and everything
+  // that reads this table treats an absent rung as unmappable:
+  //
+  //   * `/` (Markets) filters `storedRungs` on `rungSeconds(t) !== null`, so
+  //     the "Rungs on disk" line read `1min + 3min + 5min + 15min + 30min +
+  //     60min + 1day` for a store holding nine rungs — measured on the running
+  //     server, 2min (1,880 bars) and 10min (380) simply absent from the list.
+  //   * the same filter feeds `base`, the rung the chart is drawn at, so
+  //     neither could ever be charted.
+  //   * `byCell`'s sort at line 231 falls back to `?? 0`, which sorts an
+  //     unmapped rung to the FRONT of the ladder rather than into its place.
+  //
+  // The seconds are `Timeframe::SECOND_1.secs` … `DAY_1.secs`, read from
+  // crates/store/src/path.rs, not arithmetic done here.
+  ['1s', 1],
   ['1min', 60],
+  ['2min', 120],
   ['3min', 180],
   ['5min', 300],
+  ['10min', 600],
   ['15min', 900],
   ['30min', 1800],
   ['60min', 3600],
