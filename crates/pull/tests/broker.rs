@@ -129,6 +129,11 @@ fn broker(body: &str) -> (String, std::sync::mpsc::Receiver<String>) {
 /// makes this a test of the vendor path rather than of a fixture.
 fn spec(base_url: &'static str) -> HttpSpec {
     HttpSpec {
+        // ONE ENDPOINT FOR THIS FIXTURE. The per-rung split is exercised
+        // against the SHIPPED descriptor, in
+        // `http::tests::dhan_serves_the_two_rungs_from_two_endpoints_and_only_one_takes_an_interval`,
+        // where it can be checked against the vendor's own pages.
+        rung_routes: &[],
         // DHAN'S REAL REQUIRED FIELDS, read first-hand from
         // dhanhq.co/docs/v2/historical-data. This is what `DH-905 securityId
         // is required` was reporting the absence of.

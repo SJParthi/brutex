@@ -4935,11 +4935,21 @@ fn served(feed: pull::vendor::Feed, rung: pull::vendor::Granularity) -> Result<(
         return Ok(());
     }
     Err(format!(
-        "{} does not serve {rung} bars. Nothing was sent: this feed's request \
-         carries no interval field and its bars path is pinned to one rung, so \
-         a request for another would be answered with a DIFFERENT bar length \
-         and filed under the one you asked for. Pick a rung this feed declares, \
-         or record the endpoint in `pull::vendor` first.",
+        // THE REASON IS STATED GENERALLY, because it stopped being true of one
+        // feed the day that feed gained a second endpoint. It read "this feed's
+        // request carries no interval field and its bars path is pinned to one
+        // rung" — Dhan's shape before `vendor::HttpSpec::rung_routes`, quoted
+        // as though it were every unserved rung's reason. It is not: a rung is
+        // unserved because the DESCRIPTOR does not declare it, and why that
+        // descriptor cannot carry it is a per-feed fact this sentence is not
+        // the place to assert.
+        "{} does not serve {rung} bars. Nothing was sent, because a rung this \
+         feed's descriptor does not declare cannot be put on its wire — the \
+         request would be answered with a DIFFERENT bar length and filed under \
+         the one you asked for, and the bar length lives in the store PATH, so \
+         no later reader could tell them apart. Pick a rung this feed declares, \
+         or record the rung's endpoint and its wire word in `pull::vendor` \
+         first.",
         feed.display()
     ))
 }
@@ -5455,7 +5465,7 @@ async fn broker_window(
     // path segment has a different URL per window — so the honest single value
     // here is the endpoint with its placeholders left standing. It also cannot
     // fail, which a receipt should not.
-    let origin = source.endpoint();
+    let origin = source.endpoint(asked.granularity);
 
     // THE ID THE VENDOR ASKED FOR, RESOLVED IN ONE PROBE.
     //
@@ -13702,7 +13712,16 @@ mod tests {
         // never reached. It doubles as the proof that a satisfied gate opens.
         site.censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
         let asked = ingest::parse_spot(
-            "target=swept&from=2026-08-03&to=2026-08-05",
+            // A RUNG THIS FEED STILL DOES NOT SERVE, and it must be named now.
+            //
+            // This was unstated, which defaults to the MINUTE — and the minute
+            // rung was the unserved one until Dhan gained its intraday endpoint.
+            // It is served now, so the default no longer produces the
+            // per-instrument refusal this test is about. `5min` is still
+            // undeclared on this feed, pinned by
+            // `vendor::a_feed_serves_only_the_rungs_its_row_declares`, so the
+            // SUBJECT is unchanged and only the rung exhibiting it moved.
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=5min",
             day(2026, 8, 10),
         )
         .expect("a real target and a window in the past");
@@ -14062,12 +14081,18 @@ mod tests {
             "the vendor claim that lost is carried, by name: {body}"
         );
 
-        // A RUNG THIS BUILD DOES NOT SERVE IS MARKED, NOT HIDDEN AND NOT
-        // ADVERTISED. Dhan's minute rung is withdrawn until the intraday path
-        // exists, and the floor read from its documentation is still a fact.
+        // THE RUNG IS SERVED NOW, AND ITS FLOOR IS THE SAME FACT IT ALWAYS WAS.
+        //
+        // This asserted `"served":false` — Dhan's minute rung was withdrawn
+        // until the intraday endpoint existed. It exists, so the flag flips and
+        // the five-year floor beside it does not move: the floor was read from
+        // the vendor's own intraday page ("for last 5 years") the whole time,
+        // which is exactly why `served` and the floor are separate fields. What
+        // this build ASKS FOR and what the vendor OFFERS are two facts, and a
+        // rung going from withdrawn to served changes only the first.
         assert!(
-            body.contains(r#"{"rung":"1min","served":false,"kind":"rolling","unit":"y","n":5"#),
-            "the withdrawn rung carries its floor and says it is not served: {body}"
+            body.contains(r#"{"rung":"1min","served":true,"kind":"rolling","unit":"y","n":5"#),
+            "the minute rung is served and carries the floor its own page states: {body}"
         );
 
         // Every entry carries every key, so a reader never has to tell an
@@ -14654,7 +14679,18 @@ mod percentage_tests {
             Ok(()),
             "the rung this feed's bars path is pinned to must be admitted"
         );
-        let why = served(Feed::Dhan, Granularity::Minute1)
+        assert_eq!(
+            served(Feed::Dhan, Granularity::Minute1),
+            Ok(()),
+            "the minute rung is addressable now: its own endpoint and its own \
+             interval field both exist"
+        );
+        // AND A RUNG THAT STILL IS NOT ADDRESSABLE STILL REFUSES, BY NAME.
+        // `Minute5` is undeclared on this feed — `vendor::\
+        // a_feed_serves_only_the_rungs_its_row_declares` pins it — so the
+        // behaviour under test is unchanged and only the rung exhibiting it
+        // moved.
+        let why = served(Feed::Dhan, Granularity::Minute5)
             .expect_err("a rung this feed cannot address must refuse");
         assert!(
             why.contains("Dhan"),
@@ -14662,7 +14698,7 @@ mod percentage_tests {
              row to amend: {why}"
         );
         assert!(
-            why.contains(&Granularity::Minute1.to_string()),
+            why.contains(&Granularity::Minute5.to_string()),
             "and names the rung that was asked for: {why}"
         );
 

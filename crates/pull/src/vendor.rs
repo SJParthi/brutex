@@ -2432,6 +2432,25 @@ pub enum Pooling {
     PerRequestKind,
 }
 
+/// One rung served from its own endpoint, with whatever that endpoint needs.
+///
+/// A vendor that publishes daily and intraday bars at two URLs is the case this
+/// exists for, and it is Dhan. See [`HttpSpec::rung_routes`] for why the extra
+/// parameters belong here beside the path rather than in the shared list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RungRoute {
+    /// The rung this route serves.
+    pub rung: Granularity,
+    /// Its endpoint, in the same shape as [`HttpSpec::bars_path`].
+    pub path: &'static [PathSegment],
+    /// Parameters this endpoint takes that the default one does not.
+    ///
+    /// Appended to [`HttpSpec::params`], never replacing them: the instrument,
+    /// the segment and the dates are the same question at either endpoint, and
+    /// restating them per rung is how two copies drift apart.
+    pub params: &'static [Param],
+}
+
 /// Everything an HTTP feed needs.
 ///
 /// [`Auth`] and [`Budget`] live **here**, not on [`Descriptor`]. That is the
@@ -2448,6 +2467,38 @@ pub struct HttpSpec {
     /// [`PathSegment::Literal`] rows and reads exactly as its old string did.
     /// See [`PathSegment`] for why this is a list.
     pub bars_path: &'static [PathSegment],
+    /// Rungs this feed serves from a DIFFERENT endpoint than [`Self::bars_path`].
+    ///
+    /// Empty for a feed that answers every rung it declares from one path,
+    /// which is the ordinary case and is what Groww is: `/v1/historical/candles`
+    /// takes `candle_interval` and serves every rung from the one endpoint.
+    ///
+    /// # Why this exists, and why it carries PARAMS and not just a path
+    ///
+    /// Dhan splits the two rungs across two endpoints — `/v2/charts/historical`
+    /// is daily, `/v2/charts/intraday` is minute — and the intraday one takes an
+    /// `interval` field the daily one does not document at all.
+    ///
+    /// A path-only override would therefore not be enough. The `interval`
+    /// parameter has to travel WITH the rung that needs it: putting it in
+    /// [`Self::params`] would send it on the daily request too, and
+    /// `ParamValue::Granularity` resolves through
+    /// [`Self::granularity_token`], which answers `None` for a rung the feed
+    /// records no word for and fails the whole request as
+    /// `FetchError::RungNotSpellable`. So one shared `params` list cannot
+    /// express "this field, on this rung only" — and guessing that the daily
+    /// endpoint ignores an undocumented extra field is exactly the invention
+    /// `CLAUDE.md` §3 rule 1 forbids.
+    ///
+    /// # What this repairs
+    ///
+    /// `Minute1` was declared on Dhan once and withdrawn, because one
+    /// `bars_path` meant a minute request went to the DAILY endpoint — and that
+    /// endpoint ANSWERED. Daily bars would have been filed under `1min/`, which
+    /// no later reader could tell from real minute data, because the bar length
+    /// lives in the PATH here and not in the row. A rung that fails loudly is
+    /// recoverable; that one did not fail at all.
+    pub rung_routes: &'static [RungRoute],
     /// The verb.
     pub method: Method,
     /// Which header carries the credential, and how.
@@ -2583,8 +2634,21 @@ impl HttpSpec {
     /// changes its length.
     #[must_use]
     pub fn path_template(&self) -> String {
+        Self::template_of(self.bars_path)
+    }
+
+    /// The same, for the endpoint that serves `rung`.
+    ///
+    /// Equal to [`Self::path_template`] for every feed that serves its rungs
+    /// from one URL, which is all of them but Dhan.
+    #[must_use]
+    pub fn path_template_for(&self, rung: Granularity) -> String {
+        Self::template_of(self.path_for(rung))
+    }
+
+    fn template_of(path: &'static [PathSegment]) -> String {
         let mut out = String::new();
-        for segment in self.bars_path {
+        for segment in path {
             out.push('/');
             match *segment {
                 PathSegment::Literal(word) => out.push_str(word),
@@ -2614,6 +2678,26 @@ impl HttpSpec {
             .iter()
             .find(|(at, _)| *at as u8 == rung as u8)
             .map(|(_, cap)| *cap)
+    }
+
+    /// The endpoint and the extra parameters this rung is served from.
+    ///
+    /// `None` where the rung has no override and [`Self::bars_path`] with
+    /// [`Self::params`] alone is the whole request.
+    ///
+    /// CONSTANT WORK. The table's length is a property of the DESCRIPTOR — one
+    /// row per rung this feed serves from its own endpoint, which is at most
+    /// the number of rungs the feed declares — and never of the request, the
+    /// window or the store. Both feeds in this build have 0 or 1 rows.
+    #[must_use]
+    pub fn route_for(&self, rung: Granularity) -> Option<&'static RungRoute> {
+        self.rung_routes.iter().find(|r| r.rung as u8 == rung as u8)
+    }
+
+    /// The path this rung's bars are fetched from.
+    #[must_use]
+    pub fn path_for(&self, rung: Granularity) -> &'static [PathSegment] {
+        self.route_for(rung).map_or(self.bars_path, |r| r.path)
     }
 
     /// This feed's wire word for `rung`, or `None` when it has no recorded one.
@@ -3722,6 +3806,23 @@ const DHAN: Descriptor = Descriptor {
             PathSegment::Literal("charts"),
             PathSegment::Literal("historical"),
         ],
+        // THE MINUTE RUNG IS A DIFFERENT ENDPOINT, and it takes a field the
+        // daily one does not document. Both facts are the vendor's own:
+        // "POST /charts/historical — Get OHLC for daily timeframe" and
+        // "POST /charts/intraday — Get OHLC for minute timeframe", and
+        // `interval` appears in the intraday parameter table and in no other.
+        rung_routes: &[RungRoute {
+            rung: Granularity::Minute1,
+            path: &[
+                PathSegment::Literal("v2"),
+                PathSegment::Literal("charts"),
+                PathSegment::Literal("intraday"),
+            ],
+            params: &[Param {
+                name: "interval",
+                value: ParamValue::Granularity,
+            }],
+        }],
         method: Method::Post,
         auth: Auth {
             header: "access-token",
@@ -3799,7 +3900,13 @@ const DHAN: Descriptor = Descriptor {
         // so there is no word here to spell a rung with. Its rung is decided by
         // `bars_path`, which means this build cannot vary it and the bars are
         // folded to whatever rung they are filed under.
-        granularity_tokens: &[],
+        // THE VENDOR'S OWN WORD, from the intraday parameter table:
+        // "interval | enum | Minute intervals Values: 1, 5, 15, 30, 60".
+        // `1` and not `1minute` — that spelling is Groww's, and `1min` is the
+        // STORE's. Three vocabularies for one rung, which is what this table is
+        // for. No word for `Day1`, because the daily endpoint takes no interval
+        // at all and a token here would send one.
+        granularity_tokens: &[(Granularity::Minute1, "1")],
         pooling: Pooling::PerVendor,
         // Read first-hand from dhanhq.co/docs/v2/historical-data. All three are
         // marked REQUIRED there, and their absence is exactly what DH-905
@@ -3878,7 +3985,9 @@ const DHAN: Descriptor = Descriptor {
     // Restoring it is not a one-row diff: it needs `bars_path` to become a
     // per-rung table and an `interval` parameter whose word comes from
     // `granularity_tokens`. UNVERIFIED until both exist.
-    granularities: GranularitySet::EMPTY.with(Granularity::Day1),
+    granularities: GranularitySet::EMPTY
+        .with(Granularity::Day1)
+        .with(Granularity::Minute1),
     history: DHAN_HISTORY,
     granularity_floor: DHAN_FLOOR,
     segments: SegmentSet::EMPTY
@@ -3908,6 +4017,10 @@ const GROWW: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.groww.in",
+        // NO OVERRIDE, and that is a property of the vendor rather than an
+        // omission: `/v1/historical/candles` takes `candle_interval` and serves
+        // every rung this feed declares from the one endpoint.
+        rung_routes: &[],
         // THE LIVE ENDPOINT. The vendor's own page says of the previous
         // one: "This API request is deprecated and will NOT work in the
         // future."
@@ -4392,6 +4505,10 @@ const ZERODHA: Descriptor = Descriptor {
     record: RecordShape::Ohlcv,
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.kite.trade",
+        // NO OVERRIDE: this vendor puts the rung in `bars_path` itself as a
+        // PathSegment — D-0133 — so the endpoint already varies with the rung
+        // and there is nothing for a route table to add.
+        rung_routes: &[],
         // THE ROW §5 PREDICTED. Both the instrument and the rung are PATH
         // SEGMENTS, which is why `bars_path` is a list — D-0133. The two
         // placeholders are the vendor's own names for them, so a refusal reads
@@ -5138,11 +5255,16 @@ mod tests {
             // only `params` reported a populated table with no reader — and the
             // rule would have been "fixed" by deleting the tokens that make the
             // request work.
-            let named_in_query = spec
-                .params
-                .iter()
-                .any(|p| matches!(p.value, ParamValue::Granularity));
-            let named_in_path = spec.bars_path.iter().any(|segment| {
+            // THREE PLACES A RUNG CAN BE NAMED, and the rule is about all of
+            // them. A query parameter (Groww's `candle_interval`), a path
+            // segment (Zerodha's `/:interval`, D-0133), or a PER-RUNG parameter
+            // that travels only with the endpoint that takes it (Dhan's
+            // `interval`, which the daily endpoint does not document). Asking
+            // only the first two reported Dhan's populated token table as
+            // having no reader — and the rule would then have been "fixed" by
+            // deleting the token that makes the minute request work.
+            let rung_param = |p: &Param| matches!(p.value, ParamValue::Granularity);
+            let rung_segment = |segment: &PathSegment| {
                 matches!(
                     segment,
                     PathSegment::Value {
@@ -5150,7 +5272,17 @@ mod tests {
                         ..
                     }
                 )
-            });
+            };
+            let named_in_query = spec.params.iter().any(rung_param)
+                || spec
+                    .rung_routes
+                    .iter()
+                    .any(|r| r.params.iter().any(rung_param));
+            let named_in_path = spec.bars_path.iter().any(rung_segment)
+                || spec
+                    .rung_routes
+                    .iter()
+                    .any(|r| r.path.iter().any(rung_segment));
             assert_eq!(
                 named_in_query || named_in_path,
                 !spec.granularity_tokens.is_empty(),
@@ -6032,11 +6164,31 @@ mod tests {
         // request fetched daily bars and filed them under `1min/`. The test
         // passed the whole time, because it asked whether the row DECLARED the
         // rung and never whether the request could carry it.
+        // AND IT IS INVERTED BACK, WITH THE PRECONDITION NOW ASSERTED RATHER
+        // THAN ASSUMED. The rung was withdrawn until "the intraday path and an
+        // interval field" existed. Both exist, so the rung is served again —
+        // but declaring it is no longer enough on its own: the two clauses
+        // below are what make it SAFE, and they are checked here so the rung
+        // can never be re-declared without them. That is the difference between
+        // this assertion and the one that passed while the defect was live.
         assert!(
-            !Feed::Dhan.serves(Granularity::Minute1),
-            "the minute rung needs the intraday path and an interval field; \
-             until both exist it must refuse by name rather than file daily \
-             bars as minute bars"
+            Feed::Dhan.serves(Granularity::Minute1),
+            "the intraday endpoint and its interval field both exist now"
+        );
+        let Transport::Http(dhan) = Feed::Dhan.descriptor().transport else {
+            panic!("Dhan is an HTTP broker");
+        };
+        assert_ne!(
+            dhan.path_for(Granularity::Minute1),
+            dhan.path_for(Granularity::Day1),
+            "the two rungs must resolve to DIFFERENT endpoints — one path for \
+             both is the defect that filed daily bars under 1min/"
+        );
+        assert!(
+            dhan.route_for(Granularity::Minute1)
+                .is_some_and(|r| r.params.iter().any(|p| p.name == "interval")),
+            "and the minute rung must carry the interval field the intraday \
+             endpoint takes and the daily one does not document"
         );
         assert!(
             !Feed::Dhan.serves(Granularity::Minute5),
@@ -7220,12 +7372,23 @@ mod tests {
         // THE NARROWER-THAN-ALLOWED CASE, NAMED. Dhan's vendor floor is a
         // minute and this build does not fetch the rung; the two refusals must
         // not read the same, because one of them a code change fixes.
-        assert!(!Feed::Dhan.serves(Granularity::Minute1));
+        //
+        // FOR DHAN THAT GAP IS NOW CLOSED, and this asserts the closure rather
+        // than deleting the case. The vendor's floor allowed the minute rung
+        // the whole time; what was missing was the intraday endpoint and its
+        // interval field, and until they existed the build declined to ask.
+        // Both exist, so the build now asks for exactly what the floor allows —
+        // and the two refusals still read differently, which is what this
+        // section is about: one is the vendor's and one is ours.
+        assert!(
+            Feed::Dhan.serves(Granularity::Minute1),
+            "the build now asks for the rung its vendor floor always allowed"
+        );
         assert!(
             !Feed::Dhan
                 .granularity_verdict(Granularity::Minute1)
                 .is_refused(),
-            "the vendor serves the minute rung; this build is what does not ask for it"
+            "and the vendor never refused it — the gap was ours, and it is closed"
         );
         // And the edge of the mask: nothing is finer than the finest rung, so
         // every set passes against it.

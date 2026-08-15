@@ -289,9 +289,22 @@ impl HttpSource {
     /// cannot fail, which is the whole reason it is separate from [`Self::url`]:
     /// a receipt that failed to render because one instrument had no vendor id
     /// would be a worse receipt than one naming the endpoint generically.
+    ///
+    /// # It takes the RUNG, because a feed can have more than one endpoint
+    ///
+    /// Dhan serves daily from `/v2/charts/historical` and minute from
+    /// `/v2/charts/intraday`. Built from `bars_path` alone this reported the
+    /// DEFAULT endpoint whatever was actually fetched — so a minute run's
+    /// receipt named the daily URL. A receipt that names the wrong endpoint is
+    /// worse than one that names none: it is the diagnostic an operator would
+    /// have trusted while looking for a bug somewhere else.
     #[must_use]
-    pub fn endpoint(&self) -> String {
-        format!("{}{}", self.spec.base_url, self.spec.path_template())
+    pub fn endpoint(&self, rung: crate::vendor::Granularity) -> String {
+        format!(
+            "{}{}",
+            self.spec.base_url,
+            self.spec.path_template_for(rung)
+        )
     }
 
     /// The URL **one particular request** is fetched from.
@@ -311,7 +324,12 @@ impl HttpSource {
     /// in a URL path.
     pub fn url(&self, request: &BarRequest, from: &str, to: &str) -> Result<String, FetchError> {
         let mut out = String::from(self.spec.base_url);
-        for segment in self.spec.bars_path {
+        // THE RUNG PICKS THE ENDPOINT. `path_for` is `bars_path` for every feed
+        // that serves its rungs from one URL, and the rung's own path for one
+        // that does not — see `vendor::HttpSpec::rung_routes` for the daily /
+        // intraday split that made this necessary and for what it cost when one
+        // field had to answer for both.
+        for segment in self.spec.path_for(request.granularity) {
             out.push('/');
             match *segment {
                 crate::vendor::PathSegment::Literal(word) => out.push_str(word),
@@ -1000,10 +1018,20 @@ impl HttpSource {
         // refuse: a feed that spells its bar length in a request field has no
         // word for a rung nobody has recorded one for, and the request must not
         // go out naming a different length than the answer will be filed under.
+        //
+        // THE RUNG'S OWN FIELDS COME AFTER THE SHARED ONES, appended rather
+        // than merged: `rung_routes` carries what ONE endpoint takes and the
+        // other does not, so a shared list cannot hold it without sending it to
+        // both. Empty for every feed that serves its rungs from one URL.
         let pairs: Vec<(&'static str, String)> = self
             .spec
             .params
             .iter()
+            .chain(
+                self.spec
+                    .route_for(request.granularity)
+                    .map_or([].as_slice(), |r| r.params),
+            )
             .map(|p| Ok((p.name, self.resolve_param(p, request, &from, &to)?)))
             .collect::<Result<_, FetchError>>()?;
 
@@ -1517,6 +1545,7 @@ mod tests {
             extra_headers: &[],
             base_url: "https://vendor.invalid",
             bars_path: &[crate::vendor::PathSegment::Literal("bars")],
+            rung_routes: &[],
             method: Method::Post,
             auth: crate::vendor::Auth {
                 header: "x-token",
@@ -2005,7 +2034,10 @@ mod tests {
         let shown = format!("{source:?}");
         assert!(!shown.contains("SUPERSECRET"), "the token leaked: {shown}");
         assert!(shown.contains("<redacted>"), "and it says so: {shown}");
-        assert_eq!(source.endpoint(), "https://vendor.invalid/bars");
+        assert_eq!(
+            source.endpoint(crate::vendor::Granularity::Day1),
+            "https://vendor.invalid/bars"
+        );
     }
 
     /// A server on loopback that answers once and reports what it was sent.
@@ -2873,6 +2905,112 @@ mod tests {
             (DateFormat::CompactDmy, "01072025"),
         ] {
             assert_eq!(HttpSource::on_the_wire(day, format), want);
+        }
+    }
+
+    /// DHAN'S TWO RUNGS GO TO TWO ENDPOINTS, and the minute one carries the
+    /// field the daily one does not document.
+    ///
+    /// Driven off the SHIPPED descriptor rather than a fixture, because the
+    /// thing under test is what this build will actually put on a socket.
+    ///
+    /// # The defect this closes
+    ///
+    /// `Minute1` was declared on this feed once and withdrawn. One `bars_path`
+    /// meant the minute request went to `/v2/charts/historical` — the DAILY
+    /// endpoint — which answered, with daily bars, that would then be filed
+    /// under `1min/`. The bar length lives in the PATH in this store, so no
+    /// later reader could tell those from real minute data. It did not fail;
+    /// that is what made it dangerous.
+    #[test]
+    fn dhan_serves_the_two_rungs_from_two_endpoints_and_only_one_takes_an_interval() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP broker");
+        };
+
+        let day = spec.path_for(crate::vendor::Granularity::Day1);
+        let minute = spec.path_for(crate::vendor::Granularity::Minute1);
+        assert_ne!(
+            day, minute,
+            "the two rungs must not resolve to one endpoint: that is the defect"
+        );
+        let joined = |segs: &[crate::vendor::PathSegment]| {
+            segs.iter()
+                .map(|s| match *s {
+                    crate::vendor::PathSegment::Literal(w) => w,
+                    crate::vendor::PathSegment::Value { placeholder, .. } => placeholder,
+                })
+                .collect::<Vec<_>>()
+                .join("/")
+        };
+        assert_eq!(
+            joined(day),
+            "v2/charts/historical",
+            "the vendor's daily page"
+        );
+        assert_eq!(
+            joined(minute),
+            "v2/charts/intraday",
+            "the vendor's intraday page"
+        );
+
+        // THE INTERVAL TRAVELS WITH THE MINUTE RUNG AND NOWHERE ELSE. In the
+        // shared `params` list it would be sent to the daily endpoint too,
+        // which does not document it.
+        assert!(
+            spec.route_for(crate::vendor::Granularity::Day1).is_none(),
+            "the daily rung is the default endpoint and adds nothing"
+        );
+        let route = spec
+            .route_for(crate::vendor::Granularity::Minute1)
+            .expect("the minute rung has its own route");
+        assert_eq!(route.params.len(), 1, "one field, and it is the interval");
+        assert_eq!(route.params[0].name, "interval");
+
+        // AND THE WORD IS THE VENDOR'S, NOT THE STORE'S. Dhan spells the rung
+        // `1`; Groww spells the same rung `1minute`; the store spells it
+        // `1min`. Three vocabularies, and the descriptor is what keeps them
+        // apart.
+        assert_eq!(
+            spec.granularity_token(crate::vendor::Granularity::Minute1),
+            Some("1"),
+            "the intraday `interval` enum is 1, 5, 15, 30, 60"
+        );
+        assert_eq!(
+            spec.granularity_token(crate::vendor::Granularity::Day1),
+            None,
+            "the daily endpoint takes no interval, so there is no word to send"
+        );
+        // AND THE RUNG IS ACTUALLY OFFERED NOW.
+        assert!(
+            crate::vendor::Feed::Dhan.serves(crate::vendor::Granularity::Minute1),
+            "the rung is declared, so the form may offer it"
+        );
+    }
+
+    /// A FEED THAT SERVES EVERY RUNG FROM ONE URL IS UNCHANGED BY ANY OF THIS.
+    #[test]
+    fn groww_serves_both_rungs_from_the_one_endpoint_it_always_did() {
+        let crate::vendor::Transport::Http(spec) =
+            crate::vendor::Feed::Groww.descriptor().transport
+        else {
+            panic!("Groww is an HTTP broker");
+        };
+        assert!(spec.rung_routes.is_empty(), "no override, by construction");
+        for rung in [
+            crate::vendor::Granularity::Day1,
+            crate::vendor::Granularity::Minute1,
+        ] {
+            assert_eq!(
+                spec.path_for(rung),
+                spec.bars_path,
+                "every rung resolves to `/v1/historical/candles`"
+            );
+            assert!(
+                spec.route_for(rung).is_none(),
+                "and adds no per-rung parameter"
+            );
         }
     }
 }
