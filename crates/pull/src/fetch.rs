@@ -183,6 +183,28 @@ pub enum FetchError {
         /// Whatever the vendor said, truncated.
         detail: String,
     },
+    /// The vendor answered, and this build could not read what it said.
+    ///
+    /// # Why this is not [`Self::TransportFailed`]
+    ///
+    /// It was. `decode_body` runs INSIDE `HttpSource::window_async`, so every
+    /// decode fault — a price off the paisa grid, a null where a number
+    /// belongs, a column of the wrong length — surfaced as "the vendor was not
+    /// reached", which is false: the vendor was reached and answered, and the
+    /// exchange had already succeeded.
+    ///
+    /// Two things followed from the wrong name. An operator chasing a network
+    /// problem that did not exist; and `with_retry`, which cannot tell a
+    /// timeout from a decode fault by type, spending its whole ladder —
+    /// 13.75 s of backoff — re-asking for bytes that will be identical and
+    /// will fail identically. A deterministic fault is not a blip.
+    ///
+    /// Carries the inner refusal verbatim, so nothing an operator could read
+    /// before is lost; only the sentence in front of it changed.
+    BodyNotUnderstood {
+        /// The decoder's own words.
+        detail: String,
+    },
     /// The transport failed before an answer arrived.
     TransportFailed {
         /// What went wrong, in the transport's own words.
@@ -292,6 +314,12 @@ impl core::fmt::Display for FetchError {
             ),
             Self::VendorRefused { status, ref detail } => {
                 write!(f, "the vendor refused with status {status}: {detail}")
+            }
+            Self::BodyNotUnderstood { ref detail } => {
+                write!(
+                    f,
+                    "the vendor answered and the body was not readable: {detail}"
+                )
             }
             Self::TransportFailed { ref detail } => {
                 write!(f, "the vendor was not reached: {detail}")

@@ -14124,3 +14124,35 @@ opens at 15:14, and asserts that a July date is unaffected — so this is a date
 change taking effect, not a correction applied backwards over history already on
 disk.
 
+## D-0152 — a body this build cannot read is not a transport failure
+
+**Decided.** `FetchError::BodyNotUnderstood` names a decode fault, and
+`with_retry` returns on it instead of retrying.
+
+**What it said before.** `decode_body` runs INSIDE
+`HttpSource::window_async`, so every decode fault — a price off the paisa grid,
+a null where a number belongs, a column of the wrong length — came back as
+`TransportFailed`, whose sentence is *"the vendor was not reached"*. The vendor
+was reached. It answered. The exchange had already succeeded and the bytes were
+in hand.
+
+**Two things followed from the wrong name.** An operator chasing a network
+problem that did not exist. And `with_retry`, which cannot tell a timeout from a
+decode fault when both carry the same variant, spending its whole ladder —
+13.75 s of backoff per chunk — re-asking for bytes that come back identical and
+fail identically. A deterministic fault is not a blip, and retrying one is
+waiting for arithmetic to change its mind.
+
+**Scope, honestly.** This renames the fault and fixes the retry. It does NOT
+re-plumb the decoder's error vocabulary: `one_price` and its siblings still
+raise a generic detail rather than `PriceRefused { row, field, raw }`, because
+that variant needs a row index those functions do not carry. The inner refusal
+is preserved verbatim inside `BodyNotUnderstood`, so nothing an operator could
+read before is lost — only the sentence in front of it changed. Threading the
+row through is the remaining piece and is not in this change.
+
+**Found by the audit** at `crates/pull/src/http.rs:782`, filed against the
+negative-price refusal added earlier the same day. The criticism was right and
+broader than filed: that refusal followed a convention the whole price decoder
+already had.
+

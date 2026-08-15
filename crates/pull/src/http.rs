@@ -1085,7 +1085,15 @@ impl HttpSource {
             });
         }
 
-        decode_body(&text, &self.spec)
+        // NAMED AS A DECODE FAULT, BECAUSE THE EXCHANGE ALREADY SUCCEEDED.
+        //
+        // Everything below this line is reading bytes that arrived. Left as
+        // `TransportFailed` it read as "the vendor was not reached" — false,
+        // and it sent `with_retry` through its whole ladder re-asking for bytes
+        // that will come back identical. See `FetchError::BodyNotUnderstood`.
+        decode_body(&text, &self.spec).map_err(|why| FetchError::BodyNotUnderstood {
+            detail: why.to_string(),
+        })
     }
 }
 

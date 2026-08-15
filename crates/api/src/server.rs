@@ -4902,6 +4902,16 @@ async fn with_retry(
                     pull::fetch::FetchError::VendorRefused { status, .. } => Some(status),
                     _ => None,
                 };
+                // A BODY THIS BUILD CANNOT READ IS NOT A BLIP.
+                //
+                // The exchange succeeded; the bytes are simply not what the
+                // descriptor says. Asking again returns the same bytes and
+                // fails the same way, so the ladder below would spend 13.75 s
+                // proving that. Returned at once, like any other answered
+                // refusal.
+                if matches!(why, pull::fetch::FetchError::BodyNotUnderstood { .. }) {
+                    return Err(text);
+                }
                 let invalid_auth = text.contains("Invalid_Authentication");
                 if status.is_some_and(|code| (500..=599).contains(&code)) {
                     server_errors = server_errors.saturating_add(1);
