@@ -4083,3 +4083,68 @@ default is `PAUSED`, so nothing starts on its own.
 **How it was found.** `a_whole_round_runs_and_a_refused_broker_is_named_on_the_page`
 changed behaviour when the order landed, which sent me to read what rung the
 autopilot actually asks for.
+
+---
+
+## 71. The walk-forward validates a different strategy from the one it recommends
+
+Under D-0157 the combination and its exit variant are chosen TOGETHER: every
+candidate is ranked on the best its own 125-cell grid can do. That fixed the
+selection defect — measured, the true joint optimum had been ranking 10,534th
+of 10,575 on a real fold, 617% better than what the two-stage rule returned.
+
+**The out-of-sample figure did not follow.** `trade::walk` takes a mask, a
+horizon and a direction, and no stop, target or trail. So
+`FoldResult::out_of_sample` is the chosen COMBINATION walked with no exit
+levels at all, while `chosen_exit` and `chosen_exit_total` describe a variant
+that was never applied to the test window.
+
+A reader who sees a chosen stop beside an out-of-sample total will reasonably
+assume the second used the first. It does not. That is the shape `CLAUDE.md`
+§4 bans — a true number beside a wrong implication — and it is recorded here
+rather than left to a commit message.
+
+**What would close it.** `walk` gains the three levels, resolving them against
+ladders carried on `FoldResult` from the training grid, and `out_of_sample`
+becomes the same variant the selection chose. That is a signature change at
+every call site.
+
+---
+
+## 72. Four things the runner does not have, named
+
+Recorded because §3 rule 6 asks for honest limits and because each was found by
+adversarial audit rather than by review — the class of gap that survives
+precisely by never being written down.
+
+**No risk term in any objective.** `grep -rniE 'drawdown|max_loss|worst_trade|peak_to_trough' crates/runner/src`
+returns zero. `Cell` carries no worst-single-trade and no equity drawdown;
+`Summary::worst` is a TOTAL under pessimistic fills, not a worst trade. The
+stated aim is maximum profit at minimal stop, and only the first half is ranked
+on. `Cell::edge_ratio` is the nearest thing and is computed over trades that
+ended PROFITABLE, so it is structurally silent about how large a loser gets.
+
+**PBO has the statistic and not the design.** `pbo::place` correctly finds the
+in-sample winner and ranks it out of sample, which is Bailey–Borwein–López de
+Prado–Zhu's per-split quantity. The CSCV experimental design — the S-choose-S/2
+combinatorial splits that feed it — does not exist, and `walk_forward` keeps
+only each fold's winner, so the full candidate vectors a real split needs are
+not retained. Reported PBO is therefore only as good as the placements a caller
+supplies, and no caller in this repository can supply real ones.
+
+**Twelve named mutants survive.** An adversarial fleet named fourteen mutations
+of `crates/runner` that the suite does not catch; two are now killed
+(`restricted`'s `clear_before`, and `side_of`'s `Short` arm — see
+`docs/04-invariants.md` R-02 and R-03). The remaining twelve include
+`LAST_FILL_MINUTE` +1, which re-introduces a bug this repository already fixed
+once, and swapping `winner_mae` with `winner_mfe`, which inverts the sniper
+ratio. Gate 18 is the gate that should refuse them.
+
+**`grid::peak` is a loop the cost model omits.** `peak_adverse` and
+`peak_favourable` are each `for i in from..=to` and are called for every
+profitable candidate in every cell, so the real bar-visit count carries a
+`2 × variants × winners × span` term. The exit DECISION is genuinely three
+integer compares; the MAE/MFE measured beside it is not. The reduction is
+available and not taken: `excursion::crossings` already accumulates running
+`mae`/`mfe` and discards them, and because both are running MAXIMA the value at
+offset d IS `peak(entry, entry + d)`.

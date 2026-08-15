@@ -2413,3 +2413,23 @@ store asked before this.
 `crates/store/tests/unit.rs`, which also pins `OI_NULL == i64::MIN` and refuses
 `i64::MIN + 1`.
 
+
+## The walk-forward's own guarantees — D-0156, D-0157
+
+Five properties added while fixing the selection defects. Each is here because
+`CLAUDE.md` §9 asks for the invariant beside the test that proves it, and
+because every one of them was, at some point this session, *believed* rather
+than checked.
+
+| Id | Invariant | Proven by | ✓ |
+|---|---|---|---|
+| R-01 | **Every candidate the sweep produced is priced.** `FoldResult::priced` counts what the ranking loop visited and must equal `considered`. A prefix cap of any size breaks the equality the moment it truncates — measured with `.take(N)` restored on a 9,299-candidate fold: N=512 dropped 8,787, N=5,000 dropped 4,299, N=9,000 dropped 299. The value-comparison test it replaced fired only below ~1,683 and passed at the shipped 20,000, so it tested a constant rather than a property | `runner::validate::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped` | ✓ |
+| R-02 | **A fold's out-of-sample walk sees no training bar.** `restricted` blanks every row whose source is before the cut, and the check is against `ConditionMask::ZERO` rather than against a mask — an empty mask hits everything, `(bits & 0) == 0`, so asking whether a blanked row "hits" one is a question whose answer is always yes. Mutating `clear_before(from)` to `clear_before(0)` leaves 1,312 live rows before bar 3,188 | `runner::validate::the_out_of_sample_walk_cannot_see_a_single_training_bar` | ✓ |
+| R-03 | **The short direction is exercised, and differs from the long one.** No test ran `walk_forward` short before this, so a `panic!` planted in `side_of`'s `Short` arm survived the whole suite — half the execution model was never entered. The test also requires the two directions to disagree somewhere, so a direction accepted and then ignored fails it | `runner::validate::a_short_walk_forward_runs_and_is_not_the_long_one` | ✓ |
+| R-04 | **The stepdown threshold never rises as the surviving set shrinks.** Each Romano–Wolf round takes the bootstrap maximum over fewer strategies, so the bar must be non-increasing; that monotonicity is why a strategy masked by a stronger one can clear later. Drawing fresh indices per round broke it — measured 32.536 → 33.906 at seed 97, rising in 19 of 400 configurations, 0 of 400 with one resample matrix held across the stepdown | `runner::bootstrap::the_stepdown_threshold_never_rises_as_the_surviving_set_shrinks` | ✓ |
+| R-05 | **A grid holds exactly `(stops+1)(targets+1)(trails+1)` cells.** The count lived in four places and two were wrong: `evaluate`'s doc said `(rungs+1)^2`, the module header said `400 variants`, `validate::DEFAULT_RUNGS` said 125, and the reservation asked for 25 before pushing 125. One `grid::variants` function is now the only place it is computed | `runner::grid::the_cell_count_is_the_product_of_all_three_ladders_and_nothing_reserves_less` | ✓ |
+
+**What is NOT claimed here.** `FoldResult::out_of_sample` is a level-less walk:
+`trade::walk` takes no stop, target or trail, so the exit chosen in sample
+cannot be applied to the test window. Selection became joint under D-0157; the
+out-of-sample *validation* did not. That gap is recorded in `docs/06-limits.md`.
