@@ -1908,6 +1908,26 @@
     return c;
   });
 
+  /* THE EXPIRIES THIS SELECTION ACTUALLY REACHES, sorted, for the menu.
+   *
+   * `expiriesAll` stays on `deco` and must: `expiryRefusal` DISABLES on it, and
+   * a disable computed from a selection is the trap where choosing an expiry
+   * then narrowing past it kills the only control that could clear it. The
+   * gate's fast path reads it too, and its written proof is
+   * `matchedPreContract ⊆ deco` — fold that list from the subset and the
+   * implication inverts, so an empty list would RELEASE every contract row the
+   * gate exists to hold back.
+   *
+   * So the list an operator picks from is separate from the list the refusal
+   * is computed over. This is the first, and it is what the cascade requires:
+   * only the expiries left by feed, universe, instrument, segment, timeframe
+   * and month. Sorted, because every list on this page is. */
+  const expiryOffered = $derived.by(() => {
+    const seen = new Set();
+    for (const r of matchedPreContract) if (r.expiry !== null) seen.add(r.expiry);
+    return [...seen].sort();
+  });
+
   /** How many rows above this rung carry a contract at all — the gate's denominator. */
   const contractHere = $derived(
     matchedPreContract.reduce(
@@ -5060,10 +5080,23 @@
            IT RENDERS ONLY WHEN THERE IS A WINDOW TO CHOOSE. One month is not a
            range, and a control whose every setting produces the same table is a
            control that has nothing to say. -->
-      {#if monthsAll.length > 1}
-        {@render monthField('from', fromMonth, 'From month', 'Any earlier')}
-        {@render monthField('to', toMonth, 'To month', 'Any later')}
-      {/if}
+      <!-- THE FROM/TO RANGE IS GONE. ONE MONTH CONTROL, SINGLE SELECT.
+           ==================================================================
+           MONTH was secretly TWO controls: this from/to range, and the single
+           month picker below. A range is a selection of many months, which is
+           a multi-select — and every control on this page is single select.
+           Two controls for one rung also meant the rung was applied at two
+           different depths of the cascade, which is the one thing the prefix
+           rule cannot express.
+
+           `fromMonth` and `toMonth` stay declared and stay empty, so
+           `windowed` is `timeframed` by definition and the cascade collapses
+           to one month step. The calendar snippet and its handlers are dead
+           and are removed in the commit that follows this one, separately,
+           because deleting ~250 lines across thirty-three sites in the same
+           edit as a behaviour change is how a page stops rendering with
+           nothing to point at.
+           ================================================================== -->
 
       <!-- THE MONTH ROLL-UP, WHICH WAS A BAND OF CARDS AND IS NOW A MENU. The
            band was the widest block on the page and said, per month, what one
@@ -5434,83 +5467,45 @@
            carries no attribute at all. -->
       <div class="cell" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
         <span title="Which contract — futures and options show nothing without one.">Expiry</span>
-        <div class="picker" data-drop="exp">
-          <button
-            class="mnyb"
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={drop === 'exp'}
-            disabled={Boolean(expiryRefusal)}
-            title={expiryRefusal
-              ? `No expiry can be chosen — ${expiryRefusal}`
-              : expiry
-                ? `Contracts expiring ${dayLabel(expiry)} — the store's own key for it is ${expiry}. ${fmt(expiryCount.get(expiry) ?? 0)} instrument-month(s) here are on it. Every future and option on another expiry is not shown: a bar belongs to one contract, and two expiries under one heading would be a series no contract ever traded.`
-                : `NOTHING IS CHOSEN, so all ${fmt(contractHere)} contract row(s) this selection reaches are held back — this is a refusal and not an empty store. ${fmt(expiriesAll.length)} expiry/expiries are stored. Indices and equities carry no expiry and are unaffected: they are in the table below already.`}
-            onclick={(e) => {
-              e.stopPropagation();
-              drop = drop === 'exp' ? null : 'exp';
-            }}
-            >{expiryRefusal
-              ? 'No contract stored'
-              : expiry
-                ? dayLabel(expiry)
-                : `None chosen · ${fmt(expiriesAll.length)} stored`}</button
-          >
-          {#if drop === 'exp'}
-            <div class="menu" role="group" aria-label="Expiry — which contract">
-              <!-- THE UNCHOSEN ROW IS DRAWN AND IT DOES NOT SAY "ALL". It is
-                   the state that HOLDS CONTRACTS BACK, and labelling it the way
-                   every other rung labels its empty state would make it read as
-                   "no narrowing", which is the opposite of what it does. -->
-              <button
-                class="opt"
-                type="button"
-                aria-pressed={expiry === ''}
-                title="Choose no contract. Every future and option stays out of the table — this is the gate, not an 'all expiries' setting, and there is no setting that blends two contracts into one series."
-                onclick={() => {
-                  expiry = '';
-                  drop = null;
-                }}
-              >
-                <span class="tk">{expiry === '' ? '✓' : ''}</span>
-                <span class="nm">None</span>
-                <span class="ct" class:warn={contractHere > 0}
-                  >{contractHere > 0 ? `${fmt(contractHere)} row(s) held back` : 'no contract here'}</span
-                >
-              </button>
-              {#if expiriesAll.length === 0}
-                <hr />
-                <p class="none">This store names no contract.</p>
-              {:else}
-                <hr />
-                <!-- KEYED, COMPARED AND ASSIGNED ON THE RAW ISO DAY. Only the
-                     `.nm` text node is `dayLabel`, exactly as the month menu
-                     relabels only its own text node. -->
-                {#each expiriesAll as e (e)}
-                  {@const n = expiryCount.get(e) ?? 0}
-                  <button
-                    class="opt"
-                    type="button"
-                    aria-pressed={expiry === e}
-                    title={n > 0
-                      ? `${dayLabel(e)} — the store's own key for it is ${e}. ${fmt(n)} instrument-month(s) under the rungs above are on this contract, which is what choosing it returns.`
-                      : `${dayLabel(e)} — the store's own key for it is ${e}. This contract is stored, but no row under the rungs above is on it, so choosing it returns nothing and the table will say so. That is a finding about the selection, not about the store.`}
-                    onclick={() => {
-                      expiry = expiry === e ? '' : e;
-                      drop = null;
-                    }}
-                  >
-                    <span class="tk">{expiry === e ? '✓' : ''}</span>
-                    <span class="nm">{dayLabel(e)}</span>
-                    <span class="ct" class:warn={n === 0}
-                      >{n > 0 ? `${fmt(n)} row(s)` : 'no rows here'}</span
-                    >
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-        </div>
+        <!-- THE SAME `Picker` THE OTHER THREE USE, so this control is
+             searchable like them. It was 77 lines of hand-rolled dropdown with
+             no filter box, which is why an expiry could only be found by
+             scrolling. `single` because every control on this page is single
+             select; `filter` because that is the whole point of the change. -->
+        <Picker
+          single
+          filter
+          label="expiries"
+          disabled={Boolean(expiryRefusal)}
+          summary={expiryRefusal
+            ? 'No contract stored'
+            : expiry
+              ? dayLabel(expiry)
+              : `None chosen · ${fmt(expiryOffered.length)} here`}
+          rows={[
+            {
+              /* THE UNCHOSEN ROW IS DRAWN AND IT DOES NOT SAY "ALL". It is the
+                 state that HOLDS CONTRACTS BACK — a bar belongs to one
+                 contract, and two expiries under one heading would be a series
+                 no contract ever traded. */
+              key: '',
+              name: 'None chosen',
+              detail: `${fmt(contractHere)} contract row(s) held back`,
+              why:
+                contractHere > 0
+                  ? 'This is a refusal, not an empty store. Indices and equities carry no expiry and are unaffected — they are in the table below already.'
+                  : undefined
+            },
+            ...expiryOffered.map((d) => ({
+              key: d,
+              name: dayLabel(d),
+              detail: `${fmt(expiryCount.get(d) ?? 0)} instrument-month(s)`,
+              title: `Contracts expiring ${dayLabel(d)} — the store's own key for it is ${d}.`
+            }))
+          ]}
+          selected={new Set(expiry ? [expiry] : [])}
+          onchange={(/** @type {Set<string>} */ sel) => (expiry = [...sel][0] ?? '')}
+        />
         <span class="count" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
           {#if expiryRefusal}
             No contract — {expiryRefusal}
