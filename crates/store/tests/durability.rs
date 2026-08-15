@@ -137,3 +137,94 @@ fn a_directory_flush_the_host_refuses_is_returned_and_named() {
         .expect("the same month, with the directory readable");
     assert_eq!(opened.records(), 0, "a fresh month holds no records");
 }
+
+/// D-0149 — a month interrupted inside `initialise` opens, at every size the
+/// interruption can leave behind.
+///
+/// # The window
+///
+/// `initialise` is a 32,768-byte zero fill, then a 64-byte header, then one
+/// sync. A process that dies between the two writes leaves a file with bytes
+/// and no header. The repair condition was `len == 0`, so every one of those
+/// sizes was skipped, `validated` found no header slot, and the month refused
+/// to open for good — §3 rule 8 forbids rewriting it.
+///
+/// The likeliest crash point is the cruellest: after the fill and before the
+/// header the file is exactly `REGION_LEN`, the same size a healthy empty month
+/// has.
+#[test]
+fn a_month_interrupted_between_the_zero_fill_and_the_header_still_opens() {
+    // Every size the interruption can leave: the first byte, a partial fill,
+    // one short of the region, and the whole region with no header.
+    for len in [1_u64, 64, 4_096, 16_384, 20_000, 32_767, 32_768] {
+        let scratch = Scratch::new(&format!("TORN{len}"));
+        let path = bars_path();
+        let on_disk = path.to_path_buf(&scratch.root);
+        let dir = on_disk
+            .parent()
+            .expect("a month has a parent")
+            .to_path_buf();
+        fs::create_dir_all(&dir).expect("the month directory");
+
+        // The state a crash inside `initialise` leaves: zeroes, no header.
+        fs::write(&on_disk, vec![0u8; usize::try_from(len).expect("fits")]).expect("the torn file");
+        assert_eq!(
+            fs::metadata(&on_disk).expect("measurable").len(),
+            len,
+            "the fixture must be exactly the torn size"
+        );
+
+        let opened = BarFile::open_or_create(&scratch.root, bars_path(), 7).unwrap_or_else(|why| {
+            panic!(
+                "a torn month of {len} bytes must be repaired, not \
+                                          refused forever: {why}"
+            )
+        });
+
+        // Repaired to a healthy EMPTY month -- not to something that pretends
+        // to hold bars. The whole argument for repairing rather than refusing
+        // is that this file provably held nothing.
+        assert_eq!(
+            opened.header().n_valid,
+            0,
+            "{len}: repaired months hold no bars"
+        );
+        assert_eq!(
+            fs::metadata(&on_disk).expect("measurable").len(),
+            32_768,
+            "{len}: the repair writes the full region"
+        );
+    }
+}
+
+/// And the restraint: a file that has something to lose still refuses.
+///
+/// "No valid header" is NOT the repair condition, deliberately. A month holding
+/// real records with a damaged header must refuse loudly — that one has data,
+/// and §3 rule 8 outranks getting it open.
+#[test]
+fn a_month_with_bytes_that_are_not_zero_is_refused_rather_than_reinitialised() {
+    let scratch = Scratch::new("NOTZERO");
+    let path = bars_path();
+    let on_disk = path.to_path_buf(&scratch.root);
+    let dir = on_disk.parent().expect("a parent").to_path_buf();
+    fs::create_dir_all(&dir).expect("the month directory");
+
+    // Inside the region, so length alone would admit it -- but one byte is not
+    // zero, so this is not an interrupted fill and might be anything.
+    let mut damaged = vec![0u8; 4_096];
+    damaged[2_048] = 0x01;
+    fs::write(&on_disk, &damaged).expect("the damaged file");
+
+    let refused = BarFile::open_or_create(&scratch.root, bars_path(), 7);
+    assert!(
+        refused.is_err(),
+        "a file holding a byte this build did not write must not be silently \
+         re-initialised -- that would be the §4 fallback that hides a failure"
+    );
+    assert_eq!(
+        fs::metadata(&on_disk).expect("measurable").len(),
+        4_096,
+        "and the refusal leaves the file exactly as it was found"
+    );
+}

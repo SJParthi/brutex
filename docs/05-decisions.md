@@ -13982,3 +13982,46 @@ show which one.
 **Cost.** Two integer comparisons per bar, inside a loop that already runs per
 bar. §3 rule 4 untouched.
 
+## D-0149 — a month interrupted inside `initialise` was poisoned forever
+
+**Decided.** The repair condition at `BarFile::open_or_create` moves from
+`len == 0` to *every byte this file has is zero, and it has no more than
+`REGION_LEN`*.
+
+**The window.** `initialise` is two writes with nothing between them — a
+32,768-byte zero fill, then the 64-byte header — and one sync after both. A
+process that dies inside that window leaves a file of 1..=32,768 bytes holding
+no committed header. On the next open `len != 0`, so the repair was skipped,
+`validated` found no header slot, and the month refused to open. Permanently:
+§3 rule 8 forbids rewriting it, so there was no path back.
+
+And the likeliest crash point is the cruellest one. After the fill and before
+the header the file is exactly `REGION_LEN` — the same size a **healthy empty
+month** has.
+
+**Why all-zero is a safe repair condition, and "no valid header" is not.**
+
+* Records live PAST `REGION_LEN`, so a file this short has none.
+* A committed header is never all zeros — `Header::commit` writes a magic and a
+  CRC — so all-zero proves no header was ever committed.
+* Therefore re-running `initialise` destroys nothing, and refusing would strand
+  a month that holds nothing.
+
+The tempting wider rule — *no valid header, so re-initialise* — is refused. A
+month holding real records with a damaged header must still refuse loudly: that
+one has something to lose, and §3 rule 8 outranks getting it open. A test pins
+this: a 4,096-byte file with one non-zero byte is refused and left untouched.
+
+`len == 0` is subsumed rather than kept beside the new condition. An empty file
+is the all-zero case with nothing in it, and two conditions that must agree are
+two conditions that can drift.
+
+**Cost.** One read of at most 32,768 bytes, once per file open, on a path that
+already reads that region to parse the header. Nothing per bar.
+
+**Found by the audit, and reproduced twice.** A verifier built a scratch binary
+against the crate and measured that 1, 64, 4,096, 16,384, 20,000, 32,767 and
+32,768 all failed to open while 0 self-healed. The new test asserts the same
+seven sizes, and was itself run against the old condition first — it fails there
+with *"no header slot survived"*, which is how I know it asserts something.
+

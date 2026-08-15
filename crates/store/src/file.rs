@@ -626,10 +626,46 @@ impl BarFile {
 
         let bars = fault(open_rw(&bars_path), &bars_path, Action::Open)?;
         let mut len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
-        if len == 0 {
-            initialise(&bars, &bars_path, symbol_id, timeframe_secs)?;
-            fsync_dir(&dir)?;
-            len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+
+        // `len == 0` WAS THE REPAIR CONDITION, AND IT DID NOT COVER THE CRASH.
+        //
+        // `initialise` is two writes with nothing between them: a 32,768-byte
+        // zero fill, then the 64-byte header, then one sync. A process that
+        // dies inside that window leaves a file of 1..=32,768 bytes with no
+        // committed header. On the next open `len != 0`, so the repair was
+        // skipped, `validated` found no header slot, and the month refused to
+        // open — FOREVER. Nothing could rewrite it, because §3 rule 8 says
+        // nothing may.
+        //
+        // And the likeliest crash point is the worst one: after the fill and
+        // before the header is exactly `REGION_LEN` bytes, the size a healthy
+        // empty month also has.
+        //
+        // The condition is now "every byte this file has is zero, and it has no
+        // more than the region". That is provably an interrupted `initialise`
+        // and provably holds no data:
+        //
+        //   * records live PAST `REGION_LEN`, so a file this short has none;
+        //   * a committed header is never all zeros — `Header::commit` writes a
+        //     magic and a CRC — so all-zero means no header was ever committed;
+        //   * therefore re-running `initialise` destroys nothing, and refusing
+        //     instead would strand a month that holds nothing.
+        //
+        // Deliberately NOT "no valid header ⇒ re-initialise". A file with real
+        // records and a corrupted header must still refuse loudly: that one has
+        // something to lose, and §3 rule 8 outranks getting it open.
+        //
+        // `len == 0` is subsumed rather than kept beside this — an empty file
+        // is the all-zero case with nothing in it, and two conditions that must
+        // agree are two conditions that can drift.
+        if len <= REGION_LEN_U64 {
+            let mut head = vec![0u8; usize::try_from(len).unwrap_or(REGION_LEN)];
+            read_fully(&bars, &bars_path, 0, &mut head)?;
+            if head.iter().all(|&byte| byte == 0) {
+                initialise(&bars, &bars_path, symbol_id, timeframe_secs)?;
+                fsync_dir(&dir)?;
+                len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
+            }
         }
 
         // THE SAME DOOR AS `open_existing`, AND NOW ACTUALLY THE SAME CODE.
