@@ -771,6 +771,36 @@ jobs:
           # four: `csv.rs` decodes a body that is already in memory, reads no
           # Parameter Store, and holds no credential.
 
+          # ---- group 24: AN INVENTED AWS ERROR BODY, WHOSE WHOLE PURPOSE IS TO
+          # PROVE A PATH IS NOT LEAKED. crates/pull/src/ssm.rs test module.
+          #
+          # READ THIS ONE TWICE, because it is the only group whose entries are
+          # shaped exactly like the four segments CLAUDE.md §8 keeps out of this
+          # repository. That is not a coincidence and it is not a slip: the
+          # fixture is a fabricated `AccessDeniedException` body carrying a full
+          # parameter ARN, and the test asserts that the renderer emits NONE of
+          # it. `ssm.rs:893` reads
+          #
+          #     for leak in ["SomeFutureException", "parameter/", "anorg", "arn:aws"]
+          #
+          # and fails if any appears in the message an operator sees. So `anorg`
+          # is tracked precisely so that a build which starts leaking an org
+          # segment goes red.
+          #
+          # Each is transparently invented -- `anorg`, `anenv`, `avendor` and
+          # `afield` are "an org", "an env", "a vendor", "a field" spelled as
+          # identifiers, and no vendor in crates/pull/src/vendor.rs is named
+          # `avendor`. `000000000000` is a zeroed AWS account id, the value AWS
+          # documentation itself uses as a placeholder, and twelve digits is
+          # the account-id width. `assumed-role` is a fixed ARN component of an
+          # STS role session, not a segment anyone chose.
+          #
+          # Gate 1c still refuses the real path in any tracked file and this
+          # group does not touch it: none of these six is a real org, env,
+          # vendor or field, and the file that holds them is the one proving
+          # the real ones never reach a log.
+          ssm_leak_fixture='anorg anenv avendor afield 000000000000 assumed-role'
+
           # ---- group 23: A YEAR-MONTH IN AN ASSERTION. D-0070.
           # `pull::unit::a_daily_bucket_is_an_ist_day_...` asserts the month a
           # folded bar derives to, and that assertion is the whole proof of the
@@ -931,7 +961,8 @@ jobs:
           ${debug_label} ${wire_date} ${aws_sigv4} ${aws_shared}
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
-          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}"
+          ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
+          ${ssm_leak_fixture}"
           bad=0
           while IFS= read -r word; do
             if [ -z "$word" ]; then continue; fi
