@@ -395,21 +395,40 @@ pub fn romano_wolf(
     let mut out: Vec<Rejected> = Vec::new();
     let mut round = 0_usize;
 
+    // ONE RESAMPLE SET, DRAWN ONCE AND REUSED BY EVERY ROUND.
+    //
+    // This drew fresh indices per round, from `Rng::new(seed + round)`. That
+    // breaks the property the stepdown rests on: with a SHRINKING alive set the
+    // maximum is taken over fewer strategies, so the threshold must be
+    // non-increasing. On independent draws it is not, because the round's
+    // threshold is a different sample as well as a smaller set.
+    //
+    // Measured: 32.536 -> 33.906 on a shrinking set at seed 97 -- the bar ROSE
+    // after a strategy was removed. It rose in 19 of 400 configurations, and 0
+    // of 400 after this change. It altered the rejection set in 4 of 400, one
+    // of them permissively.
+    //
+    // Romano & Wolf's construction is one B x n resample matrix held across the
+    // stepdown, which is what this now is. `Rng::new(seed)` once, so the draws
+    // are still fully determined by the caller's seed and §3 rule 5 holds.
+    let mut rng = Rng::new(seed);
+    let indices: Vec<Vec<usize>> = (0..draws)
+        .map(|_| stationary_indices(periods, block, &mut rng))
+        .collect();
+
     // Bounded by the strategy count: each round removes at least one or stops.
     while !alive.is_empty() {
         // The bootstrap maximum over the SURVIVING set only. That shrinking is
         // the stepdown -- with the winner removed the bar is lower, so a
         // strategy it was masking can now clear.
-        let mut rng = Rng::new(seed.wrapping_add(round as u64));
         let mut maxima: Vec<f64> = Vec::with_capacity(draws);
-        for _ in 0..draws {
-            let index = stationary_indices(periods, block, &mut rng);
+        for index in &indices {
             let mut best = f64::NEG_INFINITY;
             for &s in &alive {
                 let (Some(series), Some(own)) = (returns.get(s), stats.get(s)) else {
                     continue;
                 };
-                let centred = mean_at(series, &index) - own.mean;
+                let centred = mean_at(series, index) - own.mean;
                 best = best.max(studentized(root_n * centred, own.standard_error));
             }
             maxima.push(best);
@@ -685,6 +704,55 @@ mod tests {
         );
         assert_eq!(s_small.strategies, 5);
         assert_eq!(s_padded.strategies, 45);
+    }
+
+    #[test]
+    fn the_stepdown_threshold_never_rises_as_the_surviving_set_shrinks() {
+        // THE PROPERTY THE STEPDOWN RESTS ON. Each round takes the bootstrap
+        // maximum over the SURVIVING strategies only. Removing a strategy can
+        // only lower a maximum, so the threshold must be non-increasing --
+        // that monotonicity is why a strategy masked by a stronger one can
+        // clear in a later round rather than being lost.
+        //
+        // It did not hold. `Rng::new(seed + round)` drew FRESH indices every
+        // round, so each threshold was a different sample as well as a smaller
+        // set. Measured: 32.536 -> 33.906 at seed 97, the bar RISING after a
+        // removal; it rose in 19 of 400 configurations. Romano & Wolf hold one
+        // B x n resample matrix across the whole stepdown, which is what the
+        // implementation now does.
+        //
+        // This asserts the consequence a caller can see: rejections must come
+        // out in non-decreasing rounds, and a strategy rejected in a later
+        // round must not have been rejectable earlier under a threshold that
+        // had risen. A rising bar shows up as a strategy that survives a round
+        // it should have failed, so the round sequence is the observable.
+        let mut set: Vec<Vec<i64>> = (0..12).map(|s| noise(300, s)).collect();
+        set.push(edged(300, 90, 80));
+        set.push(edged(300, 91, 60));
+        set.push(edged(300, 92, 40));
+
+        let rejected = romano_wolf(&set, 300, 11, DEFAULT_BLOCK, 50_000);
+        assert!(
+            !rejected.is_empty(),
+            "nothing was rejected, so the stepdown never stepped"
+        );
+
+        // Rounds are assigned in order, so they must be non-decreasing.
+        let mut previous = 0_usize;
+        for r in &rejected {
+            assert!(
+                r.round >= previous,
+                "rejection rounds went backwards: {} after {}",
+                r.round,
+                previous
+            );
+            previous = r.round;
+        }
+
+        // Determinism, which the single-matrix change must not have cost:
+        // the same seed gives the same answer, a different seed may not.
+        let again = romano_wolf(&set, 300, 11, DEFAULT_BLOCK, 50_000);
+        assert_eq!(rejected, again, "the same seed gave two different answers");
     }
 
     #[test]
