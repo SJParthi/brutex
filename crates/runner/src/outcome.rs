@@ -70,8 +70,8 @@ use vocab::ConditionMask;
 ///
 /// # What it was before
 ///
-/// [`forward`] computed `close[i + H] - close[i]` over a flat slice with no
-/// notion of a day at all. A signal fired fifteen minutes before the close
+/// [`forward`] computed `close[i + H] - close[i]` over the slice as one
+/// unbroken run, with no notion of a day at all. A signal fired before the close
 /// measured its "next fifteen bars" straight through the overnight gap and into
 /// the following morning's open — an overnight hold priced as a quarter of an
 /// hour of intraday movement, and gapping risk is not the same risk. Two
