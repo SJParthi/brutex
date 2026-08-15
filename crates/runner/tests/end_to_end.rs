@@ -258,3 +258,93 @@ fn the_pipeline_refuses_a_slice_it_cannot_measure_rather_than_inventing_one() {
         "sections that were not supplied must say so rather than reading as empty"
     );
 }
+
+/// The drill-down ladder: how deep the sweep reaches as support falls.
+///
+/// # What this proves that a unit test cannot
+///
+/// `CLAUDE.md` §6 says there is no depth parameter — the ladder climbs until the
+/// frequent frontier empties. That is easy to assert and hard to believe, so
+/// this measures it: sweep the same slice at falling support thresholds and
+/// watch how far it reaches.
+///
+/// # The comparison is only legal between sweeps that went extinct
+///
+/// Anti-monotonicity says lowering `min_hits` keeps strictly MORE combinations
+/// frequent, so a lower threshold can never go extinct sooner. Stated that
+/// baldly the assertion is **false**, and it failed the first time this test
+/// ran: depth 16 at `min_hits=600` against depth 12 at `min_hits=300`.
+///
+/// Nothing was wrong with the prune. A lower threshold makes each level wider,
+/// a wider level hits the candidate ceiling sooner, and a sweep that breaches
+/// the ceiling stops where it stopped — [`Sweep::completed`] is false and the
+/// deepest level it holds is **partial**. Its depth is an artefact of the
+/// budget, not a fact about the data, and comparing it to an extinct sweep's
+/// depth compares two different measurements that happen to share a name.
+///
+/// So the invariant below is guarded on `completed()`, and the halted rungs are
+/// still printed — with the budget that stopped them named — because a rung
+/// that reached the end of the money is exactly what a reader needs to see.
+/// Hiding it would leave a truncated search reading as an exhaustive one, which
+/// is the failure §4 bans outright.
+///
+/// Every bar is `synthetic::sessions`, generated in-process. No stored bar is
+/// read, so the figures are facts about the SEARCH and not about any market.
+#[test]
+fn the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first() {
+    let bars = synthetic::sessions(12);
+    let mut deepest_extinct = 0_usize;
+    let mut extinct_rungs = 0_usize;
+    let mut rows: Vec<String> = Vec::new();
+
+    // Falling support against the SHIPPED ceiling, so the figures describe the
+    // engine an operator actually runs rather than one this test invented.
+    for min_hits in [1_500_u64, 1_000, 600, 300, 150] {
+        let swept = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut evaluator());
+        let depth = swept.sweep.depth();
+        let frequent = swept.sweep.all_frequent().count();
+        let generated: u64 = swept.sweep.levels.iter().map(|l| l.generated).sum();
+        let distinct = closed::closed(&swept.sweep).kept.len();
+
+        let ending = match swept.sweep.halted {
+            None => {
+                // Extinct: the frontier emptied on its own, so this depth is a
+                // fact about the data and comparable to the last such fact.
+                assert!(
+                    depth >= deepest_extinct,
+                    "min_hits {min_hits} went extinct at depth {depth} where a \
+                     HIGHER threshold reached {deepest_extinct} -- with both \
+                     sweeps extinct no budget can explain that, so the prune \
+                     dropped a candidate anti-monotonicity says it must keep"
+                );
+                deepest_extinct = depth;
+                extinct_rungs = extinct_rungs.saturating_add(1);
+                "extinct".to_owned()
+            }
+            Some(halt) => format!("HALTED k={} {:?}", halt.k, halt.breach),
+        };
+
+        rows.push(format!(
+            "  {min_hits:>8}{depth:>7}{generated:>13}{frequent:>10}{distinct:>10}   {ending}"
+        ));
+    }
+
+    assert!(
+        extinct_rungs > 0,
+        "every rung hit a budget, so this measured the budgets and not the data"
+    );
+    assert!(
+        deepest_extinct > 1,
+        "the deepest extinct rung must climb past k=1, or nothing is climbing"
+    );
+
+    println!("\nDRILL-DOWN LADDER   (synthetic::sessions(12), no stored bars)");
+    println!(
+        "  {:>8}{:>7}{:>13}{:>10}{:>10}   ended by",
+        "min_hits", "depth", "enumerated", "frequent", "distinct"
+    );
+    for row in &rows {
+        println!("{row}");
+    }
+    println!();
+}
