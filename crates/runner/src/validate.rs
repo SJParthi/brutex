@@ -112,6 +112,13 @@ pub struct FoldResult {
     pub test_bars: usize,
     /// Combinations the sweep produced on the training bars.
     pub considered: u64,
+    /// The exit variant chosen IN SAMPLE, as (stop, target, trail) rungs.
+    ///
+    /// `None` on every element means the no-levels baseline won. Chosen on the
+    /// training bars for the same reason the combination is: a stop fitted to
+    /// the test window is look-ahead, and a stop fitted to the future looks
+    /// spectacular and is trivially findable.
+    pub chosen_exit: Option<(Option<usize>, Option<usize>, Option<usize>)>,
     /// The combination with the best in-sample worst-case total, if any.
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound. That selection
@@ -174,6 +181,27 @@ impl Validated {
 /// Whatever it drops is counted in [`Validated::not_considered`] and never
 /// silently discarded.
 pub const DEFAULT_CANDIDATES: usize = 512;
+
+/// How many rungs each exit ladder gets when a fold picks its exit.
+///
+/// Four gives a 5x5x5 grid -- 125 variants including the no-stop no-target
+/// no-trail baseline -- per chosen combination. It is a stated assumption and
+/// not a derivation: more rungs resolve the ladder more finely and cost
+/// proportionally, and nothing in the data says where that trade sits.
+pub const DEFAULT_RUNGS: usize = 4;
+
+/// The excursion side matching a fill direction.
+///
+/// Two enums for the same fact, in two crates that may not depend on each
+/// other: `costs::fill::Direction` is about which leg fills first, and
+/// `excursion::Side` is about which extreme of a bar hurts. Converting here
+/// rather than making one depend on the other keeps the graph acyclic.
+const fn side_of(d: Direction) -> crate::excursion::Side {
+    match d {
+        Direction::Long => crate::excursion::Side::Long,
+        Direction::Short => crate::excursion::Side::Short,
+    }
+}
 
 /// Run an anchored walk-forward over `bars`.
 ///
@@ -246,6 +274,33 @@ pub fn walk_forward(
             }
         }
 
+        // THE EXIT IS CHOSEN IN SAMPLE TOO, and that is not a detail.
+        //
+        // A stop level picked by looking at the test window is the same
+        // look-ahead as a combination picked that way -- worse, because a stop
+        // fitted to the future looks spectacular and is trivially findable.
+        // `grid::evaluate` derives the ladders from the TRAINING trades and
+        // ranks the variants on them, so the exit travels to the test window
+        // already decided.
+        //
+        // `sharpest` and not `best`: the aim is the setup whose winners went
+        // least against you, which is the one that survives the tightest stop.
+        // Ranking on total profit alone would prefer a variant that made more
+        // money by risking more, and that is the opposite of what is wanted.
+        let chosen_exit = best.as_ref().and_then(|(mask, _)| {
+            let g = crate::grid::evaluate(
+                train,
+                &train_column,
+                mask,
+                horizon,
+                side_of(direction),
+                DEFAULT_RUNGS,
+            );
+            g.sharpest()
+                .or_else(|| g.best())
+                .map(|c| (c.stop, c.target, c.trail))
+        });
+
         let (chosen, in_sample) = match best {
             Some((mask, s)) => (Some(mask), s),
             None => (None, Summary::default()),
@@ -271,6 +326,7 @@ pub fn walk_forward(
             test_bars: fold.test.len(),
             considered,
             chosen,
+            chosen_exit,
             in_sample,
             out_of_sample,
         });
@@ -406,6 +462,33 @@ mod tests {
             assert!(
                 v.not_considered > 0,
                 "candidates were dropped and not_considered stayed zero"
+            );
+        }
+    }
+
+    #[test]
+    fn the_exit_levels_are_chosen_on_the_training_bars_and_not_on_the_test_window() {
+        // A stop fitted to the test window is the same look-ahead as a
+        // combination fitted to it -- and worse, because a stop fitted to the
+        // future looks spectacular and is trivially findable.
+        //
+        // The assertion is structural rather than statistical: a fold that
+        // chose a combination must also carry an exit variant, and that variant
+        // is produced by `grid::evaluate` over the TRAINING slice alone. If the
+        // selection ever moved to the test window this field would still be
+        // populated, so the test also pins the shape that makes that visible --
+        // `chosen_exit` is `None` exactly when `chosen` is.
+        let bars = crate::synthetic::sessions(12);
+        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+
+        assert!(v.decided() > 0, "at least one fold must choose something");
+        for f in &v.folds {
+            assert_eq!(
+                f.chosen.is_some(),
+                f.chosen_exit.is_some(),
+                "fold {} carries a combination without an exit, or the reverse -- \
+                 the two are chosen together on the same bars",
+                f.index
             );
         }
     }
