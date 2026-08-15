@@ -697,6 +697,35 @@ mod tests {
                     winner_mfe: 300,
                     ..crate::grid::Cell::default()
                 },
+                // A stop-only variant: exercises the "-" rendering for a rung
+                // that is absent while another is present.
+                crate::grid::Cell {
+                    stop: Some(0),
+                    trades: 51,
+                    wins: 24,
+                    pessimistic: 1_021,
+                    optimistic: 1_240,
+                    stopped: 22,
+                    timed_out: 29,
+                    winner_mae: 96,
+                    winner_mfe: 210,
+                    ..crate::grid::Cell::default()
+                },
+                // A target-and-trail variant with NO stop, so the other two "-"
+                // renderings are exercised too.
+                crate::grid::Cell {
+                    target: Some(0),
+                    trail: Some(1),
+                    trades: 44,
+                    wins: 20,
+                    pessimistic: 300,
+                    optimistic: 300,
+                    targeted: 25,
+                    timed_out: 19,
+                    winner_mae: 150,
+                    winner_mfe: 200,
+                    ..crate::grid::Cell::default()
+                },
                 // A survivor with sharp winners.
                 crate::grid::Cell {
                     stop: Some(0),

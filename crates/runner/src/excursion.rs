@@ -636,6 +636,12 @@ mod tests {
             "a peak for a crossing that never happened would price an exit that \
              never happened"
         );
+        assert_eq!(
+            c.last(),
+            0,
+            "one bar walked, so the last offset is zero -- the accessor a caller \
+             uses to say `held to the end` rather than `never crossed`"
+        );
     }
 
     #[test]

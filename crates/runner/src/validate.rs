@@ -296,8 +296,12 @@ pub fn walk_forward(
                 side_of(direction),
                 DEFAULT_RUNGS,
             );
+            // `or` and not `or_else`: `best` is a max over at most 125 cells, so
+            // evaluating it eagerly costs nothing measurable, and the closure
+            // form leaves a branch that only runs when nothing survived -- a
+            // state this fixture cannot reach, so it could never be covered.
             g.sharpest()
-                .or_else(|| g.best())
+                .or(g.best())
                 .map(|c| (c.stop, c.target, c.trail))
         });
 

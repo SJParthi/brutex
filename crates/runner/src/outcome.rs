@@ -714,23 +714,19 @@ mod tests {
                 continue;
             }
             let entry_day = indicators::ist_day(bars.get(i).map_or(0, |b| b.ts_micros));
-            // The exit is at or before the forced close of the entry's own day,
-            // so the last bar this outcome could have read is that day's 15:10.
+            // The exit is at or before the forced close of the entry's own day, so
+            // the last bar this outcome could have read is that day's 15:10 --
+            // which is why the horizon bar, clamped to the slice, is still the
+            // same day. An outcome that left its day would show here.
             let exit_day = indicators::ist_day(
                 bars.get(i.saturating_add(15).min(bars.len().saturating_sub(1)))
                     .map_or(0, |b| b.ts_micros),
             );
             assert!(
-                entry_day == exit_day || i.saturating_add(15) > close_of(i),
-                "bar {i} measured an outcome whose horizon leaves its own day"
+                entry_day == exit_day,
+                "bar {i} measured an outcome whose exit is on another day"
             );
         }
-    }
-
-    /// The index of the 15:10 bar in the session bar `i` belongs to.
-    fn close_of(i: usize) -> usize {
-        // 375 bars per session, the forced close 355 bars after the open.
-        (i / 375).saturating_mul(375).saturating_add(355)
     }
 
     #[test]
