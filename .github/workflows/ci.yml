@@ -610,7 +610,7 @@ jobs:
           # NAME rather than filed under the nearest directory that exists.
           # Both name a scratch path this repository chose, not a segment any
           # vendor or account uses.
-          late_scaffold='census-incremental fits skipped daily unstorable'
+          late_scaffold='census-incremental fits skipped daily unstorable all counts'
           # `crates/pull/src/folder.rs` and its tests, added by another line of work. Read in
           # context before declaring, one at a time, because declaring a literal is a claim
           # that it is not a parameter-path segment:
