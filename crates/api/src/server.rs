@@ -4731,9 +4731,12 @@ enum Step {
     /// The vendor gave a reason about the request. Asking again cannot change
     /// it.
     Answered,
-    /// The vendor's own side failed, and has now said so
-    /// [`SERVER_ERROR_ATTEMPTS`] times.
-    ServerDown,
+    /// The vendor's own side failed, and has now said so this many times.
+    ///
+    /// Carried rather than assumed: the message used to interpolate
+    /// [`SERVER_ERROR_ATTEMPTS`] directly, which asserted a count nothing had
+    /// measured.
+    ServerDown { answered: u32 },
     /// Ask again in `wait_ms`. `throttled` is the governor's cue to take its
     /// multiplicative decrease first.
     Again { wait_ms: u64, throttled: bool },
@@ -4748,8 +4751,22 @@ enum Step {
 /// answered at all. `invalid_auth` is the body-level marker a vendor writes
 /// instead of a status.
 ///
+/// `attempt` is the chunk's attempt ordinal, counting failures of every class.
+/// `server_errors` counts only the 5xx answers, INCLUDING the one being judged.
+///
+/// # Why those are two numbers and not one
+///
+/// They were one. The 5xx cap read the shared ordinal, so a 502 arriving after
+/// two timeouts on the same chunk was refused on the vendor's FIRST 5xx —
+/// exactly the defect the 5xx retry was added to fix, reappearing whenever the
+/// chunk had a bad minute first. And the message said "it answered that 3
+/// times" when the vendor had answered once, which is a measurement the code
+/// never took, stated as fact (§3 rule 6).
+///
+/// Two counters cost one `u32` and remove both.
+///
 /// Constant work — a handful of integer comparisons, no allocation.
-const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32) -> Step {
+const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32, server_errors: u32) -> Step {
     if invalid_auth {
         return Step::CredentialDied;
     }
@@ -4785,16 +4802,25 @@ const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32) -> Step {
         // than a blip gets, and the governor is not touched: a 500 names no
         // budget.
         Some(500..=599) => {
-            // `|| attempt >= THROTTLE_ATTEMPTS` was also tested here and could
-            // never decide anything: `SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS`
-            // is const-asserted, so the first test has always fired by then.
-            // Removed for the reason the cap above was -- an unreachable
-            // disjunct is an uncoverable branch and a surviving mutant.
-            if attempt >= SERVER_ERROR_ATTEMPTS {
-                return Step::ServerDown;
+            // COUNTED AGAINST 5xx ANSWERS, NOT AGAINST EVERY FAILURE. See the
+            // note on the parameters above for what reading the shared ordinal
+            // here cost.
+            //
+            // An earlier draft also tested `|| attempt >= THROTTLE_ATTEMPTS`,
+            // which could never decide anything, since
+            // `SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS` is const-asserted.
+            // An unreachable disjunct is an uncoverable branch and a surviving
+            // mutant, so it is gone; the ladder's own bound still applies below
+            // through `attempt`.
+            if server_errors >= SERVER_ERROR_ATTEMPTS || attempt >= THROTTLE_ATTEMPTS {
+                return Step::ServerDown {
+                    answered: server_errors,
+                };
             }
+            // Quadratic in the 5xx count, so two timeouts before the first 502
+            // do not push it straight to a four-second wait.
             Step::Again {
-                wait_ms: 250 * attempt as u64 * attempt as u64,
+                wait_ms: 250 * server_errors as u64 * server_errors as u64,
                 throttled: false,
             }
         }
@@ -4846,6 +4872,8 @@ async fn with_retry(
     site: &Site,
 ) -> Result<pull::fetch::RawWindow, String> {
     let mut last = String::new();
+    // Counted apart from `attempt`, so a 5xx budget is spent by 5xx answers.
+    let mut server_errors = 0u32;
     for attempt in 1..=THROTTLE_ATTEMPTS {
         match source.window_async(request).await {
             // THE ADDITIVE INCREASE. Without this the governor admits
@@ -4875,7 +4903,10 @@ async fn with_retry(
                     _ => None,
                 };
                 let invalid_auth = text.contains("Invalid_Authentication");
-                match step(status, invalid_auth, attempt) {
+                if status.is_some_and(|code| (500..=599).contains(&code)) {
+                    server_errors = server_errors.saturating_add(1);
+                }
+                match step(status, invalid_auth, attempt, server_errors) {
                     Step::CredentialDied => {
                         // A CREDENTIAL DEATH MID-RUN IS CERTAIN, NOT A BLIP.
                         //
@@ -4900,11 +4931,12 @@ async fn with_retry(
                     // It gave a reason; the reason will not change because it
                     // was asked twice more.
                     Step::Answered => return Err(text),
-                    Step::ServerDown => {
+                    Step::ServerDown { answered } => {
                         return Err(format!(
-                            "{text} — and it answered that {SERVER_ERROR_ATTEMPTS} \
-                             times. The vendor is reachable and its own side is \
-                             failing, which is not a blip this run can wait out."
+                            "{text} — and its own side has now failed {answered} \
+                             time(s) on this chunk, out of {SERVER_ERROR_ATTEMPTS} \
+                             allowed. The vendor is reachable and failing, which \
+                             is not a blip this run can wait out."
                         ));
                     }
                     Step::Again { wait_ms, throttled } => {
@@ -11480,23 +11512,27 @@ mod tests {
         // A CREDENTIAL DEATH IS CERTAIN, so it never waits, at any attempt.
         // 403 is the third broker's `TokenException` and 401 is the other two.
         for attempt in 1..=THROTTLE_ATTEMPTS {
-            assert_eq!(step(Some(401), false, attempt), Step::CredentialDied);
-            assert_eq!(step(Some(403), false, attempt), Step::CredentialDied);
+            assert_eq!(step(Some(401), false, attempt, 0), Step::CredentialDied);
+            assert_eq!(step(Some(403), false, attempt, 0), Step::CredentialDied);
             // And the body-level marker a vendor writes instead of a status,
             // which outranks whatever the status happened to be.
-            assert_eq!(step(None, true, attempt), Step::CredentialDied);
-            assert_eq!(step(Some(200), true, attempt), Step::CredentialDied);
+            assert_eq!(step(None, true, attempt, 0), Step::CredentialDied);
+            assert_eq!(step(Some(200), true, attempt, 0), Step::CredentialDied);
         }
 
         // A REASON ABOUT THE REQUEST IS NOT RE-ASKED.
         for code in [400, 404, 405, 410, 418, 422] {
-            assert_eq!(step(Some(code), false, 1), Step::Answered, "status {code}");
+            assert_eq!(
+                step(Some(code), false, 1, 0),
+                Step::Answered,
+                "status {code}"
+            );
         }
 
         // 429 BACKS OFF EXPONENTIALLY AND TELLS THE GOVERNOR.
         let mut waits = Vec::new();
         for attempt in 1..THROTTLE_ATTEMPTS {
-            match step(Some(429), false, attempt) {
+            match step(Some(429), false, attempt, 0) {
                 Step::Again { wait_ms, throttled } => {
                     assert!(throttled, "a 429 is the governor's cue");
                     waits.push(wait_ms);
@@ -11509,12 +11545,15 @@ mod tests {
             waits.windows(2).all(|w| w[1] > w[0]),
             "each wait exceeds the last, or it is not a backoff"
         );
-        assert_eq!(step(Some(429), false, THROTTLE_ATTEMPTS), Step::Exhausted);
+        assert_eq!(
+            step(Some(429), false, THROTTLE_ATTEMPTS, 0),
+            Step::Exhausted
+        );
 
         // THE TOTAL, WHICH IS THE NUMBER THAT ACTUALLY BOUNDS A RUN.
         //
         // This replaces a line that asserted nothing. It read
-        // `matches!(step(Some(429), false, 20), Exhausted | Again { wait_ms:
+        // `matches!(step(Some(429), false, 20, 0), Exhausted | Again { wait_ms:
         // 30_000, .. })` and claimed to prove a 30,000 ms cap -- but attempt 20
         // is past `THROTTLE_ATTEMPTS`, so the first arm always matched and the
         // cap was never evaluated. The cap could not fire at any reachable
@@ -11522,11 +11561,11 @@ mod tests {
         // this was one, and it was mine.
         assert_eq!(waits.iter().sum::<u64>(), MAX_CHUNK_BACKOFF_MS);
 
-        // 5xx IS RETRIED -- THE BUG THIS CLASS EXISTS FOR -- ON THE SHORTER
-        // LADDER, QUADRATICALLY, AND WITHOUT TOUCHING THE GOVERNOR.
+        // 5xx IS RETRIED -- THE BUG THIS CLASS EXISTS FOR -- ON ITS OWN
+        // SHORTER LADDER, QUADRATICALLY, AND WITHOUT TOUCHING THE GOVERNOR.
         for code in [500, 502, 503, 504, 599] {
             assert_eq!(
-                step(Some(code), false, 1),
+                step(Some(code), false, 1, 1),
                 Step::Again {
                     wait_ms: 250,
                     throttled: false
@@ -11535,41 +11574,77 @@ mod tests {
             );
         }
         assert_eq!(
-            step(Some(503), false, 2),
+            step(Some(503), false, 2, 2),
             Step::Again {
                 wait_ms: 1_000,
                 throttled: false
             }
         );
-        // And it STOPS at its own cap rather than the throttle ladder's, so a
-        // vendor having a bad hour does not cost 13.75 s per instrument.
+        // Stops at its OWN cap, so a bad hour at the vendor does not cost
+        // 13.75 s per instrument.
         assert_eq!(
-            step(Some(503), false, SERVER_ERROR_ATTEMPTS),
-            Step::ServerDown
+            step(
+                Some(503),
+                false,
+                SERVER_ERROR_ATTEMPTS,
+                SERVER_ERROR_ATTEMPTS
+            ),
+            Step::ServerDown {
+                answered: SERVER_ERROR_ATTEMPTS
+            }
         );
         let spent: u64 = (1..SERVER_ERROR_ATTEMPTS)
             .map(|a| 250 * u64::from(a) * u64::from(a))
             .sum();
         assert_eq!(spent, 1_250, "a dead vendor costs 1.25 s, not 13.75 s");
 
+        // THE COUNTER IS THE 5xx COUNT, NOT THE ATTEMPT ORDINAL.
+        //
+        // This is the defect the audit filed as a blocker. The two counters
+        // were one, so a 502 arriving after two timeouts on the same chunk hit
+        // the cap on the vendor's FIRST 5xx -- the exact bug the 5xx retry was
+        // added to fix, back again whenever the chunk had a bad minute first.
+        assert_eq!(
+            step(Some(502), false, 3, 1),
+            Step::Again {
+                wait_ms: 250,
+                throttled: false
+            },
+            "attempt 3 with one 5xx answer is the vendor's FIRST failure and \
+             must be re-asked"
+        );
+        // And the reported count is the one that was measured, so the message
+        // cannot claim three answers when there was one.
+        assert_eq!(
+            step(Some(502), false, 5, 3),
+            Step::ServerDown { answered: 3 }
+        );
+
+        // The chunk's own ladder still bounds it: past THROTTLE_ATTEMPTS there
+        // are no attempts left, whatever the 5xx count is.
+        assert_eq!(
+            step(Some(502), false, THROTTLE_ATTEMPTS, 1),
+            Step::ServerDown { answered: 1 }
+        );
+
         // NOTHING ANSWERED AT ALL IS THE TRANSPORT BLIP THE QUADRATIC WAIT WAS
         // SIZED FOR, and it gets the full ladder because a lost packet is much
         // weaker evidence of a broken vendor than a 500 is.
         assert_eq!(
-            step(None, false, 1),
+            step(None, false, 1, 0),
             Step::Again {
                 wait_ms: 250,
                 throttled: false
             }
         );
         assert_eq!(
-            step(None, false, THROTTLE_ATTEMPTS - 1),
+            step(None, false, THROTTLE_ATTEMPTS - 1, 0),
             Step::Again {
                 wait_ms: 250 * 25,
                 throttled: false
             }
         );
-        assert_eq!(step(None, false, THROTTLE_ATTEMPTS), Step::Exhausted);
+        assert_eq!(step(None, false, THROTTLE_ATTEMPTS, 0), Step::Exhausted);
     }
 
     /// The transport is checked before anything a refusal should not cost.
