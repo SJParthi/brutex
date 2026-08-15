@@ -55,7 +55,7 @@ const WORKSPACE: &str = include_str!("../../../Cargo.toml");
 /// Closed against `WORKSPACE` by [`the_manifest_list_is_the_whole_workspace`], so a
 /// crate added to the workspace and not to this list is a failing test rather than a
 /// silently unchecked row.
-const MANIFESTS: [(&str, &str); 11] = [
+const MANIFESTS: [(&str, &str); 12] = [
     ("api", include_str!("../../api/Cargo.toml")),
     ("core", include_str!("../Cargo.toml")),
     ("costs", include_str!("../../costs/Cargo.toml")),
@@ -64,6 +64,7 @@ const MANIFESTS: [(&str, &str); 11] = [
     ("indicators", include_str!("../../indicators/Cargo.toml")),
     ("lake", include_str!("../../lake/Cargo.toml")),
     ("pull", include_str!("../../pull/Cargo.toml")),
+    ("runner", include_str!("../../runner/Cargo.toml")),
     ("store", include_str!("../../store/Cargo.toml")),
     ("telemetry", include_str!("../../telemetry/Cargo.toml")),
     ("vocab", include_str!("../../vocab/Cargo.toml")),
