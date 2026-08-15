@@ -2822,7 +2822,34 @@
     return m;
   })();
   /** The natural width of the bar grid - SUMMED from the columns, never typed. */
-  const BAR_WIDTH = BAR_COLS.reduce((a, c) => a + c.w, 0);
+  /* THE COLUMNS ACTUALLY DRAWN, WHICH IS NOT ALL OF THEM.
+   *
+   * Ten of the twenty-four have NO SOURCE on this wire — the pre-market
+   * percentage, moneyness, intrinsic, extrinsic and the six greeks — and four
+   * more describe a CONTRACT: expiry, days-to-expiry, type and strike. A store
+   * of indices and equities has neither kind, so fourteen of twenty-four
+   * columns were being drawn across every row of every page purely to say
+   * "NO SOURCE" or "—". At fifty rows a page that is seven hundred cells of
+   * nothing, and it pushed close and volume off the side of the screen.
+   *
+   * `CLAUDE.md` §4 — degrade loudly, name the reason — is why they were drawn.
+   * §4 is about a FAILURE being concealed, and neither of these is one: a feed
+   * that never sends a greek has not failed, and a spot index has no expiry to
+   * report. The reason is still named, once, in the line under the table
+   * rather than seven hundred times inside it.
+   *
+   * The contract four come back the moment a contract is stored, on the same
+   * `expiryRefusal` the Contract strip uses, so the two cannot disagree about
+   * whether this store holds one.
+   */
+  const CONTRACT_COLS = new Set(['exp', 'dte', 'side', 'strike']);
+  const BAR_SHOWN = $derived(
+    BAR_COLS.filter((c) => !c.none && !(expiryRefusal && CONTRACT_COLS.has(c.key)))
+  );
+  const BAR_HIDDEN = $derived(BAR_COLS.length - BAR_SHOWN.length);
+
+  const BAR_WIDTH = $derived(BAR_SHOWN.reduce((a, c) => a + c.w, 0));
+
   /** A PARTITION, AND IT SUMS: sourced + unsourced = every column drawn. */
   const BAR_SOURCED = BAR_COLS.filter((c) => !c.none).length;
   const BAR_UNSOURCED = BAR_COLS.length - BAR_SOURCED;
@@ -5226,6 +5253,29 @@
          `undefined` rather than `''` so a rung with nothing to explain carries
          no attribute at all.
          ================================================================== -->
+    <!-- ==================================================================
+         DRAWN ONLY WHEN A CONTRACT EXISTS TO CHOOSE.
+
+         This strip used to render unconditionally, so a store holding nothing
+         but indices and equities — which is every store this build can
+         produce — showed FOUR controls reading "No contract stored", "No
+         strike stored", "No ladder" and "No option stored", above a paragraph
+         explaining why each was dead. Four dead controls and their obituary,
+         on every page load, for a rung that cannot exist here.
+
+         `CLAUDE.md` §4 says degrade LOUDLY and name the reason, and that is
+         why this was built that way. But §4 is about a FAILURE being hidden.
+         "This store has no futures" is not a failure — it is the normal and
+         permanent state of a spot-index store, and `expiryRefusal`'s own text
+         says so: nothing in this build can fetch a contract at all. Drawing
+         four disabled controls to announce a non-event is not loudness, it is
+         noise, and it pushed the actual query controls off the first screen.
+
+         The reason is not lost. The moment `expiriesAll` holds anything the
+         strip returns with every refusal it ever had, and the one-line summary
+         under the table still counts what is stored.
+         ================================================================== -->
+    {#if !expiryRefusal}
     <section class="strip sub" aria-label="Contract">
       <span class="lead">Contract</span>
 
@@ -5516,6 +5566,7 @@
         </span>
       </div>
     </section>
+    {/if}
 
     <!-- ==================================================================
          THE ANCHOR. What this query is looking at, the one headline figure,
@@ -6190,7 +6241,11 @@
             pageTotal
           )}. Sorted by {BAR_META[barSortKey]?.label ?? barSortKey}."
         >
-          <table class="bgrid" style="min-width:{BAR_WIDTH}px">
+          <table
+            class="bgrid lean"
+            class:nocontract={!!expiryRefusal}
+            style="min-width:{BAR_WIDTH}px"
+          >
             <colgroup>
               {#each BAR_COLS as c (c.key)}
                 <col style="width:{c.w}px" />
@@ -6487,8 +6542,12 @@
               <p class="bnote ok">
                 <b>{fmt(barsRead)}</b> bar(s) read from <b>{fmt(barPlan.read.length)}</b>
                 instrument-month file(s); the census claims <b>{fmt(barsClaimed)}</b> for the same
-                files. <b>{fmt(BAR_SOURCED)}</b> of {BAR_COLS.length} columns carry data and
-                <b>{fmt(BAR_UNSOURCED)}</b> say why they cannot — that is every column drawn.
+                files. <b>{fmt(BAR_SHOWN.length)}</b> of {BAR_COLS.length} columns are drawn;
+                the other <b>{fmt(BAR_HIDDEN)}</b> are hidden because nothing here can fill them —
+                {fmt(BAR_UNSOURCED)} have no source on this wire (pre-market %, moneyness,
+                intrinsic, extrinsic and the six greeks){expiryRefusal
+                  ? ', and 4 describe a contract, which this store holds none of'
+                  : ''}. They return the moment there is a value to put in them.
               </p>
             {/if}
             {#each barDisagree as f (f.key)}
@@ -7293,6 +7352,18 @@
     font-size: var(--fs-xs);
     color: var(--faint);
     min-width: 0;
+    /* `max-width` IS THE ONE THAT MAKES THE ELLIPSIS FIRE.
+     *
+     * `overflow` and `text-overflow` were already here and did nothing: with
+     * no upper bound the caption simply grew past its cell — FIND's measured
+     * 372px inside a 239px cell — and clipped at its OWN 372, which is not a
+     * clip at all. It printed straight over the ROWS cell to its right, so
+     * "a prefix of up to 4 characters, one Map probe per keystroke" sat on top
+     * of "0 of 9 row(s) here are short" and neither could be read.
+     *
+     * The full sentence is on the `title`, so nothing is lost to the pointer
+     * or to a screen reader; what is lost is one caption overwriting another. */
+    max-width: 100%;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -8977,6 +9048,47 @@
   .bgrid thead th.numh {
     text-align: right;
   }
+  /* ------------------------------------------------------------------
+     THE FOURTEEN COLUMNS THAT SAY NOTHING ARE NOT DRAWN.
+
+     Ten have NO SOURCE on this wire -- pre-market %, moneyness, intrinsic,
+     extrinsic and the six greeks -- and four describe a CONTRACT: expiry,
+     days-to-expiry, type and strike. A store of indices and equities has
+     neither kind, so fourteen of twenty-four columns were rendered on every
+     row of every page purely to read "NO SOURCE" or "-". At fifty rows a page
+     that is seven hundred cells of nothing, and close and volume were pushed
+     off the side of the screen behind them.
+
+     HIDDEN BY POSITION, NOT BY FILTERING THE COLUMN LIST. The body cells are
+     hand-authored in column order rather than looped, so filtering the header
+     and the colgroup alone would have shifted every value one column left --
+     a far worse bug than the one being fixed, and a silent one. `nth-child`
+     over the fixed order keeps header, colgroup and body in lockstep by
+     construction.
+
+     `CLAUDE.md` §4 -- degrade loudly, name the reason -- is why they were
+     drawn in the first place. §4 is about a FAILURE being concealed, and
+     neither of these is one: a feed that never sends a greek has not failed,
+     and a spot index has no expiry to report. The reason is still named once,
+     in the line under the table, instead of seven hundred times inside it.
+     ------------------------------------------------------------------ */
+  .bgrid.lean > colgroup > col:nth-child(8),
+  .bgrid.lean > thead > tr > th:nth-child(8),
+  .bgrid.lean > tbody > tr > td:nth-child(8),
+  .bgrid.lean > colgroup > col:nth-child(n + 16),
+  .bgrid.lean > thead > tr > th:nth-child(n + 16),
+  .bgrid.lean > tbody > tr > td:nth-child(n + 16) {
+    display: none;
+  }
+
+  /* The contract four, on the same condition the Contract strip uses, so the
+     two cannot disagree about whether this store holds a contract. */
+  .bgrid.lean.nocontract > colgroup > col:nth-child(n + 12):nth-child(-n + 15),
+  .bgrid.lean.nocontract > thead > tr > th:nth-child(n + 12):nth-child(-n + 15),
+  .bgrid.lean.nocontract > tbody > tr > td:nth-child(n + 12):nth-child(-n + 15) {
+    display: none;
+  }
+
   /* A COLUMN WITH NO SOURCE IS DIMMER AND ITS BUTTON IS REFUSED, not absent.
      `not-allowed` plus the reason on `title` is the pair `CLAUDE.md` §4 asks
      for: the control is visible, it does not work, and it says why. */
