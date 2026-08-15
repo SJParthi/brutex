@@ -4043,3 +4043,43 @@ both blocks.
 
 **How it was found.** CI, twice in a row, on the branch. The claim had been in
 the file since it was written.
+
+---
+
+## 70. The autopilot pins the MINUTE rung, so the pull order now stalls every month it walks
+
+**What is true.** `autopilot::backfill` sets `Granularity::Minute1` once, at
+`crates/api/src/autopilot.rs:2118`, and every round it drives asks for that rung.
+D-0153 put the pull order in front of `broker_run`, and the order refuses a
+minute pull whose day pass has not landed.
+
+**So the autopilot, started against a store with no day bars, does this:** asks
+for a month at one minute, is refused with *"the 1day pass comes first"*,
+classifies as `Transport`, backs off, and retries. `MAX_MONTH_ATTEMPTS × (1 +
+STALL_RETRIES)` is **9** attempts, after which the month is stalled and passed.
+It then does the same for the next month, and the next.
+
+It does **not** busy-loop and it does **not** hide anything — every stall
+carries the order's own sentence, which names the pass to run instead. But it
+walks the whole ladder storing nothing, and an operator who starts it expecting
+a backfill gets a page full of stalls.
+
+**Why it was not "fixed" by exempting the autopilot.** Because the order is the
+operator's rule and the autopilot is not a special case of it — the same 5.8×
+argument applies with more force to an unattended process, which can spend 81
+windows per instrument discovering what 14 would have told it.
+
+**What would close it.** The autopilot walking the ladder rather than pinning a
+rung: for each month, the day rung first, and the minute rung only once that
+month's day pass is held. `ladder::precedes` already states the order and
+`next_window` already answers "what does this rung still need" per rung, so the
+shape exists; what does not exist is a frontier that carries a RUNG alongside
+its month. That is a `FeedState` change, not a new mechanism.
+
+**Until then.** The day pass is run from `/ingest` by hand, and the autopilot is
+useful for the minute rung only on months whose day bars are already held. The
+default is `PAUSED`, so nothing starts on its own.
+
+**How it was found.** `a_whole_round_runs_and_a_refused_broker_is_named_on_the_page`
+changed behaviour when the order landed, which sent me to read what rung the
+autopilot actually asks for.
