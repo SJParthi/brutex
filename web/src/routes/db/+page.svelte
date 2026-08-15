@@ -3818,6 +3818,57 @@
    * do not share a ruler. Keyed on `tf`, each rung is measured against its own
    * largest move and the bar answers "big for a bar of this length".
    */
+  /* VOLUME AND RANGE GET THEIR OWN PER-RUNG SCALES, for the reason the change
+   * scale has one: a minute's volume and a day's are not two sizes of the same
+   * thing, so they do not share a ruler. Folded over `barRows` and never
+   * `barPage`, so turning the page cannot change what a full bar means. */
+  const volFullByTf = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const top = new Map();
+    for (const b of barRows) {
+      const v = b.vol ?? 0;
+      if (v > (top.get(b.tf) ?? 0)) top.set(b.tf, v);
+    }
+    return top;
+  });
+
+  /** @param {number} v @param {string} tf */
+  function volMag(v, tf) {
+    const full = volFullByTf.get(tf) ?? 0;
+    return full <= 0 ? 0 : Math.round((Math.min(v ?? 0, full) / full) * 100);
+  }
+
+  /* THE BAR'S OWN RANGE, high minus low, as a share of the widest range at that
+   * rung. This is what the spine down the left edge is scaled by: a doji reads
+   * as a short tick and a wide bar as a tall one, so the column answers "where
+   * did anything actually happen" before a single figure is read. */
+  const rngFullByTf = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const top = new Map();
+    for (const b of barRows) {
+      const r = b.h - b.l;
+      if (r > (top.get(b.tf) ?? 0)) top.set(b.tf, r);
+    }
+    return top;
+  });
+
+  /** @param {number} r @param {string} tf */
+  function rngMag(r, tf) {
+    const full = rngFullByTf.get(tf) ?? 0;
+    if (full <= 0) return MIN_SPINE;
+    /* SQUARE ROOT, NOT LINEAR. Measured on the real page: against the widest
+     * 1-minute range in the month, an ordinary minute is under a fifth of it,
+     * so a linear scale put all fifty rows on the floor — distinct values: 1.
+     * A range is a length and the eye compares lengths by area, so the square
+     * root is the honest curve here: it keeps the ordering exact and spends the
+     * height where the rows actually are. The widest bar is still full height. */
+    return Math.max(MIN_SPINE, Math.sqrt(Math.min(r, full) / full));
+  }
+
+  /* A FLAT BAR STILL GETS A TICK. Zero range is a real state — a minute with
+   * one print — and a row with no mark at all reads as a rendering fault. */
+  const MIN_SPINE = 0.08;
+
   const chgFullByTf = $derived.by(() => {
     /** @type {Map<string, number>} */
     const top = new Map();
@@ -5875,7 +5926,13 @@
               {:else}
                 {#key stamp}
                   {#each barPage as b, i (b.rk)}
-                    <tr class="brow" class:odd={i % 2 === 1} class:row-in={entering}>
+                    <tr
+                      class="brow"
+                      class:odd={i % 2 === 1}
+                      class:row-in={entering}
+                      data-dir={b.c > b.o ? 'up' : b.c < b.o ? 'down' : 'flat'}
+                      style="--rng:{rngMag(b.h - b.l, b.tf)}"
+                    >
                       <!-- DATE / TIME. The stamp is IST and says so; the rung
                            and the instrument that produced the bar are on the
                            title, because a grid that mixes two files must be
@@ -5890,7 +5947,7 @@
                       <td class="bn" title="{fmt(b.h)} paisa, as stored">{paisaText(b.h)}</td>
                       <td class="bn" title="{fmt(b.l)} paisa, as stored">{paisaText(b.l)}</td>
                       <td class="bn" title="{fmt(b.c)} paisa, as stored">{paisaText(b.c)}</td>
-                      <td class="bn">{fmt(b.vol)}</td>
+                      <td class="bn bvol" style="--vmag:{volMag(b.vol, b.tf)}%">{fmt(b.vol)}</td>
 
                       <!-- PRE-MARKET %: no source on this wire. -->
                       <td class="bn na"
@@ -8590,24 +8647,104 @@
    * `prefers-reduced-motion` is honoured below: the width is a paint, not an
    * animation, but the transition on it is.
    */
+  /* ---------------------------------------------------------------------
+     THE CHANGE COLUMN IS A SIGNED SILHOUETTE.
+
+     It was a bar growing from the right, coloured up or down. Colour alone is a
+     poor encoding: it dies in greyscale and it dies for a red-green dichromat,
+     and it gave the reader no shape to scan. Now the axis is the cell's centre
+     and the bar grows RIGHT for up and LEFT for down, so direction is carried
+     by POSITION and the column resolves into a distribution down fifty rows.
+
+     THE TRANSITION HERE HAD NEVER RUN. It named `background-image`, which is a
+     discrete property — no engine interpolates two gradients. `--mag` is now a
+     registered property (theme.css) so the number the gradient is built from is
+     what animates, and it does.
+     --------------------------------------------------------------------- */
   .bpc {
     --mag: 0%;
     position: relative;
     background-image: linear-gradient(
-      to left,
-      color-mix(in srgb, currentColor 18%, transparent) 0 var(--mag),
-      transparent var(--mag)
+      color-mix(in srgb, currentColor 20%, transparent) 0 100%,
+      color-mix(in srgb, currentColor 20%, transparent)
     );
     background-repeat: no-repeat;
-    /* A band under the text rather than a full-height block: at 40px rows a
-       solid fill fights the figure for contrast. */
-    background-size: 100% 60%;
-    background-position: center;
-    transition: background-image 160ms ease-out;
+    /* A 3px band on the cell's floor, not a full-height wash: at 40px rows a
+       block fights the figure it is meant to annotate. */
+    background-size: var(--mag) 3px;
   }
-  @media (prefers-reduced-motion: reduce) {
-    .bpc {
-      transition: none;
+  .bpc[data-dir='up'] {
+    background-position: 50% bottom;
+  }
+  .bpc[data-dir='down'] {
+    background-position: calc(50% - var(--mag)) bottom;
+  }
+
+  /* VOLUME, THE SAME IDEA AND DELIBERATELY NEUTRAL. Length reads as size; it
+     must never read as direction, so this one has no `data-dir` and takes
+     `--dim` rather than the up/down pair. Grows from the right, under the
+     figure, so the number stays what the eye lands on. */
+  .bvol {
+    --vmag: 0%;
+    background-image: linear-gradient(
+      color-mix(in srgb, var(--dim) 24%, transparent) 0 100%,
+      color-mix(in srgb, var(--dim) 24%, transparent)
+    );
+    background-repeat: no-repeat;
+    background-size: var(--vmag) 3px;
+    background-position: right bottom;
+  }
+
+  /* ---------------------------------------------------------------------
+     THE DIRECTION SPINE — one tick per row, down the left edge.
+
+     Height is the bar's own RANGE against the widest range at its rung, so the
+     left margin becomes a profile of where the session actually moved. Colour
+     is close against open. It lands inside the 8px padding the first cell
+     already has, so it displaces nothing, and `overflow: hidden` on the cell
+     clips it to the row.
+     --------------------------------------------------------------------- */
+  .brow > td:first-child {
+    position: relative;
+  }
+  .brow > td:first-child::before {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: currentColor;
+    transform: scaleY(var(--rng, 0.18));
+    transform-origin: center;
+  }
+  .brow[data-dir='up'] > td:first-child {
+    color: color-mix(in srgb, var(--up) 58%, transparent);
+  }
+  .brow[data-dir='down'] > td:first-child {
+    color: color-mix(in srgb, var(--down) 58%, transparent);
+  }
+  .brow[data-dir='flat'] > td:first-child {
+    color: color-mix(in srgb, var(--dim) 45%, transparent);
+  }
+
+  /* O / H / L ARE CONTEXT; CLOSE IS THE FIGURE. Four prices at one weight makes
+     a reader parse all four to find the one they came for. */
+  .bgrid > tbody > tr > td:nth-child(3),
+  .bgrid > tbody > tr > td:nth-child(4),
+  .bgrid > tbody > tr > td:nth-child(5) {
+    color: var(--ink-2);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    /* `--mag`, `--vmag` and `--rng` are registered, so these interpolate. The
+       rule this replaces named `background-image` and never ran. */
+    .bpc,
+    .bvol {
+      transition:
+        --mag 160ms var(--ease-out),
+        --vmag 160ms var(--ease-out);
+    }
+    .brow > td:first-child::before {
+      transition: transform 160ms var(--ease-out);
     }
   }
   .bpc[data-dir='up'] {
