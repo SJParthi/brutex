@@ -443,6 +443,113 @@ mod tests {
         );
     }
 
+    /// THE VENDOR'S OWN CONTRACT NAMES BECOME THIS STORE'S IDENTITY.
+    ///
+    /// Every name here is quoted from
+    /// groww.in/trade-api/docs/curl/backtesting. Two namings, one contract: the
+    /// vendor writes a `DDMmmYY` expiry and a strike in RUPEES, this store
+    /// writes an ISO expiry and a strike in PAISA — `CLAUDE.md` §7.
+    #[test]
+    fn the_vendors_contract_names_translate_into_this_stores_identity() {
+        for (name, underlying, contract) in [
+            (
+                "NSE-NIFTY-04Jan24-19200-CE",
+                "NIFTY",
+                "2024-01-04-1920000-CE",
+            ),
+            (
+                "NSE-NIFTY-02Jan25-28500-PE",
+                "NIFTY",
+                "2025-01-02-2850000-PE",
+            ),
+            ("NSE-NIFTY-30Sep25-FUT", "NIFTY", "2025-09-30-FUT"),
+            (
+                "BSE-SENSEX-25Sep25-79500-CE",
+                "SENSEX",
+                "2025-09-25-7950000-CE",
+            ),
+        ] {
+            let got = read_contract(name).unwrap_or_else(|| panic!("{name} must read"));
+            assert_eq!(got.underlying, underlying, "{name}");
+            assert_eq!(got.contract.as_str(), contract, "{name}");
+            assert_eq!(
+                got.vendor_symbol, name,
+                "the vendor's own name is kept whole — it is what goes back on \
+                 the wire to ask for bars"
+            );
+        }
+    }
+
+    /// A STRIKE WITH PAISE IS EXACT, AND NEVER GOES THROUGH A FLOAT.
+    ///
+    /// `19200.05` is not representable in binary floating point. §7 is what
+    /// forbids discovering that at the write boundary, so the two halves are
+    /// parsed as integers and combined.
+    #[test]
+    fn a_fractional_strike_is_read_as_exact_paisa_and_a_third_place_is_refused() {
+        let paisa = |s: &str| {
+            read_contract(&format!("NSE-NIFTY-04Jan24-{s}-CE"))
+                .map(|f| f.contract.as_str().to_owned())
+        };
+        assert_eq!(paisa("19200"), Some("2024-01-04-1920000-CE".to_owned()));
+        assert_eq!(
+            paisa("19200.5"),
+            Some("2024-01-04-1920050-CE".to_owned()),
+            "one place is TENTHS of a rupee — fifty paise, not five"
+        );
+        assert_eq!(paisa("19200.05"), Some("2024-01-04-1920005-CE".to_owned()));
+        assert_eq!(
+            paisa("19200.005"),
+            None,
+            "the tick grid is two places, so a third is a name this build does \
+             not understand — refused, never rounded"
+        );
+    }
+
+    /// A NAME THIS BUILD CANNOT READ IS REFUSED, NEVER GUESSED AT.
+    ///
+    /// A wrong strike or a wrong expiry names a DIFFERENT contract, and filing
+    /// it would merge two series into one file — which no later reader could
+    /// undo, because the file would look like one contract that traded more.
+    #[test]
+    fn a_contract_name_this_build_cannot_read_is_refused_rather_than_guessed() {
+        for bad in [
+            "NSE-NIFTY-04Jan24-19200-XX",   // not a side
+            "NSE-NIFTY-04Xxx24-19200-CE",   // not a month
+            "NSE-NIFTY-4Jan24-19200-CE",    // day not two digits
+            "NSE-NIFTY-04Jan24-abc-CE",     // strike not a number
+            "NSE-NIFTY-32Jan24-19200-CE",   // no such day
+            "NSE-NIFTY-04Jan24",            // nothing after the expiry
+            "NSE-NIFTY-04Jan24-19200-CE-X", // one field too many
+            "NSE--04Jan24-FUT",             // no underlying
+            "NIFTY",                        // not a contract at all
+            "",
+        ] {
+            assert_eq!(read_contract(bad), None, "must refuse: {bad}");
+        }
+    }
+
+    /// EVERY DISCOVERED NAME ROUND-TRIPS INTO A PATH SEGMENT.
+    ///
+    /// The contract this produces is the same type `store::path` files bars
+    /// under, so a name that reads here is a name that can be STORED — there is
+    /// no second validation between discovery and the write boundary that could
+    /// disagree with this one.
+    #[test]
+    fn a_read_contract_is_one_the_store_can_file_under() {
+        let found = read_contract("NSE-BANKNIFTY-30Sep25-52000-PE").expect("it reads");
+        assert!(found.contract.is_option() && !found.contract.is_future());
+        assert_eq!(found.contract.as_str(), "2025-09-30-5200000-PE");
+        // AND IT FITS A PATH SEGMENT, which is the bound that made the contract
+        // a segment of its own rather than part of the symbol: this whole name
+        // is 26 bytes and would not have fitted a 24-byte symbol.
+        assert!(found.contract.as_str().len() <= 24);
+        assert!(
+            "BANKNIFTY-30Sep25-52000-PE".len() > 24,
+            "the joined name would NOT have fitted, which is why it is split"
+        );
+    }
+
     /// NO DISCOVERY REQUEST NAMES A BARS-ONLY FIELD.
     ///
     /// A discovery request has no window and no rung, so `From`, `To`,
@@ -473,4 +580,127 @@ mod tests {
             }
         }
     }
+}
+
+/// One discovered contract, in this repository's own identity.
+///
+/// # Why a translation is needed at all
+///
+/// Groww names a contract `NSE-NIFTY-04Jan24-19200-CE`: exchange, underlying,
+/// a `DDMmmYY` expiry, a strike in RUPEES, and the side. This store names the
+/// same contract `2024-01-04-1920000-CE` — an ISO expiry and a strike in
+/// PAISA, because `CLAUDE.md` §7 makes every price an `i64` of paisa and never
+/// a float.
+///
+/// Two namings, one contract. The translation is here, once, so no caller
+/// invents a second one — and it is a REFUSAL and not a best effort: a name
+/// this build cannot read is skipped and reported, never guessed at, because a
+/// wrong strike names a different contract and would merge two series into one
+/// file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Found {
+    /// The vendor's own name, exactly as discovered — what goes back on the
+    /// wire to ask for bars.
+    pub vendor_symbol: String,
+    /// The underlying, for the store's symbol segment.
+    pub underlying: String,
+    /// This store's contract segment.
+    pub contract: brutex_core::instrument::Contract,
+}
+
+/// The twelve month tokens Groww writes, lower-cased for comparison.
+const MONTHS: [&str; 12] = [
+    "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+];
+
+/// Reads one discovered contract name into this store's identity.
+///
+/// Returns [`None`] for a name this build cannot read. That is a REFUSAL and
+/// the caller must report it rather than skip it silently: a contract dropped
+/// without a word is a month that looks complete and is not.
+///
+/// # What is accepted
+///
+/// `<EXCHANGE>-<UNDERLYING>-<DDMmmYY>-<STRIKE>-<CE|PE>` for an option and
+/// `<EXCHANGE>-<UNDERLYING>-<DDMmmYY>-FUT` for a future, which is the grammar
+/// the vendor documents and the only one it answers with.
+///
+/// # The strike is rupees on the wire and paisa in the store
+///
+/// `19200` becomes `1920000`. A fractional strike — `19200.5` — is read the
+/// same way, to `1920050`, because a strike with paise is still an exact
+/// decimal and reading it as a float is what §7 forbids. Anything with more
+/// than two decimal places is refused rather than rounded: the tick grid is two
+/// places, so a third is a name this build does not understand.
+#[must_use]
+pub fn read_contract(name: &str) -> Option<Found> {
+    let mut parts = name.split('-');
+    let _exchange = parts.next()?;
+    let underlying = parts.next()?;
+    if underlying.is_empty() {
+        return None;
+    }
+    let expiry = parse_expiry(parts.next()?)?;
+    let tail: Vec<&str> = parts.collect();
+    let contract = match tail.as_slice() {
+        // A FUTURE: nothing after the expiry but the word.
+        ["FUT"] => {
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Future { expiry })?
+        }
+        [strike, side] => {
+            let side = match *side {
+                "CE" => brutex_core::instrument::OptionSide::Call,
+                "PE" => brutex_core::instrument::OptionSide::Put,
+                _ => return None,
+            };
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
+                expiry,
+                strike: brutex_core::price::Paisa::from_raw(paisa_of(strike)?),
+                side,
+            })?
+        }
+        _ => return None,
+    };
+    Some(Found {
+        vendor_symbol: name.to_owned(),
+        underlying: underlying.to_owned(),
+        contract,
+    })
+}
+
+/// `04Jan24` into an expiry.
+///
+/// The two-digit year is read as 20xx. Groww answers for 2020 onward and this
+/// build stores no contract older than that, so there is no century to be
+/// ambiguous about — and a name this build cannot read is refused rather than
+/// resolved by a rule nobody wrote down.
+fn parse_expiry(token: &str) -> Option<brutex_core::instrument::Expiry> {
+    if token.len() != 7 {
+        return None;
+    }
+    let day: u8 = token.get(0..2)?.parse().ok()?;
+    let month = token.get(2..5)?.to_ascii_lowercase();
+    let month = u8::try_from(MONTHS.iter().position(|m| *m == month)? + 1).ok()?;
+    let year: u16 = token.get(5..7)?.parse().ok()?;
+    brutex_core::instrument::Expiry::new(2000u16.checked_add(year)?, month, day).ok()
+}
+
+/// A strike in rupees, as an exact number of paisa.
+///
+/// Integer arithmetic on the two halves rather than a parse to `f64` and a
+/// multiply — `19200.05` is not representable in binary floating point, and
+/// §7 is what forbids finding that out at the write boundary.
+fn paisa_of(text: &str) -> Option<i64> {
+    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
+    if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let rupees: i64 = whole.parse().ok()?;
+    // Two places, padded: "5" is fifty paise and not five.
+    let paise: i64 = match frac.len() {
+        0 => 0,
+        1 => frac.parse::<i64>().ok()?.checked_mul(10)?,
+        _ => frac.parse().ok()?,
+    };
+    rupees.checked_mul(100)?.checked_add(paise)
 }
