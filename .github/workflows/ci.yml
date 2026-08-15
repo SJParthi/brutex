@@ -566,7 +566,11 @@ jobs:
           # the strike in the vendor's OWN worked example, used in the tests so
           # the paisa conversion is asserted against a number the vendor
           # published rather than one invented here -- the same reason Dhan's
-          # `13` is on this list. A month name is not a secret in any sense
+          # `13` is on this list. `2020` is the year Groww states its F&O history
+          # begins and `2019` is the year one before it, asserted in the refusal
+          # so the message names BOTH ends of the gap an operator just typed --
+          # a refusal that says only "before the floor" sends them to the
+          # vendor's dashboard instead of to the field. Two calendar years. A month name is not a secret in any sense
           # section 8 is about.
           #
           # `expiries`, `contracts`, `underlying_symbol`, `expiry_date`, `year`
@@ -584,7 +588,7 @@ jobs:
           groww_symbol candle_interval 1minute
           expiries contracts underlying_symbol expiry_date year month
           jan feb mar apr may jun jul aug sep oct nov dec
-          19200
+          19200 2019 2020
           '
 
           # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
