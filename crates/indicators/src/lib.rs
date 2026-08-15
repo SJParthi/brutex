@@ -924,8 +924,14 @@ mod tests {
     #[test]
     fn extreme_prices_neither_panic_nor_overflow() {
         let mut s = CurDayFib::new();
-        // Field order is sane, so `ohlc_is_sane` would pass it — and the range
-        // overflows i64. It must be REFUSED, not saturated.
+        // Field order is sane, and D-0143 means `ohlc_is_sane` would now REFUSE
+        // this bar anyway, for the `i64::MIN` low. That is not why this test
+        // exists and it does not weaken it: this crate is handed bars by
+        // callers that never crossed `BarFile::append`, so the range guard must
+        // hold on its own. The bar must be REFUSED here, not saturated.
+        //
+        // The comment used to say `ohlc_is_sane` "would pass it", which stopped
+        // being true the day the sign check went in.
         assert_eq!(
             s.step(&bar(0, 0, i64::MAX, i64::MIN, 0), tol()),
             Err(Corrupt::RangeOverflows),

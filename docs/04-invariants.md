@@ -715,12 +715,23 @@ applies — and about the two vendor facts nobody has written down.
 | G-09 | An unstated rung is the minute, and a rung this ladder does not have is refused naming what arrived | `api::ingest::a_spot_request_names_its_bar_length_defaults_to_the_minute_or_is_refused` — the default is the load-bearing half: `/pull/spot` is a replayable POST, and a body written before the field existed that silently changed rung would file one window into two directories the append-only store cannot then reconcile | ✓ |
 
 **What these rows do NOT claim.** That a daily bar's timestamp is the session
-open. `pull::fold` buckets on `ts_micros.div_euclid(width) * width`, which is
-UTC-epoch aligned, so an NSE session — 03:45 to 10:00 UTC, and 12:45 to 13:45
-UTC for the Muhurat sessions `docs/00-charter.md` §3 records — falls inside one
-UTC day and yields one bucket. The resulting bar is stamped **00:00:00 UTC,
-which is 05:30 IST**, not 09:15. That is correct-by-construction only for venues
-whose session does not cross a UTC midnight, and this surface has no other.
+open. `pull::fold` buckets on `(t + A).div_euclid(width) * width - A`, where `A`
+is `IST_ANCHOR_MICROS` — the grid is anchored at **IST midnight**, not at the
+UTC epoch. An NSE session therefore falls inside one IST day and yields one
+bucket, and the resulting bar is stamped **00:00:00 IST**, not 09:15.
+
+**This paragraph previously said the grid was UTC-epoch aligned and the stamp
+was 05:30 IST.** Both were true before the anchor moved and neither is now. The
+arithmetic note in `pull::fold` records why the two coincide for every width
+that divides 19,800 and diverge for every width that does not — which is the
+same fact `Timeframe::aligns_with_the_open` turns on, and the reason the 30- and
+60-minute rungs are refused rather than filed.
+
+Anchoring at IST midnight is what makes this correct for a venue whose session
+does not cross an IST midnight, and this surface has no other. The Muhurat
+sessions `docs/00-charter.md` §3 records are inside one IST day as well; what
+this build cannot yet express is a venue with TWO sessions on one day, which
+`docs/06-limits.md` records.
 `pull::broker::a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar`
 is what pins the one bucket; nothing here pins the stamp to a session boundary,
 because it is not one.

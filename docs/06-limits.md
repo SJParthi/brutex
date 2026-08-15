@@ -3966,3 +3966,40 @@ universe. The two figures above were measured once, by hand, on a throwaway
 bench; nothing in CI would fail if a third note started growing the same way.
 The page would stay flat — that is what `Notes` guarantees — but `/health`
 would quietly get slower and this section would be stale without saying so.
+
+## 68. A `SessionRow` states ONE session per day, and Muhurat is a second one
+
+`vendor::SessionRow` carries a single `open_minute` and a single `close_minute`.
+That shape cannot describe a day with two sessions, and NSE has one:
+`docs/00-charter.md` §3 records the Muhurat (Diwali) session as roughly an hour
+in the **evening**, on a date the exchange announces each year, on a day that is
+otherwise a holiday.
+
+**What that costs today.** `session::Window::verdict` now reads the venue's
+hours (D-0151), and for a Muhurat date those hours are whatever row is in force
+— the regular 09:15 to 15:15 or 15:30. An evening bar therefore falls outside
+them and is dropped as `AtOrAfterSessionClose`.
+
+**A drop, and not a silent write.** That is the direction this failure should
+point, and it is why this is a limit rather than a defect: the bar is counted by
+`DropReason` and the census reports it, so the loss is visible rather than
+recorded as data. Nothing wrong reaches the store.
+
+**Not fixed here, and the reason is scope, not difficulty.** Expressing it means
+either a second optional session on the row or a row that repeats within a day,
+and either one changes a type that three tables and a compile-time assertion are
+built on. It also needs the dates, and this repository does not invent them:
+each year's Muhurat date and hours come from an NSE circular, and no such
+circular has been retrieved and cited in `docs/00-charter.md`. Under §3 rule 1
+that makes the hours `UNVERIFIED`, and a table row cannot carry a value nobody
+has sourced.
+
+**What would close it.** A retrieved circular per year, recorded in the charter;
+then a row shape that can hold a second interval; then `verdict` consulting
+both. In that order — the citation first, because the type is the easy half.
+
+**How it was found.** An adversarial audit filed the claim that
+`finished_day_only` is "Muhurat-aware". It is not, no session table row for any
+Muhurat date exists, and the row type could not hold one. The claim has been
+removed rather than left standing.
+

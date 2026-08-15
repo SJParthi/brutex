@@ -4134,10 +4134,19 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
     // is now whether the session has ENDED rather than whether the calendar day
     // has. A future day, and today while the market is open, both still refuse.
     //
-    // The close comes from the session table rather than a literal 15:30: NSE
-    // shuts at 15:30 on an ordinary day and at 14:45 on the 2025 Muhurat
-    // session, and a hardcoded time would refuse a finished Muhurat day for
-    // forty-five minutes and admit an unfinished one on another.
+    // The close comes from the session table rather than a literal 15:30,
+    // because the close MOVES: NSE's CAS change put the index at 15:15 from
+    // 2026-08-03 while cash kept 15:30, and a hardcoded time would have been
+    // wrong for one of them from that date (D-0151).
+    //
+    // THIS COMMENT USED TO CITE MUHURAT, AND THAT WAS A CLAIM ABOUT A ROW THAT
+    // DOES NOT EXIST. It said a literal "would refuse a finished Muhurat day
+    // for forty-five minutes", which reads as though the table holds the 2025
+    // Muhurat hours. It does not, no session row for any Muhurat date exists,
+    // and `SessionRow` carries ONE open and ONE close so it could not hold an
+    // evening session beside a regular one. `docs/06-limits.md` §68 records
+    // what closing that would take. Reading the table is still right; the
+    // reason it is right is the CAS split, which is real.
     // NSE CASH, because that is the venue whose 15:30 close this is about and
     // the one every spot instrument in the engine surface trades on. A venue
     // with no row for the day — a holiday, or a date past the table — answers
@@ -11770,9 +11779,11 @@ mod tests {
             body.contains("== today && !closed"),
             "and today is refused only while its session is still running"
         );
-        // The close is READ, never hardcoded: NSE shuts at 15:30 ordinarily and
-        // at 14:45 on the 2025 Muhurat session, and a literal would refuse a
-        // finished Muhurat day for forty-five minutes.
+        // The close is READ, never hardcoded, because the close MOVES: the CAS
+        // change put the index at 15:15 from 2026-08-03 while cash kept 15:30
+        // (D-0151). This comment used to cite a 14:45 Muhurat close instead —
+        // a row the table has never held, in a shape `SessionRow` cannot carry.
+        // See `docs/06-limits.md` §68.
         //
         // COMMENTS STRIPPED FIRST, and the first draft of this failed for it:
         // the paragraph above the guard EXPLAINS the 15:30 it must not contain,
