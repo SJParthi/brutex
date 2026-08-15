@@ -4290,3 +4290,57 @@ carried into a walk-forward test.
 **Found by** measuring the ambiguity counters directly, after an independent
 fleet reported that an `optimistic`-for-`pessimistic` substitution left the
 suite green.
+
+---
+
+## 76. The ranking key cannot be chosen on synthetic data, and here is the measurement that shows it
+
+Three keys now exist: `Grid::sharpest` (max `edge_ratio`, the shipped one),
+`Grid::best` (max `pessimistic`), and max `Cell::return_over_drawdown`. §73
+records that the shipped key is a proxy and that choosing between them needs
+evidence. This is the attempt, and its result is that the evidence cannot come
+from this fixture.
+
+**Measured, `synthetic::sessions(12)`, `min_hits = 150`, 400 candidates, long.
+Generated in-process; no stored bar and no vendor.**
+
+| key | total P&L | total drawdown | total worst trade | picked NO STOP |
+|---|---|---|---|---|
+| `sharpest` (shipped) | 1,623,299 | 40,963 | −20,221 | 264 / 400 |
+| `best` | 4,944,785 | 180 | −180 | **400 / 400** |
+| `return_over_drawdown` | 3,580,346 | 180 | −180 | **400 / 400** |
+
+Read naively this says the shipped key is worse on every dimension at once —
+three times less profit, 227× the drawdown, 112× the worst single trade — and
+that either alternative should replace it.
+
+**It says no such thing, and the tell is in the last two columns.**
+
+Two keys chose the no-stop variant 400 times out of 400, with a total drawdown
+of 180 paisa across all 400 candidates. That is not a discovery about stop
+losses. `synthetic::bar` sets `close = BASE + day×400 + minute×3`: the generator
+**trends upward deterministically**. A long position that never stops out rides
+that trend, equity rises monotonically, and a drawdown cannot occur.
+
+So on this data "never use a stop" is literally optimal, and a key selected on
+that basis would be fitted to a random-number generator rather than to a market.
+
+**What this does establish**, and it is not nothing:
+
+- The three keys genuinely disagree — 264 versus 400 no-stop selections is not
+  noise, so the choice is real rather than cosmetic.
+- `sharpest` produces materially more drawdown than the alternatives even here,
+  which is the opposite of what a key named for risk-precision should do, and is
+  worth re-measuring on data with two-sided moves.
+- The machinery to decide is now in place: before `worst_trade` and
+  `max_drawdown` existed there was nothing to measure any alternative against.
+
+**What would close it.** A generator with two-sided moves — mean-reverting or
+regime-switching, still fully synthetic and deterministic — on which a no-stop
+long is not automatically optimal. Then the same table decides the key on
+evidence. Until that exists the shipped key stays, and it stays labelled a proxy.
+
+**Not closed by using real bars.** The operator's standing instruction is that no
+real pulled or stored data is used, and it holds here: a key chosen on real
+history would be fitted to that history, which is the overfitting this crate's
+whole second half exists to detect.
