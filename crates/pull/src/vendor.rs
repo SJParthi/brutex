@@ -1441,6 +1441,7 @@ const _: () = assert!(NSE_DERIVATIVES_SESSIONS.is_shipping_shape());
 const _: () = assert!(NSE_INDEX_SESSIONS.anchor_matches_session_constants());
 const _: () = assert!(NSE_CASH_SESSIONS.anchor_matches_session_constants());
 const _: () = assert!(NSE_DERIVATIVES_SESSIONS.anchor_matches_session_constants());
+
 const _: () = assert!(Venue::ALL.len() == VENUE_COUNT);
 
 // The anchor's one-minute count is `crate::session`'s 375, derived rather than
@@ -1621,6 +1622,22 @@ pub enum Listing {
     Index,
     /// A cash-segment equity on the main board.
     Equity,
+}
+
+impl Listing {
+    /// The venue whose trading hours govern this listing class.
+    ///
+    /// Total, and it stays total by the enum being closed: `CLAUDE.md` §1 pulls
+    /// index and cash only, so there is no derivative arm to get wrong and no
+    /// catch-all to hide a new one. A third variant is a compile error here,
+    /// which is the point.
+    #[must_use]
+    pub const fn venue(self) -> Venue {
+        match self {
+            Self::Index => Venue::NseIndex,
+            Self::Equity => Venue::NseCash,
+        }
+    }
 }
 
 /// One feed's words for one listing class.

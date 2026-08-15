@@ -624,7 +624,15 @@ pub fn land(
         // different answers.
         let verdict = request
             .window
-            .verdict(epoch_utc, request.granularity.cadence())
+            // THE VENUE DECIDES THE HOURS, and the listing decides the venue.
+            // NSE's 2026-08-03 CAS change put the index close at 15:15 and left
+            // cash at 15:30; passing the listing through is what lets `verdict`
+            // tell those apart instead of applying one number to both.
+            .verdict(
+                epoch_utc,
+                request.granularity.cadence(),
+                request.listing.venue(),
+            )
             .map_err(|why| FetchError::TimestampRefused {
                 row: i,
                 raw: row.timestamp,

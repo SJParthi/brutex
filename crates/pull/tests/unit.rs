@@ -50,6 +50,7 @@ use pull::secret::{
     CredentialHalt, CredentialReader, ParameterStore, Secret, SecretError, SecretSource,
     SsmSecretSource,
 };
+use pull::vendor::Venue;
 
 /// [`HEADER_LEN`] as a length, for building test regions.
 const HEADER_LEN_USIZE: usize = 32_768;
@@ -4235,7 +4236,7 @@ fn the_four_seconds_that_define_the_session_window() {
         );
         assert_eq!(
             window
-                .verdict(secs, Cadence::Minute)
+                .verdict(secs, Cadence::Minute, Venue::NseCash)
                 .expect("a real second"),
             expect,
             "{secs}"
@@ -4246,7 +4247,11 @@ fn the_four_seconds_that_define_the_session_window() {
     // exchange never traded, and 15:40 would admit ten more minutes of them.
     assert_eq!(
         window
-            .verdict(ist_epoch(2025, 2, 1, 15, 40, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2025, 2, 1, 15, 40, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::AtOrAfterSessionClose),
         "the operator's asserted 15:40 close is outside the exchange's session"
@@ -4268,7 +4273,7 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
     for minute in 0..1_440_i64 {
         let secs = midnight + minute * SECS_PER_MINUTE;
         match window
-            .verdict(secs, Cadence::Minute)
+            .verdict(secs, Cadence::Minute, Venue::NseCash)
             .expect("a real second")
         {
             None => kept_minutes += 1,
@@ -4292,7 +4297,7 @@ fn a_saturday_is_a_full_session_because_there_is_no_weekend_rule() {
         let base = ist_epoch(2025, 1, day_of_month, 0, 0, 0);
         let kept = (0..1_440_i64)
             .filter(|m| {
-                one.verdict(base + m * SECS_PER_MINUTE, Cadence::Minute)
+                one.verdict(base + m * SECS_PER_MINUTE, Cadence::Minute, Venue::NseCash)
                     .expect("real")
                     .is_none()
             })
@@ -4319,7 +4324,7 @@ fn every_second_of_a_day_falls_on_exactly_one_side_of_the_session() {
     let mut previous: Option<Option<DropReason>> = None;
     for offset in 0..SECS_PER_DAY {
         let verdict = window
-            .verdict(midnight + offset, Cadence::Minute)
+            .verdict(midnight + offset, Cadence::Minute, Venue::NseCash)
             .expect("a real second");
         match verdict {
             None => kept += 1,
@@ -4357,12 +4362,16 @@ fn a_daily_bar_is_exempt_from_the_session_filter() {
     );
 
     assert_eq!(
-        window.verdict(midnight, Cadence::Daily).expect("real"),
+        window
+            .verdict(midnight, Cadence::Daily, Venue::NseCash)
+            .expect("real"),
         None,
         "a daily bar at IST midnight must survive"
     );
     assert_eq!(
-        window.verdict(midnight, Cadence::Minute).expect("real"),
+        window
+            .verdict(midnight, Cadence::Minute, Venue::NseCash)
+            .expect("real"),
         Some(DropReason::BeforeSessionOpen),
         "the same second at minute cadence is a drop — the exemption is real"
     );
@@ -4372,7 +4381,11 @@ fn a_daily_bar_is_exempt_from_the_session_filter() {
     let survived = (0..1_440_i64)
         .filter(|m| {
             window
-                .verdict(midnight + m * SECS_PER_MINUTE, Cadence::Daily)
+                .verdict(
+                    midnight + m * SECS_PER_MINUTE,
+                    Cadence::Daily,
+                    Venue::NseCash,
+                )
                 .expect("real")
                 .is_none()
         })
@@ -4383,13 +4396,13 @@ fn a_daily_bar_is_exempt_from_the_session_filter() {
     // from the session is not exempt from the window.
     assert_eq!(
         window
-            .verdict(midnight - SECS_PER_DAY, Cadence::Daily)
+            .verdict(midnight - SECS_PER_DAY, Cadence::Daily, Venue::NseCash)
             .expect("real"),
         Some(DropReason::BeforeWindow)
     );
     assert_eq!(
         window
-            .verdict(midnight + SECS_PER_DAY, Cadence::Daily)
+            .verdict(midnight + SECS_PER_DAY, Cadence::Daily, Venue::NseCash)
             .expect("real"),
         Some(DropReason::AfterWindow)
     );
@@ -4424,7 +4437,9 @@ fn a_bar_that_is_not_minute_aligned_is_kept_and_its_offset_is_visible() {
         );
         assert!(at.in_regular_session());
         assert_eq!(
-            window.verdict(secs, Cadence::Minute).expect("real"),
+            window
+                .verdict(secs, Cadence::Minute, Venue::NseCash)
+                .expect("real"),
             None,
             "a misaligned bar inside the session is kept, not dropped"
         );
@@ -4434,20 +4449,32 @@ fn a_bar_that_is_not_minute_aligned_is_kept_and_its_offset_is_visible() {
     // while 15:30:00 — perfectly aligned — is not.
     assert_eq!(
         window
-            .verdict(ist_epoch(2025, 2, 1, 15, 29, 59), Cadence::Minute)
+            .verdict(
+                ist_epoch(2025, 2, 1, 15, 29, 59),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         None
     );
     assert_eq!(
         window
-            .verdict(ist_epoch(2025, 2, 1, 15, 30, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2025, 2, 1, 15, 30, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::AtOrAfterSessionClose)
     );
     // A misaligned bar one second before the open is still out.
     assert_eq!(
         window
-            .verdict(ist_epoch(2025, 2, 1, 9, 14, 59), Cadence::Minute)
+            .verdict(
+                ist_epoch(2025, 2, 1, 9, 14, 59),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::BeforeSessionOpen)
     );
@@ -4466,7 +4493,7 @@ fn in_regular_session_agrees_with_the_verdict_on_every_minute() {
         let at = IstMoment::from_epoch_secs(secs).expect("real");
         let by_moment = at.in_regular_session();
         let by_verdict = window
-            .verdict(secs, Cadence::Minute)
+            .verdict(secs, Cadence::Minute, Venue::NseCash)
             .expect("real")
             .is_none();
         assert_eq!(by_moment, by_verdict, "minute {minute} is classified twice");
@@ -4529,7 +4556,11 @@ fn an_inclusive_window_survives_the_vendors_exclusive_to_date() {
     // A bar at 09:15 on the operator's last day: kept.
     assert_eq!(
         window
-            .verdict(ist_epoch(2022, 2, 8, 9, 15, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2022, 2, 8, 9, 15, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         None,
         "without wire_to's +1 this bar would never have been fetched at all"
@@ -4538,7 +4569,11 @@ fn an_inclusive_window_survives_the_vendors_exclusive_to_date() {
     // reason names the window rather than the session.
     assert_eq!(
         window
-            .verdict(ist_epoch(2022, 2, 9, 9, 15, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2022, 2, 9, 9, 15, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::AfterWindow)
     );
@@ -4547,14 +4582,22 @@ fn an_inclusive_window_survives_the_vendors_exclusive_to_date() {
     // what happened.
     assert_eq!(
         window
-            .verdict(ist_epoch(2022, 2, 9, 3, 0, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2022, 2, 9, 3, 0, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::AfterWindow),
         "the window is checked before the session, deliberately"
     );
     assert_eq!(
         window
-            .verdict(ist_epoch(2022, 1, 7, 3, 0, 0), Cadence::Minute)
+            .verdict(
+                ist_epoch(2022, 1, 7, 3, 0, 0),
+                Cadence::Minute,
+                Venue::NseCash
+            )
             .expect("real"),
         Some(DropReason::BeforeWindow)
     );
@@ -4778,7 +4821,7 @@ fn an_unreadable_timestamp_is_refused_by_the_verdict_not_counted_as_a_drop() {
         253_402_281_000,
         371_086_500_594_600,
     ] {
-        let got = window.verdict(bad, Cadence::Minute);
+        let got = window.verdict(bad, Cadence::Minute, Venue::NseCash);
         assert!(got.is_err(), "{bad} must be refused, not dropped");
         assert_eq!(
             got,
@@ -4787,7 +4830,7 @@ fn an_unreadable_timestamp_is_refused_by_the_verdict_not_counted_as_a_drop() {
         );
         // And at daily cadence too — the exemption is from the session, not
         // from being a readable timestamp.
-        assert!(window.verdict(bad, Cadence::Daily).is_err());
+        assert!(window.verdict(bad, Cadence::Daily, Venue::NseCash).is_err());
     }
 }
 
@@ -7370,5 +7413,102 @@ fn two_slots_naming_two_versions_are_each_walked_at_their_own_stride() {
         }),
         "the version-2 counter is checked against version 2's OWN capacity — \
          one 64-byte entry is zero 128-byte entries, not one"
+    );
+}
+
+/// D-0151 — after 2026-08-03 the three NSE segments close at different times,
+/// and the swept index closes EARLIEST.
+///
+/// Before this, `verdict` applied 15:30 to everything, so fifteen one-minute
+/// bars a day — 15:15 to 15:29 — were admitted for NIFTY and BANKNIFTY as
+/// ordinary session bars. `docs/00-charter.md` records what is actually in that
+/// window as UNVERIFIED: the frozen actual index or the indicative auction
+/// index, both published. Either way it is not a continuous-session bar, it
+/// went to disk, and §3 rule 8 makes the month unrewritable.
+#[test]
+fn the_index_closes_at_1515_after_the_cas_change_and_cash_still_closes_at_1530() {
+    // A day after the change, and one before it.
+    let after = Window::new(d(2026, 8, 10), d(2026, 8, 10)).expect("a legal window");
+    let before = Window::new(d(2026, 7, 10), d(2026, 7, 10)).expect("a legal window");
+
+    // THE FIFTEEN BARS. Each was admitted before; each is now out of session
+    // for the index, and each is still IN session for cash.
+    for minute in 15..30 {
+        let secs = ist_epoch(2026, 8, 10, 15, minute, 0);
+        assert_eq!(
+            after
+                .verdict(secs, Cadence::Minute, Venue::NseIndex)
+                .expect("a real timestamp"),
+            Some(DropReason::AtOrAfterSessionClose),
+            "15:{minute} is past the index close of 15:15 after the CAS change"
+        );
+        assert_eq!(
+            after
+                .verdict(secs, Cadence::Minute, Venue::NseCash)
+                .expect("a real timestamp"),
+            None,
+            "15:{minute} is still inside the cash session, which kept 15:30"
+        );
+    }
+
+    // The last index bar still opens at 15:14, so the close is exclusive in the
+    // same way the anchor's is.
+    assert_eq!(
+        after
+            .verdict(
+                ist_epoch(2026, 8, 10, 15, 14, 0),
+                Cadence::Minute,
+                Venue::NseIndex
+            )
+            .expect("a real timestamp"),
+        None,
+        "15:14 is the last index bar of the continuous session"
+    );
+
+    // AND THE CHANGE IS DATED. Before 2026-08-03 the index used 15:30 like
+    // everything else, so this is a new row taking effect and not a correction
+    // applied backwards over history already on disk.
+    for minute in 15..30 {
+        assert_eq!(
+            before
+                .verdict(
+                    ist_epoch(2026, 7, 10, 15, minute, 0),
+                    Cadence::Minute,
+                    Venue::NseIndex
+                )
+                .expect("a real timestamp"),
+            None,
+            "before the change the index closed at 15:30 like the rest"
+        );
+    }
+
+    // The open did not move, on either venue or either side of the date.
+    for venue in [Venue::NseIndex, Venue::NseCash] {
+        assert_eq!(
+            after
+                .verdict(ist_epoch(2026, 8, 10, 9, 14, 0), Cadence::Minute, venue)
+                .expect("a real timestamp"),
+            Some(DropReason::BeforeSessionOpen),
+            "{venue} opens at 09:15"
+        );
+        assert_eq!(
+            after
+                .verdict(ist_epoch(2026, 8, 10, 9, 15, 0), Cadence::Minute, venue)
+                .expect("a real timestamp"),
+            None,
+        );
+    }
+
+    // A DAILY BAR IS STILL EXEMPT on both venues -- it has no intraday time,
+    // and the session narrowing must not start dropping it.
+    assert_eq!(
+        after
+            .verdict(
+                ist_epoch(2026, 8, 10, 0, 0, 0),
+                Cadence::Daily,
+                Venue::NseIndex
+            )
+            .expect("a real timestamp"),
+        None,
     );
 }

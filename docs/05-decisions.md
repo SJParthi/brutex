@@ -14063,3 +14063,64 @@ verifier reached, not the one it was filed at.
 The script that was to append this entry failed after the commit had already
 been made, so the entry lands one commit later. The number is unchanged.
 
+## D-0151 — the session filter never opened the session table, and the swept index closes earliest
+
+**Decided.** `session::Window::verdict` takes a `Venue` and reads that venue's
+hours from `vendor::Venue::hours_on`. It no longer reads
+`SESSION_OPEN_MINUTE`/`SESSION_CLOSE_MINUTE` directly.
+
+**What it was doing.** Applying 09:15–15:30 to every venue, on every day. That
+was right until 2026-08-03 and has been wrong since — twelve days as this is
+written.
+
+NSE's CAS change (NSE/CMTR/74466) moved the three segments apart, and this
+repository had already encoded all three, with citations:
+
+| venue | close after 2026-08-03 | why |
+|---|---|---|
+| `NSE_INDEX_SESSIONS` | **15:15** | every share the index is computed from is CAS-eligible and leaves continuous trading then, so the index freezes with them |
+| `NSE_CASH_SESSIONS` | 15:30 | a share with no derivative contract is not CAS-eligible and keeps its close |
+| `NSE_DERIVATIVES_SESSIONS` | 15:40 | positions adjust against the cash auction's closing prices |
+
+`verdict` opened none of them. **The swept index closes EARLIEST of the three**,
+so the one venue the engine exists for was the one getting the most wrong
+answer: fifteen one-minute bars a day, 15:15 to 15:29, admitted as ordinary
+session bars. `docs/00-charter.md` records what is actually in that window as
+UNVERIFIED — the frozen actual index or the indicative auction index, both
+published, and only measurement can say which. Either way it is not a
+continuous-session bar, it went to disk, and §3 rule 8 makes the month
+unrewritable.
+
+**How it was found, and a correction.** The audit filed this as a blocker; a
+verifier confirmed the mechanism and downgraded it, and I first read the
+downgrade as meaning the constants and the table happen to agree. They do for
+cash — the `AUG_3_2026` cash row restates the anchor — and I checked cash. The
+divergence was surfaced by a compile-time assertion written to prove the
+opposite: `every_row_matches_session_constants` fired on `NSE_INDEX_SESSIONS`
+the first time it was built. That assertion is not in this change, because the
+index row is *supposed* to differ; what it proved is that the caller was the
+thing that had to move.
+
+**A refusal, not a fallback.** `hours_on` refuses a day whose row carries no
+verified hours. That becomes `SessionError::VenueHoursUnknown` and stops the
+decode. Quietly applying the anchor's hours instead would admit or drop bars
+against a session nobody has confirmed, and say nothing — the §4 row exactly.
+Every shipped row is verified, so this refusal is unreachable with today's
+tables; it exists so that adding an unverified row cannot silently mean
+"assume 15:30".
+
+**The venue comes from the listing.** `Listing::venue` is total by the enum
+being closed — §1 pulls index and cash only, so there is no derivative arm to
+get wrong and no catch-all to hide a new one.
+
+**Cost.** One table lookup per bar, over an array of three rows with an early
+exit. `verdict` stops being a `const fn`, which nothing depended on: its only
+production caller is `fetch::land`.
+
+**Proved by**
+`the_index_closes_at_1515_after_the_cas_change_and_cash_still_closes_at_1530`,
+which walks all fifteen minutes on both venues, pins that the last index bar
+opens at 15:14, and asserts that a July date is unaffected — so this is a dated
+change taking effect, not a correction applied backwards over history already on
+disk.
+

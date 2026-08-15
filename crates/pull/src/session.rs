@@ -158,6 +158,17 @@ pub enum SessionError {
         /// The value that was refused.
         secs: i64,
     },
+    /// The venue's session table states no verified hours for this day.
+    ///
+    /// A REFUSAL and never a fallback. The alternative — quietly applying the
+    /// anchor's hours — is the §4 row about hiding a failure: it would admit or
+    /// drop bars against a session nobody has confirmed, and say nothing.
+    VenueHoursUnknown {
+        /// Which venue, in its own words.
+        venue: &'static str,
+        /// The day, as days from the epoch.
+        days: u32,
+    },
     /// The timestamp does not name a date this build can render.
     ///
     /// Reached three ways, all of which are the same fault to an operator —
@@ -233,6 +244,13 @@ pub enum SessionError {
 impl fmt::Display for SessionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Self::VenueHoursUnknown { venue, days } => write!(
+                f,
+                "{venue} states no verified trading hours for day {days}, so \
+                 whether a bar at that time is inside the session is unknown. \
+                 Refused rather than assumed: applying another day's hours \
+                 would admit or drop bars against a session nobody confirmed"
+            ),
             Self::BeforeEpoch { secs } => {
                 write!(f, "timestamp {secs} is before the Unix epoch")
             }
@@ -1046,15 +1064,16 @@ impl Window {
     /// a timestamp is a refusal, never a drop: a drop is a bar this engine
     /// declined, and a bar it could not read is the vendor or the decoder being
     /// wrong.
-    pub const fn verdict(
+    pub fn verdict(
         self,
         epoch_secs: i64,
         cadence: Cadence,
+        venue: crate::vendor::Venue,
     ) -> Result<Option<DropReason>, SessionError> {
-        let at = match IstMoment::from_epoch_secs(epoch_secs) {
-            Ok(at) => at,
-            Err(e) => return Err(e),
-        };
+        // `?` rather than a match: this stopped being a `const fn` when it
+        // started reading the venue table, and the manual match only existed
+        // because `?` was not const-callable.
+        let at = IstMoment::from_epoch_secs(epoch_secs)?;
         let day = at.day().days_from_epoch();
         if day < self.from.days_from_epoch() {
             return Ok(Some(DropReason::BeforeWindow));
@@ -1068,10 +1087,41 @@ impl Window {
         if matches!(cadence, Cadence::Daily) {
             return Ok(None);
         }
-        if at.minute_of_day() < SESSION_OPEN_MINUTE {
+        // THE HOURS COME FROM THE VENUE'S OWN TABLE, NOT FROM THESE CONSTANTS.
+        //
+        // They used to come from `SESSION_OPEN_MINUTE`/`SESSION_CLOSE_MINUTE`
+        // directly, for every venue and every day, and on 2026-08-03 that
+        // became wrong in the one place it matters most.
+        //
+        // NSE's CAS change (NSE/CMTR/74466) moved the three segments apart:
+        // the swept INDEX now stops at 15:15, because every share it is
+        // computed from is CAS-eligible and leaves continuous trading then;
+        // cash keeps 15:30; derivatives extend to 15:40. `crate::vendor` had
+        // all three encoded, with citations, in `NSE_INDEX_SESSIONS`,
+        // `NSE_CASH_SESSIONS` and `NSE_DERIVATIVES_SESSIONS` — and this
+        // function never opened them.
+        //
+        // So for the two instruments the engine exists to sweep, fifteen
+        // one-minute bars a day from 15:15 to 15:29 were admitted as ordinary
+        // session bars. The charter records what is in them as UNVERIFIED:
+        // the frozen actual index or the indicative auction index, both
+        // published, and only measurement can say which. Either way they are
+        // not continuous-session bars, they went to disk, and §3 rule 8 makes
+        // the month unrewritable.
+        //
+        // Reading the table also removes the second source of truth. The
+        // constants remain as the ANCHOR row's value — every table names them
+        // — so there is one number, in one place, cited once.
+        let session = venue
+            .hours_on(at.day())
+            .map_err(|why| SessionError::VenueHoursUnknown {
+                venue: why.venue().label(),
+                days: why.day().days_from_epoch(),
+            })?;
+        if at.minute_of_day() < session.open_minute() {
             return Ok(Some(DropReason::BeforeSessionOpen));
         }
-        if at.minute_of_day() >= SESSION_CLOSE_MINUTE {
+        if at.minute_of_day() >= session.close_minute() {
             return Ok(Some(DropReason::AtOrAfterSessionClose));
         }
         Ok(None)
