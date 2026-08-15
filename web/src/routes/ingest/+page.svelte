@@ -2265,6 +2265,13 @@
     // This is the same fact where a run is about to be started. It is a
     // MEASUREMENT, not a vendor claim: the span was read by walking the folder,
     // so comparing a window against it is arithmetic rather than an opinion.
+    // THE TICKED-VERSUS-REQUESTED GAP IS A CAUTION, not a banner of its own.
+    // It is permanent for as long as SpotRequest carries no member field, so
+    // it belongs where the other standing facts about this run are, behind one
+    // count — not stacked above the button as a second alert.
+    if (askGap) {
+      out.push(askGap);
+    }
     if (windowVsFolder && active) {
       const w = windowVsFolder;
       const span = `${dayLabel(w.earliest)} – ${dayLabel(w.latest)}`;
@@ -6027,11 +6034,14 @@
                difference is stated in words: the request cannot be narrowed and
                this is the only line that can say so. It sat in a 248px grid
                track and wrapped into a ribbon; at full width it is a sentence. -->
-          {#if askGap}
-            <p class="caution">
-              <span class="tag warn">ticked ≠ requested</span><span class="msg">{askGap}</span>
-            </p>
-          {/if}
+          <!-- THIS BANNER IS GONE FROM THE SURFACE AND JOINED THE FOLD.
+               `askGap` says the request cannot be narrowed to the ticked
+               instruments — true, and a property of api::ingest::SpotRequest
+               that never changes while this route exists. A permanent fact
+               about an API, drawn as a yellow alert above the button on every
+               load where a tick count differs, is not a warning: it is
+               furniture. It is in `cautions` below with the rest, where its
+               count is visible and its sentence is one click away. -->
 
           <!-- ══ FOLDED, NOT DELETED, AND THE COUNT IS THE HEADLINE ══
 
