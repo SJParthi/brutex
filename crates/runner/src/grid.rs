@@ -39,8 +39,14 @@
 //! crossings for a candidate entry depend only on that entry bar and its own
 //! session's square-off, never on which variant is being evaluated. They are
 //! computed once per candidate entry, and every variant's exit is then three
-//! integer compares. `400 variants x 1,124 signals` is 450,000 lookups against
-//! 1,124 path walks, not 450,000 path walks.
+//! integer compares. At the shipped four rungs that is `125 variants x 1,124
+//! signals` — 140,500 lookups against 1,124 path walks, not 140,500 path walks.
+//!
+//! This paragraph read `400 variants` and `450,000` until the count was checked
+//! against the loop. Neither number was ever right for this code: 400 is
+//! `(rungs+1)^2` at twenty rungs, from a two-ladder design, and the trailing
+//! ladder made the nest three deep without the arithmetic following it. See
+//! [`variants`], which is now the only place that count is computed.
 //!
 //! # The ambiguous bar is resolved twice, never once
 //!
@@ -167,7 +173,8 @@ impl Cell {
 /// Every variant of one combination.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Grid {
-    /// One per (stop, target) pair, including the no-stop no-target row.
+    /// One per (stop, target, trail) triple, including the row with none of
+    /// them.
     pub cells: Vec<Cell>,
     /// Signals the combination fired, before exclusivity.
     pub signals: u64,
@@ -175,6 +182,15 @@ pub struct Grid {
     pub stops: Ladder,
     /// The target ladder these cells index into.
     pub targets: Ladder,
+    /// The trailing ladder these cells index into.
+    ///
+    /// **This was absent and the cells indexed into it anyway.** [`Cell::trail`]
+    /// carried a rung index with no ladder beside it to read the rung's value
+    /// out of, and no caller could reconstruct the cell count — which is
+    /// exactly how the doc block above [`evaluate`] came to claim
+    /// `(rungs + 1)^2` for a three-deep loop. Scaled on the FAVOURABLE
+    /// excursion, for the reason `evaluate` gives where it is built.
+    pub trails: Ladder,
 }
 
 impl Grid {
@@ -226,6 +242,26 @@ enum Ended {
 }
 
 /// One candidate entry, with its path measured once.
+/// How many cells a grid of these ladder lengths holds.
+///
+/// The `+ 1` on each is the "no level of this kind" row, so a grid with no
+/// ladders at all still holds the single baseline cell rather than none.
+///
+/// # Why this is a function and not three multiplications at the call site
+///
+/// It was three multiplications at the call site, and one of them was missing.
+/// The reservation counted stops and targets and not trails while the loop
+/// pushed all three, and the doc block above [`evaluate`] independently claimed
+/// `(rungs + 1)^2` while `crate::validate` said 125. Three statements of one
+/// number, two of them wrong, none able to catch the others. Now there is one.
+#[must_use]
+pub const fn variants(stops: usize, targets: usize, trails: usize) -> usize {
+    stops
+        .saturating_add(1)
+        .saturating_mul(targets.saturating_add(1))
+        .saturating_mul(trails.saturating_add(1))
+}
+
 struct Candidate {
     signal: usize,
     entry: usize,
@@ -241,11 +277,34 @@ struct Candidate {
 ///
 /// # Cost
 ///
-/// One path walk per candidate entry, then one sequence walk per variant with
-/// `O(1)` exit lookups. `rungs` controls both ladders, so the variant count is
-/// `(rungs + 1)^2` including the no-stop no-target row.
+/// The exit DECISION per variant is three integer compares against a cached
+/// crossing table, and that part is genuinely constant.
 ///
-/// UNVERIFIED as a measured figure: no bench row covers this yet.
+/// **Two corrections to what this block used to say.**
+///
+/// It claimed the variant count is `(rungs + 1)^2`. The loop below is three
+/// deep — stops, targets AND trails — so it is
+/// `(stops + 1)(targets + 1)(trails + 1)`, which at the shipped
+/// [`crate::validate::DEFAULT_RUNGS`] of four is **125 and not 25**. That
+/// module's own doc has said "5x5x5 grid — 125 variants" the whole time, so the
+/// two halves of this crate disagreed with each other in writing. See
+/// [`variants`].
+///
+/// It also said "`O(1)` exit lookups", which is true of the decision and hides
+/// what is measured beside it: [`peak_adverse`] and [`peak_favourable`] are each
+/// `for i in from..=to` over the held window, and `one_variant` calls both for
+/// every profitable candidate in every cell. So the real bar-visit count carries
+/// a `2 × variants × winners × span` term that no version of this block has ever
+/// mentioned. It is honest work — the MAE and MFE of the winners are reported —
+/// but it is not constant and it was documented as though it were.
+///
+/// UNVERIFIED as a measured figure: no bench row covers this crate's grid. That
+/// is the same admission as before and it is now attached to the right claim.
+///
+/// The reduction is available and not taken here: [`crate::excursion::crossings`]
+/// already accumulates running `mae`/`mfe` and discards them, and because both
+/// are running MAXIMA the value at offset `d` IS `peak(entry, entry + d)`.
+/// Recording them per offset would turn each of these walks into an index.
 #[must_use]
 #[allow(
     clippy::too_many_lines,
@@ -281,21 +340,13 @@ pub fn evaluate(
     // grid is placed on the distribution it will be measured against.
     let mut adverse: Vec<Ppm> = Vec::with_capacity(timed.trades.len());
     let mut favourable: Vec<Ppm> = Vec::with_capacity(timed.trades.len());
-    let probe = Ladder::new(vec![1]).unwrap_or_default();
     for t in &timed.trades {
         let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
-        let c = crossings(
-            bars,
-            t.entry_bar,
-            t.exit_bar,
-            entry_price,
-            side,
-            Ladders {
-                stops: &probe,
-                targets: &probe,
-                trails: &probe,
-            },
-        );
+        // A `crossings` call stood here against a one-rung probe ladder, and
+        // thirteen lines later its result met `let _ = c;`. A full path walk per
+        // trade, computed and thrown away -- and `let _ =` is what kept the
+        // unused-variable lint from ever saying so. The two peaks below are what
+        // this pass actually needs, and they walk the same path themselves.
         adverse.push(peak_adverse(
             bars,
             t.entry_bar,
@@ -310,7 +361,6 @@ pub fn evaluate(
             entry_price,
             side,
         ));
-        let _ = c;
     }
     let stops = Ladder::from_excursions(&mut adverse.clone(), rungs).unwrap_or_default();
     let targets = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
@@ -348,12 +398,12 @@ pub fn evaluate(
         .collect();
 
     // PASS FOUR: every variant, each a sequence walk with O(1) exits.
-    let mut cells: Vec<Cell> = Vec::with_capacity(
-        stops
-            .len()
-            .saturating_add(1)
-            .saturating_mul(targets.len().saturating_add(1)),
-    );
+    // THE TRAILS FACTOR WAS MISSING and the loop below is three deep. At the
+    // shipped four rungs this reserved 5x5 = 25 and then pushed 5x5x5 = 125, so
+    // every grid reallocated its way to the right size. `Grid::variants` beside
+    // this is the same arithmetic, named once.
+    let mut cells: Vec<Cell> =
+        Vec::with_capacity(variants(stops.len(), targets.len(), trails.len()));
     for s in 0..=stops.len() {
         for t in 0..=targets.len() {
             for r in 0..=trails.len() {
@@ -380,6 +430,7 @@ pub fn evaluate(
         signals: timed.signals,
         stops,
         targets,
+        trails,
     }
 }
 
@@ -929,5 +980,49 @@ mod tests {
         }
         let empty = evaluate(&bars, &column, &impossible, h(15), Side::Long, 4);
         assert!(empty.cells.is_empty() || empty.baseline().is_some());
+    }
+
+    #[test]
+    fn the_cell_count_is_the_product_of_all_three_ladders_and_nothing_reserves_less() {
+        // THE THREE STATEMENTS THAT DISAGREED. `evaluate`'s doc said the variant
+        // count was `(rungs + 1)^2`; the module header said `400 variants` and
+        // `450,000` lookups; `crate::validate::DEFAULT_RUNGS` said "5x5x5 grid --
+        // 125 variants". The loop is three deep, so validate was right and the
+        // other two were wrong -- and the reservation was wrong with them,
+        // asking for 5x5 = 25 before pushing 125.
+        //
+        // Nothing could catch that, because the count lived in four places and
+        // no test read any of them. This reads the ONE place it lives now and
+        // checks the grid actually built that many.
+        assert_eq!(
+            super::variants(0, 0, 0),
+            1,
+            "no ladders is still the baseline row"
+        );
+        assert_eq!(super::variants(4, 4, 4), 125, "the shipped four rungs");
+        assert_eq!(
+            super::variants(4, 4, 0),
+            25,
+            "25 is what TWO ladders give -- the number the doc block used to claim for three"
+        );
+
+        let bars = crate::synthetic::sessions(12);
+        let mut ev = evaluator();
+        let column = Column::build(&bars, &mut ev);
+        let swept = crate::Sweeper::new(engine::Ladder::with_min_hits(150).with_ceiling(20_000))
+            .run(&bars, &mut evaluator());
+        let item = crate::closed::closed(&swept.sweep)
+            .kept
+            .first()
+            .copied()
+            .expect("the fixture must produce at least one combination to grid");
+        let g = evaluate(&bars, &column, &item.mask, h(15), Side::Long, 4);
+        if !g.cells.is_empty() {
+            assert_eq!(
+                g.cells.len(),
+                super::variants(g.stops.len(), g.targets.len(), g.trails.len()),
+                "the grid built a different number of cells than `variants` says it holds"
+            );
+        }
     }
 }
