@@ -112,6 +112,58 @@ pub struct FoldResult {
     pub test_bars: usize,
     /// Combinations the sweep produced on the training bars.
     pub considered: u64,
+    /// Combinations this fold actually trade-walked and ranked.
+    ///
+    /// **Equal to [`Self::considered`], and that equality is the point.** A cap
+    /// stood in the pricing loop and ranked `closed.kept`'s first N, which is an
+    /// argmax over an arbitrary prefix — see the comment on that loop. The test
+    /// written to prove the cap's removal compared the chosen combination
+    /// against an independently computed argmax, and **it passed with the cap
+    /// restored at its shipped 20,000**, because on that fixture the true best
+    /// sat at index 315 and 1,682 and the prefix reached 10,575. It bound only
+    /// below ~1,683. A test that fires on one value of a constant is a test of
+    /// that value, not of the property.
+    ///
+    /// So the property is recorded rather than inferred: this counts what the
+    /// loop visited, and
+    /// `runner::validate::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped`
+    /// asserts it equals `considered`. That fires **whenever a cap truncates**,
+    /// which is the exact condition, rather than whenever a cap truncates AND
+    /// the discarded part happened to hold the winner. Measured with `.take(N)`
+    /// restored, fold 1 of the shipped fixture holding 9,299 candidates:
+    ///
+    /// | N | old test | this equality |
+    /// |---|---|---|
+    /// | 512 | FAILED | FAILED, dropped 8,787 |
+    /// | 5,000 | ok | FAILED, dropped 4,299 |
+    /// | 9,000 | ok | FAILED, dropped 299 |
+    /// | 20,000 | ok | ok — and correctly so: 20,000 > 10,575, nothing truncated |
+    ///
+    /// The last row is not a gap. A cap that discards nothing has done nothing
+    /// wrong, and a test that failed there would be asserting the absence of a
+    /// constant rather than the presence of a property.
+    pub priced: u64,
+    /// The budget this fold's sweep spent, if it did not go extinct.
+    ///
+    /// **`None` means the search finished on its own** and the candidate set is
+    /// complete. `Some` means a level breached a budget and the deepest level
+    /// held is partial.
+    ///
+    /// This was not recorded, and a comment two hundred lines up claimed the
+    /// sweep "already reports" it. It did not: `Sweep::halted` was read nowhere
+    /// in this module, no field carried it, and the audit printed nothing. The
+    /// same change that deleted the candidate cap also deleted the only row the
+    /// walk-forward render had that could say a search was not exhaustive.
+    ///
+    /// The direction is the opposite of the intuition, which is why leaving it
+    /// unreported was worse than it looked: a halt **inflates** the candidate
+    /// count, because [`crate::closed`] recognises a redundant set only by a
+    /// superset one level up, and a truncated level never enumerated those
+    /// supersets. Measured on `synthetic::sessions(24)` at `min_hits = 600`
+    /// varying only the ceiling: `1 << 26` went extinct and kept **1,407**;
+    /// `1_000_000` halted at k=9 and kept **318,862**. A tighter budget produced
+    /// 226x more work and a worse answer, and said nothing.
+    pub halted: Option<engine::Halt>,
     /// The exit variant chosen IN SAMPLE, as (stop, target, trail) rungs.
     ///
     /// `None` on every element means the no-levels baseline won. Chosen on the
@@ -136,13 +188,6 @@ pub struct FoldResult {
 pub struct Validated {
     /// One entry per test period, in time order.
     pub folds: Vec<FoldResult>,
-    /// Combinations that were trade-walked but not ranked, because the
-    /// candidate budget was reached.
-    ///
-    /// **Reported, never silent.** A validation that quietly looked at the first
-    /// N combinations and called it a search would be the same defect as a
-    /// bench measuring nothing.
-    pub not_considered: u64,
 }
 
 impl Validated {
@@ -169,18 +214,6 @@ impl Validated {
         self.folds.iter().filter(|f| f.chosen.is_some()).count()
     }
 }
-
-/// How many combinations a fold may trade-walk before it stops ranking.
-///
-/// A bound rather than a preference: the sweep can emit tens of thousands of
-/// frequent itemsets, and each one costs a full pass over the training bars to
-/// price. The cap is applied to the CLOSED set — [`crate::closed`] removes exact
-/// duplicates losslessly first, so the budget is spent on distinct hypotheses
-/// rather than on the same one under several names.
-///
-/// Whatever it drops is counted in [`Validated::not_considered`] and never
-/// silently discarded.
-pub const DEFAULT_CANDIDATES: usize = 20_000;
 
 /// How many rungs each exit ladder gets when a fold picks its exit.
 ///
@@ -225,8 +258,15 @@ const fn side_of(d: Direction) -> crate::excursion::Side {
 ///
 /// # Cost
 ///
-/// One sweep and up to [`DEFAULT_CANDIDATES`] trade-walks per fold, plus one
-/// trade-walk on the test side. Every one is a pass over its own bars.
+/// One sweep per fold, then one trade-walk per DISTINCT combination the sweep
+/// produced, plus one trade-walk on the test side. Every one is a pass over its
+/// own bars.
+///
+/// The candidate count is `crate::closed::closed(..).kept.len()`, which the
+/// sweep already bounds: a walk that reaches [`engine::Ladder::with_ceiling`]
+/// halts and records the breach in `Sweep::halted`. There is no second cap here,
+/// because the one that used to be here ranked a prefix — see the comment on the
+/// pricing loop below.
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
@@ -254,17 +294,58 @@ pub fn walk_forward(
         // budget buys distinct hypotheses rather than aliases of one.
         let closed = crate::closed::closed(&swept.sweep);
         let considered = u64::try_from(closed.kept.len()).unwrap_or(u64::MAX);
-        let over = closed.kept.len().saturating_sub(DEFAULT_CANDIDATES);
-        out.not_considered = out
-            .not_considered
-            .saturating_add(u64::try_from(over).unwrap_or(0));
 
-        // Price every candidate on the training bars and keep the best under
+        // Price EVERY candidate on the training bars and keep the best under
         // PESSIMISTIC fills. `max_by_key` on the worst-case total, so a
         // combination flattered by optimistic fills cannot win.
+        //
+        // # There was a cap here, and it chose the wrong hypothesis
+        //
+        // `closed.kept` is built by `crate::closed` in SWEEP order — level by
+        // level, then discovery order within a level. That ordering has no
+        // relationship to how a combination performs. So `.take(N)` was an
+        // argmax over an arbitrary PREFIX, and the argmax of a prefix is not
+        // the argmax of the set.
+        //
+        // MEASURED, `synthetic::sessions(24)` at `min_hits = 600`, 2,134
+        // distinct candidates, no stored bar involved: `take(512)` selects
+        // index 476 at −8,910 paisa where the true best is index 1,196 at
+        // −5,795 — a different hypothesis, 54% worse.
+        //
+        // At `take(20_000)` that same fixture selects CORRECTLY, and that is
+        // the argument for deleting the cap rather than raising it. Whether the
+        // cap is wrong depends on whether the candidate set happens to be
+        // smaller than a constant nobody re-checks, and the run prints the same
+        // line either way. Correctness that holds only while a fixture stays
+        // smaller than a number is not correctness, it is luck with a receipt.
+        //
+        // It reported what it dropped, and that is exactly what made it
+        // survivable. `candidates NOT ranked 10160` reads as a budget note —
+        // an honest-looking line that says nothing about the only thing that
+        // matters, which is whether the answer left in the budget is the right
+        // one. `CLAUDE.md` §4 bans a fallback that hides a failure; a disclosed
+        // count that conceals a wrong selection is that fallback wearing a
+        // receipt.
+        //
+        // What bounds this now is the sweep and NOT a second number. That
+        // sentence used to end "a bound the sweep already enforces and already
+        // reports", and the second half was false: `Sweep::halted` was read
+        // nowhere in this module and printed nowhere in the audit. It is
+        // recorded on `FoldResult::halted` now, and the field's own doc carries
+        // the measurement showing a halt makes the candidate set BIGGER rather
+        // than smaller.
+        //
+        // Ties are kept by the FIRST candidate to reach the value, because the
+        // comparison is strict. On the shipped fixture 495 of 9,299 candidates
+        // tie at fold 1's maximum, so on that fold the tie-break decides what
+        // gets reported rather than the ranking. Naming it here because a
+        // silent tie-break that selects among 495 equals is a coin toss wearing
+        // an argmax's clothes.
         let train_column = Column::build(train, &mut evaluator());
         let mut best: Option<(ConditionMask, Summary)> = None;
-        for item in closed.kept.iter().take(DEFAULT_CANDIDATES) {
+        let mut priced: u64 = 0;
+        for item in &closed.kept {
+            priced = priced.saturating_add(1);
             let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
             if s.trades == 0 {
                 continue;
@@ -329,6 +410,8 @@ pub fn walk_forward(
             purged: fold.purged,
             test_bars: fold.test.len(),
             considered,
+            priced,
+            halted: swept.sweep.halted,
             chosen,
             chosen_exit,
             in_sample,
@@ -367,14 +450,16 @@ fn restricted(column: &Column, from: usize) -> Column {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{DEFAULT_CANDIDATES, Validated, walk_forward};
+    use super::{Summary, Validated, walk, walk_forward};
     use crate::Sweeper;
     use crate::outcome::Horizon;
     use costs::fill::Direction;
     use engine::Ladder;
+    use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
     use indicators::vwap::Availability;
+    use vocab::ConditionMask;
 
     fn evaluator() -> Evaluator {
         Evaluator::new(
@@ -456,16 +541,110 @@ mod tests {
     }
 
     #[test]
-    fn what_the_candidate_budget_dropped_is_counted_rather_than_silent() {
+    fn every_candidate_the_sweep_produced_is_priced_and_none_is_skipped() {
+        // THE TEST THAT STOOD HERE DID NOT PROVE THE CHANGE IT WAS WRITTEN FOR,
+        // and that was found by putting the deleted cap back rather than by
+        // reading it.
+        //
+        // It re-derived each fold's winner over the whole closed set and
+        // required the fold's answer to match. Sound in principle. MEASURED
+        // with `.take(N)` restored in the pricing loop:
+        //
+        //   take(512)     FAILED   (left Some(-1460), right Some(-1220))
+        //   take(20_000)  ok       <- the value that actually shipped
+        //
+        // On this fixture the true best sits at index 315 and 1,682 while the
+        // candidate set reaches 10,575, so any cap above ~1,683 leaves the test
+        // green. It fired only for a constant that had already been replaced. A
+        // test that depends on where the argmax happens to land is a test of the
+        // fixture, and `CLAUDE.md` §9 asks for the property.
+        //
+        // A bigger fixture does not fix it: `sessions(24)`/`min_hits 600`/
+        // `ceiling 65_536` reaches 31,124-38,616 candidates with the argmax at
+        // index 175 and 532 -- still inside any plausible prefix, still green.
+        //
+        // So this asserts the property directly. `FoldResult::priced` counts
+        // what the loop visited; `considered` is what the sweep handed it. A
+        // prefix cap of ANY size breaks that equality on ANY fixture where the
+        // set outgrows it, immediately and by construction, with no dependence
+        // on where the best candidate sits.
         let bars = crate::synthetic::sessions(12);
-        let v = walk_forward(&bars, h(15), 2, Direction::Long, &sweeper(), evaluator);
-        // Either every candidate fitted, or the overflow was recorded. What is
-        // forbidden is a budget that drops work and says nothing.
-        let total: u64 = v.folds.iter().map(|f| f.considered).sum();
-        if total > DEFAULT_CANDIDATES as u64 {
-            assert!(
-                v.not_considered > 0,
-                "candidates were dropped and not_considered stayed zero"
+        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        assert!(!v.folds.is_empty(), "no folds, so this asserts nothing");
+
+        let mut seen_any = false;
+        for f in &v.folds {
+            assert_eq!(
+                f.priced,
+                f.considered,
+                "fold {} was handed {} candidates and priced {} -- something \
+                 between the sweep and the ranking dropped {}",
+                f.index,
+                f.considered,
+                f.priced,
+                f.considered.saturating_sub(f.priced)
+            );
+            seen_any |= f.considered > 0;
+        }
+        assert!(
+            seen_any,
+            "every fold was handed zero candidates, so the equality above is vacuous"
+        );
+    }
+
+    #[test]
+    fn the_chosen_combination_is_the_best_of_every_candidate_and_not_of_a_prefix() {
+        // The value check, beside the structural one above. This one re-derives
+        // the winner independently and compares the MASK rather than the total.
+        //
+        // The mask and not the total, because `cargo-mutants` kills the total
+        // version: mutating the pricing loop's `s.worst > b.worst` to `>=`
+        // SURVIVED a total-based assertion. Both operators reach the same
+        // maximum VALUE and disagree about which candidate carries it, and on
+        // the shipped fixture 495 of 9,299 candidates tie at fold 1's maximum.
+        // So comparing totals cannot see a tie-break change that alters which
+        // combination is reported, which is the thing a caller acts on.
+        let bars = crate::synthetic::sessions(12);
+        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        assert!(
+            v.decided() > 0,
+            "no fold chose anything, so this asserts nothing"
+        );
+
+        for f in v.folds.iter().filter(|f| f.chosen.is_some()) {
+            let train = bars
+                .get(..f.train_bars)
+                .expect("a fold's own training prefix is in range");
+            let swept = sweeper().run(train, &mut evaluator());
+            let closed = crate::closed::closed(&swept.sweep);
+            let column = Column::build(train, &mut evaluator());
+
+            // Same rule as the pricing loop, including the strict `>` so the
+            // first candidate to reach the maximum keeps it.
+            let mut top: Option<(ConditionMask, i64)> = None;
+            for item in &closed.kept {
+                let s = Summary::of(&walk(train, &column, &item.mask, h(15), Direction::Long));
+                if s.trades == 0 {
+                    continue;
+                }
+                if top.is_none_or(|(_, best)| s.worst > best) {
+                    top = Some((item.mask, s.worst));
+                }
+            }
+
+            assert_eq!(
+                f.chosen,
+                top.map(|(m, _)| m),
+                "fold {} reported a different COMBINATION than the independent \
+                 argmax over its {} candidates",
+                f.index,
+                f.considered
+            );
+            assert_eq!(
+                Some(f.in_sample.worst),
+                top.map(|(_, w)| w),
+                "fold {} reported a different total than the independent argmax",
+                f.index
             );
         }
     }

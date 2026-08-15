@@ -346,14 +346,6 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
         &v.held_up().to_string(),
         "under pessimistic fills",
     );
-    if v.not_considered > 0 {
-        row(
-            out,
-            "  candidates NOT ranked",
-            &v.not_considered.to_string(),
-            "the budget was reached; the search was not exhaustive",
-        );
-    }
     let _ = writeln!(out);
     let _ = writeln!(
         out,
@@ -811,6 +803,8 @@ mod tests {
                     purged: 15,
                     test_bars: 500,
                     considered: 207,
+                    priced: 207,
+                    halted: None,
                     chosen_exit: Some((Some(0), None, None)),
                     chosen: Some(vocab::ConditionMask::default()),
                     in_sample: crate::validate::Summary {
@@ -832,6 +826,8 @@ mod tests {
                     purged: 15,
                     test_bars: 500,
                     considered: 311,
+                    priced: 311,
+                    halted: None,
                     chosen_exit: Some((Some(1), Some(2), None)),
                     chosen: Some(vocab::ConditionMask::default()),
                     in_sample: crate::validate::Summary {
@@ -848,17 +844,24 @@ mod tests {
                     },
                 },
             ],
-            not_considered: 44,
         };
         let mut out = String::new();
         walk_forward(&mut out, &v);
 
         assert_eq!(cell(&out, "folds"), "2");
         assert_eq!(cell(&out, "still positive out of sample"), "1");
+        // THE ROW THIS ASSERTED IS GONE, and its absence is the fix rather than
+        // a regression. It read "candidates NOT ranked 44" and its message here
+        // said a search that looks at the first N and calls it exhaustive is the
+        // defect. That was right about the defect and wrong about the remedy:
+        // the budget was reporting the count it discarded while discarding the
+        // best candidate along with it, so the honest-looking line was what made
+        // the wrong answer survivable. The cap is deleted, every candidate is
+        // priced, and `runner::validate::the_chosen_combination_is_the_best_of_every_candidate_and_not_of_a_prefix`
+        // holds the property this row used to gesture at.
         assert!(
-            out.contains("candidates NOT ranked"),
-            "a budget that dropped 44 candidates must say so -- a search that \
-             looked at the first N and called it exhaustive is the defect"
+            !out.contains("candidates NOT ranked"),
+            "the candidate budget no longer exists, so nothing may report one"
         );
         assert!(
             out.contains("ONE DRAW"),

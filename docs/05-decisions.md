@@ -14332,3 +14332,82 @@ has a test on the side that writes the strings.
 - `api::server::a_run_the_order_refuses_says_so_on_its_receipt_and_answers_409`
 
 Invariants P-12, P-13.
+
+## D-0156 · 2026-08-15 · The candidate cap is deleted, because it ranked a prefix
+
+`crates/runner/src/validate.rs`.
+
+`DEFAULT_CANDIDATES = 20_000` and `Validated::not_considered` are gone. The
+pricing loop in `walk_forward` prices every element of `closed.kept`.
+
+**Why.** `crate::closed` builds `kept` in SWEEP order — level by level, then
+discovery order within a level. That ordering has no relationship to how a
+combination performs, so `.take(N)` made the selection an argmax over an
+arbitrary PREFIX, and the argmax of a prefix is not the argmax of the set.
+
+Measured, `synthetic::sessions(24)`, `min_hits = 600`, `DEFAULT_CEILING`,
+horizon 15, long: `take(512)` selects index 476 at −8,910 paisa where the true
+best is −5,795 — 54% worse. The true best is a TIE at indices 984 and 1,196, and
+the loop's comparison is strict `>`, so the first to reach it keeps it: index
+984. Both figures are from this repository's synthetic generator; no stored bar
+was read.
+
+**The cap was correct at its shipped value on every fixture in the tree, and
+that is the argument for deleting it rather than raising it.** Whether it was
+wrong depended on whether the candidate set happened to be smaller than a
+constant nobody re-checked, and the run printed the same line either way. An
+earlier change raised it from 512 to 20,000 and reported the defect solved; it
+was postponed until the data grew.
+
+**What bounds the loop now.** The sweep. A walk that reaches `Ladder::ceiling`
+halts and the breach is recorded on `Sweep::halted`. That is a real bound and it
+is ANTI-CORRELATED with work: a halt INFLATES `closed.kept`, because `closed`
+recognises a redundant set only via a superset one level up and a truncated
+level never enumerated those supersets. Measured on `sessions(24)` at
+`min_hits = 600`, varying only the ceiling: `1 << 26` went extinct and kept
+1,407; `1_000_000` halted at k=9 and kept 318,862. A tighter budget produced
+226x more work and a worse answer.
+
+So `FoldResult` gains `halted`, and the audit prints it. It was previously read
+nowhere in the module while a comment claimed the sweep "already reports" it,
+and the same change that deleted the cap also deleted the only row the
+walk-forward render had that could say a search was not exhaustive.
+
+**Cost.** The pricing loop is `kept x train_bars x ~4.1 ns`. At the shipped
+`DEFAULT_CEILING` the change makes it CHEAPER, because extinction closes the set
+to hundreds: on a 281,250-bar slice at three splits, ~3.2 s against ~0.2 s
+capped — but the capped run at `ceiling = 20_000` halts at k=4-6 and prices
+12,372 partial candidates, where the uncapped extinct run prices 2,010 complete
+ones. There is no configuration in this repository where removal is unaffordable.
+The worst case admitted by `DEFAULT_CEILING` is `2^26 x 384` candidates, which
+is a sentence rather than a bound; that is recorded in `docs/06-limits.md`.
+
+**Proof.** `FoldResult::priced` counts what the loop visited, and
+`runner::validate::every_candidate_the_sweep_produced_is_priced_and_none_is_skipped`
+asserts it equals `considered`. That is the property; the first attempt was not.
+The test originally written for this change compared the chosen combination
+against an independently computed argmax, and PASSED with the cap restored at
+20,000, because on that fixture the true best sits at index 315 and 1,682 while
+the set reaches 10,575 — it bound only below ~1,683. Measured with `.take(N)`
+restored on fold 1 of the shipped fixture, 9,299 candidates:
+
+| N | the first test | the equality |
+|---|---|---|
+| 512 | FAILED | FAILED, dropped 8,787 |
+| 5,000 | ok | FAILED, dropped 4,299 |
+| 9,000 | ok | FAILED, dropped 299 |
+| 20,000 | ok | ok — 20,000 > 10,575, nothing truncated |
+
+The last row is correct rather than a gap: a cap that discards nothing has done
+nothing wrong.
+
+The value check remains beside it and now compares the MASK, not the total.
+`cargo-mutants` kills the total form: mutating `s.worst > b.worst` to `>=`
+SURVIVES a total-based assertion, because both operators reach the same maximum
+VALUE and disagree about which candidate carries it. 495 of 9,299 candidates tie
+at fold 1's maximum, so on that fold the tie-break decides what is reported.
+
+**What this does not do.** It does not make the selection joint. The combination
+is still chosen with no exit levels and the 125-cell grid still runs on that one
+winner afterwards. That is a separate and larger defect, recorded in
+`docs/06-limits.md` rather than fixed here.
