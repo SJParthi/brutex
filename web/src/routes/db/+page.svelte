@@ -3856,7 +3856,79 @@
   /* ======================================================================
      WINDOWING — only the visible slice is in the DOM
      ====================================================================== */
-  const ROW = 32;
+  /* 40px, AND IT IS THE SAME 40 THE `--dbrow` TOKEN SETS. Raised together with
+     it: this places row N at `N * ROW`, so a disagreement drifts the rows away
+     from the scrollbar one pixel per row and the list is unusable by the
+     thousandth. 32 was cramped at the grid's new 14px type. */
+  /* A CHANGE IN BASIS POINTS AS A PERCENTAGE OF THE CELL'S WIDTH.
+   *
+   * Capped at 100 basis points — one percent — because that is where an
+   * index minute-bar move stops being ordinary. Everything at or beyond it
+   * draws a full bar, so the scale answers "is this one big" rather than
+   * "how big", which is the question a column of fifty rows is actually
+   * being scanned for. The exact figure is the text, unclipped, right there.
+   *
+   * `Math.abs` — direction is already carried by `data-dir`, which colours
+   * the bar; length carries magnitude alone, so an up and a down of the same
+   * size are the same length and are comparable at a glance.
+   */
+  /* SCALED TO WHAT IS ACTUALLY IN THE SELECTION, NOT TO A GUESS.
+   *
+   * The first draft fixed full width at 100 basis points -- one percent -- on
+   * the reasoning that an index minute-bar move stops being ordinary there.
+   * Measured against the real rows: the 90th percentile is 5 bps, the 99th is
+   * 8, and the largest on the page is 8. Every bar drew at 5-8% of the cell and
+   * the column was blank. A scale nothing reaches is not a scale.
+   *
+   * Taken from `barRows` -- every row the query matched, not `barPage` -- so
+   * turning to page 2 cannot silently change what a full bar means. That
+   * stability is the whole reason this is not computed per page.
+   *
+   * The floor stops a dead-flat selection from magnifying rounding into a
+   * full-width bar: with every row at 0 or 1 bps there is nothing to compare
+   * and the column stays quiet.
+   */
+  const CHG_FLOOR_BPS = 10;
+
+  /* ONE SCALE PER RUNG, because a rung is what makes two moves comparable.
+   *
+   * A single scale over the whole selection was the second draft and it was
+   * also wrong: with 1min and 1day rows matched together the daily move — the
+   * whole session in one bar — set full width, and every minute row drew at
+   * under a tenth of it. The column went blank again for the rung anybody
+   * actually scans.
+   *
+   * A minute bar and a daily bar are not two sizes of the same thing, so they
+   * do not share a ruler. Keyed on `tf`, each rung is measured against its own
+   * largest move and the bar answers "big for a bar of this length".
+   */
+  const chgFullByTf = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const top = new Map();
+    for (const b of barRows) {
+      if (b.chg === null) continue;
+      const a = Math.abs(b.chg);
+      if (a > (top.get(b.tf) ?? 0)) top.set(b.tf, a);
+    }
+    for (const [tf, v] of top) top.set(tf, Math.max(v, CHG_FLOOR_BPS));
+    return top;
+  });
+
+  /** The rungs on screen and their scales, for the header's own explanation. */
+  const chgScaleText = $derived(
+    [...chgFullByTf].map(([tf, v]) => `${tf} ${fmt(v)} bps`).join(', ')
+  );
+
+  /**
+   * @param {number} bps
+   * @param {string} tf
+   */
+  function chgMag(bps, tf) {
+    const full = chgFullByTf.get(tf) ?? CHG_FLOOR_BPS;
+    return Math.round((Math.min(Math.abs(bps), full) / full) * 100);
+  }
+
+  const ROW = 40;
   const HEAD = 30; /* the sticky header covers the top of the scroll box */
   const OVER = 6;
   let scroller = $state(null);
@@ -6319,7 +6391,9 @@
                       disabled={Boolean(c.none)}
                       title={c.none
                         ? `${c.label} — no source, so there is nothing to order: ${c.none}`
-                        : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
+                        : c.key === 'chg'
+                          ? `${c.label} — ${c.why}. The bar behind each figure is that figure's size against the largest move in this selection, measured PER RUNG so a minute bar is never judged against a daily one (${chgScaleText}). Scaled across every matched row rather than this page, so turning the page does not change what a full bar means. Click to sort; click again to reverse.`
+                          : `${c.label} — ${c.why}. Click to sort; click again to reverse.`}
                       onclick={() => barHead(c.key)}
                     >
                       <span>{c.label}</span>
@@ -6429,7 +6503,17 @@
                         ></td
                       >
 
-                      <td class="bn bpc" data-dir={dirOf(b.chg)}>
+                      <!-- THE NUMBER, AND THE SAME NUMBER AS A LENGTH.
+                           A column of ±0.05% reads as a column of identical
+                           text; the bar behind it is the only thing that makes
+                           an outlier findable by eye at fifty rows a page. It
+                           is drawn from the SAME `b.chg` the text renders and
+                           carries no scale of its own — see `--mag`. -->
+                      <td
+                        class="bn bpc"
+                        data-dir={dirOf(b.chg)}
+                        style={b.chg === null ? undefined : `--mag:${chgMag(b.chg, b.tf)}%`}
+                      >
                         {#if b.chg === null}
                           <span
                             class="unk"
@@ -7117,11 +7201,11 @@
      theme file holds itself to. */
 
   .db {
-    /* 32px, AND IT IS THE SAME 32 THE WINDOWING ARITHMETIC USES. `ROW = 32` in
-       the script places row N at `N * 32px`; if these two ever disagree the
+    /* 40px, AND IT IS THE SAME 40 THE WINDOWING ARITHMETIC USES. `ROW = 40` in
+       the script places row N at `N * 40px`; if these two ever disagree the
        rows drift away from the scrollbar a pixel per row and the list is
        unusable by the thousandth. Neither number moves without the other. */
-    --dbrow: 32px;
+    --dbrow: 40px;
   }
 
   /* ---- THE BOARD ------------------------------------------------------
@@ -9069,8 +9153,16 @@
     border-spacing: 0;
     width: 100%;
     table-layout: fixed;
-    font-size: 12.5px;
+    /* 14px, UP FROM 12.5. The body sets 16px and this grid was rendering the
+       only numbers on the page two and a half pixels under it, in a mono face
+       whose figures are already narrower than the sans around them. Measured
+       before changing anything: header 11.5px, cells 12.5px, row 32px. */
+    font-size: 14px;
     font-variant-numeric: tabular-nums;
+    /* Figures line up in a column whatever their digits -- a 1 takes the width
+       of a 9. Already implied by the mono face; stated so a future face change
+       cannot quietly break the column. */
+    font-feature-settings: 'tnum' 1;
   }
   .bgrid thead th {
     position: sticky;
@@ -9081,15 +9173,26 @@
     text-align: left;
     background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
     border-bottom: 1px solid var(--line);
-    font-size: var(--fs-micro);
+    /* THE HEADER IS MONO BECAUSE THE COLUMN UNDER IT IS.
+     *
+     * The alignment was already exact -- both the header text and the cell text
+     * ended on the same pixel, measured. It LOOKED wrong because the header was
+     * a 11.5px sans and the figures a 12.5px mono, and two right-aligned runs
+     * in different faces at different sizes do not read as one edge. Matching
+     * the family and closing the size gap fixes the appearance, which is the
+     * thing that was actually broken. */
+    font-family: var(--mono);
+    font-size: 12px;
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--faint);
+    color: var(--dim);
     white-space: nowrap;
   }
   .bgrid thead th.numh {
     text-align: right;
+    /* The header's figures sit on the same grid as the column's. */
+    font-variant-numeric: tabular-nums;
   }
   /* THE STATS LINE KEEPS ITS FIGURES AND HIDES ITS CLAUSES. See the comment
      at the `<p class="count terse">` for the sentence this replaced. The `.u`
@@ -9214,6 +9317,40 @@
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     border-bottom-style: dotted;
+  }
+  /* THE BAR IS A BACKGROUND, NOT AN ELEMENT.
+   *
+   * One gradient on the cell that already exists, so there is no extra node
+   * per row and nothing to keep in sync with the text. It grows from the
+   * RIGHT, under the right-aligned figure, so the number stays the thing the
+   * eye lands on and the bar is read second.
+   *
+   * `--mag` is set inline per cell and defaults to 0 here, so a cell that
+   * carries no change — the nulls, and every column that is not this one —
+   * draws nothing at all rather than a zero-width artefact.
+   *
+   * `prefers-reduced-motion` is honoured below: the width is a paint, not an
+   * animation, but the transition on it is.
+   */
+  .bpc {
+    --mag: 0%;
+    position: relative;
+    background-image: linear-gradient(
+      to left,
+      color-mix(in srgb, currentColor 18%, transparent) 0 var(--mag),
+      transparent var(--mag)
+    );
+    background-repeat: no-repeat;
+    /* A band under the text rather than a full-height block: at 40px rows a
+       solid fill fights the figure for contrast. */
+    background-size: 100% 60%;
+    background-position: center;
+    transition: background-image 160ms ease-out;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .bpc {
+      transition: none;
+    }
   }
   .bpc[data-dir='up'] {
     color: var(--up);
