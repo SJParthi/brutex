@@ -4003,3 +4003,43 @@ both. In that order — the citation first, because the type is the easy half.
 Muhurat date exists, and the row type could not hold one. The claim has been
 removed rather than left standing.
 
+
+---
+
+## 69. The pull ladder's probe COUNT is proven and the probe's own cost is not
+
+`crates/api/src/ladder.rs` documented its cost as ``O(names × months)`` probes,
+"each `O(1)`". Gate 12 refused both doc blocks, and it was right to: neither
+named a proof, and the two halves of that bound are not equally supported.
+
+**What is proven.** The multiplier is the size of the *ask*, not the size of the
+store. `api::ladder::a_window_names_every_month_file_it_touches` asserts the
+month enumeration returns exactly the months a window touches — one inside a
+month, two across a month boundary, and the year boundary where a naive `+1`
+breaks. The `names` half is structural rather than measured: `held` iterates the
+caller's own list and never walks the census, which is visible in the loop and
+is why the store's size does not appear in the bound at all.
+
+**What is not.** The per-probe `O(1)`. The probe is `Manifest::entry`, a single
+`HashMap::get` over `index: HashMap<EntryKey, Held>`, so the claim is very
+likely true — but *likely* is not measured, and no test here isolates one
+lookup. `docs/04-invariants.md` C-03 is explicit that the nearest measurement
+"does NOT isolate a probe's own cost", so it cannot be borrowed either.
+
+**Why it was not papered over.** Two adjacent tests were available and either
+would have satisfied the gate by resolving to a real function:
+`a_mixed_target_is_probed_under_each_instruments_own_segment` proves each
+instrument is probed under its own segment, and
+`a_month_with_no_bars_cannot_even_be_recorded` proves the zero-row case is
+unreachable. Both are real tests and neither measures a probe's cost. Naming one
+would have turned the gate green while leaving the claim exactly as unproven as
+it was — which is the defect class gate 12 was written to catch, not a way
+through it.
+
+**What would close it.** A bench that probes a manifest at two index sizes an
+order of magnitude apart and asserts the per-probe time does not track the size,
+in the shape gate 8 already uses. Until then the `O(1)` reads `UNVERIFIED` in
+both blocks.
+
+**How it was found.** CI, twice in a row, on the branch. The claim had been in
+the file since it was written.

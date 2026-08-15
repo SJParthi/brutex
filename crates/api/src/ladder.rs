@@ -47,6 +47,23 @@
 //! this walks the caller's own list rather than the census. `O(names × months)`
 //! probes, each `O(1)`, and it opens no file: the census is already loaded by
 //! the caller that is about to write to it.
+//!
+//! **The `O(1)` per probe is `UNVERIFIED` and the multiplier is not.** Taking
+//! the two halves separately, because only one of them is measured:
+//!
+//! - `months` is proven. `api::ladder::a_window_names_every_month_file_it_touches`
+//!   asserts the enumeration returns exactly the months a window touches — one
+//!   month inside a month, two across a month boundary, and the year boundary
+//!   where a naive `+1` breaks. So the multiplier is the size of the ASK.
+//! - `names` is structural, not measured: this iterates the caller's own list
+//!   and the census is never walked, which is visible in the loop and is why
+//!   the store's size does not appear in the bound at all.
+//! - The per-probe `O(1)` is the unmeasured half. No test here isolates one
+//!   `HashMap::get`, and `docs/04-invariants.md` C-03 says outright that the
+//!   nearest measurement "does NOT isolate a probe's own cost".
+//!
+//! Recorded in `docs/06-limits.md`. Naming a test that proves something
+//! adjacent would be the exact defect gate 12 was written to catch.
 
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -281,8 +298,14 @@ pub fn gate(
 
 /// Whether the census holds this one instrument-month at `(segment, rung)`.
 ///
-/// One `O(1)` map probe. Callers walk their OWN list, so the cost is the size of
-/// the ask and never the size of the store.
+/// One map probe. Callers walk their OWN list, so the count is the size of the
+/// ask and never the size of the store.
+///
+/// The probe is [`Manifest::entry`], a single `HashMap::get`. Its `O(1)` is
+/// `UNVERIFIED` for the reason the module doc gives: no test here isolates one
+/// lookup, and `docs/04-invariants.md` C-03 states that the nearest measurement
+/// does not isolate a probe's own cost either. What IS proven is the count —
+/// see `api::ladder::a_window_names_every_month_file_it_touches`.
 ///
 /// # Absent is the whole test, and it covers the dangerous case
 ///
