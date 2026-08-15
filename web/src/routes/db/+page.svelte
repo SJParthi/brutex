@@ -4793,148 +4793,12 @@
         </div>
       {/if}
 
-      <!-- THE INSTRUMENT RUNG'S TEXT INPUT — not a tenth rung.
-           ==================================================================
-           It used to be labelled FIND and read as a control of its own. It is
-           not: it writes `filter`, which drives `typed` -> `textMatched`, which
-           IS the instrument stage of the cascade.
-
-           The old reason it sat apart — "it reaches an instrument OR a month" —
-           died with the month rung. The remaining reason is mechanical:
-           `Picker`'s own filter box is internal `$state` (`q`, Picker.svelte
-           :114) with no way to read it out, so folding this into the picker
-           means giving that shared component a bindable filter — and
-           /markets and /ingest use it too. That is a change outside this page,
-           and this page is the scope.
-
-           So it stays, relabelled, sitting under the picker it belongs to.
-           Both search the instrument rung; this one also drives the row set. -->
-      <div class="cell combo">
-        <span
-          title="Instrument or month — this box reaches either, which is why it is not folded into the picker beside it."
-          >Search</span
-        >
-        <!-- A `.picker` FOR THE POSITIONING CONTEXT AND NOTHING ELSE, and
-             deliberately WITHOUT `data-drop`: `onWindowDown` closes the one
-             menu `drop` governs by testing `.picker[data-drop]`, and this
-             listbox is not one of those — it is closed by the field's own blur
-             and by Escape in `onWindowKey`. Without the attribute a press in
-             here reads as a press AWAY from the feed/universe/month menu,
-             which is exactly right: opening this one shuts that one. -->
-        <div class="picker find">
-          <span class="dwrap">
-            <!-- THE COMBOBOX ATTRIBUTES ARE PROMISES, AND EACH IS KEPT.
-                 `aria-controls` names the listbox below, which is in the
-                 document at all times; `aria-expanded` is the listbox's real
-                 state and not a constant; `aria-activedescendant` names a row
-                 that exists exactly when one is highlighted, and is absent
-                 rather than empty when none is. `aria-autocomplete="list"` is
-                 the truth about what typing does here — it filters a list and
-                 never completes the text in the field. -->
-            <input
-              class="din mono search"
-              type="search"
-              role="combobox"
-              placeholder="Instrument or month"
-              aria-label="Filter by instrument or month"
-              aria-expanded={findShown}
-              aria-controls="db-findlist"
-              aria-autocomplete="list"
-              aria-activedescendant={findShown && findCursor >= 0 && findCursor < findRows.length
-                ? `db-find-${findCursor}`
-                : undefined}
-              autocomplete="off"
-              spellcheck="false"
-              bind:this={searchEl}
-              bind:value={filter}
-              oninput={() => {
-                findOpen = true;
-                /* THE HIGHLIGHT IS DROPPED WHENEVER THE LIST CHANGES. Keeping
-                   the index would leave it pointing at whatever row happens to
-                   land at that position next, and Enter would commit a key the
-                   reader never looked at. */
-                findCursor = -1;
-              }}
-              onfocus={() => (findOpen = true)}
-              onblur={() => {
-                findOpen = false;
-                findCursor = -1;
-              }}
-              onkeydown={onFindKey}
-            />
-            <kbd class="kbd slash" aria-hidden="true">/</kbd>
-          </span>
-          <!-- ALWAYS IN THE DOCUMENT, and that is the difference between this
-               popup and `.derr` above, which is gated by an `{#if}`. An
-               `aria-controls` IDREF that resolves to nothing is a promise the
-               document does not keep: the attribute would name an element that
-               is not there for every second the list is shut, which is most of
-               them. The node stays and its ROWS are what come and go. -->
-          <div
-            class="menu list"
-            class:shown={findShown}
-            id="db-findlist"
-            role="listbox"
-            aria-label="Instruments and months starting with what you typed"
-          >
-            {#if findShown}
-              <!-- KEYED ON KIND AND KEY TOGETHER, with the same ESCAPED
-                   separator `deco` uses for its compound key, and written
-                   as an escape for the same reason: a literal NUL byte in
-                   this source makes grep and ripgrep classify the whole
-                   file as binary and return nothing for every pattern. The
-                   runtime key is byte-identical; the source stays
-                   searchable. An instrument row and a month row are two
-                   different nodes, and a key that was only the string could
-                   collide between them. -->
-              {#each findRows as f, i (f.kind + '\u0000' + f.key)}
-                <!-- svelte-ignore a11y_click_events_have_key_events -->
-                <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-                <!-- A ROW IS NOT A TAB STOP AND MUST NOT BE. In this pattern
-                     the field keeps the focus and `aria-activedescendant`
-                     points at the row — ↑ ↓ Enter are handled on the input, so
-                     the keyboard is served there and not here. `mousedown` is
-                     prevented so the press does not blur the field and close
-                     the list out from under the click that follows. -->
-                <div
-                  class="opt"
-                  role="option"
-                  id="db-find-{i}"
-                  tabindex="-1"
-                  aria-selected={i === findCursor}
-                  class:cur={i === findCursor}
-                  title={f.kind === 'month'
-                    ? `Filter to ${f.name} — the store's own key for it is ${f.key}, and that raw key is what the box is set to.`
-                    : `Filter to ${f.key} — the store's own spelling of this instrument.`}
-                  onmousedown={(e) => e.preventDefault()}
-                  onclick={() => commitFind(f)}
-                >
-                  <span class="tk">{filter.trim() === f.key ? '✓' : ''}</span>
-                  <span class="nm">{f.name}</span>
-                  <span class="ct">{f.detail}</span>
-                </div>
-              {:else}
-                <!-- SHOWN AND REFUSED, NEVER SILENT — the same rule the month
-                     menu follows. A list that vanishes when it empties reads as
-                     a control that broke. -->
-                <p class="none">Nothing held starts with “{filter.trim()}”.</p>
-              {/each}
-              {#if findMore > 0}
-                <p class="none">
-                  {fmt(findMore)} more match — the list draws {FIND_ROWS}. Keep typing to narrow it.
-                </p>
-              {/if}
-            {/if}
-          </div>
-        </div>
-        <span class="count">
-          {#if typed}
-            “{filter.trim()}” · {fmt(textMatched.length)} row(s) match
-          {:else}
-            a prefix of up to {MAX_PREFIX} characters, one Map probe per keystroke
-          {/if}
-        </span>
-      </div>
+      <!-- THE SEARCH BOX IS GONE. It was the instrument rung's text input, not a
+           rung of its own, and the Instrument picker beside it has its own filter
+           box — two search fields for one question. Both wrote `filter`, so the
+           picker keeps the state and `typed`/`textMatched` are unchanged; what is
+           lost is the `/` shortcut and prefix matching against a MONTH, which the
+           month rung no longer exists to use. -->
 
     <!-- ==================================================================
          THE SEGMENT TABLIST — `.segs`, AND IT IS ABOVE WHAT IT FILTERS.
@@ -5037,6 +4901,41 @@
           {/if}
         </span>
       </div>
+      <!-- ==================================================================
+           THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
+           A spot series runs forever, so "show me the 12th" is a real question.
+           A CONTRACT is defined by its expiry and its bars stop there, so a
+           second date range asks something the contract has already answered.
+           Gated on `dayWindowApplies`, which is simply "no expiry chosen".
+           ================================================================== -->
+        <div class="cell">
+          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
+            >From date</span
+          >
+          <input
+            class="tin"
+            type="date"
+            bind:value={fromDay}
+            max={toDay || undefined}
+            aria-label="First day to show"
+          />
+          <span class="count"
+            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
+          >
+        </div>
+
+        <div class="cell">
+          <span title="Only bars on or before this day. Spot only.">To date</span>
+          <input
+            class="tin"
+            type="date"
+            bind:value={toDay}
+            min={fromDay || undefined}
+            aria-label="Last day to show"
+          />
+          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+        </div>
+      
 
 
 
@@ -5347,58 +5246,6 @@
     </section>
     {/if}
 
-    <!-- ==================================================================
-         THE DAY WINDOW IS THE LAST RUNG, AFTER SIDE.
-
-         The order is feed, universe, instrument, segment, timeframe, expiry,
-         strike, moneyness, side, from date, to date — and the dates are last
-         because every rung above them narrows by IDENTITY (what the series
-         is) while these two narrow by TIME (which of its days to draw). A
-         window is the last question you ask, not one asked halfway up.
-
-         It sits OUTSIDE the contract strip so it survives when that strip is
-         not drawn: a spot store holds no contract, the four contract rungs
-         vanish, and the dates must still be there — spot is exactly where a
-         day window earns its place.
-         ================================================================== -->
-    <section class="strip sub" aria-label="Window">
-      <span class="lead">Window</span>
-      <!-- ==================================================================
-           THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
-           A spot series runs forever, so "show me the 12th" is a real question.
-           A CONTRACT is defined by its expiry and its bars stop there, so a
-           second date range asks something the contract has already answered.
-           Gated on `dayWindowApplies`, which is simply "no expiry chosen".
-           ================================================================== -->
-        <div class="cell">
-          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
-            >From date</span
-          >
-          <input
-            class="tin"
-            type="date"
-            bind:value={fromDay}
-            max={toDay || undefined}
-            aria-label="First day to show"
-          />
-          <span class="count"
-            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
-          >
-        </div>
-
-        <div class="cell">
-          <span title="Only bars on or before this day. Spot only.">To date</span>
-          <input
-            class="tin"
-            type="date"
-            bind:value={toDay}
-            min={fromDay || undefined}
-            aria-label="Last day to show"
-          />
-          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
-        </div>
-      
-    </section>
 
     <!-- ==================================================================
          THE ANCHOR. What this query is looking at, the one headline figure,
