@@ -82,6 +82,27 @@ use vocab::ConditionMask;
 /// 14:55 and 15:10 exits early at 15:10 rather than running its full horizon.
 const AUTO_CLOSE_MINUTE: i64 = 15 * 60 + 10;
 
+/// The last bar whose interval ENDS at or before the square-off: the one
+/// stamped 15:09.
+///
+/// # A bar is stamped at its OPEN, so the stamp is one minute early
+///
+/// `docs/00-charter.md` §3 stamps a bar at the open of its interval, so the bar
+/// stamped `m` covers `[m, m+1)` and its close prints at `m+1`. The bar stamped
+/// 15:10 therefore closes at **15:11**, a minute AFTER the position was squared
+/// off, and using it as the exit reads a price the trade never saw.
+///
+/// This was wrong in the first version of this rule and the error was measured
+/// rather than reasoned about: an entry at 14:55 came out as 105 paisa against
+/// the 15:10-stamped bar's close and 77 paisa against the correct one — **36% on
+/// fourteen observations per session**. The stamp looked right, reconciled with
+/// every neighbouring number, and was measured against the wrong instant.
+///
+/// So the last fill bar is 909, and [`AUTO_CLOSE_MINUTE`] stays 910 because 910
+/// is the INSTANT the position closes. The two are different facts and both are
+/// needed: one is a deadline, the other is the last bar that fits inside it.
+const LAST_FILL_MINUTE: i64 = AUTO_CLOSE_MINUTE - 1;
+
 /// How many bars ahead an outcome looks.
 ///
 /// A newtype so a caller cannot pass a bar count, a period or a `min_hits`
@@ -260,7 +281,7 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         } else {
             None
         };
-        let mine = if minute <= AUTO_CLOSE_MINUTE {
+        let mine = if minute <= LAST_FILL_MINUTE {
             Some(i)
         } else {
             None
@@ -282,7 +303,7 @@ pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
         };
         // NO ENTRY AT OR AFTER THE FORCED CLOSE. At 15:10 the position is being
         // closed, so it cannot also be opened; `<` and not `<=`.
-        if minute >= AUTO_CLOSE_MINUTE {
+        if minute > LAST_FILL_MINUTE {
             ret.push(None);
             continue;
         }
@@ -355,7 +376,7 @@ fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
     };
     j.checked_add(1)
         .and_then(|k| stamps.get(k))
-        .is_some_and(|&(next_day, next_minute)| next_day != day || next_minute >= AUTO_CLOSE_MINUTE)
+        .is_some_and(|&(next_day, next_minute)| next_day != day || next_minute > LAST_FILL_MINUTE)
 }
 
 /// Minute of the IST day, `0..1440`.
@@ -507,7 +528,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{AUTO_CLOSE_MINUTE, Edge, Horizon, edge, forward};
+    use super::{Edge, Horizon, LAST_FILL_MINUTE, edge, forward};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -637,15 +658,18 @@ mod tests {
                 .rem_euclid(1_440)
         };
         let close_bar = (0..375)
-            .find(|&i| minute_of(i) == AUTO_CLOSE_MINUTE)
-            .expect("the fixture must contain a 15:10 bar");
+            .find(|&i| minute_of(i) == LAST_FILL_MINUTE)
+            .expect("the fixture must contain a 15:09 bar");
         assert_eq!(
-            close_bar, 355,
-            "bar 355 is 15:10 on a 09:15-anchored session"
+            close_bar, 354,
+            "bar 354 is STAMPED 15:09 and CLOSES at 15:10, so it is the last \
+             fill that fits inside the square-off. The bar stamped 15:10 closes \
+             at 15:11 -- a minute after the position is already gone."
         );
 
-        // ONE: a bar at the forced close cannot be an entry, nor can any bar
-        // after it, right up to the exchange close at 15:29.
+        // ONE: the forced-close bar cannot itself be an entry (entering at the
+        // square-off leaves zero holding time), and nor can any bar after it,
+        // right up to the exchange close at 15:29.
         for i in close_bar..375 {
             assert!(
                 f.at(i).is_none(),
