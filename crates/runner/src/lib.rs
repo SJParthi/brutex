@@ -58,6 +58,7 @@ pub mod resample;
 pub mod significance;
 pub mod split;
 pub mod synthetic;
+pub mod trade;
 
 use engine::{Ladder, Sweep};
 use indicators::column::{Census, Column};

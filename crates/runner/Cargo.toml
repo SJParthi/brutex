@@ -37,6 +37,17 @@ vocab       = { path = "../vocab", version = "0.1.0" }
 indicators  = { path = "../indicators", version = "0.1.0" }
 engine      = { path = "../engine", version = "0.1.0" }
 
+# THE FILL MODEL. `crate::trade` prices every entry and exit through
+# `costs::fill::worst_case_fills` rather than reimplementing a tick of adverse
+# movement here -- that function is the one `COSTS_VERIFIED` checks its examples
+# against, and a second copy of the rule would be a second thing to get wrong.
+#
+# The graph stays acyclic: `costs` declares `brutex_core` and nothing else, so
+# this adds `runner -> costs -> core` beside the `runner -> core` that already
+# exists. CLAUDE.md section 5 does not list `costs` or `runner` at all; D-0095
+# records that gap rather than pretending the drawing is complete.
+costs       = { path = "../costs", version = "0.1.0" }
+
 [lints]
 workspace = true
 

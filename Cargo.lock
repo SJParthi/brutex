@@ -1013,6 +1013,7 @@ name = "runner"
 version = "0.1.0"
 dependencies = [
  "core",
+ "costs",
  "engine",
  "indicators",
  "vocab",
