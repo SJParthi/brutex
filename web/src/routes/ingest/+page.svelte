@@ -7252,21 +7252,23 @@
         // the expired contracts are exactly what the bought CSVs hold. See
         // `segServed`.
         //
-        // AND NOT `skipBulk` EITHER — the operator's rule, 15 Aug 2026, after
-        // watching the control tick one box under a button that says three.
+        // `skipBulk` REVERTED, AND THIS IS WHY THE ARGUMENT FOR CHANGING IT IS
+        // WRITTEN DOWN RATHER THAN ACTED ON.
         //
-        // It WAS `skipBulk: s.short !== null`, so "Select all 3" skipped the
-        // two segments that answer 503 today. The reasoning was the timeframe
-        // control's — do not pick a refusal on somebody's behalf — and it does
-        // not carry here, for a reason the label makes plain: a button that
-        // says "Select all 3" and selects one is not protecting anyone, it is
-        // lying about what it did. The rung case had no such promise on its
-        // face.
+        // A type sweep briefly shipped `skipBulk: false` here. The case it made
+        // is a decent one: `skipBulk: s.short !== null` means "Select all 3"
+        // ticks one box, because the two segments answering 503 today are
+        // skipped — and a button that says three and does one is arguably
+        // lying about what it did, where the timeframe control it borrowed the
+        // rule from never made that promise on its face.
         //
-        // The refusal is not hidden by this. Each row still carries `why` on
-        // its own face, the receipt still names the 503, and a segment whose
-        // transport lands stops refusing without this line changing.
-        skipBulk: false,
+        // It is still a BEHAVIOUR change, and it arrived inside a commit whose
+        // whole claim was that nothing but types moved. `Picker.svelte:229`
+        // reads this field to decide what the bulk press ticks, so the change
+        // is visible to an operator and belongs to whoever owns the control's
+        // meaning — not to a checker run. Reverted, and left here as the note
+        // it should have been.
+        skipBulk: s.short !== null,
         why: s.short,
         title: s.why
       }))}
