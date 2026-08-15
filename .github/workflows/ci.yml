@@ -559,6 +559,16 @@ jobs:
           # in a test so the request can be asserted against a value the vendor
           # published rather than one invented here.
           #
+          # The twelve month TOKENS are the calendar, lower-cased. Groww writes a
+          # contract expiry as `04Jan24` and `pull::fno::read_contract` reads it
+          # into this store's `2024-01-04`, so the table it compares against is
+          # the twelve English month abbreviations and nothing else. `19200` is
+          # the strike in the vendor's OWN worked example, used in the tests so
+          # the paisa conversion is asserted against a number the vendor
+          # published rather than one invented here -- the same reason Dhan's
+          # `13` is on this list. A month name is not a secret in any sense
+          # section 8 is about.
+          #
           # `expiries`, `contracts`, `underlying_symbol`, `expiry_date`, `year`
           # and `month` are Groww's expired-F&O contract lookup -- two path
           # segments and four query fields, read from
@@ -573,6 +583,8 @@ jobs:
           13
           groww_symbol candle_interval 1minute
           expiries contracts underlying_symbol expiry_date year month
+          jan feb mar apr may jun jul aug sep oct nov dec
+          19200
           '
 
           # ---- group 18: RFC 6238 APPENDIX B, and the words beside it.
