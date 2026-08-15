@@ -103,9 +103,15 @@ pub fn render(
     let _ = writeln!(out, "AUDIT");
     let _ = writeln!(
         out,
-        "  spot run: slippage IS in these figures (two ticks a round trip).\n  \
-         There is no brokerage, STT, stamp or GST on a spot index because no\n  \
-         order is placed. That changes when options land."
+        "  INDEX SPOT run. Slippage IS in these figures -- two ticks a round\n  \
+         trip. There is no brokerage, STT, stamp or GST, because an INDEX is\n  \
+         not tradeable: no order is placed, so nothing charges for one.\n\n  \
+         THIS IS SCOPED TO AN INDEX AND TO NOTHING ELSE. A STOCK spot IS\n  \
+         tradeable -- you buy real shares -- so brokerage, STT, stamp, the\n  \
+         exchange charge and GST all apply there, and so do they on options.\n  \
+         `costs::scope::Segment` has no equity-spot variant today, so that\n  \
+         charge path does not exist yet and this header would be WRONG the\n  \
+         day a stock is swept."
     );
     let _ = writeln!(out);
 
@@ -640,19 +646,33 @@ mod tests {
     }
 
     #[test]
-    fn a_spot_run_states_that_slippage_is_in_and_charges_do_not_exist() {
+    fn an_index_run_says_charges_do_not_exist_and_names_where_they_do() {
         // The caveat I carried for most of a session was WRONG for spot: a spot
         // index is not tradeable, so no order is placed and there is no
         // brokerage, STT, stamp or GST to be gross of. `costs::scope` says so.
         // The header records which of the two worlds a reader is in, because
         // the answer changes the moment options land.
         let out = super::render(None, None, None, None, None, 10);
-        assert!(out.contains("slippage IS in these figures"));
+        assert!(out.contains("Slippage IS in these figures"));
         assert!(out.contains("no brokerage"));
+
+        // THE SCOPE IS THE POINT. "No brokerage" is true of an INDEX and false
+        // of a STOCK -- a stock spot is tradeable, you buy real shares, and
+        // every charge applies. A header saying "spot" would be silently wrong
+        // the day a stock is swept, which is the stale-doc failure this
+        // repository keeps finding.
         assert!(
-            out.contains("changes when options land"),
-            "the header must say the answer is scoped to spot, or it becomes \
-             wrong silently the day options arrive"
+            out.contains("INDEX SPOT run"),
+            "the header must name INDEX specifically, never just spot"
+        );
+        assert!(
+            out.contains("STOCK spot IS"),
+            "the header must state that a stock spot DOES carry charges"
+        );
+        assert!(
+            out.contains("no equity-spot variant"),
+            "the gap must be named: `costs::scope::Segment` cannot represent a \
+             stock at all, so the charge path does not exist yet"
         );
     }
 
