@@ -87,6 +87,11 @@ impl Summary {
     /// it is deliberately blunt: a positive worst-case total means the
     /// combination survived pessimistic fills, and nothing more. It is not a
     /// verdict and not a recommendation.
+    ///
+    /// "Worst case" here names the FILL MODEL and not a cost bound — the same
+    /// distinction `costs::fill`'s header draws about its own use of the words.
+    /// That the pessimistic total can never exceed the optimistic one is held by
+    /// `runner::trade::the_worst_case_is_never_better_than_the_best_case`.
     #[must_use]
     pub const fn worst_case_positive(&self) -> bool {
         self.worst > 0
@@ -108,6 +113,10 @@ pub struct FoldResult {
     /// Combinations the sweep produced on the training bars.
     pub considered: u64,
     /// The combination with the best in-sample worst-case total, if any.
+    ///
+    /// "Worst case" names the FILL MODEL, not a cost bound. That selection
+    /// really is by the pessimistic total is held by
+    /// `runner::validate::selection_is_by_the_worst_case_so_an_optimistic_fill_cannot_win`.
     pub chosen: Option<ConditionMask>,
     /// What it did on the bars it was chosen on.
     pub in_sample: Summary,
@@ -132,6 +141,9 @@ pub struct Validated {
 impl Validated {
     /// Folds whose chosen combination was still positive out of sample, under
     /// the worst-case fill.
+    ///
+    /// "Worst case" names the FILL MODEL, not a cost bound -- see
+    /// `runner::trade::the_worst_case_is_never_better_than_the_best_case`.
     #[must_use]
     pub fn held_up(&self) -> usize {
         self.folds
