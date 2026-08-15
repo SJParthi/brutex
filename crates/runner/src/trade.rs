@@ -517,6 +517,52 @@ mod tests {
     }
 
     #[test]
+    fn a_bar_the_fill_model_refuses_is_counted_as_too_late_and_never_traded() {
+        // THE ENTRY BAR IS ONE THE COLUMN MAY HAVE SKIPPED.
+        //
+        // `Column::build` refuses corrupt bars, so they never become SIGNALS.
+        // But the entry is `signal + 1`, read from the raw slice, so a bar the
+        // column passed over still reaches `round_trip` -- and
+        // `costs::fill::Bar::new` refuses a price below one tick, because a fill
+        // there is a price nobody traded at.
+        //
+        // Nothing had ever exercised that path. If it were wrong the walk would
+        // either panic or, worse, trade at a fabricated price and report it as
+        // an ordinary result. It must count the signal as `too_late` and take
+        // no position, and the reconciliation must still hold.
+        let mut bars = crate::synthetic::sessions(8);
+        // Price every bar at one paisa -- below the five-paisa tick, so every
+        // fill is refused. Timestamps are untouched, so the bars stay valid
+        // candles and the column still sweeps them.
+        for bar in &mut bars {
+            *bar = indicators::Candle::new(bar.ts_micros, 1, 1, 1, 1, 100, indicators::OI_NULL);
+        }
+        let column = Column::build(&bars, &mut evaluator());
+        let t = walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Direction::Long,
+        );
+
+        assert!(t.signals > 0, "the fixture must still produce signals");
+        assert_eq!(
+            t.count(),
+            0,
+            "not one trade may be taken at a price the fill model refuses"
+        );
+        assert!(
+            t.too_late > 0,
+            "a refused fill must be counted, not dropped"
+        );
+        assert!(
+            t.reconciles(),
+            "every signal must still land in exactly one bucket: {t:?}"
+        );
+    }
+
+    #[test]
     fn an_empty_column_produces_no_trades_and_still_reconciles() {
         let bars: Vec<indicators::Candle> = Vec::new();
         let column = Column::build(&bars, &mut evaluator());

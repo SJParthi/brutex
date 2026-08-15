@@ -710,6 +710,36 @@ mod tests {
     }
 
     #[test]
+    fn a_sample_too_short_for_hansens_gate_keeps_every_strategy() {
+        // Hansen's threshold is `-sqrt(2 log log n)`, and `log log n` is
+        // undefined below e. A sample too short to take it cannot drop any
+        // strategy from the recentring, and the direction that failure falls in
+        // matters: keeping everything is CONSERVATIVE, which is where a
+        // threshold that cannot be computed has to land.
+        //
+        // Dropping a strategy on an uncomputable gate would make the test more
+        // powerful on exactly the samples that justify it least.
+        let set = vec![vec![10_i64, 20, 30], vec![-5_i64, -5, -5]];
+        let v = spa(&set, 50, 9, DEFAULT_BLOCK).expect("three periods still yield a verdict");
+        assert_eq!(v.strategies, 2);
+        assert!(
+            v.statistic.is_finite(),
+            "a three-period sample must still produce a finite statistic"
+        );
+    }
+
+    #[test]
+    fn spa_with_no_draws_reports_no_evidence_rather_than_certainty() {
+        // The same rule the Reality Check follows: with nothing to compare
+        // against, a p-value of 0 would read as overwhelming evidence. One
+        // reads as none, which is the truth.
+        let set = vec![edged(100, 1, 500), noise(100, 2)];
+        let v = spa(&set, 0, 1, DEFAULT_BLOCK).expect("a verdict");
+        same(v.p_value, 1.0, "no draws means no evidence");
+        assert!(!v.clears(), "no draws cannot clear anything");
+    }
+
+    #[test]
     fn a_series_that_never_varies_does_not_produce_an_infinite_statistic() {
         // Zero standard error would divide to infinity, which reads as the
         // strongest result ever found rather than as a degenerate one.
