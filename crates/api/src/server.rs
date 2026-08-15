@@ -4624,6 +4624,36 @@ const THROTTLE_ATTEMPTS: u32 = 6;
 /// actually watch.
 const SERVER_ERROR_ATTEMPTS: u32 = 3;
 
+/// The longest a single refused chunk may sleep, in milliseconds.
+///
+/// This is the bound a runtime `.min()` inside [`step`] reached for and could
+/// never enforce, because the cap sat above every value the ladder produces.
+/// Stated here it is checked when the code is COMPILED, so raising
+/// [`THROTTLE_ATTEMPTS`] past what the exponential ladder can afford is a build
+/// failure naming this constant, rather than a run that quietly sleeps for
+/// minutes on one instrument.
+///
+/// 31,000 ms is `1000 + 2000 + 4000 + 8000 + 16000` — the five waits a 429 can
+/// spend before the sixth attempt gives up.
+const MAX_CHUNK_BACKOFF_MS: u64 = 31_000;
+
+const _: () = {
+    // Summed the same way `step` computes each wait, so the two cannot drift.
+    let mut spent = 0u64;
+    let mut attempt = 1u32;
+    while attempt < THROTTLE_ATTEMPTS {
+        spent += 1_000u64 << (attempt - 1);
+        attempt += 1;
+    }
+    assert!(
+        spent <= MAX_CHUNK_BACKOFF_MS,
+        "the 429 ladder now sleeps longer than a chunk is allowed to; lower \
+         THROTTLE_ATTEMPTS or raise MAX_CHUNK_BACKOFF_MS deliberately"
+    );
+    // And the shift must stay defined: `u64 << 64` is a panic, not a big number.
+    assert!(THROTTLE_ATTEMPTS <= 64);
+};
+
 /// One chunk, retried on the failures that are worth retrying.
 ///
 /// # Which failures, and why not all of them
@@ -4734,15 +4764,20 @@ const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32) -> Step {
                 return Step::Exhausted;
             }
             // Exponential, because the vendor is saying the arrival RATE is
-            // wrong and 250 ms twice does not change a rate. Capped so a long
-            // ladder cannot park a run for minutes.
+            // wrong and 250 ms twice does not change a rate.
+            //
+            // NO CAP, BECAUSE A CAP HERE IS A BRANCH NOTHING CAN ENTER. The
+            // first draft wrote `.min(30_000)`. The largest reachable `attempt`
+            // in an `Again` is `THROTTLE_ATTEMPTS - 1` = 5, so the largest wait
+            // is `1_000 << 4` = 16,000 ms and the cap could never fire. §4 bans
+            // a test that asserts nothing, and an uncoverable branch is the
+            // same defect one level down: nothing can cover it, so a mutant
+            // that deletes it survives, so §9 fails.
+            //
+            // The bound it reached for is enforced at COMPILE time instead --
+            // see `MAX_CHUNK_BACKOFF_MS`.
             Step::Again {
-                // `.min` is not const-callable, and this stays `const fn`
-                // so the whole policy is checkable without running it.
-                wait_ms: {
-                    let doubled = 1_000_u64 << (attempt - 1);
-                    if doubled > 30_000 { 30_000 } else { doubled }
-                },
+                wait_ms: 1_000_u64 << (attempt - 1),
                 throttled: true,
             }
         }
@@ -4750,7 +4785,12 @@ const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32) -> Step {
         // than a blip gets, and the governor is not touched: a 500 names no
         // budget.
         Some(500..=599) => {
-            if attempt >= SERVER_ERROR_ATTEMPTS || attempt >= THROTTLE_ATTEMPTS {
+            // `|| attempt >= THROTTLE_ATTEMPTS` was also tested here and could
+            // never decide anything: `SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS`
+            // is const-asserted, so the first test has always fired by then.
+            // Removed for the reason the cap above was -- an unreachable
+            // disjunct is an uncoverable branch and a surviving mutant.
+            if attempt >= SERVER_ERROR_ATTEMPTS {
                 return Step::ServerDown;
             }
             Step::Again {
@@ -4875,12 +4915,16 @@ async fn with_retry(
                             //
                             // Measured: a 785-instrument, 3-chunk pull fired
                             // ~2,355 requests in 365 s (~6.4/s) and 458
-                            // instruments died on `status 429`. This branch used
-                            // to be unreachable — every `refused with status`
-                            // returned at once, including 429 — so the backoff
-                            // never ran on the only error it was built for and
-                            // `record_throttled` was dead code workspace-wide.
-                            // AIMD that never observes a refusal is a constant.
+                            // instruments died on `status 429`.
+                            //
+                            // An earlier draft of this comment said the branch
+                            // "used to be unreachable" and that
+                            // `record_throttled` was dead workspace-wide. That
+                            // described a build TWO steps back, not the one
+                            // this replaced: the immediately preceding version
+                            // already tested `throttled` first and reached this
+                            // call. Corrected rather than deleted, because the
+                            // measurement above is why the branch exists.
                             if let Ok(mut budgets) = site.budgets.lock()
                                 && let Some(Some(g)) = budgets.get_mut(feed as usize)
                             {
@@ -11466,15 +11510,17 @@ mod tests {
             "each wait exceeds the last, or it is not a backoff"
         );
         assert_eq!(step(Some(429), false, THROTTLE_ATTEMPTS), Step::Exhausted);
-        // The cap holds, so a long ladder cannot park a run for minutes.
-        assert!(matches!(
-            step(Some(429), false, 20),
-            Step::Exhausted
-                | Step::Again {
-                    wait_ms: 30_000,
-                    ..
-                }
-        ));
+
+        // THE TOTAL, WHICH IS THE NUMBER THAT ACTUALLY BOUNDS A RUN.
+        //
+        // This replaces a line that asserted nothing. It read
+        // `matches!(step(Some(429), false, 20), Exhausted | Again { wait_ms:
+        // 30_000, .. })` and claimed to prove a 30,000 ms cap -- but attempt 20
+        // is past `THROTTLE_ATTEMPTS`, so the first arm always matched and the
+        // cap was never evaluated. The cap could not fire at any reachable
+        // attempt either, and is now gone. §4 bans a test that asserts nothing;
+        // this was one, and it was mine.
+        assert_eq!(waits.iter().sum::<u64>(), MAX_CHUNK_BACKOFF_MS);
 
         // 5xx IS RETRIED -- THE BUG THIS CLASS EXISTS FOR -- ON THE SHORTER
         // LADDER, QUADRATICALLY, AND WITHOUT TOUCHING THE GOVERNOR.
