@@ -214,7 +214,19 @@
    */
   function selectAll() {
     const next = new Set(selected);
-    for (const r of shown) if (!r.disabled) next.add(r.key);
+    // AND IT NEVER SELECTS A ROW THAT IS KNOWN TO REFUSE.
+    //
+    // `disabled` is "nothing could ever make this work". `skipBulk` is weaker
+    // and is the one that was missing: this row CAN be ticked, a person may
+    // have a reason to, and picking it FOR them is choosing a request that will
+    // be refused. Measured on Dhan: the feed declares one rung, the control
+    // offers two, "Select all" ticked both, and the run came back
+    // "Instruments refused 1 — Dhan does not serve 1min bars".
+    //
+    // A bulk action is a convenience. A convenience that manufactures a refusal
+    // is worse than no bulk action, and the row stays individually clickable so
+    // nothing is taken away from someone who means it.
+    for (const r of shown) if (!r.disabled && !r.skipBulk) next.add(r.key);
     emit(next);
   }
   function clearAll() {

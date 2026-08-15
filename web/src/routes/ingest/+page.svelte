@@ -1589,6 +1589,11 @@
         why: says.join(' ') || undefined,
         title: long.join(' ') || undefined,
         state: v.state,
+        // NOT `disabled` — see Picker's `selectAll`. This rung can be ticked
+        // and a person may mean to; what it must not be is ticked FOR him by a
+        // bulk action, because `served()` refuses it by name and the run comes
+        // back with a refusal nobody chose.
+        skipBulk: fetches === false,
         fetches,
         stored: r.stored,
         label: r.label
@@ -5990,25 +5995,47 @@
                   <b>{receipt.verdict}{receipts.length > 1 ? ` — ${receipt.rung}` : ''}</b>
                   <span>{receipt.reason}</span>
                 </div>
-                <table class="kv">
-                  <tbody>
-                    {#each receipt.facts as f, i (f.k + i)}
-                      <tr class="row-in" style="animation-delay:{Math.min(i, 14) * 12}ms">
-                        <th>{f.k}</th>
-                        <td class:mono={/^[\d.,\s]+$/.test(f.v)}>{f.v}</td>
-                      </tr>
-                    {/each}
-                  </tbody>
-                </table>
-                <details class="wire" bind:open={showRaw}>
-                  <summary>The server's own receipt page</summary>
-                  {#if showRaw}
-                    <!-- SANDBOXED, AND WITHOUT allow-scripts. The page is read
-                         above as text; this frame is only for comparing what
-                         the server drew against what was read out of it. -->
-                    <iframe title="Server receipt, sandboxed" sandbox="" srcdoc={receipt.raw}></iframe>
-                  {/if}
+                <!-- ══ THE VERDICT IS THE ANSWER; THE TWENTY ROWS ARE THE
+                     EVIDENCE, AND EVIDENCE FOLDS ══
+
+                     This drew a `kv` table of every fact the receipt carries —
+                     target, instruments covered, which names the feed cannot
+                     say, window, from, to, calendar days, toDate on the wire,
+                     timeframe, feed, bar length, source, store root, attempted,
+                     reached, refused, refused because, recorded, status —
+                     twenty rows, unfolded, under every run. The verdict line
+                     above already says what happened and why in two sentences.
+
+                     Folded. Open it when a run did something you did not
+                     expect, which is the only time twenty facts are the answer
+                     to anything. -->
+                <details class="wire">
+                  <summary>Every field the server understood ({n(receipt.facts.length)})</summary>
+                  <table class="kv">
+                    <tbody>
+                      {#each receipt.facts as f, i (f.k + i)}
+                        <tr>
+                          <th>{f.k}</th>
+                          <td class:mono={/^[\d.,\s]+$/.test(f.v)}>{f.v}</td>
+                        </tr>
+                      {/each}
+                    </tbody>
+                  </table>
                 </details>
+
+                <!-- THE IFRAME IS GONE, AND IT WAS THE WORST THING ON THIS
+                     PAGE. It rendered the server's OWN receipt page inside this
+                     one — a second brutex, with its own nav bar, its own purple
+                     gradient hero reading "Asked, read, answered", and its own
+                     footer — nested in a scroll box in the middle of the
+                     outcome. Two applications on one screen, one inside the
+                     other, and no reader could tell which one they were looking
+                     at.
+
+                     It existed to compare what the server drew against what was
+                     read out of it. Everything it carried is in the fold above,
+                     parsed, in this page's own type. The server's page is still
+                     one link away for anyone who wants the original. -->
               {/if}
             </div>
         </section>
@@ -8206,14 +8233,8 @@
     word-break: break-all;
     color: var(--ink);
   }
-  .wire iframe {
-    width: 100%;
-    height: 55vh;
-    margin-top: var(--s4);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    background: var(--n2);
-  }
+  /* `.wire iframe` is gone with the frame it styled — see the receipt
+     fold above for why a second application nested in this one had to go. */
 
   .actions {
     display: flex;
