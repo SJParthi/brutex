@@ -407,7 +407,7 @@ jobs:
           # this gate has already seen must not start failing because the code
           # explaining it was written. D-0132.
           timeframe='
-          tick 1s 5s 1min 3min 5min 15min 30min 60min 1hr 1day 1week continuous
+          tick 1s 5s 1min 2min 3min 5min 10min 15min 30min 60min 1hr 1day 1week continuous
           1d day
           '
 
@@ -682,6 +682,7 @@ jobs:
           not-base32 too-long
           at
           unreadable_volume unreadable_oi
+          timeframe
           '
 
           # THE SECOND BATCH, and why each is not a path segment. The emit
@@ -754,6 +755,16 @@ jobs:
           # `vendor` and `field`, none of which this event carries. Nothing on
           # this path reads Parameter Store, and `resolve.rs` holds no
           # credential of any kind — it crawls a public index site.
+          #
+          # THE SIXTH BATCH -- `timeframe`, from `ingest.rs`. The rung a spot pull
+          # ran at, on the once-per-target event. It is the LEFT side of a
+          # `.with(...)` whose right side is `rung.as_str()`, one of the words in
+          # the `timeframe` group above, and section 8`s shape has no `timeframe` in
+          # it: the four segments are org, env, vendor and field.
+          #
+          # `2min` and `10min` joined the timeframe group in the same commit. They
+          # are exchange rungs the other session added to `Timeframe::KNOWN`, and
+          # they are periods of time -- not an org, an env, a vendor or a field.
           #
           # THE FIFTH BATCH — `unreadable_volume` and `unreadable_oi`, from
           # `csv.rs`. Two counts on the once-per-file decode event, and both name
