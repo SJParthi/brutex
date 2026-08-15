@@ -153,7 +153,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use brutex_core::error::InstrumentError;
-use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::instrument::{CONTRACT_CAPACITY, Contract, Exchange, Segment};
 use brutex_core::symbol::{SYMBOL_CAPACITY, Symbol};
 use brutex_core::vendor::Vendor;
 use store::crc::crc32c;
@@ -188,7 +188,7 @@ pub const MAGIC_FAMILY: [u8; 7] = *b"BRUTEXM";
 /// The format version this build **writes**. Version 1 is read, never written.
 ///
 /// `Layout::KNOWN` is what this build **reads**, and it holds both.
-pub const FORMAT_VERSION: u16 = 2;
+pub const FORMAT_VERSION: u16 = 3;
 
 /// Bytes per header slot, and per checksummed image unit.
 ///
@@ -482,6 +482,22 @@ const C_FIRST_CLOSE: usize = 0;
 const C_LAST_CLOSE: usize = 8;
 
 const _: () = assert!(C_FIRST_CLOSE + 8 == C_LAST_CLOSE);
+
+/// Byte offset of the contract text, within the closes half.
+///
+/// VERSION 3 TAKES RESERVED SPACE, WHICH IS WHAT RESERVED SPACE IS FOR.
+/// `docs/02-store-format.md` §2: a future field takes reserved space in a NEW
+/// VERSION, never by reinterpreting an old one. `16..60` was reserved and
+/// zeroed by version 2; version 3 spends 25 of those 44 bytes and leaves the
+/// rest zero, and the format version is what tells the two apart.
+const C_CONTRACT: usize = 16;
+/// Bytes the contract text occupies — the same width a symbol has.
+const C_CONTRACT_LEN: usize = CONTRACT_CAPACITY;
+/// Byte offset of the contract's length.
+const C_CONTRACT_N: usize = C_CONTRACT + C_CONTRACT_LEN;
+
+const _: () = assert!(C_LAST_CLOSE + 8 <= C_CONTRACT);
+const _: () = assert!(C_CONTRACT_N < OFF_CRC);
 // 16..60 is reserved and stays zero. `docs/02-store-format.md` §2: a future
 // field takes reserved space in a NEW VERSION, never by reinterpreting this
 // one.
@@ -557,11 +573,25 @@ impl Layout {
     /// Version 2 — 128-byte entries carrying the month's first and last close.
     pub const V2: Self = Self::declared(2, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true);
 
+    /// Version 3 — the same 128 bytes, with the contract in reserved space.
+    ///
+    /// SAME GEOMETRY AS VERSION 2, and that is deliberate. The stride did not
+    /// move and neither did any version-2 field; what changed is that bytes
+    /// `16..41` of the closes half, reserved and zeroed by version 2, now carry
+    /// the derivative contract. A version-2 row and a version-3 SPOT row are
+    /// byte-identical, so the only rows whose image differs are the option and
+    /// futures rows version 2 could not tell apart at all.
+    ///
+    /// The magic is version 2's because the magic names the GEOMETRY and the
+    /// geometry is unchanged; the version field is what separates them, which
+    /// is what a version field is for.
+    pub const V3: Self = Self::declared(3, MAGIC_V2, ENTRY_STRIDE, ENTRY_LEN, true);
+
     /// Every version this build can read, in ascending order.
-    pub const KNOWN: &'static [Self] = &[Self::V1, Self::V2];
+    pub const KNOWN: &'static [Self] = &[Self::V1, Self::V2, Self::V3];
 
     /// The version this build writes. Older versions are read, never written.
-    pub const CURRENT: Self = Self::V2;
+    pub const CURRENT: Self = Self::V3;
 
     /// Declares a version's geometry at compile time.
     ///
@@ -1207,6 +1237,23 @@ fn segment_of(code: u8) -> Result<Segment, EntryFault> {
 /// is directly a `HashMap` key and a lookup is one probe rather than a scan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct EntryKey {
+    /// The derivative contract, or [`None`] for spot.
+    ///
+    /// # Why the census needs this and could not borrow it from the symbol
+    ///
+    /// `symbol` is the UNDERLYING — `NIFTY` for every strike of every expiry.
+    /// Without a contract beside it the census cannot tell `24650-CE` from
+    /// `24700-CE`, so two different option series would collide on one key: the
+    /// second would be read as a duplicate of the first, or would overwrite its
+    /// counters. Deduplication is keyed on this map, so a key that cannot
+    /// separate two instruments is not a smaller feature — it is silent data
+    /// loss.
+    ///
+    /// It holds the SAME rendering the store path uses
+    /// (`brutex_core::instrument::Contract`), so a census row and its bar file
+    /// agree byte for byte and neither can drift into naming a contract the
+    /// other does not.
+    pub contract: Option<Contract>,
     /// Trading venue.
     pub exchange: Exchange,
     /// Exchange segment.
@@ -1489,6 +1536,7 @@ impl Entry {
 
         let entry = Self {
             key: EntryKey {
+                contract: None,
                 exchange: exchange_of(exchange)?,
                 segment: segment_of(segment)?,
                 symbol,
@@ -1563,8 +1611,22 @@ impl Held {
         let (first, last) = self.closes.stored();
         write_at(&mut closes, C_FIRST_CLOSE, first.to_le_bytes());
         write_at(&mut closes, C_LAST_CLOSE, last.to_le_bytes());
-        // 16..60 stays zero. `docs/02-store-format.md` §2: a future field takes
-        // reserved space in a NEW VERSION.
+        // THE CONTRACT, AT VERSION 3. Absent for spot, which leaves these bytes
+        // zero and makes a spot row byte-identical to the version-2 one it
+        // replaces — so the only rows whose image changed are the rows that
+        // could not previously be told apart at all.
+        if let Some(ref contract) = self.entry.key.contract {
+            let text = contract.as_str().as_bytes();
+            if let Some(slot) = closes.get_mut(C_CONTRACT..C_CONTRACT + text.len()) {
+                slot.copy_from_slice(text);
+            }
+            write_at(
+                &mut closes,
+                C_CONTRACT_N,
+                [u8::try_from(text.len()).unwrap_or(0)],
+            );
+        }
+        // 41..60 stays zero, still reserved.
         seal(&mut closes);
 
         let mut out = [0u8; ENTRY_LEN];
@@ -1590,6 +1652,16 @@ impl Held {
             i64::from_le_bytes(le_bytes(&half, C_FIRST_CLOSE)),
             i64::from_le_bytes(le_bytes(&half, C_LAST_CLOSE)),
         )?;
+        // THE CONTRACT IS COMPLETED HERE, not in `Entry::decode`.
+        //
+        // `Entry` is the FIRST half and has three spare bytes; the contract
+        // needs twenty-five, so it lives in the second. That means the first
+        // half alone cannot reconstruct the whole key — and it does not have
+        // to: a version-1 or spot row has no contract, so `Entry::decode`
+        // answering `None` is the right answer for it, and this is the only
+        // place that has both halves in hand.
+        let mut entry = entry;
+        entry.key.contract = read_contract(&half);
         Ok(Self { entry, closes })
     }
 }
@@ -3187,6 +3259,22 @@ fn covered(image: &[u8; IMAGE_LEN]) -> [u8; OFF_CRC] {
 }
 
 /// Writes `src` at `offset`.
+/// The contract this half names, or [`None`] where it names none.
+///
+/// A zero length is the spot case and is not an error: every version-2 row and
+/// every spot row leaves these bytes zero, and a census full of them reads back
+/// exactly as it always did. Text that is not valid ASCII, or a length past the
+/// field, answers `None` rather than a partial name — a truncated contract is a
+/// DIFFERENT contract, and reading one would merge two series under one key.
+fn read_contract(half: &[u8; IMAGE_LEN]) -> Option<Contract> {
+    let n = usize::from(*half.get(C_CONTRACT_N)?);
+    if n == 0 || n > C_CONTRACT_LEN {
+        return None;
+    }
+    let text = core::str::from_utf8(half.get(C_CONTRACT..C_CONTRACT + n)?).ok()?;
+    Contract::parse(text)
+}
+
 fn write_at<const N: usize>(out: &mut [u8; IMAGE_LEN], offset: usize, src: [u8; N]) {
     for (dst, byte) in out.iter_mut().skip(offset).zip(src) {
         *dst = byte;

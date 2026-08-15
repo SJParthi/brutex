@@ -284,6 +284,7 @@ fn fetch(url: &str) -> pull::fetch::RawWindow {
 /// The census key the bars should be filed under.
 fn key(instrument: &str) -> EntryKey {
     EntryKey {
+        contract: None,
         exchange: brutex_core::instrument::Exchange::Nse,
         segment: brutex_core::instrument::Segment::Index,
         symbol: brutex_core::symbol::Symbol::new(instrument).expect("a legal symbol"),
@@ -677,6 +678,7 @@ fn a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar
     assert!(
         manifest
             .entry(&EntryKey {
+                contract: None,
                 timeframe: Timeframe::MINUTE_1,
                 ..key("NIFTY")
             })
@@ -685,6 +687,7 @@ fn a_daily_pull_lands_under_the_day_directory_and_folds_the_session_into_one_bar
     );
     let entry = manifest
         .entry(&EntryKey {
+            contract: None,
             timeframe: Timeframe::DAY_1,
             ..key("NIFTY")
         })

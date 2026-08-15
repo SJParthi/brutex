@@ -999,6 +999,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             symbol_id,
             parts,
             EntryKey {
+                contract: None,
                 exchange,
                 segment,
                 symbol,
@@ -1183,6 +1184,25 @@ fn derive_all(
     into: DeriveInto,
     entries: &mut Vec<Held>,
 ) {
+    // DERIVED RUNGS ARE FOR THE UNDERLYING SPOT, AND ONLY FOR IT.
+    //
+    // The operator's rule, 15 Aug 2026: the internal timeframes "should be
+    // fully one and only applicable for these underlying spots alone". A
+    // derivative is pulled at the rungs the vendor serves and at no others.
+    //
+    // Why that is the right rule and not merely the stated one: a folded bar is
+    // an ARITHMETIC claim about a continuous series, and an option contract is
+    // not one. It is born at its listing, dies at its expiry, and is illiquid at
+    // both ends — folding thirty one-minute bars of which four traded produces a
+    // bar that looks like a half-hour of trading and was nothing of the kind.
+    // The spot index has no such gaps, which is why the fold is honest there.
+    //
+    // Checked on the SEGMENT rather than on a flag, because the segment is what
+    // the store keys the file on: if it says FNO, the bars are a contract's
+    // whatever else the caller believes.
+    if matches!(into.segment, Segment::Fno) {
+        return;
+    }
     for rung in derived_from(source) {
         let parts = PathParts {
             vendor: into.vendor,
@@ -1195,6 +1215,7 @@ fn derive_all(
             file: FileKind::Bars,
         };
         let key = EntryKey {
+            contract: None,
             exchange: into.exchange,
             segment: into.segment,
             symbol: into.symbol,
@@ -1245,6 +1266,20 @@ fn derive_all(
 #[must_use]
 pub fn derived_count(source: Timeframe) -> usize {
     derived_from(source).count()
+}
+
+/// The same count, for an instrument in `segment`.
+///
+/// Zero for `FNO`. The internal rungs are the underlying spot's alone — see
+/// [`derive_all`] for the operator's rule and for why a folded option bar would
+/// be a claim nobody can support.
+#[must_use]
+pub fn derived_count_in(segment: Segment, source: Timeframe) -> usize {
+    if matches!(segment, Segment::Fno) {
+        0
+    } else {
+        derived_count(source)
+    }
 }
 
 /// [`derived_count`]'s set. Private because the rungs themselves are this

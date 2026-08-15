@@ -7759,6 +7759,7 @@ mod tests {
         manifest
             .record_held(pull::manifest::Held::unknown(pull::manifest::Entry {
                 key: pull::manifest::EntryKey {
+                    contract: None,
                     exchange: brutex_core::instrument::Exchange::Nse,
                     segment: brutex_core::instrument::Segment::Index,
                     symbol: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
@@ -13343,6 +13344,7 @@ mod tests {
         manifest
             .record(Entry {
                 key: EntryKey {
+                    contract: None,
                     exchange: brutex_core::instrument::Exchange::Nse,
                     segment: brutex_core::instrument::Segment::Index,
                     symbol,

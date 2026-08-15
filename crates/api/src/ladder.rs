@@ -473,6 +473,7 @@ const fn key(
     month: YearMonth,
 ) -> EntryKey {
     EntryKey {
+        contract: None,
         exchange,
         segment,
         symbol,
@@ -566,6 +567,7 @@ mod tests {
         for &(name, segment, timeframe, rows) in held {
             m.record_held(Held::unknown(Entry {
                 key: EntryKey {
+                    contract: None,
                     exchange: Exchange::Nse,
                     segment,
                     symbol: sym(name),
@@ -662,6 +664,7 @@ mod tests {
         let why = census
             .record_held(Held::unknown(Entry {
                 key: EntryKey {
+                    contract: None,
                     exchange: Exchange::Nse,
                     segment: Segment::Index,
                     symbol: sym("NIFTY"),

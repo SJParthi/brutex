@@ -436,6 +436,7 @@ impl Series {
     #[must_use]
     pub const fn at(&self, month: YearMonth) -> EntryKey {
         EntryKey {
+            contract: None,
             exchange: self.exchange,
             segment: self.segment,
             symbol: self.symbol,

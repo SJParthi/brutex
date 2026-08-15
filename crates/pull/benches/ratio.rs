@@ -181,6 +181,7 @@ fn key_for(symbol: &str, index: u32) -> EntryKey {
         refuse("a symbol or a month this build refuses")
     };
     EntryKey {
+        contract: None,
         exchange: Exchange::Nse,
         segment,
         symbol,

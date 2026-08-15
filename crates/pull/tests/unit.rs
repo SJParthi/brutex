@@ -1046,6 +1046,7 @@ fn every_secret_error_prints_something_distinct() {
 fn entry(symbol: &str, year: u16, month: u8, rows: u64, first: i64, last: i64) -> Entry {
     Entry {
         key: EntryKey {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol: Symbol::new(symbol).expect("a symbol"),
@@ -2040,8 +2041,8 @@ fn a_slot_that_is_not_a_header_is_named() {
     // point of the dispatch, and the failure `docs/00-charter.md` prohibition 6
     // is about.
     assert_eq!(
-        edit(&|i| i[8..10].copy_from_slice(&3u16.to_le_bytes()), true),
-        ManifestError::UnknownVersion(3)
+        edit(&|i| i[8..10].copy_from_slice(&4u16.to_le_bytes()), true),
+        ManifestError::UnknownVersion(4)
     );
     // Version 1 IS declared, so this one is refused for the magic instead: the
     // slot says version 1 and begins `BRUTEXM2`, and there is no way to tell
@@ -6199,18 +6200,18 @@ fn a_half_installed_image_is_refused_by_name() {
 fn the_log_is_the_entry_region_in_order() {
     assert_eq!(
         size_of::<Entry>(),
-        80,
-        "the version-1 record's width, unchanged by version 2"
+        112,
+        "the version-1 record's width, plus the contract version 3 added"
     );
     assert_eq!(
         size_of::<Held>(),
-        96,
+        128,
         "the per-row cost of the log, as the Manifest doc states it: the entry \
          plus the two closes"
     );
     assert_eq!(
         size_of::<(EntryKey, Held)>(),
-        152,
+        216,
         "and the per-element cost of the index, as APPEND_HEADROOM_FACTOR \
          states it"
     );
@@ -7126,8 +7127,13 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
     assert_eq!(Layout::V2.magic(), *b"BRUTEXM2");
     assert!(Layout::V2.carries_closes());
 
-    assert_eq!(Layout::CURRENT, Layout::V2);
-    assert_eq!(FORMAT_VERSION, 2);
+    assert_eq!(Layout::CURRENT, Layout::V3);
+    assert_eq!(FORMAT_VERSION, 3);
+    assert!(Layout::V3.carries_closes());
+    // VERSION 3 IS VERSION 2's GEOMETRY. Only the meaning of reserved bytes
+    // changed, so the stride, the magic and the closes flag are all the same —
+    // which is what makes a version-2 file readable and a spot row identical.
+    assert_eq!(Layout::V3.entry_stride(), Layout::V2.entry_stride());
     assert_eq!(ENTRY_STRIDE, 128);
     assert_eq!(ENTRY_LEN, 128);
     assert_eq!(
@@ -7147,7 +7153,7 @@ fn the_manifest_geometry_is_what_the_format_document_says() {
     };
     let slot = header.image();
     assert_eq!(&slot[0..8], b"BRUTEXM2");
-    assert_eq!(&slot[8..10], &2u16.to_le_bytes());
+    assert_eq!(&slot[8..10], &FORMAT_VERSION.to_le_bytes());
     assert_eq!(&slot[10..12], &128u16.to_le_bytes());
     assert_eq!(&slot[16..24], &6u64.to_le_bytes());
     assert_eq!(&slot[24..32], &7u64.to_le_bytes());
@@ -7259,15 +7265,20 @@ fn a_known_manifest_version_keeps_its_stride_after_a_new_one_exists() {
     // And the shipped table answers the same way.
     assert_eq!(Layout::for_version(1), Ok(Layout::V1));
     assert_eq!(Layout::for_version(2), Ok(Layout::V2));
+    assert_eq!(Layout::for_version(3), Ok(Layout::V3));
     assert_eq!(
         Layout::for_version(0),
         Err(ManifestError::UnknownVersion(0))
     );
+    // 4 IS THE UNKNOWN ONE NOW. This read 3 until version 3 shipped; the
+    // point of the assertion is that a version this build does not know is
+    // refused by name rather than read at CURRENT's geometry, and that point
+    // needs whatever the next unclaimed number happens to be.
     assert_eq!(
-        Layout::for_version(3),
-        Err(ManifestError::UnknownVersion(3))
+        Layout::for_version(4),
+        Err(ManifestError::UnknownVersion(4))
     );
-    assert_eq!(Layout::KNOWN.len(), 2);
+    assert_eq!(Layout::KNOWN.len(), 3);
     assert!(format!("{:?}", Layout::V2).contains(&ENTRY_STRIDE.to_string()));
 }
 

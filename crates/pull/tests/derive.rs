@@ -209,3 +209,38 @@ fn plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
         segment: "INDEX",
     }
 }
+
+/// DERIVED RUNGS ARE THE UNDERLYING SPOT'S ALONE.
+///
+/// The operator's rule, 15 Aug 2026: the internal timeframes are "fully one and
+/// only applicable for these underlying spots alone". A derivative is stored at
+/// the rungs its vendor serves and at no others.
+///
+/// Beyond the rule, the arithmetic would not survive it: an option contract is
+/// born at its listing and dies at its expiry, and is illiquid at both ends.
+/// Folding thirty one-minute bars of which four traded yields a bar that looks
+/// like a half-hour of trading and was nothing of the kind. A spot index has no
+/// such gaps, which is why the fold is honest there and only there.
+#[test]
+fn the_internal_rungs_are_derived_for_spot_and_never_for_a_derivative() {
+    use brutex_core::instrument::Segment;
+    use pull::ingest::{derived_count, derived_count_in};
+    use store::path::Timeframe;
+
+    assert_eq!(
+        derived_count_in(Segment::Index, Timeframe::MINUTE_1),
+        7,
+        "an index folds into 2, 3, 5, 10, 15, 30 and 60 minutes"
+    );
+    assert_eq!(
+        derived_count_in(Segment::Cash, Timeframe::MINUTE_1),
+        derived_count(Timeframe::MINUTE_1),
+        "a cash equity is spot too, and folds the same way"
+    );
+    assert_eq!(
+        derived_count_in(Segment::Fno, Timeframe::MINUTE_1),
+        0,
+        "a futures or options contract derives NOTHING — it is stored at the \
+         rungs the vendor served and at no others"
+    );
+}

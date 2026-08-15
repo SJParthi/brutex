@@ -420,6 +420,37 @@ impl Contract {
         })
     }
 
+    /// The contract this text names, or [`None`] where it cannot hold it.
+    ///
+    /// The inverse of [`Self::as_str`], and the reason the census can store a
+    /// contract as TEXT rather than as three decoded fields: what goes to disk
+    /// is exactly what goes in the path, so the two can never disagree about
+    /// which contract a month belongs to.
+    ///
+    /// Refuses anything over [`CONTRACT_CAPACITY`] or holding a byte a path
+    /// segment may not — a `/` here would escape the directory it names, and a
+    /// truncated contract is a DIFFERENT contract, so neither is repaired.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        if text.is_empty() || text.len() > CONTRACT_CAPACITY {
+            return None;
+        }
+        if !text
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return None;
+        }
+        let mut bytes = [0u8; CONTRACT_CAPACITY];
+        bytes
+            .get_mut(..text.len())?
+            .copy_from_slice(text.as_bytes());
+        Some(Self {
+            bytes,
+            len: u8::try_from(text.len()).ok()?,
+        })
+    }
+
     /// The rendered contract.
     #[must_use]
     pub fn as_str(&self) -> &str {

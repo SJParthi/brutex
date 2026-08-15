@@ -71,7 +71,8 @@ use pull::csv::Columns;
 use pull::fetch::BarRequest;
 use pull::ingest::{self, Ingested, Plan};
 use pull::manifest::{
-    ENTRY_STRIDE, Entry, EntryKey, HEADER_LEN, MAX_ENTRIES, Manifest, manifest_path,
+    ENTRY_STRIDE, Entry, EntryKey, FORMAT_VERSION, HEADER_LEN, Held, MAX_ENTRIES, Manifest,
+    manifest_path,
 };
 use pull::session::{Day, Window};
 use pull::vendor::{PriceScale, TimestampEncoding};
@@ -203,6 +204,7 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
 /// The census key one instrument's month is filed under.
 fn key(instrument: &str) -> EntryKey {
     EntryKey {
+        contract: None,
         exchange: Exchange::Nse,
         segment: Segment::Index,
         symbol: Symbol::new(instrument).expect("a legal symbol"),
@@ -1180,6 +1182,7 @@ fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
     // A month this run will not touch, recorded the way version 1 recorded it.
     let older = Entry {
         key: EntryKey {
+            contract: None,
             month: YearMonth::new(2021, 5).expect("May 2021"),
             ..key("BANKNIFTY")
         },
@@ -1227,11 +1230,14 @@ fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
     );
 
     let census = census_of(&store);
-    assert_eq!(census.loaded_version(), 2);
+    assert_eq!(census.loaded_version(), FORMAT_VERSION);
     // The commit lands in slot `generation % 2`, and it is the version-2 slot.
     let slot = usize::try_from(census.header().generation % 2).expect("0 or 1") * 16_384;
-    assert_eq!(&after[slot..slot + 8], b"BRUTEXM2", "version 2 now");
-    assert_eq!(census.header().format_version, 2);
+    // THE MAGIC IS STILL VERSION 2's, and that is the point of version 3: the
+    // magic names the GEOMETRY, which did not change. The version FIELD is what
+    // separates them.
+    assert_eq!(&after[slot..slot + 8], b"BRUTEXM2", "the same geometry");
+    assert_eq!(census.header().format_version, FORMAT_VERSION);
     assert_eq!(census.header().entry_stride, 128);
     assert!(!census.upgrading(), "and it will not be upgraded again");
     assert_eq!(census.entries(), 1 + rungs() as u64);
@@ -1280,5 +1286,105 @@ fn a_version_1_census_upgrades_on_the_first_run_that_records_anything() {
         fs::read(&path).expect("still there"),
         after,
         "the census is byte for byte what the upgrading run left"
+    );
+}
+
+/// TWO OPTION CONTRACTS OF ONE UNDERLYING ARE TWO ROWS, NOT ONE.
+///
+/// This is the whole reason `FORMAT_VERSION` moved to 3. `symbol` is the
+/// UNDERLYING — `NIFTY` for every strike of every expiry — so before the
+/// contract joined the key, `24650-CE` and `24700-CE` collided: the second was
+/// read as a duplicate of the first, or overwrote its counters. Deduplication
+/// is keyed on this map, so a key that cannot separate two instruments is not a
+/// smaller feature, it is silent data loss.
+#[test]
+fn two_contracts_of_one_underlying_are_two_census_rows() {
+    use brutex_core::instrument::Contract;
+
+    let mut m = Manifest::open(Vendor::Groww, &[], &[]).expect("a genesis census");
+    let key = |contract: Option<Contract>| EntryKey {
+        contract,
+        exchange: Exchange::Nse,
+        segment: Segment::Fno,
+        symbol: Symbol::new("NIFTY").expect("a legal symbol"),
+        timeframe: Timeframe::MINUTE_1,
+        month: YearMonth::new(2024, 6).expect("a real month"),
+    };
+    let ce = Contract::parse("2024-06-27-2465000-CE").expect("a legal contract");
+    let pe = Contract::parse("2024-06-27-2470000-CE").expect("a legal contract");
+    assert_ne!(ce, pe, "the premise: two different strikes");
+
+    for (c, rows) in [(ce, 375), (pe, 400)] {
+        m.record_held(Held::unknown(Entry {
+            key: key(Some(c)),
+            rows,
+            first_ts_micros: 1,
+            last_ts_micros: 2,
+        }))
+        .expect("the census has room");
+    }
+
+    assert_eq!(m.entries(), 2, "two contracts, two rows — never merged");
+    assert_eq!(
+        m.entry(&key(Some(ce))).map(|e| e.rows),
+        Some(375),
+        "each contract is found under its own key"
+    );
+    assert_eq!(m.entry(&key(Some(pe))).map(|e| e.rows), Some(400));
+    // AND THE SPOT KEY OF THE SAME NAME FINDS NEITHER. An underlying is not one
+    // of its own contracts, and a census that answered here would be handing
+    // back option bars for a spot question.
+    assert_eq!(
+        m.entry(&key(None)),
+        None,
+        "spot is a different key entirely"
+    );
+}
+
+/// A CONTRACT SURVIVES THE ROUND TRIP TO BYTES AND BACK.
+#[test]
+fn a_contract_row_decodes_to_the_contract_it_was_written_with() {
+    use brutex_core::instrument::Contract;
+
+    let contract = Contract::parse("2025-09-30-FUT").expect("a legal contract");
+    let entry = Entry {
+        key: EntryKey {
+            contract: Some(contract),
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            symbol: Symbol::new("BANKNIFTY").expect("a legal symbol"),
+            timeframe: Timeframe::DAY_1,
+            month: YearMonth::new(2025, 9).expect("a real month"),
+        },
+        rows: 21,
+        first_ts_micros: 1,
+        last_ts_micros: 2,
+    };
+    let held = Held::unknown(entry);
+    let back = Held::decode(&held.image()).expect("it decodes");
+    assert_eq!(
+        back.entry.key.contract.map(|c| c.as_str().to_owned()),
+        Some("2025-09-30-FUT".to_owned()),
+        "the contract read back is the one written"
+    );
+    assert_eq!(back.entry.key, entry.key, "and the whole key round-trips");
+
+    // A SPOT ROW LEAVES THE FIELD ABSENT, and is byte-identical to what version
+    // 2 wrote — so every row already on disk reads back exactly as it did.
+    let spot = Held::unknown(Entry {
+        key: EntryKey {
+            contract: None,
+            ..entry.key
+        },
+        ..entry
+    });
+    assert_eq!(
+        Held::decode(&spot.image())
+            .expect("it decodes")
+            .entry
+            .key
+            .contract,
+        None,
+        "no contract written, none read"
     );
 }
