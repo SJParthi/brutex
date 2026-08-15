@@ -49,6 +49,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod bootstrap;
 pub mod closed;
 pub mod excursion;
 pub mod grid;

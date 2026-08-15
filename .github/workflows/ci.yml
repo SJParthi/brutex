@@ -2899,6 +2899,7 @@ jobs:
           crates/greeks/src/solver.rs 13
           crates/greeks/src/moneyness.rs 6
           crates/runner/src/significance.rs 18
+          crates/runner/src/bootstrap.rs 29
           crates/runner/src/outcome.rs 5
           crates/runner/src/report.rs 3
           crates/lake/src/bar.rs 9
@@ -3184,6 +3185,7 @@ jobs:
           # `sort_unstable` on `i64` and not a comparator: these are integer parts
           # per million, so there is no NaN and no partial order to get wrong.
           allow_sort='
+          crates/runner/src/bootstrap.rs 1
           crates/runner/src/pbo.rs 1
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
