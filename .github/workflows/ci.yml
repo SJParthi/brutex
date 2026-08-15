@@ -408,7 +408,7 @@ jobs:
           # explaining it was written. D-0132.
           timeframe='
           tick 1s 5s 1min 2min 3min 5min 10min 15min 30min 60min 1hr 1day 1week continuous
-          1d day
+          1d day intraday
           '
 
           # ---- group 7: rate-governor display strings, crates/pull/src/rate.rs.
