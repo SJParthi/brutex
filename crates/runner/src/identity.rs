@@ -239,8 +239,20 @@ fn term(hasher: &mut Hasher, tag: u8, bytes: &[u8]) {
 pub fn identity(run: &Run<'_>) -> RunId {
     let mut hasher = Hasher::new();
 
-    // 1. mask — fixed width, six little-endian words.
-    let mut mask_bytes = [0_u8; 48];
+    // 1. mask — fixed width, one little-endian word per mask word.
+    //
+    // SIZED FROM `vocab::mask::WORDS`, NEVER FROM A LITERAL. This was
+    // `[0_u8; 48]`. Forty-eight bytes is six words, and `chunks_exact_mut(8)`
+    // over it yields exactly six chunks forever — so the day the vocabulary
+    // widens past six words, `zip` stops at the shorter side and the new words
+    // are dropped from the hash. Silently: no error, no truncation report, and
+    // nothing that fails to compile. Two runs whose masks differ only in the
+    // words above the sixth would then share a run identity, which is §3
+    // rule 3's guarantee inverted.
+    //
+    // `crates/vocab/tests/mask.rs` already sizes its own fixtures this way and
+    // says why. The literal was the outlier.
+    let mut mask_bytes = [0_u8; vocab::mask::WORDS * 8];
     for (slot, word) in mask_bytes.chunks_exact_mut(8).zip(run.mask.words()) {
         slot.copy_from_slice(&word.to_le_bytes());
     }

@@ -432,6 +432,29 @@ pub const DEFAULT_CEILING: usize = 1 << 26;
 /// a popcount, measured by `C-E-08` in `crates/engine/benches/ratio.rs`, so the
 /// budget is stated in the unit the bench measures rather than in seconds, which
 /// would be a claim about a machine rather than about the work.
+/// # IT CANNOT BIND AT THE SHIPPED CEILING, and that is recorded rather than
+/// left for the next reader to discover
+///
+/// This budget exists because time was the binding constraint and nothing
+/// counted it. At the shipped constants it still does not, and the arithmetic
+/// is short: the prefix join makes `duplicates` a **measured zero** — every
+/// pair contributes exactly one distinct candidate — so `seen` grows one entry
+/// per pair walked. [`Ladder::exhausted`] tests `admitted + seen.len() >=
+/// ceiling` in the same loop that counts pairs, and [`DEFAULT_CEILING`] is
+/// `2^26` against this `2^34`. The ceiling is **256x smaller**, so it trips
+/// 256 pairs-worth of work before this budget is approached, and every
+/// default-configured halt reports [`Breach::Candidates`] — a MEMORY reason —
+/// including runs that spent their whole time in the join.
+///
+/// `engine::the_pair_budget_refuses_where_the_ceiling_cannot` proves the budget
+/// works; note that it must call `with_pair_budget(1)` to reach it. Nothing
+/// proves it fires at the default, because it cannot.
+///
+/// UNVERIFIED whether the right correction is a larger ceiling, a smaller
+/// budget, or dropping one of the two as redundant now that pairs and distinct
+/// candidates are the same quantity. That is a `docs/05-decisions.md` choice
+/// about engine behaviour and is deliberately not made here; what is fixed here
+/// is the silence about it.
 pub const DEFAULT_PAIR_BUDGET: u64 = 1 << 34;
 
 /// The ladder. **Carries no depth field**, by `CLAUDE.md` §6.
