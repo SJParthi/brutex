@@ -2501,6 +2501,28 @@ pub struct RungRoute {
     /// the segment and the dates are the same question at either endpoint, and
     /// restating them per rung is how two copies drift apart.
     pub params: &'static [Param],
+    /// Whether THIS endpoint's range end includes the day it names, when the
+    /// vendor documents it differently from [`HttpSpec::range_end`].
+    ///
+    /// # Why a rung needs its own, and what one shared field cost
+    ///
+    /// Dhan documents `toDate` as **non-inclusive** on `/charts/historical` and
+    /// says NOTHING about it on `/charts/intraday`. One `range_end` covering
+    /// both therefore sends `toDate = last_day + 1` on the minute request on
+    /// the strength of a sentence written about the daily one.
+    ///
+    /// The two readings are not symmetric, which is why this is not a coin
+    /// flip. Read as EXCLUSIVE when the vendor is inclusive, the request
+    /// reaches one day PAST the window — and the newest day of a window that
+    /// ends today is today, whose session has not finished. A partial day in an
+    /// append-only store is the permanent gap `finished_day_only` exists to
+    /// prevent. Read as INCLUSIVE when the vendor is exclusive, the request is
+    /// one day SHORT — and short self-heals, because the resume point asks for
+    /// that day again on the next run.
+    ///
+    /// So an undocumented range end takes the inclusive reading, and it is
+    /// recorded here rather than assumed at the call site.
+    pub range_end: Option<RangeEnd>,
 }
 
 /// Everything an HTTP feed needs.
@@ -2746,6 +2768,16 @@ impl HttpSpec {
     #[must_use]
     pub fn route_for(&self, rung: Granularity) -> Option<&'static RungRoute> {
         self.rung_routes.iter().find(|r| r.rung as u8 == rung as u8)
+    }
+
+    /// Whether this rung's endpoint includes the day its range end names.
+    ///
+    /// The rung's own answer where it has one, and the feed's otherwise.
+    #[must_use]
+    pub fn range_end_for(&self, rung: Granularity) -> RangeEnd {
+        self.route_for(rung)
+            .and_then(|r| r.range_end)
+            .unwrap_or(self.range_end)
     }
 
     /// The path this rung's bars are fetched from.
@@ -3881,6 +3913,14 @@ const DHAN: Descriptor = Descriptor {
                 name: "interval",
                 value: ParamValue::Granularity,
             }],
+            // THE INCLUSIVE READING, BECAUSE THE VENDOR DOES NOT SAY.
+            //
+            // The daily page marks `toDate` "non-inclusive"; the intraday page
+            // marks it nothing at all. Of the two readings only one fails
+            // safely: inclusive can be one day SHORT, which the resume point
+            // asks for again, while exclusive can reach one day PAST the window
+            // — and the day past a window ending today is today, unfinished.
+            range_end: Some(RangeEnd::Inclusive),
         }],
         method: Method::Post,
         auth: Auth {

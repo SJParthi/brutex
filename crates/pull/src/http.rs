@@ -995,9 +995,13 @@ impl HttpSource {
     pub async fn window_async(&self, request: &BarRequest) -> Result<RawWindow, FetchError> {
         let (name, value) = self.header();
         let from = Self::on_the_wire(request.window.from(), self.spec.date_format);
+        // THE RUNG'S OWN RANGE END. `range_end_for` is the feed's for every
+        // rung that shares an endpoint, and the rung's where the vendor
+        // documents the two differently — see `vendor::RungRoute::range_end`
+        // for what one shared field would send on Dhan's minute request.
         let to = Self::wire_end(
             request.window.to(),
-            self.spec.range_end,
+            self.spec.range_end_for(request.granularity),
             self.spec.date_format,
         )?;
 
@@ -2995,6 +2999,59 @@ mod tests {
             crate::vendor::Feed::Dhan.serves(crate::vendor::Granularity::Minute1),
             "the rung is declared, so the form may offer it"
         );
+    }
+
+    /// DHAN'S MINUTE RUNG TAKES THE INCLUSIVE READING OF `toDate`.
+    ///
+    /// The vendor marks `toDate` "non-inclusive" on the DAILY page and marks it
+    /// nothing at all on the intraday one. One shared `range_end` therefore
+    /// sent `last_day + 1` on a minute request, on the strength of a sentence
+    /// written about a different endpoint.
+    ///
+    /// The two readings do not fail the same way, which is the whole reason
+    /// this is decidable without asking the vendor. Exclusive-when-inclusive
+    /// reaches one day PAST the window, and the day past a window ending today
+    /// is today — an unfinished session, written into an append-only store,
+    /// which is the permanent gap `finished_day_only` exists to prevent.
+    /// Inclusive-when-exclusive is one day SHORT, and short self-heals: the
+    /// resume point asks for that day again on the next run.
+    #[test]
+    fn dhans_minute_rung_takes_the_safe_reading_of_an_undocumented_range_end() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP broker");
+        };
+        assert_eq!(
+            spec.range_end_for(crate::vendor::Granularity::Day1),
+            RangeEnd::Exclusive,
+            "the daily page states non-inclusive, and that is verified"
+        );
+        assert_eq!(
+            spec.range_end_for(crate::vendor::Granularity::Minute1),
+            RangeEnd::Inclusive,
+            "the intraday page states nothing, so the reading that fails SHORT \
+             is taken — the other one can write an unfinished day"
+        );
+
+        // AND THE DAY THAT REACHES THE WIRE DIFFERS BY EXACTLY ONE.
+        let last = crate::session::Day::new(2026, 8, 14).expect("a real day");
+        let day = HttpSource::wire_end(
+            last,
+            spec.range_end_for(crate::vendor::Granularity::Day1),
+            spec.date_format,
+        )
+        .expect("it renders");
+        let minute = HttpSource::wire_end(
+            last,
+            spec.range_end_for(crate::vendor::Granularity::Minute1),
+            spec.date_format,
+        )
+        .expect("it renders");
+        assert_eq!(
+            day, "2026-08-15",
+            "the day AFTER, because toDate excludes it"
+        );
+        assert_eq!(minute, "2026-08-14", "the day itself, because it may not");
     }
 
     /// A FEED THAT SERVES EVERY RUNG FROM ONE URL IS UNCHANGED BY ANY OF THIS.
