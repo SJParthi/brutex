@@ -104,6 +104,20 @@ pub struct Cell {
     pub winner_mae: Ppm,
     /// Mean favourable excursion of the trades that ended profitable.
     pub winner_mfe: Ppm,
+    /// The single worst round trip, in paisa, under pessimistic fills.
+    ///
+    /// **Zero when nothing lost.** The tightest stop that would have been
+    /// needed to avoid the worst outcome this variant actually produced —
+    /// which `winner_mae` cannot answer, because it only looks at winners.
+    pub worst_trade: i64,
+    /// Largest peak-to-trough fall of the running total, in paisa.
+    ///
+    /// **Always >= 0.** Two variants with the same total are not equally
+    /// survivable: one may have reached it smoothly and the other after giving
+    /// back most of it, and a total alone cannot tell them apart. This is the
+    /// number an operator asking for "very minimal stop loss" is actually
+    /// asking about, and until it existed the engine had none.
+    pub max_drawdown: i64,
 }
 
 impl Cell {
@@ -128,6 +142,39 @@ impl Cell {
     #[must_use]
     pub const fn survives(&self) -> bool {
         self.pessimistic > 0
+    }
+
+    /// Total return per unit of worst drawdown, in hundredths.
+    ///
+    /// **The operator's actual question, as one number.** "Maximum profit at
+    /// minimal stop loss" is a ratio and was being ranked as a sum: two variants
+    /// with the same total are not equally survivable if one reached it smoothly
+    /// and the other after giving back most of it, and
+    /// [`Self::pessimistic`] alone cannot tell them apart.
+    ///
+    /// Hundredths and integer arithmetic, for the reason [`Self::edge_ratio`]
+    /// gives — `CLAUDE.md` §7 keeps this kind of value out of floats, and a
+    /// ratio used for ranking is compared far more often than it is read.
+    ///
+    /// Zero when the variant lost money, so a losing variant can never outrank a
+    /// winning one on this. Zero drawdown with a positive total returns
+    /// [`i64::MAX`] rather than dividing: a run that never gave anything back is
+    /// the best possible reading, and saturating says so where a division would
+    /// panic.
+    ///
+    /// **Nothing ranks on this yet.** It is measured and reported; whether it or
+    /// [`Self::edge_ratio`] should decide the selection is the open question in
+    /// `docs/06-limits.md`, and answering it by quietly switching the key would
+    /// be the same defect as the one that recorded a proxy as the maximum.
+    #[must_use]
+    pub const fn return_over_drawdown(&self) -> i64 {
+        if self.pessimistic <= 0 {
+            return 0;
+        }
+        if self.max_drawdown <= 0 {
+            return i64::MAX;
+        }
+        self.pessimistic.saturating_mul(100) / self.max_drawdown
     }
 
     /// The width of what minute bars cannot tell you, in paisa.
@@ -542,6 +589,12 @@ fn one_variant(
     side: Side,
 ) -> Cell {
     let (stops_rungs, targets_rungs, trails_rungs) = rungs;
+    // Running equity and its high-water mark, for the drawdown below. Local
+    // rather than on `Cell`, because they are scaffolding for the measurement
+    // and not part of it -- a caller reading a peak-so-far would be reading an
+    // artefact of iteration order.
+    let mut running: i64 = 0;
+    let mut peak_equity: i64 = 0;
     let Variant {
         stop,
         target,
@@ -615,6 +668,30 @@ fn one_variant(
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
         cell.optimistic = cell.optimistic.saturating_add(opt);
+
+        // RISK, WHICH THIS ENGINE DID NOT MEASURE AT ALL.
+        //
+        // `grep -rniE 'drawdown|max_loss|worst_trade|peak_to_trough'` over the
+        // whole crate returned NOTHING before these two lines. The operator's
+        // aim is maximum profit at MINIMAL LOSS and the second half had no
+        // number anywhere — `Cell::edge_ratio` is the nearest thing and is
+        // computed over trades that ENDED PROFITABLE, so it is structurally
+        // silent about how large a loser gets.
+        //
+        // Both are on the PESSIMISTIC series, because a risk figure taken from
+        // the flattering reading is the one number where optimism is least
+        // defensible.
+        if pess < cell.worst_trade {
+            cell.worst_trade = pess;
+        }
+        running = running.saturating_add(pess);
+        if running > peak_equity {
+            peak_equity = running;
+        }
+        let dip = peak_equity.saturating_sub(running);
+        if dip > cell.max_drawdown {
+            cell.max_drawdown = dip;
+        }
         cell.ambiguous_bars = cell
             .ambiguous_bars
             .saturating_add(u64::try_from(c.cross.ambiguous().len()).unwrap_or(0));
@@ -889,6 +966,70 @@ mod tests {
             .collect();
         let column = Column::build(&bars, &mut evaluator());
         (bars, column)
+    }
+
+    #[test]
+    fn risk_is_measured_and_a_total_alone_cannot_tell_two_variants_apart() {
+        // THE HALF THE ENGINE DID NOT HAVE. `grep -rniE
+        // 'drawdown|max_loss|worst_trade|peak_to_trough'` over the whole crate
+        // returned nothing. The stated aim is maximum profit at MINIMAL LOSS
+        // and only the first half had a number; `edge_ratio` is the nearest
+        // thing and is computed over trades that ENDED PROFITABLE, so it is
+        // structurally silent about how large a loser gets.
+        let (bars, column) = swept();
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            4,
+        );
+        assert!(!g.cells.is_empty());
+
+        for c in &g.cells {
+            // Drawdown is a peak-to-trough FALL, so it can never be negative,
+            // and a variant that lost overall must have fallen at least as far
+            // as it lost.
+            assert!(
+                c.max_drawdown >= 0,
+                "a peak-to-trough fall came out negative: {}",
+                c.max_drawdown
+            );
+            if c.pessimistic < 0 {
+                assert!(
+                    c.max_drawdown >= c.pessimistic.saturating_neg(),
+                    "a variant lost {} and reports a maximum drawdown of only {}",
+                    c.pessimistic,
+                    c.max_drawdown
+                );
+            }
+            // The worst single trade cannot be better than the total when only
+            // one trade was taken, and can never be positive-only by accident:
+            // a variant with any losing trade must carry a negative here.
+            if c.trades > 0 {
+                assert!(
+                    c.worst_trade <= 0 || c.pessimistic > 0,
+                    "every trade won yet the total is not positive"
+                );
+            }
+            // The ratio never rewards a loser.
+            if c.pessimistic <= 0 {
+                assert_eq!(
+                    c.return_over_drawdown(),
+                    0,
+                    "a losing variant scored on the risk-adjusted ratio"
+                );
+            }
+        }
+
+        // The measurement must actually vary, or the fields are decoration.
+        let first = g.cells.first().map_or(0, |c| c.max_drawdown);
+        let varies = g.cells.iter().any(|c| c.max_drawdown != first);
+        assert!(
+            varies,
+            "every variant reported the same drawdown, so nothing is being measured"
+        );
     }
 
     #[test]

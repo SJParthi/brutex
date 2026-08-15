@@ -4124,8 +4124,22 @@ Recorded because §3 rule 6 asks for honest limits and because each was found by
 adversarial audit rather than by review — the class of gap that survives
 precisely by never being written down.
 
-**No risk term in any objective.** `grep -rniE 'drawdown|max_loss|worst_trade|peak_to_trough' crates/runner/src`
-returns zero. `Cell` carries no worst-single-trade and no equity drawdown;
+**No risk term in any objective. PARTLY CLOSED.** `Cell` now carries
+`worst_trade` and `max_drawdown`, both accumulated on the PESSIMISTIC series,
+and `Cell::return_over_drawdown` is total return per unit of worst drawdown --
+the operator stated aim expressed as the ratio it actually is rather than as a
+sum. `runner::grid::risk_is_measured_and_a_total_alone_cannot_tell_two_variants_apart`
+holds that a fall is never negative, that a losing variant reports a drawdown at
+least as large as its loss, that a loser can never score on the ratio, and that
+the measurement varies across cells rather than being decoration.
+
+STILL OPEN: nothing RANKS on it. Selection remains `sharpest()` on
+`edge_ratio`. Switching the key quietly would repeat the defect section 73
+records -- a proxy presented as the maximum -- so which of the three keys should
+decide is a choice to be made deliberately and measured, not slipped in.
+
+The former text follows, and was true until this: `grep -rniE .drawdown|max_loss|worst_trade|peak_to_trough. crates/runner/src`
+returned zero. `Cell` carries no worst-single-trade and no equity drawdown;
 `Summary::worst` is a TOTAL under pessimistic fills, not a worst trade. The
 stated aim is maximum profit at minimal stop, and only the first half is ranked
 on. `Cell::edge_ratio` is the nearest thing and is computed over trades that
