@@ -355,10 +355,37 @@ impl Timeframe {
         name: "3min",
     };
 
+    /// Two-minute bars.
+    ///
+    /// **Does not divide 555** — 277.5 — so under a grid anchored at IST
+    /// midnight its first bar of the day would open at 09:14 and hold one
+    /// minute of trade. [`Self::aligns_with_the_open`] answers `false` for it
+    /// and every writer must ask, exactly as the thirty and sixty rungs do.
+    ///
+    /// It is in [`Self::KNOWN`] because the store's job is to have somewhere to
+    /// FILE a rung, and the alignment question belongs to whoever produces the
+    /// bar. D-0132 conflated the two: it removed five rungs from
+    /// `Granularity::store_timeframe` on an alignment argument, which is a fold
+    /// property being enforced by a path table. A directory is not a claim that
+    /// the bars inside it are aligned; the predicate is.
+    pub const MINUTE_2: Self = Self {
+        secs: 120,
+        name: "2min",
+    };
+
     /// Five-minute bars. Divides 555; no stub at either end of the session.
     pub const MINUTE_5: Self = Self {
         secs: 300,
         name: "5min",
+    };
+
+    /// Ten-minute bars.
+    ///
+    /// **Does not divide 555** — 55.5 — so the same caution as [`Self::MINUTE_2`]
+    /// applies: a midnight-anchored grid gives it a five-minute opening stub.
+    pub const MINUTE_10: Self = Self {
+        secs: 600,
+        name: "10min",
     };
 
     /// Fifteen-minute bars. The coarsest rung that still divides 555.
@@ -414,8 +441,10 @@ impl Timeframe {
     pub const KNOWN: &'static [Self] = &[
         Self::DAY_1,
         Self::MINUTE_1,
+        Self::MINUTE_2,
         Self::MINUTE_3,
         Self::MINUTE_5,
+        Self::MINUTE_10,
         Self::MINUTE_15,
         Self::MINUTE_30,
         Self::MINUTE_60,

@@ -1842,8 +1842,10 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
         &[
             Timeframe::DAY_1,
             Timeframe::MINUTE_1,
+            Timeframe::MINUTE_2,
             Timeframe::MINUTE_3,
             Timeframe::MINUTE_5,
+            Timeframe::MINUTE_10,
             Timeframe::MINUTE_15,
             Timeframe::MINUTE_30,
             Timeframe::MINUTE_60,
@@ -2245,7 +2247,11 @@ fn no_two_timeframes_share_a_length_or_a_name() {
 /// into a hole.
 #[test]
 fn an_unlisted_length_is_refused_and_not_invented() {
-    for secs in [0_u32, 1, 45, 120, 7_200, 86_399] {
+    // 120 LEFT THIS LIST BECAUSE IT BECAME A RUNG. It was here as "a plausible
+    // length nobody stores"; two minutes is stored now, so asserting it is
+    // refused would assert the opposite of the table. 90 and 240 take its place
+    // — still plausible, still absent, and still refused by name.
+    for secs in [0_u32, 1, 45, 90, 240, 7_200, 86_399] {
         assert!(
             Timeframe::from_secs(secs).is_err(),
             "{secs}s resolved to a rung that is not in KNOWN"
@@ -2299,8 +2305,10 @@ fn only_the_rungs_that_divide_555_start_a_session_on_time() {
 fn every_rung_length_and_name_is_pinned_exactly() {
     for (tf, secs, name) in [
         (Timeframe::MINUTE_1, 60_u32, "1min"),
+        (Timeframe::MINUTE_2, 120, "2min"),
         (Timeframe::MINUTE_3, 180, "3min"),
         (Timeframe::MINUTE_5, 300, "5min"),
+        (Timeframe::MINUTE_10, 600, "10min"),
         (Timeframe::MINUTE_15, 900, "15min"),
         (Timeframe::MINUTE_30, 1_800, "30min"),
         (Timeframe::MINUTE_60, 3_600, "60min"),
@@ -2320,7 +2328,20 @@ fn every_rung_length_and_name_is_pinned_exactly() {
     }
     assert_eq!(
         Timeframe::KNOWN.len(),
-        7,
+        9,
         "a rung was added or removed; D-0077 is the entry that has to change"
     );
+    // EVERY RUNG IN THE TABLE IS ALSO IN `KNOWN`, and the count above only
+    // catches a rung added to one of the two. This catches it added to the
+    // other — a `MINUTE_2` const with no `KNOWN` entry is a directory name
+    // `from_secs` can never return, which is data written into a hole.
+    for (tf, _, name) in [
+        (Timeframe::MINUTE_2, 120_u32, "2min"),
+        (Timeframe::MINUTE_10, 600, "10min"),
+    ] {
+        assert!(
+            Timeframe::KNOWN.contains(&tf),
+            "{name} is a const with no place in KNOWN"
+        );
+    }
 }
