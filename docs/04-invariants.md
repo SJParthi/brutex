@@ -736,6 +736,39 @@ this build cannot yet express is a venue with TWO sessions on one day, which
 is what pins the one bucket; nothing here pins the stamp to a session boundary,
 because it is not one.
 
+## The pull order — cheap pass first, and it is enforced
+
+The rule is the operator's, 15 Aug 2026, and `crates/api/src/ladder.rs` carries
+it verbatim: day before minute, spot before derivatives, and the two archive
+feeds exempt. D-0054 wrote the sequencing down and nothing enforced it until
+D-0153 wired it into `broker_run` — **before a socket, after the target list**.
+
+| # | Invariant | Proof | State |
+|---|---|---|---|
+| P-01 | The minute rung is refused until every instrument-month in the window is held at the day rung, and the refusal carries `missing of total` rather than a sentence | `api::ladder::the_minute_rung_waits_for_the_day_pass_and_names_what_is_missing` | ✓ |
+| P-02 | The day rung has nothing in front of it and is never gated, so an empty store cannot block the cheap pass | `api::ladder::the_day_rung_is_never_gated`, `api::ladder::an_ungated_rung_runs_against_an_empty_store` | ✓ |
+| P-03 | A derivative with no spot behind it is refused for the SEGMENT, and that refusal is reported ahead of the rung one — a window failing both would otherwise send the operator to pull the day rung of a segment they should not be on | `api::ladder::derivatives_wait_for_spot_and_that_refusal_is_reported_first`, `api::ladder::with_spot_held_the_derivative_still_owes_its_own_day_pass` | ✓ |
+| P-04 | Each instrument is probed under its **own** segment and its **own** venue, never one taken for the batch. `SpotTarget::Fno` and `Everything` span `Index` and `Cash`, and `catalog::tracked` filters on universe flags and never on exchange, so neither is a batch property | `api::ladder::a_mixed_target_is_probed_under_each_instruments_own_segment`, `api::ladder::a_month_held_at_one_venue_is_not_held_at_another` | ✓ |
+| P-05 | The gate reads the **store**, not the audit journal. A day pass that reported `Stored` and wrote nothing — `audit::Outcome::Empty`, which balances trivially at `0 = 0 + 0 + 0` — passes a journal check and fails this one. `Manifest::record_held` refuses a zero-row entry as `EmptyEntry`, so an `Empty` run leaves no entry and absence is the whole test | `api::ladder::a_month_with_no_bars_cannot_even_be_recorded` | ✓ |
+| P-06 | An archive feed is exempt in the rule and in the wiring: a folder feed issues no request, so there is no expensive call for a cheap one to protect | `api::ladder::a_folder_feed_is_never_gated`, `api::server::a_folder_feed_reaches_the_loop_with_an_empty_store` | ✓ |
+| P-07 | `broker_run` consults the order before `note_run_started` and before any socket, and a refused run reports `attempted: 0` with `blocked` set — distinct from an empty `reached`, about which nothing may be concluded regarding the vendor | `api::server::a_minute_run_is_refused_until_the_day_pass_has_landed` | ✓ |
+| P-08 | A census that will not load **refuses**, quoting its own words. Reading it as "nothing held" would refuse a day pull the operator could have run; reading it as "everything held" would open the gate on a file this build just refused — `CLAUDE.md` §4's fallback that hides a failure | `api::server::an_unreadable_census_refuses_and_names_what_would_not_load` | ✓ |
+| P-09 | A window naming no instrument-month is not refused by the order — it has no prerequisite that could be missing, and the form already refuses an empty request for its own reason | `api::ladder::a_request_naming_nothing_is_not_refused_by_the_ladder` | ✓ |
+| P-10 | A window is exactly the set of month files it touches — one inside a month, two across a boundary, and the year boundary where a naive `+1` breaks. This is the multiplier in the gate's cost, and it is the measured half | `api::ladder::a_window_names_every_month_file_it_touches` | ✓ |
+
+**What these rows do NOT claim.** That futures precede options. The operator's
+order is spot → expired futures → expired options; `Segment` has three variants
+and **both** derivative legs are `Fno`. The store keys a month on that enum, so
+it cannot tell a futures month from an options month, and `segment_precedes`
+does not pretend otherwise — inventing a distinction the census cannot answer
+would be a gate reporting on a fact nobody records.
+
+Nor do they claim the per-probe `O(1)`. `Manifest::entry` is one `HashMap::get`
+and no test here isolates it; `docs/04-invariants.md` C-03 says outright that
+the nearest measurement does not isolate a probe's own cost either. What IS
+proven is the multiplier — P-10 — and that the census is never walked, which is
+structural and visible in the loop. Recorded in `docs/06-limits.md`.
+
 ## Cross-cutting
 
 | # | Must hold | Proven by | |

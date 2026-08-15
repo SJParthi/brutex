@@ -163,6 +163,17 @@ pub fn segment_precedes(segment: Segment) -> Option<Segment> {
 pub struct Wanted {
     /// The instrument.
     pub symbol: Symbol,
+    /// Which venue the store files it under.
+    ///
+    /// Per instrument for the same reason the segment is, and it was very
+    /// nearly not: the caller's list is a filter over the merged universe by
+    /// `catalog::tracked`, which selects on the UNIVERSE flags and never on the
+    /// exchange. Nothing on that path makes a batch single-venue, so taking the
+    /// first target's exchange for all of them would be an assumption the code
+    /// does not enforce — and the store keys a month on it, so a wrong one
+    /// probes a directory the bars were never written to and reports a held
+    /// month as missing.
+    pub exchange: Exchange,
     /// Which segment the store files it under.
     pub segment: Segment,
     /// The month its bars fall in.
@@ -225,13 +236,10 @@ pub fn months_of(window: pull::session::Window) -> Vec<YearMonth> {
 /// `Err`. The caller decides whether a closed gate is a `409`, a warning or a
 /// disabled button, and it needs the numbers either way.
 #[must_use]
-pub fn gate(
-    census: &Manifest,
-    feed: Feed,
-    exchange: Exchange,
-    rung: Timeframe,
-    wanted: &[Wanted],
-) -> Gate {
+pub fn gate<F>(held: F, feed: Feed, rung: Timeframe, wanted: &[Wanted]) -> Gate
+where
+    F: Fn(&EntryKey) -> bool,
+{
     // AN ARCHIVE IS NOT GATED, AND AN EMPTY ASK IS NOT REFUSED.
     //
     // A window naming nothing has no prerequisite that could be missing, and
@@ -241,10 +249,6 @@ pub fn gate(
         return Gate::Open;
     }
 
-    // THE SEGMENT GATE IS CHECKED FIRST, and the order matters. A derivative
-    // window with no spot behind it fails BOTH gates; reporting the rung one
-    // would send the operator to pull the day rung of a segment he should not
-    // be on yet.
     // THE SEGMENT GATE, and it fires only where an instrument is a derivative.
     //
     // Checked first, and the order matters: a derivative window with no spot
@@ -267,7 +271,7 @@ pub fn gate(
         // and a gate stricter than its rule refuses work nobody called wrong.
         let missing = derivative
             .iter()
-            .filter(|w| !held(census, exchange, first, rung, w.symbol, w.month))
+            .filter(|w| !held(&key(w.exchange, first, rung, w.symbol, w.month)))
             .count();
         if missing > 0 {
             return Gate::SegmentFirst {
@@ -282,7 +286,7 @@ pub fn gate(
     if let Some(first) = precedes(rung) {
         let missing = wanted
             .iter()
-            .filter(|w| !held(census, exchange, w.segment, first, w.symbol, w.month))
+            .filter(|w| !held(&key(w.exchange, w.segment, first, w.symbol, w.month)))
             .count();
         if missing > 0 {
             return Gate::RungFirst {
@@ -296,7 +300,30 @@ pub fn gate(
     Gate::Open
 }
 
-/// Whether the census holds this one instrument-month at `(segment, rung)`.
+/// The one instrument-month a probe asks about, at `(segment, rung)`.
+///
+/// Every field is named. The five are positional at the two call sites above
+/// and the two orders differ — the segment gate asks about the SPOT segment at
+/// the rung being pulled, the rung gate about this instrument's OWN segment at
+/// the rung below — so a struct with named fields is what keeps that difference
+/// legible rather than a pair of five-argument calls nobody can read.
+const fn key(
+    exchange: Exchange,
+    segment: Segment,
+    rung: Timeframe,
+    symbol: Symbol,
+    month: YearMonth,
+) -> EntryKey {
+    EntryKey {
+        exchange,
+        segment,
+        symbol,
+        timeframe: rung,
+        month,
+    }
+}
+
+/// Whether the census holds a given instrument-month — [`gate`]'s `held`.
 ///
 /// One map probe. Callers walk their OWN list, so the count is the size of the
 /// ask and never the size of the store.
@@ -316,23 +343,20 @@ pub fn gate(
 /// REFUSES an entry with no rows outright, as `EmptyEntry`, so a zero-row month
 /// cannot be in the census to be read. An `Empty` run leaves NO entry, and this
 /// refuses it by absence — see `a_month_with_no_bars_cannot_even_be_recorded`.
-fn held(
-    census: &Manifest,
-    exchange: Exchange,
-    segment: Segment,
-    rung: Timeframe,
-    symbol: Symbol,
-    month: YearMonth,
-) -> bool {
-    census
-        .entry(&EntryKey {
-            exchange,
-            segment,
-            symbol,
-            timeframe: rung,
-            month,
-        })
-        .is_some()
+///
+/// # Why a closure and not a `&Manifest`
+///
+/// Because a census that is **absent** is not a census that is empty of
+/// meaning: `census::Census` has three states and only one of them carries a
+/// `Manifest`. `Absent` is the ordinary state before the first ingest and it
+/// answers `|_| false` — nothing is held, so a rung with a prerequisite is
+/// refused and one without is not. Passing a `&Manifest` would force the caller
+/// to either fabricate an empty one or re-implement this module's arithmetic,
+/// and `Unreadable` has no honest answer here at all — it is refused by the
+/// caller before a probe is ever built. Same shape as
+/// `autopilot::next_window`, for the same reason.
+pub fn probing(census: &Manifest) -> impl Fn(&EntryKey) -> bool + '_ {
+    |k| census.entry(k).is_some()
 }
 
 #[cfg(test)]
@@ -366,6 +390,7 @@ mod tests {
             .iter()
             .map(|n| Wanted {
                 symbol: sym(n),
+                exchange: Exchange::Nse,
                 segment,
                 month: month(),
             })
@@ -408,9 +433,8 @@ mod tests {
         let empty = census_of(&[]);
         assert_eq!(
             gate(
-                &empty,
+                probing(&empty),
                 Feed::Groww,
-                Exchange::Nse,
                 Timeframe::DAY_1,
                 &want(&["NIFTY"])
             ),
@@ -429,7 +453,7 @@ mod tests {
         // Neither held.
         let none = census_of(&[]);
         assert_eq!(
-            gate(&none, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two),
+            gate(probing(&none), Feed::Groww, Timeframe::MINUTE_1, &two),
             Gate::RungFirst {
                 needs: Timeframe::DAY_1,
                 missing: 2,
@@ -443,7 +467,7 @@ mod tests {
         // been proved.
         let half = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
         assert_eq!(
-            gate(&half, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two),
+            gate(probing(&half), Feed::Groww, Timeframe::MINUTE_1, &two),
             Gate::RungFirst {
                 needs: Timeframe::DAY_1,
                 missing: 1,
@@ -456,7 +480,7 @@ mod tests {
             ("NIFTY", Segment::Index, Timeframe::DAY_1, 10),
             ("BANKNIFTY", Segment::Index, Timeframe::DAY_1, 10),
         ]);
-        assert!(gate(&both, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two).is_open());
+        assert!(gate(probing(&both), Feed::Groww, Timeframe::MINUTE_1, &two).is_open());
     }
 
     /// THE DANGEROUS OUTCOME LEAVES NO ENTRY AT ALL, which is why `is_none` is
@@ -498,9 +522,8 @@ mod tests {
         // AND SO THE GATE STAYS SHUT, by absence rather than by inspection.
         assert_eq!(
             gate(
-                &census,
+                probing(&census),
                 Feed::Groww,
-                Exchange::Nse,
                 Timeframe::MINUTE_1,
                 &want(&["NIFTY"])
             ),
@@ -530,9 +553,8 @@ mod tests {
         let nothing = census_of(&[]);
         assert_eq!(
             gate(
-                &nothing,
+                probing(&nothing),
                 Feed::Groww,
-                Exchange::Nse,
                 Timeframe::MINUTE_1,
                 &want_in(Segment::Fno, &["NIFTY"])
             ),
@@ -555,9 +577,8 @@ mod tests {
         ]);
         assert_eq!(
             gate(
-                &spot_only,
+                probing(&spot_only),
                 Feed::Groww,
-                Exchange::Nse,
                 Timeframe::MINUTE_1,
                 &want_in(Segment::Fno, &["NIFTY"])
             ),
@@ -587,9 +608,8 @@ mod tests {
             assert!(!is_gated(feed), "{feed} is a folder");
             assert!(
                 gate(
-                    &nothing,
+                    probing(&nothing),
                     feed,
-                    Exchange::Nse,
                     Timeframe::MINUTE_1,
                     &want_in(Segment::Fno, &["NIFTY"])
                 )
@@ -608,16 +628,7 @@ mod tests {
     #[test]
     fn a_request_naming_nothing_is_not_refused_by_the_ladder() {
         let nothing = census_of(&[]);
-        assert!(
-            gate(
-                &nothing,
-                Feed::Groww,
-                Exchange::Nse,
-                Timeframe::MINUTE_1,
-                &[]
-            )
-            .is_open()
-        );
+        assert!(gate(probing(&nothing), Feed::Groww, Timeframe::MINUTE_1, &[]).is_open());
     }
 
     /// EVERY RUNG THAT IS NEITHER FIRST NOR THE MINUTE HAS NO PREDECESSOR.
@@ -645,7 +656,7 @@ mod tests {
         let nothing = census_of(&[]);
         for tf in Timeframe::KNOWN.iter().filter(|t| precedes(**t).is_none()) {
             assert!(
-                gate(&nothing, Feed::Groww, Exchange::Nse, *tf, &want(&["NIFTY"])).is_open(),
+                gate(probing(&nothing), Feed::Groww, *tf, &want(&["NIFTY"])).is_open(),
                 "{} has no predecessor and must not be blocked",
                 tf.as_str()
             );
@@ -670,24 +681,19 @@ mod tests {
         let mixed = vec![
             Wanted {
                 symbol: sym("NIFTY"),
+                exchange: Exchange::Nse,
                 segment: Segment::Index,
                 month: month(),
             },
             Wanted {
                 symbol: sym("RELIANCE"),
+                exchange: Exchange::Nse,
                 segment: Segment::Cash,
                 month: month(),
             },
         ];
         assert!(
-            gate(
-                &both,
-                Feed::Groww,
-                Exchange::Nse,
-                Timeframe::MINUTE_1,
-                &mixed
-            )
-            .is_open(),
+            gate(probing(&both), Feed::Groww, Timeframe::MINUTE_1, &mixed).is_open(),
             "both landed, each in its own segment — the minute pass may run"
         );
 
@@ -698,9 +704,8 @@ mod tests {
         let as_if_all_index = want_in(Segment::Index, &["NIFTY", "RELIANCE"]);
         assert_eq!(
             gate(
-                &both,
+                probing(&both),
                 Feed::Groww,
-                Exchange::Nse,
                 Timeframe::MINUTE_1,
                 &as_if_all_index
             ),
@@ -710,6 +715,46 @@ mod tests {
                 of: 2
             },
             "the equity is not in the index directory, and never was"
+        );
+    }
+
+    /// THE VENUE IS READ FROM THE INSTRUMENT TOO, and this is what proves it.
+    ///
+    /// `Wanted::exchange` was added after `segment`, for the same reason and
+    /// with the same failure mode — the store keys a month on it, so probing
+    /// the wrong venue reports a held month as missing. Without this test the
+    /// field could be ignored entirely and every existing assertion would still
+    /// pass, because they are all `Nse` on both sides.
+    #[test]
+    fn a_month_held_at_one_venue_is_not_held_at_another() {
+        let nse = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
+        let elsewhere = vec![Wanted {
+            symbol: sym("NIFTY"),
+            exchange: Exchange::Bse,
+            segment: Segment::Index,
+            month: month(),
+        }];
+        assert_eq!(
+            gate(probing(&nse), Feed::Groww, Timeframe::MINUTE_1, &elsewhere),
+            Gate::RungFirst {
+                needs: Timeframe::DAY_1,
+                missing: 1,
+                of: 1
+            },
+            "the day pass landed on NSE; a BSE month of the same name and \
+             segment is a different file and the census does not hold it"
+        );
+        // AND THE SAME ASK AT THE VENUE IT LANDED ON IS OPEN — so the refusal
+        // above is the exchange and nothing else about this fixture.
+        assert!(
+            gate(
+                probing(&nse),
+                Feed::Groww,
+                Timeframe::MINUTE_1,
+                &want(&["NIFTY"])
+            )
+            .is_open(),
+            "same name, same segment, same month, correct venue"
         );
     }
 

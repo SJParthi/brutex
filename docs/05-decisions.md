@@ -14156,3 +14156,74 @@ negative-price refusal added earlier the same day. The criticism was right and
 broader than filed: that refusal followed a convention the whole price decoder
 already had.
 
+
+## D-0153 · 2026-08-15 · The pull order is ENFORCED at `broker_run`, before a socket, and an unreadable census refuses rather than guessing
+
+### The finding
+
+The order — day before minute, spot before derivatives — has been written down
+since D-0054 and nothing enforced it. `crates/api/src/ladder.rs` landed the rule
+and its arithmetic; this entry is the WIRING, which is where a rule stops being
+a doc comment.
+
+`broker_run` now consults `ladder_refusal` after the target list is built and
+before `note_run_started`. Both placements are load-bearing: the gate probes the
+store for THOSE instruments so it cannot be asked earlier, and a run the order
+refuses never started so it must not be announced.
+
+### The decision
+
+**The gate reads the census, and the census has three states, not two.**
+`census::Census` is `Absent | Unreadable | Held`, and only the last carries a
+`Manifest`. Each gets its own answer:
+
+| State | Answer | Why |
+|---|---|---|
+| `Held` | probe it | the ordinary path |
+| `Absent` | `\|_\| false` | the ordinary state before a first ingest. Nothing held is a real answer, not a missing one: it refuses a minute pull and lets a day pull through, because nothing precedes the day pull |
+| `Unreadable` | **refuse, quoting the census** | there is no honest answer. Reading it as "nothing held" refuses a day pull the operator could have run; reading it as "everything held" opens the gate on the strength of a file this build just refused — `CLAUDE.md` §4's fallback that hides a failure |
+
+**`gate` takes a closure, not a `&Manifest`.** `Absent` is precisely the "no
+manifest on disk" case, and `|_| false` states it. A `&Manifest` parameter would
+force the caller to fabricate an empty one or re-implement this module's
+arithmetic. Same shape as `autopilot::next_window`, for the same reason.
+
+**`Wanted` carries its own `exchange` as well as its own `segment`.** The
+segment was made per-instrument when `SpotTarget::Fno` and `Everything` turned
+out to span `Index` and `Cash`. The exchange is the same defect one field over,
+and it was nearly missed: the caller's list is a filter over the merged universe
+by `catalog::tracked`, which selects on the UNIVERSE flags and **never on the
+exchange**. Nothing on that path makes a batch single-venue, so
+`targets.first().exchange` would have been an assumption the code does not
+enforce — and the store keys a month on it, so a wrong venue probes a directory
+the bars were never written to and reports a held month as missing.
+
+### The consequence, stated plainly
+
+**Every minute pull is refused until that window's day pass has landed.** With
+the store emptied on 15 Aug 2026 that is *every* minute pull, and it is the
+operator's own rule doing exactly what it says. The refusal names the rung to
+run instead, the arithmetic (`N of M instrument-months`), and the fact that no
+socket was opened.
+
+### The proof
+
+- `ladder::a_month_held_at_one_venue_is_not_held_at_another` — the venue is read
+  per instrument. Without it the new field could be ignored and every other
+  assertion would still pass, because they are all `Nse` on both sides.
+- `server::a_minute_run_is_refused_until_the_day_pass_has_landed` — the wiring,
+  both empty-census arms, and the same request opening once the day pass is held.
+- `server::an_unreadable_census_refuses_and_names_what_would_not_load`
+- `server::a_derivative_is_refused_for_its_missing_underlying` — driven directly,
+  because `/pull/spot` names index and cash instruments only.
+- `server::a_folder_feed_reaches_the_loop_with_an_empty_store` — the archives are
+  exempt, and the wiring honours it.
+- `server::the_refused_instrument_site_is_driven_over_a_real_universe` — seeds
+  the day pass rather than working around the gate, so it stays pointed at its
+  own subject and doubles as proof that a satisfied gate opens.
+
+### Cost
+
+One hash probe per (instrument, month), over the caller's own list. The census
+is never walked, so the store's size does not appear in the bound. The
+per-probe `O(1)` remains `UNVERIFIED` for the reason `docs/06-limits.md` gives.

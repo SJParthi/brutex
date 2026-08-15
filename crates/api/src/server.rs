@@ -3690,6 +3690,20 @@ pub(crate) struct BrokerRun {
     pub took: u64,
 }
 
+impl BrokerRun {
+    /// A run that never opened a socket, and why.
+    ///
+    /// Every other counter stays at its default and that is the POINT: nothing
+    /// was attempted, so nothing may be concluded about the vendor — which is
+    /// exactly what `blocked` means as against an empty `reached`.
+    fn blocked(why: String) -> Self {
+        Self {
+            blocked: Some(why),
+            ..Self::default()
+        }
+    }
+}
+
 /// The run's **resolved** parameters, at `Info`, before the first request.
 ///
 /// The form says `2020-01-01` and the vendor's history floor clamps it; the
@@ -3839,15 +3853,120 @@ fn note_member_failure(
         .fail(&failure.instrument, month, &failure.why);
 }
 
+/// What the pull order has to say about this request, or [`None`] to proceed.
+///
+/// The rule and its reasoning are `crate::ladder`'s; this turns the [`Gate`] it
+/// returns into the sentence an operator reads, and decides what the three
+/// states of a census mean here.
+///
+/// [`Gate`]: crate::ladder::Gate
+///
+/// # An unreadable census REFUSES, and that is the whole reason this is not a
+/// two-arm match
+///
+/// [`census::Census`] has three states and only one carries a `Manifest`.
+///
+/// - **Held** — probe it. The ordinary path.
+/// - **Absent** — the ordinary state before the first ingest. Nothing is held,
+///   which is a real answer and not a missing one: `|_| false` refuses a minute
+///   pull for want of the day pass and lets the day pull itself straight
+///   through, because nothing precedes it.
+/// - **Unreadable** — a file that exists and would not load. There is no honest
+///   answer here at all. Reading it as "nothing held" would refuse a day pull
+///   the operator could have run, and reading it as "everything held" would
+///   open the gate on the strength of a file this build just refused, which is
+///   `CLAUDE.md` §4's fallback that hides a failure. So it refuses and names the
+///   census's own words.
+///
+/// `None` is returned for an ungated feed and for a rung with no store
+/// directory — the latter because `pull::ingest::Plan::timeframe` already
+/// refuses it AT THE WRITE BOUNDARY in that refusal's own words, and a second
+/// refusal here would be a worse-worded duplicate of a better one.
+fn ladder_refusal(
+    asked: &ingest::SpotRequest,
+    targets: &[brutex_core::instrument::InstrumentKey],
+    censuses: &[census::VendorCensus],
+) -> Option<String> {
+    use crate::ladder::{self, Gate};
+
+    if !ladder::is_gated(asked.feed) {
+        return None;
+    }
+    let rung = asked.granularity.store_timeframe()?;
+    // ONE `Wanted` PER INSTRUMENT-MONTH, each carrying its OWN venue and
+    // segment — see `ladder::Wanted`, where both fields say why.
+    let months = ladder::months_of(asked.window);
+    let wanted: Vec<ladder::Wanted> = targets
+        .iter()
+        .flat_map(|key| {
+            months.iter().map(move |month| ladder::Wanted {
+                symbol: key.underlying,
+                exchange: key.exchange,
+                segment: key.segment,
+                month: *month,
+            })
+        })
+        .collect();
+
+    let state = asked
+        .feed
+        .store_vendor()
+        .and_then(|v| censuses.iter().find(|c| c.vendor == v))
+        .map(|c| &c.state);
+
+    let gate = match state {
+        Some(census::Census::Unreadable { reason }) => {
+            return Some(format!(
+                "the pull order cannot be checked, so nothing was asked for. \
+                 {}'s census exists and would not load — {reason}. Until it \
+                 does, this build cannot tell whether the {} pass this run \
+                 needs has landed, and it will not open a socket on a guess.",
+                asked.feed.display(),
+                ladder::precedes(rung).map_or(rung, |first| first).as_str(),
+            ));
+        }
+        Some(census::Census::Held { manifest }) => {
+            ladder::gate(ladder::probing(manifest), asked.feed, rung, &wanted)
+        }
+        None | Some(census::Census::Absent) => ladder::gate(|_| false, asked.feed, rung, &wanted),
+    };
+
+    match gate {
+        Gate::Open => None,
+        Gate::RungFirst { needs, missing, of } => Some(format!(
+            // 5.8× is 81 minute-windows against 14 day-windows per instrument
+            // for the same span — `crate::ladder`'s module doc, from
+            // `crates/store`'s own arithmetic rather than from this sentence.
+            "the {first} pass comes first: {missing} of {of} instrument-months \
+             are not held at {first}. Nothing was asked for. Pull {first} over \
+             this same window, then run this — the cheap pass is 5.8× fewer \
+             requests for the same span, and it is what finds a wrong symbol or \
+             date range before the expensive one pays for it.",
+            first = needs.as_str(),
+        )),
+        Gate::SegmentFirst {
+            needs,
+            at,
+            missing,
+            of,
+        } => Some(format!(
+            "the underlying comes first: {missing} of {of} derivative \
+             instrument-months have no {} bars behind them at {}. Nothing was \
+             asked for. A derivative window with no spot behind it cannot be \
+             verified against anything, so pull {} over this window first.",
+            needs.as_str(),
+            at.as_str(),
+            needs.as_str(),
+        )),
+    }
+}
+
 pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
     // it was found.
     if site.broker == Broker::Refused {
-        return BrokerRun {
-            blocked: Some("this process may not reach a live broker".to_owned()),
-            ..BrokerRun::default()
-        };
+        return BrokerRun::blocked("this process may not reach a live broker".to_owned());
     }
 
     // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
@@ -3905,6 +4024,18 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // processes, and an unordered backfill resumes in a different place after
     // every restart.
     targets.sort_unstable_by_key(|k| k.underlying);
+
+    // THE PULL ORDER, AND THIS IS WHERE IT BITES. `crate::ladder` carries the
+    // rule and the operator's own words for it.
+    //
+    // AFTER the target list is built, because the gate probes the store for
+    // THESE instruments and cannot be asked before they are known. BEFORE
+    // `note_run_started`, because a run the order refuses never started — and
+    // before any socket, which is the entire point: the cheap day pass exists
+    // to find a wrong feed, symbol or window in 14 requests instead of 81.
+    if let Some(why) = ladder_refusal(asked, &targets, &site.censuses) {
+        return BrokerRun::blocked(why);
+    }
 
     note_run_started(asked, targets.len());
     let mut out = BrokerRun {
@@ -7463,6 +7594,188 @@ mod tests {
     /// order the exchange publishes them — twelve, and no ISIN among them.
     const ZERODHA_HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,\
                                 expiry,strike,tick_size,lot_size,instrument_type,segment,exchange\n";
+
+    /// The month, for a fixture that needs to name one.
+    fn month_of(year: u16, month: u8) -> store::path::YearMonth {
+        store::path::YearMonth::new(year, month).expect("a real month")
+    }
+
+    /// A census holding ONE index-month at DAY level, and nothing else.
+    ///
+    /// In memory, at a path nothing writes: the ladder gate reads the census
+    /// and never a bar file, so a fixture that reached for the disk would be
+    /// asserting something this code does not do. `Held::unknown` because the
+    /// gate asks whether the month is THERE and never what it closed at.
+    fn day_pass_held(
+        vendor: Vendor,
+        name: &str,
+        at: store::path::YearMonth,
+    ) -> census::VendorCensus {
+        let mut manifest =
+            pull::manifest::Manifest::open(vendor, &[], &[]).expect("a genesis census");
+        manifest
+            .record_held(pull::manifest::Held::unknown(pull::manifest::Entry {
+                key: pull::manifest::EntryKey {
+                    exchange: brutex_core::instrument::Exchange::Nse,
+                    segment: brutex_core::instrument::Segment::Index,
+                    symbol: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
+                    timeframe: store::path::Timeframe::DAY_1,
+                    month: at,
+                },
+                // A COUNT THE CENSUS WILL ACCEPT. `record_held` refuses a
+                // zero-row entry outright, as `EmptyEntry` — which is what
+                // makes absence the gate's whole test.
+                rows: 3,
+                first_ts_micros: 1,
+                last_ts_micros: 2,
+            }))
+            .expect("the census has room");
+        census::VendorCensus {
+            vendor,
+            path: PathBuf::from("/nonexistent/ladder-gate/census.man"),
+            state: census::Census::Held {
+                manifest: Box::new(manifest),
+            },
+        }
+    }
+
+    /// One spot instrument, in the segment named.
+    fn spot_key(
+        name: &str,
+        segment: brutex_core::instrument::Segment,
+    ) -> brutex_core::instrument::InstrumentKey {
+        brutex_core::instrument::InstrumentKey {
+            exchange: brutex_core::instrument::Exchange::Nse,
+            segment,
+            underlying: brutex_core::symbol::Symbol::new(name).expect("a legal symbol"),
+            kind: brutex_core::instrument::Kind::Index,
+        }
+    }
+
+    /// A minute request over a window inside one month.
+    fn minute_ask() -> ingest::SpotRequest {
+        ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min",
+            day(2026, 8, 10),
+        )
+        .expect("a real target and a window in the past")
+    }
+
+    /// THE ORDER REFUSES BEFORE THE LOOP, and the refusal carries the count.
+    ///
+    /// The gate itself is proven in `crate::ladder`; this is about the WIRING —
+    /// that `broker_run` consults it, that it does so before a socket, and that
+    /// what an operator reads names the rung to run instead.
+    #[test]
+    fn a_minute_run_is_refused_until_the_day_pass_has_landed() {
+        let asked = minute_ask();
+        let targets = [spot_key("NIFTY", brutex_core::instrument::Segment::Index)];
+
+        // NO CENSUS ROW AT ALL and an ABSENT one are the same answer: nothing
+        // is held. Both arms are driven here because the store before a first
+        // ingest is the ordinary state, not an error.
+        for censuses in [
+            Vec::new(),
+            vec![census::VendorCensus {
+                vendor: Vendor::Dhan,
+                path: PathBuf::from("/nonexistent/ladder-gate/none.man"),
+                state: census::Census::Absent,
+            }],
+        ] {
+            let why = ladder_refusal(&asked, &targets, &censuses)
+                .expect("the day pass has not landed, so the minute run is refused");
+            assert!(
+                why.contains("1day") && why.contains("1 of 1"),
+                "the refusal names the rung to run and the arithmetic: {why}"
+            );
+            assert!(
+                why.contains("Nothing was asked for"),
+                "and says plainly that no socket was opened: {why}"
+            );
+        }
+
+        // AND WITH IT HELD, THE SAME REQUEST IS OPEN.
+        let held = [day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        assert_eq!(
+            ladder_refusal(&asked, &targets, &held),
+            None,
+            "the prerequisite is met, so the order has nothing to say"
+        );
+    }
+
+    /// AN UNREADABLE CENSUS REFUSES RATHER THAN GUESSING EITHER WAY.
+    ///
+    /// This is the arm that would be a `CLAUDE.md` §4 silent fallback if it
+    /// read as "everything held", and a spurious refusal if it read as
+    /// "nothing held". It refuses, and it quotes the census's own words.
+    #[test]
+    fn an_unreadable_census_refuses_and_names_what_would_not_load() {
+        let censuses = vec![census::VendorCensus {
+            vendor: Vendor::Dhan,
+            path: PathBuf::from("/nonexistent/ladder-gate/broken.man"),
+            state: census::Census::Unreadable {
+                reason: "entry 4 fails its own checksum".to_owned(),
+            },
+        }];
+        let why = ladder_refusal(
+            &minute_ask(),
+            &[spot_key("NIFTY", brutex_core::instrument::Segment::Index)],
+            &censuses,
+        )
+        .expect("a census that will not load cannot clear the order");
+        assert!(
+            why.contains("entry 4 fails its own checksum"),
+            "the census's own words reach the operator: {why}"
+        );
+        assert!(
+            why.contains("will not open a socket on a guess"),
+            "and the reason it refused rather than proceeded: {why}"
+        );
+    }
+
+    /// A DERIVATIVE WITH NO SPOT BEHIND IT IS REFUSED FOR *THAT*, not the rung.
+    ///
+    /// Unreachable from `/pull/spot`, which names index and cash instruments
+    /// only — so it is driven directly. The arm exists because `Gate` carries
+    /// the variant, and the day `/pull/fno` has transport it is the sentence
+    /// that runs.
+    #[test]
+    fn a_derivative_is_refused_for_its_missing_underlying() {
+        let why = ladder_refusal(
+            &minute_ask(),
+            &[spot_key("NIFTY", brutex_core::instrument::Segment::Fno)],
+            &[],
+        )
+        .expect("no spot behind it");
+        assert!(
+            why.contains("the underlying comes first"),
+            "the SEGMENT refusal, not the rung one: {why}"
+        );
+        assert!(
+            why.contains("cannot be verified against anything"),
+            "and why that order exists at all: {why}"
+        );
+    }
+
+    /// AN ARCHIVE FEED IS EXEMPT, and the wiring honours that too.
+    #[test]
+    fn a_folder_feed_reaches_the_loop_with_an_empty_store() {
+        let asked = ingest::parse_spot(
+            "target=swept&from=2026-08-03&to=2026-08-05&granularity=1min&vendor=gdfl",
+            day(2026, 8, 10),
+        )
+        .expect("a real archive request");
+        assert_eq!(
+            ladder_refusal(
+                &asked,
+                &[spot_key("NIFTY", brutex_core::instrument::Segment::Index)],
+                &[],
+            ),
+            None,
+            "a folder feed issues no request, so there is no expensive call for \
+             a cheap one to protect"
+        );
+    }
 
     fn masters(name: &str, groww: Option<&str>, dhan: Option<&str>) -> PathBuf {
         let dir = crate::scratch::path(&format!("server-{name}"));
@@ -13183,12 +13496,21 @@ mod tests {
                 "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
             )),
         );
-        let site = Site::serving(&dir, &store_root("emit-refused"));
+        let mut site = Site::serving(&dir, &store_root("emit-refused"));
         assert_eq!(
             site.read.merged.by_key.len(),
             1,
             "the premise: the loop under test runs exactly once"
         );
+        // THE DAY PASS, HELD — the second half of the premise.
+        //
+        // `crate::ladder` refuses a minute run whose day pass has not landed,
+        // and it refuses it BEFORE the loop, which is the whole design. This
+        // test is about the per-instrument refusal that happens INSIDE the
+        // loop, so the prerequisite is seeded rather than the gate worked
+        // around: without this the run is `blocked` and the subject below is
+        // never reached. It doubles as the proof that a satisfied gate opens.
+        site.censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
         let asked = ingest::parse_spot(
             "target=swept&from=2026-08-03&to=2026-08-05",
             day(2026, 8, 10),
