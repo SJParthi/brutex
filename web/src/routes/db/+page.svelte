@@ -5436,8 +5436,39 @@
          The reason is not lost. The moment `expiriesAll` holds anything the
          strip returns with every refusal it ever had, and the one-line summary
          under the table still counts what is stored.
+
+         ------------------------------------------------------------------
+         THE GATE ABOVE IS WITHDRAWN, ON THE OWNER'S INSTRUCTION, AND THE
+         ARGUMENT FOR IT IS LEFT STANDING BECAUSE IT WAS NOT A BAD ONE.
+
+         `{#if !expiryRefusal}` collapsed this whole strip whenever no contract
+         could be reached — which, on today's wire, is always. The reasoning
+         above is sound as far as it goes: four permanently dead controls
+         announcing a non-event is noise, not loudness, and the strip did cost
+         the query rungs their place on the first screen.
+
+         Two things overrule it.
+
+         The owner asked for these four by name and in order — feed, universe,
+         instruments, segments, timeframes, expiry, strike, moneyness, side —
+         and asked for each to carry the same view, the same dropdown and the
+         same search as every rung above it. A control that is absent has no
+         view to be the same as. That is a decision about what this page IS,
+         and it is the owner's to make, not this file's.
+
+         And the consistency argument runs the other way now. /ingest draws its
+         two contract segments unconditionally, both refusing, both with the
+         reason on their face; the two pages are meant to read as one product.
+         The cost the comment measured is also mostly gone: the strip is a
+         wrapping grid since D-0153, so four rungs are one row, not four.
+
+         What made this cheap to reverse is that nothing was deleted when it
+         was hidden. Every cell still carries its own `.off` and its own
+         refusal text, exactly as the `.strip.sub` rule below still describes
+         ("it is ALWAYS DRAWN ... a strip that collapsed would take the two
+         REFUSALS with it") — a comment that had been true of the CSS and false
+         of the markup ever since the gate went in. It is true of both again.
          ================================================================== -->
-    {#if !expiryRefusal}
     <section class="strip sub" aria-label="Contract">
       <span class="lead">Contract</span>
 
@@ -5645,7 +5676,6 @@
         </span>
       </div>
     </section>
-    {/if}
 
 
     <!-- ==================================================================
