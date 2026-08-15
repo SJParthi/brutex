@@ -317,8 +317,14 @@
         {#each live as r (r.key)}
           {@const p = parts(r.name ?? r.key)}
           <label class:pdis={r.disabled} title={r.title ?? r.why ?? undefined}>
+            <!-- A RADIO WHEN THE PICKER IS SINGLE. A checkbox is a promise that
+                 you may tick a second one, and in `single` mode `toggle` emits
+                 `new Set([key])` — the first tick silently vanishes. The
+                 control has to look like what it does. `name` groups the radios
+                 per picker instance so two on one page cannot fight. -->
             <input
-              type="checkbox"
+              type={single ? 'radio' : 'checkbox'}
+              name={single ? `pk${id}` : undefined}
               checked={selected.has(r.key)}
               disabled={Boolean(r.disabled)}
               onchange={() => toggle(r.key)}
@@ -357,7 +363,12 @@
             {#each dead as r (r.key)}
               {@const p = parts(r.name ?? r.key)}
               <label class="pdis" title={r.title ?? r.why ?? undefined}>
-                <input type="checkbox" checked={false} disabled onclick={(e) => e.stopPropagation()} />
+                <input
+                  type={single ? 'radio' : 'checkbox'}
+                  checked={false}
+                  disabled
+                  onclick={(e) => e.stopPropagation()}
+                />
                 <span class="pnm">{p[0]}{#if p[1]}<mark>{p[1]}</mark>{/if}{p[2]}</span>
                 {#if r.detail}<span class="pct">{r.detail}</span>{/if}
                 {#if r.why}<span class="pwhy">{r.why}</span>{/if}
