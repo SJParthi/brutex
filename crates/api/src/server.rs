@@ -3561,27 +3561,24 @@ async fn broker_answer(
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and
     // how it was found. `broker_run` is the one that checks it, so an internal
     // caller is guarded by the same line rather than by a second copy of it.
-    if run.blocked.is_some() {
+    if let Some(blocked) = run.blocked.as_ref() {
+        // THE REASON AND THE CODE ARE THE RUN'S OWN — see `Blocked`. This block
+        // restated both as literals, which was true while `Broker::Refused` was
+        // the only producer and became a lie the moment the pull order became
+        // the second: an out-of-sequence request would have been reported as a
+        // broker outage, with a 503 to match. `autopilot::tick` already read the
+        // reason this way; only the receipt did not.
         let record = audit::Record::refused(
             audit::Scope::Spot,
             audit::Outcome::NotStarted,
             now,
             asked.target.label(),
-            "this process may not reach a live broker",
+            &blocked.why,
         )
         .with_window(asked.window);
-        facts.push((
-            "Refused because",
-            "this process may not reach a live broker. The served binary sets \
-             Broker::Live; nothing else does, so a test cannot spend the \
-             operator's rate budget by omission."
-                .to_owned(),
-        ));
+        facts.push(("Refused because", blocked.why.clone()));
         facts.push(recorded_fact(journal, &record));
-        return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            accepted_html("Spot pull", facts, site.broker),
-        );
+        return (blocked.code, accepted_html("Spot pull", facts, site.broker));
     }
 
     facts.push(("Instruments attempted", run.attempted.to_string()));
@@ -3683,7 +3680,7 @@ pub(crate) struct BrokerRun {
     ///
     /// Distinct from an empty `reached`: nothing was attempted, so nothing can
     /// be concluded about the vendor from it.
-    pub blocked: Option<String>,
+    pub blocked: Option<Blocked>,
     /// Set when the operator stopped the sweep part-way, with the reason.
     pub stopped: Option<String>,
     /// How long it took, in microseconds.
@@ -3696,12 +3693,58 @@ impl BrokerRun {
     /// Every other counter stays at its default and that is the POINT: nothing
     /// was attempted, so nothing may be concluded about the vendor — which is
     /// exactly what `blocked` means as against an empty `reached`.
-    fn blocked(why: String) -> Self {
+    fn blocked(why: String, code: axum::http::StatusCode) -> Self {
         Self {
-            blocked: Some(why),
+            blocked: Some(Blocked { why, code }),
             ..Self::default()
         }
     }
+
+    /// Refused because this process may not reach a live broker.
+    ///
+    /// `503`: the vendor path genuinely is unavailable to this process.
+    fn unreachable_broker() -> Self {
+        Self::blocked(
+            "this process may not reach a live broker. The served binary sets \
+             Broker::Live; nothing else does, so a test cannot spend the \
+             operator's rate budget by omission."
+                .to_owned(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        )
+    }
+
+    /// Refused because the pull order puts this request out of sequence.
+    ///
+    /// `409` and NOT a `503`: nothing upstream is unavailable, and the reason
+    /// carries the pass to run instead. See [`Blocked`] for what a wrong code
+    /// here has already cost once.
+    fn out_of_order(why: String) -> Self {
+        Self::blocked(why, axum::http::StatusCode::CONFLICT)
+    }
+}
+
+/// Why a run never opened a socket, and what it answers with.
+///
+/// # The status travels WITH the reason, and it has to
+///
+/// Two unrelated facts block a run: this process may not reach a live broker,
+/// and the pull order puts this request out of sequence. They were one literal
+/// while there was one producer, and the receipt restated it — so the day the
+/// second producer landed, an order refusal would have been reported to the
+/// operator as a broker outage.
+///
+/// That is the same defect [`BrokerRun::touched_wire`] documents costing an
+/// operator a diagnosis once already: a run that reached nothing answered `502`,
+/// and the page drew *Last pull HTTP 502*, which reads as **the broker is
+/// down**. A `503` on "pull the day pass first" is that mistake with a different
+/// number. Pairing the code with the reason at the point the reason is known is
+/// what stops a third producer inheriting the wrong one.
+#[derive(Debug, Clone)]
+pub(crate) struct Blocked {
+    /// The reason, in the producer's own words.
+    pub why: String,
+    /// What the receipt answers with.
+    pub code: axum::http::StatusCode,
 }
 
 /// The run's **resolved** parameters, at `Info`, before the first request.
@@ -3966,7 +4009,7 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
     // it was found.
     if site.broker == Broker::Refused {
-        return BrokerRun::blocked("this process may not reach a live broker".to_owned());
+        return BrokerRun::unreachable_broker();
     }
 
     // THE UNIVERSE, ONE INSTRUMENT AT A TIME.
@@ -4034,7 +4077,7 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // before any socket, which is the entire point: the cheap day pass exists
     // to find a wrong feed, symbol or window in 14 requests instead of 81.
     if let Some(why) = ladder_refusal(asked, &targets, &site.censuses) {
-        return BrokerRun::blocked(why);
+        return BrokerRun::out_of_order(why);
     }
 
     note_run_started(asked, targets.len());
@@ -7754,6 +7797,60 @@ mod tests {
         assert!(
             why.contains("cannot be verified against anything"),
             "and why that order exists at all: {why}"
+        );
+    }
+
+    /// THE RECEIPT CARRIES THE ORDER'S OWN WORDS AND ITS OWN CODE.
+    ///
+    /// This is the regression, and it is the whole reason `Blocked` carries a
+    /// status: `broker_answer` restated the reason and the code as literals.
+    /// That was TRUE while `Broker::Refused` was the only thing that could
+    /// block a run, and it became false the moment the pull order became the
+    /// second — an out-of-sequence request would have told the operator the
+    /// broker was unreachable, with a 503 to agree with it. Which is the
+    /// mistake `BrokerRun::touched_wire` records costing a diagnosis once
+    /// already, one number over.
+    #[tokio::test]
+    async fn a_run_the_order_refuses_says_so_on_its_receipt_and_answers_409() {
+        let _sink = crate::emitted::sink();
+        let dir = masters(
+            "ladder-receipt",
+            Some(&format!(
+                "{GROWW_HEAD}NSE,CASH,,NIFTY,IDX,,NIFTY,,,NSE-NIFTY\n"
+            )),
+            Some(&format!(
+                "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
+            )),
+        );
+        let root = store_root("ladder-receipt");
+        let mut site = Site::serving(&dir, &root);
+        // NOTHING HELD. The store before a first ingest, which is exactly the
+        // state this refusal exists for.
+        site.censuses = Vec::new();
+        let journal = audit::Journal::at(&root);
+
+        let (code, body) = broker_answer(
+            minute_ask(),
+            std::time::SystemTime::UNIX_EPOCH,
+            &site,
+            &journal,
+            Vec::new(),
+        )
+        .await;
+
+        assert_eq!(
+            code,
+            axum::http::StatusCode::CONFLICT,
+            "out of sequence is a CONFLICT; nothing upstream is unavailable: {body}"
+        );
+        assert!(
+            body.contains("1day pass comes first"),
+            "the receipt names the pass to run instead: {body}"
+        );
+        assert!(
+            !body.contains("may not reach a live broker"),
+            "and does NOT report the broker as unreachable — the literal this \
+             block used to restate for every blocked run: {body}"
         );
     }
 

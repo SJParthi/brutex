@@ -2821,7 +2821,8 @@ async fn tick(
     let record = if run.reached == 0 {
         let why = run
             .blocked
-            .clone()
+            .as_ref()
+            .map(|b| b.why.clone())
             .or_else(|| run.refused.first().cloned())
             .unwrap_or_else(|| "no instrument in the universe could be reached".to_owned());
         audit::Record::refused(
@@ -2878,7 +2879,8 @@ async fn tick(
 
     let reason = run
         .blocked
-        .clone()
+        .as_ref()
+        .map(|b| b.why.clone())
         .or_else(|| {
             run.total
                 .failures

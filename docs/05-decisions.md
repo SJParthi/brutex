@@ -14227,3 +14227,54 @@ socket was opened.
 One hash probe per (instrument, month), over the caller's own list. The census
 is never walked, so the store's size does not appear in the bound. The
 per-probe `O(1)` remains `UNVERIFIED` for the reason `docs/06-limits.md` gives.
+
+## D-0154 · 2026-08-15 · A blocked run carries its own status code, because a second producer turned a true literal into a false one
+
+### The finding
+
+D-0153 gave `BrokerRun::blocked` a second producer. Within minutes it exposed a
+defect that had been latent and correct until that moment.
+
+`broker_answer` did not read `run.blocked`. It checked `is_some()` and then
+restated the reason and the status as literals:
+
+```
+if run.blocked.is_some() {
+    …refused(…, "this process may not reach a live broker")
+    …facts.push(("Refused because", "this process may not reach a live broker…"))
+    return (StatusCode::SERVICE_UNAVAILABLE, …)
+}
+```
+
+With one producer that was accurate. With two it meant **an operator told to
+run the day pass first would have been shown "this process may not reach a live
+broker", under a 503.** They would have gone to look at their network.
+
+`autopilot::tick` had always built its reason from `run.blocked` and was
+correct throughout. Only the receipt restated it.
+
+### The decision
+
+`blocked` becomes `Option<Blocked>`, pairing the reason with the status at the
+point the reason is known:
+
+| Producer | Status | Because |
+|---|---|---|
+| `BrokerRun::unreachable_broker` | `503` | the vendor path genuinely is unavailable to this process |
+| `BrokerRun::out_of_order` | `409` | nothing upstream is unavailable; the request is out of sequence and the reason names the pass to run |
+
+**Why the status and not only the reason.** This is the defect
+`BrokerRun::touched_wire` already documents, one number over: a run that reached
+nothing used to answer `502`, the page drew `Last pull HTTP 502`, and an
+operator read it as *the broker is down*. A `503` on "pull the day pass first"
+is that same wrong diagnosis. Pairing the code with the reason is what stops a
+third producer inheriting the wrong one by omission.
+
+### The proof
+
+`api::server::a_run_the_order_refuses_says_so_on_its_receipt_and_answers_409`,
+and note what it asserts: that the broker literal is **absent** from the body,
+not merely that the order's words are present. A test asserting only the latter
+passes on the broken code, because the broken code appended both.
+
+Invariant P-11.
