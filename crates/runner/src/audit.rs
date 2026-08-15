@@ -676,6 +676,283 @@ mod tests {
         );
     }
 
+    /// A grid with real cells, a baseline and a survivor.
+    ///
+    /// Built by hand rather than by sweeping, so the numbers are known and the
+    /// assertions can be exact. Every earlier test in this module exercised the
+    /// EMPTY path -- an empty grid, a default `Validated`, `None` verdicts --
+    /// which left the populated renderers at 79% coverage. A renderer that has
+    /// never rendered anything is not a tested renderer.
+    fn populated_grid() -> crate::grid::Grid {
+        crate::grid::Grid {
+            cells: vec![
+                // The baseline: no levels at all.
+                crate::grid::Cell {
+                    trades: 40,
+                    wins: 18,
+                    pessimistic: -900,
+                    optimistic: -900,
+                    timed_out: 40,
+                    winner_mae: 240,
+                    winner_mfe: 300,
+                    ..crate::grid::Cell::default()
+                },
+                // A survivor with sharp winners.
+                crate::grid::Cell {
+                    stop: Some(0),
+                    target: Some(1),
+                    trades: 62,
+                    wins: 37,
+                    pessimistic: 4_880,
+                    optimistic: 5_102,
+                    stopped: 15,
+                    targeted: 30,
+                    timed_out: 17,
+                    ambiguous_bars: 4,
+                    winner_mae: 41,
+                    winner_mfe: 380,
+                    ..crate::grid::Cell::default()
+                },
+            ],
+            signals: 1_124,
+            ..crate::grid::Grid::default()
+        }
+    }
+
+    #[test]
+    fn a_populated_grid_puts_the_baseline_first_and_names_the_sharpest() {
+        // The baseline row IS the comparison the operator asked for, so it must
+        // never be buried among variants sorted by profit -- a reader must not
+        // have to hunt for the row that answers "with levels or without".
+        let mut out = String::new();
+        grid(&mut out, &populated_grid(), 10);
+
+        let base_at = out.find("NONE").expect("the baseline row must be present");
+        let variant_at = out.find("0/1/-").expect("the level row must be present");
+        assert!(
+            base_at < variant_at,
+            "the baseline must be printed before the variants, not sorted among \
+             them by profit"
+        );
+        assert!(
+            out.contains("SHARPEST"),
+            "a grid with a surviving variant must name it"
+        );
+        assert!(
+            out.contains("41 ppm against"),
+            "the sniper figure is the tightest stop that would not have killed a \
+             winner, and it must appear as a number"
+        );
+        assert!(
+            out.contains("depend on intra-bar ordering"),
+            "four ambiguous bars must be reported as uncertainty, not hidden"
+        );
+    }
+
+    #[test]
+    fn a_grid_where_nothing_survives_says_so_rather_than_naming_a_loser() {
+        // `sharpest` returns None when no variant made money under pessimistic
+        // fills. Printing the "best of a bad set" would read as a recommendation.
+        let losing = crate::grid::Grid {
+            cells: vec![crate::grid::Cell {
+                trades: 10,
+                wins: 2,
+                pessimistic: -5_000,
+                optimistic: -5_000,
+                ..crate::grid::Cell::default()
+            }],
+            ..crate::grid::Grid::default()
+        };
+        let mut out = String::new();
+        grid(&mut out, &losing, 10);
+        assert!(out.contains("NO SHARPEST VARIANT"));
+        assert!(
+            out.contains("a finding, not a gap"),
+            "nothing surviving is a result, and must not read as missing data"
+        );
+    }
+
+    #[test]
+    fn a_populated_walk_forward_prints_a_row_per_fold() {
+        let v = Validated {
+            folds: vec![
+                crate::validate::FoldResult {
+                    index: 0,
+                    train_bars: 1_000,
+                    purged: 15,
+                    test_bars: 500,
+                    considered: 207,
+                    chosen_exit: Some((Some(0), None, None)),
+                    chosen: Some(vocab::ConditionMask::default()),
+                    in_sample: crate::validate::Summary {
+                        trades: 30,
+                        best: 900,
+                        worst: 400,
+                        forced: 2,
+                    },
+                    out_of_sample: crate::validate::Summary {
+                        trades: 12,
+                        best: 300,
+                        worst: -150,
+                        forced: 1,
+                    },
+                },
+                crate::validate::FoldResult {
+                    index: 1,
+                    train_bars: 2_000,
+                    purged: 15,
+                    test_bars: 500,
+                    considered: 311,
+                    chosen_exit: Some((Some(1), Some(2), None)),
+                    chosen: Some(vocab::ConditionMask::default()),
+                    in_sample: crate::validate::Summary {
+                        trades: 55,
+                        best: 1_400,
+                        worst: 800,
+                        forced: 3,
+                    },
+                    out_of_sample: crate::validate::Summary {
+                        trades: 20,
+                        best: 600,
+                        worst: 220,
+                        forced: 2,
+                    },
+                },
+            ],
+            not_considered: 44,
+        };
+        let mut out = String::new();
+        walk_forward(&mut out, &v);
+
+        assert_eq!(cell(&out, "folds"), "2");
+        assert_eq!(cell(&out, "still positive out of sample"), "1");
+        assert!(
+            out.contains("candidates NOT ranked"),
+            "a budget that dropped 44 candidates must say so -- a search that \
+             looked at the first N and called it exhaustive is the defect"
+        );
+        assert!(
+            out.contains("ONE DRAW"),
+            "the walk must state that one fold is not a proof"
+        );
+    }
+
+    #[test]
+    fn a_measured_pbo_prints_its_denominator_and_its_median() {
+        // A PBO over three usable folds out of ten is a different number from
+        // one over ten, and a reader who cannot see the denominator cannot tell
+        // them apart.
+        let folds = [
+            Placement {
+                candidates: 5,
+                winner_rank: 0,
+            },
+            Placement {
+                candidates: 5,
+                winner_rank: 1,
+            },
+            Placement {
+                candidates: 5,
+                winner_rank: 4,
+            },
+            Placement {
+                candidates: 1,
+                winner_rank: 0,
+            },
+        ];
+        let mut out = String::new();
+        overfitting(&mut out, &probability_of_overfitting(&folds));
+
+        assert_eq!(cell(&out, "folds ranked"), "3");
+        assert!(
+            out.contains("folds NOT ranked"),
+            "the unrankable fold must be named and excluded from the denominator"
+        );
+        assert!(out.contains("median placement"));
+        assert!(
+            out.contains("selection carries information"),
+            "one of three below median is under half, so the procedure is not a \
+             coin flip and must be described as such"
+        );
+    }
+
+    #[test]
+    fn a_completed_bootstrap_prints_each_test_and_whether_it_cleared() {
+        let clears = crate::bootstrap::Verdict {
+            statistic: 3.42,
+            p_value: 0.004,
+            draws: 1_000,
+            strategies: 20,
+        };
+        let fails = crate::bootstrap::Verdict {
+            statistic: 0.81,
+            p_value: 0.612,
+            draws: 1_000,
+            strategies: 20,
+        };
+        let mut out = String::new();
+        bootstrap(&mut out, Some(&clears), Some(&fails), 2);
+
+        assert!(out.contains("White's Reality Check"));
+        assert!(out.contains("Hansen's SPA"));
+        assert!(
+            out.contains("0.0040"),
+            "the p-value must be printed to enough places to be read"
+        );
+        assert!(
+            out.contains("Only Romano-Wolf \nsays WHICH") || out.contains("says WHICH"),
+            "the report must say which test answers which question"
+        );
+    }
+
+    #[test]
+    fn one_call_with_everything_supplied_renders_every_section_populated() {
+        // The single entry point, exercised with real inputs rather than None.
+        // `render(None, ...)` proved the absent path; this proves the present
+        // one, and between them every branch of the dispatcher is taken.
+        let taken = Trades {
+            trades: vec![
+                Trade {
+                    signal_bar: 0,
+                    entry_bar: 1,
+                    exit_bar: 5,
+                    best: 10,
+                    worst: -5,
+                    forced: false,
+                };
+                3
+            ],
+            signals: 50,
+            while_open: 45,
+            too_late: 2,
+        };
+        let grid_in = populated_grid();
+        let folds = Validated::default();
+        let over = probability_of_overfitting(&[]);
+        let out = super::render(
+            Some(&taken),
+            Some(&grid_in),
+            Some(&folds),
+            Some(&over),
+            Some((None, None, 0)),
+            10,
+        );
+
+        assert!(
+            !out.contains("NOT SUPPLIED"),
+            "every section was supplied, so none may claim otherwise"
+        );
+        for section in [
+            "TRADES",
+            "EXIT GRID",
+            "WALK-FORWARD",
+            "OVERFITTING",
+            "BOOTSTRAP",
+        ] {
+            assert!(out.contains(section), "{section} missing");
+        }
+    }
+
     #[test]
     fn a_refused_bootstrap_is_shown_as_refused_and_never_as_a_pass() {
         let mut out = String::new();
