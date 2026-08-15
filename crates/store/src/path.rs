@@ -355,6 +355,40 @@ impl Timeframe {
         name: "3min",
     };
 
+    /// One-second bars — the rung the two archive feeds' files actually hold.
+    ///
+    /// # Why the store gains a rung below the minute
+    ///
+    /// `TrueData` and GDFL sell folders of per-second files. `docs/08-vendor-
+    /// samples.md` measured them at one row per whole second with no sub-second
+    /// field, so a second IS their finest record and it is what an operator
+    /// buys. The store had no directory for it, so a request for that rung
+    /// parsed, passed `served()`, and was then refused at the WRITE boundary —
+    /// the operator could ask for the thing he had paid for and nothing could
+    /// file it.
+    ///
+    /// # It is not intraday-aligned, and under the open anchor that is fine
+    ///
+    /// [`Self::aligns_with_the_open`] asks whether a rung divides the 555
+    /// minutes from IST midnight to the open, and answers `false` here because
+    /// its length is not a whole number of minutes at all. That predicate is
+    /// about a MIDNIGHT-anchored grid; `pull::fold` anchors an intraday rung at
+    /// the OPEN, where one second tiles the session exactly — 22,500 of them,
+    /// with no stub at either end.
+    ///
+    /// # What it unlocks, without another line being written
+    ///
+    /// `pull::ingest::derived_from` computes the derived set from this table:
+    /// every rung strictly coarser than the source whose length is a whole
+    /// multiple of it. One second divides all eight rungs above, so a
+    /// one-second ingest now files the second AND folds it into 1, 2, 3, 5, 10,
+    /// 15, 30 and 60 minutes — because the rule reads the table rather than a
+    /// list somebody has to remember to edit.
+    pub const SECOND_1: Self = Self {
+        secs: 1,
+        name: "1s",
+    };
+
     /// Two-minute bars.
     ///
     /// **Does not divide 555** — 277.5 — so under a grid anchored at IST
@@ -440,6 +474,7 @@ impl Timeframe {
     /// written costs nothing and reads honestly.
     pub const KNOWN: &'static [Self] = &[
         Self::DAY_1,
+        Self::SECOND_1,
         Self::MINUTE_1,
         Self::MINUTE_2,
         Self::MINUTE_3,

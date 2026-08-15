@@ -1841,6 +1841,7 @@ fn a_timeframe_and_a_month_are_values_not_strings() {
         Timeframe::KNOWN,
         &[
             Timeframe::DAY_1,
+            Timeframe::SECOND_1,
             Timeframe::MINUTE_1,
             Timeframe::MINUTE_2,
             Timeframe::MINUTE_3,
@@ -2251,7 +2252,11 @@ fn an_unlisted_length_is_refused_and_not_invented() {
     // length nobody stores"; two minutes is stored now, so asserting it is
     // refused would assert the opposite of the table. 90 and 240 take its place
     // — still plausible, still absent, and still refused by name.
-    for secs in [0_u32, 1, 45, 90, 240, 7_200, 86_399] {
+    // 1 LEFT THIS LIST BECAUSE IT BECAME A RUNG, exactly as 120 did before it:
+    // one second is what the archive feeds' files hold and the store carries it
+    // now. 2 and 45 take its place — still plausible, still absent, still
+    // refused by name.
+    for secs in [0_u32, 2, 45, 90, 240, 7_200, 86_399] {
         assert!(
             Timeframe::from_secs(secs).is_err(),
             "{secs}s resolved to a rung that is not in KNOWN"
@@ -2304,7 +2309,8 @@ fn only_the_rungs_that_divide_555_start_a_session_on_time() {
 #[test]
 fn every_rung_length_and_name_is_pinned_exactly() {
     for (tf, secs, name) in [
-        (Timeframe::MINUTE_1, 60_u32, "1min"),
+        (Timeframe::SECOND_1, 1_u32, "1s"),
+        (Timeframe::MINUTE_1, 60, "1min"),
         (Timeframe::MINUTE_2, 120, "2min"),
         (Timeframe::MINUTE_3, 180, "3min"),
         (Timeframe::MINUTE_5, 300, "5min"),
@@ -2328,7 +2334,7 @@ fn every_rung_length_and_name_is_pinned_exactly() {
     }
     assert_eq!(
         Timeframe::KNOWN.len(),
-        9,
+        10,
         "a rung was added or removed; D-0077 is the entry that has to change"
     );
     // EVERY RUNG IN THE TABLE IS ALSO IN `KNOWN`, and the count above only
@@ -2336,7 +2342,8 @@ fn every_rung_length_and_name_is_pinned_exactly() {
     // other — a `MINUTE_2` const with no `KNOWN` entry is a directory name
     // `from_secs` can never return, which is data written into a hole.
     for (tf, _, name) in [
-        (Timeframe::MINUTE_2, 120_u32, "2min"),
+        (Timeframe::SECOND_1, 1_u32, "1s"),
+        (Timeframe::MINUTE_2, 120, "2min"),
         (Timeframe::MINUTE_10, 600, "10min"),
     ] {
         assert!(

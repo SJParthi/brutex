@@ -545,14 +545,26 @@ fn a_shared_second_folds_last_price_wins() {
     assert!(fold(&snapshots, Bucket::SECOND).is_ok());
 }
 
-/// A second's worth of rows folds onward to the rung the store can carry, and
-/// the one-second rung refuses at the write boundary BY NAME rather than being
-/// filed under a rung it is not.
+/// A second's worth of rows folds onward to a coarser rung, and the one-second
+/// rung now has a directory of its own to land in.
+///
+/// # This test asserted the opposite, and the change is the point
+///
+/// It read *"crates/store ships no one-second stride yet"* — the word `yet`
+/// doing the work. It does now: `Timeframe::SECOND_1` exists because one second
+/// is the rung the two archive feeds' files actually hold, and until it did an
+/// operator could ask for the per-second data he had bought and watch the write
+/// boundary refuse it.
+///
+/// What the test still proves is the half that matters and did not change: a
+/// second's rows fold onward correctly, so the same bytes reach disk at every
+/// coarser rung as well.
 #[test]
-fn the_second_rung_has_no_directory_and_refuses_rather_than_substituting() {
-    assert!(
-        Granularity::Second1.store_timeframe().is_none(),
-        "crates/store ships no one-second stride yet"
+fn the_second_rung_has_a_directory_and_folds_onward_to_the_coarser_ones() {
+    assert_eq!(
+        Granularity::Second1.store_timeframe(),
+        Some(store::path::Timeframe::SECOND_1),
+        "one second is the archives' own rung and the store carries it"
     );
     assert!(Granularity::Minute1.store_timeframe().is_some());
     assert!(Granularity::Day1.store_timeframe().is_some());

@@ -736,15 +736,31 @@ fn a_rung_the_store_cannot_carry_is_refused_and_the_refusal_names_it() {
     let store_root = scratch.store();
     let (url, _seen) = broker(BODY);
 
+    // `Second5`, NOT `Second1`, AND THE SWAP IS THE POINT OF THE TEST.
+    //
+    // This used `Second1` as "the rung crates/store has not been widened to
+    // carry", and that stopped being true: the store ships `Timeframe::SECOND_1`
+    // now, because one second is the rung the two archive feeds' files actually
+    // hold and an operator could ask for the data he had bought while nothing
+    // could file it.
+    //
+    // The BEHAVIOUR under test is unchanged and still needs proving — a rung
+    // with no directory must refuse by name and write nothing — so it moves to
+    // a rung that genuinely has none. Five seconds is requestable, is on the
+    // ladder, and `Timeframe::KNOWN` holds nothing for it.
     assert_eq!(
-        pull::vendor::Granularity::Second1.store_timeframe(),
+        pull::vendor::Granularity::Second5.store_timeframe(),
         None,
-        "this test is about the rung crates/store has NOT been widened to carry"
+        "this test is about a rung crates/store has NOT been widened to carry"
+    );
+    assert!(
+        pull::vendor::Granularity::Second5.is_requestable(),
+        "and one a caller may actually ask for, so the refusal is reachable"
     );
 
     let raw = fetch(&url);
     let request = BarRequest {
-        granularity: pull::vendor::Granularity::Second1,
+        granularity: pull::vendor::Granularity::Second5,
         ..request()
     };
     let done: Ingested = ingest::from_window(&raw, "NIFTY", &url, &store_root, plan(&request));
@@ -759,7 +775,7 @@ fn a_rung_the_store_cannot_carry_is_refused_and_the_refusal_names_it() {
     assert_eq!(done.failures.len(), 1, "one refusal, not one per member");
     let why = &done.failures.first().expect("the refusal").why;
     assert!(
-        why.contains("1s"),
+        why.contains("5s"),
         "the refusal must NAME the rung it refused: {why}"
     );
     assert!(

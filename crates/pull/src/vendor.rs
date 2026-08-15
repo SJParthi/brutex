@@ -509,7 +509,16 @@ impl Granularity {
             // NAMED, NOT CAUGHT. `Timeframe::KNOWN` holds no entry for any of
             // these four, and saying so one rung at a time is what makes an
             // eighth rung a compile error instead of an inherited `None`.
-            Self::Tick | Self::Second1 | Self::Second5 | Self::Week1 => None,
+            // ONE SECOND HAS A DIRECTORY NOW. `crates/store` gained
+            // `Timeframe::SECOND_1` because it is the rung the two archive
+            // feeds' files actually hold — measured at one row per whole
+            // second — and an operator could ask for the thing he had bought
+            // while nothing could file it.
+            Self::Second1 => Some(Timeframe::SECOND_1),
+            // `Tick`, `Second5` and `Week1` still answer `None` because
+            // `Timeframe::KNOWN` genuinely holds nothing for them. A stated
+            // absence, not a catch-all.
+            Self::Tick | Self::Second5 | Self::Week1 => None,
         }
     }
 
@@ -674,7 +683,7 @@ const _: () = {
 // Without this, a rung added to `KNOWN` and forgotten in the macro would be a
 // store directory no `Granularity` names — the same silence in the other
 // direction, and the one the `_` arm produced.
-const _: () = assert!(Timeframe::KNOWN.len() == 9);
+const _: () = assert!(Timeframe::KNOWN.len() == 10);
 
 // THE TWO KNOWN ENTRIES WITH NO `Granularity`, AND THE ABSENCE IS THE DESIGN.
 //
@@ -5030,7 +5039,24 @@ mod tests {
         // same exemption and says why.
         let expected: Vec<&str> = Timeframe::KNOWN
             .iter()
-            .filter(|known| known.aligns_with_the_open() || known.secs() == 86_400)
+            // FILABILITY IS `store_timeframe`, NOT ALIGNMENT — and the two
+            // stopped being the same question when the fold moved its anchor.
+            //
+            // This filtered on `aligns_with_the_open() || secs == 86_400`,
+            // which asked "does this rung divide the 555 minutes from IST
+            // midnight to the open, or is it the day". That WAS the filability
+            // test while the grid was anchored at midnight. `crate::fold`
+            // anchors an intraday rung at the OPEN now, so alignment no longer
+            // decides anything about whether a bar can be filed — and `1s`,
+            // whose length is not a whole number of minutes at all, proves it:
+            // the predicate says false and the store ships a directory.
+            //
+            // Asked of the function that actually decides.
+            .filter(|known| {
+                Granularity::ALL
+                    .into_iter()
+                    .any(|rung| rung.store_timeframe() == Some(**known))
+            })
             .map(|known| known.as_str())
             .collect();
         assert_eq!(
@@ -6056,11 +6082,17 @@ mod tests {
                 );
             }
         }
-        assert!(
-            Granularity::Second1.store_timeframe().is_none(),
-            "the one rung both archives serve and NEITHER can file: that \
-             refusal belongs to the write boundary, which names it, and is why \
-             `serves` and `store_timeframe` are two questions"
+        // AND THE RUNG THEY BOTH SERVE CAN NOW BE FILED. This asserted the
+        // opposite — that `Second1` had nowhere to go — which was true and was
+        // the whole of why an operator could ask for the per-second data he had
+        // bought and watch the write boundary refuse it. `crates/store` ships
+        // `Timeframe::SECOND_1` now, so the two questions still differ and both
+        // answer yes for this rung.
+        assert_eq!(
+            Granularity::Second1.store_timeframe(),
+            Some(Timeframe::SECOND_1),
+            "the rung both archives serve is the rung their files hold, and it \
+             has a directory"
         );
     }
 
