@@ -2014,6 +2014,21 @@
   });
 
   /** Rows per side, with the gate above it applied — the facet rule, again. */
+  /* THE SIDES THIS SELECTION REACHES, sorted — the cascade's ninth rung.
+   *
+   * `sidesAll` stays on `deco` and feeds `sideRefusal`, which DISABLES; a
+   * disable computed from a selection is the trap where choosing a side and
+   * narrowing past it kills the control that could clear it. Same split as
+   * `expiryOffered` against `expiriesAll`, and for the same reason. */
+  const sideOffered = $derived.by(() => {
+    const seen = new Set();
+    for (const r of expiryGated) if (r.side !== null) seen.add(r.side);
+    return [...seen].sort();
+  });
+
+  /** How many rows the Both row returns — what clicking it actually gives. */
+  const mnyFilteredCount = $derived(expiryGated.length);
+
   const sideCount = $derived.by(() => {
     const c = new Map();
     for (const r of expiryGated) {
@@ -4781,54 +4796,6 @@
          whole document instead.
          ================================================================== -->
     <div class="board">
-    <!-- ==================================================================
-         THE SEGMENT TABLIST — `.segs`, AND IT IS ABOVE WHAT IT FILTERS.
-
-         A tablist belongs over the set it narrows, which is where the approved
-         design puts it, so it is the first thing under the pane head and ahead
-         of the query strip. The FEED still outranks it: this whole branch only
-         renders once a store has answered, so there is never a tab here
-         counting a feed nobody chose.
-
-         IT WAS A `Picker`, AND WHAT IT LOST IS ITS OWN RESTATEMENT. The clause
-         under it read "INDEX · CASH · FNO — showing INDEX" and "3 segment(s)
-         held": the enumeration and the count of an enumeration that is now
-         drawn, one tab per segment, with each tab's own counted total on its
-         face. A line naming what the row beside it already draws is the page
-         repeating a control it has already drawn.
-
-         "SEGMENT" IS THE STORE'S OWN SECOND FIELD — INDEX, CASH, FNO — and NOT
-         the mockup's spot/futures/options taxonomy. Relabelling it would rename
-         three sets into three other sets that do not have the same members.
-         ================================================================== -->
-    <div
-      class="segs"
-      role="tablist"
-      aria-label="Segment — the store's own second field of EXCHANGE-SEGMENT-SYMBOL"
-    >
-      <button
-        class="seg"
-        type="button"
-        role="tab"
-        aria-selected={kind === ''}
-        title="Every segment the rungs below reach, counted together. The store's own second field, not a universe."
-        onclick={() => (kind = '')}
-      >
-        All segments<span class="c">{fmt(textMatched.length)}</span>
-      </button>
-      {#each kinds as [k, n] (k)}
-        <button
-          class="seg"
-          type="button"
-          role="tab"
-          aria-selected={kind === k}
-          title={`${k} — ${fmt(n)} instrument-month(s) here. Counted with every other rung applied and this one not, so the number is what clicking it returns.`}
-          onclick={() => (kind = kind === k ? '' : k)}
-        >
-          {k}<span class="c">{fmt(n)}</span>
-        </button>
-      {/each}
-    </div>
 
     <!-- ==================================================================
          THE QUERY STRIP.
@@ -4871,62 +4838,28 @@
         <span title="Which membership to hold this store against — the cascade's second rung."
           >Universe</span
         >
-        <div class="picker" data-drop="uni">
-          <button
-            class="mnyb"
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={drop === 'uni'}
-            title={universeRefusal
-              ? `${chosenUniverse.label} is not narrowing this table — ${universeRefusal}`
-              : universe && universeCount.get(universe)
-                ? `${chosenUniverse.label} — ${fmt(universeCount.get(universe).held)} of ${fmt(universeCount.get(universe).members)} member(s) held in this store, so ${fmt(universeCount.get(universe).members - universeCount.get(universe).held)} are not stored, and ${fmt(universed.length)} instrument-month(s) are stored in it. Membership counted from /instruments.json?feed=${feeds.active ?? ''}; held counted from /store.json. "Not stored" is not "not offered" — this page reads the disk.`
-                : `Everything — ${fmt(deco.length)} instrument-month(s), joined to no membership list at all. This is the only setting that reaches stored data whose instrument this feed's master no longer lists.`}
-            onclick={(e) => {
-              e.stopPropagation();
-              drop = drop === 'uni' ? null : 'uni';
-            }}>{chosenUniverse.label}</button
-          >
-          {#if drop === 'uni'}
-            <div
-              class="menu"
-              role="group"
-              aria-label="Universe — which membership to hold this store against"
-            >
-              {#each UNIVERSES as u (u.key)}
-                {@const c = universeCount.get(u.key)}
-                {@const st = tierState(u)}
-                <button
-                  class="opt"
-                  type="button"
-                  class:off={st === 'absent'}
-                  disabled={st === 'absent'}
-                  aria-pressed={universe === u.key}
-                  onclick={() => {
-                    universe = u.key;
-                    drop = null;
-                  }}
-                  title={st === 'absent'
-                    ? tierRefusal(u.label, u.token)
-                    : u.token === ''
-                      ? `Every instrument-month in this store, joined to nothing. This is the only row that reaches stored data whose instrument this feed's master no longer lists — ${outsideMaster ? `${fmt(outsideMaster.months)} such row(s), ${fmt(outsideMaster.instruments)} instrument(s)` : 'a count that needs this feed’s master to be measured'}.`
-                      : c
-                        ? `${u.label} — ${fmt(c.held)} of ${fmt(c.members)} member(s) held in this store, so ${fmt(c.members - c.held)} are not stored. Membership counted from /instruments.json?feed=${feeds.active ?? ''}; held counted from /store.json. "Not stored" is not "not offered" — this page reads the disk.`
-                        : `${u.label} — membership not counted: ${membershipWhy ?? 'the instrument list for this feed is not on hand'}`}
-                >
-                  <span class="tk">{universe === u.key ? '✓' : ''}</span>
-                  <span class="nm">{u.label}</span>
-                  <span class="ct" class:warn={st === 'absent'}
-                    >{#if st === 'absent'}no source{:else if u.token === ''}{fmt(
-                        deco.length
-                      )} stored{:else if c}{fmt(c.held)} of {fmt(c.members)} held{:else}not
-                      counted{/if}</span
-                  >
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
+        <!-- THE SAME SEARCHABLE `Picker` AS EVERY OTHER RUNG. It was a
+             hand-rolled menu with no filter box; with 200+ NIFTY Total Market
+             members behind some universes, a list you can only scroll is a list
+             you cannot use. `single`, like everything on this page. -->
+        <Picker
+          single
+          filter
+          label="universes"
+          summary={chosenUniverse.label}
+          rows={UNIVERSES.map((u) => ({
+            key: u.key,
+            name: u.label,
+            detail: u.key
+              ? universeCount.get(u.key)
+                ? `${fmt(universeCount.get(u.key).held)} of ${fmt(universeCount.get(u.key).members)} held`
+                : 'not counted'
+              : `${fmt(deco.length)} held`,
+            why: u.key ? undefined : 'The only setting that reaches stored data whose instrument this feed\u2019s master no longer lists.'
+          }))}
+          selected={new Set([universe])}
+          onchange={(/** @type {Set<string>} */ sel) => (universe = [...sel][0] ?? '')}
+        />
         <!-- THE COUNTED CLAUSE THAT WAS A PARAGRAPH. Every figure comes from the
              rows and the master on hand, and the one sentence that is not a
              figure is a refusal naming why a figure is absent. It clips to one
@@ -4950,246 +4883,6 @@
               outsideMaster.instruments
             )} instrument(s) are not listed by {feedName}'s master — they are held, no membership
             universe can reach them, and Everything is where they show.
-          {/if}
-        </span>
-      </div>
-
-      <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
-           approved design draws as `<select id="tf">` beside the others.
-
-           IT IS A `.picker` AND NOT A `<select>`, like every other rung in
-           this strip. The design's `<select>` is shorthand for "a dropdown
-           goes here"; a native one cannot carry a per-row count, cannot carry
-           a per-row `title`, and cannot be searched — and the counted row is
-           the whole reason this page's menus exist.
-
-           EVERY RUNG THE STORE HOLDS IS OFFERED AND NO OTHER. The bar-length
-           ladder in `TF_SECS` is an ORDERING, not a list of choices: offering
-           `5min` because the ladder names it, on a store that holds no
-           five-minute bar, would be a control promising a set that does not
-           exist. The rows are counted off the rows. -->
-      <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
-        <span title="Bar length — the rung each row is stored at.">Timeframe</span>
-        <div class="picker" data-drop="tf">
-          <button
-            class="mnyb"
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={drop === 'tf'}
-            disabled={Boolean(tfRefusal)}
-            title={tfRefusal
-              ? `No bar length can be chosen — ${tfRefusal}`
-              : timeframe
-                ? `Only rows stored at ${timeframe} — ${tfNote(timeframe)}. A row here is one instrument-month AT ONE RUNG: the completeness column divides by this rung's session size and the month roll-up refuses a figure entirely when one month holds two rungs at once, so choosing one is what makes every session and coverage figure below single-valued.`
-                : `Every rung this selection holds: ${fmt(tfAll.length)} of them. Nothing is narrowed and nothing is hidden — but a month holding two rungs has no single session size, so the roll-up prints a dash rather than averaging them. Choose one and the dashes become numbers.`}
-            onclick={(e) => {
-              e.stopPropagation();
-              drop = drop === 'tf' ? null : 'tf';
-            }}
-            >{tfRefusal
-              ? 'No rung held'
-              : timeframe
-                ? timeframe
-                : `All · ${fmt(tfAll.length)}`}</button
-          >
-          {#if drop === 'tf'}
-            <div class="menu" role="group" aria-label="Timeframe — bar length">
-              <button
-                class="opt"
-                type="button"
-                aria-pressed={timeframe === ''}
-                title="Every rung this selection holds, with no bar-length filter in force. The TF column shows which is which."
-                onclick={() => {
-                  timeframe = '';
-                  drop = null;
-                }}
-              >
-                <span class="tk">{timeframe === '' ? '✓' : ''}</span>
-                <span class="nm">All rungs</span>
-                <!-- `universed`, NOT `timeframed`. Every row in this menu says
-                     what CLICKING IT returns, and clicking this one drops the
-                     rung filter — so with `1day` in force, `timeframed.length`
-                     here would advertise the daily count on the row that
-                     restores every rung. That is the facet rule stated further
-                     up, and it is the number the other rows already obey. -->
-                <span class="ct">{fmt(universed.length)} held</span>
-              </button>
-              {#if tfAll.length === 0}
-                <hr />
-                <p class="none">No rung is held here.</p>
-              {:else}
-                <hr />
-                <!-- KEYED ON THE WIRE STRING, which is also what is compared
-                     and what is assigned. There is no display form of a rung
-                     on this page: the TF column prints `1day` and so does
-                     this, so the control and the column cannot drift. -->
-                {#each tfAll as [tf, n] (tf)}
-                  <button
-                    class="opt"
-                    type="button"
-                    aria-pressed={timeframe === tf}
-                    title={`${tf} — ${tfNote(tf)}. ${fmt(n)} instrument-month(s) are stored at this rung under the rungs above. ${
-                      barsPerSession(tf) === null
-                        ? 'No session size is recorded for it, so every session and coverage figure for these rows is a dash rather than a figure computed against a denominator nobody chose.'
-                        : `One session is ${fmt(barsPerSession(tf))} bar(s) at this rung, which is the denominator the completeness column uses.`
-                    }`}
-                    onclick={() => {
-                      timeframe = timeframe === tf ? '' : tf;
-                      drop = null;
-                    }}
-                  >
-                    <span class="tk">{timeframe === tf ? '✓' : ''}</span>
-                    <span class="nm">{tf}</span>
-                    <span class="ct" class:warn={barsPerSession(tf) === null}
-                      >{fmt(n)} held · {tfNote(tf)}</span
-                    >
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-        </div>
-        <span class="count" class:warn={Boolean(tfRefusal)}>
-          {#if tfRefusal}
-            No bar length — {tfRefusal}
-          {:else if timeframe}
-            {fmt(timeframed.length)} of {fmt(universed.length)} instrument-month(s) at {timeframe} · {tfNote(
-              timeframe
-            )}
-          {:else}
-            <!-- THE COUNT, NOT THE ROLL-CALL. Nine rungs spelled out needed
-                 581px in a 143px cell, so the list was cut after the second
-                 and the count itself never appeared. Every rung and its tally
-                 is one click away in the menu below, and the whole string is
-                 on this cell's title. -->
-            {fmt(tfAll.length)} rung(s) held
-          {/if}
-        </span>
-      </div>
-
-      <!-- THE MONTH WINDOW — two ends, so it is TWO `.cell`s, exactly as the
-           design draws a From and a To. The product's OWN calendar, never the
-           platform's: `<input type="date">` renders in the OS locale, so
-           `02/09/2024` is two different days depending on who is reading it,
-           and no rule in this file can reach either its text or its popup.
-           There is not one on this page and there must never be.
-
-           IT WORKS IN WHOLE MONTHS, and that is the unit of the data rather
-           than a simplification — a row here IS an instrument-month.
-
-           IT RENDERS ONLY WHEN THERE IS A WINDOW TO CHOOSE. One month is not a
-           range, and a control whose every setting produces the same table is a
-           control that has nothing to say. -->
-      <!-- THE FROM/TO RANGE IS GONE. ONE MONTH CONTROL, SINGLE SELECT.
-           ==================================================================
-           MONTH was secretly TWO controls: this from/to range, and the single
-           month picker below. A range is a selection of many months, which is
-           a multi-select — and every control on this page is single select.
-           Two controls for one rung also meant the rung was applied at two
-           different depths of the cascade, which is the one thing the prefix
-           rule cannot express.
-
-           `fromMonth` and `toMonth` stay declared and stay empty, so
-           `windowed` is `timeframed` by definition and the cascade collapses
-           to one month step. The calendar snippet and its handlers are dead
-           and are removed in the commit that follows this one, separately,
-           because deleting ~250 lines across thirty-three sites in the same
-           edit as a behaviour change is how a page stops rendering with
-           nothing to point at.
-           ================================================================== -->
-
-      <!-- THE MONTH ROLL-UP, WHICH WAS A BAND OF CARDS AND IS NOW A MENU. The
-           band was the widest block on the page and said, per month, what one
-           row of a dropdown says. Every one of those facts is on the row below —
-           the coverage on its face, the rest on its `title`, which is the card's
-           own tooltip moved across unchanged — and the click still writes the
-           same `month`.
-
-           SHOWN AND REFUSED, NEVER DROPPED: the "no month matches the filter"
-           case is the menu's own empty row rather than a card band that
-           silently collapses to nothing. -->
-      <div class="cell">
-        <span title="One month file, or all of them.">Month</span>
-        <div class="picker" data-drop="month">
-          <button
-            class="mnyb"
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={drop === 'month'}
-            title={month
-              ? `Month ${monthLabel(month)} — the store's own key for it is ${month}. ${fmt(monthCards.length)} month(s) are on offer under the rungs above; ${fmt(holeMonths)} of them have holes.`
-              : `Every month the rungs above reach: ${fmt(monthCards.length)} of them, ${fmt(holeMonths)} with holes. A month's denominator is the fullest instrument stored for it, so a session NSE never held is never counted as missing.`}
-            onclick={(e) => {
-              e.stopPropagation();
-              drop = drop === 'month' ? null : 'month';
-            }}>{month ? monthLabel(month) : `All · ${fmt(monthCards.length)}`}</button
-          >
-          {#if drop === 'month'}
-            <div class="menu" role="group" aria-label="Months in the store">
-              <button
-                class="opt"
-                type="button"
-                aria-pressed={month === ''}
-                title="Every month the rungs above reach, with no month filter in force."
-                onclick={() => {
-                  month = '';
-                  drop = null;
-                }}
-              >
-                <span class="tk">{month === '' ? '✓' : ''}</span>
-                <span class="nm">All months</span>
-                <span class="ct">{fmt(monthCards.length)} held</span>
-              </button>
-              {#if monthCards.length === 0}
-                <hr />
-                <p class="none">No month matches the filter.</p>
-              {:else}
-                <hr />
-                {#each monthCards as m (m.month)}
-                  <button
-                    class="opt"
-                    type="button"
-                    data-state={m.state}
-                    aria-pressed={month === m.month}
-                    onclick={() => {
-                      month = month === m.month ? '' : m.month;
-                      drop = null;
-                    }}
-                    title={m.unverified === m.n
-                      ? `${monthLabel(m.month)}: ${fmt(m.n)} row(s), each the only one stored at its rung for this month. ${SOLE_WHY}`
-                      : m.missing === 0
-                        ? `${monthLabel(m.month)}: every one of the ${fmt(m.n)} instruments holds all ${m.fullest === null ? 'the bars of its own rung — this month is held at two rungs, so there is no single bar count for it' : `${fmt(m.fullest)} bars of the ${dayText(m.sessions)} sessions observed`}.${m.unverified > 0 ? ` ${fmt(m.unverified)} of them is the only row at its rung and is counted in neither direction.` : ''}`
-                        : `${monthLabel(m.month)}: ${fmt(m.n - m.full - m.unverified)} of ${fmt(m.n)} instruments short, ${fmt(m.missing)} bars missing — ${m.tf && barsPerSession(m.tf) !== null ? `${fmt(Math.floor(m.missing / barsPerSession(m.tf)))} session-equivalents` : 'session count unavailable at this rung'}. Worst: ${m.worst?.instrument} holds ${fmt(m.worst?.rows ?? 0)} of ${m.fullest === null ? 'the fullest row at its own rung' : fmt(m.fullest)}. The store's own key for this month is ${m.month}.`}
-                  >
-                    <span class="tk">{month === m.month ? '✓' : ''}</span>
-                    <!-- RELABELLED ON THE WAY TO THE SCREEN, NEVER ON THE WAY
-                         TO A COMPARISON. The `{#each}` keys on the raw
-                         `YYYY-MM`, `aria-pressed` compares it and the click
-                         assigns it; only this text node is the display form. -->
-                    <span class="nm">{monthLabel(m.month)}</span>
-                    <span class="ct" class:warn={m.state !== 'full'}>
-                      <span class="pip" aria-hidden="true"></span>
-                      {pctText(m.pct)}{#if m.unverified === m.n}
-                        · not comparable{:else if m.missing === 0}
-                        · complete{:else}
-                        · {fmt(m.n - m.full - m.unverified)} short{/if}
-                    </span>
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-        </div>
-        <span class="count" class:warn={holeMonths > 0}>
-          {#if monthCards.length === 0}
-            {blocked?.tsub ?? 'no month matches'}
-          {:else if month}
-            {dayText(monthCards.find((m) => m.month === month)?.sessions)} session(s) observed · {fmt(
-              monthCards.find((m) => m.month === month)?.n ?? 0
-            )} row(s) · {pctText(monthCards.find((m) => m.month === month)?.pct ?? null)} covered
-          {:else}
-            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} holes{#if unprovenMonths > 0}
-              · <span title={SOLE_WHY}>{fmt(unprovenMonths)} not comparable</span>{/if}
           {/if}
         </span>
       </div>
@@ -5247,12 +4940,26 @@
         </div>
       {/if}
 
-      <!-- THE TEXT BOX. It reaches an instrument OR a month, which is why it is
-           not folded into the picker above it, and it is the `/` target. -->
+      <!-- THE INSTRUMENT RUNG'S TEXT INPUT — not a tenth rung.
+           ==================================================================
+           It used to be labelled FIND and read as a control of its own. It is
+           not: it writes `filter`, which drives `typed` -> `textMatched`, which
+           IS the instrument stage of the cascade.
+
+           The old reason it sat apart — "it reaches an instrument OR a month" —
+           died with the month rung. The remaining reason is mechanical:
+           `Picker`'s own filter box is internal `$state` (`q`, Picker.svelte
+           :114) with no way to read it out, so folding this into the picker
+           means giving that shared component a bindable filter — and
+           /markets and /ingest use it too. That is a change outside this page,
+           and this page is the scope.
+
+           So it stays, relabelled, sitting under the picker it belongs to.
+           Both search the instrument rung; this one also drives the row set. -->
       <div class="cell combo">
         <span
           title="Instrument or month — this box reaches either, which is why it is not folded into the picker beside it."
-          >Find</span
+          >Search</span
         >
         <!-- A `.picker` FOR THE POSITIONING CONTEXT AND NOTHING ELSE, and
              deliberately WITHOUT `data-drop`: `onWindowDown` closes the one
@@ -5376,24 +5083,157 @@
         </span>
       </div>
 
-      <!-- HOLES ONLY — a filter, so it is a rung with a face like every other
-           rung rather than a toggle hiding in a tail. The button states the
-           CURRENT VALUE, which is what a `.mnyb` face is for. -->
+    <!-- ==================================================================
+         THE SEGMENT TABLIST — `.segs`, AND IT IS ABOVE WHAT IT FILTERS.
+
+         A tablist belongs over the set it narrows, which is where the approved
+         design puts it, so it is the first thing under the pane head and ahead
+         of the query strip. The FEED still outranks it: this whole branch only
+         renders once a store has answered, so there is never a tab here
+         counting a feed nobody chose.
+
+         IT WAS A `Picker`, AND WHAT IT LOST IS ITS OWN RESTATEMENT. The clause
+         under it read "INDEX · CASH · FNO — showing INDEX" and "3 segment(s)
+         held": the enumeration and the count of an enumeration that is now
+         drawn, one tab per segment, with each tab's own counted total on its
+         face. A line naming what the row beside it already draws is the page
+         repeating a control it has already drawn.
+
+         "SEGMENT" IS THE STORE'S OWN SECOND FIELD — INDEX, CASH, FNO — and NOT
+         the mockup's spot/futures/options taxonomy. Relabelling it would rename
+         three sets into three other sets that do not have the same members.
+         ================================================================== -->
       <div class="cell">
-        <span title="Everything held, or only what is short.">Rows</span>
-        <button
-          class="mnyb toggle"
-          type="button"
-          aria-pressed={holesOnly}
-          title="Show only rows short of the fullest instrument in their month. A month's denominator is the fullest instrument stored for it, so a session NSE never held is never counted as missing — and a whole trading day that never landed always is."
-          onclick={() => (holesOnly = !holesOnly)}
-        >
-          {holesOnly ? `Holes only · ${fmt(holed)}` : `Every row · ${fmt(scoped.length)}`}
-        </button>
-        <span class="count" class:warn={holed > 0}>
-          {fmt(holed)} of {fmt(scoped.length)} row(s) here are short
+        <span title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
+        <!-- A PICKER, NOT A TAB ROW. It was the only rung drawn as tabs, which
+             made it look like a different kind of thing from the eight around
+             it; it writes the same `kind` the cascade reads. Two or three
+             options today, and the filter box costs nothing — nine rungs that
+             behave nine ways is nine things to learn. -->
+        <Picker
+          single
+          filter
+          label="segments"
+          summary={kind ? kind : `All \u00b7 ${fmt(textMatched.length)}`}
+          rows={[
+            { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
+            ...kinds.map(([k, n]) => ({ key: k, name: k, detail: `${fmt(n)} held` }))
+          ]}
+          selected={new Set([kind])}
+          onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
+        />
+        <span class="count">{fmt(segmented.length)} instrument-month(s) here</span>
+      </div>
+
+      <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
+           approved design draws as `<select id="tf">` beside the others.
+
+           IT IS A `.picker` AND NOT A `<select>`, like every other rung in
+           this strip. The design's `<select>` is shorthand for "a dropdown
+           goes here"; a native one cannot carry a per-row count, cannot carry
+           a per-row `title`, and cannot be searched — and the counted row is
+           the whole reason this page's menus exist.
+
+           EVERY RUNG THE STORE HOLDS IS OFFERED AND NO OTHER. The bar-length
+           ladder in `TF_SECS` is an ORDERING, not a list of choices: offering
+           `5min` because the ladder names it, on a store that holds no
+           five-minute bar, would be a control promising a set that does not
+           exist. The rows are counted off the rows. -->
+      <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
+        <span title="Bar length — the rung each row is stored at.">Timeframe</span>
+        <!-- SEARCHABLE, LIKE THE REST. Nine rungs today and ten in
+             `store::path::Timeframe::KNOWN`; the list is short now and the
+             filter costs nothing, and consistency across the nine rungs is
+             worth more than saving a filter box on one of them. -->
+        <Picker
+          single
+          filter
+          label="rungs"
+          disabled={Boolean(tfRefusal)}
+          summary={tfRefusal ? 'No rung stored' : timeframe ? timeframe : `All \u00b7 ${fmt(tfAll.length)}`}
+          rows={[
+            { key: '', name: 'All rungs', detail: `${fmt(segmented.length)} held` },
+            ...tfAll.map(([tf, n]) => ({
+              key: tf,
+              name: tf,
+              detail: `${fmt(n)} held`,
+              title: tfNote(tf)
+            }))
+          ]}
+          selected={new Set([timeframe])}
+          onchange={(/** @type {Set<string>} */ sel) => (timeframe = [...sel][0] ?? '')}
+        />
+        <span class="count" class:warn={Boolean(tfRefusal)}>
+          {#if tfRefusal}
+            No bar length — {tfRefusal}
+          {:else if timeframe}
+            {fmt(timeframed.length)} of {fmt(universed.length)} instrument-month(s) at {timeframe} · {tfNote(
+              timeframe
+            )}
+          {:else}
+            <!-- THE COUNT, NOT THE ROLL-CALL. Nine rungs spelled out needed
+                 581px in a 143px cell, so the list was cut after the second
+                 and the count itself never appeared. Every rung and its tally
+                 is one click away in the menu below, and the whole string is
+                 on this cell's title. -->
+            {fmt(tfAll.length)} rung(s) held
+          {/if}
         </span>
       </div>
+
+      <!-- THE MONTH WINDOW — two ends, so it is TWO `.cell`s, exactly as the
+           design draws a From and a To. The product's OWN calendar, never the
+           platform's: `<input type="date">` renders in the OS locale, so
+           `02/09/2024` is two different days depending on who is reading it,
+           and no rule in this file can reach either its text or its popup.
+           There is not one on this page and there must never be.
+
+           IT WORKS IN WHOLE MONTHS, and that is the unit of the data rather
+           than a simplification — a row here IS an instrument-month.
+
+           IT RENDERS ONLY WHEN THERE IS A WINDOW TO CHOOSE. One month is not a
+           range, and a control whose every setting produces the same table is a
+           control that has nothing to say. -->
+      <!-- THE FROM/TO RANGE IS GONE. ONE MONTH CONTROL, SINGLE SELECT.
+           ==================================================================
+           MONTH was secretly TWO controls: this from/to range, and the single
+           month picker below. A range is a selection of many months, which is
+           a multi-select — and every control on this page is single select.
+           Two controls for one rung also meant the rung was applied at two
+           different depths of the cascade, which is the one thing the prefix
+           rule cannot express.
+
+           `fromMonth` and `toMonth` stay declared and stay empty, so
+           `windowed` is `timeframed` by definition and the cascade collapses
+           to one month step. The calendar snippet and its handlers are dead
+           and are removed in the commit that follows this one, separately,
+           because deleting ~250 lines across thirty-three sites in the same
+           edit as a behaviour change is how a page stops rendering with
+           nothing to point at.
+           ================================================================== -->
+
+      <!-- MONTH IS NOT ONE OF THE RUNGS.
+
+           The nine are feed, universe, instrument, segment, timeframe,
+           expiry, strike, moneyness, side. Month was never among them, and it
+           was the most confused rung on the page besides: two controls for one
+           thing, a from/to range that was a multi-select on a single-select
+           page, and a single-month picker beneath it.
+
+           `month` stays declared and permanently empty, so `scoped` is
+           `windowed` by definition and the cascade runs feed -> universe ->
+           instrument -> segment -> timeframe and straight on to the contract
+           rungs. Every month the selection reaches is in the table; the row
+           count and the pager are what say how many. -->
+
+
+
+      <!-- THE HOLES-ONLY TOGGLE IS GONE. It was a tenth rung on a page whose
+           rungs are nine, and it filtered on a property of the DATA rather
+           than on an identity, which is not what this strip is for.
+           `holesOnly` stays declared and permanently false, so
+           `matchedPreContract` is `scoped` by definition. -->
+
     </section>
 
     <!-- ==================================================================
@@ -5610,75 +5450,28 @@
         class:off={Boolean(sideRefusal || sideEmpty)}
         title={sideRefusal ?? sideEmpty ?? undefined}
       >
-        <span title="Which side of the contract.">Option type</span>
-        <div class="picker" data-drop="side">
-          <button
-            class="mnyb"
-            type="button"
-            aria-haspopup="true"
-            aria-expanded={drop === 'side'}
-            disabled={Boolean(sideRefusal)}
-            title={sideRefusal
-              ? `No side can be chosen — ${sideRefusal}`
-              : side
-                ? `${side} only — ${fmt(sideCount.get(side) ?? 0)} instrument-month(s) here are on this side. Everything that is not an option drops out with the rest: a side is a property of an option, so asking for one is asking only for options.`
-                : sideEmpty
-                  ? `Both sides, which narrows nothing — and there is nothing here to narrow: ${sideEmpty}.`
-                  : `Both sides, which is NO side filter at all — ${fmt(sidedHere)} option row(s) are in this selection alongside every index, equity and future. This is not "every option": it is the absence of a narrowing, which is why nothing without a side is dropped.`}
-            onclick={(e) => {
-              e.stopPropagation();
-              drop = drop === 'side' ? null : 'side';
-            }}>{sideRefusal ? 'No option stored' : side ? `${side} only` : 'Both'}</button
-          >
-          {#if drop === 'side'}
-            <div class="menu" role="group" aria-label="Option type — which side of the contract">
-              <button
-                class="opt"
-                type="button"
-                aria-pressed={side === ''}
-                title="No side filter. Every row the rungs above leave stays, including every instrument that has no side at all."
-                onclick={() => {
-                  side = '';
-                  drop = null;
-                }}
-              >
-                <span class="tk">{side === '' ? '✓' : ''}</span>
-                <span class="nm">Both</span>
-                <span class="ct">{fmt(expiryGated.length)} row(s), no side filter</span>
-              </button>
-              {#if sidesAll.length === 0}
-                <hr />
-                <p class="none">This store names no option side.</p>
-              {:else}
-                <hr />
-                <!-- KEYED, COMPARED AND ASSIGNED ON THE WIRE STRING. `CE` and
-                     `PE` are `OptionSide::as_str`'s own two words and there is
-                     no display form of them anywhere on this page. -->
-                {#each sidesAll as s (s)}
-                  {@const n = sideCount.get(s) ?? 0}
-                  <button
-                    class="opt"
-                    type="button"
-                    aria-pressed={side === s}
-                    title={n > 0
-                      ? `${s === 'CE' ? 'Calls' : 'Puts'} only — ${fmt(n)} instrument-month(s) under the rungs above carry this side, which is what choosing it returns. Every row without a side leaves the table with it.`
-                      : `${s === 'CE' ? 'Calls' : 'Puts'} — this store holds this side, and no row under the rungs above carries it${!expiry && expiryHeld > 0 ? ', because the expiry gate above is holding every contract row back' : ''}. Choosing it returns nothing and the table will say so.`}
-                    onclick={() => {
-                      side = side === s ? '' : s;
-                      drop = null;
-                    }}
-                  >
-                    <span class="tk">{side === s ? '✓' : ''}</span>
-                    <span class="nm">{s}</span>
-                    <span class="ct" class:warn={n === 0}
-                      >{n > 0 ? `${fmt(n)} row(s)` : 'no rows here'}</span
-                    >
-                  </button>
-                {/each}
-              {/if}
-            </div>
-          {/if}
-        </div>
+        <span title="Which side of the contract — calls or puts.">Side</span>
+        <!-- SEARCHABLE AND SINGLE, LIKE EVERY OTHER RUNG. Two options today,
+             and the consistency is the point: nine rungs that behave nine ways
+             is nine things to learn. -->
+        <Picker
+          single
+          filter
+          label="sides"
+          disabled={Boolean(sideRefusal)}
+          summary={sideRefusal ? 'No option stored' : side ? side : `Both \u00b7 ${fmt(sideOffered.length)}`}
+          rows={[
+            { key: '', name: 'Both', detail: `${fmt(mnyFilteredCount)} row(s)` },
+            ...sideOffered.map((s) => ({
+              key: s,
+              name: s,
+              detail: `${fmt(sideCount.get(s) ?? 0)} row(s)`,
+              title: s === 'CE' ? 'Calls.' : 'Puts.'
+            }))
+          ]}
+          selected={new Set([side])}
+          onchange={(/** @type {Set<string>} */ sel) => (side = [...sel][0] ?? '')}
+        />
         <span class="count" class:warn={Boolean(sideRefusal || sideEmpty)}>
           {#if sideRefusal}
             No side — {sideRefusal}
