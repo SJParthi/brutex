@@ -2104,12 +2104,31 @@
   const barsDetail = (n) => (deco.length === 0 ? '—' : n ? `${fmt(n)} bars` : 'no bars');
 
   /** One row per strike the store names, ascending, priced in rupees. */
+  /* THE STRIKES THIS SELECTION ACTUALLY REACHES — the cascade's seventh rung.
+   *
+   * `chainAll` is the CHAIN: every strike the store lists, in ladder order,
+   * folded from `deco`. It has to stay that way — it is the coordinate frame
+   * `atmIndex` indexes into and `ladderRungs` measures distance along, and
+   * narrowing a frame renumbers every rung under a live moneyness pick.
+   *
+   * The OFFER is a different question: which of those strikes the rungs above
+   * leave. Two values, because they answer two things — the same split
+   * `expiryOffered` makes against `expiriesAll`, and for the same reason.
+   */
+  const strikeOffered = $derived.by(() => {
+    const seen = new Set();
+    for (const r of expiryGated) if (r.strike !== null) seen.add(r.strike);
+    return seen;
+  });
+
   const strikeRows = $derived(
-    chainAll.map((c) => ({
-      key: String(c.strike),
-      name: strikeText(c.strike),
-      detail: barsDetail(strikeBars.get(c.strike) ?? 0)
-    }))
+    chainAll
+      .filter((c) => strikeOffered.has(c.strike))
+      .map((c) => ({
+        key: String(c.strike),
+        name: strikeText(c.strike),
+        detail: barsDetail(strikeBars.get(c.strike) ?? 0)
+      }))
   );
 
   /**
@@ -2124,10 +2143,22 @@
    * `ATM` is both a family and a rung, and one string standing for two rows is
    * how a tick lands on the wrong one.
    */
+  /* THE RUNGS THIS SELECTION REACHES. `ladderRungs` is the ladder — the frame —
+   * and this is which of its rungs the strike above actually leaves. */
+  const mnyOffered = $derived.by(() => {
+    const seen = new Set();
+    for (const r of expiryGated) {
+      if (strikePick.size > 0 && !(r.strike !== null && strikePick.has(String(r.strike)))) continue;
+      const k = rungKeyOf(r);
+      if (k !== null) seen.add(k);
+    }
+    return seen;
+  });
+
   const mnyRows = $derived.by(() => {
     const out = [];
     for (const f of ['ITM', 'ATM', 'OTM']) {
-      const run = ladderRungs.filter((m) => famOf(m) === f);
+      const run = ladderRungs.filter((m) => famOf(m) === f && mnyOffered.has(m));
       if (run.length === 0) continue;
       if (run.length > 1) {
         out.push({
