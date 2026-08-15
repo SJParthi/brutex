@@ -14025,3 +14025,41 @@ against the crate and measured that 1, 64, 4,096, 16,384, 20,000, 32,767 and
 seven sizes, and was itself run against the old condition first — it fails there
 with *"no header slot survived"*, which is how I know it asserts something.
 
+## D-0150 — the 5xx budget is spent by 5xx answers, and the message reports what was counted
+
+**Decided.** `step` takes a second counter, `server_errors`, and
+`Step::ServerDown` carries the number it actually saw.
+
+**Two defects, one cause.** D-0145 added the 5xx retry and gave it
+`SERVER_ERROR_ATTEMPTS = 3`, but the guard read `attempt` — the chunk's ordinal,
+incremented by a failure of ANY class.
+
+1. **The retry the change was made for did not happen.** A chunk refused by a
+   timeout, then a timeout, then a 502 reached `step(Some(502), .., attempt: 3)`
+   and hit the cap on the vendor's FIRST 5xx. So the defect D-0145 exists to
+   fix — *one 502 costs that instrument its month* — came back for any chunk
+   that had a bad minute first.
+2. **The message stated a count nothing had taken.** It interpolated the
+   constant: *"and it answered that 3 times"*, when the vendor had answered
+   once. §3 rule 6 is explicit — never claim a measurement you did not take.
+   The same sentence was false with 429s in place of the timeouts.
+
+**Both close with one `u32`.** The loop counts 5xx answers separately, the cap
+reads that, the quadratic wait is computed from it — so two timeouts before the
+first 502 no longer push it straight to a four-second wait — and
+`Step::ServerDown` now carries the real number into the sentence.
+
+**The chunk's own ladder still bounds it.** `attempt >= THROTTLE_ATTEMPTS` is
+back in the 5xx arm and is now load-bearing rather than dead: with a separate
+counter it is genuinely reachable, because a chunk can run out of attempts
+before it runs out of 5xx budget. The earlier removal was correct for the code
+as it then stood, and is wrong for this code.
+
+**Filed as a blocker, verified as minor.** Nothing reaches the store; the cost
+is forfeited retries and one misleading sentence. Recorded at the severity the
+verifier reached, not the one it was filed at.
+
+**Ledger note.** The commit that made this change names D-0150 in its message.
+The script that was to append this entry failed after the commit had already
+been made, so the entry lands one commit later. The number is unchanged.
+
