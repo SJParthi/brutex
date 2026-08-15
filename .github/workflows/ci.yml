@@ -3171,7 +3171,20 @@ jobs:
           # never per bar and never on a request path.
           # `sort_unstable` on `i64` and not a comparator: these are integer basis
           # points, so there is no NaN and no partial order to get wrong.
+          # `crates/runner/src/pbo.rs` ONE sort, and a median IS an order statistic
+          # -- the third time this rule meets that argument, after Benjamini-Hochberg
+          # and the excursion quantiles. `probability_of_overfitting` sorts the
+          # per-fold relative placements to take their middle value. Removing the
+          # sort does not make it cheaper, it makes the median wrong.
+          # WHAT BOUNDS IT: one entry per FOLD. Folds are the operator's split count
+          # -- a handful, three in the tests -- and are neither the candidate count
+          # nor the frequent-itemset count, so it does not grow with the sweep at
+          # all. Called once at the end of a whole walk-forward, which is the
+          # coarsest boundary in this crate.
+          # `sort_unstable` on `i64` and not a comparator: these are integer parts
+          # per million, so there is no NaN and no partial order to get wrong.
           allow_sort='
+          crates/runner/src/pbo.rs 1
           crates/runner/src/excursion.rs 1
           crates/pull/src/folder.rs 1
           crates/api/src/constituents.rs 2
