@@ -105,15 +105,56 @@ export const RUNG_SECONDS = new Map([
   ['1day', 86400]
 ]);
 
-/** Seconds one bar of this rung covers, or `null` when this build cannot map it. */
+/**
+ * Seconds one bar of this rung covers, or `null` when this build cannot map it.
+ *
+ * @param {string} t the rung EXACTLY as the wire spells it — `1min`, `1day`.
+ *        The table above is keyed on those spellings and on nothing else, so a
+ *        rung that arrives spelled any other way is unmappable, which is the
+ *        answer this returns rather than a guess at the seconds.
+ */
 export const rungSeconds = (t) => RUNG_SECONDS.get(t) ?? null;
 
 /** The shape a census month is written in. One spelling of the test, shared. */
 export const MONTH_KEY = /^\d{4}-\d{2}$/;
+
+/**
+ * Three-way compare, over whatever `sort` is ordering on THIS line.
+ *
+ * `@template` rather than two overloads because the ladder sort below calls it
+ * twice on one line with two different types — first on the month STRING, then
+ * on the rung's SECONDS, a number — and a signature naming only one of them
+ * would report the other as an error at a call site that is correct.
+ *
+ * @template {string | number} T
+ * @param {T} a
+ * @param {T} b
+ */
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-/** The key `byCell` is probed with. ONE spelling, so two pages cannot differ. */
+/**
+ * The key `byCell` is probed with. ONE spelling, so two pages cannot differ.
+ *
+ * @param {string} instrument the census key, as the row carries it.
+ * @param {string} timeframe the rung, as the row carries it.
+ * @param {string} month `YYYY-MM`.
+ */
 export const cellKey = (instrument, timeframe, month) => `${instrument}|${timeframe}|${month}`;
+
+/**
+ * `Number.isInteger`, restated as the type guard it already is at run time.
+ *
+ * The standard-library signature is `isInteger(number: unknown): boolean`, so a
+ * checked value stays exactly as wide as it arrived and the comparison on the
+ * VERY NEXT token — `row.rows < 0` — is then read as a comparison against a
+ * count that may not be there. The predicate states what the call has already
+ * proved; it adds no test, and at run time this is `Number.isInteger` and
+ * nothing else.
+ *
+ * @param {unknown} v
+ * @returns {v is number}
+ */
+const isWholeNumber = (v) => Number.isInteger(v);
 
 /**
  * `null` when the row is readable; otherwise the reason it is not, in words.
@@ -123,6 +164,18 @@ export const cellKey = (instrument, timeframe, month) => `${instrument}|${timefr
  * Dropping it makes it indistinguishable from a month that does not exist;
  * writing zero for it prints a measurement nobody took. It goes to `bad` with
  * the reason, and every total computed without it can say so.
+ *
+ * THE PARAMETER IS `WireRow` AND NOT `StoreRow`, DELIBERATELY. `StoreRow` is
+ * what `/store.json` PROMISES; this function exists because a promise is not a
+ * proof, and typing its input as the promise would make every test below dead
+ * code to the checker — a fault detector the type system believes can never
+ * fire. `WireRow` assumes only that the four fields MAY be present, which is
+ * the state of knowledge on entry, and each `typeof` here is what carries a
+ * field from "may be" to "is". Every `StoreRow` is a `WireRow`, so the two call
+ * sites pass without a cast at either of them.
+ *
+ * @param {WireRow | null | undefined} row
+ * @returns {string | null}
  */
 function rowFault(row) {
   if (typeof row?.instrument !== 'string' || row.instrument === '')
@@ -131,7 +184,7 @@ function rowFault(row) {
     return `its \`month\` field is ${JSON.stringify(row.month)}, which is not a YYYY-MM month`;
   if (typeof row.timeframe !== 'string' || row.timeframe === '')
     return `its \`timeframe\` field is ${JSON.stringify(row.timeframe)}`;
-  if (!Number.isInteger(row.rows) || row.rows < 0)
+  if (!isWholeNumber(row.rows) || row.rows < 0)
     return `its \`rows\` field is ${JSON.stringify(row.rows)}, which is not a whole number of records`;
   return null;
 }
@@ -163,14 +216,100 @@ function rowFault(row) {
  * }} StoreRow
  */
 
-/** @returns {{ rows: StoreRow[], readable: StoreRow[], bad: StoreRow[],
- *   byInstrument: Map<string, StoreRow[]>, badByInstrument: Map<string, StoreRow[]>,
- *   byCell: Map<string, StoreRow>, byMonth: Map<string, StoreRow[]>,
- *   cells: number, bars: number }} */
+/**
+ * ONE CENSUS ROW AS IT ARRIVES — before `rowFault` has looked at it.
+ *
+ * The same four fields `rowFault` tests, each of them merely POSSIBLE. It is
+ * the honest description of a row on entry to that function: the endpoint says
+ * it sends `StoreRow`, and this type says only what a reader may assume before
+ * checking, which is very nearly nothing. The other six fields of `StoreRow`
+ * are absent here because nothing on this path reads them before the fault
+ * check has passed.
+ *
+ * @typedef {{ instrument?: string, month?: string, timeframe?: string, rows?: number }} WireRow
+ */
+
+/**
+ * ONE READABLE INSTRUMENT-MONTH, NORMALISED — what `fold` keeps, not what the
+ * wire sent.
+ *
+ * It is deliberately NOT `StoreRow`: the four census fields are carried
+ * through, the timestamp pair is renamed and narrowed to `first`/`last` with
+ * `null` for "the entry did not carry one", and the change-in-basis-points
+ * fields are dropped because nothing that reads an index needs them. Three
+ * views — `readable`, `byInstrument` and `byMonth.list` — hold these objects BY
+ * REFERENCE, so this is one shape stored once, not three copies of a row.
+ *
+ * `first` and `last` are MICROSECONDS, the unit `crates/api` writes and the
+ * reason `$lib/dates.js` refuses to sniff a unit.
+ *
+ * @typedef {{
+ *   instrument: string,
+ *   month: string,
+ *   timeframe: string,
+ *   rows: number,
+ *   first: number | null,
+ *   last: number | null
+ * }} StoreCell
+ */
+
+/**
+ * ONE ROW THAT WOULD NOT PARSE, AND THE REASON IN WORDS.
+ *
+ * The three identity fields are `unknown` and that is the whole point: they are
+ * echoed off a row a fault has just DISPROVED, so the declaration that made
+ * them strings is exactly the thing that turned out not to hold. `why` is the
+ * only field this side authored and the only one a reader can rely on — which
+ * is why `fold` re-tests `typeof it.instrument === 'string'` before using one
+ * as a Map key, and why the pages print `why` and never the rest.
+ *
+ * @typedef {{ instrument: unknown, month: unknown, timeframe: unknown, why: string }} BadRow
+ */
+
+/**
+ * ONE MONTH'S FOLD — the two totals plus the cells they were counted from.
+ *
+ * `cells` and `bars` are held rather than re-derived from `list` so that a page
+ * asking "how much is in 2026-08" is one Map probe and two field reads, never a
+ * pass over the month.
+ *
+ * @typedef {{ cells: number, bars: number, list: StoreCell[] }} MonthFold
+ */
+
+/**
+ * THE WHOLE ANSWER, FOLDED — every shape any page asks for, from one pass.
+ *
+ * This is the shape `empty()` returns and `fold()` fills, and it is the reason
+ * this typedef is written out rather than inferred: `empty()` is what the
+ * `$state` below is seeded and re-seeded with, and an inferred `new Map()` is
+ * `Map<any, any>`, which teaches every reader of every index nothing at all.
+ *
+ * `rows` is the array EXACTLY as the wire sent it, faults and all — it is typed
+ * `StoreRow[]` because that is what the endpoint declares, and `bad` is the
+ * count of how often that declaration did not hold.
+ *
+ * `byCell` maps to a BAR COUNT and not to a cell. It is the one index whose
+ * only question is "how many bars are in this instrument-month at this rung",
+ * and `/ingest` probes it per rendered row.
+ *
+ * @typedef {{
+ *   rows: StoreRow[],
+ *   readable: StoreCell[],
+ *   bad: BadRow[],
+ *   byInstrument: Map<string, StoreCell[]>,
+ *   badByInstrument: Map<string, BadRow[]>,
+ *   byCell: Map<string, number>,
+ *   byMonth: Map<string, MonthFold>,
+ *   cells: number,
+ *   bars: number
+ * }} StoreCensus
+ */
+
+/** @returns {StoreCensus} */
 const empty = () => ({
-  rows: /** @type {StoreRow[]} */ ([]),
-  readable: /** @type {StoreRow[]} */ ([]),
-  bad: /** @type {StoreRow[]} */ ([]),
+  rows: [],
+  readable: [],
+  bad: [],
   byInstrument: new Map(),
   badByInstrument: new Map(),
   byCell: new Map(),
@@ -189,8 +328,25 @@ const empty = () => ({
  *   generation  bumped by `refreshStore`; the read key, and the shared clock
  *   reads       how many reads have SUCCEEDED — the memo key for window folds
  *   lastOk      { at, feed } of the last successful read. Never "current".
+ *
+ * @typedef {StoreCensus & {
+ *   state: 'none' | 'reading' | 'ready' | 'error',
+ *   feed: string | null,
+ *   at: number | null,
+ *   error: string | null,
+ *   generation: number,
+ *   reads: number,
+ *   lastOk: { at: number | null, feed: string | null }
+ * }} StoreReading
  */
 
+/* THE ANNOTATION IS LOAD-BEARING, NOT DECORATION. Every field seeded `null`
+   here infers the type `null` and nothing wider, so `store.at = Date.now()` is
+   "type 'number' is not assignable to type 'null'" — the read succeeds and the
+   stamp will not go on. The four nullable fields are exactly the four this
+   module's failure contract clears, so the type that admits both states is the
+   type that lets the contract be written at all. */
+/** @type {StoreReading} */
 export const store = $state({
   state: 'none',
   feed: null,
@@ -204,13 +360,19 @@ export const store = $state({
 
 /* `${feed}#${generation}` already asked for. NOT reactive: it is bookkeeping
    about a request, and an effect that reads what it writes re-runs forever. */
+/** @type {string | null} */
 let asked = null;
 /* The read in flight, so a caller that needs the answer before it can measure
    anything — the ingest baseline — awaits the SHARED request. */
+/** @type {Promise<void> | null} */
 let flight = null;
+/* THE IDENTITY OF THAT READ, and nothing else — `{}` is compared by reference
+   and carries no fields, which is the whole of what a token is for. */
+/** @type {object | null} */
 let flightToken = null;
 /* The feed the last `syncStore` asked about, so the poll and Refresh know what
    to re-read without importing the feed selection and making an import cycle. */
+/** @type {string | null} */
 let wanted = null;
 /* THE FEED THE CURRENT VALUE BELONGS TO, MIRRORED OUTSIDE THE `$state`.
    `syncStore` is called FROM an effect, so everything `read` touches
@@ -218,6 +380,7 @@ let wanted = null;
    there — a field this function also WRITES — would make the subscription
    depend on its own output and re-run until Svelte aborts it. The mirror is
    written beside every write of `store.feed` and never diverges. */
+/** @type {string | null} */
 let valueFeed = null;
 
 function clearValue() {
@@ -229,6 +392,16 @@ function clearValue() {
  *
  * The readable cells are shared BY REFERENCE between `readable`, `byInstrument`
  * and `byMonth.list` — three views of one object, never three copies of it.
+ *
+ * THE PARAMETER IS THE ENDPOINT'S PROMISE, `StoreRow[]`, and the `rowFault`
+ * gate on the next line is what turns that promise into a fact one row at a
+ * time. Nothing here reads a field of a row the gate has not already passed,
+ * which is why the promise is safe to declare and why the two shapes below —
+ * `StoreCell` for a row that parsed, `BadRow` for one that did not — are
+ * separate types rather than one optional-everything type shared by both.
+ *
+ * @param {StoreRow[]} rows the census array exactly as `/store.json` sent it.
+ * @returns {StoreCensus}
  */
 function fold(rows) {
   const out = empty();
@@ -288,6 +461,12 @@ function fold(rows) {
  *
  * Returns the in-flight promise when one is already running for this key, so
  * three pages and a poll all await the SAME request rather than racing four.
+ *
+ * @param {string} feed the wire name of the feed to read. Never null: the one
+ *        caller that can hold a null feed, `syncStore`, returns before here.
+ * @param {number} generation the shared clock's value at the call.
+ * @returns {Promise<void>} the SHARED request — the same promise every other
+ *        caller of this (feed, generation) is given.
  */
 function read(feed, generation) {
   const key = `${feed}#${generation}`;
@@ -365,6 +544,12 @@ function read(feed, generation) {
  * follows the autopilot's own target feed rather than the top bar's selection,
  * and taking the feed here keeps that possible while keeping this module free
  * of every import — no cycle with `feeds.svelte.js`, which reads it back.
+ *
+ * @param {string | null | undefined} feed `feeds.active` is `string | null`
+ *        until the feed list has landed, and a page mounts before it does. A
+ *        null feed is not an error here: it is "nothing to ask about yet", and
+ *        it is recorded in `wanted` so a later Refresh knows there is nothing
+ *        to re-read either.
  */
 export function syncStore(feed) {
   const generation = store.generation; // TRACKED — this is the shared clock
@@ -380,6 +565,8 @@ export function syncStore(feed) {
  * finds a key it has not asked for and issues exactly ONE request. Awaiting the
  * returned promise waits for that same request — the caller that needs a
  * reading before it can measure anything gets the shared one, not a seventh.
+ *
+ * @returns {Promise<void>}
  */
 export function refreshStore() {
   store.generation += 1;
@@ -396,10 +583,26 @@ export function refreshStore() {
    finest any holder asked for, and it bumps the generation — so the answer it
    fetches is the answer every page is already reading.
    ====================================================================== */
+/**
+ * ONE PAGE'S CLAIM ON THE SHARED TIMER. `live` is not the same fact as
+ * membership of `holders`: the release is idempotent, and `live` is what makes
+ * a second call to it a no-op rather than a second `filter` pass.
+ *
+ * @typedef {{ everyMs: number, live: boolean }} PollHolder
+ */
+
+/** @type {PollHolder[]} */
 let holders = [];
 let ticking = false;
 
-/** Hold the poll at `everyMs`. Returns the release — call it from cleanup. */
+/**
+ * Hold the poll at `everyMs`. Returns the release — call it from cleanup.
+ *
+ * @param {number} everyMs the period this holder wants. Floored at one second,
+ *        and a non-number floors with it, because the timer is shared and the
+ *        finest holder sets the period for every page at once.
+ * @returns {() => void} the release. Calling it twice is safe.
+ */
 export function watchStore(everyMs) {
   const holder = { everyMs: Math.max(1000, Math.trunc(everyMs) || 1000), live: true };
   holders.push(holder);
@@ -429,6 +632,35 @@ async function tick() {
 /* ======================================================================
    THE FOLD THAT DEPENDS ON A QUESTION ONE PAGE ASKS.
    ====================================================================== */
+/**
+ * THE REQUEST'S OWN POPULATION, or the absence of one.
+ *
+ * Either half absent means "every one of them". A present-but-empty Set is NOT
+ * the same statement — it is "none of them" — and `$lib/fold.js` tests
+ * `instanceof Set` rather than truthiness for exactly that reason.
+ *
+ * @typedef {{ instruments?: Set<string>, rungs?: Set<string> } | null | undefined} FoldScope
+ */
+
+/**
+ * ONE WINDOW FOLD. `at` and `held` are this module's — the stamp the reading
+ * carries and the WHOLE store's row count — and the rest is `foldWindow`'s
+ * arithmetic over the named months.
+ *
+ * `held` is deliberately not the window's count; see the note on `foldMonths`.
+ *
+ * @typedef {{
+ *   at: number | null,
+ *   held: number,
+ *   units: number,
+ *   rows: number,
+ *   byInstrument: Map<string, number>,
+ *   outside: number,
+ *   scoped: boolean
+ * }} WindowFold
+ */
+
+/** @type {{ key: string | null, value: WindowFold | null }} */
 let foldMemo = { key: null, value: null };
 
 /**
@@ -459,6 +691,12 @@ let foldMemo = { key: null, value: null };
  * request was still outstanding. A numerator and a denominator over two
  * different populations is not a ratio. The threshold was two pre-existing rows
  * in the window, not 750.
+ *
+ * @param {Iterable<string> | null | undefined} months the month keys to walk.
+ *        Taken as an iterable and copied once, because the caller's own value
+ *        is a `$derived` array that may be replaced while this runs.
+ * @param {FoldScope} scope
+ * @returns {WindowFold}
  */
 export function foldMonths(months, scope) {
   const list = [...(months ?? [])];
@@ -486,15 +724,47 @@ export function foldMonths(months, scope) {
    somewhere to go. It was two independent N-request folds — one in
    `loadFeeds`, one in `/db` — answering one question on two clocks.
    ====================================================================== */
+/**
+ * WHAT ONE FEED HOLDS, as the survey found it.
+ *
+ * `any` is "this feed has ENTRIES", which is not "this feed has countable
+ * ones": a store whose rows this build cannot parse is still somewhere to go.
+ * `error` carries one feed's failure without making it every feed's, so a
+ * caller can say "this feed could not be read" instead of the different and
+ * false sentence "this feed holds nothing".
+ *
+ * @typedef {{
+ *   wire: string,
+ *   ready: boolean,
+ *   bars: number,
+ *   cells: number,
+ *   any: boolean,
+ *   error: string | null
+ * }} FeedHolding
+ */
+
+/**
+ * @typedef {{
+ *   state: 'none' | 'reading' | 'ready' | 'error',
+ *   at: number | null,
+ *   error: string | null,
+ *   wires: string,
+ *   byFeed: Map<string, FeedHolding>
+ * }} SurveyReading
+ */
+
+/** @type {SurveyReading} */
 export const survey = $state({
   state: 'none', // 'none' | 'reading' | 'ready' | 'error'
   at: null,
   error: null,
   wires: '', // THE FEED LIST IT ANSWERED FOR — the same stamp lesson as `feed`
-  byFeed: new Map() // wire -> { wire, ready, bars, cells, any, error }
+  byFeed: new Map() // wire -> FeedHolding
 });
 
+/** @type {string | null} */
 let surveyAsked = null;
+/** @type {Promise<SurveyReading> | null} */
 let surveyFlight = null;
 
 /**
@@ -502,6 +772,15 @@ let surveyFlight = null;
  * `/feeds.json`. At most one pass per (feed list, generation), so the boot pass
  * that picks the default is the SAME pass `/db` reads when it finds the selected
  * feed empty — and a Refresh, which bumps the generation, re-asks it.
+ *
+ * `Feed` is REFERENCED, NOT REDEFINED. `$lib/feeds.svelte.js` owns that shape
+ * and both callers pass it their `feeds.all`; a second local spelling of it
+ * here is the drift where one copy gains a field and the other does not. A
+ * JSDoc `import(…)` is erased before anything runs, so the acyclic import graph
+ * this module keeps — nothing imported but `$lib/fold.js` — is untouched by it.
+ *
+ * @param {import('$lib/feeds.svelte.js').Feed[] | null | undefined} list
+ * @returns {Promise<SurveyReading>}
  */
 export function surveyStores(list) {
   const feedsIn = [...(list ?? [])];

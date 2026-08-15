@@ -30,6 +30,18 @@
   import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
   import { loadCatalogue } from '$lib/index.svelte.js';
 
+  /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
+   *
+   * `$lib/feeds.svelte.js` owns the shape because it owns the fetch — the
+   * annotation there was written against a live `/feeds.json` body. Restating
+   * the fields here would put a second copy of the server's contract in the
+   * tree, and two copies of one shape drift the day a field is added: the
+   * fetcher would learn the new field and the picker would keep insisting the
+   * old set is all there is. Imported, so there is exactly one place to change.
+   *
+   * @typedef {import('$lib/feeds.svelte.js').Feed} Feed
+   */
+
   let { children } = $props();
 
   // The feed list loads once. The INSTRUMENT list reloads whenever the feed
@@ -54,6 +66,7 @@
 
   // `/db/anything` still lights DB. An exact match alone leaves the operator
   // on a sub-route with no nav item lit and no idea where they are.
+  /** @param {string} href */
   function current(href) {
     const p = page.url.pathname;
     return p === href || (href !== '/' && p.startsWith(href + '/'));
@@ -128,6 +141,7 @@
   $effect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)');
     systemDark = mq.matches;
+    /** @param {MediaQueryListEvent} e */
     const onChange = (e) => (systemDark = e.matches);
     mq.addEventListener('change', onChange);
     return () => mq.removeEventListener('change', onChange);
@@ -152,14 +166,39 @@
      ==================================================================== */
   let open = $state(false);
   let hi = $state(-1);
+
+  /* THE THREE `bind:this` HOLDERS, TYPED AT THE DECLARATION AND NOT AT THE USE.
+   *
+   * `$state(null)` on its own infers the type `null` and nothing else, so the
+   * binding that later writes the real element is the error — the checker
+   * reports "HTMLDivElement is not assignable to null" down in the markup,
+   * pointing at the one line that is correct. `| null` is not decoration
+   * either: null is the value these genuinely hold before the header mounts,
+   * and it is what Svelte writes back when the conditionally-rendered combo is
+   * torn down on a route that carries its own feed control. Every read below
+   * already guards with `?.` for exactly that reason.
+   *
+   * `optEls` is sparse by construction: the array is filled by `bind:this` in
+   * an `{#each}`, so an index exists only once its option has mounted, which
+   * is why the scroll calls reach it through `?.` too.
+   */
+  /** @type {HTMLDivElement | null} */
   let comboEl = $state(null);
+  /** @type {HTMLDivElement | null} */
   let triggerEl = $state(null);
+  /** @type {Array<HTMLDivElement | null>} */
   let optEls = $state([]);
 
   const options = $derived(feeds.all ?? []);
   const active = $derived(options.find((f) => f.wire === feeds.active) ?? null);
   const activeIndex = $derived(options.findIndex((f) => f.wire === feeds.active));
 
+  /* `Feed | undefined` AND NOT `Feed`, because the undefined case is the whole
+     point of the `?.`: `commit()` hands this whatever sits at an index that a
+     keyboard or a pointer named, and the list can have been refetched shorter
+     since. A feed that is not there is not usable, which is the same answer as
+     a feed the server marked unready. */
+  /** @param {Feed | undefined} f */
   function usable(f) {
     return f?.ready === true;
   }
@@ -181,7 +220,17 @@
     return i >= 0 ? i : 0;
   }
 
-  /** Move the highlight, skipping feeds the server says cannot be used. */
+  /**
+   * Move the highlight, skipping feeds the server says cannot be used.
+   *
+   * The parameter is a step OR an end of the list, and the union says so
+   * rather than smuggling the ends in as sentinel numbers: `'first'` and
+   * `'last'` seed the cursor one place outside the array and then walk inward
+   * by `dir`, which is what makes a disabled first or last feed skip correctly
+   * instead of landing on it.
+   *
+   * @param {1 | -1 | 'first' | 'last'} step
+   */
   function move(step) {
     if (!options.length) return;
     let next;
@@ -206,6 +255,7 @@
   // one an operator with four brokers actually uses.
   let typed = '';
   let typedAt = 0;
+  /** @param {string} ch a single printable character, as `onTriggerKey` filters it */
   function typeahead(ch) {
     const now = Date.now();
     typed = now - typedAt > 800 ? ch.toLowerCase() : typed + ch.toLowerCase();
@@ -217,6 +267,7 @@
     }
   }
 
+  /** @param {number} i an index into `options`, or `-1` when nothing is highlighted */
   function commit(i) {
     const f = options[i];
     if (!f || !usable(f)) return;
@@ -224,6 +275,7 @@
     close();
   }
 
+  /** @param {KeyboardEvent} e */
   function onTriggerKey(e) {
     const k = e.key;
     if (!open) {
@@ -276,8 +328,19 @@
 
   $effect(() => {
     if (!open) return;
+    /* `e.target` is an `EventTarget`, which is the wider thing: a window, a
+       `fetch` XHR or a media element are all event targets and none of them is
+       in the document, so `contains()` will not take one. The narrowing is a
+       cast rather than an `instanceof` guard because a pointer event on this
+       page always originates at a node, and turning "not a node" into a fourth
+       branch would invent a case to handle that the platform cannot deliver
+       here. A node outside the combo and a node inside it are the only two
+       outcomes, which is exactly what the line already says. */
+    /** @param {PointerEvent} e */
     const away = (e) => {
-      if (comboEl && !comboEl.contains(e.target)) close({ refocus: false });
+      if (comboEl && !comboEl.contains(/** @type {Node | null} */ (e.target))) {
+        close({ refocus: false });
+      }
     };
     window.addEventListener('pointerdown', away, true);
     return () => window.removeEventListener('pointerdown', away, true);
@@ -315,6 +378,21 @@
      `r.ok` alone cannot see it.
      ==================================================================== */
   const PROBE_MS = 8000;
+
+  /* THREE STATES, NAMED, AND `why` IS A STRING THAT HAPPENS TO START NULL.
+   *
+   * Inferred from the initialiser alone this reads as `state: string, why:
+   * null`, which gets both facts backwards: the state is not any string — a
+   * typo'd `'ok'` would satisfy `string` and light nothing, because every
+   * branch in the markup tests against these three exact words — and `why` is
+   * null only until the first failure, so the assignment that finally carries
+   * the reason is what the checker rejected.
+   *
+   * `at` is a wall-clock stamp and `ms` a measured round trip; they are not
+   * interchangeable and are kept apart for that reason. `at` is 0 before the
+   * first probe returns, and nothing renders it while the state is `checking`.
+   */
+  /** @type {{ state: 'checking' | 'up' | 'down', ms: number, why: string | null, at: number }} */
   let api = $state({ state: 'checking', ms: 0, why: null, at: 0 });
 
   async function probe() {
@@ -329,10 +407,21 @@
       await r.json();
       api = { state: 'up', ms: Math.round(performance.now() - t0), why: null, at: Date.now() };
     } catch (why) {
+      /* A CAUGHT VALUE IS `unknown`, AND THAT IS THE TRUTH ABOUT `throw`.
+         Anything can be thrown, so nothing about `.message` is guaranteed —
+         which is precisely why this line reads it defensively and falls back
+         to the value itself. The cast states the shape the read assumes and
+         leaves the runtime expression untouched: a `TypeError` from a refused
+         connection has a message, a `DOMException` from an aborted fetch has
+         one too, and a bare string thrown by anything else has none and is
+         printed whole. Narrowing with `instanceof Error` instead would be a
+         behaviour change — `DOMException` does not inherit from `Error` in the
+         browser, so the abort case would lose its message and print
+         `[object DOMException]`. */
       api = {
         state: 'down',
         ms: Math.round(performance.now() - t0),
-        why: String(why?.message ?? why),
+        why: String(/** @type {{ message?: unknown }} */ (why)?.message ?? why),
         at: Date.now()
       };
     }
@@ -362,38 +451,93 @@
      there and does not have to.
      ==================================================================== */
   const PULL_PATH = /^\/pull(\/|$)/;
+
+  /** THE EVENT IS TWO EVENTS, AND THE DIFFERENCE IS NOT DECORATION.
+   *
+   * A start says a request left; an end says what came back. They are written
+   * as separate types joined by `kind` rather than as one type with five
+   * optional fields, because the strip reads `ms`, `ok` and `status` off the
+   * finished one WITHOUT a guard — `Last pull HTTP {status}` and
+   * `{clock(lastPull.ms)}` have no branch for a missing value and should not
+   * grow one. One loose type with `ms?: number` would push that impossible
+   * case into the markup and make the honest rendering of it somebody's job.
+   * Discriminating on `kind` gets the same narrowing the runtime already does
+   * one line into the hook.
+   *
+   * `why` is present only on a failed end: a rejected `fetch` never produced a
+   * response, so `status` is 0 and the reason is all there is to show.
+   *
+   * @typedef {{ kind: 'start', id: number, path: string, started: number }} PullStart
+   * @typedef {{ kind: 'end', id: number, path: string, started: number,
+   *             ms: number, ok: boolean, status: number, why?: string }} PullEnd
+   * @typedef {PullStart | PullEnd} PullEvent
+   */
+
+  /** THE HOOK LIVES ON `window` BECAUSE THE WRAPPER OUTLIVES THE COMPONENT.
+   *
+   * `window.fetch` is replaced ONCE per page and the flag below is what keeps
+   * it that way across hot reloads; the closure it captures therefore cannot
+   * hold this component's state directly, or a reload would leave the live
+   * wrapper reporting into a dead instance. So the wrapper reports through a
+   * property that the current instance re-points, and both halves of that
+   * arrangement are declared here rather than in an ambient global: nothing
+   * else in the product reads or writes either name — checked — so widening
+   * `Window` for the whole app would advertise a contract that exists in one
+   * file and invite a second writer to it.
+   *
+   * @typedef {Window & typeof globalThis & {
+   *   __brutexPull?: ((evt: PullEvent) => void) | null,
+   *   __brutexPullWrapped?: boolean
+   * }} PullWindow
+   */
+
+  /** @type {PullStart[]} */
   let inflight = $state([]);
+  /** @type {PullEnd | null} */
   let lastPull = $state(null);
   let now = $state(Date.now());
   let seq = 0;
 
   $effect(() => {
+    // The same `window`, named once with the two properties this file owns on
+    // it, so the wrapper below and the teardown agree about what they are.
+    const w = /** @type {PullWindow} */ (window);
     // Re-pointing a hook rather than re-wrapping keeps hot reload from
     // stacking wrappers, and keeps THIS instance's state the one that updates.
-    window.__brutexPull = (evt) => {
+    w.__brutexPull = (evt) => {
       if (evt.kind === 'start') inflight = [...inflight, evt];
       else {
         inflight = inflight.filter((p) => p.id !== evt.id);
         lastPull = evt;
       }
     };
-    if (!window.__brutexPullWrapped) {
-      window.__brutexPullWrapped = true;
-      const real = window.fetch.bind(window);
-      window.fetch = async (input, init) => {
+    if (!w.__brutexPullWrapped) {
+      w.__brutexPullWrapped = true;
+      const real = w.fetch.bind(window);
+      w.fetch = async (input, init) => {
         let path = '';
-        try {
-          path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
-        } catch {
-          /* a Request built from something exotic — not a pull, then */
+        /* `fetch` TAKES THREE THINGS, AND ONLY TWO OF THEM CARRY `.url`: a
+           string is the URL, a `Request` exposes it as `.url`, and a bare
+           `URL` object exposes it as `.href` and has no `.url` at all. The
+           third has never been tracked here — reading `.url` off it yielded
+           undefined, the path matched no pull, and the request went straight
+           through — and naming the case keeps that exactly rather than
+           quietly starting to track it. Making a `URL` argument trackable is
+           a behaviour change, and no call site in this app passes one. */
+        if (!(input instanceof URL)) {
+          try {
+            path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
+          } catch {
+            /* a Request built from something exotic — not a pull, then */
+          }
         }
         if (!PULL_PATH.test(path)) return real(input, init);
         const id = (seq += 1);
         const started = Date.now();
-        window.__brutexPull?.({ kind: 'start', id, path, started });
+        w.__brutexPull?.({ kind: 'start', id, path, started });
         try {
           const r = await real(input, init);
-          window.__brutexPull?.({
+          w.__brutexPull?.({
             kind: 'end',
             id,
             path,
@@ -404,7 +548,7 @@
           });
           return r;
         } catch (e) {
-          window.__brutexPull?.({
+          w.__brutexPull?.({
             kind: 'end',
             id,
             path,
@@ -412,14 +556,16 @@
             ms: Date.now() - started,
             ok: false,
             status: 0,
-            why: String(e?.message ?? e)
+            // See the probe's catch above for why this is a cast and not an
+            // `instanceof Error` narrowing.
+            why: String(/** @type {{ message?: unknown }} */ (e)?.message ?? e)
           });
           throw e;
         }
       };
     }
     return () => {
-      window.__brutexPull = null;
+      w.__brutexPull = null;
     };
   });
 
@@ -436,11 +582,13 @@
   const running = $derived(inflight.length > 0);
   const elapsed = $derived(running ? now - Math.min(...inflight.map((p) => p.started)) : 0);
 
+  /** @param {number} ms */
   function clock(ms) {
     const s = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const r = s % 60;
+    /** @param {number} n */
     const pad = (n) => String(n).padStart(2, '0');
     return h ? `${h}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
   }

@@ -84,6 +84,56 @@
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
 
   /* ======================================================================
+     THE SHAPES, NAMED ONCE — imported where they already exist
+     ----------------------------------------------------------------------
+     `StoreRow` and `Feed` are DECLARED BY THE MODULES THAT FETCH THEM, and
+     they are imported here rather than restated. A second spelling of one
+     wire shape is the drift this whole file is written against: the day
+     `/store.json` gains an eleventh field, the copy that is not the fetcher's
+     goes quietly stale and every reader downstream of it believes the stale
+     one. `import('…').Name` in a JSDoc type is a compile-time reference and
+     emits nothing — it costs the bundle zero bytes.
+
+     `MasterRow` is the exception, and it is one only because no module owns
+     `/instruments.json`'s row shape yet: `$lib/index.svelte.js` types
+     `catalogue.rows` as `any[]` and `masterRows()` re-states that. It is
+     declared HERE, from a live response read off the running server rather
+     than guessed, so the two names this page actually joins on —
+     `exchange`/`segment`/`symbol`, which is the census key, and `universes`,
+     which is the membership token list — are checked at the join and not at
+     the crash. The other fields are on the wire and are written down because
+     leaving them out would make the typedef read as a claim that they are
+     absent.
+
+     The response the shape was read from, `GET /instruments.json?feed=dhan`:
+
+       {"symbol":"NIFTY","key":"NSE-NIFTY","kind":"Index","exchange":"NSE",
+        "segment":"INDEX","universe":"index+fno","universes":["index","fno"],
+        "bars":8470,"href":"/instruments?q=NSE-NIFTY"}
+
+     `universes` is optional and `universe` is the legacy `+`-joined string
+     that predates it — see `tokensOf`, which reads the array when the row has
+     one and splits the string when it does not. Both are written optional
+     because a master row served by an older API binary carries only the
+     second, and the type has to admit the row this page is built to survive.
+     ====================================================================== */
+  /** @typedef {import('$lib/store.svelte.js').StoreRow} StoreRow */
+  /** @typedef {import('$lib/feeds.svelte.js').Feed} Feed */
+  /**
+   * @typedef {{
+   *   symbol: string,
+   *   key: string,
+   *   kind: string,
+   *   exchange: string,
+   *   segment: string,
+   *   universe?: string,
+   *   universes?: string[],
+   *   bars: number,
+   *   href: string
+   * }} MasterRow
+   */
+
+  /* ======================================================================
      DATA
      ====================================================================== */
   /* THE ROWS ARE NOT THIS PAGE'S READ ANY MORE.
@@ -314,6 +364,9 @@
    * renders a dash rather than a figure — an unknown denominator produces no
    * percentage at all, never a plausible one. The same rule the % change
    * columns already follow.
+   *
+   * @param {string | undefined} tf a rung name as the census spells it
+   * @returns {number | null} `null` means NO RECORDED SESSION SIZE, never zero
    */
   const barsPerSession = (tf) => {
     if (tf === '1min' || tf === '1m') return BARS_PER_SESSION;
@@ -445,6 +498,7 @@
      counters, the month cards, the receipt prose and every table cell.
      `audit/+page.svelte:145` pins the same way. */
   const nf = new Intl.NumberFormat('en-IN');
+  /** @param {number} n */
   const fmt = (n) => nf.format(n);
   /* FIXED TWO DECIMALS, ALWAYS. Adaptive precision made the digit count change
      from row to row, so the column's decimal point moved and the eye had to
@@ -455,6 +509,7 @@
      absence. Every caller that can reach an empty denominator passes `null`
      and gets the dash; the REASON belongs beside it at the call site, which is
      the only place that knows which absence it is. */
+  /** @param {number | null | undefined} p a ratio in 0..1, or the absence of one */
   const pctText = (p) => (p === null || p === undefined ? '—' : `${(p * 100).toFixed(2)}%`);
   /**
    * A session count, or a dash when the rung has no recorded session size.
@@ -462,6 +517,8 @@
    * `null` reaches here from `sessions()` for a rung `barsPerSession` has no
    * number for. A dash is the honest render: `0.00` would be a measurement and
    * this is an absence. Same rule the % change columns follow.
+   *
+   * @param {number | null | undefined} d
    */
   const dayText = (d) =>
     d === null || d === undefined ? '—' : Number.isInteger(d) ? String(d) : d.toFixed(2);
@@ -476,6 +533,8 @@
    * `0` means the store has NOT been read, and that is an absence: passing it
    * through would render the epoch, `01 Jan 1970, 05:30`, which is a stamp
    * nobody took.
+   *
+   * @param {number} t epoch MILLISECONDS, or `0` for "never read"
    */
   const clock = (t) => (t ? stampLabel(t) : '—');
 
@@ -490,6 +549,14 @@
    *
    * Both ends go through `dayLabel`, so the month is `Sep` and never `Sept`
    * and the zone is IST whatever the reading machine is set to.
+   *
+   * THE PARAMETER NAMES THE TWO FIELDS IT READS AND NOT THE WHOLE ROW. Every
+   * caller passes a decorated census row, but what this function needs is a
+   * pair of stamps — so a month card, a drawer line and a grid cell can all
+   * reach it without one of them having to be a census row to qualify.
+   *
+   * @param {{ firstAt: number | null, lastAt: number | null } | null | undefined} it
+   * @returns {string | null} `null` when the row carries no stamps at all
    */
   const heldWindow = (it) =>
     it && it.firstAt !== null && it.lastAt !== null
@@ -520,6 +587,8 @@
    * mirror image makes a column of gains read as a column of magnitudes. Zero
    * carries no sign because it has no direction — the cell is neutral-coloured
    * and says `0.00%`, which is a real answer and not an unknown.
+   *
+   * @param {number} bps INTEGER basis points off the wire; 125 is +1.25%
    */
   function bpsText(bps) {
     const sign = bps > 0 ? '+' : bps < 0 ? '-' : '';
@@ -532,6 +601,7 @@
       `none` is its own word rather than `flat`, because a cell nobody can
       compute and a month that did not move are different facts and must not
       share a colour. */
+  /** @param {number | null} bps */
   const dirOf = (bps) => (bps === null ? 'none' : bps > 0 ? 'up' : bps < 0 ? 'down' : 'flat');
 
   /**
@@ -559,8 +629,25 @@
       'The move times 10,000 leaves a 64-bit integer, so the server refused it rather than wrapping it into a plausible small number.'
   };
 
+  /**
+   * THE PROBE IS WIDENED AT THE LOOKUP, NOT AT THE TABLE. `WHY` keeps the
+   * five-key shape it is written in — that is the fact this page holds, and
+   * narrowing it to an index signature would let a sixth key be added above
+   * and read below with nothing noticing the sentence was never written. The
+   * CODE, by contrast, comes off the wire and may be anything at all, which is
+   * the entire reason the fallback line exists. So the widening happens
+   * exactly where the unknown key is used, and `undefined` in the cast is what
+   * makes the `??` a real branch rather than dead code. `barWhyText` does the
+   * same for the bar grid's five reasons.
+   *
+   * `null` is the ordinary case here and not an error: `chg_why` is null on
+   * every row that carries a NUMBER, and this sentence is only rendered where
+   * the number is absent.
+   *
+   * @param {string | null} code
+   */
   const whyText = (code) =>
-    WHY[code] ??
+    (code === null ? null : /** @type {Record<string, string | undefined>} */ (WHY)[code]) ??
     `The server named a reason this page does not have a sentence for: ${code ?? 'none given'}. That is a mismatch between this page and /store.json, not a fact about the data.`;
 
   /**
@@ -604,6 +691,12 @@
    * Refresh is the deliberate exception: `nonce` re-runs this effect with the
    * SAME feed, `rows` is kept, and the table stays readable under the
    * "refreshing…" indicator while the same store is re-read.
+   *
+   * `null` is NOT A FEED and is the only value it holds before the first
+   * selection lands, which is why the effect below tests `!f` before it
+   * compares: the wire string of a feed is never empty.
+   *
+   * @type {string | null}
    */
   let loadedFeed = null;
 
@@ -717,12 +810,18 @@
    */
   const monthSupport = $derived(denominators(rows).support);
 
-  /** The denominator key for one row: its month AND its rung. */
+  /**
+   * The denominator key for one row: its month AND its rung.
+   *
+   * @param {StoreRow} r
+   */
   const fullestKey = (r) => denomKey(r.month, r.timeframe);
 
   /**
    * Whether this row is its own denominator — one row at this (month, rung),
    * so `short === 0` says nothing about the month.
+   *
+   * @param {StoreRow} r
    */
   const soleDenom = (r) => isSole(monthSupport, r);
 
@@ -758,6 +857,8 @@
    *
    * DO NOT "SIMPLIFY" THIS BACK INTO ARITHMETIC ON `rows` ALONE. There is no
    * expression over a single row that can know how many sessions a month had.
+   *
+   * @param {StoreRow} r
    */
   function shortBy(r) {
     return Math.max(0, (monthFull.get(fullestKey(r)) ?? r.rows) - r.rows);
@@ -769,6 +870,9 @@
    * Fractional means a partial day. `null` when the rung has no recorded
    * bars-per-session — the caller draws a dash, never a figure computed
    * against a denominator nobody chose.
+   *
+   * @param {StoreRow} r
+   * @returns {number | null}
    */
   function sessions(r) {
     const per = barsPerSession(r.timeframe);
@@ -994,6 +1098,20 @@
     })
   );
 
+  /**
+   * ONE DECORATED CENSUS ROW — the shape everything below this line walks.
+   *
+   * DERIVED FROM `deco` RATHER THAN WRITTEN OUT, and that is the whole point.
+   * The decoration above attaches nineteen fields to the ten `/store.json`
+   * sends, and a hand-written copy of that list is a second declaration of one
+   * shape: the day `lost` or `expiry` changes its meaning, the copy still says
+   * the old thing and every reader downstream believes the copy. Reading the
+   * element type off the expression that produces it cannot drift, because
+   * there is nothing to keep in step.
+   *
+   * @typedef {(typeof deco)[number]} DecoRow
+   */
+
   /* ======================================================================
      THE UNIVERSE RUNG — feed → UNIVERSE → instruments
      ----------------------------------------------------------------------
@@ -1035,6 +1153,13 @@
    * is the same lookup and now defers to this one — two spellings of "what is
    * this feed called" is how one of them goes stale, and this file has already
    * paid for that lesson twice (see the FORMATTING block at the top).
+   *
+   * `null` is a real argument: `feeds.active` is null before the list lands
+   * and `catalogue.feed` is null whenever the last master read FAILED, and
+   * both are asked "what is this feed called" while they hold it. No wire
+   * string is ever null, so the lookup misses and the dash is the answer.
+   *
+   * @param {string | null} wire
    */
   function feedDisplay(wire) {
     return feeds.all.find((f) => f.wire === wire)?.display ?? '—';
@@ -1131,6 +1256,8 @@
    * over a full store. BUILT FROM THE THREE PARTS, never parsed out of a
    * string, because a symbol may legally contain `-` (`NIFTY-50`, `M&M`).
    * `/markets` proves the same key the same way.
+   *
+   * @param {MasterRow} row a row of `/instruments.json`, NEVER a census row
    */
   const censusKeyOf = (row) => `${row.exchange}-${row.segment}-${row.symbol}`;
 
@@ -1420,8 +1547,18 @@
      key anything is COMPARED by — `picked` below resolves back to the store's
      own `instrument` spelling, never to what was typed. */
   const index = $derived.by(() => {
+    /* THE BUCKET TYPE IS DECLARED, AND IT IS THE ONE ANNOTATION THE WHOLE
+       DOWNSTREAM CHAIN HANGS ON. A bare `new Map()` is `Map<any, any>`, so
+       `index.get(typed)` is `any`, so `textMatched` is `any`, and `segmented`,
+       `timeframed`, `windowed`, `scoped`, `matched` and every reducer and
+       comparator over them are `any` in turn — thirty-odd
+       `Parameter 'r' implicitly has an 'any' type` reports, every one of them
+       raised at a callback that is not where the shape was lost. It is lost
+       here, and it is answered here. */
+    /** @type {Map<string, DecoRow[]>} */
     const by = new Map();
     for (const it of universed) {
+      /** @type {Set<string>} */
       const seen = new Set();
       for (const raw of [it.instrument, it.sym, it.month]) {
         const token = raw.toUpperCase();
@@ -2424,7 +2561,11 @@
       .sort((a, b) => b.chg + b.prev - (a.chg + a.prev) || txt(a.code, b.code));
   });
 
-  /** Bytes, at the magnitude that reads as a quantity rather than as `0.0`. */
+  /**
+   * Bytes, at the magnitude that reads as a quantity rather than as `0.0`.
+   *
+   * @param {number} n
+   */
   function bytesText(n) {
     if (n >= 1e9) return `${(n / 1e9).toFixed(1)} GB`;
     if (n >= 1e6) return `${(n / 1e6).toFixed(1)} MB`;
@@ -2494,6 +2635,22 @@
     }
   ];
 
+  /**
+   * Three-way codepoint comparison, and STRINGS ONLY.
+   *
+   * Every one of the fourteen call sites passes a string — a month key, an
+   * instrument, a rung name, a reason code — and the block above says why:
+   * these keys are `[A-Z0-9-_&]` by construction, so `<` on the codepoints is
+   * the whole ordering and `localeCompare` would only make it a function of
+   * the operator's locale. Declaring the parameters as strings is what keeps
+   * that true: a number reaching here would compare numerically on one
+   * argument and lexically on the other the moment one side arrived as text,
+   * and the caller — `sorted`, at 20,516 rows — is the last place that would
+   * show it.
+   *
+   * @param {string} a
+   * @param {string} b
+   */
   function txt(a, b) {
     return a < b ? -1 : a > b ? 1 : 0;
   }
@@ -2508,7 +2665,18 @@
       // and a column that sorts by a neighbour is worse than one that does not
       // sort at all, because the arrow says it worked.
       if (k === 'rows') d = a.rows - b.rows;
-      else if (k === 'days') d = a.days - b.days;
+      // `?? 0` IS THE COERCION JAVASCRIPT ALREADY PERFORMS, WRITTEN DOWN.
+      // `days` is `null` for every rung `barsPerSession` has no session size
+      // for — 2min, 3min, 5min and the rest of the ladder — and `null - null`
+      // is 0 while `5 - null` is 5, because `-` sends `null` to 0 before it
+      // subtracts. Spelling it out changes no order and no output; it only
+      // stops the expression from reading as though a null could not arrive.
+      //
+      // IT IS DELIBERATELY NOT THE `?? -1` RULE `pct` USES TWO LINES DOWN.
+      // Sorting an unknown session count below every known one would be a
+      // different table from the one this page renders today, and changing
+      // which rows an operator sees first is not a typing change.
+      else if (k === 'days') d = (a.days ?? 0) - (b.days ?? 0);
       else if (k === 'short') d = a.short - b.short;
       // AN UNKNOWN SORTS AS AN UNKNOWN. `a.pct` is null for a row that is its
       // own denominator, and `null - null` is 0 while `0.9 - null` is 0.9 —
@@ -2543,6 +2711,12 @@
     });
   });
 
+  /**
+   * A click on a column heading: same column flips the direction, a new column
+   * opens on the end that column is interesting at.
+   *
+   * @param {string} key a `COLS[].key` — the field name `sorted` switches on
+   */
   function head(key) {
     if (sortKey === key) desc = !desc;
     else {
@@ -2554,6 +2728,12 @@
     }
   }
 
+  /**
+   * The `aria-sort` value for one heading — the direction stated to a screen
+   * reader, from the same two variables the arrow is drawn from.
+   *
+   * @param {string} key a `COLS[].key`
+   */
   function ariaSort(key) {
     return sortKey === key ? (desc ? 'descending' : 'ascending') : 'none';
   }
@@ -3590,18 +3770,30 @@
    */
   const monthCards = $derived.by(() =>
     rollUpMonths(windowed)
-      .map((m) => ({
-        ...m,
-        // THE FULLEST ROW, AND ONLY WHERE ONE RUNG MAKES THAT A SINGLE NUMBER.
-        // `null` draws a dash and the title says the month holds two rungs.
-        fullest: m.tf ? (m.n > 0 ? m.owed / m.n : 0) : null,
-        // NULL RATHER THAN A NUMBER when the rung is unknown or mixed; the
-        // renderer draws a dash. `dayText` owns that rule for every caller.
-        sessions:
-          m.tf && barsPerSession(m.tf) !== null && m.n > 0
-            ? m.owed / m.n / barsPerSession(m.tf)
-            : null
-      }))
+      .map((m) => {
+        // ONE CALL, ONE VALUE — the hoist `deco` already makes for the same
+        // reason. `barsPerSession` was called TWICE below, once to test for
+        // `null` and once to divide by, so the test narrowed nothing that
+        // could be checked and the second call was free to be a different
+        // answer than the one that was tested. It is pure and it is not,
+        // today; a guard that only happens to hold is not a guard.
+        //
+        // `m.tf` is the rung this month is stored at, or `false` once two
+        // rungs disagree — see `rollUpMonths`. A month with no single rung has
+        // no session size either, and asking for one is the question that
+        // returns `null` here.
+        const per = m.tf ? barsPerSession(m.tf) : null;
+        return {
+          ...m,
+          // THE FULLEST ROW, AND ONLY WHERE ONE RUNG MAKES THAT A SINGLE
+          // NUMBER. `null` draws a dash and the title says the month holds
+          // two rungs.
+          fullest: m.tf ? (m.n > 0 ? m.owed / m.n : 0) : null,
+          // NULL RATHER THAN A NUMBER when the rung is unknown or mixed; the
+          // renderer draws a dash. `dayText` owns that rule for every caller.
+          sessions: per !== null && m.n > 0 ? m.owed / m.n / per : null
+        };
+      })
       .sort((a, b) => txt(b.month, a.month))
   ); /* newest first: that is where a pull lands */
 
@@ -3626,11 +3818,39 @@
      "bars are missing" is two facts wearing one colour, and at a glance
      neither can be read.
      ====================================================================== */
+  /* THE THREE MAPS THIS BLOCK KEEPS, AND WHAT EACH ONE'S VALUE MEANS.
+     ----------------------------------------------------------------------
+     `flash` is keyed by TILE NAME — `n`, `bars`, `full`, `gaps`, `cov`,
+     `months`, the same six `snapshot` builds below — and its `n` is a
+     generation counter, NOT a count of anything on screen: it is what re-keys
+     the node so the animation restarts, and it is what the timeout compares
+     against so a later movement's class is never cleared by an earlier one's
+     timer. `dir` is `''` once the animation is over, which is the direction
+     ceasing to be stated rather than a seventh direction.
+
+     Declared rather than inferred because `$state({})` is `{}` — a type with
+     no keys at all — so every one of the four reads below is
+     `expression of type 'any' can't be used to index type '{}'`, and the
+     object would silently accept a misspelt tile name for as long as nobody
+     looked at the screen.
+
+     `prev` holds the LAST VALUE each tile was seen at, and `null` is one of
+     them: Coverage has no ratio when the selection has no denominator, and
+     `mark` refuses to call the arrival or departure of an unknown a movement. */
+  /** @type {Record<string, { n: number, dir: string }>} */
   let flash = $state({});
+  /** @type {Map<string, number | null>} */
   const prev = new Map();
+  /** @type {Map<string, ReturnType<typeof setTimeout>>} */
   const timers = new Map();
   let seeded = false;
 
+  /**
+   * Record one tile's new value, and tint it if it MOVED.
+   *
+   * @param {string} name the tile key — one of the six `snapshot` names
+   * @param {number | null} v its value now, or `null` for "not measurable"
+   */
   function mark(name, v) {
     const p = prev.get(name);
     prev.set(name, v);
@@ -3734,6 +3954,16 @@
     const at = fetchedAt;
     untrack(() => {
       if (!at) return;
+      /**
+       * THE PAIRS ARE DECLARED AS PAIRS. Inferred, this array is
+       * `(string | number | null)[][]` — every element of every row a union of
+       * all three — so the destructured `k` below is as likely to be a number
+       * as the tile name it actually always is, and `mark` cannot state what
+       * it takes. The tuple says what the rows are: a name, and a figure or
+       * the absence of one.
+       *
+       * @type {[string, number | null][]}
+       */
       const snapshot = [
         ['n', matched.length],
         ['bars', total],
@@ -4281,6 +4511,12 @@
     URL.revokeObjectURL(url);
   }
 
+  /**
+   * Put the keyboard cursor on row `next` of the current page, clamped, and
+   * scroll it into view.
+   *
+   * @param {number} next a row index into `censusPage`, in or out of range
+   */
   function moveTo(next) {
     const n = censusPage.length;
     if (n === 0) return;
@@ -4294,14 +4530,32 @@
     else if (top + ROW > el.scrollTop + viewportH) el.scrollTop = top + ROW - viewportH;
   }
 
+  /**
+   * Move the cursor by `d` rows. From no cursor at all it enters the list at
+   * the end the movement came from — down enters at the top, up at the bottom.
+   *
+   * @param {number} d rows to move, signed
+   */
   function step(d) {
     moveTo(cursor < 0 ? (d > 0 ? 0 : censusPage.length - 1) : cursor + d);
   }
 
+  /**
+   * Open the drawer on one census row.
+   *
+   * `undefined` IS A REAL ARGUMENT AND IT OPENS NOTHING. The Enter/Space path
+   * passes `censusPage[cursor]`, and an index into a windowed page can be past
+   * its end for the instant between a filter narrowing the list and the cursor
+   * being reset — which is exactly why the guard is here rather than at the
+   * one call site that can produce it.
+   *
+   * @param {DecoRow | undefined} it
+   */
   function openRow(it) {
     if (it) openKey = it.key;
   }
 
+  /** @param {KeyboardEvent} e */
   function onKey(e) {
     if (e.altKey || e.ctrlKey || e.metaKey) return;
     const page = Math.max(1, Math.floor(viewportH / ROW) - 1);
@@ -4342,6 +4596,7 @@
 
   /* `/` FOCUSES THE FILTER, from anywhere on the page that is not already a
      text field — the shortcut every terminal and every code host uses. */
+  /** @param {KeyboardEvent} e */
   function onWindowKey(e) {
     const t = e.target;
     const typing =
@@ -4382,6 +4637,11 @@
      asked for at the altitude this data actually supports. Built once as a
      Map, so opening a row is a probe and not a scan of 20,516 rows. */
   const byInstrument = $derived.by(() => {
+    /* SAME REASON AS THE PREFIX INDEX ABOVE: an unannotated `new Map()` is
+       `Map<any, any>`, and every month the drawer renders off `openMonths`
+       would then be a shape nothing checks — on the one panel that reads nine
+       fields off each row. */
+    /** @type {Map<string, DecoRow[]>} */
     const by = new Map();
     for (const it of deco) {
       let a = by.get(it.instrument);
@@ -4408,8 +4668,20 @@
     return { bars, missing, complete, unproven, n: openMonths.length };
   });
 
+  /* THE CAST IS THE ONE FACT `querySelector` CANNOT KNOW AND THIS FILE CAN.
+     `querySelector` answers `Element`, which is the interface an `<svg>` node
+     and an XML node also satisfy, and `Element` has no `focus` — only
+     `HTMLElement` does. `.dclose` is the drawer's own close control, declared
+     forty lines into the markup below as a `<button>`, so it is an
+     `HTMLButtonElement` and always has been; the type is narrowed here rather
+     than the call being made conditional, because a conditional would turn
+     "this selector matched nothing" — which would mean the drawer rendered
+     without its close button, a real defect — into a keyboard trap that
+     reports nothing. `?.` still guards the ordinary case: the effect can run
+     in the frame before the drawer's children exist. */
   $effect(() => {
-    if (openKey && drawerEl) drawerEl.querySelector('.dclose')?.focus();
+    if (openKey && drawerEl)
+      /** @type {HTMLElement | null} */ (drawerEl.querySelector('.dclose'))?.focus();
   });
 
   /* A NEW VIEW STARTS AT THE TOP. Keeping the old offset after a filter
@@ -4872,7 +5144,7 @@
               }))
             ]}
             selected={new Set([picked])}
-            onchange={(sel) => (filter = [...sel][0] ?? '')}
+            onchange={(/** @type {Set<string>} */ sel) => (filter = [...sel][0] ?? '')}
           />
           <span class="count">
             {picked
@@ -5650,7 +5922,14 @@
                         <span class="okword">full</span>
                       {:else}
                         <span class="missnum">−{fmt(it.short)}</span>
-                        {#if it.lost >= 1}
+                        <!-- THE NULL TEST IS WRITTEN OUT, NOT RELIED ON.
+                             `lost` is `null` for a rung with no recorded
+                             session size, and `null >= 1` is false — so the
+                             days-lost chip was already suppressed for those
+                             rows and still is. Stating the absence is what
+                             lets `Math.floor` below be read as taking a
+                             number, which is the only thing it can take. -->
+                        {#if it.lost !== null && it.lost >= 1}
                           <span class="lost">{Math.floor(it.lost)}d</span>
                         {/if}
                       {/if}

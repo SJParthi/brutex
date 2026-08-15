@@ -86,6 +86,154 @@
   import { store, syncStore, watchStore } from '$lib/store.svelte.js';
   import { untrack } from 'svelte';
 
+  /* ======================================================================
+     THE SHAPES, WRITTEN DOWN ONCE
+     ----------------------------------------------------------------------
+     Every shape below is the shape `readState` PRODUCES, not the shape the
+     wire sends — the wire's shape is `unknown` until that reader has looked
+     at every field, and writing a typedef for the raw body would be a claim
+     about a payload this page explicitly refuses to trust. What is written
+     here is the post-validation contract of D-0057, field for field, and it
+     is the same list the reader checks: if a field moves there, it moves
+     here, and the checker reports every reader of it rather than none.
+
+     Without these, `let ap = $state(null)` is typed `null`, and every one of
+     the ~90 reads of `ap.state`, `ap.target`, `ap.failures` and `ap.now`
+     below is reported as `Property … does not exist on type 'never'` at the
+     READER — a hundred reports of one absence, none of them fixable where
+     they are reported. `$lib/feeds.svelte.js` records the same lesson about
+     the same `$state` inference, one file over.
+     ====================================================================== */
+
+  /** The six states of D-0057. `SAYS` is keyed by exactly this union. */
+  /** @typedef {'starting' | 'running' | 'waiting' | 'paused' | 'halted' | 'complete'} ApState */
+
+  /** `target` — the span being written, and what it is being written for. */
+  /**
+   * @typedef {{
+   *   from: string | null,
+   *   to: string | null,
+   *   instruments: number | null,
+   *   timeframe: string | null,
+   *   feed: string | null
+   * }} Target
+   */
+
+  /** `now` — the cell in flight, or the whole object is null. */
+  /**
+   * @typedef {{
+   *   instrument: string | null,
+   *   month: string | null,
+   *   timeframe: string | null,
+   *   feed: string | null,
+   *   elapsed_ms: number | null,
+   *   index: number | null,
+   *   of: number | null
+   * }} Flight
+   */
+
+  /** One row of `failures`. Only `instrument` is substituted when absent. */
+  /**
+   * @typedef {{
+   *   instrument: string,
+   *   month: string | null,
+   *   why: string | null,
+   *   at: string | null
+   * }} Failure
+   */
+
+  /** A payload that PASSED the reader. Nothing else in this file is one. */
+  /**
+   * @typedef {{
+   *   state: ApState,
+   *   why: string | null,
+   *   cursor: string | null,
+   *   target: Target,
+   *   now: Flight | null,
+   *   waiting_ms: number | null,
+   *   absorbed_ms: number | null,
+   *   journal: string | null,
+   *   failures: Failure[]
+   * }} Autopilot
+   */
+
+  /**
+   * The reader's own answer. `ok` is a LITERAL on both arms, which is what
+   * makes `if (!parsed.ok) return` narrow — a bare `boolean` there and the
+   * checker cannot tell the refusal from the value, which is exactly the
+   * confusion the two-armed shape exists to prevent.
+   *
+   * @typedef {{ ok: true, value: Autopilot } | { ok: false, why: string }} ReadResult
+   */
+
+  /** The four link states, spelled out — see `link` for why it is not a boolean. */
+  /**
+   * @typedef {{
+   *   kind: 'probing' | 'ok' | 'absent' | 'broken',
+   *   why: string | null,
+   *   at: number,
+   *   ms: number
+   * }} Link
+   */
+
+  /** `span`'s refusal, carried whole into `ladder.refuse` and printed there. */
+  /** @typedef {{ ok: false, field: string, raw: unknown, why: string }} SpanRefusal */
+  /** @typedef {{ ok: true, months: string[] } | SpanRefusal} SpanResult */
+
+  /**
+   * One month of the ladder, as `rowOf` measures it. `expBars`, `cellPct` and
+   * `barPct` are null WHEN THERE IS NO DENOMINATOR, which is not the same
+   * fact as zero and is why none of them is typed `number`.
+   *
+   * @typedef {{
+   *   key: string,
+   *   cells: number,
+   *   bars: number,
+   *   per: number | null,
+   *   expBars: number | null,
+   *   cellPct: number | null,
+   *   barPct: number | null
+   * }} Rung
+   */
+
+  /** One answer behind a dial: its key, its face, and why it is that answer. */
+  /** @typedef {{ k: string, n: string, y: string, off?: boolean }} DialOption */
+
+  /**
+   * ONE LINE OF EVIDENCE under the claim: what it is, what it reads, and WHICH
+   * OF THE THREE SOURCES it came from. `s` is the union and not a string on
+   * purpose — the whole design of this page is that a measured number and a
+   * reported one never wear the same chip, and a plain `string` there would
+   * let a typo render a fact with no provenance at all.
+   *
+   * `v` may be null: a fact whose value is unknown is dropped by `evidence`
+   * rather than drawn as a blank, and the claim above it is refused when that
+   * leaves the list empty.
+   *
+   * @typedef {{ k: string, v: string | null, s: 'mea' | 'rep' | 'obs' }} Fact
+   */
+
+  /** The one verdict, and the facts that are drawn in the same element. */
+  /**
+   * @typedef {{
+   *   tone: 'good' | 'warn' | 'bad' | 'unknown',
+   *   claim: string,
+   *   sub: string,
+   *   facts: Fact[]
+   * }} Verdict
+   */
+
+  /** The control's receipt. `tone` comes from the SENTENCE — see `classify`. */
+  /**
+   * @typedef {{
+   *   action: string,
+   *   tone: 'done' | 'partial' | 'refused',
+   *   code: number,
+   *   why: string,
+   *   at: number
+   * }} Receipt
+   */
+
   /** The live state. Small payload, so a short period is cheap. */
   const TICK_MS = 2000;
   /** The census. ~400 KB on a real store — polled slowly, on purpose. */
@@ -116,6 +264,13 @@
      There is no path in this file that can print the three characters N a N.
      ====================================================================== */
 
+  /* THE PARAMETER IS `unknown` AND THAT IS THE POINT. Every one of these
+     takes whatever the payload carried — the reader hands them fields it has
+     not vouched for — and the `typeof` line inside each is the whole reason
+     the function exists. Typing the parameter `number` would move the refusal
+     to the caller and leave the guard below unreachable. */
+
+  /** @param {unknown} v */
   function inr(v) {
     if (typeof v !== 'number' || !Number.isFinite(v)) return null;
     const neg = v < 0;
@@ -125,7 +280,15 @@
     const rest = s.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ',');
     return (neg ? '-' : '') + rest + ',' + last3;
   }
-  /** The same, as a string, for the places that must be one (title=, sentences). */
+  /**
+   * The same, as a string, for the places that must be one (title=, sentences).
+   *
+   * `dash` is OPTIONAL rather than defaulted in the signature, because most
+   * callers want the em-dash and the handful that want their own word say so.
+   *
+   * @param {unknown} v
+   * @param {string} [dash]
+   */
   const inrs = (v, dash) => {
     const t = inr(v);
     return t === null ? (dash ?? '—') : t;
@@ -146,45 +309,68 @@
   const MKEY = /^(\d{4})-(0[1-9]|1[0-2])$/;
   const DKEY = /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/;
 
-  /** `YYYY-MM` -> `Apr 2024`. Anything else comes back null, never a guess. */
+  /**
+   * `YYYY-MM` -> `Apr 2024`. Anything else comes back null, never a guess.
+   * @param {unknown} k
+   */
   function monthLabel(k) {
     const m = typeof k === 'string' ? MKEY.exec(k) : null;
     return m ? `${MON[+m[2] - 1]} ${m[1]}` : null;
   }
-  /** `YYYY-MM-DD` -> `11 Aug 2026`. */
+  /**
+   * `YYYY-MM-DD` -> `11 Aug 2026`.
+   * @param {unknown} k
+   */
   function dayLabel(k) {
     const m = typeof k === 'string' ? DKEY.exec(k) : null;
     return m ? `${m[3]} ${MON[+m[2] - 1]} ${m[1]}` : null;
   }
 
-  /** A duration the SERVER measured, plus local drift bounded by the poll. */
+  /**
+   * A duration the SERVER measured, plus local drift bounded by the poll.
+   * @param {unknown} ms
+   */
   function clock(ms) {
     if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) return null;
     const s = Math.floor(ms / 1000);
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const r = s % 60;
-    const p2 = (x) => String(x).padStart(2, '0');
+    const p2 = (/** @type {number} */ x) => String(x).padStart(2, '0');
     return h ? `${h}:${p2(m)}:${p2(r)}` : `${p2(m)}:${p2(r)}`;
   }
-  /** IST, always, and it says IST. An operator abroad should not do arithmetic. */
+  /**
+   * IST, always, and it says IST. An operator abroad should not do arithmetic.
+   * @param {unknown} epoch
+   */
   function istTime(epoch) {
     if (typeof epoch !== 'number' || !Number.isFinite(epoch) || epoch <= 0) return null;
     const d = new Date(epoch + 19800000);
-    const p2 = (x) => String(x).padStart(2, '0');
+    const p2 = (/** @type {number} */ x) => String(x).padStart(2, '0');
     return `${p2(d.getUTCHours())}:${p2(d.getUTCMinutes())}:${p2(d.getUTCSeconds())}`;
   }
-  const ago = (ms) =>
+  const ago = (/** @type {number} */ ms) =>
     ms < 1500 ? 'just now' : ms < 60000 ? `${Math.floor(ms / 1000)}s ago` : `${Math.floor(ms / 60000)}m ago`;
 
   /**
    * THREE-WAY, ALWAYS. Returning 1 for equal makes a sort unstable and a
    * "did this change" test lie; it has reappeared three times in this
    * repository and it does not appear here.
+   *
+   * Both axes it is asked to order are ordered by `<`: month keys, which are
+   * strings chosen so that lexical order IS chronological order, and the
+   * original index of a failure, which is a number. One signature covers
+   * both, and nothing else is ever passed to it.
+   *
+   * @param {string | number} a
+   * @param {string | number} b
    */
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-  /** The feed's own name, from `/feeds.json`. Nothing here names a vendor. */
+  /**
+   * The feed's own name, from `/feeds.json`. Nothing here names a vendor.
+   * @param {string | null | undefined} w
+   */
   const feedName = (w) => (feeds.all ?? []).find((f) => f.wire === w)?.display ?? (w ? String(w) : null);
 
   /* ======================================================================
@@ -207,6 +393,21 @@
   /** Fifty years. A target wider than this is a typo, not a backfill. */
   const MAX_SPAN = 600;
 
+  /**
+   * `null` IS ONE OF THE INPUTS, not an accident of the signature. `target.from`
+   * is `string | null` after the reader, and the whole job of this function is
+   * to say which endpoint was not a month key — so it has to be reachable with
+   * the value that is not one.
+   *
+   * The declared return type is what makes `if (!sp.ok) return …` narrow at
+   * every caller: inferred from the returns alone, `ok` widens to `boolean`,
+   * the four object shapes merge, and `sp.months` becomes possibly-undefined
+   * for every reader of a span that has already been proven good.
+   *
+   * @param {string | null} from
+   * @param {string | null} to
+   * @returns {SpanResult}
+   */
   function span(from, to) {
     const f = typeof from === 'string' ? MKEY.exec(from) : null;
     if (!f)
@@ -224,7 +425,11 @@
         raw: to,
         why: 'the store writes one file per month and keys it YYYY-MM. This is not that.'
       };
-    if (cmp(from, to) > 0)
+    // BOTH ARE STRINGS HERE, PROVEN BY THE TWO GUARDS ABOVE: `MKEY` only ever
+    // matches when the value handed to it was a string, so a non-null `f` and
+    // `t` is that proof. The checker cannot carry a narrowing backwards from
+    // the match to the value that produced it, so it is stated instead.
+    if (cmp(/** @type {string} */ (from), /** @type {string} */ (to)) > 0)
       return {
         ok: false,
         field: 'target.from … target.to',
@@ -272,7 +477,19 @@
 
   const BARS_NO_DENOM =
     'no route states how many sessions a month holds, so bars are counted here and never divided — a fraction needs both numbers';
-  const expectedBars = () => null;
+  /**
+   * THE PARAMETERS ARE DECLARED AND UNREAD, ON PURPOSE. Both callers already
+   * hand it the month and the instrument count, because those are the two
+   * numbers the answer would be built from the day a route states a month's
+   * sessions. Dropping them from the signature to match the empty body would
+   * make this function look like a constant instead of a MISSING MEASUREMENT,
+   * and every call site would have to be edited back when the route arrives.
+   *
+   * @param {string} month
+   * @param {number | null} per
+   * @returns {number | null}
+   */
+  const expectedBars = (month, per) => null;
 
   /* ======================================================================
      THE CONTRACT READER
@@ -283,14 +500,17 @@
      ====================================================================== */
 
   /** The states the contract defines. Anything else is a contract violation. */
+  /** @type {ApState[]} */
   const STATES = ['starting', 'running', 'waiting', 'paused', 'halted', 'complete'];
 
   /** States in which a REASON is mandatory. A stop with no why is banned. */
   const MUST_EXPLAIN = ['paused', 'halted'];
 
+  /** @param {unknown} v */
   function str(v) {
     return typeof v === 'string' && v.length > 0 ? v : null;
   }
+  /** @param {unknown} v */
   function num(v) {
     return typeof v === 'number' && Number.isFinite(v) ? v : null;
   }
@@ -301,14 +521,29 @@
    * Deliberately not a schema library: the shape is nine fields and a list, and
    * a dependency that turns a named refusal into `/target/from: required` is a
    * worse message for the person who has to fix it.
+   *
+   * THE INPUT IS `unknown` AND STAYS UNTRUSTED. It arrives from `r.json()` and
+   * from the control's embedded `status`, and neither is a promise about a
+   * shape — writing a parameter type for the raw body would hand this function
+   * the very assumption it exists to check. What the guard below establishes is
+   * that it is a non-null, non-array object, and `Record<string, unknown>` is
+   * the widest thing that is then TRUE: every field read off it is still
+   * `unknown` and still has to go through `str` or `num` before it is believed.
+   *
+   * @param {unknown} input
+   * @returns {ReadResult}
    */
-  function readState(raw) {
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+  function readState(input) {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
       return { ok: false, why: 'the body is not a JSON object' };
     }
+    const raw = /** @type {Record<string, unknown>} */ (input);
     const state = str(raw.state);
     if (!state) return { ok: false, why: 'no `state` field' };
-    if (!STATES.includes(state)) {
+    // `Array<ApState>.includes` will not accept a plain `string`, and a plain
+    // string is exactly what is being asked about. The list is widened for the
+    // question; the ANSWER to it is what licenses the `ApState` at the bottom.
+    if (!(/** @type {readonly string[]} */ (STATES)).includes(state)) {
       return { ok: false, why: `\`state\` is "${state}", which is not one of ${STATES.join(', ')}` };
     }
     const why = str(raw.why);
@@ -319,8 +554,10 @@
       };
     }
 
-    const t = raw.target;
-    if (t === null || typeof t !== 'object') return { ok: false, why: 'no `target` object' };
+    const raw_target = raw.target;
+    if (raw_target === null || typeof raw_target !== 'object')
+      return { ok: false, why: 'no `target` object' };
+    const t = /** @type {Record<string, unknown>} */ (raw_target);
     const target = {
       from: str(t.from),
       to: str(t.to),
@@ -328,17 +565,22 @@
       timeframe: str(t.timeframe),
       feed: str(t.feed)
     };
-    for (const k of ['from', 'to', 'instruments']) {
+    // THE LIST IS THE KEYS, not strings that look like them: a plain `string`
+    // cannot index `target`, and the day a field is renamed the checker should
+    // report THIS line rather than let a loop look for a key that is gone.
+    for (const k of /** @type {('from' | 'to' | 'instruments')[]} */ (['from', 'to', 'instruments'])) {
       if (target[k] === null) return { ok: false, why: `no \`target.${k}\`` };
     }
 
     // `now` is null when nothing is in flight, and that is a legal answer —
     // but only for a state that is not running. A "running" autopilot with
     // nothing in flight is exactly the hang this page exists to expose.
+    /** @type {Flight | null} */
     let flight = null;
     if (raw.now !== null && raw.now !== undefined) {
-      const n = raw.now;
-      if (typeof n !== 'object') return { ok: false, why: '`now` is neither null nor an object' };
+      const raw_now = raw.now;
+      if (typeof raw_now !== 'object') return { ok: false, why: '`now` is neither null nor an object' };
+      const n = /** @type {Record<string, unknown>} */ (raw_now);
       // `elapsed_ms` IS A DURATION MEASURED BY THE SERVER, not a timestamp.
       // A start instant would have to be compared against the browser's clock,
       // and two clocks that disagree by a minute render a cell that has been
@@ -352,7 +594,7 @@
         index: num(n.index),
         of: num(n.of)
       };
-      for (const k of ['instrument', 'month']) {
+      for (const k of /** @type {('instrument' | 'month')[]} */ (['instrument', 'month'])) {
         if (flight[k] === null) return { ok: false, why: `no \`now.${k}\`` };
       }
     }
@@ -377,7 +619,11 @@
     return {
       ok: true,
       value: {
-        state,
+        // ONE OF THE SIX, PROVEN BY THE MEMBERSHIP TEST AT THE TOP. `str`
+        // hands back a `string` because that is all it can know; the check
+        // against `STATES` is what narrows it, and the checker cannot carry
+        // that result through a widened `includes`, so it is stated here.
+        state: /** @type {ApState} */ (state),
         why,
         cursor: str(raw.cursor),
         target,
@@ -404,9 +650,11 @@
      can honestly claim. It is what answers "what happened while I was away".
      ====================================================================== */
 
+  /** @type {{ t: number, text: string }[]} */
   let trail = $state([]);
   const watchAt = Date.now();
 
+  /** @param {string} text */
   function note(text) {
     trail = [{ t: Date.now(), text }, ...trail].slice(0, 60);
   }
@@ -421,11 +669,32 @@
   //   ok       — a valid payload
   //   absent   — 404. The binary has no autopilot.
   //   broken   — it answered, and the answer was not the contract.
+  /** @type {Link} */
   let link = $state({ kind: 'probing', why: null, at: 0, ms: 0 });
-  let ap = $state(null);
+  /**
+   * THE VALIDATED PAYLOAD, OR NOTHING. Null is not "empty" — it is every one
+   * of the four link states that is not `ok`, and the difference is the whole
+   * page: an absent autopilot and an idle one must not render the same.
+   *
+   * THE CAST IS ON THE INITIAL VALUE AND NOT ONLY ON THE DECLARATION, because
+   * the two say different things to the checker. A `@type` alone declares the
+   * union, and then flow analysis observes that the value assigned right here
+   * is `null` and that nothing at the top level assigns it again — every
+   * `ap?.…` in a `$derived(…)` below is read as `null` narrowed by `?.`, which
+   * is `never`, and the field lookups on it are reported one per use. Every
+   * write to `ap` happens inside `adopt` and `tick`, which flow analysis does
+   * not follow. Stating the union on the value itself is what says the
+   * variable HOLDS the union rather than merely permitting it.
+   *
+   * @type {Autopilot | null}
+   */
+  let ap = $state(/** @type {Autopilot | null} */ (null));
   let now = $state(Date.now());
 
-  /** Adopt a validated payload, and note what moved since the last one. */
+  /**
+   * Adopt a validated payload, and note what moved since the last one.
+   * @param {Autopilot} next
+   */
   function adopt(next) {
     const prev = ap;
     if (!prev) {
@@ -454,7 +723,10 @@
     ap = next;
   }
 
-  /** Move `link`, and say so once, when the kind actually changes. */
+  /**
+   * Move `link`, and say so once, when the kind actually changes.
+   * @param {Link} next
+   */
   function setLink(next) {
     if (link.kind !== next.kind) {
       note(
@@ -510,9 +782,16 @@
       adopt(parsed.value);
       setLink({ kind: 'ok', why: null, at: Date.now(), ms });
     } catch (e) {
+      // A CAUGHT VALUE IS `unknown`, AND THIS LINE ALREADY KNEW THAT. Both
+      // throws above are `Error`s, but a rejected `fetch` can settle with
+      // anything at all, which is why the reason is read off the value with
+      // `?.` and falls back to the value itself. The cast says only what those
+      // two operators already assume — that a `message` MAY be there — rather
+      // than asserting a class the runtime has not checked.
+      const cause = /** @type {{ message?: unknown } | null | undefined} */ (e);
       setLink({
         kind: 'broken',
-        why: String(e?.message ?? e),
+        why: String(cause?.message ?? e),
         at: Date.now(),
         ms: Math.round(performance.now() - t0)
       });
@@ -609,7 +888,9 @@
   let notedRead = 0;
   let notedCells = 0;
   let notedBars = 0;
+  /** @type {string | null} */
   let notedFeed = null;
+  /** @type {string | null} */
   let notedError = null;
   $effect(() => {
     const reads = store.reads;
@@ -672,6 +953,13 @@
    * it is a VISIBLE GAP rather than a row that was never drawn. When it is not
    * known, only the observed months appear — and the page says so, rather than
    * inventing a floor.
+   *
+   * `refuse` IS THE REFUSAL OR IT IS NULL, and the two arms are keyed on the
+   * same literal `ok` that `span` uses, so the panel that prints
+   * `ladder.refuse.field` is only reachable on the arm that has one.
+   *
+   * @type {{ ok: true, refuse: null, months: string[], framed: boolean }
+   *      | { ok: false, refuse: SpanRefusal, months: string[], framed: boolean }}
    */
   const ladder = $derived.by(() => {
     const t = ap?.target;
@@ -688,7 +976,11 @@
     scope.same && typeof ap?.target?.instruments === 'number' ? ap.target.instruments : null
   );
 
-  /** One month's reading: what is held, and what it is held against. */
+  /**
+   * One month's reading: what is held, and what it is held against.
+   * @param {string} key
+   * @returns {Rung}
+   */
   function rowOf(key) {
     const h = census.months.get(key) ?? { cells: 0, bars: 0 };
     const exp = expectedBars(key, per);
@@ -774,7 +1066,8 @@
 
   /** What one rung is, as one word. The tape, the buckets and the filter read
       the same call, so a row cannot be counted as one thing and drawn as
-      another. */
+      another.
+      @param {Rung} r */
   function classOf(r) {
     if (r.cells <= 0 && r.bars <= 0) return 'none';
     if (r.per === null) return 'nod';
@@ -804,10 +1097,12 @@
      ones the beam draws underneath the claim — one element, one pass.
      ====================================================================== */
 
+  /** @type {Verdict} */
   const verdict = $derived.by(() => {
     const lk = link;
 
     if (lk.kind === 'absent' || lk.kind === 'broken') {
+      /** @type {Fact[]} */
       const facts = [];
       if (counted) {
         facts.push({ k: 'instrument-months held', v: inrs(census.cells), s: 'mea' });
@@ -885,6 +1180,7 @@
     const out = cellsTarget === null ? null : Math.max(0, cellsTarget - held);
     const b = buckets;
 
+    /** @type {Fact[]} */
     const facts = [];
     facts.push({
       k: 'instrument-months held',
@@ -1012,12 +1308,19 @@
      ====================================================================== */
 
   let control = $state({ busy: false });
+  /** @type {Receipt | null} */
   let receipt = $state(null);
 
-  /** The tone comes from the SENTENCE, never from the status code alone. */
+  /**
+   * The tone comes from the SENTENCE, never from the status code alone.
+   * @param {boolean} accepted
+   * @param {string} why
+   * @returns {'done' | 'partial' | 'refused'}
+   */
   const classify = (accepted, why) =>
     !accepted ? 'refused' : /NOT a full recovery|terminal|could not|poisoned/.test(why) ? 'partial' : 'done';
 
+  /** @param {string} action */
   async function send(action) {
     control = { busy: true };
     let code = 0;
@@ -1071,7 +1374,11 @@
       // A control that failed and said nothing is a button that lies. The
       // reason goes on the page beside the button that produced it, in the
       // same element the server's own sentence would have used.
-      const why = String(e?.message ?? e);
+      //
+      // Read by SHAPE and not by class, for the reason `tick` gives: a
+      // rejected `fetch` is not required to settle with an `Error`.
+      const cause = /** @type {{ message?: unknown } | null | undefined} */ (e);
+      const why = String(cause?.message ?? e);
       receipt = { action, tone: 'refused', code, why, at: Date.now() };
       note(`POST ${CONTROL} action=${action} failed — ${why}`);
     } finally {
@@ -1137,11 +1444,16 @@
      and the face has to survive all of them.
      ====================================================================== */
 
+  /** Which dial is open, by its id — `null` is "none of them". */
+  /** @type {string | null} */
   let drop = $state(null);
   let show = $state('all');
   let group = $state('month');
+  /** The month key of the expanded rung, or `null`. */
+  /** @type {string | null} */
   let openRung = $state(null);
 
+  /** @type {DialOption[]} */
   const SHOW = [
     { k: 'all', n: 'every month', y: 'the whole target span, gaps included' },
     { k: 'gap', n: 'only the gaps', y: 'anything a rerun would still have to touch' },
@@ -1151,6 +1463,7 @@
     // can never match. CLAUDE.md §4: name the reason on the control it is about.
     { k: 'short', n: 'only bars short', y: BARS_NO_DENOM, off: true }
   ];
+  /** @type {DialOption[]} */
   const GROUPS = [
     { k: 'month', n: 'by month', y: 'oldest first — the order the backfill needs them' },
     { k: 'instrument', n: 'by instrument', y: 'one heading per symbol that is stalled' },
@@ -1167,9 +1480,23 @@
     })
   );
 
+  /**
+   * A pointerdown anywhere that is not inside a dial closes the open one.
+   *
+   * `e.target` is an `EventTarget`, and an `EventTarget` is not necessarily an
+   * `Element` — a pointerdown can be delivered to the document itself, which
+   * is precisely why the call below is written `?.closest?.(…)` and not
+   * `.closest(…)`. The cast is to THAT shape, an optional `closest`, rather
+   * than to `Element`: asserting the element would be claiming the thing the
+   * two question marks are there to doubt.
+   *
+   * @param {PointerEvent} e
+   */
   function onWindowDown(e) {
-    if (drop && !e.target?.closest?.('.dial')) drop = null;
+    const hit = /** @type {{ closest?: (selector: string) => unknown } | null} */ (e.target);
+    if (drop && !hit?.closest?.('.dial')) drop = null;
   }
+  /** @param {KeyboardEvent} e */
   function onWindowKey(e) {
     if (e.key === 'Escape' && drop) drop = null;
   }
@@ -1178,12 +1505,14 @@
      THE SNAGS — what is stuck. A failure is never a count on its own.
      ====================================================================== */
 
+  /** @param {Failure} f */
   function reasonOf(f) {
     if (!f.why) return 'no reason in the payload';
     const m = /^([A-Z]{2}-\d{3})/.exec(f.why);
     if (m) return m[1];
     return f.why.startsWith('the store refused') ? 'store refused the batch' : 'transport';
   }
+  /** @param {Failure} f */
   const groupKey = (f) =>
     group === 'month'
       ? (monthLabel(f.month) ?? f.month ?? 'no month')
@@ -1191,7 +1520,8 @@
         ? f.instrument
         : reasonOf(f);
   /** THE SORT KEY IS THE RAW MONTH, so the order is chronological and not
-      alphabetical — "Apr 2021" before "Feb 2020" is what the label sorts to. */
+      alphabetical — "Apr 2021" before "Feb 2020" is what the label sorts to.
+      @param {Failure} f */
   const sortKey = (f) => (group === 'month' ? (f.month ?? '') : groupKey(f));
 
   const snags = $derived(
@@ -1209,7 +1539,12 @@
      blanked, and a month is never rendered from anything but its key.
      ===================================================================== -->
 
-{#snippet N(v, why)}
+<!-- `why` IS OPTIONAL AND SAYS SO IN THE SIGNATURE. Most callers have no
+     sentence of their own and want the default one, which the body already
+     supplies with `why ?? NO_NUMBER`; the explicit `= undefined` changes
+     nothing at run time and tells the checker that a one-argument render is
+     the intended call and not a missing argument. -->
+{#snippet N(/** @type {unknown} */ v, /** @type {string | undefined} */ why = undefined)}
   {#if inr(v) !== null}
     <span class="mono">{inr(v)}</span>
   {:else}
@@ -1217,7 +1552,7 @@
   {/if}
 {/snippet}
 
-{#snippet monthNode(k)}
+{#snippet monthNode(/** @type {string | null} */ k)}
   {#if monthLabel(k)}
     <span class="mono" title={k}>{monthLabel(k)}</span>
   {:else}
@@ -1227,7 +1562,7 @@
   {/if}
 {/snippet}
 
-{#snippet src(kind)}
+{#snippet src(/** @type {'mea' | 'rep' | 'obs'} */ kind)}
   <span
     class="src"
     class:mea={kind === 'mea'}
@@ -1242,7 +1577,13 @@
   >
 {/snippet}
 
-{#snippet dial(id, label, value, opts, pick)}
+{#snippet dial(
+  /** @type {string} */ id,
+  /** @type {string} */ label,
+  /** @type {string} */ value,
+  /** @type {DialOption[]} */ opts,
+  /** @type {(k: string) => void} */ pick
+)}
   {@const cur = opts.find((o) => o.k === value) ?? { n: String(value), y: '' }}
   <span class="dial" class:open={drop === id}>
     <button
@@ -1412,12 +1753,18 @@
            its own face rather than leaving it to the beam. -->
       <div class="gauge">
         <span class="g-k">State</span>
+        <!-- `ap !== null` RATHER THAN `Boolean(ap)`, and it is the same test:
+             `ap` is either the validated payload or null, so the two agree on
+             every value it can hold. The difference is only that the checker
+             follows the comparison into the rest of the `&&` chain and knows
+             `ap.state` is reachable there, where a `Boolean(…)` call is an
+             ordinary function call it cannot see through. -->
         <div
           class="g-v"
-          class:up={Boolean(ap) && !contradicted && (ap.state === 'running' || ap.state === 'complete')}
-          class:am={Boolean(ap) && !contradicted && (ap.state === 'waiting' || ap.state === 'paused')}
-          class:cy={Boolean(ap) && !contradicted && ap.state === 'starting'}
-          class:dn={Boolean(ap) && (Boolean(contradicted) || ap.state === 'halted')}
+          class:up={ap !== null && !contradicted && (ap.state === 'running' || ap.state === 'complete')}
+          class:am={ap !== null && !contradicted && (ap.state === 'waiting' || ap.state === 'paused')}
+          class:cy={ap !== null && !contradicted && ap.state === 'starting'}
+          class:dn={ap !== null && (Boolean(contradicted) || ap.state === 'halted')}
         >
           {#if ap}
             <span>{contradicted ? 'complete?' : ap.state}</span>
@@ -1471,10 +1818,19 @@
         </div>
         <div class="g-n">
           {@render src('mea')}
+          <!-- `census.at ?? 0` IS THE SUBTRACTION THIS LINE ALREADY DID. The
+               stamp is typed `number | null`, because the shared census
+               declares the field by its initial value alone — `$state({ at:
+               null })` in `$lib/store.svelte.js` — although every ready read
+               writes `Date.now()` into it, and `counted` above is a boolean
+               rather than a narrowing, so the checker cannot see that this
+               branch only runs on a landed read. `null` coerces to `0` in a
+               subtraction, so the `?? 0` states the coercion the expression
+               was relying on and computes the identical number. -->
           <em
             >{#if counted}{cellsTarget === null
                 ? `no denominator — ${scope.same ? 'the target names no instrument count' : 'a different feed'}`
-                : `of ${inrs(cellsTarget)}`} · read {ago(now - census.at)}{:else}{notCounted}{/if}</em
+                : `of ${inrs(cellsTarget)}`} · read {ago(now - (census.at ?? 0))}{:else}{notCounted}{/if}</em
           >
         </div>
       </div>
