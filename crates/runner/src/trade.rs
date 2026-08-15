@@ -213,6 +213,33 @@ pub fn walk(
             out.too_late = out.too_late.saturating_add(1);
             continue;
         };
+
+        // RULE 1b. AND THAT SESSION MUST BE THE SIGNAL'S OWN.
+        //
+        // `exits` answers "the last bar of THIS bar's session a fill can land
+        // in", which is exactly right for the entry bar and says nothing about
+        // where the signal was. A signal on the final bar of a session takes
+        // `entry = signal + 1`, which is the FIRST bar of the next session, and
+        // that bar has a perfectly good forced exit of its own — so the guard
+        // above passed it and the position opened across the overnight gap.
+        //
+        // MEASURED before this check existed, `synthetic::sessions(12)`, 41
+        // single-condition masks: 132 trades entered on a later session's bar.
+        // The first is a signal on bar 2,249 of day 5 filling on bar 2,250 of
+        // day 6. Every one of them priced an entry against a gap that no
+        // intraday rule permits and that this engine squares off at 15:10
+        // precisely to avoid.
+        //
+        // This is the same defect class as the forward-return gap fixed
+        // earlier: the square-off bounds the EXIT, and nothing bounded the
+        // entry to the same day.
+        let same_session = bars.get(signal).zip(bars.get(entry)).is_some_and(|(s, e)| {
+            indicators::ist_day(s.ts_micros) == indicators::ist_day(e.ts_micros)
+        });
+        if !same_session {
+            out.too_late = out.too_late.saturating_add(1);
+            continue;
+        }
         let wanted = entry.saturating_add(h);
         let exit = wanted.min(forced);
         if exit <= entry {
@@ -469,8 +496,26 @@ mod tests {
 
     #[test]
     fn no_trade_is_held_past_the_square_off_or_into_another_day() {
-        // RULE 1. Every exit is inside the entry's own session and at or before
-        // the bar whose close is 15:10.
+        // RULE 1. The WHOLE round trip -- signal, entry and exit -- is inside
+        // one session, and the exit is at or before the bar whose close is
+        // 15:10.
+        //
+        // # This test used to check two of those three, and the missing one was
+        // # where the bug was
+        //
+        // It compared ENTRY against EXIT and stopped. A signal on the last bar
+        // of day 5 takes `entry = signal + 1`, which is day 6's first bar, and
+        // then exits on day 6 — so entry and exit agree perfectly and this test
+        // passed while the position had been opened across the overnight gap.
+        //
+        // MEASURED at the time the signal leg was added: 132 such trades across
+        // 41 single-condition masks on `synthetic::sessions(12)`, the first
+        // being bar 2,249 of day 5 filling on bar 2,250 of day 6. The guard is
+        // now in `walk` as RULE 1b and this asserts all three legs.
+        //
+        // A test whose NAME says "into another day" and which checks one of the
+        // two boundaries a day has is the failure mode this comment exists to
+        // keep visible.
         let (bars, column) = swept();
         let t = walk(
             &bars,
@@ -482,8 +527,15 @@ mod tests {
         assert!(t.count() > 0);
 
         for trade in &t.trades {
+            let signal_ts = bars.get(trade.signal_bar).map_or(0, |b| b.ts_micros);
             let entry_ts = bars.get(trade.entry_bar).map_or(0, |b| b.ts_micros);
             let exit_ts = bars.get(trade.exit_bar).map_or(0, |b| b.ts_micros);
+            assert_eq!(
+                indicators::ist_day(signal_ts),
+                indicators::ist_day(entry_ts),
+                "a signal on one day filled on another -- the position opened \
+                 across the overnight gap the 15:10 square-off exists to prevent"
+            );
             assert_eq!(
                 indicators::ist_day(entry_ts),
                 indicators::ist_day(exit_ts),
