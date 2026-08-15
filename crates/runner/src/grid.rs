@@ -845,6 +845,105 @@ mod tests {
         (bars, column)
     }
 
+    /// The same slice with one bar in fifty given a very wide range.
+    ///
+    /// # Why this fixture has to exist
+    ///
+    /// `crate::synthetic::bar` sets `high = max(open, close) + 60` and
+    /// `low = min(..) - 60`, so a bar spans about 120 paisa on a 2,500,000
+    /// base — 48 parts per million. The exit ladders are quantiles of the
+    /// OBSERVED excursions, so every rung lands inside that range and no single
+    /// bar ever reaches both a stop and a target.
+    ///
+    /// MEASURED on the unmodified fixture: 300 combinations, 19,300 cells,
+    /// **zero** with `ambiguous_bars > 0` and **zero** with non-zero
+    /// `uncertainty()`. So `pessimistic == optimistic` everywhere, and the
+    /// entire two-case model — the reason this module prices each variant twice
+    /// — ran only on data where the two cases cannot differ.
+    ///
+    /// Widening EVERY bar would not help: the rungs are derived from the
+    /// excursions, so a uniformly wider slice gives uniformly wider rungs and
+    /// the ratio is unchanged. What is needed is most bars narrow, so the
+    /// quantiles stay small, and a few far wider, so those span both rungs.
+    /// One in fifty, at fifteen times the range.
+    fn swept_with_wide_bars() -> (Vec<indicators::Candle>, Column) {
+        let bars: Vec<indicators::Candle> = crate::synthetic::sessions(8)
+            .into_iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if i % 50 != 0 {
+                    return b;
+                }
+                let mid = b.open.midpoint(b.close);
+                let reach = 900_i64;
+                indicators::Candle::new(
+                    b.ts_micros,
+                    b.open,
+                    mid.saturating_add(reach),
+                    mid.saturating_sub(reach),
+                    b.close,
+                    b.volume,
+                    b.open_interest,
+                )
+            })
+            .collect();
+        let column = Column::build(&bars, &mut evaluator());
+        (bars, column)
+    }
+
+    #[test]
+    fn a_bar_that_reaches_both_levels_makes_the_two_readings_disagree() {
+        // THE CASE THE WHOLE TWO-CASE MODEL EXISTS FOR, exercised for the first
+        // time. When one bar reaches both the stop and the target, minute data
+        // cannot say which came first: `pessimistic` resolves it as the stop,
+        // `optimistic` as the target, and the gap is the measurement error that
+        // `Cell::uncertainty` reports.
+        //
+        // Every fixture in this repository produced zero such bars, so the
+        // resolution was never observable and `pessimistic == optimistic` held
+        // everywhere by accident of the data rather than by any property.
+        let (bars, column) = swept_with_wide_bars();
+        let g = evaluate(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(15),
+            Side::Long,
+            4,
+        );
+        assert!(!g.cells.is_empty(), "the fixture must produce a grid");
+
+        let ambiguous = g.cells.iter().filter(|c| c.ambiguous_bars > 0).count();
+        assert!(
+            ambiguous > 0,
+            "no cell saw a bar reaching both levels, so this fixture is no \
+             better than the ones it was written to replace"
+        );
+
+        let disagree = g
+            .cells
+            .iter()
+            .filter(|c| c.depends_on_unknowable_ordering())
+            .count();
+        assert!(
+            disagree > 0,
+            "{ambiguous} cells had an ambiguous bar and none reported any \
+             uncertainty -- the two readings are being computed identically"
+        );
+
+        // The direction is fixed and is not a convention that may drift: the
+        // pessimistic reading resolves ambiguity as the STOP, so it can never
+        // exceed the optimistic one.
+        for c in &g.cells {
+            assert!(
+                c.pessimistic <= c.optimistic,
+                "a cell resolved ambiguity in its own favour: {} > {}",
+                c.pessimistic,
+                c.optimistic
+            );
+        }
+    }
+
     #[test]
     fn the_no_stop_no_target_baseline_is_a_row_of_the_same_table() {
         // THE COMPARISON THE OPERATOR ASKED FOR. "With levels" and "without

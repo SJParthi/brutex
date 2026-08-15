@@ -4259,10 +4259,19 @@ And any figure quoted from these fixtures understates real uncertainty. On real
 minute bars, wicks reach both levels and the two readings separate; here they
 never do, so every measured spread in this repository is a floor.
 
-**What would close it.** A hand-built fixture whose bars are wide enough that a
-single bar spans both a stop and a target rung — then `uncertainty()` is
-non-zero, the pessimistic resolution is observable, and the ranking key becomes
-provable.
+**PARTLY CLOSED.** `runner::grid::a_bar_that_reaches_both_levels_makes_the_two_readings_disagree`
+builds one: `synthetic::sessions(8)` with one bar in fifty widened to fifteen
+times its range. Widening EVERY bar does not work -- the rungs are quantiles of
+the excursions, so a uniformly wider slice gives uniformly wider rungs and the
+ratio is unchanged. Most bars narrow keeps the quantiles small; a few far wider
+span both rungs. The test asserts ambiguous cells exist, that they report
+non-zero uncertainty, and that no cell ever resolves ambiguity in its own
+favour.
+
+Still open on this fixture: `validate`s ranking key. The grid path is now
+exercised, but `walk_forward` runs on the unmodified generator, so substituting
+`cell.optimistic` there remains a no-op. Closing that needs the wide-bar slice
+carried into a walk-forward test.
 
 **Found by** measuring the ambiguity counters directly, after an independent
 fleet reported that an `optimistic`-for-`pessimistic` substitution left the
