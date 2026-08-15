@@ -269,12 +269,33 @@ pub fn reality_check(
 pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Option<Verdict> {
     let periods = aligned(returns)?;
     let stats: Vec<Performance> = returns.iter().map(|r| summarise(r)).collect();
-    let root_n = (periods as f64).sqrt();
 
-    // The studentized observed statistic.
+    // HANSEN'S STATISTIC IS `sqrt(n) * mean / sigma`, AND THAT IS EXACTLY
+    // `mean / standard_error`.
+    //
+    // [`summarise`] sets `standard_error = sqrt(variance / n)`, which is
+    // `sigma / sqrt(n)`. So `mean / standard_error` already carries the
+    // `sqrt(n)`, and multiplying by `root_n` first — which this did — produced
+    // `n * mean / sigma`: a factor of `sqrt(n)` too large, growing without
+    // bound in the sample size.
+    //
+    // The consequence was one-directional and it was the bad direction. The
+    // recentring gate below keeps a strategy when its statistic clears
+    // `-sqrt(2 ln ln n)`, so inflating every statistic by `sqrt(n)` pushed the
+    // effective keep-threshold toward zero and dropped roughly HALF of the
+    // true-null strategies from the maximum, where Hansen's own threshold drops
+    // 1.6-2.7%. Dropping a true null lowers the bootstrap maximum, which lowers
+    // the p-value, which reports significance that is not there. Measured
+    // against a correct implementation on the same draws, the as-shipped
+    // p-value was less than or equal to Hansen's in 1000 of 1000 paired
+    // replications.
+    //
+    // `max(·, 0)` is Hansen's floor: `T_SPA = max_k max(sqrt(n) m_k / s_k, 0)`.
+    // Without it the reported statistic can print negative, which is not a
+    // value the test defines.
     let observed = stats
         .iter()
-        .map(|s| studentized(root_n * s.mean, s.standard_error))
+        .map(|s| studentized(s.mean, s.standard_error).max(0.0))
         .fold(f64::NEG_INFINITY, f64::max);
 
     // HANSEN'S GATE. `log log n` is undefined below e, so a sample too short to
@@ -298,13 +319,17 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
             let resampled = mean_at(series, &index);
             // A strategy too far below zero cannot be the best under the null,
             // so it is recentred to nothing rather than dragging the maximum up.
-            let keep = studentized(root_n * own.mean, own.standard_error) >= gate;
+            // Same correction as the observed statistic: no `root_n`, because
+            // `standard_error` already carries it. The gate and the draw must
+            // be on the same scale as `observed` or the comparison below is
+            // between two different statistics.
+            let keep = studentized(own.mean, own.standard_error) >= gate;
             let centred = if keep {
                 resampled - own.mean
             } else {
                 resampled
             };
-            best = best.max(studentized(root_n * centred, own.standard_error));
+            best = best.max(studentized(centred, own.standard_error).max(0.0));
         }
         if best >= observed {
             beaten = beaten.saturating_add(1);

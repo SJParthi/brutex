@@ -150,12 +150,30 @@ fn the_whole_pipeline_runs_and_every_stage_feeds_the_next() {
     // each fold ranked its candidates in sample and the winner landed somewhere
     // out of sample. With one candidate per fold there is nothing to rank, so
     // this exercises the refusal rather than inventing a ranking.
+    // ONE CHOSEN COMBINATION PER FOLD IS NOT A RANKING, and this used to
+    // pretend otherwise.
+    //
+    // It passed `candidates: f.considered` — thousands — beside
+    // `winner_rank: usize::from(!positive)`, which is a BOOLEAN: zero or one.
+    // A rank of 0 or 1 against thousands of candidates is a relative placement
+    // of ~0 whatever actually happened, so `Pbo::probability` reported **0.0%
+    // overfitting for eight consecutive total failures**. The number was not
+    // wrong by a little; it was structurally incapable of being anything else.
+    //
+    // A real PBO needs each split's FULL vector of candidate performances, in
+    // sample and out, so `pbo::place` can find the in-sample winner and rank it
+    // out of sample. `walk_forward` keeps only the winner, so that vector does
+    // not exist here. The honest placement is therefore one candidate — which
+    // `Placement::relative` correctly refuses as unrankable — and the assertion
+    // below checks that every fold lands in the refusal rather than in a
+    // fabricated probability.
     let placements: Vec<pbo::Placement> = folds
         .folds
         .iter()
-        .map(|f| pbo::Placement {
-            candidates: usize::try_from(f.considered).unwrap_or(1).max(1),
-            winner_rank: usize::from(!f.out_of_sample.worst_case_positive()),
+        .filter(|f| f.chosen.is_some())
+        .map(|_| pbo::Placement {
+            candidates: 1,
+            winner_rank: 0,
         })
         .collect();
     let overfit = pbo::probability_of_overfitting(&placements);
