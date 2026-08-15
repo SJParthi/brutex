@@ -229,6 +229,69 @@ impl Leg {
     }
 }
 
+/// Every month a request for `leg` must actually cover, given the months its
+/// window names.
+///
+/// # A FUTURES PULL REACHES BACK ONE MONTH, and it has to
+///
+/// The operator's rule, 15 Aug 2026: *"when we start to pull futures always
+/// ensure to fetch it for the current month and as well as even the previous
+/// month also"*.
+///
+/// The reason is the instrument, not a preference. A futures contract expiring
+/// in September was LISTED and TRADING through August — the front month rolls
+/// on the last Thursday, so for most of a contract's life the month named on it
+/// is not the month it traded in. A window that asked only for September would
+/// fetch the last few sessions of a contract that had been trading for weeks,
+/// and the bars before the roll — where the volume actually is — would never be
+/// asked for at all.
+///
+/// Spot has no such thing: an index trades in the month it is named for and in
+/// no other, so its month set is exactly the window's.
+///
+/// Options are left at the window's own months. They are not exempted from the
+/// idea; the rule as stated names futures, and widening a fetch for an
+/// instrument the operator did not name would be inventing scope — the reach
+/// for an option chain is a per-expiry question this build has no measurement
+/// for yet.
+///
+/// # Cost
+///
+/// At most one extra month per month asked for, so the set at most doubles and
+/// is never a function of the store. The predecessor is arithmetic on a month
+/// ordinal, not a calendar walk.
+#[must_use]
+pub fn months_for(leg: Leg, months: &[YearMonth]) -> Vec<YearMonth> {
+    let mut out: Vec<YearMonth> = Vec::with_capacity(months.len().saturating_mul(2));
+    for &m in months {
+        if leg == Leg::Future
+            && let Some(prev) = month_before(m)
+        {
+            out.push(prev);
+        }
+        out.push(m);
+    }
+    // ONE ROW PER MONTH. Consecutive months in the window make one month both
+    // its own and its successor's predecessor, and asking twice would fetch it
+    // twice and count it twice.
+    out.sort_unstable_by_key(|m| (m.year(), m.month()));
+    out.dedup_by_key(|m| (m.year(), m.month()));
+    out
+}
+
+/// The month before `m`, or [`None`] at the store's floor.
+///
+/// Arithmetic on the ordinal rather than a calendar step, so January is the
+/// same cost as June and the year boundary cannot be got wrong by a `- 1`.
+#[must_use]
+pub fn month_before(m: YearMonth) -> Option<YearMonth> {
+    let ordinal = u32::from(m.year()) * 12 + u32::from(m.month() - 1);
+    let back = ordinal.checked_sub(1)?;
+    let year = u16::try_from(back / 12).ok()?;
+    let month = u8::try_from(back % 12 + 1).ok()?;
+    YearMonth::new(year, month).ok()
+}
+
 /// The six steps of the order, in sequence.
 ///
 /// `(leg, rung)` — spot day, spot minute, futures day, futures minute, options
@@ -1049,6 +1112,58 @@ mod tests {
                 side: OptionSide::Call,
             }),
             Leg::Option
+        );
+    }
+
+    /// A FUTURES PULL REACHES BACK ONE MONTH; SPOT DOES NOT.
+    ///
+    /// The operator's rule of 15 Aug 2026, and the instrument's own shape: a
+    /// September future was listed and trading through August, so a window
+    /// naming only September would miss the sessions before the roll — which is
+    /// where the volume is.
+    #[test]
+    fn a_futures_pull_covers_the_previous_month_and_spot_covers_only_its_own() {
+        let m = |y, mo| YearMonth::new(y, mo).expect("a real month");
+
+        assert_eq!(
+            months_for(Leg::Spot, &[m(2025, 9)]),
+            vec![m(2025, 9)],
+            "an index trades in the month it is named for and no other"
+        );
+        assert_eq!(
+            months_for(Leg::Future, &[m(2025, 9)]),
+            vec![m(2025, 8), m(2025, 9)],
+            "a future reaches back one month, in order"
+        );
+        assert_eq!(
+            months_for(Leg::Option, &[m(2025, 9)]),
+            vec![m(2025, 9)],
+            "options are left at the window's own months — the rule named \
+             futures, and widening a fetch nobody asked to widen is invention"
+        );
+
+        // THE YEAR BOUNDARY, where a naive `month - 1` gives month zero.
+        assert_eq!(
+            months_for(Leg::Future, &[m(2025, 1)]),
+            vec![m(2024, 12), m(2025, 1)],
+            "January reaches back into the previous December"
+        );
+
+        // CONSECUTIVE MONTHS ARE NOT FETCHED TWICE. August is September's
+        // predecessor and also its own month; asking twice would fetch and
+        // count it twice.
+        assert_eq!(
+            months_for(Leg::Future, &[m(2025, 8), m(2025, 9)]),
+            vec![m(2025, 7), m(2025, 8), m(2025, 9)],
+            "three months, each once"
+        );
+
+        // AND THE STORE'S FLOOR IS NOT STEPPED OVER. 1970-01 has no
+        // predecessor a `YearMonth` can hold, so the set is just itself.
+        assert_eq!(
+            months_for(Leg::Future, &[m(1970, 1)]),
+            vec![m(1970, 1)],
+            "no month before the epoch, and no panic reaching for one"
         );
     }
 

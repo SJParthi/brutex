@@ -1026,6 +1026,10 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         symbol_id,
         timeframe,
         DeriveInto {
+            // SPOT INGEST. The contract path is not reachable from here yet;
+            // when it is, this carries the contract the bars were filed under
+            // and `derive_all` reads the option/future line off it.
+            contract: None,
             vendor,
             exchange,
             segment,
@@ -1132,6 +1136,8 @@ fn identify(instrument: &str, exchange: &str, segment: &str) -> Result<Identity,
 /// everywhere they go.
 #[derive(Clone, Copy)]
 struct DeriveInto {
+    /// The contract these bars belong to, or `None` for spot.
+    contract: Option<brutex_core::instrument::Contract>,
     vendor: Vendor,
     exchange: Exchange,
     segment: Segment,
@@ -1197,10 +1203,24 @@ fn derive_all(
     // bar that looks like a half-hour of trading and was nothing of the kind.
     // The spot index has no such gaps, which is why the fold is honest there.
     //
-    // Checked on the SEGMENT rather than on a flag, because the segment is what
-    // the store keys the file on: if it says FNO, the bars are a contract's
-    // whatever else the caller believes.
-    if matches!(into.segment, Segment::Fno) {
+    // SPOT AND EXPIRED FUTURES DERIVE. EXPIRED OPTIONS DO NOT.
+    //
+    // The line is drawn where the arithmetic stops holding. A folded bar is a
+    // claim about a CONTINUOUS series. A spot index is one, and so is a futures
+    // contract: one contract per expiry, the front month carries the volume,
+    // and it trades every minute of every session it is alive for.
+    //
+    // An option chain is not. Each expiry has hundreds of strikes, and away
+    // from the money most of them do not trade for minutes at a time — so
+    // folding thirty one-minute bars of which four traded yields a bar that
+    // looks like half an hour of trading and was nothing of the kind. The gaps
+    // are the instrument, not a defect in it.
+    //
+    // Read off the CONTRACT rather than the segment, because both derivative
+    // legs are `Segment::Fno` and the segment therefore cannot tell them apart
+    // — the same reason `api::ladder::Leg` exists. The suffix is the test:
+    // `-FUT` for a future, a strike and a side for an option.
+    if into.contract.is_some_and(|c| c.is_option()) {
         return;
     }
     for rung in derived_from(source) {
@@ -1268,14 +1288,17 @@ pub fn derived_count(source: Timeframe) -> usize {
     derived_from(source).count()
 }
 
-/// The same count, for an instrument in `segment`.
+/// The same count, for an instrument holding `contract`.
 ///
-/// Zero for `FNO`. The internal rungs are the underlying spot's alone — see
-/// [`derive_all`] for the operator's rule and for why a folded option bar would
-/// be a claim nobody can support.
+/// Zero for an OPTION, and the full set for spot and for a future. See
+/// [`derive_all`] for where that line is drawn and why the arithmetic stops
+/// holding on an option chain and not on a futures contract.
 #[must_use]
-pub fn derived_count_in(segment: Segment, source: Timeframe) -> usize {
-    if matches!(segment, Segment::Fno) {
+pub fn derived_count_in(
+    contract: Option<brutex_core::instrument::Contract>,
+    source: Timeframe,
+) -> usize {
+    if contract.is_some_and(|c| c.is_option()) {
         0
     } else {
         derived_count(source)

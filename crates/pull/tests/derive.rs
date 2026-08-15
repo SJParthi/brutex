@@ -210,7 +210,7 @@ fn plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
     }
 }
 
-/// DERIVED RUNGS ARE THE UNDERLYING SPOT'S ALONE.
+/// DERIVED RUNGS ARE FOR SPOT AND FUTURES. OPTIONS DERIVE NOTHING.
 ///
 /// The operator's rule, 15 Aug 2026: the internal timeframes are "fully one and
 /// only applicable for these underlying spots alone". A derivative is stored at
@@ -222,25 +222,35 @@ fn plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
 /// like a half-hour of trading and was nothing of the kind. A spot index has no
 /// such gaps, which is why the fold is honest there and only there.
 #[test]
-fn the_internal_rungs_are_derived_for_spot_and_never_for_a_derivative() {
-    use brutex_core::instrument::Segment;
+fn the_internal_rungs_are_derived_for_spot_and_futures_but_never_for_options() {
+    use brutex_core::instrument::Contract;
     use pull::ingest::{derived_count, derived_count_in};
     use store::path::Timeframe;
 
+    let fut = Contract::parse("2025-09-30-FUT").expect("a legal future");
+    let ce = Contract::parse("2025-09-30-2465000-CE").expect("a legal option");
+    let pe = Contract::parse("2025-09-30-2465000-PE").expect("a legal option");
+
     assert_eq!(
-        derived_count_in(Segment::Index, Timeframe::MINUTE_1),
+        derived_count_in(None, Timeframe::MINUTE_1),
         7,
-        "an index folds into 2, 3, 5, 10, 15, 30 and 60 minutes"
+        "spot folds into 2, 3, 5, 10, 15, 30 and 60 minutes"
     );
     assert_eq!(
-        derived_count_in(Segment::Cash, Timeframe::MINUTE_1),
+        derived_count_in(Some(fut), Timeframe::MINUTE_1),
         derived_count(Timeframe::MINUTE_1),
-        "a cash equity is spot too, and folds the same way"
+        "and a FUTURE folds exactly the same way — one contract per expiry, \
+         trading every minute it is alive"
     );
-    assert_eq!(
-        derived_count_in(Segment::Fno, Timeframe::MINUTE_1),
-        0,
-        "a futures or options contract derives NOTHING — it is stored at the \
-         rungs the vendor served and at no others"
-    );
+    for opt in [ce, pe] {
+        assert_eq!(
+            derived_count_in(Some(opt), Timeframe::MINUTE_1),
+            0,
+            "an OPTION derives nothing: away from the money most strikes do not \
+             trade for minutes at a time, so a folded bar would claim a \
+             half-hour of trading that never happened"
+        );
+    }
+    assert!(fut.is_future() && !fut.is_option());
+    assert!(ce.is_option() && pe.is_option());
 }

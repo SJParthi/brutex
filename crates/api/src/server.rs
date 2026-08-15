@@ -3995,16 +3995,22 @@ fn ladder_refusal(
     let wanted: Vec<ladder::Wanted> = targets
         .iter()
         .flat_map(|key| {
-            months.iter().map(move |month| ladder::Wanted {
+            // THE MONTHS THIS INSTRUMENT'S LEG ACTUALLY COVERS. A futures
+            // contract reaches back one month, because it was trading before
+            // the month it is named for — `ladder::months_for` carries the rule
+            // and the reason. Spot is the window's own months.
+            let leg = ladder::Leg::of(key.kind);
+            let mine = ladder::months_for(leg, &months);
+            mine.into_iter().map(move |month| ladder::Wanted {
                 // THE INSTRUMENT'S OWN LEG, from its own kind. A request can
                 // name instruments in more than one leg and the order is about
                 // each of them separately — the same reason `segment` and
                 // `exchange` are per instrument here.
-                leg: ladder::Leg::of(key.kind),
+                leg,
                 symbol: key.underlying,
                 exchange: key.exchange,
                 segment: key.segment,
-                month: *month,
+                month,
             })
         })
         .collect();

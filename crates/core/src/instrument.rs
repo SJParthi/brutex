@@ -451,6 +451,23 @@ impl Contract {
         })
     }
 
+    /// Whether this names a FUTURES contract.
+    ///
+    /// A future renders `<expiry>-FUT` and an option `<expiry>-<strike>-<side>`,
+    /// so the suffix is the whole test and it reads off the same text the store
+    /// path uses. No second encoding of the same fact, and therefore nothing
+    /// that can disagree with the directory the bars are in.
+    #[must_use]
+    pub fn is_future(&self) -> bool {
+        self.as_str().ends_with("-FUT")
+    }
+
+    /// Whether this names an OPTIONS contract.
+    #[must_use]
+    pub fn is_option(&self) -> bool {
+        !self.is_future()
+    }
+
     /// The rendered contract.
     #[must_use]
     pub fn as_str(&self) -> &str {
