@@ -65,7 +65,7 @@
 //! Recorded in `docs/06-limits.md`. Naming a test that proves something
 //! adjacent would be the exact defect gate 12 was written to catch.
 
-use brutex_core::instrument::{Exchange, Segment};
+use brutex_core::instrument::{Exchange, Kind, Segment};
 use brutex_core::symbol::Symbol;
 use pull::manifest::{EntryKey, Manifest};
 use pull::vendor::{Feed, SourceKind};
@@ -86,6 +86,21 @@ pub enum Gate {
         /// Instrument-months of `needs` that are missing.
         missing: usize,
         /// Instrument-months the window asks for in total.
+        of: usize,
+    },
+    /// A LEG the operator's order puts first is not COMPLETE.
+    ///
+    /// Complete means at both rungs. The operator's words are "one and only
+    /// when all these are entirely extremely fully successful alone only then
+    /// go ahead", so a futures pass does not begin because spot's day landed.
+    LegFirst {
+        /// The leg that has to finish first.
+        needs: Leg,
+        /// The rung of that leg which is short.
+        at: Timeframe,
+        /// Instrument-months of `needs` missing at `at`.
+        missing: usize,
+        /// Instrument-months this request asks for in that leg.
         of: usize,
     },
     /// A SEGMENT the operator's order puts first is not fully held.
@@ -144,6 +159,91 @@ pub fn segment_precedes(segment: Segment) -> Option<Segment> {
     matches!(segment, Segment::Fno).then_some(Segment::Index)
 }
 
+/// One step of the operator's order, coarser than a rung and finer than a
+/// segment.
+///
+/// # Why this exists, and why `Segment` could not carry it
+///
+/// The operator's order, 15 Aug 2026, is **spot → expired futures → expired
+/// options**, and each of those three finishes its DAY pass before its MINUTE
+/// pass. Six steps, strictly ordered.
+///
+/// [`Segment`] has three variants — `Index`, `Cash`, `Fno` — and **both**
+/// derivative legs are `Fno`. So a segment cannot tell a futures month from an
+/// options month, and this module said so in as many words: *"inventing a
+/// distinction here that the census cannot answer would be a gate that reports
+/// on a fact nobody records."*
+///
+/// That was true and it is no longer. `brutex_core::instrument::Kind`
+/// distinguishes `Future` from `Option`, and since the contract path landed the
+/// store records the difference too: a future files under `<expiry>-FUT` and an
+/// option under `<expiry>-<strike>-<side>`. The fact is recorded now, so the
+/// gate may read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Leg {
+    /// The underlying — an index or a cash equity.
+    Spot,
+    /// An expired futures contract.
+    Future,
+    /// An expired options contract.
+    Option,
+}
+
+impl Leg {
+    /// The three legs, in the order the operator gave them.
+    pub const ORDER: [Self; 3] = [Self::Spot, Self::Future, Self::Option];
+
+    /// Which leg an instrument belongs to.
+    #[must_use]
+    pub const fn of(kind: Kind) -> Self {
+        match kind {
+            Kind::Index | Kind::Equity => Self::Spot,
+            Kind::Future { .. } => Self::Future,
+            Kind::Option { .. } => Self::Option,
+        }
+    }
+
+    /// Every leg that must be COMPLETE before this one may start.
+    ///
+    /// Complete means at **both** rungs, which is the operator's own words:
+    /// *"one and only when all these are entirely extremely fully successful
+    /// alone only then go ahead"*. A futures pass does not begin because spot's
+    /// day landed — it begins when spot's day AND spot's minute have.
+    #[must_use]
+    pub fn before(self) -> &'static [Self] {
+        match self {
+            Self::Spot => &[],
+            Self::Future => &[Self::Spot],
+            Self::Option => &[Self::Spot, Self::Future],
+        }
+    }
+
+    /// The word an operator reads.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Spot => "spot",
+            Self::Future => "expired futures",
+            Self::Option => "expired options",
+        }
+    }
+}
+
+/// The six steps of the order, in sequence.
+///
+/// `(leg, rung)` — spot day, spot minute, futures day, futures minute, options
+/// day, options minute. The whole rule in one table, which is what a test can
+/// assert against and what a page can draw.
+#[must_use]
+pub fn steps() -> Vec<(Leg, Timeframe)> {
+    let mut out = Vec::with_capacity(6);
+    for leg in Leg::ORDER {
+        out.push((leg, Timeframe::DAY_1));
+        out.push((leg, Timeframe::MINUTE_1));
+    }
+    out
+}
+
 /// One instrument-month the caller is about to ask for.
 ///
 /// # The segment is PER INSTRUMENT, and it has to be
@@ -161,6 +261,12 @@ pub fn segment_precedes(segment: Segment) -> Option<Segment> {
 /// catalogue it resolved the names from carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wanted {
+    /// Which step of the order this instrument belongs to.
+    ///
+    /// From `Leg::of(key.kind)` at the call site — the instrument's own kind,
+    /// never the request's, because one request can name instruments in more
+    /// than one leg and the order is about each of them separately.
+    pub leg: Leg,
     /// The instrument.
     pub symbol: Symbol,
     /// Which venue the store files it under.
@@ -247,6 +353,58 @@ where
     // says a request with no instrument-month is not a request.
     if !is_gated(feed) || wanted.is_empty() {
         return Gate::Open;
+    }
+
+    // THE LEG ORDER, CHECKED FIRST AND AT BOTH RUNGS.
+    //
+    // Spot, then expired futures, then expired options — and each COMPLETE
+    // before the next begins, which is what the operator's "entirely extremely
+    // fully successful" means and why this checks DAY_1 and MINUTE_1 rather
+    // than the rung being asked for. A futures minute pass that started because
+    // spot's day had landed would be exactly the order the rule forbids.
+    //
+    // Reported ahead of the rung check for the same reason the segment one was:
+    // a request failing both would otherwise send the operator to pull the day
+    // rung of a leg they should not be on yet.
+    //
+    // The earliest unfinished predecessor wins, so the operator is sent to the
+    // FIRST thing that is missing rather than the last.
+    for leg in Leg::ORDER {
+        let mine: Vec<&Wanted> = wanted.iter().filter(|w| w.leg == leg).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        for needs in leg.before() {
+            for at in [Timeframe::DAY_1, Timeframe::MINUTE_1] {
+                // EVERY MONTH THIS REQUEST TOUCHES, under the earlier leg. The
+                // instruments are this request's own — the gate never walks the
+                // store — so an underlying the operator did not ask for is not
+                // demanded of them.
+                // UNDER THE PREDECESSOR'S OWN SEGMENT, not this one's. A
+                // futures contract is filed under FNO and the spot bars it
+                // waits for are not — they are under INDEX or CASH. Probing
+                // FNO for them finds nothing and would refuse a leg that was
+                // ready, every time.
+                let missing = mine
+                    .iter()
+                    .filter(|w| {
+                        let seg = match needs {
+                            Leg::Spot => segment_precedes(w.segment).unwrap_or(w.segment),
+                            Leg::Future | Leg::Option => w.segment,
+                        };
+                        !held(&key(w.exchange, seg, at, w.symbol, w.month))
+                    })
+                    .count();
+                if missing > 0 {
+                    return Gate::LegFirst {
+                        needs: *needs,
+                        at,
+                        missing,
+                        of: mine.len(),
+                    };
+                }
+            }
+        }
     }
 
     // THE SEGMENT GATE, and it fires only where an instrument is a derivative.
@@ -389,6 +547,7 @@ mod tests {
         names
             .iter()
             .map(|n| Wanted {
+                leg: Leg::Spot,
                 symbol: sym(n),
                 exchange: Exchange::Nse,
                 segment,
@@ -680,12 +839,14 @@ mod tests {
         ]);
         let mixed = vec![
             Wanted {
+                leg: Leg::Spot,
                 symbol: sym("NIFTY"),
                 exchange: Exchange::Nse,
                 segment: Segment::Index,
                 month: month(),
             },
             Wanted {
+                leg: Leg::Spot,
                 symbol: sym("RELIANCE"),
                 exchange: Exchange::Nse,
                 segment: Segment::Cash,
@@ -729,6 +890,7 @@ mod tests {
     fn a_month_held_at_one_venue_is_not_held_at_another() {
         let nse = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
         let elsewhere = vec![Wanted {
+            leg: Leg::Spot,
             symbol: sym("NIFTY"),
             exchange: Exchange::Bse,
             segment: Segment::Index,
@@ -755,6 +917,135 @@ mod tests {
             )
             .is_open(),
             "same name, same segment, same month, correct venue"
+        );
+    }
+
+    /// THE SIX STEPS, IN THE OPERATOR'S ORDER, ASSERTED AS A SEQUENCE.
+    ///
+    /// spot day → spot minute → futures day → futures minute → options day →
+    /// options minute. This is the whole rule of 15 Aug 2026 in one assertion.
+    #[test]
+    fn the_order_is_six_steps_and_each_leg_finishes_before_the_next_begins() {
+        assert_eq!(
+            steps(),
+            vec![
+                (Leg::Spot, Timeframe::DAY_1),
+                (Leg::Spot, Timeframe::MINUTE_1),
+                (Leg::Future, Timeframe::DAY_1),
+                (Leg::Future, Timeframe::MINUTE_1),
+                (Leg::Option, Timeframe::DAY_1),
+                (Leg::Option, Timeframe::MINUTE_1),
+            ],
+            "spot, then expired futures, then expired options — day before \
+             minute inside each"
+        );
+        assert_eq!(Leg::Spot.before(), &[]);
+        assert_eq!(Leg::Future.before(), &[Leg::Spot]);
+        assert_eq!(
+            Leg::Option.before(),
+            &[Leg::Spot, Leg::Future],
+            "options wait for BOTH, not only for futures"
+        );
+    }
+
+    /// A LEG IS NOT STARTED BY ITS PREDECESSOR'S DAY PASS ALONE.
+    ///
+    /// This is the clause that makes the order mean what the operator said:
+    /// "one and only when all these are entirely extremely fully successful".
+    /// Spot's day landing is not spot finishing.
+    #[test]
+    fn futures_wait_for_spot_to_finish_both_rungs_not_just_its_day_pass() {
+        let want_fut = |names: &[&str]| -> Vec<Wanted> {
+            names
+                .iter()
+                .map(|n| Wanted {
+                    leg: Leg::Future,
+                    symbol: sym(n),
+                    exchange: Exchange::Nse,
+                    segment: Segment::Fno,
+                    month: month(),
+                })
+                .collect()
+        };
+
+        // Spot's DAY pass has landed and its MINUTE pass has not.
+        let half = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
+        assert_eq!(
+            gate(
+                probing(&half),
+                Feed::Groww,
+                Timeframe::DAY_1,
+                &want_fut(&["NIFTY"])
+            ),
+            Gate::LegFirst {
+                needs: Leg::Spot,
+                at: Timeframe::MINUTE_1,
+                missing: 1,
+                of: 1
+            },
+            "the day pass alone does not open the futures leg — and the refusal \
+             names the MINUTE rung, which is the one still owed"
+        );
+
+        // Both rungs of spot held: the futures leg opens.
+        let both = census_of(&[
+            ("NIFTY", Segment::Index, Timeframe::DAY_1, 10),
+            ("NIFTY", Segment::Index, Timeframe::MINUTE_1, 3750),
+        ]);
+        assert!(
+            gate(
+                probing(&both),
+                Feed::Groww,
+                Timeframe::DAY_1,
+                &want_fut(&["NIFTY"])
+            )
+            .is_open(),
+            "spot finished, so the futures day pass may run"
+        );
+    }
+
+    /// OPTIONS WAIT FOR FUTURES, AND THE REFUSAL NAMES THE EARLIEST GAP.
+    #[test]
+    fn options_are_refused_for_the_first_unfinished_leg_not_the_nearest_one() {
+        let want_opt = vec![Wanted {
+            leg: Leg::Option,
+            symbol: sym("NIFTY"),
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            month: month(),
+        }];
+        // NOTHING held at all: the refusal must name SPOT, the first step, and
+        // not FUTURES, the nearest one. An operator sent to the wrong step
+        // spends a whole pass discovering it.
+        let nothing = census_of(&[]);
+        assert_eq!(
+            gate(probing(&nothing), Feed::Groww, Timeframe::DAY_1, &want_opt),
+            Gate::LegFirst {
+                needs: Leg::Spot,
+                at: Timeframe::DAY_1,
+                missing: 1,
+                of: 1
+            },
+            "the EARLIEST unfinished predecessor wins"
+        );
+    }
+
+    /// EVERY KIND LANDS IN EXACTLY ONE LEG.
+    #[test]
+    fn every_instrument_kind_belongs_to_one_leg_of_the_order() {
+        use brutex_core::instrument::{Expiry, OptionSide};
+        use brutex_core::price::Paisa;
+        let expiry = Expiry::new(2025, 9, 30).expect("a real expiry");
+        assert_eq!(Leg::of(Kind::Index), Leg::Spot);
+        assert_eq!(Leg::of(Kind::Equity), Leg::Spot);
+        assert_eq!(Leg::of(Kind::Future { expiry }), Leg::Future);
+        assert_eq!(
+            Leg::of(Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_465_000),
+                side: OptionSide::Call,
+            }),
+            Leg::Option
         );
     }
 

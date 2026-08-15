@@ -3996,6 +3996,11 @@ fn ladder_refusal(
         .iter()
         .flat_map(|key| {
             months.iter().map(move |month| ladder::Wanted {
+                // THE INSTRUMENT'S OWN LEG, from its own kind. A request can
+                // name instruments in more than one leg and the order is about
+                // each of them separately — the same reason `segment` and
+                // `exchange` are per instrument here.
+                leg: ladder::Leg::of(key.kind),
                 symbol: key.underlying,
                 exchange: key.exchange,
                 segment: key.segment,
@@ -4029,6 +4034,22 @@ fn ladder_refusal(
 
     match gate {
         Gate::Open => None,
+        Gate::LegFirst {
+            needs,
+            at,
+            missing,
+            of,
+        } => Some(format!(
+            "{} comes first, and it has to FINISH: {missing} of {of} \
+             instrument-months have no {} bars behind them at {}. Nothing was \
+             asked for. The order is spot, then expired futures, then expired \
+             options — and each of the three completes BOTH its day pass and \
+             its minute pass before the next begins, because a leg that is only \
+             half pulled cannot be checked against anything.",
+            needs.label(),
+            needs.label(),
+            at.as_str(),
+        )),
         Gate::RungFirst { needs, missing, of } => Some(format!(
             // 5.8× is 81 minute-windows against 14 day-windows per instrument
             // for the same span — `crate::ladder`'s module doc, from
@@ -13715,7 +13736,7 @@ mod tests {
                 "{DHAN_HEAD}NSE,I,NA,INDEX,NIFTY,NIFTY,INDEX,NA,0001-01-01,,,1333\n"
             )),
         );
-        let mut site = Site::serving(&dir, &store_root("emit-refused"));
+        let site = Site::serving(&dir, &store_root("emit-refused"));
         assert_eq!(
             site.read.merged.by_key.len(),
             1,
