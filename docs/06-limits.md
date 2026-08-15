@@ -4155,3 +4155,38 @@ integer compares; the MAE/MFE measured beside it is not. The reduction is
 available and not taken: `excursion::crossings` already accumulates running
 `mae`/`mfe` and discards them, and because both are running MAXIMA the value at
 offset d IS `peak(entry, entry + d)`.
+
+---
+
+## 73. The ranking key is a proxy, and two commits described it as the maximum
+
+D-0157 and the comment above the pricing loop both said each candidate is ranked
+on "the best its OWN exit grid can do". That is not what the code does and an
+independent audit caught it.
+
+The key is `Grid::sharpest()`, which is `max_by_key(Cell::edge_ratio)` over
+surviving cells — so the ranked value is the pessimistic total **of the sharpest
+cell**, not the largest pessimistic total the grid holds. Measured: the two
+differ on **96–99.6%** of candidates, and the mask this selects scores **17.2%
+below** the one `Grid::best()` would select.
+
+**The key is deliberate; the description was not.** The stated aim is maximum
+profit at minimal stop, and ranking on total profit alone prefers a variant that
+made more by risking more. `edge_ratio` is favourable-over-adverse excursion on
+the winners, which is the tightest stop that would not have killed them.
+
+**Why it is nonetheless recorded as a limit rather than a settled choice.**
+
+- It is a proxy a person chose, not a derivation.
+- It is computed only over trades that ENDED PROFITABLE, so it is structurally
+  silent about how large a loser gets — the very quantity "minimal stop loss"
+  is about.
+- An earlier audit measured `sharpest()` selecting the NO-STOP variant 61–100%
+  of the time, which is the widest risk on the ladder.
+- On the shipped fixture `pessimistic == optimistic` for all 9,299 and 10,575
+  candidates, so no test on that data can distinguish the two readings at all.
+
+**What would close it.** A risk term in the objective — worst realised trade and
+peak-to-trough equity drawdown, neither of which exists anywhere in the crate
+(§71) — and then a deliberate choice of key measured against it, rather than a
+proxy standing in for one.

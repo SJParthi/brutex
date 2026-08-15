@@ -429,10 +429,27 @@ pub fn walk_forward(
         // share one walk. A whole fold at 11,013 candidates goes from 0.20 s to
         // 0.86 s.
         //
-        // `sharpest().or(best())` is the same rule the exit selection already
-        // used, moved up so it decides the combination too: the aim is the
-        // setup whose winners went least against you, which is the one that
-        // survives the tightest stop.
+        // THE RANKING KEY IS NOT THE GRID'S MAXIMUM, AND THIS COMMENT SAID IT
+        // WAS.
+        //
+        // `sharpest()` is `max_by_key(Cell::edge_ratio)` over surviving cells,
+        // so what is ranked is the pessimistic total OF THE SHARPEST CELL, not
+        // the largest pessimistic total the grid holds. Those differ on
+        // 96-99.6% of candidates, and the mask this picks scores 17.2% below
+        // the one `g.best()` would pick.
+        //
+        // The key is deliberate and the description was not. The operator's aim
+        // is maximum profit at MINIMAL STOP, and ranking on total profit alone
+        // prefers a variant that made more by risking more -- the opposite.
+        // `edge_ratio` is favourable-over-adverse excursion on the winners,
+        // which is the tightest stop that would not have killed them.
+        //
+        // But it is a proxy chosen by a person, it is computed only over trades
+        // that ENDED PROFITABLE so it is structurally silent about how large a
+        // loser gets, and an earlier audit measured it selecting the NO-STOP
+        // variant 61-100% of the time. Whether it or `best()` is the right key
+        // is an open question recorded in `docs/06-limits.md`, not one this
+        // comment should settle by describing the code as something else.
         let mut best: Option<(ConditionMask, Summary, ExitPick)> = None;
         let mut priced: u64 = 0;
         for item in &closed.kept {
