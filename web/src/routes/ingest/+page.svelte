@@ -550,7 +550,7 @@
     {
       key: 'futures',
       label: 'Expired futures',
-      note: 'contracts that have already settled',
+      note: 'contracts that have already settled · 503 — no transport in this build',
       served: false,
       short:
         'No expired future is listed anywhere this page can read, and no route in this build fetches one.',
@@ -559,7 +559,7 @@
     {
       key: 'options',
       label: 'Expired options',
-      note: 'contracts that have already settled',
+      note: 'contracts that have already settled · 503 — no transport in this build',
       served: false,
       short:
         'Same three reasons as expired futures — purged from the master, no transport, one contract per request.',
@@ -7053,7 +7053,18 @@
         key: s.key,
         name: s.label,
         detail: s.note,
-        disabled: !segServed(s),
+        // NEVER `disabled`, AND THAT IS THE OPERATOR'S RULE. Every segment is
+        // offered on every feed — stated three times — because on an ARCHIVE
+        // the expired contracts are exactly what the bought CSVs hold. See
+        // `segServed`.
+        //
+        // `skipBulk` IS THE PART THAT WAS MISSING. `POST /pull/fno` parses a
+        // request in full and then answers 503 — "expired F&O has no
+        // local-archive path and no HTTP transport in this build" — so a bulk
+        // action that ticked these picked a refusal nobody chose, which is the
+        // same defect the timeframe control had on Dhan. The row stays
+        // individually clickable for an operator who means it.
+        skipBulk: s.short !== null,
         why: s.short,
         title: s.why
       }))}
