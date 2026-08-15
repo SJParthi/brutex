@@ -315,10 +315,27 @@
    * @type {ReadonlyMap<string, number>}
    */
   const TF_SECS = new Map([
+    ['1s', 1],
     ['1min', 60],
     ['1m', 60],
+    // 2min AND 10min WERE MISSING, AND THE STORE HAS BOTH.
+    //
+    // `store::path::Timeframe::KNOWN` lists SECOND_1, MINUTE_1, MINUTE_2,
+    // MINUTE_3, MINUTE_5, MINUTE_10, MINUTE_15, MINUTE_30, MINUTE_60 and
+    // DAY_1 — ten rungs — and this table carried seven of them. The two
+    // absentees sort to `Infinity` and land at the END of the ladder, after
+    // 1day, each labelled "length not recorded". Measured on the live page:
+    // the rung menu read 1min, 3min, 5min, 15min, 30min, 60min, 1day, 10min,
+    // 2min. Two of the nine rungs the store actually holds were out of order
+    // and disclaiming a length the store publishes.
+    //
+    // The seconds are `Timeframe::MINUTE_2.secs` = 120 and
+    // `MINUTE_10.secs` = 600, read from `crates/store/src/path.rs`, not
+    // arithmetic done here.
+    ['2min', 120],
     ['3min', 180],
     ['5min', 300],
+    ['10min', 600],
     ['15min', 900],
     ['30min', 1800],
     ['60min', 3600],
@@ -1332,6 +1349,144 @@
      ====================================================================== */
 
   /* ======================================================================
+     THE PREFIX INDEX — one Map probe per keystroke
+     ----------------------------------------------------------------------
+     Same shape as `web/typeahead.js`, for the same reason: the universe is
+     bounded, so index it once and probe it forever. Every 1..4-character
+     prefix of the full instrument, of its symbol, and of its month maps to the
+     rows carrying it. Typing up to four characters is ONE Map probe; beyond
+     four it is a filter over one bucket, which is bounded by the largest
+     4-prefix bucket and never by the store.
+     ====================================================================== */
+  const MAX_PREFIX = 4;
+
+  /* THE BUCKET KEY AND THE PROBE KEY ARE ONE FORM, AND THEY WERE NOT.
+     `typed` below is `filter.trim().toUpperCase()`, and these buckets were cut
+     from the token EXACTLY AS THE STORE SPELLS IT. Two spellings of one key is
+     the silent failure this whole file is written against: the day a store
+     writes one instrument, one symbol or one month key in anything but upper
+     case, its bucket is filed under a prefix no probe can ever ask for — the
+     row is in `windowed`, the table below counts it, and the text box simply
+     never finds it. Nothing errors and nothing looks wrong. Normalised on BOTH
+     sides here, once per token rather than once per prefix, so the index and
+     the box cannot spell the same key two ways.
+
+     `it.sym` is the tail the row DISPLAYS, and it stays in the index on
+     purpose: it is a substring of `it.instrument`, so typing `NIFTY` at
+     `NSE-INDEX-NIFTY` is a real question. What it is not allowed to be is the
+     key anything is COMPARED by — `picked` below resolves back to the store's
+     own `instrument` spelling, never to what was typed. */
+  const index = $derived.by(() => {
+    const by = new Map();
+    for (const it of universed) {
+      const seen = new Set();
+      for (const raw of [it.instrument, it.sym, it.month]) {
+        const token = raw.toUpperCase();
+        for (let n = 1; n <= Math.min(MAX_PREFIX, token.length); n += 1) {
+          const k = token.slice(0, n);
+          if (seen.has(k)) continue;
+          seen.add(k);
+          let bucket = by.get(k);
+          if (!bucket) by.set(k, (bucket = []));
+          bucket.push(it);
+        }
+      }
+    }
+    return by;
+  });
+
+  const typed = $derived(filter.trim().toUpperCase());
+
+  const textMatched = $derived.by(() => {
+    /* `universed`, NOT `deco`. The two coarser rungs above are already applied
+       to the index this probes, so an empty text box has to fall through to
+       the same set the index was built from — falling back to the whole store
+       would make typing WIDEN the selection. */
+    if (!typed) return universed;
+    if (typed.length <= MAX_PREFIX) return index.get(typed) ?? [];
+    const seed = index.get(typed.slice(0, MAX_PREFIX)) ?? [];
+    /* THE SAME NORMALISATION AS THE INDEX ABOVE, for the same reason: past four
+       characters this is the probe, and a bucket cut one way cannot be filtered
+       the other. */
+    return seed.filter(
+      (r) =>
+        r.instrument.toUpperCase().startsWith(typed) ||
+        r.sym.toUpperCase().startsWith(typed) ||
+        r.month.toUpperCase().startsWith(typed)
+    );
+  });
+
+  /* ---- THE INSTRUMENT RUNG, WHICH IS THE TEXT BOX -----------------------
+     ONE STATE, TWO ENTRY POINTS. The page has had an instrument filter since
+     it was written, and it answers this rung's question faster than a list
+     can: a Map probe against a typed prefix. A second, independent "chosen
+     instrument" beside it would be two answers to one question, and the table
+     would look correct while returning nothing the moment they disagreed.
+
+     So the picker does not own a selection at all. It WRITES the text box, and
+     it shows a row as ticked exactly when the text box currently holds that
+     row's key. Typing anything else unticks it with no bookkeeping, because
+     there is nothing to keep. The Picker is an enumeration of what the coarser
+     rungs left; the text box is the state.
+     ====================================================================== */
+  const instrumentRows = $derived.by(() => {
+    const by = new Map();
+    for (const it of universed) {
+      let a = by.get(it.instrument);
+      if (!a) by.set(it.instrument, (a = { key: it.instrument, months: 0, bars: 0, short: 0 }));
+      a.months += 1;
+      a.bars += it.rows;
+      a.short += it.short;
+    }
+    return [...by.values()].sort((a, b) => txt(a.key, b.key));
+  });
+
+  /**
+   * O(1): the STORE'S OWN SPELLING of the instrument the text box currently
+   * names, or `''`.
+   *
+   * A Map and not a Set, and the value is the raw key rather than the typed
+   * text. `typed` is upper-cased — it has to be, because it is a probe against
+   * the prefix index — so returning it would put a DISPLAY-cased string into
+   * `picked`, and `picked` is not a label: it is the `selected` key the
+   * instrument `Picker` matches its rows against, the key `narrowing` reports,
+   * and the name the anchor prints. One character of case drift there and the
+   * ticked row silently stops being ticked while the table filters correctly,
+   * which is the same class of failure as an ISO date used as a label.
+   */
+  const instrumentKeys = $derived.by(() => {
+    const s = new Map();
+    for (const r of instrumentRows) s.set(r.key.toUpperCase(), r.key);
+    return s;
+  });
+  const picked = $derived(instrumentKeys.get(typed) ?? '');
+
+  /* ---- facets ---------------------------------------------------------
+     A FACET'S OWN SELECTION IS EXCLUDED FROM ITS OWN COUNT, and every other
+     selection is applied. Otherwise a toggle promises a number and delivers a
+     different one: "INDEX 60" while a month holding 23 of them is selected is
+     a count of rows the click cannot produce.
+
+     The month band is the deliberate exception, and only for `holesOnly`: the
+     cards are a ROLL-UP, not a filter chip — "2026-07 is 92.9% complete" is a
+     statement about the month, and narrowing it to the incomplete rows would
+     make every card read 0% complete and say nothing. */
+
+  const kinds = $derived.by(() => {
+    const c = new Map();
+    for (const it of textMatched) c.set(it.kind, (c.get(it.kind) ?? 0) + 1);
+    // THE TIE-BREAK IS THREE-WAY, and `txt` is what makes it so. `a < b ? -1 :
+    // 1` answers "greater" for two EQUAL keys, in both directions at once, and
+    // a comparator that contradicts itself leaves the order of those elements
+    // unspecified — the same counts could render in a different order on the
+    // next pass. Same inputs, same order, everywhere.
+    return [...c.entries()].sort((a, b) => b[1] - a[1] || txt(a[0], b[0]));
+  });
+
+  /** Text and kind: the base the month cards roll up. */
+  const segmented = $derived(kind ? textMatched.filter((r) => r.kind === kind) : textMatched);
+
+  /* ======================================================================
      THE BAR-LENGTH RUNG — feed → universe → TIMEFRAME → months
      ----------------------------------------------------------------------
      IT SITS HERE, ABOVE THE MONTH WINDOW, AND THAT PLACEMENT IS THE POINT. A
@@ -1354,7 +1509,7 @@
   /** Every rung the chosen universe holds, in LENGTH order, with its row count. */
   const tfAll = $derived.by(() => {
     const c = new Map();
-    for (const it of universed) c.set(it.timeframe, (c.get(it.timeframe) ?? 0) + 1);
+    for (const it of segmented) c.set(it.timeframe, (c.get(it.timeframe) ?? 0) + 1);
     /* BY LENGTH, NEVER BY TEXT — see `tfCmp`. As text these read `15min`,
        `1day`, `1min`, which is an ordering by first character and not by
        anything a bar length has. */
@@ -1369,7 +1524,7 @@
    * accidentally drop a row whose rung string this page has never heard of.
    */
   const timeframed = $derived(
-    timeframe ? universed.filter((r) => r.timeframe === timeframe) : universed
+    timeframe ? segmented.filter((r) => r.timeframe === timeframe) : universed
   );
 
   /**
@@ -1687,147 +1842,9 @@
     !fromMonth && !toMonth ? timeframed : timeframed.filter((r) => inWindow(r.month))
   );
 
-  /* ======================================================================
-     THE PREFIX INDEX — one Map probe per keystroke
-     ----------------------------------------------------------------------
-     Same shape as `web/typeahead.js`, for the same reason: the universe is
-     bounded, so index it once and probe it forever. Every 1..4-character
-     prefix of the full instrument, of its symbol, and of its month maps to the
-     rows carrying it. Typing up to four characters is ONE Map probe; beyond
-     four it is a filter over one bucket, which is bounded by the largest
-     4-prefix bucket and never by the store.
-     ====================================================================== */
-  const MAX_PREFIX = 4;
-
-  /* THE BUCKET KEY AND THE PROBE KEY ARE ONE FORM, AND THEY WERE NOT.
-     `typed` below is `filter.trim().toUpperCase()`, and these buckets were cut
-     from the token EXACTLY AS THE STORE SPELLS IT. Two spellings of one key is
-     the silent failure this whole file is written against: the day a store
-     writes one instrument, one symbol or one month key in anything but upper
-     case, its bucket is filed under a prefix no probe can ever ask for — the
-     row is in `windowed`, the table below counts it, and the text box simply
-     never finds it. Nothing errors and nothing looks wrong. Normalised on BOTH
-     sides here, once per token rather than once per prefix, so the index and
-     the box cannot spell the same key two ways.
-
-     `it.sym` is the tail the row DISPLAYS, and it stays in the index on
-     purpose: it is a substring of `it.instrument`, so typing `NIFTY` at
-     `NSE-INDEX-NIFTY` is a real question. What it is not allowed to be is the
-     key anything is COMPARED by — `picked` below resolves back to the store's
-     own `instrument` spelling, never to what was typed. */
-  const index = $derived.by(() => {
-    const by = new Map();
-    for (const it of windowed) {
-      const seen = new Set();
-      for (const raw of [it.instrument, it.sym, it.month]) {
-        const token = raw.toUpperCase();
-        for (let n = 1; n <= Math.min(MAX_PREFIX, token.length); n += 1) {
-          const k = token.slice(0, n);
-          if (seen.has(k)) continue;
-          seen.add(k);
-          let bucket = by.get(k);
-          if (!bucket) by.set(k, (bucket = []));
-          bucket.push(it);
-        }
-      }
-    }
-    return by;
-  });
-
-  const typed = $derived(filter.trim().toUpperCase());
-
-  const textMatched = $derived.by(() => {
-    /* `windowed`, NOT `deco`. The two coarser rungs above are already applied
-       to the index this probes, so an empty text box has to fall through to
-       the same set the index was built from — falling back to the whole store
-       would make typing WIDEN the selection. */
-    if (!typed) return windowed;
-    if (typed.length <= MAX_PREFIX) return index.get(typed) ?? [];
-    const seed = index.get(typed.slice(0, MAX_PREFIX)) ?? [];
-    /* THE SAME NORMALISATION AS THE INDEX ABOVE, for the same reason: past four
-       characters this is the probe, and a bucket cut one way cannot be filtered
-       the other. */
-    return seed.filter(
-      (r) =>
-        r.instrument.toUpperCase().startsWith(typed) ||
-        r.sym.toUpperCase().startsWith(typed) ||
-        r.month.toUpperCase().startsWith(typed)
-    );
-  });
-
-  /* ---- THE INSTRUMENT RUNG, WHICH IS THE TEXT BOX -----------------------
-     ONE STATE, TWO ENTRY POINTS. The page has had an instrument filter since
-     it was written, and it answers this rung's question faster than a list
-     can: a Map probe against a typed prefix. A second, independent "chosen
-     instrument" beside it would be two answers to one question, and the table
-     would look correct while returning nothing the moment they disagreed.
-
-     So the picker does not own a selection at all. It WRITES the text box, and
-     it shows a row as ticked exactly when the text box currently holds that
-     row's key. Typing anything else unticks it with no bookkeeping, because
-     there is nothing to keep. The Picker is an enumeration of what the coarser
-     rungs left; the text box is the state.
-     ====================================================================== */
-  const instrumentRows = $derived.by(() => {
-    const by = new Map();
-    for (const it of windowed) {
-      let a = by.get(it.instrument);
-      if (!a) by.set(it.instrument, (a = { key: it.instrument, months: 0, bars: 0, short: 0 }));
-      a.months += 1;
-      a.bars += it.rows;
-      a.short += it.short;
-    }
-    return [...by.values()].sort((a, b) => txt(a.key, b.key));
-  });
-
-  /**
-   * O(1): the STORE'S OWN SPELLING of the instrument the text box currently
-   * names, or `''`.
-   *
-   * A Map and not a Set, and the value is the raw key rather than the typed
-   * text. `typed` is upper-cased — it has to be, because it is a probe against
-   * the prefix index — so returning it would put a DISPLAY-cased string into
-   * `picked`, and `picked` is not a label: it is the `selected` key the
-   * instrument `Picker` matches its rows against, the key `narrowing` reports,
-   * and the name the anchor prints. One character of case drift there and the
-   * ticked row silently stops being ticked while the table filters correctly,
-   * which is the same class of failure as an ISO date used as a label.
-   */
-  const instrumentKeys = $derived.by(() => {
-    const s = new Map();
-    for (const r of instrumentRows) s.set(r.key.toUpperCase(), r.key);
-    return s;
-  });
-  const picked = $derived(instrumentKeys.get(typed) ?? '');
-
-  /* ---- facets ---------------------------------------------------------
-     A FACET'S OWN SELECTION IS EXCLUDED FROM ITS OWN COUNT, and every other
-     selection is applied. Otherwise a toggle promises a number and delivers a
-     different one: "INDEX 60" while a month holding 23 of them is selected is
-     a count of rows the click cannot produce.
-
-     The month band is the deliberate exception, and only for `holesOnly`: the
-     cards are a ROLL-UP, not a filter chip — "2026-07 is 92.9% complete" is a
-     statement about the month, and narrowing it to the incomplete rows would
-     make every card read 0% complete and say nothing. */
-  const byMonth = $derived(month ? textMatched.filter((r) => r.month === month) : textMatched);
-
-  const kinds = $derived.by(() => {
-    const c = new Map();
-    for (const it of byMonth) c.set(it.kind, (c.get(it.kind) ?? 0) + 1);
-    // THE TIE-BREAK IS THREE-WAY, and `txt` is what makes it so. `a < b ? -1 :
-    // 1` answers "greater" for two EQUAL keys, in both directions at once, and
-    // a comparator that contradicts itself leaves the order of those elements
-    // unspecified — the same counts could render in a different order on the
-    // next pass. Same inputs, same order, everywhere.
-    return [...c.entries()].sort((a, b) => b[1] - a[1] || txt(a[0], b[0]));
-  });
-
-  /** Text and kind: the base the month cards roll up. */
-  const pool = $derived(kind ? textMatched.filter((r) => r.kind === kind) : textMatched);
 
   /** Everything except the holes toggle — what that toggle counts against. */
-  const scoped = $derived(month ? pool.filter((r) => r.month === month) : pool);
+  const scoped = $derived(month ? windowed.filter((r) => r.month === month) : windowed);
   const holed = $derived(scoped.reduce((a, r) => a + (r.short > 0 ? 1 : 0), 0));
 
   /**
@@ -3672,7 +3689,7 @@
    * holds one rung — `sessions` already worked this way.
    */
   const monthCards = $derived.by(() =>
-    rollUpMonths(pool)
+    rollUpMonths(windowed)
       .map((m) => ({
         ...m,
         // THE FULLEST ROW, AND ONLY WHERE ONE RUNG MAKES THAT A SINGLE NUMBER.
@@ -4771,7 +4788,7 @@
         title="Every segment the rungs below reach, counted together. The store's own second field, not a universe."
         onclick={() => (kind = '')}
       >
-        All segments<span class="c">{fmt(byMonth.length)}</span>
+        All segments<span class="c">{fmt(textMatched.length)}</span>
       </button>
       {#each kinds as [k, n] (k)}
         <button
