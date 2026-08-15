@@ -2337,7 +2337,11 @@
     // this one named a refusal that no longer exists. The counts beside the
     // universe control already say how many instruments a run will attempt, and
     // they are measured rather than asserted.
-    if (rung !== '1min') {
+    // AND ONLY WHILE A RUN IS ACTUALLY GOING. This fired on an idle form,
+    // where "live progress below" describes nothing that is happening and the
+    // operator has not asked for anything yet. A caution about how a reading is
+    // taken is worth saying at the moment the reading is being taken.
+    if (rung !== '1min' && phase !== 'idle') {
       out.push(
         `Live progress below is measured from /store.json, which stamps every row "1m" regardless of rung. Growth shown while this run is going may belong to another rung — it cannot be separated from the wire.`
       );
@@ -6327,6 +6331,25 @@
            and out-of-reach from the same feed floor that refuses a day in the
            date control above. Nothing here is generated and nothing is
            extrapolated. -->
+      <!-- ══ NOTHING BELOW EXISTS UNTIL THERE IS A WINDOW TO COUNT ══
+
+           This section drew on every load. With no dates picked it rendered a
+           heading, a verdict strip reading "No window", a paginated table with
+           five column headers and their unit captions, an empty body repeating
+           the same sentence, a pager reading "0 of 0 series", and two footer
+           paragraphs defining terms for numbers that were not on screen —
+           SEVEN blocks, all of them saying the same thing: you have not picked
+           a window yet.
+
+           The date field says that already, in three words, where the window
+           is chosen. A census of nothing is not a census, and drawing its
+           chrome so it can announce its own emptiness is the noise that made
+           this page unreadable before it was ever used.
+
+           WHEN THERE IS A WINDOW, EVERY WORD OF IT COMES BACK. Nothing here is
+           deleted and no refusal is hidden: this is a section that has nothing
+           to report until it does. -->
+      {#if windowOk}
       <section class="census">
         <h2 class="sec">
           Every series in that window
@@ -6738,6 +6761,7 @@
           </p>
         </details>
       </section>
+      {/if}
     </div>
   {/if}
 </div>
