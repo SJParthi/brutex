@@ -802,6 +802,32 @@ impl BarFile {
         let next = match self.header.advance(count, first_ts, last_ts) {
             Ok(next) => next,
             Err(source) => {
+                // ONLY A TIMESTAMP DISAGREEMENT CAN BE AN OVERLAP, and asking
+                // that first is what stops this function recursing forever.
+                //
+                // `advance` refuses for three reasons, and this doc block names
+                // all three: timestamps out of order, `CounterOverflow`, and
+                // `GenerationExhausted`. The two counter refusals are TERMINAL —
+                // they say the file cannot take another batch at all, and they
+                // say nothing whatever about these bars' timestamps.
+                //
+                // The recovery below did not ask. For a batch that legitimately
+                // FOLLOWS what is held, `suffix_that_follows` finds an empty
+                // overlap and hands back the WHOLE batch, and `self.append` was
+                // then called with byte-identical input — same header, same
+                // bars, same refusal, forever. Not a hang either: it is a stack
+                // overflow, which aborts the process, and an abort cannot be
+                // caught, reported, or turned into the named error the doc
+                // above promises. `store::fault::the_counter_and_the_generation
+                // _refuse_to_wrap` asserts that named error and reaches it by
+                // another path, so nothing failed while this one recursed.
+                if !matches!(source, FormatError::TimestampsOutOfOrder { .. }) {
+                    return Err(StoreError::Format {
+                        path: self.bars_path.clone(),
+                        source,
+                    });
+                }
+
                 // It does not follow. Three things it could be, and only the
                 // third is a conflict.
                 //
