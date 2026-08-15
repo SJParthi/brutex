@@ -3200,6 +3200,33 @@ fn refused_and_recorded(
     })
 }
 
+/// The page a request refused for a **named** reason answers with.
+///
+/// # Why this is not [`accepted_html`] with an extra fact
+///
+/// It differs in the one line the reader actually reads. `accepted_html` fills
+/// its headline from [`halt_for`], which on a serving process is [`HTTP_LIVE`] —
+/// a paragraph explaining that the credential comes from Parameter Store and
+/// which transport decides the path. All true, and none of it an answer to *why
+/// did my pull not run*.
+///
+/// So a request refused for a reason this build KNOWS — the pull order, a
+/// window the feed will not serve — rendered under a headline about socket
+/// plumbing, with its actual reason twentieth in a table. The reason is the
+/// headline here, and `halt_for`'s paragraph stays where it belongs: on the
+/// answers that have no more specific thing to say.
+fn refused_html(scope: &str, mut facts: Vec<(&'static str, String)>, why: &str) -> String {
+    facts.push(("Status", "NOT STARTED".to_owned()));
+    render::receipt_page(&render::Receipt {
+        scope,
+        verdict: "NOT STARTED",
+        reason: why,
+        good: false,
+        facts: &facts,
+        footnote: "Nothing here was written to the store.",
+    })
+}
+
 /// The page a valid request answers with, given that nothing can run.
 fn accepted_html(scope: &str, mut facts: Vec<(&'static str, String)>, broker: Broker) -> String {
     facts.push(("Status", "NOT STARTED".to_owned()));
@@ -3555,6 +3582,12 @@ async fn broker_answer(
         let mut facts = facts;
         facts.push(("Refused because", why.to_owned()));
         facts.push(recorded_fact(journal, &record));
+        // NOT `refused_html`, and the difference is load-bearing on a
+        // non-serving process: this closure's headline is `halt_for`, whose
+        // `Broker::Refused` text states that NO VENDOR IS CONTACTED from here.
+        // That assurance is the answer to a question the specific reason does
+        // not address, and `a_valid_window_is_echoed_with_the_wire_date_and_        // still_starts_nothing` reads it back. Giving this site a specific
+        // headline as well means carrying that assurance into the facts first.
         (code, accepted_html("Spot pull", facts, site.broker))
     };
 
@@ -3578,7 +3611,7 @@ async fn broker_answer(
         .with_window(asked.window);
         facts.push(("Refused because", blocked.why.clone()));
         facts.push(recorded_fact(journal, &record));
-        return (blocked.code, accepted_html("Spot pull", facts, site.broker));
+        return (blocked.code, refused_html("Spot pull", facts, &blocked.why));
     }
 
     facts.push(("Instruments attempted", run.attempted.to_string()));
@@ -3704,10 +3737,28 @@ impl BrokerRun {
     ///
     /// `503`: the vendor path genuinely is unavailable to this process.
     fn unreachable_broker() -> Self {
+        // THE ASSURANCE TRAVELS WITH THE REASON. "No vendor was contacted"
+        // used to reach the reader through `halt_for`, because the receipt's
+        // headline came from the broker state rather than from the refusal.
+        // Now that the headline is the refusal's own words, the words have to
+        // carry it — it answers a question the bare refusal does not, and
+        // `a_valid_window_is_echoed_with_the_wire_date_and_still_starts_nothing`
+        // reads it back off the rendered page.
+        //
+        // AND IT MAY NOT SAY "CREDENTIAL", which a draft of this sentence did,
+        // as "no credential was read". `autopilot::classify` matches that word
+        // as a SUBSTRING and `observe` turns a feed-wide credential fault into
+        // a permanent `Halt::Credential` — so the phrasing alone converted a
+        // transport-shaped refusal that should back off into a halt telling the
+        // operator their Parameter Store token was dead. It is not. This text
+        // is load-bearing input to a classifier, not prose;
+        // `a_whole_round_runs_and_a_refused_broker_is_named_on_the_page` is
+        // what caught it and what still holds it.
         Self::blocked(
-            "this process may not reach a live broker. The served binary sets \
-             Broker::Live; nothing else does, so a test cannot spend the \
-             operator's rate budget by omission."
+            "this process may not reach a live broker, so no vendor was \
+             contacted from this process. The served binary sets Broker::Live; \
+             nothing else does, so a test cannot spend the operator's rate \
+             budget by omission."
                 .to_owned(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
         )
@@ -7852,6 +7903,48 @@ mod tests {
             "and does NOT report the broker as unreachable — the literal this \
              block used to restate for every blocked run: {body}"
         );
+    }
+
+    /// NO REASON THIS BUILD WRITES IS MISTAKEN FOR A CREDENTIAL OR A DISK.
+    ///
+    /// `autopilot::classify` reads a refusal by SUBSTRING, and `observe` turns
+    /// a feed-wide `Credential` into a permanent halt and a repeated `Store`
+    /// into another. So every sentence that can reach it is classifier input,
+    /// not prose — and this asserts the ones this module authors.
+    ///
+    /// It exists because a draft of `unreachable_broker` said "no credential
+    /// was read". One word, and a transport-shaped refusal that should back off
+    /// for thirty seconds became a halt telling the operator their Parameter
+    /// Store token was dead. Nothing in the sentence was false; it was simply
+    /// being read by something other than a human.
+    #[test]
+    fn no_refusal_this_module_writes_is_read_as_a_credential_or_disk_fault() {
+        let ladder_refusals = [
+            ladder_refusal(
+                &minute_ask(),
+                &[spot_key("NIFTY", brutex_core::instrument::Segment::Index)],
+                &[],
+            )
+            .expect("the rung refusal"),
+            ladder_refusal(
+                &minute_ask(),
+                &[spot_key("NIFTY", brutex_core::instrument::Segment::Fno)],
+                &[],
+            )
+            .expect("the segment refusal"),
+        ];
+        let broker = BrokerRun::unreachable_broker()
+            .blocked
+            .expect("it is blocked")
+            .why;
+
+        for why in ladder_refusals.iter().map(String::as_str).chain([&*broker]) {
+            assert_eq!(
+                crate::autopilot::classify(why),
+                crate::autopilot::Trouble::Transport,
+                "this reason halts the backfill for a fault it is not about: {why}"
+            );
+        }
     }
 
     /// AN ARCHIVE FEED IS EXEMPT, and the wiring honours that too.

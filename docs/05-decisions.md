@@ -14278,3 +14278,57 @@ not merely that the order's words are present. A test asserting only the latter
 passes on the broken code, because the broken code appended both.
 
 Invariant P-11.
+
+## D-0155 · 2026-08-15 · A refusal's headline is its own reason, and refusal text is classifier input rather than prose
+
+### Two findings, both surfaced by D-0153's second producer
+
+**One: the headline was never the reason.** `accepted_html` fills the receipt's
+`.halt` line from `halt_for(broker)`. On a serving process that is `HTTP_LIVE`
+— a paragraph explaining that the credential comes from Parameter Store and
+which transport decides the path. So a request refused for a reason this build
+KNOWS rendered under a headline about socket plumbing, with its actual reason
+twentieth in a table.
+
+`refused_html` puts the reason on the headline. The pull-order refusal uses it.
+The `refuse` closure deliberately does **not**: on a non-serving process its
+`halt_for` text states that no vendor is contacted from here, which answers a
+question the specific reason does not, and
+`a_valid_window_is_echoed_with_the_wire_date_and_still_starts_nothing` reads it
+back. Giving that site a specific headline means carrying the assurance into the
+facts first, and that is its own change.
+
+**Two: the words are read by a classifier.** Moving the assurance into
+`unreachable_broker`'s reason, a draft wrote *"so no credential was read and no
+vendor was contacted"*. `autopilot::classify` matches `"credential"` as a
+**substring**, and `observe` turns a feed-wide `Trouble::Credential` into
+`Halt::Credential` — permanent, and unrecoverable without a restart.
+
+So one word converted a transport-shaped refusal that should back off for
+thirty seconds into a halt telling the operator their Parameter Store token was
+dead. It is not. Nothing in the sentence was false; it was being read by
+something other than a human.
+
+### The decision
+
+Every sentence that can reach `classify` is **classifier input**, and is
+asserted as such. `no_refusal_this_module_writes_is_read_as_a_credential_or_disk_fault`
+walks the refusals this module authors — both pull-order refusals and the
+unreachable-broker one — and asserts each classifies as `Transport`.
+
+This is the same hazard `classify`'s own comment records from the other
+direction: Kite's `403 TokenException` was a CREDENTIAL fact filed as a
+transport blip, and it cost nine retries a month against a session that was
+never coming back. That was a real fault classified too softly; this was a soft
+fault classified too hard. The table is the fix in both directions, and now it
+has a test on the side that writes the strings.
+
+### The proof
+
+- `api::server::no_refusal_this_module_writes_is_read_as_a_credential_or_disk_fault`
+- `api::autopilot::a_whole_round_runs_and_a_refused_broker_is_named_on_the_page`
+  — the existing test that CAUGHT it, by asserting the round backs off by
+  `BACKOFF_FLOOR_SECS` rather than halting
+- `api::server::a_run_the_order_refuses_says_so_on_its_receipt_and_answers_409`
+
+Invariants P-12, P-13.
