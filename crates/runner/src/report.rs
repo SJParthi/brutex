@@ -300,13 +300,42 @@ pub fn render_findings(ranked: &Ranked, sweep: &Sweep) -> String {
             // rather than refuse.
             paisa(s.edge.mean_paisa),
             s.edge.t,
-            if !judgeable {
+            // MISPAIRED OUTRANKS EVERY OTHER VERDICT, and it is checked first.
+            //
+            // `Edge::mismatched` counts hits whose bar the `Forward` could not
+            // answer for because the two were built from DIFFERENT slices. Its
+            // own doc says a non-zero count makes the whole struct meaningless
+            // -- the mean and the t are then computed from returns belonging to
+            // other bars. It was computed, documented that way, and never
+            // rendered: `render_findings` printed rank, hits, n, mean, t and a
+            // verdict, and an operator had no way to see it at all. A row that
+            // says "clears" on fabricated numbers is the worst output this
+            // report can produce, so it is now impossible to print one.
+            if s.edge.mismatched > 0 {
+                "MISPAIRED — the forward outcomes belong to other bars; \
+                 this row's mean and t mean nothing"
+            } else if !judgeable {
                 "TOO FEW OBSERVATIONS to judge -- a normal bar cannot rule on a t"
             } else if clears {
                 "clears"
             } else {
                 "BELOW THE BAR — indistinguishable from luck"
             }
+        );
+    }
+    // AND SAID ONCE MORE, IN A LINE OF ITS OWN. A per-row tag is easy to miss
+    // in a table an operator scans for `clears`; a mispairing is a fault in the
+    // RUN, not a property of one combination, and it is reported as one.
+    let mispaired = ranked.top.iter().filter(|s| s.edge.mismatched > 0).count();
+    if mispaired > 0 {
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "  MISPAIRED: {mispaired} of {} row(s) measured a column against a \
+             forward built from a different slice. Nothing in this section is \
+             trustworthy. Rebuild the forward from the same bars the column \
+             was built from.",
+            ranked.top.len()
         );
     }
     let _ = writeln!(out);

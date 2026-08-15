@@ -144,6 +144,34 @@ impl Forward {
     pub const fn covers(&self, i: usize) -> bool {
         i < self.bars_len
     }
+
+    /// Was this built from the same slice as a column that was offered
+    /// `offered` bars?
+    ///
+    /// # The direction [`Self::covers`] structurally cannot see
+    ///
+    /// `covers` answers a PER-INDEX question — `i < bars_len` — and that is
+    /// satisfied by **every** index of a shorter column. So it catches a
+    /// `Forward` built from a slice shorter than the column's and nothing else.
+    ///
+    /// The other direction is silent and worse. Pair a `Forward` over
+    /// one-minute bars with a `Column` built from the five-minute resampling of
+    /// the same session: the column's sources run `0..600`, the forward's
+    /// `bars_len` is 3,000, every per-index check passes, and [`Self::at`]
+    /// returns the ONE-MINUTE forward return for a FIVE-MINUTE bar. `n` comes
+    /// out full, [`Edge::mismatched`] comes out zero, and the t-statistic is
+    /// fabricated from returns belonging to other bars.
+    ///
+    /// Comparing lengths catches both directions at once, and it is checked
+    /// ONCE per [`edge`] rather than per bar.
+    ///
+    /// # Cost
+    ///
+    /// One `try_from` and one integer compare. `CLAUDE.md` §3 rule 4.
+    #[must_use]
+    pub fn built_from_same_slice_as(&self, offered: u64) -> bool {
+        u64::try_from(self.bars_len).is_ok_and(|len| len == offered)
+    }
 }
 
 /// Close-to-close forward returns over `horizon`.
@@ -229,6 +257,13 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     let mut mean = 0.0_f64;
     let mut m2 = 0.0_f64;
 
+    // WHOLE-SLICE AGREEMENT, ASKED ONCE. `covers` is a per-index test and every
+    // index of a SHORTER column satisfies it, so on its own it lets a `Forward`
+    // built from a longer slice through silently -- see
+    // `Forward::built_from_same_slice_as`. Asked here rather than per bar
+    // because it is a property of the pair, not of a row.
+    let paired = forward.built_from_same_slice_as(column.census().offered);
+
     for (bits, &source) in column.bits().iter().zip(column.sources()) {
         if !bits.hits(mask) {
             continue;
@@ -236,10 +271,15 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
         // THE PAIRING THAT MUST GO THROUGH `sources`. `first_swept + j` runs one
         // behind from the first refused bar onward, and every outcome after it
         // would be read off the wrong bar -- see `Column::sources`.
-        if !forward.covers(source) {
+        if !paired || !forward.covers(source) {
             // NOT the tail. The caller paired this column with a `Forward`
             // built from a different slice, and the shortfall would otherwise
             // be indistinguishable from the documented tail exclusion.
+            //
+            // `!paired` first, because when the two slices disagree at all
+            // EVERY hit is mispaired -- not merely the ones whose index runs
+            // off the end. A longer forward covers every index and would
+            // otherwise report a full `n` against returns from other bars.
             mismatched = mismatched.saturating_add(1);
             continue;
         }
@@ -416,12 +456,93 @@ mod tests {
     }
 
     #[test]
+    fn a_forward_from_a_longer_slice_is_refused_rather_than_silently_mispaired() {
+        // THE DIRECTION `covers` CANNOT SEE. A column built from a SHORT slice
+        // paired with a forward built from a LONGER one: every source index
+        // satisfies `i < bars_len`, so the per-index guard passes on every row
+        // and `at(source)` hands back a return belonging to a different bar.
+        //
+        // Before `built_from_same_slice_as`, this produced a full `n`, a
+        // `mismatched` of ZERO, and a t computed from other bars' returns --
+        // reported by the renderer as an ordinary finding.
+        // `synthetic::sessions` and not hand-rolled candles: a short hand-made
+        // slice warms up and never sweeps a bar, so the column comes out EMPTY
+        // and every assertion below would pass without the guard existing.
+        // Eight sessions and not two: the warm-up consumes more than two
+        // sessions, so a two-session column comes out EMPTY and every
+        // assertion below would pass without the guard existing at all.
+        let short = crate::synthetic::sessions(8);
+        let long = crate::synthetic::sessions(16);
+
+        let column = Column::build(&short, &mut evaluator());
+        assert!(
+            !column.is_empty(),
+            "the fixture must sweep bars, or this test proves nothing"
+        );
+        let from_long = forward(&long, h(1));
+        let all = ConditionMask::default();
+
+        let wrong = edge(&column, &from_long, &all);
+        assert_eq!(
+            wrong.n, 0,
+            "not one observation may be counted from a forward built from \
+             another slice"
+        );
+        assert!(
+            wrong.mismatched > 0,
+            "every hit must be counted as mispaired, not silently measured"
+        );
+
+        // And the same column against its OWN forward still measures.
+        let from_short = forward(&short, h(1));
+        let right = edge(&column, &from_short, &all);
+        assert_eq!(right.mismatched, 0, "the matching pair must not be refused");
+        assert!(
+            right.n > 0,
+            "the matching pair must still produce observations"
+        );
+    }
+
+    #[test]
     fn an_identical_sample_reports_zero_rather_than_an_infinite_t() {
         // A perfectly flat series: every forward move is the same, so the
         // standard error is zero. Dividing by it would be infinity, which reads
         // as the strongest result ever found rather than as a degenerate one.
-        let bars: Vec<Candle> = (0..40).map(|i| candle(i, 100 + i * 10)).collect();
+        // THE FIXTURE HAD TO CHANGE, and the reason is the point of the test.
+        // This was forty hand-made candles. Forty candles never clear the
+        // warm-up, so the column came out EMPTY, `edge` returned the default
+        // with t = 0, and `is_finite()` was satisfied by a measurement that
+        // never happened. The assertion could not fail, which is the shape
+        // `CLAUDE.md` §4 refuses.
+        //
+        // `sessions(8)` sweeps real bars; the prices are then overwritten with
+        // a constant +10 ramp on the SAME timestamps, so every close-to-close
+        // move is identical, the spread is exactly zero, and the degenerate
+        // path this test exists for is actually reached.
+        let bars: Vec<Candle> = crate::synthetic::sessions(8)
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let close =
+                    100_000_i64.saturating_add(i64::try_from(i).unwrap_or(0).saturating_mul(10));
+                Candle::new(
+                    c.ts_micros,
+                    close,
+                    close.saturating_add(10),
+                    close.saturating_sub(10),
+                    close,
+                    100,
+                    OI_NULL,
+                )
+            })
+            .collect();
         let column = Column::build(&bars, &mut evaluator());
+        assert!(
+            !column.is_empty(),
+            "the fixture must sweep at least one bar, or this test asserts \
+             nothing: an empty column yields t = 0 and `is_finite` passes on a \
+             measurement that never happened"
+        );
         let f = forward(&bars, h(1));
         // Every step is +10, so any mask that fires twice has zero spread.
         let all = ConditionMask::default();
