@@ -128,10 +128,26 @@ pub fn segment_precedes(segment: Segment) -> Option<Segment> {
 }
 
 /// One instrument-month the caller is about to ask for.
+///
+/// # The segment is PER INSTRUMENT, and it has to be
+///
+/// The first draft took one `Segment` for the whole request, which reads as
+/// obvious and is wrong for two of the nine spot targets. `SpotTarget::Fno` is
+/// the 213 F&O **underlyings** — NIFTY and BANKNIFTY are indices and the other
+/// 211 are equities — and `Everything` is the reference index series and the
+/// NIFTY Total Market constituents together. Both span `Index` and `Cash`.
+///
+/// The store keys a month on the segment, so probing a target's whole name list
+/// under one of them would look for equities in the index directory and find
+/// nothing: the gate would report every constituent as missing and refuse a run
+/// that was ready. The caller knows each instrument's segment because the
+/// catalogue it resolved the names from carries it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Wanted {
     /// The instrument.
     pub symbol: Symbol,
+    /// Which segment the store files it under.
+    pub segment: Segment,
     /// The month its bars fall in.
     pub month: YearMonth,
 }
@@ -196,7 +212,6 @@ pub fn gate(
     census: &Manifest,
     feed: Feed,
     exchange: Exchange,
-    segment: Segment,
     rung: Timeframe,
     wanted: &[Wanted],
 ) -> Gate {
@@ -213,24 +228,45 @@ pub fn gate(
     // window with no spot behind it fails BOTH gates; reporting the rung one
     // would send the operator to pull the day rung of a segment he should not
     // be on yet.
-    if let Some(first) = segment_precedes(segment) {
-        // AT THE RUNG BEING ASKED FOR, not at the finest one. Asking for spot's
-        // MINUTE bars before an F&O day pull would be a stricter rule than the
-        // operator stated, and a gate stricter than its rule refuses work
-        // nobody said was wrong.
-        let missing = missing_at(census, exchange, first, rung, wanted);
+    // THE SEGMENT GATE, and it fires only where an instrument is a derivative.
+    //
+    // Checked first, and the order matters: a derivative window with no spot
+    // behind it fails BOTH gates, and reporting the rung one would send the
+    // operator to pull the day rung of a segment he should not be on yet.
+    //
+    // Every derivative in `wanted` is checked against its own underlying
+    // segment. On a SPOT request this loop finds nothing — `/pull/spot` names
+    // index and cash instruments and `segment_precedes` answers `None` for both
+    // — which is correct rather than a gap: the order's derivative step belongs
+    // to `/pull/fno`, whose transport does not exist in this build.
+    let derivative: Vec<Wanted> = wanted
+        .iter()
+        .filter(|w| segment_precedes(w.segment).is_some())
+        .copied()
+        .collect();
+    if let Some(first) = derivative.first().and_then(|w| segment_precedes(w.segment)) {
+        // AT THE RUNG BEING ASKED FOR, not at the finest one. Requiring spot's
+        // MINUTE bars before an F&O day pull would be stricter than the rule,
+        // and a gate stricter than its rule refuses work nobody called wrong.
+        let missing = derivative
+            .iter()
+            .filter(|w| !held(census, exchange, first, rung, w.symbol, w.month))
+            .count();
         if missing > 0 {
             return Gate::SegmentFirst {
                 needs: first,
                 at: rung,
                 missing,
-                of: wanted.len(),
+                of: derivative.len(),
             };
         }
     }
 
     if let Some(first) = precedes(rung) {
-        let missing = missing_at(census, exchange, segment, first, wanted);
+        let missing = wanted
+            .iter()
+            .filter(|w| !held(census, exchange, w.segment, first, w.symbol, w.month))
+            .count();
         if missing > 0 {
             return Gate::RungFirst {
                 needs: first,
@@ -243,47 +279,37 @@ pub fn gate(
     Gate::Open
 }
 
-/// How many of `wanted` the census does NOT hold at `(segment, rung)`.
+/// Whether the census holds this one instrument-month at `(segment, rung)`.
 ///
-/// One `O(1)` probe each, over the CALLER'S list rather than over the census —
-/// so the cost is the size of the ask and never the size of the store.
-fn missing_at(
+/// One `O(1)` map probe. Callers walk their OWN list, so the cost is the size of
+/// the ask and never the size of the store.
+///
+/// # Absent is the whole test, and it covers the dangerous case
+///
+/// A draft also treated a month held with ZERO rows as missing, to catch
+/// `audit::Outcome::Empty` — the run that completes clean and stores nothing,
+/// balances trivially at `0 = 0 + 0 + 0`, and is the one outcome that looks
+/// exactly like success. That clause is unreachable: `Manifest::record_held`
+/// REFUSES an entry with no rows outright, as `EmptyEntry`, so a zero-row month
+/// cannot be in the census to be read. An `Empty` run leaves NO entry, and this
+/// refuses it by absence — see `a_month_with_no_bars_cannot_even_be_recorded`.
+fn held(
     census: &Manifest,
     exchange: Exchange,
     segment: Segment,
     rung: Timeframe,
-    wanted: &[Wanted],
-) -> usize {
-    wanted
-        .iter()
-        .filter(|w| {
-            census
-                .entry(&EntryKey {
-                    exchange,
-                    segment,
-                    symbol: w.symbol,
-                    timeframe: rung,
-                    month: w.month,
-                })
-                // ABSENT IS THE WHOLE TEST, AND IT COVERS THE DANGEROUS CASE
-                // WITHOUT A SECOND CLAUSE.
-                //
-                // The first draft also treated a month held with ZERO rows as
-                // missing, to catch `audit::Outcome::Empty` — the run that
-                // completes clean and stores nothing, balances trivially at
-                // 0 = 0 + 0 + 0, and is the one outcome that looks exactly like
-                // success. That clause is unreachable: `Manifest::record_held`
-                // REFUSES an entry with no rows outright, as `EmptyEntry`, so a
-                // zero-row month cannot be in the census to be read.
-                //
-                // Which means an `Empty` run leaves NO entry, and `is_none`
-                // already refuses it. The guarantee is the census's, one layer
-                // down, and asserting it here as well would be an unreachable
-                // branch in the function that decides whether a run happens —
-                // see `a_month_with_no_bars_cannot_even_be_recorded`.
-                .is_none()
+    symbol: Symbol,
+    month: YearMonth,
+) -> bool {
+    census
+        .entry(&EntryKey {
+            exchange,
+            segment,
+            symbol,
+            timeframe: rung,
+            month,
         })
-        .count()
+        .is_some()
 }
 
 #[cfg(test)]
@@ -307,11 +333,17 @@ mod tests {
         Symbol::new(name).expect("a legal symbol")
     }
 
+    /// Instruments in the INDEX segment, which is what a spot request names.
     fn want(names: &[&str]) -> Vec<Wanted> {
+        want_in(Segment::Index, names)
+    }
+
+    fn want_in(segment: Segment, names: &[&str]) -> Vec<Wanted> {
         names
             .iter()
             .map(|n| Wanted {
                 symbol: sym(n),
+                segment,
                 month: month(),
             })
             .collect()
@@ -356,7 +388,6 @@ mod tests {
                 &empty,
                 Feed::Groww,
                 Exchange::Nse,
-                Segment::Index,
                 Timeframe::DAY_1,
                 &want(&["NIFTY"])
             ),
@@ -375,14 +406,7 @@ mod tests {
         // Neither held.
         let none = census_of(&[]);
         assert_eq!(
-            gate(
-                &none,
-                Feed::Groww,
-                Exchange::Nse,
-                Segment::Index,
-                Timeframe::MINUTE_1,
-                &two
-            ),
+            gate(&none, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two),
             Gate::RungFirst {
                 needs: Timeframe::DAY_1,
                 missing: 2,
@@ -396,14 +420,7 @@ mod tests {
         // been proved.
         let half = census_of(&[("NIFTY", Segment::Index, Timeframe::DAY_1, 10)]);
         assert_eq!(
-            gate(
-                &half,
-                Feed::Groww,
-                Exchange::Nse,
-                Segment::Index,
-                Timeframe::MINUTE_1,
-                &two
-            ),
+            gate(&half, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two),
             Gate::RungFirst {
                 needs: Timeframe::DAY_1,
                 missing: 1,
@@ -416,17 +433,7 @@ mod tests {
             ("NIFTY", Segment::Index, Timeframe::DAY_1, 10),
             ("BANKNIFTY", Segment::Index, Timeframe::DAY_1, 10),
         ]);
-        assert!(
-            gate(
-                &both,
-                Feed::Groww,
-                Exchange::Nse,
-                Segment::Index,
-                Timeframe::MINUTE_1,
-                &two
-            )
-            .is_open()
-        );
+        assert!(gate(&both, Feed::Groww, Exchange::Nse, Timeframe::MINUTE_1, &two).is_open());
     }
 
     /// THE DANGEROUS OUTCOME LEAVES NO ENTRY AT ALL, which is why `is_none` is
@@ -471,7 +478,6 @@ mod tests {
                 &census,
                 Feed::Groww,
                 Exchange::Nse,
-                Segment::Index,
                 Timeframe::MINUTE_1,
                 &want(&["NIFTY"])
             ),
@@ -504,9 +510,8 @@ mod tests {
                 &nothing,
                 Feed::Groww,
                 Exchange::Nse,
-                Segment::Fno,
                 Timeframe::MINUTE_1,
-                &want(&["NIFTY"])
+                &want_in(Segment::Fno, &["NIFTY"])
             ),
             Gate::SegmentFirst {
                 needs: Segment::Index,
@@ -530,9 +535,8 @@ mod tests {
                 &spot_only,
                 Feed::Groww,
                 Exchange::Nse,
-                Segment::Fno,
                 Timeframe::MINUTE_1,
-                &want(&["NIFTY"])
+                &want_in(Segment::Fno, &["NIFTY"])
             ),
             Gate::RungFirst {
                 needs: Timeframe::DAY_1,
@@ -563,9 +567,8 @@ mod tests {
                     &nothing,
                     feed,
                     Exchange::Nse,
-                    Segment::Fno,
                     Timeframe::MINUTE_1,
-                    &want(&["NIFTY"])
+                    &want_in(Segment::Fno, &["NIFTY"])
                 )
                 .is_open(),
                 "{feed} runs whatever the store holds"
@@ -587,7 +590,6 @@ mod tests {
                 &nothing,
                 Feed::Groww,
                 Exchange::Nse,
-                Segment::Fno,
                 Timeframe::MINUTE_1,
                 &[]
             )
@@ -620,19 +622,72 @@ mod tests {
         let nothing = census_of(&[]);
         for tf in Timeframe::KNOWN.iter().filter(|t| precedes(**t).is_none()) {
             assert!(
-                gate(
-                    &nothing,
-                    Feed::Groww,
-                    Exchange::Nse,
-                    Segment::Index,
-                    *tf,
-                    &want(&["NIFTY"])
-                )
-                .is_open(),
+                gate(&nothing, Feed::Groww, Exchange::Nse, *tf, &want(&["NIFTY"])).is_open(),
                 "{} has no predecessor and must not be blocked",
                 tf.as_str()
             );
         }
+    }
+
+    /// A TARGET THAT SPANS TWO SEGMENTS IS PROBED IN BOTH, and this is the case
+    /// a request-level segment could not express.
+    ///
+    /// `SpotTarget::Fno` is the 213 F&O **underlyings**: NIFTY and BANKNIFTY are
+    /// indices, the other 211 are equities. `Everything` mixes the same two.
+    /// The store keys a month on the segment, so probing that whole list under
+    /// one of them looks for equities in the index directory, finds nothing,
+    /// and reports every constituent as missing — refusing a run that was ready.
+    #[test]
+    fn a_mixed_target_is_probed_under_each_instruments_own_segment() {
+        // The day pass landed: the index under INDEX, the equity under CASH.
+        let both = census_of(&[
+            ("NIFTY", Segment::Index, Timeframe::DAY_1, 10),
+            ("RELIANCE", Segment::Cash, Timeframe::DAY_1, 10),
+        ]);
+        let mixed = vec![
+            Wanted {
+                symbol: sym("NIFTY"),
+                segment: Segment::Index,
+                month: month(),
+            },
+            Wanted {
+                symbol: sym("RELIANCE"),
+                segment: Segment::Cash,
+                month: month(),
+            },
+        ];
+        assert!(
+            gate(
+                &both,
+                Feed::Groww,
+                Exchange::Nse,
+                Timeframe::MINUTE_1,
+                &mixed
+            )
+            .is_open(),
+            "both landed, each in its own segment — the minute pass may run"
+        );
+
+        // AND THE SAME NAMES UNDER ONE SEGMENT WOULD HAVE REPORTED A LIE. This
+        // is the old shape, kept as an assertion so the reason the signature
+        // changed cannot be forgotten: probing the equity under INDEX finds
+        // nothing.
+        let as_if_all_index = want_in(Segment::Index, &["NIFTY", "RELIANCE"]);
+        assert_eq!(
+            gate(
+                &both,
+                Feed::Groww,
+                Exchange::Nse,
+                Timeframe::MINUTE_1,
+                &as_if_all_index
+            ),
+            Gate::RungFirst {
+                needs: Timeframe::DAY_1,
+                missing: 1,
+                of: 2
+            },
+            "the equity is not in the index directory, and never was"
+        );
     }
 
     // ======================================================================
