@@ -453,7 +453,7 @@ impl Timeframe {
     /// The number of minutes from IST midnight to the NSE open, 09:15.
     ///
     /// A rung's bars align with the open exactly when its length divides this.
-    const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
+    pub const OPEN_MINUTES_PAST_IST_MIDNIGHT: u32 = 9 * 60 + 15;
 
     /// Does a session's first bar on this rung start exactly at 09:15?
     ///

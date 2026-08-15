@@ -640,14 +640,58 @@ const _: () = {
     // 555 / 30 = 18.5 and 555 / 60 = 9.25.
     assert!(!Timeframe::MINUTE_30.aligns_with_the_open());
     assert!(!Timeframe::MINUTE_60.aligns_with_the_open());
+    // 555 / 2 = 277.5 and 555 / 10 = 55.5 — the two derive-only rungs answer
+    // the same way, which is why they are derive-only.
+    assert!(!Timeframe::MINUTE_2.aligns_with_the_open());
+    assert!(!Timeframe::MINUTE_10.aligns_with_the_open());
 };
+
+// ══ AND THE ANCHOR MOVED, SO READ THE FOUR `false`s ABOVE CORRECTLY ══
+//
+// The block above still holds and still says what it always said: those four
+// rungs do not divide 555, so a grid anchored at IST MIDNIGHT gives each of
+// them an opening stub. That was the whole reason `store_timeframe` refused
+// thirty and sixty.
+//
+// `crate::fold` no longer anchors an intraday rung at midnight. It anchors at
+// the OPEN, so every intraday rung's first bar of the day begins at 09:15 by
+// construction and the predicate above has stopped being the question that
+// decides whether a rung is safe to file. What decides it now is whether the
+// SESSION divides evenly — 375 minutes — and the answer is ragged for the same
+// four, at the other end:
+//
+//   1min 375  3min 125  5min 75  15min 25    tile the session exactly
+//   2min 187.5  10min 37.5  30min 12.5  60min 6.25    short LAST bar
+//
+// A trailing stub is a different object from a leading one. The last bar covers
+// 15:15-15:30, is stamped correctly and holds the trades that happened in it; a
+// leading stub was stamped before the open and mislabelled. `store_timeframe`
+// is therefore free to file all of them, and this comment is here so the four
+// `false`s above are not read as a refusal they no longer imply.
 
 // THE SIX ABOVE PLUS THE DAY ARE EVERY ENTRY `Timeframe::KNOWN` HOLDS.
 //
 // Without this, a rung added to `KNOWN` and forgotten in the macro would be a
 // store directory no `Granularity` names — the same silence in the other
 // direction, and the one the `_` arm produced.
-const _: () = assert!(Timeframe::KNOWN.len() == 7);
+const _: () = assert!(Timeframe::KNOWN.len() == 9);
+
+// THE TWO KNOWN ENTRIES WITH NO `Granularity`, AND THE ABSENCE IS THE DESIGN.
+//
+// `Timeframe::MINUTE_2` and `MINUTE_10` are store directories with no rung on
+// this ladder, and the count above is deliberately NOT an equality between the
+// two vocabularies any more.
+//
+// `Granularity` is what a caller may ASK A VENDOR FOR. `Timeframe` is what this
+// repository may FILE. Two and ten minutes are neither requested nor served by
+// anybody — they are DERIVED, folded from the one-minute bars a pull already
+// landed, and written straight to a directory. A rung on this ladder for them
+// would be a request nobody can send, which is the shape §4 bans and which is
+// exactly why `Tick` is refused by `is_requestable` rather than deleted.
+//
+// So the assertion above pins the store's SIZE, not a correspondence: a rung
+// added to `KNOWN` still has to be accounted for here, and accounting for it
+// may correctly mean writing it down as derive-only.
 
 // THE DAY RUNG, TIED THE SAME WAY — but only the NAME can be tied the same way.
 //
@@ -5004,12 +5048,26 @@ mod tests {
         }
         // THE STUB RUNGS ARE REFUSED, AND THE COUNT IS PINNED so this test
         // cannot pass by refusing everything.
+        // THE MIDNIGHT-STUB RUNGS ARE PINNED so this test cannot pass by
+        // refusing everything — and there are FOUR of them now, not two.
+        //
+        // It said two, and named 30min and 60min. Two and ten minutes joined
+        // `KNOWN` for the derive ladder and answer `aligns_with_the_open` the
+        // same way — 555/2 = 277.5, 555/10 = 55.5 — so the count is four.
+        //
+        // WHAT THE COUNT MEANS HAS ALSO MOVED, and the old wording said "the
+        // fold cannot align with the open" which is no longer true of any of
+        // them: `crate::fold` anchors an intraday rung AT the open, so every
+        // one begins the day at 09:15 by construction. These four are the rungs
+        // that do not divide 555, which is now a statement about the MIDNIGHT
+        // grid the daily rung still uses and about nothing else. Their
+        // raggedness moved to a short LAST bar, which is stamped correctly.
         assert_eq!(
             Timeframe::KNOWN.len() - expected.len(),
-            2,
-            "30min and 60min are the two rungs the store ships that the fold \
-             cannot align with the open; if that changed, store_timeframe's \
-             refusal must be revisited"
+            4,
+            "2min, 10min, 30min and 60min are the rungs that do not divide the \
+             555 minutes from IST midnight to the open; if that set changed, \
+             the fold's anchor and store_timeframe must both be revisited"
         );
         // Coarsest last, which is the order `Granularity::ALL` walks and the
         // order a backfill lands them in.

@@ -157,6 +157,74 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
     // and silently. §1 fixes the engine surface at NSE, so there is exactly one
     // trading day this store addresses and it is the IST one.
     const IST_ANCHOR_MICROS: i64 = crate::session::IST_OFFSET_SECS * 1_000_000;
+
+    // ══ AND FOR AN INTRADAY RUNG THE GRID STARTS AT THE OPEN, NOT AT MIDNIGHT ══
+    //
+    // THE PROBLEM THIS SOLVES. The NSE open is 555 minutes past IST midnight,
+    // so a midnight-anchored rung lands on 09:15 only when its length divides
+    // 555. Three, five and fifteen do. TWO, TEN, THIRTY AND SIXTY DO NOT —
+    // 277.5, 55.5, 18.5, 9.25 — and each of those opens the session with a bar
+    // stamped BEFORE the open holding only part of it. A 30-minute bar stamped
+    // 09:00 containing 09:15-09:29 is fifteen minutes of trade in a record
+    // whose header says 1,800 seconds, and every later reader takes it as full.
+    // That is why `store_timeframe` refused those rungs, and refusing them is
+    // what stopped the operator's own ladder — 2, 3, 5, 10, 15, 30, 60 — from
+    // existing at all.
+    //
+    // THE FAULT IS THE ANCHOR, NOT THE RUNG. Anchored at the OPEN, every rung's
+    // first bar of the day begins exactly at 09:15. What is left over is a
+    // SHORT LAST BAR, because 375 session-minutes does not divide by 2, 10, 30
+    // or 60 either — and a trailing stub is a different object from a leading
+    // one. The last bar covers 15:15-15:30, is stamped correctly, and holds the
+    // trades that happened in it. The leading stub was mislabelled. One is a
+    // short final bar; the other is a lie.
+    //
+    // THE DAILY RUNG KEEPS MIDNIGHT, and that is not a special case for its own
+    // sake. A day-wide bucket anchored at the open would run 09:15 to 09:15 —
+    // one "day" spanning two calendar dates, which is not what `DAY_1` means
+    // anywhere else in this repository. `Grid::Daily` is one record covering a
+    // whole session, addressed by the IST day it fell on.
+    //
+    // NOTHING ALREADY WRITTEN MOVES. Computed rather than assumed:
+    //
+    //   rung    19800 % w    53100 % w    edges
+    //   1min        0            0        unchanged
+    //   3min        0            0        unchanged
+    //   5min        0            0        unchanged
+    //   15min       0            0        unchanged
+    //   2min        0           60        MOVE — no rung existed to write them
+    //   10min       0          300        MOVE — no rung existed
+    //   30min       0          900        MOVE — store_timeframe refused it
+    //   60min    1800         2700        MOVE — store_timeframe refused it
+    //
+    // Every rung whose edges move is a rung this build could never file until
+    // now, so there are no bars on disk to disagree with. The four rungs that
+    // DO have history are unchanged by arithmetic, not by luck: 60, 180, 300
+    // and 900 all divide 33,300 as well as 19,800. `CLAUDE.md` §3 rule 8.
+    // MINUS, NOT PLUS, AND THE SIGN IS THE WHOLE THING.
+    //
+    // The edge condition is `t + A ≡ 0 (mod w)`, so the grid lands on instants
+    // where `t ≡ -A`. The midnight anchor is `+19,800` because IST midnight IS
+    // `-19,800` in this frame. To land on the open — 33,300 seconds LATER — the
+    // anchor has to move the same distance the other way.
+    //
+    // Adding it instead was wrong and the probe caught it at exactly one rung:
+    // `(19,800 + 33,300) % 3,600` is 2,700 where 900 is needed, so the hour bar
+    // opened 45 minutes BEFORE the session and every other rung looked right.
+    // A sign error that is invisible on seven rungs out of eight is the reason
+    // this is asserted against a real session rather than reasoned about.
+    //
+    // Negative is fine: `div_euclid` floors, so a negative anchor shifts the
+    // grid without ever rounding toward zero. Every width in `Timeframe::KNOWN`
+    // divides 86,400, so adding a day to the anchor would be equivalent — the
+    // negative form is written because it is the arithmetic, not a workaround.
+    const OPEN_ANCHOR_MICROS: i64 = IST_ANCHOR_MICROS
+        - (store::path::Timeframe::OPEN_MINUTES_PAST_IST_MIDNIGHT as i64) * 60 * 1_000_000;
+    let anchor = if bucket.secs() >= 86_400 {
+        IST_ANCHOR_MICROS
+    } else {
+        OPEN_ANCHOR_MICROS
+    };
     let width = i64::from(bucket.secs()) * 1_000_000;
     let mut out: Vec<Bar> = Vec::new();
     let mut open_at: Option<i64> = None;
@@ -200,16 +268,16 @@ pub fn fold(snapshots: &[Bar], bucket: Bucket) -> Result<Vec<Bar>, FoldError> {
         //
         // Checked at both ends. Saturating here would silently file a bar in
         // the wrong bucket rather than refuse, which `CLAUDE.md` §4 bans.
-        let shifted =
-            snap.ts_micros
-                .checked_add(IST_ANCHOR_MICROS)
-                .ok_or(FoldError::AnchorOverflow {
-                    ts_micros: snap.ts_micros,
-                })?;
+        let shifted = snap
+            .ts_micros
+            .checked_add(anchor)
+            .ok_or(FoldError::AnchorOverflow {
+                ts_micros: snap.ts_micros,
+            })?;
         let start = shifted
             .div_euclid(width)
             .checked_mul(width)
-            .and_then(|edge| edge.checked_sub(IST_ANCHOR_MICROS))
+            .and_then(|edge| edge.checked_sub(anchor))
             .ok_or(FoldError::AnchorOverflow {
                 ts_micros: snap.ts_micros,
             })?;
