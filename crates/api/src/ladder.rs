@@ -1124,6 +1124,34 @@ mod tests {
         );
     }
 
+    /// EVERY LEG NAMES ITSELF, AND NO TWO NAME THE SAME THING.
+    ///
+    /// `label` is the only place the order speaks to an operator — it is what
+    /// `ladder_refusal` puts in "spot comes first, and it has to FINISH". A
+    /// label that is empty, or that two legs share, turns a refusal that names
+    /// the step you are missing into one that names nothing.
+    ///
+    /// Asserted here because nothing else does: the sentence is built in
+    /// `crates/api/src/server.rs` and no test reads it back, so a mutation to
+    /// any of these three strings survives the whole suite.
+    #[test]
+    fn every_leg_names_itself_and_no_two_legs_share_a_name() {
+        assert_eq!(Leg::Spot.label(), "spot");
+        assert_eq!(Leg::Future.label(), "expired futures");
+        assert_eq!(Leg::Option.label(), "expired options");
+
+        let names: Vec<&str> = Leg::ORDER.iter().map(|l| l.label()).collect();
+        for (i, a) in names.iter().enumerate() {
+            assert!(!a.is_empty(), "leg {i} names itself with nothing");
+            for b in names.iter().skip(i + 1) {
+                assert_ne!(a, b, "two legs share a name, so a refusal cannot say which");
+            }
+        }
+        // AND THE ORDER IS THE ORDER. `ORDER` is what `steps` and the leg gate
+        // both walk, so a reordering here silently reorders the whole rule.
+        assert_eq!(Leg::ORDER, [Leg::Spot, Leg::Future, Leg::Option]);
+    }
+
     /// A FUTURES PULL REACHES BACK ONE MONTH; SPOT DOES NOT.
     ///
     /// The operator's rule of 15 Aug 2026, and the instrument's own shape: a

@@ -499,6 +499,12 @@ mod tests {
         );
         assert_eq!(paisa("19200.05"), Some("2024-01-04-1920005-CE".to_owned()));
         assert_eq!(
+            paisa("19200.0a"),
+            None,
+            "a non-digit in the fraction is refused — the digit check is the \
+             only thing standing between `.0a` and a strike parsed as 19200.00"
+        );
+        assert_eq!(
             paisa("19200.005"),
             None,
             "the tick grid is two places, so a third is a name this build does \
