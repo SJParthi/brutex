@@ -3195,7 +3195,19 @@ jobs:
           # coarsest boundary in this crate.
           # `sort_unstable` on `i64` and not a comparator: these are integer parts
           # per million, so there is no NaN and no partial order to get wrong.
+          # `crates/runner/src/audit.rs` ONE sort, and it is a RENDER ordering rather
+          # than a computation: the exit-grid table puts the no-levels baseline row
+          # first and the rest by pessimistic total, so a reader comparing "with
+          # levels" against "without" does not have to hunt for the row that IS the
+          # comparison. Removing it does not change a single number, only where they
+          # appear on the page.
+          # WHAT BOUNDS IT: one entry per GRID CELL, and the grid is
+          # `(stops + 1) x (targets + 1) x (trails + 1)` -- 125 at the shipped rung
+          # count. It is neither the candidate count nor the frequent-itemset count,
+          # so it does not grow with the sweep. Called once per rendered report at
+          # the coarsest boundary this crate has, and the render touches no bar.
           allow_sort='
+          crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
           crates/runner/src/pbo.rs 1
           crates/runner/src/excursion.rs 1
