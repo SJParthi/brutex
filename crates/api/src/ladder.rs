@@ -271,10 +271,19 @@ pub fn months_for(leg: Leg, months: &[YearMonth]) -> Vec<YearMonth> {
         }
         out.push(m);
     }
-    // ONE ROW PER MONTH. Consecutive months in the window make one month both
-    // its own and its successor's predecessor, and asking twice would fetch it
-    // twice and count it twice.
-    out.sort_unstable_by_key(|m| (m.year(), m.month()));
+    // ONE ROW PER MONTH, AND NO SORT.
+    //
+    // The result is already ascending, so a sort would be work that changes
+    // nothing — and gate 11 rule 4 bans one here for exactly that reason: a
+    // sort on a request path is the construct that turned a bounded page into
+    // an O(universe) one elsewhere in this build.
+    //
+    // Why it is already ordered. `months` is ascending. For consecutive entries
+    // m1 < m2 the emitted run is `prev(m1), m1, prev(m2), m2`, and
+    // `m1 <= prev(m2)` in every case: if m2 is the very next month then
+    // prev(m2) IS m1, and if m2 is further out then prev(m2) is later than m1.
+    // So the sequence never steps backwards, and the only repeat it can produce
+    // is ADJACENT — which is precisely what `dedup_by_key` removes.
     out.dedup_by_key(|m| (m.year(), m.month()));
     out
 }
