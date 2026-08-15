@@ -5283,21 +5283,10 @@
         {picked || feedName}
       </h1>
 
-      <span
-        class="px"
-        title="Instrument-months matched by every rung above — the row count of the table below, before the sort. It flashes only when the STORE moves between two reads, never when you type."
-      >
-        <span class="k">Instrument-months</span>
-        {#key flash.n?.n}
-          <b
-            class="p mono"
-            class:flash-up={flash.n?.dir === 'up'}
-            class:flash-down={flash.n?.dir === 'down'}>{fmt(matched.length)}</b
-          >
-        {/key}
-        <span class="d">{filtered ? `of ${fmt(deco.length)} stored` : 'every row in the store'}</span
-        >
-      </span>
+      <!-- THE COUNT CHIP AND THE "% change — what these are" HELP LINK ARE GONE.
+           Neither is a rung and neither is a column: the first restates a number
+           the row count under the grid already gives, and the second is help text
+           on a page whose columns say what they are. -->
 
       <!-- THE TWO PRESSES THAT ARE ACTIONS RATHER THAN FILTERS. The count is ON
            the button: "% change — what these are" invites a click nobody makes,
@@ -5307,19 +5296,6 @@
         {#if filtered}
           <button class="btn ghost sm" type="button" onclick={reset}>Reset all filters</button>
         {/if}
-        <button
-          class="btn ghost sm"
-          type="button"
-          aria-pressed={noteOpen}
-          aria-controls="db-blocked"
-          onclick={() => (noteOpen = !noteOpen)}
-        >
-          {#if refusedForSplits > 0}
-            % change · {fmt(refusedForSplits)} refused — why
-          {:else}
-            % change — what these are
-          {/if}
-        </button>
         <!-- EXPORT WRITES THE MATCHED SET, NOT THE WINDOW. Only ~30 rows exist
              in the DOM at any moment; the file is every row the selection
              matched, in the order the table is sorted in.
@@ -5375,114 +5351,11 @@
            Nothing is deleted — the markup, the counts and the reasons are all
            still built; only their default visibility changed.
            ================================================================== -->
-      <p class="count terse">
-        <span class="k">Bars</span>
-        {#key flash.bars?.n}
-          <b
-            class="mono"
-            class:flash-up={flash.bars?.dir === 'up'}
-            class:flash-down={flash.bars?.dir === 'down'}>{fmt(total)}</b
-          >
-        {/key}
-        <!-- A SESSION COUNT NEEDS A SESSION SIZE. Rows at a rung
-             `barsPerSession` has no number for are skipped by the sum, so with
-             no convertible row on screen the sum is 0 — and "0
-             session-equivalents" beside a six-figure bar count is a measurement
-             claimed over an absence. `matched.length === 0` takes the NUMBER,
-             not the dash: no rows is no bars is no sessions, which is counted
-             all the way down. -->
-        <span class="u"
-          >{#if ranged > 0 || matched.length === 0}· {fmt(Math.round(sessionEquivalents))}
-            session-equivalents{:else}· — session-equivalents, no row here is at a rung with a
-            recorded session size{/if}</span
-        >
+      <!-- THE STATS LINE IS GONE. BARS / COMPLETE / BARS MISSING / COVERAGE /
+           MONTHS was a fifth band of numbers about the numbers below it. The
+           row count under the grid is the one figure a reader needs, and the
+           grid itself is the rest. -->
 
-        <span class="k">Complete</span>
-        {#key flash.full?.n}
-          <b
-            class="mono"
-            class:flash-up={flash.full?.dir === 'up'}
-            class:flash-down={flash.full?.dir === 'down'}>{fmt(full)}</b
-          >
-        {/key}
-        <span class="u"
-          >of {fmt(matched.length)} · {fmt(matched.length - full - unverified)} short{#if unverified > 0}
-            · <span title={SOLE_WHY}>{fmt(unverified)} not comparable</span>{/if}</span
-        >
-
-        <span class="k">Bars missing</span>
-        {#key flash.gaps?.n}
-          <b
-            class="mono"
-            class:risk={gaps > 0}
-            class:flash-up={flash.gaps?.dir === 'down'}
-            class:flash-down={flash.gaps?.dir === 'up'}>{fmt(gaps)}</b
-          >
-        {/key}
-        <span class="u"
-          >{#if ranged > 0 || matched.length === 0}· {fmt(Math.floor(gapSessions))} whole
-            sessions{:else}· — whole sessions{/if}, vs the fullest instrument each month</span
-        >
-
-        <span class="k">Coverage</span>
-        {#key flash.cov?.n}
-          <b
-            class="mono"
-            class:flash-up={flash.cov?.dir === 'up'}
-            class:flash-down={flash.cov?.dir === 'down'}>{pctText(coverage)}</b
-          >
-        {/key}
-        <!-- NO METER FOR A RATIO THAT DOES NOT EXIST. A bar is a length, and a
-             length is a claim: at `coverage === null` an empty track reads as
-             0% coverage, which is the opposite lie to the 100.00% the value
-             used to print. The reason takes the meter's place. -->
-        {#if coverage === null}
-          <span class="u"
-            >{unverified > 0 && comparable.length === 0
-              ? 'every row here is the only one stored at its (month, rung), so each is its own denominator and there is no ratio'
-              : (blocked?.tsub ?? 'no bars in this selection, so there is no ratio')}</span
-          >
-        {:else}
-          <span
-            class="meter"
-            data-state={coverage >= 1 ? 'full' : coverage >= 0.99 ? 'near' : 'gap'}
-            aria-hidden="true"><span class="fill" style="width:{coverage * 100}%"></span></span
-          >
-          {#if unverified > 0}
-            <span class="u" title={SOLE_WHY}
-              >over {fmt(comparable.length)} comparable row(s); {fmt(unverified)} more are their own
-              denominator and are in neither half</span
-            >
-          {/if}
-        {/if}
-
-        <span class="k">Months</span>
-        {#key flash.months?.n}
-          <b
-            class="mono"
-            class:flash-up={flash.months?.dir === 'up'}
-            class:flash-down={flash.months?.dir === 'down'}>{fmt(monthsIn.length)}</b
-          >
-        {/key}
-        <span class="u">
-          {#if monthsIn.length}
-            <!-- `monthsIn` is built and SORTED as raw `YYYY-MM` and stays that
-                 way: the sort is what makes `[0]` the earliest and `[len-1]`
-                 the latest. Only these two reads are relabelled, on the way to
-                 the screen, and the raw keys stay in the title. -->
-            <span
-              title="{monthLabel(monthsIn[0])} → {monthLabel(
-                monthsIn[monthsIn.length - 1]
-              )} — the store's own keys for them are {monthsIn[0]} and {monthsIn[
-                monthsIn.length - 1
-              ]}"
-              >{monthLabel(monthsIn[0])} → {monthLabel(monthsIn[monthsIn.length - 1])}</span
-            > · <span class:risk={holeMonths > 0}>{holeMonths} with holes</span>
-          {:else}
-            {blocked?.tsub ?? 'nothing matches'}
-          {/if}
-        </span>
-      </p>
       <span class="sr-only" aria-live="polite"
         >{viewNow.showing}. {fmt(pageTotal)} row(s) matched, showing {fmt(pageFrom)} to {fmt(
           pageTo
@@ -5525,64 +5398,12 @@
       </section>
     {/if}
 
-    <!-- ==================================================================
-         WHICH GRID IS SHOWING, AND IT SAYS SO IN WORDS.
-         Two different questions over one store. Neither replaces the other,
-         and the page never leaves the reader guessing which one answered:
-         the pressed tab, the sentence beside it and the grid's own caption
-         are one derived value read three times.
-         ================================================================== -->
-    <div class="viewbar">
-      <div class="views" role="tablist" aria-label="What one row of the grid is">
-        {#each VIEWS as v (v.key)}
-          <button
-            class="vtab"
-            type="button"
-            role="tab"
-            aria-selected={view === v.key}
-            title={v.title}
-            onclick={() => (view = v.key)}
-          >
-            {v.label}<i>{v.sub}</i>
-          </button>
-        {/each}
-      </div>
+      <!-- THE VIEW BAR IS GONE. The Coverage/Bars tabs, the "Showing one row
+           per BAR" sentence, the read-budget picker and the "6 read + 3 over
+           budget" clause were four pieces of chrome between the rungs and the
+           grid, and none of them is a rung or a column. `view` stays pinned to
+           `bars`, which is the grid this page is for. -->
 
-      <span class="vsay">Showing <b>{viewNow.showing}</b></span>
-
-      {#if view === 'bars'}
-        <!-- THE READ BUDGET. A CONTROL, NOT A COUNT: `/bars.json` is one
-             month per request, so the reader decides how many files this
-             grid opens and the cost is on the control's own face. -->
-        <label class="vbudget">
-          <span>Instrument-months to read</span>
-          <select
-            bind:value={readBudget}
-            title="Each one is a separate /bars.json request and about 81 bytes per bar on the wire — measured, from 668,251 bytes for 8,250 bars. The newest months are read first."
-          >
-            {#each READ_BUDGETS as n (n)}
-              <option
-                value={n}
-                title={n === 0
-                  ? `Read every instrument-month the query matched — ${fmt(barPlan.all.length)} request(s) right now.`
-                  : `Read the ${fmt(n)} newest matched instrument-month(s).`}>{budgetLabel(n)}</option
-              >
-            {/each}
-          </select>
-        </label>
-
-        <!-- A PARTITION, AND IT SUMS ON SCREEN. read + held back = matched. -->
-        <span class="vsum">
-          <b>{fmt(barPlan.read.length)}</b> read
-          {#if barPlan.held > 0}
-            + <b>{fmt(barPlan.held)}</b> over budget
-          {:else}
-            + <b>0</b> over budget
-          {/if}
-          = <b>{fmt(barPlan.all.length)}</b> instrument-month(s) matched
-        </span>
-      {/if}
-    </div>
 
     <!-- ==================================================================
          THE CENSUS TABLE. Windowed: only the visible slice exists in the DOM.
@@ -6260,15 +6081,10 @@
         {#if barFails.length || barFaults.length || barDisagree.length || barsRead > 0}
           <div class="bnotes">
             {#if barsRead > 0}
-              <p class="bnote ok">
-                <b>{fmt(barsRead)}</b> bar(s) read from <b>{fmt(barPlan.read.length)}</b>
-                instrument-month file(s); the census claims <b>{fmt(barsClaimed)}</b> for the same
-                files. <b>{fmt(BAR_SHOWN.length)}</b> of {BAR_COLS.length} columns drawn<span
-                  class="u"
-                  title="{fmt(BAR_UNSOURCED)} have no source on this wire — pre-market %, moneyness, intrinsic, extrinsic and the six greeks. The rest describe a contract this selection does not hold. Columns follow what is on screen: spot shows none of them, a future adds expiry and days-to-expiry, an option adds type and strike on top."
-                  >, the rest have nothing to put in them</span
-                >.
-              </p>
+      <!-- THE COLUMNS NOTE IS GONE. "10 of 24 columns drawn, the rest have
+           nothing to put in them" is a sentence about the page rather than
+           about the store, and the columns that are drawn are self-evident. -->
+
             {/if}
             {#each barDisagree as f (f.key)}
               <p class="bnote warn">
@@ -6425,22 +6241,11 @@
          rows, so it narrows with them; an absence is named and never rendered
          as an epoch. -->
     <p class="pager">
-      <span class="of"
-        ><b>{fmt(pageTotal)}</b> row(s) matched · <b>{fmt(
-          view === 'bars' ? barPage.length : censusPage.length
-        )}</b>
-        on this page · <b>{view === 'bars' ? barPage.length : slice.length}</b> in the DOM</span
-      >
-      <span class="of"
-        >newest bar {#if newestBar === null}<b>—</b>, because no row in this selection carries a
-          last-bar stamp{:else}<b title="last_ts from /store.json, microseconds, rendered IST"
-            >{stampLabel(newestBar)}</b
-          >{/if}</span
-      >
-      <span class="of"
-        ><kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> move, <kbd class="kbd">Enter</kbd> opens,
-        <kbd class="kbd">/</kbd> filters</span
-      >
+      <!-- THE ROW COUNT, AND NOTHING ELSE. "N in the DOM" is a fact about the
+           windowing, not about the store; "newest bar" repeats a value the
+           first row of the grid already shows; the keyboard legend is a help
+           text on a page whose shortcuts are one key each. -->
+      <span class="of"><b>{fmt(pageTotal)}</b> row(s)</span>
     </p>
     </div>
   {/if}

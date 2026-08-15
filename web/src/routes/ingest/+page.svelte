@@ -5284,12 +5284,16 @@
                     class="pknote"
                     class:warn={!reachKnown}
                     title={reachKnown
-                      ? `${n(reach)} of ${n(catalogue.rows.length)} row(s) in ${active.display}'s master carry this universe.`
+                      ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.`
                       : reachWhy}
                   >
-                    {reachKnown
-                      ? `of ${n(catalogue.rows.length)} in ${active.display}'s master`
-                      : reachWhy}
+                    <!-- "IN <FEED>'S MASTER" WAS WRONG, AND WRONG BY A FACTOR OF THREE.
+                         `catalogue.rows` is /instruments.json, which is the merged
+                         TRACKED catalogue. Measured against the running server: it
+                         returns 869 rows for Dhan while /health reports 2,878 kept
+                         from Dhan's master. The label named the larger thing and
+                         printed the smaller number. -->
+                    {reachKnown ? `of ${n(catalogue.rows.length)} tracked` : reachWhy}
                   </span>
                 </div>
               {/if}

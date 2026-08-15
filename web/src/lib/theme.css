@@ -1978,3 +1978,33 @@ th.num .sort {
     background: var(--panel-2);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   REGISTERED CUSTOM PROPERTIES — the ones a transition has to be able to read.
+
+   An unregistered custom property is substituted at computed-value time, so a
+   declaration that reads it changes DISCRETELY. /db's magnitude bar learned
+   this the expensive way: it carried `transition: background-image 160ms` and
+   `background-image` is not an animatable property, so the rule had never once
+   run. Registering the number the gradient is built from is what makes the
+   growth interpolable — the transition then names `--mag`, not the gradient.
+
+   Document level and not a component `<style>`: `@property` is a global
+   registration, and a second copy inside a scoped block is a second source of
+   truth for one name.
+   --------------------------------------------------------------------------- */
+@property --mag {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+@property --vmag {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 0%;
+}
+@property --rng {
+  syntax: '<number>';
+  inherits: false;
+  initial-value: 0;
+}
