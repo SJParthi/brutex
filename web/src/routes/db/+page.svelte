@@ -5181,9 +5181,18 @@
          the mockup's spot/futures/options taxonomy. Relabelling it would rename
          three sets into three other sets that do not have the same members.
          ================================================================== -->
-      <!-- DRAWN ONLY WHEN THERE IS SOMETHING TO CHOOSE — one segment is not a choice between segments. -->
-      {#if kinds.length > 1}
-      <div class="cell">
+      <!-- ALWAYS DRAWN, DISABLED WHEN THERE IS NOTHING TO CHOOSE.
+           It was `{#if kinds.length > 1}`, on the reasoning that one segment is
+           not a choice between segments. True, and it is the wrong conclusion
+           twice over. /ingest draws Segments unconditionally — three rows, two
+           of them refusing with their reason on their face — so a reader
+           comparing the two strips found a rung on one page and a gap on the
+           other. And it is this file's own rule besides: a rung that cannot be
+           used is DRAWN AND DISABLED, never hidden, because "why is there no
+           segment control" is exactly the question `CLAUDE.md` §4 says must be
+           answered out loud rather than by an absence. The single segment the
+           store holds is now stated rather than implied. -->
+      <div class="cell" class:off={kinds.length < 2}>
         <span title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
         <!-- A PICKER, NOT A TAB ROW. It was the only rung drawn as tabs, which
              made it look like a different kind of thing from the eight around
@@ -5198,6 +5207,7 @@
           single
           filter
           label="segments"
+          disabled={kinds.length < 2}
           summary={kind ? kind : `All \u00b7 ${fmt(kinds.length)}`}
           rows={[
             { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
@@ -5206,9 +5216,12 @@
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
         />
-        <span class="count">{fmt(segmented.length)} instrument-month(s) here</span>
+        <span class="count"
+          >{kinds.length < 2
+            ? `${kinds.length === 1 ? kinds[0][0] : 'nothing'} \u2014 the only segment this store holds`
+            : `${fmt(segmented.length)} instrument-month(s) here`}</span
+        >
       </div>
-      {/if}
 
       <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
            approved design draws as `<select id="tf">` beside the others.
@@ -5224,8 +5237,13 @@
            `5min` because the ladder names it, on a store that holds no
            five-minute bar, would be a control promising a set that does not
            exist. The rows are counted off the rows. -->
-      <!-- DRAWN ONLY WHEN THERE IS SOMETHING TO CHOOSE — a rung list with nothing in it offers no choice. -->
-      {#if tfAll.length > 0}
+      <!-- ALWAYS DRAWN, DISABLED WHEN EMPTY — the same correction as Segment
+           above, for the same two reasons. `tfRefusal` already existed to say
+           WHY there is no rung to pick, and gating the whole cell on
+           `tfAll.length > 0` deleted the control that was carrying that
+           sentence, so the one state the refusal was written for was the one
+           state the reader never saw it in. The `Picker` is already
+           `disabled={Boolean(tfRefusal)}`. -->
       <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
         <span title="Bar length — the rung each row is stored at.">Timeframe</span>
         <!-- SEARCHABLE, LIKE THE REST. Nine rungs today and ten in
@@ -5267,7 +5285,6 @@
           {/if}
         </span>
       </div>
-      {/if}
       <!-- ==================================================================
            THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
            A spot series runs forever, so "show me the 12th" is a real question.
@@ -5275,33 +5292,50 @@
            second date range asks something the contract has already answered.
            Gated on `dayWindowApplies`, which is simply "no expiry chosen".
            ================================================================== -->
-        <div class="cell">
-          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
-            >From date</span
-          >
-          <input
-            class="tin"
-            type="date"
-            bind:value={fromDay}
-            max={toDay || undefined}
-            aria-label="First day to show"
-          />
-          <span class="count"
-            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
-          >
-        </div>
+      <!-- THE TWO ENDS ARE ONE RUNG, AND THE RUNG TAKES THE WHOLE ROW.
+           As two independent grid items they were placed like any other pair,
+           so at five tracks From landed in column 5 and To wrapped to column 1
+           of the next row — the two ends of one window at opposite corners of
+           the panel, with three unrelated rungs between them. /ingest draws
+           the identical control and answers this with `.pk.wide2`: the day
+           window is `grid-column: 1 / -1` and holds both ends in a `.dates`
+           flex row, capped so a pair of date fields cannot spread across
+           1,200px and read as the panel's most important control when it is
+           its last one. Same rule, same reason, same numbers. -->
+      <div class="cell wide2">
+        <span title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
+          >Days to show</span
+        >
+        <div class="dates">
+          <div class="dcell">
+            <span
+              class="dlbl"
+              title="Only bars on or after this day. Spot only — a contract's window is its expiry."
+              >From date</span
+            >
+            <input
+              class="tin"
+              type="date"
+              bind:value={fromDay}
+              max={toDay || undefined}
+              aria-label="First day to show"
+            />
+            <span class="count">{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span>
+          </div>
 
-        <div class="cell">
-          <span title="Only bars on or before this day. Spot only.">To date</span>
-          <input
-            class="tin"
-            type="date"
-            bind:value={toDay}
-            min={fromDay || undefined}
-            aria-label="Last day to show"
-          />
-          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+          <div class="dcell">
+            <span class="dlbl" title="Only bars on or before this day. Spot only.">To date</span>
+            <input
+              class="tin"
+              type="date"
+              bind:value={toDay}
+              min={fromDay || undefined}
+              aria-label="Last day to show"
+            />
+            <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+          </div>
         </div>
+      </div>
       
 
 
@@ -6938,13 +6972,72 @@
      `nowrap`/ellipsis with the whole text on a `title` and in the document —
      that was the rule before this change and it is why narrowing a cell costs
      no fact. */
+  /* THE STRIP IS /INGEST'S `.pickers` GRID, AND THAT IS THE WHOLE POINT.
+   *
+   * This used to be a single unbroken horizontal BAR: `display: flex`,
+   * `flex-wrap: nowrap`, every rung an equal `flex: 1 1 0` share divided by
+   * hairlines, with a vertical `.lead` down the left. It was a different
+   * object from the control strip on /ingest, and the owner asked for one
+   * object on both pages — same view, same dropdown, same search, same data.
+   *
+   * An earlier comment in this file recorded the opposite instruction ("the
+   * owner asked for /ingest to have its OWN design, and two pages wearing one
+   * vocabulary is how a change to either becomes a change to both"). That
+   * decision is SUPERSEDED, on the record, by D-0153. The hazard it named is
+   * real and is answered rather than ignored: the shared thing is
+   * `$lib/Picker.svelte`, one component, so a change to the look lands on both
+   * pages ON PURPOSE instead of drifting. What is NOT shared is either page's
+   * content — the rungs, their refusals and their cascade are still this
+   * file's own.
+   *
+   * Every metric below is /ingest's `.pickers`, copied because it is the same
+   * rule and not because it is a nice number: `auto-fit` + a 248px floor is
+   * what lets nine rungs wrap onto as many rows as the window allows instead
+   * of nine cells fighting over one line. The bar could not wrap, so at nine
+   * rungs each one got a ninth of the width and every caption clipped
+   * mid-word. */
   .strip {
+    /* `flex: none` IS ABOUT THE STRIP AS AN ITEM, NOT AS A CONTAINER, and the
+       two roles are easy to confuse into a bug. `.board` is a flex COLUMN and
+       this is one of its children; the default `flex-shrink: 1` lets a child
+       be compressed below its content when the column overflows, which is what
+       a tall table under it guarantees. Dropped by mistake in the grid rewrite
+       below, and measured: the strip reported `height: 124px` against a
+       `scrollHeight` of 409px — Timeframe and the day window were cut off at
+       the panel's edge with nothing to scroll them into view. */
     flex: none;
-    display: flex;
-    align-items: stretch;
-    flex-wrap: nowrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+    /* ---- RESET A ROW TEMPLATE THIS FILE DID NOT WRITE ----------------------
+     * `theme.css` §8 also styles `.strip`, and it declares
+     * `grid-template-rows: var(--lab-h) var(--ctl-h) auto` for a SUBGRID
+     * vocabulary: three named rows — label, control, note — that every
+     * `.field` child spans with `grid-template-rows: subgrid`, so a two-line
+     * refusal under one control cannot push that control off the baseline its
+     * neighbours sit on.
+     *
+     * That rule was always matching this element. It was INERT only because
+     * this file said `display: flex`, and a row template does nothing to a
+     * flex container. Switching to `display: grid` woke it, and the symptom
+     * was measured before it was understood: the row holding the rungs
+     * resolved to `--ctl-h` (42px) while the rungs in it were 88–104px, so
+     * every one of them overflowed its own track and the day window below
+     * drew straight through the feed rung's note.
+     *
+     * `none` rather than adoption, and the reason is wrapping. The shared
+     * vocabulary is built for ONE row of fields — three explicit tracks, every
+     * field pinned to `grid-row: span 3`. This strip has six rungs plus a
+     * full-width day window and has to wrap to a second band at any window
+     * narrower than six tracks; pinned rows cannot do that, and a dense flow of
+     * repeating three-row bands is a much larger thing than the alignment it
+     * would buy. /ingest reaches the same look with plain auto rows and a flex
+     * column per rung, so that is what this takes. */
+    grid-template-rows: none;
+    gap: var(--s6) var(--s5);
+    align-items: start;
     min-width: 0;
     overflow: visible;
+    padding: var(--s6);
     border: 1px solid var(--line);
     border-radius: var(--r4);
     background: linear-gradient(180deg, var(--panel-2), var(--panel));
@@ -6964,8 +7057,14 @@
        the control it is the same control as. */
     text-align: left;
   }
+  /* ONE TRACK'S WORTH, AS A WIDTH RATHER THAN A FLEX BASIS. `flex: 0 1 300px`
+     described a flex item and this is a grid item now, so it did nothing at
+     all — the lone feed rung stretched to `max-content`, which on a blank page
+     is the width of its longest caption. /ingest solves the identical problem
+     with `.blankpick { max-width: 320px }`; this is that rule. */
   .strip.solo .cell {
-    flex: 0 1 300px;
+    width: 300px;
+    max-width: 100%;
   }
   /* THE CONTRACT STRIP IS THE QUIETER OF THE TWO, and it is ALWAYS DRAWN. The
      approved design collapses it when the segment carries no contract; here it
@@ -6977,12 +7076,15 @@
   .strip.sub {
     background: var(--panel);
   }
+  /* THE STRIP'S NAME IS A HEADING ABOVE IT, NOT A GUTTER BESIDE IT. As a flex
+     child with a right hairline it was a tenth column competing with the nine
+     rungs for the one line. `1 / -1` takes the full track count whatever
+     `auto-fit` resolves to — the same rule /ingest uses for `.pk.wide2`, and
+     the reason it is `-1` rather than `span 9` is that the last line is
+     wherever the window says it is. */
   .lead {
-    flex: none;
-    display: flex;
-    align-items: center;
-    padding: 0 var(--s6);
-    border-right: 1px solid var(--line-soft);
+    grid-column: 1 / -1;
+    font-family: var(--mono);
     font-size: var(--fs-micro);
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
@@ -7003,53 +7105,46 @@
      it cannot give the text one, and the two month fields carried no clause,
      so their content stopped one line short and left a hole under the field
      in a row that was otherwise closed. They have a counted clause now. */
+  /* A RUNG IS /INGEST'S `.pk` — a three-row flex column and nothing else.
+     The hairline dividers and the cell padding both belonged to the bar: a
+     divider separates cells sharing one box, and there is no shared box now,
+     just tracks with a real gap between them. Keeping either would draw the
+     bar's furniture around a grid that is not a bar. */
   .strip .cell {
     position: relative;
     display: flex;
     flex-direction: column;
-    gap: var(--s1);
-    padding: var(--s4) var(--s5);
-    border-right: 1px solid var(--line-soft);
-    /* ZERO BASIS, EQUAL SHARE — see the block on `.strip`. `min-width: 0` is
-       what lets the share go below the cell's own content, which is the only
-       reason an ellipsis ever gets to do its job inside a flex item. */
+    gap: var(--s2);
     min-width: 0;
-    flex: 1 1 0;
   }
-  /* NO HAIRLINE ON THE LAST CELL. Every cell draws a divider on its right, and
-     with the strip left-packed the last one would hang in the middle of an
-     otherwise empty bar, reading as the edge of a control that is not there. */
-  .strip > *:last-child {
-    border-right: 0;
-  }
-  /* THE FOCUS SIGNAL IS ON THE CELL, not on each control inside it: a cell holds
-     a button, a field and sometimes a popup, and one underline under the group
-     says "you are here" once instead of three times. */
-  .strip .cell::after {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    bottom: -1px;
-    height: 2px;
-    background: var(--acc);
-    transform: scaleX(0);
-  }
-  .strip .cell:focus-within::after {
-    transform: scaleX(1);
-  }
+  /* NO CELL-LEVEL FOCUS UNDERLINE. It was the bar's signal — one 2px rule
+     under a group of controls sharing a hairline box — and under a grid cell
+     it draws across the gap below, pointing at whatever rung wrapped onto the
+     next row. Every control in here already states its own focus: `.pbtn`,
+     `.din` and `.dbtn` each carry `:focus-visible { outline: 2px solid }`,
+     which is the signal /ingest shows and is the one a keyboard reader
+     actually needs — per control, not per group. */
   /* A RUNG THAT CANNOT BE USED SAYS SO ON ITS CAPTION AND ITS CONTROL, NEVER ON
      ITS CLAUSE. The clause is the refusal; dimming it would be the page
      whispering the one sentence that has to be read. */
   .strip .cell.off > span:first-of-type {
     opacity: 0.55;
   }
+  /* THE CAPTION IS /INGEST'S `.plbl`, WHICH IS THE SHARED `.lab` IN
+     `theme.css` §8. Four properties differed and every one of them was
+     visible: this drew the sans face at `--w-bold` in `--dim` with the default
+     line-height, /ingest draws MONO at `--w-semi` in `--faint` on `--lab-h`.
+     Two faces for one label is most of why the two strips did not read as the
+     same control. `--lab-h` is the height the grid reserves for a label row,
+     so it is also what keeps every rung's control on one baseline. */
   .strip .cell > span:first-of-type {
+    font-family: var(--mono);
     font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
+    font-weight: var(--w-semi);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
-    color: var(--dim);
+    color: var(--faint);
+    line-height: var(--lab-h);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -7065,9 +7160,16 @@
      word belongs — and the substantive fact was never in the gloss anyway: it
      is the `.count` clause under the control. A rule left standing for a node
      nothing builds is how the sub-clause finds its way back. */
+  /* THE CLAUSE IS /INGEST'S `.pknote`: MONO at `--fs-micro`, and it opens with
+     a `· ` the way every caption in that strip does. The bullet is generated
+     rather than typed into each of the nine strings, so a rung added later
+     cannot forget it. Two lines are kept from the bar-era rule below — see
+     the measurement there; /ingest reaches the same place with `.pknote.wrap`
+     on the notes that need it. */
   .strip .cell > .count {
     margin: 0;
-    font-size: var(--fs-xs);
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
     color: var(--faint);
     min-width: 0;
     /* `max-width` IS THE ONE THAT MAKES THE ELLIPSIS FIRE.
@@ -7100,7 +7202,14 @@
     white-space: normal;
     line-height: 1.35;
   }
+  .strip .cell > .count::before {
+    content: '· ';
+    color: var(--faint);
+  }
   .strip .cell > .count.warn {
+    color: var(--warn);
+  }
+  .strip .cell > .count.warn::before {
     color: var(--warn);
   }
   /* THE FIND BOX AND THE TWO CONTRACT RUNGS ASK FOR MORE OF THE ROW, and they
@@ -7113,11 +7222,74 @@
      divided. Asking for more of the line therefore costs nothing here — a
      wider Find box cannot push a rung onto a second baseline, which is
      exactly what a 264px basis used to do. */
-  .strip .cell.combo {
-    flex: 1.5 1 0;
-  }
+  /* A GRID ITEM HAS NO FLEX BASIS, so `flex: 1.5 1 0` and `flex: 1.3 1 0` were
+     inert the moment `.strip` stopped being a flex container. They asked for a
+     larger share of ONE line, and the grid's answer to "this rung needs more
+     room" is a whole track — `span 2` where two tracks exist, and nothing
+     where they do not, which is what `auto-fit` already handles by wrapping.
+     Left as a no-op they would read as live sizing to the next reader. */
+  .strip .cell.combo,
   .strip .cell.mcell {
-    flex: 1.3 1 0;
+    min-width: 0;
+  }
+
+  /* ---- THE DAY WINDOW, WHICH IS /INGEST'S `.pk.wide2` AND `.dates` --------
+     `1 / -1` rather than `span 2` is the rule /ingest states and the reason is
+     worth keeping: a spanning item is placed on the first line that FITS it,
+     so `span 2` let the window finish a row of rungs whenever an odd count
+     left a gap — and the row it finished was the row it then broke. `-1` is
+     whatever the last line happens to be, so it is right at every track count,
+     including one, where `span 2` grows an implicit second column and pushes
+     the panel past its own box. */
+  .strip .cell.wide2 {
+    grid-column: 1 / -1;
+  }
+  .strip .cell.wide2 .dates {
+    max-width: 560px;
+  }
+  .dates {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: var(--s5);
+  }
+  .dcell {
+    flex: 1 1 190px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+  }
+  /* THE END'S OWN LABEL SITS UNDER THE RUNG'S. It is `--fs-mini` in the sans
+     face where the rung caption above it is `--fs-micro` mono, which is
+     /ingest's pairing: the rung is named once in the strip's label voice, and
+     From/To are a quieter second level inside it rather than two more rungs. */
+  .dlbl {
+    font-size: var(--fs-mini);
+    font-weight: var(--w-bold);
+    letter-spacing: var(--track-caps);
+    text-transform: uppercase;
+    color: var(--faint);
+    white-space: nowrap;
+  }
+  /* THE COUNT CLAUSE INSIDE A `.dcell` IS NOT A CHILD OF `.cell`, so the
+     `.strip .cell > .count` rule above cannot reach it — `>` is the whole
+     reason, and it is the right selector there. Stated again here at the same
+     metrics so both ends of the window read like every other rung's clause. */
+  .dcell > .count {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: var(--fs-micro);
+    line-height: 1.35;
+    color: var(--faint);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dcell > .count::before {
+    content: '· ';
+    color: var(--faint);
   }
 
   /* THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, AND IT POINTS
@@ -7179,21 +7351,35 @@
      back. Feed, Universe, Timeframe, Month and the holes toggle now wear the
      face below; Strike, Moneyness and Instrument are `$lib/Picker.svelte`,
      brought to the same metrics further down. */
+  /* THE FEED FACE IS /INGEST'S `.ddb`, WHICH IS `Picker`'S `.pbtn` UNDER A
+   * DIFFERENT NAME.
+   *
+   * The feed cannot BE a `Picker` — on either page — and the reason is the
+   * same one /ingest records: a Picker row is a checkbox, and a feed the
+   * server refuses needs a row that is drawn, dead, and carrying
+   * `/feeds.json`'s own reason. A tick cannot say why it is unavailable. So
+   * the menu stays hand-rolled here and the FACE is brought to Picker's
+   * metrics instead, property for property — 15px semibold mono, 11px/14px
+   * padding, 9px radius, the caret at 17px/12px — which is exactly what
+   * /ingest does and why its five controls read as one control.
+   *
+   * What this replaced was the bar-era face: borderless, `padding: 0 20px 0
+   * 0`, a 19px line box, the caret pulled in to 6px. Beside eight bordered
+   * Pickers it read as a link someone had left in the strip. */
   .mnyb {
     appearance: none;
-    background-color: transparent;
-    border: 0;
+    width: 100%;
     margin: 0;
-    padding: 0 20px 0 0;
+    background-color: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 9px;
     color: var(--ink);
     font: inherit;
     font-size: var(--fs-base);
     font-weight: var(--w-semi);
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.015em;
-    height: 19px;
-    line-height: 19px;
+    padding: 11px 36px 11px 14px;
     text-align: left;
     cursor: pointer;
     max-width: 100%;
@@ -7202,20 +7388,19 @@
     white-space: nowrap;
     background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
       linear-gradient(135deg, var(--acc) 50%, transparent 50%);
-    background-position: calc(100% - 6px) 58%, calc(100% - 1px) 58%;
+    background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%;
     background-size: 5px 5px, 5px 5px;
     background-repeat: no-repeat;
   }
   .mnyb:hover:not(:disabled) {
-    color: var(--acc);
+    border-color: var(--dim);
   }
   .mnyb:focus-visible {
-    outline: 2px solid var(--focus);
+    outline: 2px solid var(--acc);
     outline-offset: 2px;
-    border-radius: var(--r1);
   }
   .mnyb:disabled {
-    color: var(--faint);
+    opacity: 0.45;
     cursor: not-allowed;
   }
   /* THE TOGGLE WEARS THE SAME FACE AND OPENS NOTHING, so it drops the caret
@@ -7230,32 +7415,33 @@
     color: var(--acc);
   }
 
-  /* THE SHARED `Picker`'S FACE, BROUGHT TO THE STRIP'S METRICS FROM OUTSIDE IT.
-     `$lib/Picker.svelte` is shared with /markets and /ingest and its spelling is
-     not ours to change, so its `.pbtn` is reached with `:global()` from a
-     selector this component owns — the rule can only ever apply inside a `.cell`
-     this file wrote. Without it the three `Picker` rungs would wear a 15px
-     bordered box in a row of 13px borderless faces, and one strip would read as
-     two controls beside five. Only the FACE is touched; the menu, the filter
-     box and every row inside it are Picker's own and stay identical across the
-     three pages. */
+  /* THE SHARED `Picker` NOW WEARS ITS OWN FACE, AND DELETING A RULE IS THE
+   * WHOLE OF THE FIX.
+   *
+   * What stood here stripped `$lib/Picker.svelte`'s `.pbtn` back to a 13px
+   * borderless inline face — `border: 0`, `padding: 0 20px 0 0`, a 19px line
+   * box, the caret pulled in to 6px. Its reasoning was sound for the strip it
+   * was written against: that strip's other rungs were hand-rolled `.mnyb`
+   * faces at those metrics, and a bordered box among them would have read as
+   * two kinds of control in one bar.
+   *
+   * The premise is gone. Every rung in this strip is a `Picker` now, so there
+   * is nothing left to match DOWN to — and Picker's untouched `.pbtn` is
+   * already, property for property, /ingest's `.ddb`: 15px semibold mono,
+   * 11px/14px padding, 9px radius, the caret at 17px/12px. /ingest says so in
+   * its own comment ("every measurement below is Picker's, so the five read as
+   * one control"). The two pages were drawing the SAME COMPONENT and this file
+   * was the only reason they did not look it.
+   *
+   * The one rule kept is /ingest's, and for /ingest's stated reason: `.pbtn`
+   * does not clip, so a long summary wraps to a second line and makes that ONE
+   * rung taller than its neighbours — the row broken by a string rather than
+   * by a rule. Picker is shared and is not edited from here, so the clip is
+   * applied from this page, to Pickers inside this strip only. */
   .strip .cell :global(.pbtn) {
-    width: auto;
-    max-width: 100%;
-    background-color: transparent;
-    border: 0;
-    border-radius: 0;
-    padding: 0 20px 0 0;
-    font-size: var(--fs-base);
-    height: 19px;
-    line-height: 19px;
+    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
-    background-position: calc(100% - 6px) 58%, calc(100% - 1px) 58%;
-  }
-  .strip .cell :global(.pbtn:hover:not(:disabled)) {
-    color: var(--acc);
   }
 
   /* ---- THE MENU -------------------------------------------------------
@@ -7394,24 +7580,25 @@
      bordered box, which is right on a page that has one search and wrong in a
      row of borderless faces, so the box is taken off HERE — three class names
      deep, which is what beats a single-class theme rule without touching it. */
+  /* THE DAY AND MONTH FIELDS TAKE /INGEST'S BOX, for the same reason the
+     Picker face does: this de-styled them to the bar's borderless 19px line,
+     and the bar is gone. /ingest sets `font-size: var(--fs-base); padding:
+     11px 13px; border-radius: 9px` on `.dates .din` — the field then agrees
+     with `.pbtn` on height, radius and face, which is what makes a row of
+     dropdowns and a pair of dates read as one strip. The focus outline is
+     restored with them: suppressing it was only defensible while the CELL drew
+     a focus underline for the whole group, and that rule is deleted above. */
   .strip .cell .din {
     width: 100%;
     max-width: none;
-    background: transparent;
-    border: 0;
-    border-radius: 0;
-    padding: 0;
-    height: 19px;
-    line-height: 19px;
     font-size: var(--fs-base);
-    font-weight: var(--w-semi);
-    color: var(--ink);
+    padding: 11px 13px;
+    border-radius: 9px;
   }
-  .strip .cell .din:focus,
-  .strip .cell .din:focus-visible {
-    outline: none;
-    border-color: transparent;
-    box-shadow: none;
+  .strip .cell .dbtn {
+    font-size: var(--fs-base);
+    padding: 11px 10px;
+    border-radius: 9px;
   }
   /* The month field is the same face at the same height — it is a button rather
      than a text box, for the reason stated at the snippet, but nothing about
@@ -7427,8 +7614,6 @@
      point long after the captions do. */
   .strip .cell .dval {
     font-size: var(--fs-base);
-    height: 19px;
-    line-height: 19px;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
