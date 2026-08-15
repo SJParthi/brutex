@@ -57,7 +57,6 @@ fn evaluator() -> Evaluator {
 
 #[test]
 #[expect(
-    clippy::expect_used,
     clippy::too_many_lines,
     reason = "one procedure, and splitting it would hide that each stage's \
               output is the next stage's input -- which is the thing under test."
