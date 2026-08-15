@@ -292,6 +292,33 @@ impl Bar {
         hi_ok && lo_ok && signs_ok
     }
 
+    /// Whether the two COUNTS on this bar can have happened.
+    ///
+    /// Separate from [`Self::ohlc_is_sane`] because they are separate claims,
+    /// and folding counts into a predicate named for the OHLC is how the sign
+    /// check went missing on the prices in the first place — a name stops
+    /// being read once it looks familiar.
+    ///
+    /// `volume` is a count of shares or contracts. `CLAUDE.md` §7 is explicit
+    /// that **zero means zero**: there is no sentinel here, so every negative
+    /// is a decoder that read the wrong column or a scale applied twice.
+    ///
+    /// `open_interest` has exactly one legal negative, [`OI_NULL`], which is
+    /// `i64::MIN` and means ABSENT rather than zero. Every other negative is
+    /// the same class of fault as a negative volume.
+    ///
+    /// **What this was worth.** Before it existed, `survey` asked only about
+    /// the four prices, so a bar with `volume: -1` was appended, checksummed,
+    /// counted and recorded as good — and §3 rule 8 makes the month
+    /// unrewritable. That is the same silent write D-0143 closed on the price
+    /// side, left open one field over.
+    #[must_use]
+    pub const fn counts_are_sane(&self) -> bool {
+        let volume_ok = self.volume >= 0;
+        let oi_ok = self.open_interest == OI_NULL || self.open_interest >= 0;
+        volume_ok && oi_ok
+    }
+
     /// The close, as a price.
     #[must_use]
     pub const fn close_price(&self) -> Paisa {

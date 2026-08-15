@@ -2349,3 +2349,20 @@ and recorded as good. §3 rule 8 makes that month permanent.
 `a_negative_price_is_refused_where_the_vendor_value_can_still_be_named` in
 `crates/pull/src/http.rs`.
 
+## A stored count is never negative, except the OI sentinel — D-0148
+
+`volume >= 0` always, and `open_interest` is either `OI_NULL` or `>= 0`.
+
+Enforced by `Bar::counts_are_sane` (`crates/store/src/format.rs`), called by
+`survey` in `crates/store/src/file.rs` — the same all-or-nothing gate that
+carries the price rule, so a bad batch leaves the month exactly as it was.
+
+**Why the ordering check and the price rule did not already cover it.**
+`ohlc_is_sane` is named for, and only examines, the four prices. A bar with a
+well-ordered non-negative OHLC and `volume: -1` satisfied every question the
+store asked before this.
+
+**Proved by** `a_negative_count_is_refused_and_the_oi_sentinel_is_not` in
+`crates/store/tests/unit.rs`, which also pins `OI_NULL == i64::MIN` and refuses
+`i64::MIN + 1`.
+

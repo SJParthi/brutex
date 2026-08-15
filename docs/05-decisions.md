@@ -13948,3 +13948,37 @@ the 104. Those rows are now readable, so the fixtures moved to `NIFTY.100` — a
 period is still outside the allowlist. The tests' subject, grouping unreadable
 rows by reason, is unchanged; only the example moved.
 
+## D-0148 — a count is never negative either, and `ohlc_is_sane` was never going to say so
+
+**Decided.** `Bar::counts_are_sane` joins `Bar::ohlc_is_sane` at the append
+gate, and `StoreError::ImpossibleCount` names the field.
+
+**The gap D-0143 left one field over.** `survey` — the all-or-nothing check
+`BarFile::append` runs before it writes a byte — asked exactly one question per
+bar, and that question was named for the four prices. So D-0143 closed the
+negative *price*, and `volume: -1` still walked past, was appended,
+checksummed, counted, and recorded as good. §3 rule 8 makes that month
+permanent. Same silent write, same permanence, one field over.
+
+**The rule, and its one exception.** `volume` is a count of shares or
+contracts and §7 is explicit that **zero means zero** — there is no sentinel, so
+every negative is a decoder on the wrong column or a scale applied twice.
+`open_interest` has exactly one legal negative, `OI_NULL`, which is `i64::MIN`
+and means ABSENT. A naive `open_interest >= 0` would have refused every cash
+equity bar this store holds, which is why the test asserts `OI_NULL == i64::MIN`
+and separately refuses `i64::MIN + 1` — the nearest legal-looking impostor.
+
+**Why a second predicate rather than another clause.** Folding counts into a
+predicate named for the OHLC is precisely how the sign check went missing on the
+prices: a name stops being read once it looks familiar, and `ohlc_is_sane` had
+been read as "the bar is fine" for long enough that three crates wrote comments
+about what it does not check. Two names, two questions.
+
+**And a distinct error.** `ImpossibleBar` says "impossible OHLC". Sent to an
+operator holding a bad volume that is a wrong diagnosis, and §4 requires the
+reason to be named. `ImpossibleCount` carries both counts so the message can
+show which one.
+
+**Cost.** Two integer comparisons per bar, inside a loop that already runs per
+bar. §3 rule 4 untouched.
+

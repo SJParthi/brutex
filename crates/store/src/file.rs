@@ -372,6 +372,19 @@ pub enum StoreError {
         /// The timestamp that did not follow.
         next: i64,
     },
+    /// A batch holding a bar whose VOLUME or OPEN INTEREST cannot have
+    /// happened.
+    ///
+    /// Separate from [`Self::ImpossibleBar`] so the message names the field an
+    /// operator has to go and look at. See [`Bar::counts_are_sane`].
+    ImpossibleCount {
+        /// Index within the batch.
+        at: u64,
+        /// The volume as offered.
+        volume: i64,
+        /// The open interest as offered. [`OI_NULL`] is legal and means absent.
+        open_interest: i64,
+    },
     /// A batch holding a bar whose OHLC cannot have happened.
     ///
     /// [`Bar::ohlc_is_sane`] exists "so an impossible bar never reaches the
@@ -380,6 +393,24 @@ pub enum StoreError {
         /// Index within the batch.
         at: u64,
     },
+}
+
+/// The [`StoreError::ImpossibleCount`] sentence.
+///
+/// Lifted out of `Display::fmt` only to keep that match under the workspace's
+/// 100-line ceiling; it carries no logic of its own.
+fn write_impossible_count(
+    f: &mut fmt::Formatter<'_>,
+    at: u64,
+    volume: i64,
+    open_interest: i64,
+) -> fmt::Result {
+    write!(
+        f,
+        "batch record {at} has an impossible count: volume {volume}, open \
+         interest {open_interest}. A count is never negative — zero means \
+         zero, and the only legal negative is the open-interest null sentinel"
+    )
 }
 
 impl fmt::Display for StoreError {
@@ -474,6 +505,11 @@ impl fmt::Display for StoreError {
             Self::BatchNotOrdered { at, previous, next } => {
                 write!(f, "batch record {at}: {next} does not follow {previous}")
             }
+            Self::ImpossibleCount {
+                at,
+                volume,
+                open_interest,
+            } => write_impossible_count(f, *at, *volume, *open_interest),
             Self::ImpossibleBar { at } => {
                 write!(f, "batch record {at} has impossible OHLC")
             }
@@ -1034,6 +1070,21 @@ fn survey(batch: &[Bar]) -> Result<(i64, i64), StoreError> {
         if !bar.ohlc_is_sane() {
             return Err(StoreError::ImpossibleBar {
                 at: len_u64(offset),
+            });
+        }
+        // AND THE COUNTS, WHICH THIS LOOP DID NOT ASK ABOUT.
+        //
+        // `ohlc_is_sane` is named for the four prices and checks exactly those.
+        // So `volume: -1` walked past here, was appended, checksummed and
+        // recorded as good — the same silent write D-0143 closed on the price
+        // side, one field over. Named as its own fault rather than folded into
+        // `ImpossibleBar`, because "impossible OHLC" sent to an operator
+        // holding a bad volume is a wrong diagnosis, and §4 requires the reason.
+        if !bar.counts_are_sane() {
+            return Err(StoreError::ImpossibleCount {
+                at: len_u64(offset),
+                volume: bar.volume,
+                open_interest: bar.open_interest,
             });
         }
         if let Some(earlier) = previous

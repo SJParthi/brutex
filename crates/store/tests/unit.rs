@@ -376,6 +376,85 @@ fn negative_prices_are_not_sane_however_well_ordered() {
     assert!(real.high.checked_sub(real.low).is_some());
 }
 
+/// A count is never negative, and the one legal negative is the OI sentinel.
+#[test]
+fn a_negative_count_is_refused_and_the_oi_sentinel_is_not() {
+    let real = Bar {
+        ts_micros: 1_717_386_300_000_000,
+        open: 2_333_870,
+        high: 2_333_870,
+        low: 2_308_370,
+        close: 2_310_955,
+        volume: 41_250,
+        open_interest: OI_NULL,
+    };
+    assert!(real.ohlc_is_sane() && real.counts_are_sane());
+
+    // ZERO IS A REAL COUNT, on both fields. §7: zero means zero.
+    assert!(
+        Bar {
+            volume: 0,
+            open_interest: 0,
+            ..real
+        }
+        .counts_are_sane()
+    );
+
+    // THE SENTINEL IS THE ONE LEGAL NEGATIVE, and it is `i64::MIN` -- so a
+    // naive `>= 0` on open interest would have refused every bar this store
+    // holds for a cash equity.
+    assert_eq!(OI_NULL, i64::MIN);
+    assert!(
+        Bar {
+            open_interest: OI_NULL,
+            ..real
+        }
+        .counts_are_sane()
+    );
+    assert!(
+        Bar {
+            open_interest: OI_NULL,
+            ..real
+        }
+        .oi_is_null()
+    );
+
+    // AND EVERYTHING ELSE BELOW ZERO IS REFUSED.
+    for (what, bar) in [
+        ("volume", Bar { volume: -1, ..real }),
+        (
+            "volume at the floor",
+            Bar {
+                volume: i64::MIN,
+                ..real
+            },
+        ),
+        (
+            "open interest",
+            Bar {
+                open_interest: -1,
+                ..real
+            },
+        ),
+        // One short of the sentinel: the nearest legal-looking impostor.
+        (
+            "open interest beside the sentinel",
+            Bar {
+                open_interest: i64::MIN + 1,
+                ..real
+            },
+        ),
+    ] {
+        assert!(!bar.counts_are_sane(), "{what} below zero must be refused");
+        // ...and the OHLC predicate still says yes, which is exactly why this
+        // is a second question and not a clause of the first.
+        assert!(
+            bar.ohlc_is_sane(),
+            "{what} does not make the OHLC impossible"
+        );
+    }
+}
+
 // ===========================================================================
 // The record's 56 bytes — the encoder, pinned
 // ===========================================================================
