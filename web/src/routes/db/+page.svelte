@@ -142,8 +142,11 @@
      has to be expressible without inventing a sentinel date the store has
      never heard of. */
   let universe = $state(''); /* '' = Everything: no membership join at all */
-  let fromMonth = $state(''); /* '' = no lower bound */
-  let toMonth = $state(''); /* '' = no upper bound */
+  /* THE MONTH RANGE IS RETIRED, and these two are the last of it. Kept as
+   * declarations only so `reset()` and the `filtered` guard keep naming the
+   * same set of state; both are permanently empty and nothing writes them. */
+  let fromMonth = $state('');
+  let toMonth = $state('');
 
   /* ---- THE BAR-LENGTH RUNG, WHICH THIS PAGE PRINTED AND COULD NOT CHOOSE
      The rung has been a COLUMN since the server stopped stamping `"1m"` on
@@ -1549,213 +1552,20 @@
     return [...c.entries()].sort((a, b) => txt(b[0], a[0]));
   });
 
-  /**
-   * A range whose ends are the wrong way round matches nothing, and it is
-   * NAMED rather than quietly swapped. Swapping would silently answer a
-   * question the operator did not ask; refusing to and saying which two months
-   * are in the wrong order is the same rule every other empty state here
-   * follows.
-   */
-  const rangeInverted = $derived(Boolean(fromMonth && toMonth && fromMonth > toMonth));
-
-  /* ======================================================================
-     THE MONTH CALENDAR — the product's own, at the unit a row actually has
-     ----------------------------------------------------------------------
-     A YEAR SELECT AND A GRID OF TWELVE MONTHS. Not a day grid, and the
-     difference is not decoration: a row on this page IS an instrument-month,
-     so a from-DAY would have to be rounded to a month before it could be
-     applied, and a control whose value is silently coarsened is a control that
-     lies about what it did. `/markets` is where a day is the unit, and that is
-     where a day grid belongs.
-
-     THE VALUE NEVER STOPS BEING `YYYY-MM`. `fromMonth` and `toMonth` are the
-     same raw keys they were — the label `Sep 2024` is produced by
-     `monthLabel()` at the render site and nowhere else, exactly as the rule at
-     the top of `$lib/dates.js` requires. The window comparison, the `{#each}`
-     keys and the tooltips all still read the key.
-
-     A MONTH THE STORE HOLDS NOTHING FOR IS SHOWN AND REFUSED, not omitted. An
-     omitted month and a month nobody thought of look identical, and the gap in
-     a backfill is the single most useful thing this control can show while the
-     operator is choosing a bound. It is struck through, it refuses the click,
-     and its `title` says which set it is empty in.
-     ====================================================================== */
-  /**
-   * Which end's calendar is open — `'from'`, `'to'`, or nothing.
-   * @type {'from' | 'to' | null}
-   */
-  let calOpen = $state(null);
-  /** The year on show in the open calendar. A number, never a label. */
-  let calYear = $state(0);
-  /** @type {HTMLElement | null} */
-  let calEl = $state(null);
-  /**
-   * The control that opened it, so Escape can put the focus back.
-   * @type {HTMLElement | null}
-   */
-  let calBtn = null;
-
-  /** The twelve slots, fixed. Indices, so `MON[i]` is the only naming. */
-  const MONTH_SLOTS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
-
-  /** `YYYY-MM` -> rows held, for the grid's enabled test and its tooltip. */
-  const monthRows = $derived(new Map(monthsAll));
-
-  /**
-   * The YEARS the store actually holds a month in, ascending.
+  /* THE MONTH CALENDAR IS GONE, AND SO IS EVERYTHING THAT DROVE IT.
    *
-   * COUNTED FROM THE ROWS, never a range between two endpoints: a backfill with
-   * a year-long hole in the middle would otherwise offer a year whose every
-   * month refuses the click, which is a page of dead ends rather than a fact.
-   */
-  const heldYears = $derived.by(() => {
-    const s = new Set();
-    for (const [m] of monthsAll) s.add(Number(m.slice(0, 4)));
-    return [...s].sort((a, b) => a - b);
-  });
-
-  /* THE KEY IS BUILT, never parsed back out of a label. Zero-padded because
-     `2020-3` is not a key this store has ever written and would compare wrong
-     against `2020-11` in the very string comparison the window depends on.
-
-     DECLARED ABOVE ITS READER, like every other helper in this file — see the
-     FORMATTING block at the top for the reordering this rule already cost. */
-  /**
-   * @param {number} y
-   * @param {number} i zero-based month slot
-   * @returns {string}
-   */
-  const monthKey = (y, i) => `${y}-${String(i + 1).padStart(2, '0')}`;
-
-  /**
-   * How many of the twelve slots in `y` the store holds — counted, per year.
-   * @param {number} y
-   */
-  const monthsHeldIn = (y) => {
-    let n = 0;
-    for (const i of MONTH_SLOTS) if (monthRows.has(monthKey(y, i))) n += 1;
-    return n;
-  };
-
-  /**
-   * @param {'from' | 'to'} which
-   * @param {HTMLElement | null} [btn]
-   */
-  function openCal(which, btn) {
-    const cur = which === 'from' ? fromMonth : toMonth;
-    /* NO BOUND YET: open at the end of the store this bound is about — the
-       earliest year for `from`, the latest for `to` — because that is the year
-       the operator setting that bound is nearly always reaching for. */
-    const fallback = which === 'from' ? heldYears[0] : heldYears[heldYears.length - 1];
-    /* THE PANEL ONLY EVER OPENS ON A YEAR THE STORE HOLDS, and the bound's own
-       year is not always one of them: narrowing the universe can leave a
-       standing `fromMonth` whose year has no row left in it. Opening there
-       would put a year on the select that is not among its options — the
-       browser would draw the first option while `calYear` still said the
-       other, so the twelve months on screen would not be the twelve months the
-       header named. */
-    const y = cur ? Number(cur.slice(0, 4)) : Number.NaN;
-    calYear = heldYears.includes(y) ? y : (fallback ?? 0);
-    calBtn = btn ?? null;
-    calOpen = which;
-  }
-
-  function closeCal(refocus = true) {
-    calOpen = null;
-    if (refocus) calBtn?.focus();
-    calBtn = null;
-  }
-
-  /**
-   * Commit one end of the window. `''` clears that bound; it is not a month.
-   * @param {'from' | 'to'} which
-   * @param {string} key raw `YYYY-MM`, or `''` for no bound
-   */
-  function setCal(which, key) {
-    if (which === 'from') fromMonth = key;
-    else toMonth = key;
-    closeCal();
-  }
-
-  /* STEPS THROUGH THE YEARS THE STORE HOLDS, not through the integers. A year
-     the store holds nothing in is not between two years it does — it is not on
-     the list at all, so it cannot be stepped onto. */
-  /** @param {number} d */
-  function stepYear(d) {
-    const i = heldYears.indexOf(calYear);
-    const next = heldYears[(i < 0 ? 0 : i) + d];
-    if (next !== undefined) calYear = next;
-  }
-
-  /**
-   * Arrow keys across the twelve, PageUp/PageDown across the years, Escape out.
+   * The from/to range went when MONTH stopped being a rung; the 186-line
+   * snippet that drew it went next; this is the state and the handlers behind
+   * both. `openCal`, `setCal` and `calKey` had no caller left, so `calOpen`
+   * could never leave null, so `closeCal`, `stepYear`, `heldYears`,
+   * `monthRows`, `monthKey`, `MONTH_SLOTS`, `monthsHeldIn`, `calYear`,
+   * `calEl`, `calBtn` and `rangeInverted` were all unreachable behind it.
    *
-   * A DISABLED BUTTON CANNOT HOLD FOCUS, so the walk keeps going in the
-   * direction it was asked for until it finds one that can. Landing on a month
-   * the store is empty in would silently drop the focus to the document, and a
-   * keyboard operator would have no way back into the grid.
+   * Checked one at a time before cutting: every reference to each of them was
+   * inside this block. `onWindowDown` stays — it also closes the pickers, and
+   * only its `closeCal(false)` line went.
    */
-  /** @param {KeyboardEvent} e */
-  function calKey(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      e.stopPropagation();
-      closeCal();
-      return;
-    }
-    if (e.altKey || e.ctrlKey || e.metaKey) return;
-    if (e.key === 'PageUp' || e.key === 'PageDown') {
-      e.preventDefault();
-      stepYear(e.key === 'PageUp' ? -1 : 1);
-      return;
-    }
-    /* CAST, NOT A GUESS. The selector is `button.cmon` and every node it can
-       return is one of the twelve month buttons; `querySelectorAll` types its
-       answer as `Element` because it cannot read a selector at compile time. */
-    const cells = /** @type {HTMLButtonElement[]} */ (
-      calEl ? [...calEl.querySelectorAll('button.cmon')] : []
-    );
-    if (cells.length === 0) return;
-    const at = document.activeElement
-      ? cells.indexOf(/** @type {HTMLButtonElement} */ (document.activeElement))
-      : -1;
-    let want;
-    let dir;
-    switch (e.key) {
-      case 'ArrowRight':
-        want = at + 1;
-        dir = 1;
-        break;
-      case 'ArrowLeft':
-        want = at - 1;
-        dir = -1;
-        break;
-      case 'ArrowDown':
-        want = at + 3;
-        dir = 1;
-        break;
-      case 'ArrowUp':
-        want = at - 3;
-        dir = -1;
-        break;
-      case 'Home':
-        want = 0;
-        dir = 1;
-        break;
-      case 'End':
-        want = cells.length - 1;
-        dir = -1;
-        break;
-      default:
-        return;
-    }
-    e.preventDefault();
-    if (at < 0) want = dir > 0 ? 0 : cells.length - 1;
-    let i = want;
-    while (i >= 0 && i < cells.length && cells[i].disabled) i += dir;
-    if (i < 0 || i >= cells.length) return;
-    cells[i].focus();
-  }
+
 
   /* THE POINTER CLOSES IT TOO, and the button that opened it is excluded so
      the two do not fight: without that, pointerdown closes the panel and the
@@ -1780,49 +1590,12 @@
         ? t.closest('.picker[data-drop]')
         : t.parentElement?.closest('.picker[data-drop]');
     if (drop !== null && !inDrop) drop = null;
-    if (!calOpen) return;
-    if (calEl?.contains(t)) return;
-    if (calBtn?.contains(t)) return;
-    closeCal(false);
   }
 
-  /* FOCUS GOES INTO THE GRID ON OPEN — on the chosen month when there is one,
-     on the first month the store can offer otherwise. It reads `calOpen` and
-     `calEl` and nothing else, so changing the year or arrowing about does not
-     re-run it and snatch the focus back. */
-  $effect(() => {
-    if (!calOpen || !calEl) return;
-    const sel = calEl.querySelector('button.cmon[aria-pressed="true"]:not(:disabled)');
-    const first = calEl.querySelector('button.cmon:not(:disabled)');
-    /* THE YEAR SELECT IS THE LAST RESORT, and it is reachable: a universe can
-       leave a year with no month the store holds, and a panel that focuses
-       nothing is a dialog a keyboard cannot get out of except by Tab. */
-    const land = /** @type {HTMLElement | null} */ (sel ?? first ?? calEl.querySelector('select'));
-    land?.focus();
-  });
-
-  /* THE YEAR ON SHOW IS ALWAYS A YEAR THE STORE HOLDS, even after the set
-     under it changes. The pointer cannot do this — an outside press closes the
-     panel — but the KEYBOARD can: tab out to a universe chip, press Enter, and
-     `heldYears` is rebuilt while the panel is still open. The select would then
-     draw whichever option the browser fell back to while `calYear` still named
-     the old one, so the header and the twelve months below it would disagree
-     about which year is on screen. Snapped rather than closed, because closing
-     would also throw away the focus the operator is holding.
-
-     `calYear` IS READ THROUGH `untrack`. Reading it normally would make this
-     effect depend on the value it writes, which is a loop expressed as a
-     coincidence that it terminates. Its real dependencies are the two things
-     that can invalidate the year: whether the panel is open, and the list. */
-  $effect(() => {
-    if (!calOpen || heldYears.length === 0) return;
-    if (!heldYears.includes(untrack(() => calYear))) calYear = heldYears[0];
-  });
 
   /* RAW KEY COMPARISON, BOTH ENDS. `YYYY-MM` is fixed-width and
      most-significant-first, so `<=` on the string IS chronological order. The
      labels never enter this function. */
-  const inWindow = (m) => (!fromMonth || m >= fromMonth) && (!toMonth || m <= toMonth);
 
   /**
    * The universe, narrowed to the month window — the base every finer control
@@ -1838,9 +1611,12 @@
      this one — see the block on `tfAll` — so reading the set from before it
      would make the window, the prefix index, the instrument list and every
      count under them describe rows the chosen rung excludes. */
-  const windowed = $derived(
-    !fromMonth && !toMonth ? timeframed : timeframed.filter((r) => inWindow(r.month))
-  );
+  /* `windowed` IS `timeframed`. The month WINDOW was the rung between them and
+   * there is no month rung any more, so the stage collapses. Kept as a name
+   * rather than dissolved into its readers because the cascade is easier to
+   * read as one identifier per stage, and because `scoped` below is where a
+   * month rung would return if it ever did. */
+  const windowed = $derived(timeframed);
 
 
   /** Everything except the holes toggle — what that toggle counts against. */
@@ -4400,11 +4176,6 @@
     const typing =
       t instanceof HTMLElement &&
       (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
-    /* THE CALENDAR OWNS THE KEYBOARD WHILE IT IS OPEN. `/` inside an open
-       popup would throw the focus to the filter box and leave a dialog on
-       screen that nothing has focus in — the popup's own handler closes it
-       first, and this shortcut stays out of the way until it has. */
-    if (calOpen) return;
     /* AN OPEN MENU OWNS ESCAPE, for the same reason the calendar owns the
        keyboard above it: a menu left on screen after the key that dismisses
        things has been pressed is a control the reader has to click to be rid
