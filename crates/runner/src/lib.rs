@@ -54,6 +54,7 @@ pub mod excursion;
 pub mod grid;
 pub mod identity;
 pub mod outcome;
+pub mod pbo;
 pub mod rank;
 pub mod report;
 pub mod resample;
