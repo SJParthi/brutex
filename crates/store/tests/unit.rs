@@ -1523,6 +1523,7 @@ fn parts(vendor: Vendor, symbol: &str) -> PathParts<'_> {
         exchange: "NSE",
         segment: "INDEX",
         symbol,
+        contract: None,
         timeframe: Timeframe::MINUTE_1,
         month: YearMonth::new(2024, 6).expect("a real month"),
         file: FileKind::Bars,
@@ -1806,6 +1807,7 @@ fn a_segment_that_could_escape_the_vendor_prefix_is_refused() {
             "symbol",
             PathParts {
                 symbol: "../DHAN",
+                contract: None,
                 ..parts(Vendor::Groww, "NIFTY")
             },
         ),
@@ -1972,13 +1974,20 @@ fn a_path_is_built_from_the_canonical_identity_not_from_loose_strings() {
     // builder does not form -- so it refuses by name rather than filing every
     // expiry under the underlying and silently merging distinct series.
     let expiry = Expiry::new(2024, 6, 27).expect("a real expiry");
-    for kind in [
-        Kind::Future { expiry },
-        Kind::Option {
-            expiry,
-            strike: Paisa::from_raw(2_500_000),
-            side: OptionSide::Call,
-        },
+    // AND THE CONTRACT SEGMENT NOW EXISTS, which is what D-0019 asked for and
+    // what this used to assert the ABSENCE of. Each derivative gets its own
+    // directory under the underlying, so two expiries of one symbol — and two
+    // strikes of one expiry — can never share a bar file.
+    for (kind, expected) in [
+        (Kind::Future { expiry }, "2024-06-27-FUT"),
+        (
+            Kind::Option {
+                expiry,
+                strike: Paisa::from_raw(2_500_000),
+                side: OptionSide::Call,
+            },
+            "2024-06-27-2500000-CE",
+        ),
     ] {
         let contract = InstrumentKey {
             exchange: Exchange::Nse,
@@ -1986,15 +1995,27 @@ fn a_path_is_built_from_the_canonical_identity_not_from_loose_strings() {
             underlying: Symbol::new("NIFTY").expect("a real symbol"),
             kind,
         };
+        let path = StorePath::for_key(
+            Vendor::Groww,
+            &contract,
+            Timeframe::MINUTE_1,
+            month,
+            FileKind::Bars,
+        )
+        .expect("a derivative has a contract path now");
         assert_eq!(
-            StorePath::for_key(
-                Vendor::Groww,
-                &contract,
-                Timeframe::MINUTE_1,
-                month,
-                FileKind::Bars,
-            ),
-            Err(PathError::ContractPathUnsupported),
+            path.to_string(),
+            format!("bars/groww/NSE/FNO/NIFTY/{expected}/1min/2024-06.bin"),
+            "the contract is a segment of its OWN, below the underlying"
+        );
+        // THE STRIKE IS PAISA AND CARRIES NO DECIMAL POINT. `CLAUDE.md` §7:
+        // prices are i64 paisa, never a float. 2,500,000 paisa is 25,000
+        // rupees, and rendering it as `25000.00` would put a `.` in a path
+        // segment and invite a reader to parse it back as one.
+        assert!(
+            !expected.contains('.'),
+            "a strike rendered with a decimal point invites a reader to parse \
+             it back as a float: {expected}"
         );
     }
 }
@@ -2029,6 +2050,7 @@ fn a_maximal_path_fits_the_declared_bound() {
         exchange: &longest,
         segment: &longest,
         symbol: &longest,
+        contract: None,
         timeframe: slowest_name,
         month: YearMonth::new(9999, 12).expect("a real month"),
         file: fattest,

@@ -172,6 +172,7 @@ fn bars_path() -> StorePath<'static> {
         exchange: "NSE",
         segment: "INDEX",
         symbol: "NIFTY",
+        contract: None,
         timeframe: Timeframe::MINUTE_1,
         month: YearMonth::new(2022, 10).expect("October 2022"),
         file: FileKind::Bars,

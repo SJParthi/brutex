@@ -211,6 +211,7 @@ pub fn open(
         exchange,
         segment,
         symbol,
+        contract: None,
         timeframe,
         month,
         file: FileKind::Bars,

@@ -224,6 +224,7 @@ fn bar_file(store_root: &Path, instrument: &str) -> BarFile {
         exchange: "NSE",
         segment: "INDEX",
         symbol: instrument,
+        contract: None,
         timeframe: Timeframe::MINUTE_1,
         month: month(),
         file: FileKind::Bars,

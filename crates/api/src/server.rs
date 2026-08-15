@@ -3567,7 +3567,9 @@ async fn broker_answer(
 
     // THE SWEEP ITSELF, shared verbatim with the autopilot. Everything below
     // this line is the receipt; everything inside it is the pull.
-    let run = broker_run(&asked, site).await;
+    // FRESH, NOT `site.censuses`: see `broker_run`. One manifest read against a
+    // call that is about to open sockets is free in the only units that matter.
+    let run = broker_run(&asked, site, &census::read_all(&site.store_root)).await;
 
     // A refusal, recorded and rendered, with the reason it carries.
     let refuse = |facts: Vec<(&'static str, String)>, why: &str, code: axum::http::StatusCode| {
@@ -4055,7 +4057,11 @@ fn ladder_refusal(
     }
 }
 
-pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> BrokerRun {
+pub(crate) async fn broker_run(
+    asked: &ingest::SpotRequest,
+    site: &Site,
+    censuses: &[census::VendorCensus],
+) -> BrokerRun {
     let started = std::time::Instant::now();
     // BEFORE ANY SOCKET. See `Broker` for what this is guarding against and how
     // it was found.
@@ -4127,7 +4133,19 @@ pub(crate) async fn broker_run(asked: &ingest::SpotRequest, site: &Site) -> Brok
     // `note_run_started`, because a run the order refuses never started — and
     // before any socket, which is the entire point: the cheap day pass exists
     // to find a wrong feed, symbol or window in 14 requests instead of 81.
-    if let Some(why) = ladder_refusal(asked, &targets, &site.censuses) {
+    // THE CENSUS IS THE CALLER'S, AND IT MUST BE A FRESH ONE.
+    //
+    // This read `site.censuses`, which is filled once in `Site::load` and never
+    // again — D-0039, and the field's own doc says so. So a day pass written by
+    // THIS process was invisible to the gate for the life of the process: the
+    // bars were on disk, the manifest counted them, and the minute run that
+    // followed was still refused for want of them. The documented workaround
+    // was to restart the server, which is a workaround for a bug.
+    //
+    // It is a parameter rather than a read inside here so the two callers can
+    // each answer honestly: `autopilot::tick` already takes a fresh census
+    // either side of this call, and a hand run reads one per request.
+    if let Some(why) = ladder_refusal(asked, &targets, censuses) {
         return BrokerRun::out_of_order(why);
     }
 
@@ -7884,10 +7902,11 @@ mod tests {
             )),
         );
         let root = store_root("ladder-receipt");
-        let mut site = Site::serving(&dir, &root);
-        // NOTHING HELD. The store before a first ingest, which is exactly the
-        // state this refusal exists for.
-        site.censuses = Vec::new();
+        // NOTHING HELD, AND IT IS THE DISK THAT SAYS SO. `broker_answer` reads
+        // a FRESH census per request now, so seeding `site.censuses` would be
+        // ignored — this scratch root has no manifest, which is exactly the
+        // state before a first ingest and exactly what this refusal is for.
+        let site = Site::serving(&dir, &root);
         let journal = audit::Journal::at(&root);
 
         let (code, body) = broker_answer(
@@ -13710,7 +13729,7 @@ mod tests {
         // loop, so the prerequisite is seeded rather than the gate worked
         // around: without this the run is `blocked` and the subject below is
         // never reached. It doubles as the proof that a satisfied gate opens.
-        site.censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
+        let censuses = vec![day_pass_held(Vendor::Dhan, "NIFTY", month_of(2026, 8))];
         let asked = ingest::parse_spot(
             // A RUNG THIS FEED STILL DOES NOT SERVE, and it must be named now.
             //
@@ -13727,7 +13746,7 @@ mod tests {
         .expect("a real target and a window in the past");
 
         let from = crate::emitted::mark();
-        let out = broker_run(&asked, &site).await;
+        let out = broker_run(&asked, &site, &censuses).await;
         assert!(
             out.blocked.is_none(),
             "a serving site reaches the loop: {out:?}"
@@ -13835,7 +13854,9 @@ mod tests {
         .expect("a real target and a window in the past");
 
         let from = crate::emitted::mark();
-        let out = broker_run(&asked, &site).await;
+        // AN EMPTY CENSUS, PASSED EXPLICITLY. The universe is empty here, so
+        // the gate has no instrument-month to probe and cannot refuse.
+        let out = broker_run(&asked, &site, &[]).await;
         assert_eq!(out.attempted, 0, "an empty universe attempts nothing");
         assert!(
             out.blocked.is_none(),

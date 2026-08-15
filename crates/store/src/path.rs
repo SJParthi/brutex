@@ -73,7 +73,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use brutex_core::instrument::{InstrumentKey, Kind};
+use brutex_core::instrument::{Contract, InstrumentKey, Kind};
 use brutex_core::symbol::SYMBOL_CAPACITY;
 use brutex_core::vendor::Vendor;
 
@@ -629,8 +629,15 @@ pub struct PathParts<'a> {
     pub exchange: &'a str,
     /// The exchange segment, e.g. `INDEX`. Upper case.
     pub segment: &'a str,
-    /// The symbol or contract, e.g. `NIFTY`. Upper case.
+    /// The underlying symbol, e.g. `NIFTY`. Upper case.
     pub symbol: &'a str,
+    /// The contract, for a future or an option, and [`None`] for spot.
+    ///
+    /// A SEGMENT OF ITS OWN, below the underlying — see
+    /// [`brutex_core::instrument::Contract`] for why it is not part of the
+    /// symbol. `None` renders a path one level shallower, which is what a spot
+    /// instrument's path has always been.
+    pub contract: Option<Contract>,
     /// The bar length.
     pub timeframe: Timeframe,
     /// The month the file covers.
@@ -648,6 +655,8 @@ pub struct StorePath<'a> {
     exchange: &'a str,
     segment: &'a str,
     symbol: &'a str,
+    /// The contract level, present only for a future or an option.
+    contract: Option<Contract>,
     timeframe: Timeframe,
     month: YearMonth,
     file: FileKind,
@@ -677,6 +686,7 @@ impl<'a> StorePath<'a> {
     ///     exchange: "NSE",
     ///     segment: "INDEX",
     ///     symbol: "NIFTY",
+    ///     contract: None,
     ///     timeframe: Timeframe::MINUTE_1,
     ///     month: YearMonth::new(2024, 6)?,
     ///     file: FileKind::Bars,
@@ -688,6 +698,7 @@ impl<'a> StorePath<'a> {
     ///     exchange: "NSE",
     ///     segment: "INDEX",
     ///     symbol: "NIFTY",
+    ///     contract: None,
     ///     timeframe: Timeframe::MINUTE_1,
     ///     month: YearMonth::new(2024, 6)?,
     ///     file: FileKind::Bars,
@@ -708,11 +719,20 @@ impl<'a> StorePath<'a> {
         check_segment("exchange", parts.exchange, SegmentCase::Upper)?;
         check_segment("segment", parts.segment, SegmentCase::Upper)?;
         check_segment("symbol", parts.symbol, SegmentCase::Upper)?;
+        // THE CONTRACT IS CHECKED LIKE ANY OTHER SEGMENT. It is rendered by
+        // `Contract`, not typed by an operator, but a segment that reaches the
+        // filesystem unchecked is the traversal this function exists to refuse
+        // — and a renderer is exactly the thing a later change could alter
+        // without anyone re-reading this call.
+        if let Some(ref contract) = parts.contract {
+            check_segment("contract", contract.as_str(), SegmentCase::Upper)?;
+        }
         Ok(Self {
             vendor: parts.vendor,
             exchange: parts.exchange,
             segment: parts.segment,
             symbol: parts.symbol,
+            contract: parts.contract,
             timeframe: parts.timeframe,
             month: parts.month,
             file: parts.file,
@@ -737,18 +757,23 @@ impl<'a> StorePath<'a> {
         month: YearMonth,
         file: FileKind,
     ) -> Result<Self, PathError> {
-        match key.kind {
-            Kind::Index | Kind::Equity => Self::new(PathParts {
-                vendor,
-                exchange: key.exchange.as_str(),
-                segment: key.segment.as_str(),
-                symbol: key.underlying.as_str(),
-                timeframe,
-                month,
-                file,
-            }),
-            _ => Err(PathError::ContractPathUnsupported),
-        }
+        // ONE CALL, BOTH SHAPES. `Contract::of` answers `None` for spot and a
+        // rendered segment for a derivative, so the branch that used to be a
+        // refusal is now the ordinary difference between two paths.
+        let contract = match key.kind {
+            Kind::Index | Kind::Equity => None,
+            other => Some(Contract::of(other).ok_or(PathError::ContractPathUnsupported)?),
+        };
+        Self::new(PathParts {
+            vendor,
+            exchange: key.exchange.as_str(),
+            segment: key.segment.as_str(),
+            symbol: key.underlying.as_str(),
+            contract,
+            timeframe,
+            month,
+            file,
+        })
     }
 
     /// The same month, naming a different sibling file.
@@ -768,6 +793,7 @@ impl<'a> StorePath<'a> {
             exchange: self.exchange,
             segment: self.segment,
             symbol: self.symbol,
+            contract: self.contract,
             timeframe: self.timeframe,
             month: self.month,
             file,
@@ -840,12 +866,22 @@ impl fmt::Display for StorePath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{}/{}/{}/{}/{}/{}/{}{}",
+            "{}/{}/{}/{}/{}",
             STORE_ROOT,
             self.vendor.as_str(),
             self.exchange,
             self.segment,
             self.symbol,
+        )?;
+        // THE CONTRACT LEVEL EXISTS ONLY WHERE THERE IS A CONTRACT. A spot
+        // path is unchanged, byte for byte, which is what keeps every bar file
+        // already on disk addressable by the same string that wrote it.
+        if let Some(ref contract) = self.contract {
+            write!(f, "/{contract}")?;
+        }
+        write!(
+            f,
+            "/{}/{}{}",
             self.timeframe.as_str(),
             self.month,
             self.file.extension(),

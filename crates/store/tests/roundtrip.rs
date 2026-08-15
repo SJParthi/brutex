@@ -140,6 +140,7 @@ fn parts() -> PathParts<'static> {
         exchange: "NSE",
         segment: "INDEX",
         symbol: "NIFTY",
+        contract: None,
         timeframe: Timeframe::MINUTE_1,
         month: YearMonth::new(2024, 6).expect("2024-06"),
         file: FileKind::Bars,

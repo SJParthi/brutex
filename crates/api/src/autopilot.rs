@@ -2811,7 +2811,11 @@ async fn tick(
     // THE EXISTING PULL PATH, UNCHANGED. The month split, the floor clamp, the
     // AIMD governor's waiting, the retry backoff, the credential read and the
     // store append are all the ones `/pull/spot` runs.
-    let run = crate::server::broker_run(&asked, site).await;
+    // A FRESH CENSUS FOR THE GATE. This function already reads one either side
+    // of this call; the pull order must see the same store those reads do, and
+    // not the one `Site::load` froze at process start.
+    let run =
+        crate::server::broker_run(&asked, site, &crate::census::read_all(&site.store_root)).await;
     let took = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
     let source = format!("autopilot {} {}", state.feed.display(), unit.month);
 

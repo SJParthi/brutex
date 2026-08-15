@@ -319,6 +319,132 @@ impl fmt::Display for InstrumentKey {
     }
 }
 
+/// The longest a rendered contract segment can be.
+///
+/// Deliberately equal to `SYMBOL_CAPACITY`: a contract is a PATH SEGMENT in the
+/// store exactly as a symbol is, and `store::path::MAX_SEGMENT_LEN` is pinned
+/// to that same number by a `const` assertion. One bound, three places, and a
+/// widening in one of them cannot silently outgrow the others.
+pub const CONTRACT_CAPACITY: usize = 24;
+
+/// One derivative contract, rendered as the store files it.
+///
+/// # Why this is a segment of its OWN and not part of the symbol
+///
+/// D-0019 files a future or an option under its CONTRACT, because `NIFTY`
+/// alone would put every expiry of every strike in one directory. The obvious
+/// implementation appends the contract to the symbol — and it does not fit.
+/// `Symbol` holds 24 bytes and so does a path segment, while the real names run
+/// longer than that: `BANKNIFTY-30Sep25-24650-CE` is 26 and `MIDCPNIFTY` is 27.
+/// A capacity that holds NIFTY and drops BANKNIFTY is the worst of both, since
+/// the failure appears only on some underlyings.
+///
+/// So the underlying stays the symbol and the contract is the segment BELOW it:
+/// `.../FNO/BANKNIFTY/2025-09-30-2465000-CE/1min/2026-08.bin`. Each part is
+/// independently inside the bound, the directory tree groups every contract
+/// under its own underlying, and neither field had to grow.
+///
+/// # The strike is PAISA, and it is not a decimal
+///
+/// `CLAUDE.md` §7: prices are `i64` paisa and never a float. A strike rendered
+/// as `24650.00` puts a `.` in a path segment and invites a reader to parse it
+/// back as a float; rendered as `2465000` it is the integer the store already
+/// holds, and it round-trips exactly.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Contract {
+    bytes: [u8; CONTRACT_CAPACITY],
+    len: u8,
+}
+
+impl Contract {
+    /// The contract segment for `kind`, or [`None`] where the kind has none.
+    ///
+    /// `None` for [`Kind::Index`] and [`Kind::Equity`] is the whole point: a
+    /// spot instrument has no expiry and no strike, so it has no contract
+    /// directory and its path is one level shallower. That absence is the
+    /// signal the path builder branches on, rather than a flag beside it.
+    #[must_use]
+    pub fn of(kind: Kind) -> Option<Self> {
+        match kind {
+            Kind::Index | Kind::Equity => None,
+            Kind::Future { expiry } => Self::render(expiry, None),
+            Kind::Option {
+                expiry,
+                strike,
+                side,
+            } => Self::render(expiry, Some((strike, side))),
+        }
+    }
+
+    /// `YYYY-MM-DD-FUT` or `YYYY-MM-DD-<paisa>-CE`.
+    ///
+    /// Returns `None` only if the rendering would exceed
+    /// [`CONTRACT_CAPACITY`], which needs a strike above 999,999,999,999 paisa
+    /// — ten crore rupees a share. Refused rather than truncated: a truncated
+    /// strike names a DIFFERENT contract and would merge two series into one
+    /// file, which is the exact failure this type exists to prevent.
+    fn render(expiry: Expiry, option: Option<(Paisa, OptionSide)>) -> Option<Self> {
+        use std::fmt::Write as _;
+        let mut text = String::with_capacity(CONTRACT_CAPACITY);
+        // `write!` to a String cannot fail; the capacity check below is the
+        // real bound and it is checked explicitly rather than trusted.
+        let _ = write!(
+            text,
+            "{:04}-{:02}-{:02}",
+            expiry.year(),
+            expiry.month(),
+            expiry.day()
+        );
+        match option {
+            None => {
+                let _ = write!(text, "-FUT");
+            }
+            Some((strike, side)) => {
+                let _ = write!(text, "-{}-{}", strike.raw(), side.as_str());
+            }
+        }
+        if text.len() > CONTRACT_CAPACITY {
+            return None;
+        }
+        let mut bytes = [0u8; CONTRACT_CAPACITY];
+        // `get_mut` and not an index: the capacity check above already refused
+        // an over-long rendering, so this cannot be `None` — and writing it as
+        // a fallible lookup means a future change to that check cannot turn
+        // this line into a panic without the compiler saying so.
+        bytes
+            .get_mut(..text.len())?
+            .copy_from_slice(text.as_bytes());
+        Some(Self {
+            bytes,
+            len: u8::try_from(text.len()).ok()?,
+        })
+    }
+
+    /// The rendered contract.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        let n = usize::from(self.len);
+        // Same shape as `Symbol::as_str`, and for the same reason: the
+        // constructor admits only ASCII, and ASCII is valid UTF-8. `get` and
+        // `unwrap_or` rather than an index and an `expect`, because this runs
+        // on the write path for every derivative bar file and a slice index
+        // there is a panic in the one place a panic must not be.
+        core::str::from_utf8(self.bytes.get(..n).unwrap_or(&[])).unwrap_or("")
+    }
+}
+
+impl fmt::Debug for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Contract({})", self.as_str())
+    }
+}
+
+impl fmt::Display for Contract {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::indexing_slicing,
