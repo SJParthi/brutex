@@ -12,6 +12,32 @@
  */
 import { survey, surveyStores } from '$lib/store.svelte.js';
 
+/**
+ * ONE FEED, AS `/feeds.json` SENDS IT.
+ *
+ * Typed because `$state({ all: [] })` infers `never[]`, and every read of a
+ * field off a member of that array is then an error the checker reports at the
+ * READER rather than here — `Property 'wire' does not exist on type 'never'`,
+ * once per use, across /db, /ingest, /autopilot and the layout. One annotation
+ * at the source clears the lot.
+ *
+ * The shape is the server's, read off a live response rather than guessed:
+ * `crates/api` builds it from the descriptor table in `pull::vendor`.
+ *
+ * @typedef {{
+ *   wire: string,
+ *   display: string,
+ *   kind: string,
+ *   kind_label: string,
+ *   verb: string,
+ *   ready: boolean,
+ *   why: string,
+ *   finest?: { rung: string, kind: string, label: string,
+ *              tick_stream: boolean, conflated: boolean }
+ * }} Feed
+ */
+
+/** @type {{ all: Feed[], active: string | null, error: string | null }} */
 export const feeds = $state({ all: [], active: null, error: null });
 
 /* ONE FLIGHT, AND ONE ANSWER PER PAGE LIFE.

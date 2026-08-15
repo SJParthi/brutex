@@ -245,6 +245,7 @@
    *
    * @type {'feed' | 'uni' | 'tf' | 'month' | 'exp' | 'side' | null}
    */
+  /** @type {string | null} */
   let drop = $state(null);
 
   let strikePick = $state(new Set());
@@ -3931,6 +3932,7 @@
   const ROW = 40;
   const HEAD = 30; /* the sticky header covers the top of the scroll box */
   const OVER = 6;
+  /** @type {HTMLElement | null} */
   let scroller = $state(null);
   let scrollTop = $state(0);
   let viewportH = $state(600);
@@ -3971,8 +3973,11 @@
      scrolled into view, so the id it names is always in the DOM.
      ====================================================================== */
   let cursor = $state(-1);
+  /** @type {string | null} */
   let openKey = $state(null); /* the row whose detail drawer is open */
+  /** @type {HTMLInputElement | null} */
   let searchEl = $state(null);
+  /** @type {HTMLElement | null} */
   let drawerEl = $state(null);
 
   /* ======================================================================
