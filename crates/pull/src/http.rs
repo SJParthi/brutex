@@ -1387,6 +1387,21 @@ fn local_seconds(text: &str) -> Option<i64> {
     let num = |from: usize, to: usize| -> Option<i64> { text.get(from..to)?.parse().ok() };
     let (y, mo, d) = (num(0, 4)?, num(5, 7)?, num(8, 10)?);
     let (h, mi, sec) = (num(11, 13)?, num(14, 16)?, num(17, 19)?);
+    // RANGE-CHECKED, AND THEY WERE NOT. `Day::new` below validates the date
+    // half and nothing validated the clock half at all, so `33:99:99` parsed
+    // and was arithmetically folded into the following day: hour 33 is
+    // 24 + 9, which lands the bar at 09:xx on the NEXT calendar day. A bar
+    // stamped on a day the vendor never sent one for is not a rejected row —
+    // it is a row filed under the wrong date, and the store is append-only, so
+    // it is filed there permanently.
+    //
+    // `?` and not a clamp: `CLAUDE.md` §4 refuses a fallback that hides a
+    // failure, and the caller already treats `None` as an unreadable timestamp.
+    // A leap second would be `60`, which no vendor here sends and which this
+    // deliberately refuses rather than silently rounds.
+    if h > 23 || mi > 59 || sec > 59 {
+        return None;
+    }
     let day = crate::session::Day::new(
         u16::try_from(y).ok()?,
         u8::try_from(mo).ok()?,

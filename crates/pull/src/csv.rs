@@ -336,6 +336,33 @@ struct Tally {
     lines: u64,
     /// The blank lines, plus the header row when the shape declares one.
     skipped: u64,
+    /// Rows whose volume field would not parse and were stored as `0`.
+    ///
+    /// # Why a count and not a refusal
+    ///
+    /// `CLAUDE.md` §4 allows a degrade OR a refusal — "degrade loudly and name
+    /// the reason, or refuse. Never both silently." The substitution below is
+    /// the degrade, and until this counter existed it was the *silently*.
+    ///
+    /// The substitution is also inconsistent with its own neighbour, which is
+    /// how it was found: the comment beside it argues that `None` and `Some(0)`
+    /// are different facts for open interest — "zero open interest is a
+    /// measurement, an unreadable field is not" — and then stores an unreadable
+    /// VOLUME as the measurement `0`. `RawRow::volume` is `i64` and not
+    /// `Option<i64>`, so absence cannot be expressed there without a type
+    /// change that reaches the store format; making it visible is what this
+    /// crate can do without changing what lands.
+    ///
+    /// Two plain integers in the row loop, emitted once where the file ends —
+    /// the same shape gate 17 prescribes and the same one `lines` and `skipped`
+    /// already use.
+    unreadable_volume: u64,
+    /// Rows whose open-interest field would not parse and were stored absent.
+    ///
+    /// Absence here is CORRECT — see [`Self::unreadable_volume`] — but it is
+    /// indistinguishable on the wire from a vendor that simply sends no open
+    /// interest, and those are different facts about the feed.
+    unreadable_open_interest: u64,
 }
 
 /// One decoded file, on the rolling log.
@@ -372,7 +399,21 @@ fn note_decoded(columns: Columns, tally: Tally, rows: usize) {
             .with("rows", telemetry::Value::Uint(rows as u64))
             .with("skipped", telemetry::Value::Uint(tally.skipped))
             .with("fields", telemetry::Value::Uint(columns.count() as u64))
-            .with("header", telemetry::Value::Bool(columns.has_header())),
+            .with("header", telemetry::Value::Bool(columns.has_header()))
+            // THE SUBSTITUTIONS, ON THE SAME LINE AS THE COUNTS THEY QUALIFY. A
+            // `rows` figure that includes rows whose volume this build invented
+            // is not the same fact as one where every field was read, and until
+            // these two appeared there was no way to tell those apart from
+            // outside -- which is the silence §4 forbids, not the substitution
+            // itself.
+            .with(
+                "unreadable_volume",
+                telemetry::Value::Uint(tally.unreadable_volume),
+            )
+            .with(
+                "unreadable_oi",
+                telemetry::Value::Uint(tally.unreadable_open_interest),
+            ),
     );
 }
 
@@ -433,6 +474,8 @@ pub fn decode(body: &str, columns: Columns) -> Result<Vec<RawRow>, CsvError> {
     let mut tally = Tally {
         lines: 0,
         skipped: 0,
+        unreadable_volume: 0,
+        unreadable_open_interest: 0,
     };
     // ONE EVENT PER FILE, ON EITHER OUTCOME. The pass below is per row and
     // logs nothing; this is where its two counters are read. A file that
@@ -532,13 +575,25 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             // read is not a trade — and ABSENT for open interest, because
             // `None` and `Some(0)` are different facts: zero open interest is a
             // measurement, an unreadable field is not.
-            volume: fields
-                .get(at.volume)
-                .and_then(|v| v.trim().parse::<i64>().ok())
-                .unwrap_or(0),
-            open_interest: fields
-                .get(at.open_interest)
-                .and_then(|v| v.trim().parse::<i64>().ok()),
+            volume: {
+                let parsed = fields
+                    .get(at.volume)
+                    .and_then(|v| v.trim().parse::<i64>().ok());
+                if parsed.is_none() {
+                    tally.unreadable_volume = tally.unreadable_volume.saturating_add(1);
+                }
+                parsed.unwrap_or(0)
+            },
+            open_interest: {
+                let parsed = fields
+                    .get(at.open_interest)
+                    .and_then(|v| v.trim().parse::<i64>().ok());
+                if parsed.is_none() {
+                    tally.unreadable_open_interest =
+                        tally.unreadable_open_interest.saturating_add(1);
+                }
+                parsed
+            },
         });
     }
 

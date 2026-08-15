@@ -681,6 +681,7 @@ jobs:
           about census rows_read slices
           not-base32 too-long
           at
+          unreadable_volume unreadable_oi
           '
 
           # THE SECOND BATCH, and why each is not a path segment. The emit
@@ -753,6 +754,22 @@ jobs:
           # `vendor` and `field`, none of which this event carries. Nothing on
           # this path reads Parameter Store, and `resolve.rs` holds no
           # credential of any kind — it crawls a public index site.
+          #
+          # THE FIFTH BATCH — `unreadable_volume` and `unreadable_oi`, from
+          # `csv.rs`. Two counts on the once-per-file decode event, and both name
+          # a SUBSTITUTION this build made: a volume field that would not parse
+          # is stored as `0` and an open interest as absent. CLAUDE.md §4 permits
+          # the degrade and forbids it being silent, and these are what stop it
+          # being silent — `rows` including rows whose volume was invented is not
+          # the same fact as `rows` where every field was read.
+          #
+          # Not path segments. Both are the LEFT side of a `.with(...)` and the
+          # right side is an integer COUNT, never a name; `unreadable_oi` is
+          # abbreviated the way the struct field is not, because the wire key is
+          # read in a column and the struct field is read in prose. §8's shape is
+          # `/<org>/<env>/<vendor>/<field>` and neither word can be any of those
+          # four: `csv.rs` decodes a body that is already in memory, reads no
+          # Parameter Store, and holds no credential.
 
           # ---- group 23: A YEAR-MONTH IN AN ASSERTION. D-0070.
           # `pull::unit::a_daily_bucket_is_an_ist_day_...` asserts the month a
