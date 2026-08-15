@@ -54,7 +54,7 @@ use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
 
-use crate::excursion::{Crossings, Ladder, NEVER, Ppm, Side, crossings};
+use crate::excursion::{Crossings, Ladder, Ladders, NEVER, Ppm, Side, crossings};
 use crate::outcome::Horizon;
 
 /// One (stop, target) variant's result over the whole slice.
@@ -62,8 +62,15 @@ use crate::outcome::Horizon;
 pub struct Cell {
     /// Index into the stop ladder, or `None` for **no stop**.
     pub stop: Option<usize>,
-    /// Index into the target ladder, or `None` for **no target**.
+    /// Index into the target ladder, or **no target**.
     pub target: Option<usize>,
+    /// Index into the trailing ladder, or `None` for **no trailing stop**.
+    ///
+    /// A trailing stop follows the best price seen and fires on the give-back.
+    /// TRAILING TAKE PROFIT is this armed by a target: reach the target rung,
+    /// then trail -- so it is a combination of two rungs rather than a third
+    /// mechanism, and it appears in this table as such.
+    pub trail: Option<usize>,
     /// Round trips taken under this variant.
     pub trades: u64,
     /// Trades that ended above water, resolving ambiguity against you.
@@ -141,7 +148,7 @@ impl Grid {
     pub fn baseline(&self) -> Option<&Cell> {
         self.cells
             .iter()
-            .find(|c| c.stop.is_none() && c.target.is_none())
+            .find(|c| c.stop.is_none() && c.target.is_none() && c.trail.is_none())
     }
 
     /// The variant with the largest pessimistic total.
@@ -198,6 +205,12 @@ struct Candidate {
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the four passes are one procedure and splitting them would hide \
+              that the ladders are derived from the same trades the grid is \
+              then measured against."
+)]
 pub fn evaluate(
     bars: &[Candle],
     column: &Column,
@@ -235,8 +248,11 @@ pub fn evaluate(
             t.exit_bar,
             entry_price,
             side,
-            &probe,
-            &probe,
+            Ladders {
+                stops: &probe,
+                targets: &probe,
+                trails: &probe,
+            },
         );
         adverse.push(peak_adverse(
             bars,
@@ -256,6 +272,12 @@ pub fn evaluate(
     }
     let stops = Ladder::from_excursions(&mut adverse.clone(), rungs).unwrap_or_default();
     let targets = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
+    // THE TRAILING LADDER IS SCALED ON THE FAVOURABLE MOVE, not the adverse one.
+    // A trailing stop is a give-back FROM A PROFIT, so the distance that makes
+    // sense is a fraction of what the move actually offered -- deriving it from
+    // the adverse excursion would size "how much of my gain will I return" by
+    // "how much did it hurt on the way in", which are different quantities.
+    let trails = Ladder::from_excursions(&mut favourable.clone(), rungs).unwrap_or_default();
 
     // PASS THREE: each candidate's path measured ONCE against both ladders.
     let candidates: Vec<Candidate> = timed
@@ -273,8 +295,11 @@ pub fn evaluate(
                     t.exit_bar,
                     entry_price,
                     side,
-                    &stops,
-                    &targets,
+                    Ladders {
+                        stops: &stops,
+                        targets: &targets,
+                        trails: &trails,
+                    },
                 ),
             }
         })
@@ -289,9 +314,22 @@ pub fn evaluate(
     );
     for s in 0..=stops.len() {
         for t in 0..=targets.len() {
-            let stop = (s < stops.len()).then_some(s);
-            let target = (t < targets.len()).then_some(t);
-            cells.push(one_variant(bars, &candidates, stop, target, side));
+            for r in 0..=trails.len() {
+                let stop = (s < stops.len()).then_some(s);
+                let target = (t < targets.len()).then_some(t);
+                let trail = (r < trails.len()).then_some(r);
+                cells.push(one_variant(
+                    bars,
+                    &candidates,
+                    (stops.rungs(), targets.rungs()),
+                    Variant {
+                        stop,
+                        target,
+                        trail,
+                    },
+                    side,
+                ));
+            }
         }
     }
 
@@ -307,16 +345,30 @@ pub fn evaluate(
 ///
 /// Exclusivity is applied here rather than reused, because a stop that fires
 /// early frees the next signal sooner and the sequence genuinely differs.
+#[derive(Clone, Copy)]
+struct Variant {
+    stop: Option<usize>,
+    target: Option<usize>,
+    trail: Option<usize>,
+}
+
 fn one_variant(
     bars: &[Candle],
     candidates: &[Candidate],
-    stop: Option<usize>,
-    target: Option<usize>,
+    rungs: (&[Ppm], &[Ppm]),
+    v: Variant,
     side: Side,
 ) -> Cell {
+    let (stops_rungs, targets_rungs) = rungs;
+    let Variant {
+        stop,
+        target,
+        trail,
+    } = v;
     let mut cell = Cell {
         stop,
         target,
+        trail,
         ..Cell::default()
     };
     let mut open_until: Option<usize> = None;
@@ -330,26 +382,51 @@ fn one_variant(
         let span = c.time_exit.saturating_sub(c.entry);
         let stop_at = stop.map_or(NEVER, |r| c.cross.stop_at(r));
         let target_at = target.map_or(NEVER, |r| c.cross.target_at(r));
+        // The trailing exit competes with the other two: whichever fires first
+        // ends the position, and a trail that never fires is NEVER.
+        let trail_at = trail.map_or(NEVER, |r| c.cross.trail_at(r));
 
-        // PESSIMISTIC: when both are reachable on the same bar, the stop wins.
-        // OPTIMISTIC: the target does. `<=` versus `<` is the whole difference.
-        let pess_off = span.min(stop_at).min(target_at);
-        let opt_off = span.min(if target_at <= stop_at {
-            target_at
-        } else {
-            stop_at
-        });
-        let ended = if stop_at <= pess_off && stop_at != NEVER {
-            Ended::Stop
-        } else if target_at <= pess_off && target_at != NEVER {
-            Ended::Target
-        } else {
-            Ended::Time
-        };
+        // ONE EXIT BAR, TWO ATTRIBUTIONS.
+        //
+        // Which bar a level exit happens on is not in doubt: it is the first bar
+        // any level was reached. What minute data cannot say is WHICH level
+        // filled when a single bar reached both, and that is the only thing the
+        // two readings are entitled to differ about.
+        //
+        // Letting the optimistic case pick a LATER target over an EARLIER stop
+        // was not optimism, it was a different trade -- one held past a stop
+        // that had already fired. It produced a pessimistic total that BEAT the
+        // optimistic one, which is how the error announced itself.
+        let pess_off = span.min(stop_at).min(target_at).min(trail_at);
+        let opt_off = pess_off;
+        // PESSIMISTIC resolves an ambiguous bar as the STOP, so the stop is
+        // tested first. OPTIMISTIC resolves it as the TARGET, so the target is.
+        // That ordering is the entire difference between the two readings.
+        let pess_by = ended_by(stop_at, target_at, trail_at, pess_off, true);
+        let opt_by = ended_by(stop_at, target_at, trail_at, opt_off, false);
+        let ended = pess_by;
 
         let entry_price = bars.get(c.entry).map_or(0, |b| b.open);
-        let pess = realised(bars, c.entry, pess_off, entry_price, side);
-        let opt = realised(bars, c.entry, opt_off, entry_price, side);
+        let stop_ppm = stop.and_then(|r| stops_rungs.get(r).copied());
+        let target_ppm = target.and_then(|r| targets_rungs.get(r).copied());
+        let pess = realised(
+            bars,
+            c.entry,
+            pess_off,
+            entry_price,
+            side,
+            pess_by,
+            level_for(pess_by, stop_ppm, target_ppm),
+        );
+        let opt = realised(
+            bars,
+            c.entry,
+            opt_off,
+            entry_price,
+            side,
+            opt_by,
+            level_for(opt_by, stop_ppm, target_ppm),
+        );
 
         cell.trades = cell.trades.saturating_add(1);
         cell.pessimistic = cell.pessimistic.saturating_add(pess);
@@ -391,14 +468,98 @@ fn one_variant(
 }
 
 /// Close-to-entry move at `entry + offset`, in paisa.
-fn realised(bars: &[Candle], entry: usize, offset: usize, entry_price: i64, side: Side) -> i64 {
-    let exit = bars
-        .get(entry.saturating_add(offset))
-        .map_or(entry_price, |b| b.close);
-    match side {
-        Side::Long => exit.saturating_sub(entry_price),
-        Side::Short => entry_price.saturating_sub(exit),
+fn realised(
+    bars: &[Candle],
+    entry: usize,
+    offset: usize,
+    entry_price: i64,
+    side: Side,
+    by: Ended,
+    level_ppm: Option<Ppm>,
+) -> i64 {
+    // A LEVEL EXIT FILLS AT ITS LEVEL, NOT AT THE BAR'S CLOSE.
+    //
+    // This priced every exit at the close, which is right for a time exit and
+    // wrong for the other two: a stop order fills where the stop was, and a
+    // target order where the target was, and the bar's close is neither. On a
+    // bar that ran far past the level the close overstates the loss and
+    // understates the gain, both by however far the bar continued.
+    //
+    // It also made the pessimistic and optimistic readings identical. Resolving
+    // an ambiguous bar as "the stop first" instead of "the target first" picked
+    // the same BAR, so both computed the same close and agreed by construction
+    // -- and the test asserting they agree passed without ever exercising the
+    // disagreement it was written for.
+    match (by, level_ppm) {
+        (Ended::Stop, Some(ppm)) => -paisa_of(ppm, entry_price),
+        (Ended::Target, Some(ppm)) => paisa_of(ppm, entry_price),
+        // A trailing exit's level moves with the peak, so it is not a fixed
+        // distance from entry and cannot be derived from the rung alone. The
+        // bar's close stands in, and that is an ADMISSION rather than a model:
+        // it is the one exit here whose fill price is approximate.
+        // UNVERIFIED how far it differs; no measurement has been taken.
+        _ => {
+            let exit = bars
+                .get(entry.saturating_add(offset))
+                .map_or(entry_price, |b| b.close);
+            match side {
+                Side::Long => exit.saturating_sub(entry_price),
+                Side::Short => entry_price.saturating_sub(exit),
+            }
+        }
     }
+}
+
+/// Which exit fired first, with ties broken by the caller's pessimism.
+///
+/// `stop_wins` is the whole pessimistic/optimistic split: when a stop and a
+/// target were both reachable on the same bar, minute data cannot say which
+/// came first, so the pessimistic reading takes the stop and the optimistic one
+/// takes the target.
+const fn ended_by(
+    stop_at: usize,
+    target_at: usize,
+    trail_at: usize,
+    chosen: usize,
+    stop_wins: bool,
+) -> Ended {
+    let stop_fired = stop_at != NEVER && stop_at <= chosen;
+    let target_fired = target_at != NEVER && target_at <= chosen;
+    let trail_fired = trail_at != NEVER && trail_at <= chosen;
+    if stop_fired && target_fired {
+        return if stop_wins {
+            Ended::Stop
+        } else {
+            Ended::Target
+        };
+    }
+    if stop_fired {
+        Ended::Stop
+    } else if target_fired {
+        Ended::Target
+    } else if trail_fired {
+        // A trailing exit is a stop by nature -- it gives back part of a gain --
+        // but it is priced from the peak rather than from entry, so it is
+        // reported as a Time exit and priced at the close. See `realised`.
+        Ended::Time
+    } else {
+        Ended::Time
+    }
+}
+
+/// The level a given exit reason fills at, in parts per million from entry.
+const fn level_for(by: Ended, stop_ppm: Option<Ppm>, target_ppm: Option<Ppm>) -> Option<Ppm> {
+    match by {
+        Ended::Stop => stop_ppm,
+        Ended::Target => target_ppm,
+        Ended::Time => None,
+    }
+}
+
+/// A parts-per-million distance as a paisa move against `price`.
+fn paisa_of(ppm: Ppm, price: i64) -> i64 {
+    let scaled = i128::from(ppm).saturating_mul(i128::from(price)) / 1_000_000;
+    i64::try_from(scaled).unwrap_or(i64::MAX)
 }
 
 /// The worst the path went against the position, in parts per million.
@@ -504,7 +665,7 @@ mod tests {
         );
         let base = g.baseline().expect("a baseline");
         for c in &g.cells {
-            if c.stop.is_none() && c.target.is_none() {
+            if c.stop.is_none() && c.target.is_none() && c.trail.is_none() {
                 continue;
             }
             assert!(

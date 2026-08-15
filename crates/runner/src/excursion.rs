@@ -152,6 +152,21 @@ impl Ladder {
     }
 }
 
+/// The three ladders a path is measured against.
+///
+/// Bundled because they always travel together and a function taking six loose
+/// parameters invites a caller to swap two of them silently -- the stop and the
+/// target ladders have the same type and opposite meanings.
+#[derive(Clone, Copy, Debug)]
+pub struct Ladders<'a> {
+    /// Distance from entry, against the position.
+    pub stops: &'a Ladder,
+    /// Distance from entry, for the position.
+    pub targets: &'a Ladder,
+    /// Give-back from the running peak.
+    pub trails: &'a Ladder,
+}
+
 /// Where a trade's path first crossed each rung.
 ///
 /// Offsets are **bars after the entry bar**, so `0` means the entry bar itself
@@ -162,6 +177,13 @@ pub struct Crossings {
     adverse: Vec<usize>,
     /// First offset at which the favourable excursion reached rung `i`.
     favourable: Vec<usize>,
+    /// First offset at which the retreat from the running peak reached rung `i`.
+    ///
+    /// A TRAILING stop: the level follows the best price seen and fires on the
+    /// give-back, not on the distance from entry. Measured in the same pass and
+    /// for the same reason -- the largest retreat so far is monotone even though
+    /// the retreat itself is not.
+    trailing: Vec<usize>,
     /// Offsets on which BOTH a stop and a target rung were newly reached, so
     /// the bar's own order decides and one-minute data does not carry it.
     ambiguous: Vec<usize>,
@@ -183,6 +205,21 @@ impl Crossings {
     #[must_use]
     pub fn target_at(&self, rung: usize) -> usize {
         self.favourable.get(rung).copied().unwrap_or(NEVER)
+    }
+
+    /// The offset a trailing stop at rung `i` would have exited on, or [`NEVER`].
+    ///
+    /// # This is the exit that makes a sniper setup pay
+    ///
+    /// A fixed stop asks "how far from where I got in". A trailing stop asks
+    /// "how much of what I made am I willing to give back", which is the
+    /// question that lets a winner run while still cutting it. TRAILING TAKE
+    /// PROFIT is this same lookup ARMED by a target rung: reach the target,
+    /// then trail -- so it composes from the two ladders rather than needing a
+    /// third mechanism.
+    #[must_use]
+    pub fn trail_at(&self, rung: usize) -> usize {
+        self.trailing.get(rung).copied().unwrap_or(NEVER)
     }
 
     /// Offsets where a stop and a target were both newly reached on one bar.
@@ -236,12 +273,17 @@ pub fn crossings(
     to: usize,
     entry: i64,
     side: Side,
-    stops: &Ladder,
-    targets: &Ladder,
+    ladders: Ladders<'_>,
 ) -> Crossings {
+    let Ladders {
+        stops,
+        targets,
+        trails,
+    } = ladders;
     let mut out = Crossings {
         adverse: vec![NEVER; stops.len()],
         favourable: vec![NEVER; targets.len()],
+        trailing: vec![NEVER; trails.len()],
         ambiguous: Vec::new(),
         last: 0,
     };
@@ -249,12 +291,24 @@ pub fn crossings(
         return out;
     }
 
-    // Cursors into the two ladders. Both only advance: once a rung is crossed
-    // it stays crossed, because MAE and MFE are running maxima.
+    // Cursors into the three ladders. All only advance: once a rung is crossed
+    // it stays crossed, because MAE, MFE and the trailing give-back are all
+    // running maxima.
     let mut stop_cursor = 0_usize;
     let mut target_cursor = 0_usize;
+    let mut trail_cursor = 0_usize;
     let mut mae: Ppm = 0;
     let mut mfe: Ppm = 0;
+    // THE TRAILING PAIR. `peak` is the best price seen so far and only ever
+    // improves; `give_back` is the largest retreat FROM that peak and, being a
+    // running maximum, is monotone in exactly the way the merge needs.
+    //
+    // That monotonicity is the whole reason a trailing stop costs no more than
+    // a fixed one. The retreat itself wobbles -- it shrinks whenever a new peak
+    // is made -- but "has a trail of `d` fired by bar j" asks about the LARGEST
+    // retreat so far, and that never decreases.
+    let mut peak: i64 = entry;
+    let mut give_back: Ppm = 0;
 
     for offset in 0..=to.saturating_sub(from) {
         let Some(bar) = bars.get(from.saturating_add(offset)) else {
@@ -276,8 +330,32 @@ pub fn crossings(
             Side::Long => favourable_price.saturating_sub(entry),
             Side::Short => entry.saturating_sub(favourable_price),
         };
-        mae = mae.max(bps_of(adverse_move, entry));
-        mfe = mfe.max(bps_of(favourable_move, entry));
+        mae = mae.max(ppm_of(adverse_move, entry));
+        mfe = mfe.max(ppm_of(favourable_move, entry));
+
+        // The peak improves first, then the retreat is measured FROM it. Order
+        // matters: measuring the retreat before updating the peak would compare
+        // this bar's low against the previous bar's high and report a give-back
+        // one bar late on every new high.
+        peak = match side {
+            Side::Long => peak.max(favourable_price),
+            Side::Short => peak.min(favourable_price),
+        };
+        let retreat = match side {
+            Side::Long => peak.saturating_sub(adverse_price),
+            Side::Short => adverse_price.saturating_sub(peak),
+        };
+        give_back = give_back.max(ppm_of(retreat, entry));
+        while trails
+            .rungs()
+            .get(trail_cursor)
+            .is_some_and(|&rung| give_back >= rung)
+        {
+            if let Some(slot) = out.trailing.get_mut(trail_cursor) {
+                *slot = offset;
+            }
+            trail_cursor = trail_cursor.saturating_add(1);
+        }
 
         let stop_before = stop_cursor;
         while stops
@@ -317,7 +395,7 @@ pub fn crossings(
 /// Integer arithmetic at `i128` width and narrowed once: a paisa move times
 /// 10,000 leaves `i64` for a large enough move, and a wrapped threshold would
 /// compare a huge adverse excursion as a tiny one.
-fn bps_of(move_paisa: i64, entry: i64) -> Ppm {
+fn ppm_of(move_paisa: i64, entry: i64) -> Ppm {
     if move_paisa <= 0 || entry <= 0 {
         return 0;
     }
@@ -331,7 +409,7 @@ fn bps_of(move_paisa: i64, entry: i64) -> Ppm {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Ladder, NEVER, Ppm, Side, crossings};
+    use super::{Ladder, Ladders, NEVER, Ppm, Side, crossings};
     use indicators::{Candle, OI_NULL};
 
     fn bar(minute: i64, low: i64, high: i64) -> Candle {
@@ -376,7 +454,18 @@ mod tests {
         ];
         let stops = ladder(&[5_000, 15_000, 30_000]);
         let targets = ladder(&[5_000]);
-        let c = crossings(&bars, 0, 2, entry, Side::Long, &stops, &targets);
+        let c = crossings(
+            &bars,
+            0,
+            2,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &stops,
+                targets: &targets,
+                trails: &targets,
+            },
+        );
 
         assert_eq!(c.stop_at(0), 0, "5,000 ppm was reached on the first bar");
         assert_eq!(c.stop_at(1), 1, "15,000 ppm on the second");
@@ -391,8 +480,30 @@ mod tests {
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry - 1_000, entry + 1_000)];
         let rungs = ladder(&[5_000]);
-        let long = crossings(&bars, 0, 0, entry, Side::Long, &rungs, &rungs);
-        let short = crossings(&bars, 0, 0, entry, Side::Short, &rungs, &rungs);
+        let long = crossings(
+            &bars,
+            0,
+            0,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
+        let short = crossings(
+            &bars,
+            0,
+            0,
+            entry,
+            Side::Short,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
 
         assert_eq!(long.stop_at(0), 0, "a long is stopped by the LOW");
         assert_eq!(long.target_at(0), 0, "and targeted by the HIGH");
@@ -408,7 +519,18 @@ mod tests {
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry - 1_000, entry + 1_000)];
         let rungs = ladder(&[5_000]);
-        let c = crossings(&bars, 0, 0, entry, Side::Long, &rungs, &rungs);
+        let c = crossings(
+            &bars,
+            0,
+            0,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
 
         assert_eq!(
             c.ambiguous(),
@@ -422,7 +544,18 @@ mod tests {
         let entry = 100_000_i64;
         let bars = vec![bar(0, entry, entry + 1_000), bar(1, entry, entry + 2_000)];
         let rungs = ladder(&[5_000]);
-        let c = crossings(&bars, 0, 1, entry, Side::Long, &rungs, &rungs);
+        let c = crossings(
+            &bars,
+            0,
+            1,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
         assert!(c.ambiguous().is_empty(), "nothing went adverse at all");
         assert_eq!(c.stop_at(0), NEVER);
         assert_eq!(c.target_at(0), 0);
@@ -462,9 +595,31 @@ mod tests {
     fn an_empty_window_or_a_zero_entry_records_nothing_rather_than_panicking() {
         let rungs = ladder(&[5_000]);
         let bars = vec![bar(0, 90_000, 110_000)];
-        let c = crossings(&bars, 0, 0, 0, Side::Long, &rungs, &rungs);
+        let c = crossings(
+            &bars,
+            0,
+            0,
+            0,
+            Side::Long,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
         assert_eq!(c.stop_at(0), NEVER, "a zero entry price divides nothing");
-        let d = crossings(&bars, 5, 1, 100_000, Side::Long, &rungs, &rungs);
+        let d = crossings(
+            &bars,
+            5,
+            1,
+            100_000,
+            Side::Long,
+            Ladders {
+                stops: &rungs,
+                targets: &rungs,
+                trails: &rungs,
+            },
+        );
         assert_eq!(d.stop_at(0), NEVER, "an inverted window walks no bar");
     }
 }
