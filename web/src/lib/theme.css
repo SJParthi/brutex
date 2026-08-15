@@ -292,7 +292,13 @@
      THE STEPS STAY CLOSE for the reason the old comment gave: two adjacent
      sizes that jump too far read as two documents. What changed is the floor,
      not the spacing. */
-  --fs-micro: 11.5px;
+  /* 12px, UP FROM 11.5. Measured on /db against a 16px base: the column
+     headers, the strip captions and every `.k` label were rendering four and a
+     half pixels under the body text, and the one number-bearing grid on the
+     page was under it too. The floor moved once before for the same reason and
+     the comment above records that the SPACING is what must not change -- so
+     this is the floor again and the steps above it are untouched. */
+  --fs-micro: 12px;
   --fs-mini: 12.5px;
   --fs-xs: 13.5px;
   --fs-sm: 15px;
@@ -670,7 +676,7 @@ body {
   flex: none;
 }
 .pane-title {
-  font-size: 10.5px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--faint);
@@ -1317,7 +1323,7 @@ button.status.bad:hover {
   line-height: var(--lh-tight);
 }
 .stat .n {
-  font-size: 10.5px;
+  font-size: var(--fs-micro);
   color: var(--faint);
 }
 

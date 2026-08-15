@@ -4900,7 +4900,7 @@
               universeCount.get(universe).members - universeCount.get(universe).held
             )} not stored · {fmt(universed.length)} instrument-month(s) stored in it
           {:else}
-            {fmt(deco.length)} instrument-month(s), joined to no membership list
+            {fmt(deco.length)} held · no membership list
           {/if}
           {#if outsideMaster && outsideMaster.months > 0}
             · {fmt(outsideMaster.months)} stored instrument-month(s) across {fmt(
@@ -5014,7 +5014,12 @@
               timeframe
             )}
           {:else}
-            {fmt(tfAll.length)} rung(s) held · {tfAll.map(([tf, n]) => `${tf} ${fmt(n)}`).join(' · ')}
+            <!-- THE COUNT, NOT THE ROLL-CALL. Nine rungs spelled out needed
+                 581px in a 143px cell, so the list was cut after the second
+                 and the count itself never appeared. Every rung and its tally
+                 is one click away in the menu below, and the whole string is
+                 on this cell's title. -->
+            {fmt(tfAll.length)} rung(s) held
           {/if}
         </span>
       </div>
@@ -5127,7 +5132,7 @@
               monthCards.find((m) => m.month === month)?.n ?? 0
             )} row(s) · {pctText(monthCards.find((m) => m.month === month)?.pct ?? null)} covered
           {:else}
-            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} with holes{#if unprovenMonths > 0}
+            {fmt(monthCards.length)} month(s) · {fmt(holeMonths)} holes{#if unprovenMonths > 0}
               · <span title={SOLE_WHY}>{fmt(unprovenMonths)} not comparable</span>{/if}
           {/if}
         </span>
@@ -6987,8 +6992,11 @@
       {:else if loading && rows.length === 0}
         reading this feed's store — every count below is this feed's store
       {:else}
-        every count below is this feed's store · {fmt(deco.length)} instrument-month(s) held · read
-        {clock(fetchedAt)}
+        <!-- THE COUNT AND THE CLOCK. "every count below is this feed's
+             store" is a standing fact about the page, identical on every load,
+             and it was taking the width the two live numbers needed. It is on
+             this cell's own title. -->
+        {fmt(deco.length)} held · read {clock(fetchedAt)}
       {/if}
     </span>
   </div>
@@ -7491,9 +7499,23 @@
      * The full sentence is on the `title`, so nothing is lost to the pointer
      * or to a screen reader; what is lost is one caption overwriting another. */
     max-width: 100%;
+    /* TWO LINES, NOT ONE CLIPPED ONE.
+     *
+     * Measured: these captions need 156px to 581px and the cell gives 143px, so
+     * every one of the six was cut mid-word -- "9 rung(s) held · 1min 1 · 3m…",
+     * "every count below is this fe…". A caption that stops before its first
+     * fact is not a shorter caption, it is a blank one that costs a line.
+     *
+     * Clamped at two so a long one cannot push the strip open, and the whole
+     * sentence is still on the `title`. The leading count -- which is the fact
+     * these carry -- now fits in every one of them. */
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    line-height: 1.35;
   }
   .strip .cell > .count.warn {
     color: var(--warn);
