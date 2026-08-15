@@ -501,6 +501,79 @@ impl fmt::Display for Contract {
     clippy::panic
 )]
 mod tests {
+
+    /// EVERY GUARD ON `Contract` REFUSES, and each is asserted separately.
+    ///
+    /// These are the arms a mutation survives in: a capacity check deleted, a
+    /// comparison flipped, a byte filter removed. Each one lets a name through
+    /// that would either be TRUNCATED — naming a different contract, merging
+    /// two series into one file — or would carry a byte a path segment may not.
+    #[test]
+    fn a_contract_refuses_what_it_cannot_hold_and_what_a_path_may_not_carry() {
+        // AT THE BOUND, and one past it. `parse` is the inverse of `as_str`,
+        // so the two must agree about exactly where the edge is.
+        let at = "A".repeat(CONTRACT_CAPACITY);
+        assert_eq!(
+            Contract::parse(&at).map(|c| c.as_str().len()),
+            Some(CONTRACT_CAPACITY),
+            "{CONTRACT_CAPACITY} bytes is inside"
+        );
+        assert_eq!(
+            Contract::parse(&"A".repeat(CONTRACT_CAPACITY + 1)),
+            None,
+            "one past it is refused, never truncated: a truncated contract \
+             names a DIFFERENT contract"
+        );
+        assert_eq!(Contract::parse(""), None, "and empty is not a contract");
+
+        // A BYTE A PATH SEGMENT MAY NOT CARRY. `/` would escape the directory
+        // it names; lower case and a dot are simply not this grammar.
+        for bad in [
+            "2025-09-30/FUT",
+            "2025-09-30-fut",
+            "2025-09-30-24650.5-CE",
+            "a b",
+        ] {
+            assert_eq!(Contract::parse(bad), None, "must refuse: {bad}");
+        }
+
+        // AND THE RENDERER'S OWN BOUND. A strike large enough to overflow the
+        // segment is refused rather than written short — the same rule from the
+        // other direction, and the only way to reach `render`'s length check.
+        let huge = Kind::Option {
+            expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+            strike: crate::price::Paisa::from_raw(i64::MAX),
+            side: OptionSide::Call,
+        };
+        assert_eq!(
+            Contract::of(huge),
+            None,
+            "a strike that cannot fit the segment is refused, not truncated"
+        );
+
+        // THE ROUND TRIP HOLDS for every shape this build files.
+        for kind in [
+            Kind::Future {
+                expiry: Expiry::new(2025, 9, 30).expect("a real expiry"),
+            },
+            Kind::Option {
+                expiry: Expiry::new(2024, 1, 4).expect("a real expiry"),
+                strike: crate::price::Paisa::from_raw(1_920_000),
+                side: OptionSide::Put,
+            },
+        ] {
+            let made = Contract::of(kind).expect("it renders");
+            assert_eq!(
+                Contract::parse(made.as_str()),
+                Some(made),
+                "as_str and parse are inverses"
+            );
+        }
+
+        // AND SPOT HAS NO CONTRACT AT ALL, which is what the path branches on.
+        assert_eq!(Contract::of(Kind::Index), None);
+        assert_eq!(Contract::of(Kind::Equity), None);
+    }
     use super::*;
     use std::collections::HashMap;
 
