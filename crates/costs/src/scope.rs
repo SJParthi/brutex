@@ -99,10 +99,32 @@ impl core::fmt::Display for Segment {
 /// ```
 #[must_use]
 pub const fn is_cost_free(segment: Segment) -> bool {
-    // The underlying is an index in every variant this enum has, so the rule
-    // reduces to its second clause. Written as the negation of `is_option`
-    // rather than as its own list, so the two can never disagree.
-    !segment.is_option()
+    // AN EXHAUSTIVE MATCH, AND THE ARMS ARE THE POINT.
+    //
+    // This was `!segment.is_option()`, justified by a comment reading "the
+    // underlying is an index in every variant this enum has, so the rule
+    // reduces to its second clause". That reduction is TRUE TODAY and stops
+    // being true the moment a non-index variant is added.
+    //
+    // The failure it would cause is silent and expensive. An EQUITY spot is
+    // tradeable -- you buy real shares, and brokerage, STT, stamp duty, the
+    // exchange charge and GST all apply. Under the old form `EquitySpot` would
+    // have answered `is_cost_free = true`, reporting zero charges on a trade
+    // that really paid them, with no compile error and no failing test.
+    //
+    // Written out, a new variant is a COMPILE ERROR here instead. Whoever adds
+    // one has to say which side it falls on, which is the only moment anybody
+    // will have the context to answer correctly. That matters at step three of
+    // the stated rollout -- indices first, then F&O stocks -- and `Segment`
+    // has no equity variant today, so the charge path for one does not exist
+    // yet either.
+    match segment {
+        // Not tradeable. An index level is a number, not an instrument: no
+        // order can be placed on it, so nothing charges for one.
+        Segment::IndexSpot | Segment::IndexFuture => true,
+        // The whole subject of this crate.
+        Segment::IndexOption => false,
+    }
 }
 
 /// The exact complement of [`is_cost_free`].
