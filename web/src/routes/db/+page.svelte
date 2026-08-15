@@ -2842,9 +2842,39 @@
    * `expiryRefusal` the Contract strip uses, so the two cannot disagree about
    * whether this store holds one.
    */
-  const CONTRACT_COLS = new Set(['exp', 'dte', 'side', 'strike']);
+  /* WHAT KIND OF THING IS ON SCREEN, which is what decides the columns.
+   *
+   * A spot index has no expiry and no strike. A FUTURE has an expiry and no
+   * strike. An OPTION has both, plus a side. Drawing all four contract columns
+   * for a spot store meant four columns of "-" on every row; drawing strike and
+   * type for a futures selection would mean two more.
+   *
+   * Read off the rows the query actually leaves (`scoped`) rather than off the
+   * page being viewed, so paging to row 51 cannot change which columns exist.
+   * `side` is the option marker because only an option has one; an expiry with
+   * no side is a future. Both come from the name, parsed once per row when the
+   * store is read — see `contractOf` and `expiryOf`.
+   */
+  const shape = $derived.by(() => {
+    let future = false;
+    let option = false;
+    for (const r of scoped) {
+      if (r.side) option = true;
+      else if (r.expiry) future = true;
+      if (option && future) break;
+    }
+    return { future, option, contract: future || option };
+  });
+
+  const OPTION_COLS = new Set(['side', 'strike']);
+  const FUTURE_COLS = new Set(['exp', 'dte']);
   const BAR_SHOWN = $derived(
-    BAR_COLS.filter((c) => !c.none && !(expiryRefusal && CONTRACT_COLS.has(c.key)))
+    BAR_COLS.filter(
+      (c) =>
+        !c.none &&
+        !(!shape.contract && FUTURE_COLS.has(c.key)) &&
+        !(!shape.option && OPTION_COLS.has(c.key))
+    )
   );
   const BAR_HIDDEN = $derived(BAR_COLS.length - BAR_SHOWN.length);
 
@@ -5667,7 +5697,24 @@
            or a session count at a rung nobody has a session size for. Those
            render the em dash and `blocked.tsub` names which absence it is.
            ============================================================== -->
-      <p class="count">
+      <!-- ==================================================================
+           THE NUMBERS ARE THE HEADLINE; THE CLAUSES ARE ON HOVER.
+
+           Every figure here carried a trailing `.u` clause, and read end to end
+           the line came out as three hundred and nineteen characters of running
+           prose: "BARS 8,470 · 20 session-equivalents COMPLETE 0 of 9 · 0
+           short · 9 not comparable BARS MISSING 0 · 0 whole sessions, vs the
+           fullest instrument each month COVERAGE — every row here is the only
+           one stored at its (month, rung), so each is its own denominator and
+           there is no ratio MONTHS 1 Aug 2026 → Aug 2026 · 0 with holes".
+
+           Five numbers matter and they were buried in it. `terse` hides the
+           clauses and keeps every one of them on the title, so the qualifier is
+           one hover away rather than in the way of the figure it qualifies.
+           Nothing is deleted — the markup, the counts and the reasons are all
+           still built; only their default visibility changed.
+           ================================================================== -->
+      <p class="count terse">
         <span class="k">Bars</span>
         {#key flash.bars?.n}
           <b
@@ -6243,7 +6290,8 @@
         >
           <table
             class="bgrid lean"
-            class:nocontract={!!expiryRefusal}
+            class:nofuture={!shape.contract}
+            class:nooption={!shape.option}
             style="min-width:{BAR_WIDTH}px"
           >
             <colgroup>
@@ -6542,12 +6590,11 @@
               <p class="bnote ok">
                 <b>{fmt(barsRead)}</b> bar(s) read from <b>{fmt(barPlan.read.length)}</b>
                 instrument-month file(s); the census claims <b>{fmt(barsClaimed)}</b> for the same
-                files. <b>{fmt(BAR_SHOWN.length)}</b> of {BAR_COLS.length} columns are drawn;
-                the other <b>{fmt(BAR_HIDDEN)}</b> are hidden because nothing here can fill them —
-                {fmt(BAR_UNSOURCED)} have no source on this wire (pre-market %, moneyness,
-                intrinsic, extrinsic and the six greeks){expiryRefusal
-                  ? ', and 4 describe a contract, which this store holds none of'
-                  : ''}. They return the moment there is a value to put in them.
+                files. <b>{fmt(BAR_SHOWN.length)}</b> of {BAR_COLS.length} columns drawn<span
+                  class="u"
+                  title="{fmt(BAR_UNSOURCED)} have no source on this wire — pre-market %, moneyness, intrinsic, extrinsic and the six greeks. The rest describe a contract this selection does not hold. Columns follow what is on screen: spot shows none of them, a future adds expiry and days-to-expiry, an option adds type and strike on top."
+                  >, the rest have nothing to put in them</span
+                >.
               </p>
             {/if}
             {#each barDisagree as f (f.key)}
@@ -6720,10 +6767,6 @@
       <span class="of"
         ><kbd class="kbd">↑</kbd><kbd class="kbd">↓</kbd> move, <kbd class="kbd">Enter</kbd> opens,
         <kbd class="kbd">/</kbd> filters</span
-      >
-      <span class="of"
-        >a month's denominator is the fullest instrument stored for it, so a session NSE never held
-        is never counted as missing — and a whole trading day that never landed always is.</span
       >
     </p>
     </div>
@@ -9048,6 +9091,22 @@
   .bgrid thead th.numh {
     text-align: right;
   }
+  /* THE STATS LINE KEEPS ITS FIGURES AND HIDES ITS CLAUSES. See the comment
+     at the `<p class="count terse">` for the sentence this replaced. The `.u`
+     spans still render into the accessibility tree and still carry their
+     titles; they are simply not competing with the numbers for the eye. */
+  .count.terse > .u,
+  .count.terse .u {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
   /* ------------------------------------------------------------------
      THE FOURTEEN COLUMNS THAT SAY NOTHING ARE NOT DRAWN.
 
@@ -9081,11 +9140,27 @@
     display: none;
   }
 
-  /* The contract four, on the same condition the Contract strip uses, so the
-     two cannot disagree about whether this store holds a contract. */
-  .bgrid.lean.nocontract > colgroup > col:nth-child(n + 12):nth-child(-n + 15),
-  .bgrid.lean.nocontract > thead > tr > th:nth-child(n + 12):nth-child(-n + 15),
-  .bgrid.lean.nocontract > tbody > tr > td:nth-child(n + 12):nth-child(-n + 15) {
+  /* EXPIRY (12) AND DAYS-TO-EXPIRY (13) belong to anything with a contract, so
+     they appear for a future and for an option and for nothing else. */
+  .bgrid.lean.nofuture > colgroup > col:nth-child(12),
+  .bgrid.lean.nofuture > colgroup > col:nth-child(13),
+  .bgrid.lean.nofuture > thead > tr > th:nth-child(12),
+  .bgrid.lean.nofuture > thead > tr > th:nth-child(13),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(12),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(13) {
+    display: none;
+  }
+
+  /* TYPE (14) AND STRIKE (15) belong to an OPTION only. A future has an expiry
+     and no strike, so a futures selection keeps 12 and 13 and loses these two.
+     That is the whole difference between the two contract shapes, and it is
+     the reason these are two rules rather than one range. */
+  .bgrid.lean.nooption > colgroup > col:nth-child(14),
+  .bgrid.lean.nooption > colgroup > col:nth-child(15),
+  .bgrid.lean.nooption > thead > tr > th:nth-child(14),
+  .bgrid.lean.nooption > thead > tr > th:nth-child(15),
+  .bgrid.lean.nooption > tbody > tr > td:nth-child(14),
+  .bgrid.lean.nooption > tbody > tr > td:nth-child(15) {
     display: none;
   }
 
