@@ -1989,6 +1989,23 @@
   const windowOk = $derived(windowDays > 0);
 
   /**
+   * WHETHER THE WINDOW REACHES OUTSIDE THE HOLIDAY TABLE THIS PAGE CARRIES.
+   *
+   * `false` while no window is picked — an absent window is not outside
+   * anything, and saying it is would put a caveat on a number nobody asked for.
+   *
+   * It decides whether the census footer's fold OPENS ITSELF. Outside the
+   * table's range every "expected" count can be one session too high, so that
+   * paragraph stops being a definition and becomes a caveat on a number that is
+   * on screen — and a limit that applies right now is not something to make an
+   * operator hunt for. Inside it, the same paragraph is a definition and folds
+   * away with the rest.
+   */
+  const outsideHolidayTable = $derived(
+    windowOk && (!holidaysKnownFor(from) || !holidaysKnownFor(to))
+  );
+
+  /**
    * THE WINDOW ASKED FOR, AGAINST THE DAYS THE FOLDER ACTUALLY HOLDS.
    *
    * `null` unless there is something to say — a REST feed, an unread folder, a
@@ -4779,7 +4796,7 @@
            DRAWN. Without this the form kept its 5fr and the vacated 4fr stayed
            on screen as a column of nothing — the panel removed, its hole left
            behind. -->
-      <div class="cols" class:solo={phase === 'idle'}>
+      <div class="cols">
         <!-- ====================================== THE CONTROL STRIP =======
              ONE PANEL, and every control in it is a labelled dropdown standing
              in the same row as its peers: the feed across the top, then
@@ -5979,11 +5996,34 @@
             </p>
           {/if}
 
-          {#each cautions as c (c)}
-            <p class="caution">
-              <span class="tag warn">caution</span><span class="msg">{c}</span>
-            </p>
-          {/each}
+          <!-- ══ FOLDED, NOT DELETED, AND THE COUNT IS THE HEADLINE ══
+
+               Every one of these is a real caution — a rung this build does not
+               fetch, a store with no directory for it, a window outside the
+               folder's span — and §4 requires each to be named. What it does
+               not require is all of them open, all at once, above the button,
+               as full paragraphs. Five stacked yellow blocks is how a page
+               teaches an operator to scroll past yellow blocks, and then the
+               sixth one is the one that mattered.
+
+               So the COUNT is always visible and the sentences are one click
+               away. Nothing is lost, nothing is summarised, and the disclosure
+               opens itself when there is exactly one — a single caution has
+               nothing to fold and hiding it would only add a click. -->
+          {#if cautions.length > 0}
+            <details class="cautions" open={cautions.length === 1}>
+              <summary>
+                <span class="tag warn">caution</span>
+                {n(cautions.length)}
+                {cautions.length === 1 ? 'thing' : 'things'} to know before this run
+              </summary>
+              {#each cautions as c (c)}
+                <p class="caution">
+                  <span class="msg">{c}</span>
+                </p>
+              {/each}
+            </details>
+          {/if}
 
           <details class="wire">
             <summary>What goes on the wire</summary>
@@ -6609,25 +6649,47 @@
           </div>
         </div>
 
-        <p class="hint foot">
-          Stored is <span class="mono">/store.json?feed={feeds.active}</span> — one row per
-          instrument-month-timeframe, read once per feed and again after every pull. Expected is the
-          NSE sessions INSIDE {windowOk ? `${dayLabel(from)} – ${dayLabel(to)}` : 'the window'},
-          not the whole month file, times the rung's bars per session. A month with no row at all is
-          <b>never pulled</b>, which is not a zero and is never drawn as one. <b>retrying</b> and
-          <b>failed</b> are <span class="mono">/ingest/status.json</span>'s evidence — the sweep's
-          own ladder — and appear only where that route names them.
-        </p>
-        <!-- THE CALENDAR'S OWN LIMIT, BESIDE THE NUMBER IT BOUNDS. Every
-             "expected" above is only as good as the holiday table behind it,
-             and that table has a first and a last day. -->
-        <p class="hint foot" class:warn={!windowOk ? false : !holidaysKnownFor(from) || !holidaysKnownFor(to)}>
-          The expected counts exclude weekends and the {n(HOLIDAY_COUNT)} NSE holidays this page carries,
-          which cover {dayLabel(HOL_FROM)} – {dayLabel(HOL_THRU)}. Outside those dates a weekday is
-          ASSUMED to be a session, so an expectation there can be one session too high and a month
-          that is actually complete can read as short. That is a limit of this page's table, not a
-          finding about the store.
-        </p>
+        <!-- ══ TWO FOOTERS FOLDED INTO ONE DISCLOSURE ══
+
+             Both were true, both were long, and both drew under the census on
+             every load whether or not anything on screen depended on them. One
+             defined `stored` and `expected`; the other stated the holiday
+             table's own bounds. Together they were a wall of prose under a
+             table, which is where a reader stops reading and therefore where a
+             page should put the least.
+
+             NOT DELETED — §4's limit-stating is exactly what the second one
+             does, and `docs/06-limits.md` is the other place it lives. Folded,
+             so the reader who wants the definitions clicks once and the reader
+             who wants the numbers is not made to scroll past them.
+
+             The fold OPENS ITSELF when the window reaches outside the holiday
+             table, because there the second paragraph stops being a definition
+             and becomes a caveat on a number that is on screen. A limit that
+             applies right now is not something to make somebody hunt for. -->
+        <details class="foothold" open={outsideHolidayTable}>
+          <summary class:warn={outsideHolidayTable}>
+            {outsideHolidayTable
+              ? 'This window reaches outside the holiday table — what the counts mean'
+              : 'What stored and expected mean'}
+          </summary>
+          <p class="hint foot">
+            Stored is <span class="mono">/store.json?feed={feeds.active}</span> — one row per
+            instrument-month-timeframe, read once per feed and again after every pull. Expected is
+            the NSE sessions INSIDE {windowOk ? `${dayLabel(from)} – ${dayLabel(to)}` : 'the window'},
+            not the whole month file, times the rung's bars per session. A month with no row at all
+            is <b>never pulled</b>, which is not a zero and is never drawn as one. <b>retrying</b>
+            and <b>failed</b> are <span class="mono">/ingest/status.json</span>'s evidence — the
+            sweep's own ladder — and appear only where that route names them.
+          </p>
+          <p class="hint foot" class:warn={outsideHolidayTable}>
+            The expected counts exclude weekends and the {n(HOLIDAY_COUNT)} NSE holidays this page
+            carries, which cover {dayLabel(HOL_FROM)} – {dayLabel(HOL_THRU)}. Outside those dates a
+            weekday is ASSUMED to be a session, so an expectation there can be one session too high
+            and a month that is actually complete can read as short. That is a limit of this page's
+            table, not a finding about the store.
+          </p>
+        </details>
       </section>
     </div>
   {/if}
@@ -7074,17 +7136,27 @@
     flex-direction: column;
     gap: var(--s5);
   }
+  /* ONE COLUMN, ALWAYS. THE RUN CARD GOES UNDER THE FORM, NEVER BESIDE IT.
+     This was `5fr 4fr` the moment a run started, so pressing Start took the
+     form — six controls that had just been laid out across the full width —
+     and squeezed it into five ninths, while the run card took the other four.
+     Every control reflowed under the operator's hands at the exact moment he
+     had stopped touching them, and the strip that had been one clean row
+     became two ragged ones beside a panel.
+
+     A form and its outcome are SEQUENTIAL, not parallel: you fill the first,
+     then you watch the second. Putting them side by side says they are two
+     things to look at at once, which is false, and it costs the form the width
+     its own layout was designed against. Full width for both, stacked, and the
+     page does not move when the run begins. */
   .cols {
     display: grid;
-    grid-template-columns: minmax(0, 5fr) minmax(0, 4fr);
+    grid-template-columns: minmax(0, 1fr);
     gap: var(--s5);
     align-items: start;
   }
   /* The run card is only drawn once there is a run, and a two-column track with
      one card in it is the removed panel's hole still holding its width. */
-  .cols.solo {
-    grid-template-columns: minmax(0, 1fr);
-  }
   @media (max-width: 1100px) {
     .cols {
       grid-template-columns: minmax(0, 1fr);
@@ -8002,6 +8074,52 @@
     min-width: 0;
   }
 
+  /* THE FOLDED CAUTIONS. Same chrome as `.wire` below it — one disclosure
+     idiom on this page, not two — with the warn hue on the summary so a closed
+     fold still reads as something to open rather than as a section heading.
+     The paragraphs inside drop their own `caution` tag: the summary already
+     carries one, and repeating it on every line was the stutter that made five
+     of these unreadable. */
+  .cautions {
+    border: 1px solid var(--warn);
+    border-radius: var(--r3);
+    padding: var(--s4) var(--s5);
+    background: var(--warn-soft);
+  }
+  .cautions summary {
+    cursor: pointer;
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    color: var(--warn);
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+  }
+  .cautions .caution {
+    margin: var(--s4) 0 0;
+    background: none;
+    border: 0;
+    padding: 0;
+  }
+  /* THE FOLDED FOOTER. Same disclosure chrome as `.wire` and `.cautions`, so
+     this page has ONE fold idiom rather than three that look like three
+     different kinds of thing. */
+  .foothold {
+    border-top: 1px solid var(--line-soft);
+    padding-top: var(--s4);
+  }
+  .foothold summary {
+    cursor: pointer;
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    color: var(--dim);
+  }
+  .foothold summary.warn {
+    color: var(--warn);
+  }
+  .foothold .foot {
+    margin-top: var(--s4);
+  }
   .wire {
     border: 1px solid var(--line);
     border-radius: var(--r3);
