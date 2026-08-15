@@ -4881,11 +4881,15 @@
              it; it writes the same `kind` the cascade reads. Two or three
              options today, and the filter box costs nothing — nine rungs that
              behave nine ways is nine things to learn. -->
+        <!-- THE FACE COUNTS SEGMENTS, NOT ROWS. Every other rung's "All ·" names
+             how many OPTIONS its menu holds — 1 instrument, 9 rungs — and this
+             one printed `textMatched.length`, the row count, so it read
+             "All · 9" beside a store that holds exactly one segment. -->
         <Picker
           single
           filter
           label="segments"
-          summary={kind ? kind : `All \u00b7 ${fmt(textMatched.length)}`}
+          summary={kind ? kind : `All \u00b7 ${fmt(kinds.length)}`}
           rows={[
             { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
             ...kinds.map(([k, n]) => ({ key: k, name: k, detail: `${fmt(n)} held` }))
