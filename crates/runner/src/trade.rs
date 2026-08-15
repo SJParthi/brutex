@@ -296,6 +296,14 @@ fn paisa(raw: i64) -> brutex_core::price::Paisa {
 /// searching its session. `None` where the bar is at or past the square-off, or
 /// where the session's bars simply run out before it — see
 /// [`crate::outcome`]'s note on why the end of the data is not a square-off.
+///
+/// UNVERIFIED as a measured figure, and no bench row covers it. What is claimed
+/// is the SHAPE: the loop body is a fixed number of integer operations and one
+/// `Option` copy, and the answer for bar `i` is inherited from bar `i + 1`
+/// whenever they share a day, so nothing re-walks a session. A forward search
+/// per bar would be O(H) with `H` caller-supplied — constant only by accident,
+/// which is the kind of bound `CLAUDE.md` §3 rule 6 asks to be labelled rather
+/// than asserted.
 fn forced_exits(bars: &[Candle]) -> Vec<Option<usize>> {
     let stamps: Vec<(i64, i64)> = bars
         .iter()
