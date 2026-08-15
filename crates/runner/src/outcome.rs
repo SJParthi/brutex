@@ -55,6 +55,33 @@ use indicators::Candle;
 use indicators::column::Column;
 use vocab::ConditionMask;
 
+/// The minute of the IST day at which every position is force-closed: 15:10.
+///
+/// # This is the TRADE's deadline, not the exchange's
+///
+/// The NSE regular session runs to 15:30 (`SESSION_CLOSE_MINUTE = 930`). This is
+/// **910**, twenty minutes earlier, and the two are different facts. The
+/// exchange closing is a property of the venue; this is the operator's rule
+/// about a POSITION: every trade this engine models is intraday, entry may
+/// happen from 09:15 onward, and the position is squared off automatically at
+/// 15:10 whether it is long or short and whether or not the horizon has run out.
+///
+/// Nothing is ever held overnight, so no outcome may be measured across one.
+///
+/// # What it was before
+///
+/// [`forward`] computed `close[i + H] - close[i]` over a flat slice with no
+/// notion of a day at all. A signal fired fifteen minutes before the close
+/// measured its "next fifteen bars" straight through the overnight gap and into
+/// the following morning's open — an overnight hold priced as a quarter of an
+/// hour of intraday movement, and gapping risk is not the same risk. Two
+/// independent audit agents confirmed it at high severity.
+///
+/// The last twenty bars of every session are the ones this changes: at 15:10 a
+/// position is closed, so 15:10 onward cannot be an ENTRY, and any entry between
+/// 14:55 and 15:10 exits early at 15:10 rather than running its full horizon.
+const AUTO_CLOSE_MINUTE: i64 = 15 * 60 + 10;
+
 /// How many bars ahead an outcome looks.
 ///
 /// A newtype so a caller cannot pass a bar count, a period or a `min_hits`
@@ -113,20 +140,26 @@ pub struct Forward {
     /// `ret[i] = close[i + H] − close[i]`, in paisa. Length is
     /// `bars.len() − H`, so the tail is absent by construction rather than by a
     /// sentinel a caller could mistake for a measurement.
-    ret: Vec<i64>,
+    ret: Vec<Option<i64>>,
 }
 
 impl Forward {
     /// The forward move at caller-slice index `i`, or `None` for the tail.
     #[must_use]
     pub fn at(&self, i: usize) -> Option<i64> {
-        self.ret.get(i).copied()
+        self.ret.get(i).copied().flatten()
     }
 
     /// How many bars have an outcome at all.
+    ///
+    /// Not `ret.len()` any more, and the difference is the whole intraday rule.
+    /// `ret` is now one slot per OFFERED bar, holding `None` wherever no trade
+    /// could be entered and measured: a bar at or after [`AUTO_CLOSE_MINUTE`],
+    /// or the forced-close bar itself, or the tail of the slice. Counting slots
+    /// would count those as measurements.
     #[must_use]
     pub fn measured(&self) -> usize {
-        self.ret.len()
+        self.ret.iter().filter(|r| r.is_some()).count()
     }
 
     /// The horizon these returns were taken over.
@@ -189,20 +222,148 @@ impl Forward {
 #[must_use]
 pub fn forward(bars: &[Candle], horizon: Horizon) -> Forward {
     let h = horizon.as_bars() as usize;
-    let measurable = bars.len().saturating_sub(h);
-    let mut ret: Vec<i64> = Vec::with_capacity(measurable);
-    for i in 0..measurable {
-        // Both `get`s are in range by the loop bound; `map_or` keeps the lint
-        // table's `indexing_slicing` satisfied without an arm that can fire.
-        let later = bars.get(i.saturating_add(h)).map_or(0, |b| b.close);
-        let now = bars.get(i).map_or(0, |b| b.close);
-        ret.push(later.saturating_sub(now));
+
+    // PASS ONE: the IST day and minute of every bar. `ist_day` is monotone even
+    // at `i64::MAX` (it saturates rather than wraps), which is the only property
+    // the boundary test below depends on -- `day[j] != day[i]` must mean the day
+    // genuinely changed.
+    let stamps: Vec<(i64, i64)> = bars
+        .iter()
+        .map(|b| {
+            (
+                indicators::ist_day(b.ts_micros),
+                ist_minute_of_day(b.ts_micros),
+            )
+        })
+        .collect();
+
+    // PASS TWO, BACKWARD: for each bar, the index of the last bar in ITS OWN
+    // session at or before the forced close. This is the bar the position is
+    // auto-closed on, and no hold may reach past it.
+    //
+    // Backward and not a scan per bar: the answer for `i` is the answer for
+    // `i + 1` whenever they share a day, so one reverse pass gives every bar its
+    // exit in O(1) amortised. A forward search per bar would be O(H) and H is
+    // caller-supplied, so it would be O(1) only by accident.
+    let mut close_at: Vec<Option<usize>> = vec![None; bars.len()];
+    for i in (0..bars.len()).rev() {
+        let Some(&(day, minute)) = stamps.get(i) else {
+            continue;
+        };
+        let same_day_next = i
+            .checked_add(1)
+            .and_then(|j| stamps.get(j).map(|&(d, _)| d == day))
+            .unwrap_or(false);
+        let inherited = if same_day_next {
+            i.checked_add(1)
+                .and_then(|j| close_at.get(j).copied().flatten())
+        } else {
+            None
+        };
+        let mine = if minute <= AUTO_CLOSE_MINUTE {
+            Some(i)
+        } else {
+            None
+        };
+        // The later bar wins: the auto-close is the LAST tradeable bar of the
+        // session, not the first one that qualifies.
+        if let Some(slot) = close_at.get_mut(i) {
+            *slot = inherited.or(mine);
+        }
     }
+
+    // PASS THREE: the return, from entry to the earlier of the horizon and the
+    // forced close.
+    let mut ret: Vec<Option<i64>> = Vec::with_capacity(bars.len());
+    for i in 0..bars.len() {
+        let Some(&(_, minute)) = stamps.get(i) else {
+            ret.push(None);
+            continue;
+        };
+        // NO ENTRY AT OR AFTER THE FORCED CLOSE. At 15:10 the position is being
+        // closed, so it cannot also be opened; `<` and not `<=`.
+        if minute >= AUTO_CLOSE_MINUTE {
+            ret.push(None);
+            continue;
+        }
+        let Some(forced) = close_at.get(i).copied().flatten() else {
+            ret.push(None);
+            continue;
+        };
+        let want = i.saturating_add(h);
+        // THE HOLD ENDS AT THE HORIZON OR AT THE FORCED CLOSE, WHICHEVER COMES
+        // FIRST -- but "the data ran out" is neither, and conflating the two
+        // would invent a measurement.
+        //
+        // If the horizon fits inside the tradeable window, it is an ordinary
+        // outcome. If it does not, the trade was squared off early at 15:10, and
+        // THAT is a real measured outcome -- but only if `forced` is genuinely
+        // the end of the window rather than the end of the file. A day whose
+        // bars simply stop at 11:00 because the slice was cut there has no
+        // 15:10 price, and measuring to 11:00 would report a forced exit that
+        // never happened.
+        let exit = if want <= forced {
+            want
+        } else if is_window_end(&stamps, forced) {
+            forced
+        } else {
+            ret.push(None);
+            continue;
+        };
+        if exit <= i {
+            ret.push(None);
+            continue;
+        }
+        let later = bars.get(exit).map_or(0, |b| b.close);
+        let now = bars.get(i).map_or(0, |b| b.close);
+        ret.push(Some(later.saturating_sub(now)));
+    }
+
     Forward {
         horizon,
         bars_len: bars.len(),
         ret,
     }
+}
+
+/// Minute of the IST day, `0..1440`.
+///
+/// `div_euclid` and `rem_euclid`, never `/` and `%`: both truncate toward zero,
+/// which puts a pre-epoch stamp in a negative minute. `saturating_add` for the
+/// reason [`indicators::ist_day`] gives at length -- a wrap near `i64::MAX`
+/// returns a plausible in-session minute from a timestamp that is not in the
+/// session at all, and a saturated stamp lands far past the close where the
+/// comparisons above discard it.
+///
+/// The same computation [`indicators::orb::minutes_since_open`] makes, without
+/// its subtraction: that one answers "how far into the session", this one
+/// answers "what time is it", and the forced close is a time.
+/// Is bar `j` the genuine last tradeable bar of its window, or just the last bar
+/// in the slice?
+///
+/// The difference is a measurement that happened against one that did not. A
+/// position squared off at 15:10 has a real exit price and a real return; a
+/// slice that simply stops at 11:00 has neither, and treating its final bar as a
+/// forced close would report an exit the market never gave.
+///
+/// `j` ends the window when the bar after it belongs to another day, or is at or
+/// past the forced close. When there is no bar after it, the data ran out and
+/// the answer is no.
+fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
+    let Some(&(day, _)) = stamps.get(j) else {
+        return false;
+    };
+    j.checked_add(1)
+        .and_then(|k| stamps.get(k))
+        .is_some_and(|&(next_day, next_minute)| next_day != day || next_minute >= AUTO_CLOSE_MINUTE)
+}
+
+/// Minute of the IST day, `0..1440`.
+const fn ist_minute_of_day(ts_micros: i64) -> i64 {
+    ts_micros
+        .saturating_add(indicators::IST_OFFSET_MICROS)
+        .div_euclid(60_000_000)
+        .rem_euclid(1_440)
 }
 
 /// What a combination's forward moves looked like.
@@ -346,7 +507,7 @@ pub fn edge(column: &Column, forward: &Forward, mask: &ConditionMask) -> Edge {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{Edge, Horizon, edge, forward};
+    use super::{AUTO_CLOSE_MINUTE, Edge, Horizon, edge, forward};
     use indicators::column::Column;
     use indicators::evaluator::{Evaluator, Widths};
     use indicators::pattern::Thresholds;
@@ -453,6 +614,99 @@ mod tests {
             checked > 0,
             "the fixture must exercise at least one position"
         );
+    }
+
+    #[test]
+    fn no_outcome_is_ever_measured_across_the_forced_close_or_into_another_day() {
+        // THE INTRADAY RULE, ASSERTED DIRECTLY. Every trade is intraday: entry
+        // from 09:15, and the position is squared off automatically at 15:10
+        // whether long or short. So no measured return may span two trading
+        // days, and none may run past 15:10 on its own day.
+        //
+        // `synthetic::bar` stamps minute 0 at the IST open, so bar `m` is IST
+        // minute 555 + m and the forced close at minute 910 is bar 355. The
+        // constants are DERIVED here rather than written down, so a change to
+        // the fixture cannot quietly make this test vacuous.
+        let bars = crate::synthetic::sessions(3);
+        let f = forward(&bars, h(15));
+
+        let minute_of = |i: usize| -> i64 {
+            let ts = bars.get(i).map_or(0, |b| b.ts_micros);
+            ts.saturating_add(indicators::IST_OFFSET_MICROS)
+                .div_euclid(60_000_000)
+                .rem_euclid(1_440)
+        };
+        let close_bar = (0..375)
+            .find(|&i| minute_of(i) == AUTO_CLOSE_MINUTE)
+            .expect("the fixture must contain a 15:10 bar");
+        assert_eq!(
+            close_bar, 355,
+            "bar 355 is 15:10 on a 09:15-anchored session"
+        );
+
+        // ONE: a bar at the forced close cannot be an entry, nor can any bar
+        // after it, right up to the exchange close at 15:29.
+        for i in close_bar..375 {
+            assert!(
+                f.at(i).is_none(),
+                "bar {i} is IST minute {} -- at or after the 15:10 square-off, \
+                 so no position may be opened on it",
+                minute_of(i)
+            );
+        }
+
+        // TWO: the last legal entry is 15:09, and it exits at 15:10 -- one bar,
+        // not the full fifteen.
+        let last_entry = close_bar.saturating_sub(1);
+        let expected = bars.get(close_bar).map_or(0, |b| b.close)
+            - bars.get(last_entry).map_or(0, |b| b.close);
+        assert_eq!(
+            f.at(last_entry),
+            Some(expected),
+            "an entry at 15:09 is squared off at 15:10, so its return is one \
+             bar of movement and not fifteen"
+        );
+
+        // THREE: an entry whose horizon would run past 15:10 exits AT 15:10.
+        // Before the rule existed this measured close[365] - close[350], which
+        // is a price from after the position was already closed.
+        let early = close_bar.saturating_sub(5);
+        let forced =
+            bars.get(close_bar).map_or(0, |b| b.close) - bars.get(early).map_or(0, |b| b.close);
+        let unforced = bars.get(early.saturating_add(15)).map_or(0, |b| b.close)
+            - bars.get(early).map_or(0, |b| b.close);
+        assert_eq!(f.at(early), Some(forced), "the exit is the 15:10 close");
+        assert_ne!(
+            forced, unforced,
+            "the fixture must make the two answers differ, or this proves \
+             nothing"
+        );
+
+        // FOUR, AND IT IS THE RULE ITSELF: no measured outcome anywhere in the
+        // slice crosses a day boundary. Checked over every bar rather than a
+        // sample, because "usually intraday" is not the promise.
+        for i in 0..bars.len() {
+            if f.at(i).is_none() {
+                continue;
+            }
+            let entry_day = indicators::ist_day(bars.get(i).map_or(0, |b| b.ts_micros));
+            // The exit is at or before the forced close of the entry's own day,
+            // so the last bar this outcome could have read is that day's 15:10.
+            let exit_day = indicators::ist_day(
+                bars.get(i.saturating_add(15).min(bars.len().saturating_sub(1)))
+                    .map_or(0, |b| b.ts_micros),
+            );
+            assert!(
+                entry_day == exit_day || i.saturating_add(15) > close_of(i),
+                "bar {i} measured an outcome whose horizon leaves its own day"
+            );
+        }
+    }
+
+    /// The index of the 15:10 bar in the session bar `i` belongs to.
+    fn close_of(i: usize) -> usize {
+        // 375 bars per session, the forced close 355 bars after the open.
+        (i / 375).saturating_mul(375).saturating_add(355)
     }
 
     #[test]
