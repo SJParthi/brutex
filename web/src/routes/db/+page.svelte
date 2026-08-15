@@ -168,8 +168,24 @@
   let fromDay = $state('');
   let toDay = $state('');
 
-  /** Whether the day window is live: spot only, and only if a side is set. */
-  const dayWindowApplies = $derived(expiry === '');
+  /* THE WINDOW IS ALWAYS DRAWN, AND IT NEVER TOUCHES THE RUNGS ABOVE IT.
+   *
+   * An earlier draft hid this pair the moment an expiry was chosen. That was a
+   * misreading of "the dates must not be applicable to a contract". The order
+   * the owner set is feed, universe, instrument, segment, timeframe, expiry,
+   * strike, moneyness, side, FROM DATE, TO DATE — the dates are in the F&O
+   * list, so they are present for a contract too.
+   *
+   * What must not happen is the window narrowing the CONTRACT RUNGS. It cannot:
+   * this filters `barRows`, which is downstream of every offer.
+   * `expiryOffered` folds `matchedPreContract`; `strikeOffered` and
+   * `sideOffered` fold `expiryGated` — all upstream of the bars. So choosing a
+   * fortnight can never make an expiry vanish from its own menu, which is the
+   * failure that instruction was guarding against.
+   *
+   * A contract's extent is still its expiry. The window only says which of its
+   * days to draw. */
+  const dayWindowApplies = true;
 
   /* ---- THE BAR-LENGTH RUNG, WHICH THIS PAGE PRINTED AND COULD NOT CHOOSE
      The rung has been a COLUMN since the server stopped stamping `"1m"` on
@@ -5022,42 +5038,6 @@
         </span>
       </div>
 
-      <!-- ==================================================================
-           THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
-           A spot series runs forever, so "show me the 12th" is a real question.
-           A CONTRACT is defined by its expiry and its bars stop there, so a
-           second date range asks something the contract has already answered.
-           Gated on `dayWindowApplies`, which is simply "no expiry chosen".
-           ================================================================== -->
-      {#if dayWindowApplies}
-        <div class="cell">
-          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
-            >From date</span
-          >
-          <input
-            class="tin"
-            type="date"
-            bind:value={fromDay}
-            max={toDay || undefined}
-            aria-label="First day to show"
-          />
-          <span class="count"
-            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
-          >
-        </div>
-
-        <div class="cell">
-          <span title="Only bars on or before this day. Spot only.">To date</span>
-          <input
-            class="tin"
-            type="date"
-            bind:value={toDay}
-            min={fromDay || undefined}
-            aria-label="Last day to show"
-          />
-          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
-        </div>
-      {/if}
 
 
       <!-- THE MONTH WINDOW — two ends, so it is TWO `.cell`s, exactly as the
@@ -5366,6 +5346,59 @@
       </div>
     </section>
     {/if}
+
+    <!-- ==================================================================
+         THE DAY WINDOW IS THE LAST RUNG, AFTER SIDE.
+
+         The order is feed, universe, instrument, segment, timeframe, expiry,
+         strike, moneyness, side, from date, to date — and the dates are last
+         because every rung above them narrows by IDENTITY (what the series
+         is) while these two narrow by TIME (which of its days to draw). A
+         window is the last question you ask, not one asked halfway up.
+
+         It sits OUTSIDE the contract strip so it survives when that strip is
+         not drawn: a spot store holds no contract, the four contract rungs
+         vanish, and the dates must still be there — spot is exactly where a
+         day window earns its place.
+         ================================================================== -->
+    <section class="strip sub" aria-label="Window">
+      <span class="lead">Window</span>
+      <!-- ==================================================================
+           THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
+           A spot series runs forever, so "show me the 12th" is a real question.
+           A CONTRACT is defined by its expiry and its bars stop there, so a
+           second date range asks something the contract has already answered.
+           Gated on `dayWindowApplies`, which is simply "no expiry chosen".
+           ================================================================== -->
+        <div class="cell">
+          <span title="Only bars on or after this day. Spot only — a contract's window is its expiry."
+            >From date</span
+          >
+          <input
+            class="tin"
+            type="date"
+            bind:value={fromDay}
+            max={toDay || undefined}
+            aria-label="First day to show"
+          />
+          <span class="count"
+            >{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span
+          >
+        </div>
+
+        <div class="cell">
+          <span title="Only bars on or before this day. Spot only.">To date</span>
+          <input
+            class="tin"
+            type="date"
+            bind:value={toDay}
+            min={fromDay || undefined}
+            aria-label="Last day to show"
+          />
+          <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+        </div>
+      
+    </section>
 
     <!-- ==================================================================
          THE ANCHOR. What this query is looking at, the one headline figure,
