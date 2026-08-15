@@ -541,6 +541,120 @@ mod tests {
     }
 
     #[test]
+    fn the_out_of_sample_walk_cannot_see_a_single_training_bar() {
+        // KILLS: `restricted`'s `clear_before(from)` -> `clear_before(0)`.
+        //
+        // That mutation survived the whole suite. It blanks nothing, so every
+        // out-of-sample walk sees the ENTIRE column including the training
+        // prefix, and the fold's "out of sample" total silently becomes an
+        // in-sample one. Measured at the time: 8 training bars leaked into
+        // every fold. The tests that existed asserted `train_bars > 0` and
+        // `purged >= horizon` -- both true under the mutant, because neither
+        // looks at what the restricted column actually contains.
+        //
+        // This asserts the containment directly: a column restricted to `from`
+        // must fire on NO bar before `from`, whatever the mask.
+        let bars = crate::synthetic::sessions(12);
+        let full = Column::build(&bars, &mut evaluator());
+        assert!(!full.is_empty(), "the fixture must sweep something");
+
+        // `from` is a BAR index, not a column index -- `clear_before` compares
+        // it against `sources()`. The first draft passed `full.len() / 2`,
+        // which is a column offset, and every source sits past the warm-up, so
+        // NOTHING was before it and the vacuity guard below caught it. Keeping
+        // the note because the two index spaces look identical at a glance and
+        // this module converts between them constantly.
+        let from = *full
+            .sources()
+            .get(full.len() / 2)
+            .expect("the column has a middle");
+        let confined = super::restricted(&full, from);
+
+        // AGAINST `ConditionMask::ZERO`, not against a mask. The first draft of
+        // this test asked whether each row `hits` an empty mask, and an empty
+        // mask hits EVERYTHING -- `(bits & 0) == 0` holds for a blanked row
+        // exactly as it does for a live one. So the mutant survived the test
+        // written to kill it, for the same reason the original bug survived the
+        // suite: the question was asked in a form whose answer is always yes.
+        let live_before = confined
+            .sources()
+            .iter()
+            .zip(confined.bits())
+            .filter(|(src, bits)| **src < from && **bits != ConditionMask::ZERO)
+            .count();
+        assert_eq!(
+            live_before, 0,
+            "a column restricted to bar {from} still carries live bits on \
+             {live_before} earlier rows -- the training prefix is visible out \
+             of sample"
+        );
+
+        // The restriction must also have had something to do, or the assertion
+        // above holds vacuously.
+        let live_originally = full
+            .sources()
+            .iter()
+            .zip(full.bits())
+            .filter(|(src, bits)| **src < from && **bits != ConditionMask::ZERO)
+            .count();
+        assert!(
+            live_originally > 0,
+            "no row before bar {from} carried any bit even before restricting, \
+             so this proves nothing"
+        );
+        let live_after = confined
+            .sources()
+            .iter()
+            .zip(confined.bits())
+            .filter(|(src, bits)| **src >= from && **bits != ConditionMask::ZERO)
+            .count();
+        assert!(
+            live_after > 0,
+            "the restriction blanked the whole column, so it proves nothing"
+        );
+    }
+
+    #[test]
+    fn a_short_walk_forward_runs_and_is_not_the_long_one() {
+        // KILLS: a `panic!` planted in `side_of`'s `Direction::Short` arm.
+        //
+        // It survived, because NO test in this module ever ran `walk_forward`
+        // short. Every fixture passed `Direction::Long`, so half the execution
+        // model -- the half that decides which extreme of a bar hurts -- was
+        // never entered. A crate that only ever tests one direction is testing
+        // one direction.
+        let bars = crate::synthetic::sessions(12);
+        let long = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        let short = walk_forward(&bars, h(15), 3, Direction::Short, &sweeper(), evaluator);
+
+        assert_eq!(short.folds.len(), 3, "the short walk must produce folds");
+        assert!(
+            short.decided() > 0,
+            "the short walk chose nothing, so nothing short was exercised"
+        );
+        for f in &short.folds {
+            assert_eq!(
+                f.priced, f.considered,
+                "fold {} skipped candidates",
+                f.index
+            );
+        }
+
+        // The two directions must actually differ somewhere. Identical results
+        // would mean the direction never reached the pricing.
+        let differ = long
+            .folds
+            .iter()
+            .zip(&short.folds)
+            .any(|(l, s)| l.in_sample != s.in_sample || l.chosen != s.chosen);
+        assert!(
+            differ,
+            "long and short produced identical folds -- the direction is not \
+             reaching the trade walk"
+        );
+    }
+
+    #[test]
     fn every_candidate_the_sweep_produced_is_priced_and_none_is_skipped() {
         // THE TEST THAT STOOD HERE DID NOT PROVE THE CHANGE IT WAS WRITTEN FOR,
         // and that was found by putting the deleted cap back rather than by
