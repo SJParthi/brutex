@@ -445,6 +445,95 @@ struct Variant {
     trail: Option<usize>,
 }
 
+/// One already-chosen exit variant, applied to bars it was NOT chosen on.
+///
+/// # Why this exists, and what was wrong without it
+///
+/// [`evaluate`] derives its ladders from the slice it is given. That is right
+/// in sample and is look-ahead out of sample: levels fitted to the test window
+/// look spectacular and are trivially findable. So a walk-forward cannot call
+/// `evaluate` on its test bars to score the exit it picked.
+///
+/// It did not call anything. `crate::validate` chose a `(stop, target, trail)`
+/// on the training grid, recorded it, and then measured out-of-sample
+/// performance with [`crate::trade::walk`] — which takes no levels at all. The
+/// fold reported a chosen stop beside an out-of-sample total that had never
+/// used it, which `docs/06-limits.md` §70 records and `CLAUDE.md` §4 bans: a
+/// true number beside a wrong implication.
+///
+/// This takes the ladders as ARGUMENTS, so the caller supplies the ones its
+/// training half produced and the rung values travel to the test window
+/// unchanged. Nothing here reads the test slice to decide a level.
+///
+/// `None` when the mask took no trade on these bars — which is a real answer
+/// and not a zero, and is why it is an `Option` rather than a defaulted [`Cell`].
+///
+/// # Cost
+///
+/// One [`crate::trade::walk`] plus one `crossings` pass per trade, then a
+/// single variant's exit lookups. That is [`evaluate`]'s work divided by the
+/// variant count rather than multiplied by it.
+///
+/// UNVERIFIED as a measured figure: no bench row covers this crate's grid.
+#[must_use]
+pub fn with_levels(
+    bars: &[Candle],
+    column: &Column,
+    mask: &ConditionMask,
+    horizon: Horizon,
+    side: Side,
+    ladders: Ladders<'_>,
+    variant: (Option<usize>, Option<usize>, Option<usize>),
+) -> Option<Cell> {
+    let timed = crate::trade::walk(bars, column, mask, horizon, direction_of(side));
+    if timed.trades.is_empty() {
+        return None;
+    }
+    let candidates: Vec<Candidate> = timed
+        .trades
+        .iter()
+        .map(|t| {
+            let entry_price = bars.get(t.entry_bar).map_or(0, |b| b.open);
+            Candidate {
+                signal: t.signal_bar,
+                entry: t.entry_bar,
+                time_exit: t.exit_bar,
+                cross: crossings(bars, t.entry_bar, t.exit_bar, entry_price, side, ladders),
+            }
+        })
+        .collect();
+
+    let (stop, target, trail) = variant;
+    Some(one_variant(
+        bars,
+        &candidates,
+        (
+            ladders.stops.rungs(),
+            ladders.targets.rungs(),
+            ladders.trails.rungs(),
+        ),
+        Variant {
+            stop,
+            target,
+            trail,
+        },
+        side,
+    ))
+}
+
+/// The fill direction matching an excursion side.
+///
+/// The inverse of `crate::validate::side_of`, and here rather than there
+/// because this module is the one that needs it. Two enums for one fact, in
+/// crates that may not depend on each other — `costs::fill::Direction` is about
+/// which leg fills first, `Side` about which extreme of a bar hurts.
+const fn direction_of(side: Side) -> costs::fill::Direction {
+    match side {
+        Side::Long => costs::fill::Direction::Long,
+        Side::Short => costs::fill::Direction::Short,
+    }
+}
+
 fn one_variant(
     bars: &[Candle],
     candidates: &[Candidate],

@@ -179,6 +179,20 @@ pub struct FoldResult {
     /// "with these levels versus without them" is the whole question the exit
     /// grid exists to answer.
     pub chosen_exit_total: Option<i64>,
+    /// What the chosen exit variant scored OUT of sample, pessimistically.
+    ///
+    /// The number `out_of_sample` should have been all along. That field is the
+    /// chosen combination walked with NO levels, and a reader seeing a chosen
+    /// stop beside it will assume the stop was applied. It was not, until this.
+    /// `docs/06-limits.md` section 70 records the gap.
+    ///
+    /// The rung VALUES come from the training grid and travel unchanged --
+    /// re-deriving ladders from the test bars would be look-ahead, and a stop
+    /// fitted to the future looks spectacular and is trivially findable.
+    ///
+    /// `None` when nothing was chosen, or when the combination took no trade on
+    /// the test window. A fold that never traded is not a fold that scored zero.
+    pub out_of_sample_exit: Option<i64>,
     /// The combination with the best in-sample worst-case total, if any.
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound. That selection
@@ -243,12 +257,22 @@ pub const DEFAULT_RUNGS: usize = 4;
 /// ONE evaluation. They used to be two: the combination was chosen on a
 /// level-less walk and a second grid pass then ran on the winner, which is how
 /// the search became `1 x 125` instead of `N x 125`.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct ExitPick {
     /// `(stop, target, trail)` rung indices. All `None` is the baseline row.
     rungs: (Option<usize>, Option<usize>, Option<usize>),
     /// The cell's pessimistic total. This is the ranking key.
     pessimistic: i64,
+    /// The TRAINING ladders this variant's rung indices point into.
+    ///
+    /// Carried so the same rung VALUES can be applied to the test window. With
+    /// only the indices, a fold recorded a chosen stop and then measured
+    /// out-of-sample performance with no stop at all — `docs/06-limits.md` §70.
+    /// Rebuilding ladders from the test bars would be look-ahead, so they
+    /// travel from training rather than being re-derived.
+    stops: crate::excursion::Ladder,
+    targets: crate::excursion::Ladder,
+    trails: crate::excursion::Ladder,
 }
 
 const fn side_of(d: Direction) -> crate::excursion::Side {
@@ -292,6 +316,16 @@ const fn side_of(d: Direction) -> crate::excursion::Side {
 ///
 /// UNVERIFIED as a measured figure: no bench row covers this yet.
 #[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one fold is one procedure: sweep, close, rank jointly, then judge \
+              on bars it never saw. Splitting it would put the training half and \
+              the test half in separate functions, and the ONE thing this module \
+              exists to keep straight is which bars each may touch. Every \
+              look-ahead defect found in it -- the training-bar leak, the \
+              level-less out-of-sample walk -- came from those two halves \
+              drifting apart in a reader's head."
+)]
 pub fn walk_forward(
     bars: &[Candle],
     horizon: Horizon,
@@ -428,6 +462,9 @@ pub fn walk_forward(
                     ExitPick {
                         rungs: (cell.stop, cell.target, cell.trail),
                         pessimistic: cell.pessimistic,
+                        stops: g.stops.clone(),
+                        targets: g.targets.clone(),
+                        trails: g.trails.clone(),
                     },
                 ));
             }
@@ -439,22 +476,54 @@ pub fn walk_forward(
         // test window is the same look-ahead as a combination fitted to it, and
         // worse, because a stop fitted to the future looks spectacular and is
         // trivially findable.
-        let (chosen, in_sample, chosen_exit, chosen_exit_total) = match best {
-            Some((mask, s, pick)) => (Some(mask), s, Some(pick.rungs), Some(pick.pessimistic)),
-            None => (None, Summary::default(), None, None),
+        let (chosen, in_sample, chosen_exit, chosen_exit_total, ladders) = match best {
+            Some((mask, s, pick)) => (
+                Some(mask),
+                s,
+                Some(pick.rungs),
+                Some(pick.pessimistic),
+                Some((pick.stops, pick.targets, pick.trails)),
+            ),
+            None => (None, Summary::default(), None, None, None),
         };
 
         // OUT OF SAMPLE. The column runs from bar zero so the indicators hold
         // what they would genuinely have held, and the trade walk is confined to
         // the test window by `restricted`.
-        let out_of_sample = match chosen {
+        let (out_of_sample, out_of_sample_exit) = match chosen {
             Some(mask) => {
                 let upto = bars.get(..fold.test.end).unwrap_or(bars);
                 let full = Column::build(upto, &mut evaluator());
                 let confined = restricted(&full, fold.test.start);
-                Summary::of(&walk(upto, &confined, &mask, horizon, direction))
+                let plain = Summary::of(&walk(upto, &confined, &mask, horizon, direction));
+
+                // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
+                // that this fold reported a chosen stop beside an out-of-sample
+                // total that had never used it -- the walk above takes no
+                // levels. The variant is now scored on the test window using
+                // the TRAINING ladders, so the rung values travel unchanged and
+                // nothing about the test bars decides a level.
+                let with = ladders.as_ref().zip(chosen_exit).and_then(
+                    |((stops, targets, trails), variant)| {
+                        crate::grid::with_levels(
+                            upto,
+                            &confined,
+                            &mask,
+                            horizon,
+                            side_of(direction),
+                            crate::excursion::Ladders {
+                                stops,
+                                targets,
+                                trails,
+                            },
+                            variant,
+                        )
+                        .map(|c| c.pessimistic)
+                    },
+                );
+                (plain, with)
             }
-            None => Summary::default(),
+            None => (Summary::default(), None),
         };
 
         out.folds.push(FoldResult {
@@ -470,6 +539,7 @@ pub fn walk_forward(
             chosen_exit_total,
             in_sample,
             out_of_sample,
+            out_of_sample_exit,
         });
     }
     out
@@ -665,6 +735,53 @@ mod tests {
         assert!(
             live_after > 0,
             "the restriction blanked the whole column, so it proves nothing"
+        );
+    }
+
+    #[test]
+    fn the_chosen_exit_is_applied_out_of_sample_and_not_merely_recorded() {
+        // `docs/06-limits.md` §70: the fold recorded a chosen stop and then
+        // measured out-of-sample performance with `trade::walk`, which takes no
+        // levels. So a reader saw a chosen exit beside an out-of-sample total
+        // that had never used it — a true number beside a wrong implication,
+        // which is the shape `CLAUDE.md` §4 bans.
+        //
+        // Two things must hold and neither is implied by the other:
+        //   1. the exit IS applied, so a fold with a chosen exit carries a
+        //      figure computed with it;
+        //   2. the figure is a DIFFERENT number from the level-less walk, or
+        //      the levels made no difference and the field is decoration.
+        let bars = crate::synthetic::sessions(12);
+        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        assert!(v.decided() > 0, "no fold chose anything");
+
+        let mut applied = 0_usize;
+        let mut differed = 0_usize;
+        for f in v.folds.iter().filter(|f| f.chosen.is_some()) {
+            // A fold whose combination took no trade on the test window has no
+            // exit figure, and that is an answer rather than a zero.
+            if f.out_of_sample.trades == 0 {
+                continue;
+            }
+            assert!(
+                f.out_of_sample_exit.is_some(),
+                "fold {} chose an exit and reported no out-of-sample figure for it",
+                f.index
+            );
+            applied = applied.saturating_add(1);
+            if f.out_of_sample_exit != Some(f.out_of_sample.worst) {
+                differed = differed.saturating_add(1);
+            }
+        }
+        assert!(
+            applied > 0,
+            "no fold traded out of sample, so nothing was applied"
+        );
+        assert!(
+            differed > 0,
+            "the exit-applied figure equalled the level-less walk on every fold \
+             -- either the levels are not reaching the test window, or they are \
+             all NEVER and the field says nothing"
         );
     }
 

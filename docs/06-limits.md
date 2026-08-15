@@ -4104,10 +4104,17 @@ assume the second used the first. It does not. That is the shape `CLAUDE.md`
 §4 bans — a true number beside a wrong implication — and it is recorded here
 rather than left to a commit message.
 
-**What would close it.** `walk` gains the three levels, resolving them against
-ladders carried on `FoldResult` from the training grid, and `out_of_sample`
-becomes the same variant the selection chose. That is a signature change at
-every call site.
+**CLOSED.** `grid::with_levels` takes the ladders as ARGUMENTS rather than
+deriving them, so the TRAINING rung values travel to the test window unchanged
+and nothing about the test bars decides a level. `FoldResult` carries them and
+gains `out_of_sample_exit`, the chosen variant scored on bars it never saw.
+`runner::validate::the_chosen_exit_is_applied_out_of_sample_and_not_merely_recorded`
+requires both that the figure exists and that it DIFFERS from the level-less
+walk -- an equal figure would mean the levels never reached the test window.
+
+`out_of_sample` stays beside it as the same combination with no levels, because
+"with these levels versus without them" is the comparison the grid exists to
+answer, and out of sample is where that comparison finally means something.
 
 ---
 
