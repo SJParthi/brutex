@@ -5620,20 +5620,57 @@
                    `productLine` unchanged, and the measured store reading
                    beside it. An estimate is labelled an estimate — the server
                    states no total. -->
-              <p class="ask">
-                <span class="k">Asked</span>
-                <b class="mono">{productLine}</b>
-                <span class="u">instrument-month(s), estimated</span>
-                <span class="k">Held</span>
-                <b class="mono">{live ? n(live.units) : storeRead.at ? n(heldInWindow) : '—'}</b>
-                <span class="u"
-                  >{live
-                    ? `· ${n(live.rows)} bar(s), measured from /store.json`
-                    : storeRead.at
-                      ? `· ${n(heldBarsInWindow)} bar(s), measured from /store.json`
-                      : '· measured when the store answers'}</span
-                >
-              </p>
+              <!-- ══ THE ASK, AS TILES RATHER THAN AS A SENTENCE ══
+
+                   This was one line reading
+                   "Asked 50 instrument(s) × 1 segment(s) × 1 rung(s) × 0 month
+                   file(s) = 0 instrument-month(s), estimated Held 0 · 0 bar(s),
+                   measured from /store.json" — two numbers that decide whether
+                   to press the button, wearing eleven words and a multiplication
+                   in between. The reference draws exactly this as a row of
+                   tiles, and it is right: a figure somebody looks AT belongs in
+                   the data scale, and the arithmetic that produced it belongs
+                   under it in small type.
+
+                   `.metric` is theme.css section 8 — the reference's own class,
+                   so this row is the same rule the mockup draws with rather than
+                   a second one that resembles it. `.v` inside it is the data
+                   scale with tabular figures.
+
+                   ESTIMATED AND MEASURED KEEP THEIR WORDS. The left tile is
+                   arithmetic on what was ticked; the right is a reading of
+                   /store.json. §3 rule 6 makes that distinction load-bearing,
+                   and it survives the move: it is each tile's footer. -->
+              <div class="tiles">
+                <div class="metric">
+                  <span class="k">Asked</span>
+                  <span class="v">{reachKnown ? n(expectedUnits) : '—'}</span>
+                  <span class="foot">instrument-month(s) · estimated</span>
+                </div>
+                <div class="metric">
+                  <span class="k">Held</span>
+                  <span class="v"
+                    >{live ? n(live.units) : storeRead.at ? n(heldInWindow) : '—'}</span
+                  >
+                  <span class="foot">
+                    {live || storeRead.at
+                      ? `${n(live ? live.rows : heldBarsInWindow)} bar(s) · measured`
+                      : 'measured when the store answers'}
+                  </span>
+                </div>
+                <div class="metric">
+                  <span class="k">Instruments</span>
+                  <span class="v">{reachKnown ? n(insCount) : '—'}</span>
+                  <span class="foot">
+                    {n(segmentsReached.length)} segment(s) · {n(rungCount)} rung(s)
+                  </span>
+                </div>
+                <div class="metric">
+                  <span class="k">Window</span>
+                  <span class="v">{windowOk ? n(windowDays) : '—'}</span>
+                  <span class="foot">day(s) · {n(windowMonths.length)} month file(s)</span>
+                </div>
+              </div>
 
               <!-- ================================ THE TWO BULK ACTIONS =====
                    One clears the selection; the other would clear the store,
@@ -7687,33 +7724,14 @@
      control: the product with its factors, and the measured store reading
      beside it. `productLine` verbatim, so the factors still multiply to the
      total printed next to them in every state. */
-  .ask {
-    grid-column: 1 / -1;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: var(--s2) var(--s4);
-    margin: 0;
-    padding-top: var(--s5);
-    border-top: 1px solid var(--line);
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  .ask .k {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--acc);
-  }
-  .ask b {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-bold);
-    color: var(--ink);
-  }
+  /* `.ask` IS GONE WITH ITS ELEMENT. It styled one flex line carrying two
+     numbers and eleven words between them; that line is now the `.tiles` row
+     above, drawn with the reference's own `.metric`. Svelte reported `.ask .k`
+     as an unused selector the moment the element left, which is the compiler
+     doing what a dead-CSS gate would: a rule with nothing to match is a rule
+     the next reader has to prove is dead before touching anything near it.
 
+     The tile row inherits the border-top this used to draw — see `.tiles`. */
   /* The submit rung closes the panel the way the strip's own rungs are
      separated — a rule above it and the press on the right. */
   .form > .actions {
@@ -8119,6 +8137,21 @@
   }
   .foothold .foot {
     margin-top: var(--s4);
+  }
+  /* THE TILE ROW. `auto-fit` rather than a fixed four, so the row reflows
+     instead of overflowing on a narrow window — and `minmax` keeps a tile from
+     collapsing to the width of its own label. The reference draws four; this
+     draws whatever fits, which is the same design at every width. */
+  .tiles {
+    grid-column: 1 / -1;
+    margin-top: var(--s5);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 1px;
+    background: var(--line-soft);
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r3);
+    overflow: hidden;
   }
   .wire {
     border: 1px solid var(--line);
