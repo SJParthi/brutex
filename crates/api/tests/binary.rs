@@ -29,6 +29,27 @@ const GROWW_HEAD: &str = "exchange,segment,underlying_symbol,trading_symbol,inst
 const DHAN_HEAD: &str = "EXCH_ID,SEGMENT,ISIN,INSTRUMENT,UNDERLYING_SYMBOL,SYMBOL_NAME,\
                          SERIES,SM_EXPIRY_DATE,STRIKE_PRICE,OPTION_TYPE,SECURITY_ID\n";
 
+/// Zerodha's master, header only — the vendor read cleanly and listed nothing.
+///
+/// # Why every fixture below gets one
+///
+/// The binary reads THREE masters. This file knew about two, so every run
+/// through [`masters`] was missing one and the binary was right to call it
+/// `DEGRADED` — which is exactly what
+/// [`the_binary_reports_what_it_read_and_exits_zero`] then failed on. The
+/// vendor list is `core::vendor`, and a test fixture that enumerates vendors by
+/// hand goes stale the moment one is added.
+///
+/// Header only, and deliberately so: an empty master is a state this build must
+/// handle, and it keeps the read clean so a test about something else stays
+/// about that. Zero rows also means no merge count moves. The same fixture in
+/// `api::server`'s unit tests is header-only for the same reason.
+///
+/// The columns are `core::vendor::MasterColumns` for this vendor, in the order
+/// the exchange publishes them — twelve, and no ISIN among them.
+const ZERODHA_HEAD: &str = "instrument_token,exchange_token,tradingsymbol,name,last_price,\
+                            expiry,strike,tick_size,lot_size,instrument_type,segment,exchange\n";
+
 /// A directory holding the given vendor masters, named after the test.
 ///
 /// A `None` deletes that vendor's file, so a test can drive the
@@ -41,7 +62,11 @@ fn masters(name: &str, groww: Option<&str>, dhan: Option<&str>) -> std::path::Pa
     // it spells the same rule out.
     let dir = std::env::temp_dir().join(format!("brutex-{}-binary-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("mkdir");
-    for (file, body) in [("groww_instruments.csv", groww), ("dhan_scrip.csv", dhan)] {
+    for (file, body) in [
+        ("groww_instruments.csv", groww),
+        ("dhan_scrip.csv", dhan),
+        ("zerodha_instruments.csv", Some(ZERODHA_HEAD)),
+    ] {
         let path = dir.join(file);
         match body {
             Some(text) => std::fs::write(&path, text).expect("write"),
