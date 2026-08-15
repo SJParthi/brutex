@@ -149,6 +149,41 @@ pub fn is_gated(feed: Feed) -> bool {
     matches!(feed.source_kind(), SourceKind::Rest)
 }
 
+/// Every month a window touches, in order.
+///
+/// The store addresses one month per file, so a window is a set of month files
+/// and the gate's question is asked once per (instrument, month). Walked from
+/// the window's own ends rather than counted, because a month's length is not a
+/// constant and `end_of_month` is the calendar's answer rather than arithmetic
+/// on 30.
+///
+/// # Errors
+///
+/// None — a window whose ends are already `Day`s cannot name a month that is not
+/// a month. A day that will not convert is skipped rather than refusing the
+/// walk: it cannot happen for a constructed `Window`, and a gate that refused a
+/// whole run over an unrepresentable month would be a refusal nobody could act
+/// on.
+#[must_use]
+pub fn months_of(window: pull::session::Window) -> Vec<YearMonth> {
+    let mut out = Vec::new();
+    let mut at = window.from();
+    loop {
+        if let Ok(ym) = at.year_month() {
+            out.push(ym);
+        }
+        let last = at.end_of_month();
+        if last.days_from_epoch() >= window.to().days_from_epoch() {
+            return out;
+        }
+        let Ok(next) = pull::session::Day::from_days(last.days_from_epoch().saturating_add(1))
+        else {
+            return out;
+        };
+        at = next;
+    }
+}
+
 /// May this request run?
 ///
 /// # Errors
@@ -598,5 +633,46 @@ mod tests {
                 tf.as_str()
             );
         }
+    }
+
+    // ======================================================================
+    // The month walk
+    // ======================================================================
+
+    /// A WINDOW IS A SET OF MONTH FILES, and the walk names each one once.
+    #[test]
+    fn a_window_names_every_month_file_it_touches() {
+        let day = |y, m, d| pull::session::Day::new(y, m, d).expect("a real day");
+        let win = |a, b| pull::session::Window::new(a, b).expect("a forward window");
+
+        // Inside one month.
+        assert_eq!(
+            months_of(win(day(2026, 8, 3), day(2026, 8, 14))),
+            vec![YearMonth::new(2026, 8).expect("a month")]
+        );
+        // Across a boundary — both files, not one.
+        assert_eq!(
+            months_of(win(day(2026, 8, 28), day(2026, 9, 2))),
+            vec![
+                YearMonth::new(2026, 8).expect("a month"),
+                YearMonth::new(2026, 9).expect("a month")
+            ]
+        );
+        // Across a YEAR boundary, which is where a naive +1 on the month breaks.
+        assert_eq!(
+            months_of(win(day(2025, 12, 30), day(2026, 1, 2))),
+            vec![
+                YearMonth::new(2025, 12).expect("a month"),
+                YearMonth::new(2026, 1).expect("a month")
+            ]
+        );
+        // One day is one month.
+        assert_eq!(
+            months_of(win(day(2026, 2, 28), day(2026, 2, 28))),
+            vec![YearMonth::new(2026, 2).expect("a month")]
+        );
+        // A long span names them all, in order, with no gap.
+        let long = months_of(win(day(2026, 1, 1), day(2026, 12, 31)));
+        assert_eq!(long.len(), 12, "twelve month files: {long:?}");
     }
 }
