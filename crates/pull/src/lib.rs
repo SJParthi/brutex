@@ -82,6 +82,7 @@ pub mod archive;
 pub mod config;
 pub mod csv;
 pub mod fetch;
+pub mod fno;
 pub mod fold;
 pub mod folder;
 pub mod http;
