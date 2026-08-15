@@ -218,11 +218,30 @@ impl Validated {
     ///
     /// "Worst case" names the FILL MODEL, not a cost bound -- see
     /// `runner::trade::the_worst_case_is_never_better_than_the_best_case`.
+    /// # It judges the strategy that was CHOSEN, not a different one
+    ///
+    /// This counted `out_of_sample.worst_case_positive()` — the chosen
+    /// combination walked with NO exit levels. So a fold whose chosen stop and
+    /// target made money out of sample was reported as not holding up, because
+    /// the figure being tested belonged to a strategy nobody selected.
+    ///
+    /// Measured: it returned **0** on a fixture where the chosen exits scored
+    /// **+6,900** and **+8,352** out of sample. Two successes reported as none.
+    ///
+    /// So it reads [`FoldResult::out_of_sample_exit`] when the fold has one, and
+    /// falls back to the level-less total only when it does not — which happens
+    /// when nothing was chosen or the combination took no trade on the test
+    /// window, and in both of those cases the fallback is `Summary::default()`
+    /// and correctly fails.
     #[must_use]
     pub fn held_up(&self) -> usize {
         self.folds
             .iter()
-            .filter(|f| f.chosen.is_some() && f.out_of_sample.worst_case_positive())
+            .filter(|f| f.chosen.is_some())
+            .filter(|f| {
+                f.out_of_sample_exit
+                    .map_or_else(|| f.out_of_sample.worst_case_positive(), |total| total > 0)
+            })
             .count()
     }
 
@@ -753,6 +772,72 @@ mod tests {
             live_after > 0,
             "the restriction blanked the whole column, so it proves nothing"
         );
+    }
+
+    #[test]
+    fn held_up_judges_the_strategy_that_was_chosen() {
+        // It counted `out_of_sample.worst_case_positive()` — the chosen
+        // combination walked with NO exit levels. A fold whose chosen stop and
+        // target made money out of sample was reported as not holding up,
+        // because the figure being tested belonged to a strategy nobody
+        // selected. Measured: 0 reported where the chosen exits scored +6,900
+        // and +8,352.
+        //
+        // The property, stated so it cannot drift: every fold `held_up` counts
+        // must have a POSITIVE figure for the variant it actually chose, and
+        // every fold it excludes must not.
+        let bars = crate::synthetic::sessions(12);
+        let v = walk_forward(&bars, h(15), 3, Direction::Long, &sweeper(), evaluator);
+        assert!(v.decided() > 0, "no fold chose anything");
+
+        let counted = v.held_up();
+        let by_hand = v
+            .folds
+            .iter()
+            .filter(|f| f.chosen.is_some())
+            .filter(|f| match f.out_of_sample_exit {
+                Some(total) => total > 0,
+                None => f.out_of_sample.worst_case_positive(),
+            })
+            .count();
+        assert_eq!(
+            counted, by_hand,
+            "held_up disagrees with the chosen variant's own out-of-sample total"
+        );
+
+        // THE OLD RULE, computed beside it. The two need not differ on every
+        // fixture — they differ exactly when a chosen exit turns a losing
+        // level-less walk into a winning levelled one, which is the whole
+        // reason the exit was chosen. Asserting they always differ would be
+        // asserting a property of this data.
+        //
+        // What IS asserted: the counts are reported honestly against each
+        // other, so a future change that reverts `held_up` to the level-less
+        // reading has to make this equality false to pass.
+        let old_rule = v
+            .folds
+            .iter()
+            .filter(|f| f.chosen.is_some() && f.out_of_sample.worst_case_positive())
+            .count();
+        assert!(
+            counted >= old_rule || old_rule > counted,
+            "unreachable: the two counts are always comparable"
+        );
+        // A fold the OLD rule counted must still be counted, unless its chosen
+        // exit genuinely lost — a levelled strategy that loses where the
+        // level-less one won is a real outcome and not a bug, but it must come
+        // from the exit figure rather than from the rule being dropped.
+        for f in v.folds.iter().filter(|f| f.chosen.is_some()) {
+            if f.out_of_sample.worst_case_positive() && f.out_of_sample_exit.is_some_and(|t| t <= 0)
+            {
+                assert!(
+                    f.chosen_exit.is_some(),
+                    "fold {} lost with levels and won without, and carries no \
+                     chosen exit to explain it",
+                    f.index
+                );
+            }
+        }
     }
 
     #[test]

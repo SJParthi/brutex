@@ -832,7 +832,7 @@ mod tests {
                     halted: None,
                     chosen_exit: Some((Some(1), Some(2), None)),
                     chosen_exit_total: Some(2_000),
-                    out_of_sample_exit: Some(500),
+                    out_of_sample_exit: Some(-500),
                     chosen: Some(vocab::ConditionMask::default()),
                     in_sample: crate::validate::Summary {
                         trades: 55,
