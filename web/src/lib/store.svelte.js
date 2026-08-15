@@ -136,10 +136,41 @@ function rowFault(row) {
   return null;
 }
 
+/**
+ * ONE INSTRUMENT-MONTH ROW, AS `/store.json` SENDS IT.
+ *
+ * Typed because the arrays below infer `never[]` without it, and every callback
+ * that walks one — `.map((r) => …)`, `.filter((r) => …)` — is then reported as
+ * `Parameter 'r' implicitly has an 'any' type` at the CALL SITE. 148 of those
+ * across /db and /ingest, all of them this one absence, none of them fixable
+ * where they are reported.
+ *
+ * Read off a live response rather than guessed. `crates/api` writes it; the
+ * timestamps are MICROSECONDS, which is why `$lib/dates.js` refuses to sniff
+ * the unit.
+ *
+ * @typedef {{
+ *   instrument: string,
+ *   month: string,
+ *   timeframe: string,
+ *   rows: number,
+ *   first_ts: number,
+ *   last_ts: number,
+ *   chg_bps: number | null,
+ *   chg_why: string | null,
+ *   prev_chg_bps: number | null,
+ *   prev_chg_why: string | null
+ * }} StoreRow
+ */
+
+/** @returns {{ rows: StoreRow[], readable: StoreRow[], bad: StoreRow[],
+ *   byInstrument: Map<string, StoreRow[]>, badByInstrument: Map<string, StoreRow[]>,
+ *   byCell: Map<string, StoreRow>, byMonth: Map<string, StoreRow[]>,
+ *   cells: number, bars: number }} */
 const empty = () => ({
-  rows: [],
-  readable: [],
-  bad: [],
+  rows: /** @type {StoreRow[]} */ ([]),
+  readable: /** @type {StoreRow[]} */ ([]),
+  bad: /** @type {StoreRow[]} */ ([]),
   byInstrument: new Map(),
   badByInstrument: new Map(),
   byCell: new Map(),
