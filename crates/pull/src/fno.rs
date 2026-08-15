@@ -550,6 +550,118 @@ mod tests {
         );
     }
 
+    /// EVERY REFUSAL SAYS WHAT IT IS, AND NAMES ITS OWN NUMBERS.
+    ///
+    /// Five arms, five messages, and each is read by an operator who has just
+    /// watched a month come back empty. A refusal that does not say WHICH month
+    /// or WHICH year sends them to the vendor's dashboard instead of to the
+    /// field they typed — so the arithmetic is in the sentence, not just in the
+    /// variant.
+    #[test]
+    fn every_refusal_carries_its_own_reason_and_its_own_numbers() {
+        let say = |e: &FnoError| e.to_string();
+
+        let no = say(&FnoError::NoLookup);
+        assert!(no.contains("no expired-contract lookup"), "{no}");
+        assert!(no.contains("nothing was sent"), "{no}");
+
+        let floor = say(&FnoError::BeforeFloor {
+            asked: 2019,
+            floor: 2020,
+        });
+        assert!(
+            floor.contains("2019") && floor.contains("2020"),
+            "both years, so the operator sees the gap they typed: {floor}"
+        );
+        assert!(
+            floor.contains("same bytes"),
+            "and WHY it was refused instead of asked: {floor}"
+        );
+
+        let month = say(&FnoError::MonthOutOfRange { month: 13 });
+        assert!(month.contains("13"), "the month asked for: {month}");
+
+        let expiry = say(&FnoError::NoExpiry);
+        assert!(
+            expiry.contains("expiries lookup"),
+            "it names the call that produces what is missing: {expiry}"
+        );
+
+        let unread = say(&FnoError::Unreadable { field: "contracts" });
+        assert!(
+            unread.contains("contracts"),
+            "the field it looked for: {unread}"
+        );
+        assert!(
+            unread.contains("month that had fewer"),
+            "and why nothing partial was returned: {unread}"
+        );
+
+        // NO TWO REFUSALS READ ALIKE. A message repeated across arms is a
+        // message that cannot tell an operator which arm they are in.
+        let all = [no, floor, month, expiry, unread];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "two refusals read identically");
+            }
+        }
+    }
+
+    /// A DISCOVERY PATH MAY CARRY A VALUE SEGMENT, and it resolves through the
+    /// same table the query string does.
+    ///
+    /// No shipped feed puts its underlying in the PATH — Groww's two lookups
+    /// are all literals — so this drives it against a spec built here. The arm
+    /// exists so a vendor that does is one descriptor row rather than a second
+    /// URL builder, and an untested builder arm is one that silently emits a
+    /// placeholder instead of a value.
+    #[test]
+    fn a_value_segment_in_a_discovery_path_resolves_like_any_other_field() {
+        let base = groww();
+        let d = base.fno.expect("Groww has a lookup");
+        let spec = HttpSpec {
+            fno: Some(FnoDiscovery {
+                expiries_path: &[
+                    PathSegment::Literal("v1"),
+                    PathSegment::Value {
+                        placeholder: "underlying_symbol",
+                        value: ParamValue::Underlying,
+                    },
+                    PathSegment::Literal("expiries"),
+                ],
+                expiries_params: &[],
+                ..d
+            }),
+            ..base
+        };
+        assert_eq!(
+            expiries_url(&spec, &ask()).expect("it builds"),
+            "https://api.groww.in/v1/NIFTY/expiries",
+            "the segment carries the VALUE, not the placeholder"
+        );
+
+        // AND A SEGMENT THIS ASK CANNOT FILL FALLS BACK TO ITS PLACEHOLDER
+        // rather than emitting an empty segment — `//` in a path is a different
+        // URL, and a vendor would answer it differently.
+        let unfillable = HttpSpec {
+            fno: Some(FnoDiscovery {
+                expiries_path: &[PathSegment::Value {
+                    placeholder: "expiry_date",
+                    value: ParamValue::ExpiryDate,
+                }],
+                expiries_params: &[],
+                ..d
+            }),
+            ..base
+        };
+        assert_eq!(
+            expiries_url(&unfillable, &ask()).expect("it builds"),
+            "https://api.groww.in/expiry_date",
+            "an ask with no expiry leaves the placeholder standing, never an \
+             empty segment"
+        );
+    }
+
     /// NO DISCOVERY REQUEST NAMES A BARS-ONLY FIELD.
     ///
     /// A discovery request has no window and no rung, so `From`, `To`,
