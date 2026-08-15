@@ -483,6 +483,84 @@ pub fn body(name: &str, with_decryption: bool) -> String {
     serde_json::json!({ "Name": name, "WithDecryption": with_decryption }).to_string()
 }
 
+/// What an operator is told about a refusal, holding the body at arm's length.
+///
+/// Split out of the request so the §8 promise is TESTABLE. The rule it enforces
+/// is one sentence: nothing from `body` reaches the output except an exact
+/// match against [`AWS_FAULTS`], and those are closed tokens that cannot carry
+/// a path.
+///
+/// Constant work in the body's length — one pass per known fault over a
+/// response AWS bounds itself.
+#[must_use]
+fn refusal_detail(status: u16, body: &str) -> String {
+    match AWS_FAULTS.iter().find(|name| body.contains(*name)) {
+        Some(name) => format!("Parameter Store refused with {status}: {name}"),
+        None => format!(
+            "Parameter Store refused with {status} and named no fault this \
+             build recognises. The response body is deliberately not quoted: \
+             AWS states a denial as a sentence naming the parameter ARN, and \
+             §8 keeps that path out of this process's output. See CloudTrail \
+             for the full text."
+        ),
+    }
+}
+
+/// AWS fault names this build will repeat back, and nothing else.
+///
+/// An ALLOWLIST rather than a filter, because the thing being kept out is not a
+/// known pattern — it is a free-text sentence AWS composes, and any sentence it
+/// composes about `ssm:GetParameter` names the parameter ARN. There is no
+/// redaction rule that is safe against text you have not read. A fixed set of
+/// closed tokens is safe by construction: none of these can carry a path.
+///
+/// Being incomplete is harmless. An unmatched fault reports its HTTP status and
+/// nothing else, which is still more than the `kind` alone, and `kind` is what
+/// an operator acts on.
+const AWS_FAULTS: [&str; 12] = [
+    "AccessDeniedException",
+    "ParameterNotFound",
+    "ParameterVersionNotFound",
+    "InvalidKeyId",
+    "InternalServerError",
+    "ThrottlingException",
+    "TooManyUpdates",
+    "ValidationException",
+    "ExpiredTokenException",
+    "InvalidSignatureException",
+    "MissingAuthenticationToken",
+    "UnrecognizedClientException",
+];
+
+// `indexing_slicing` is denied workspace-wide because an index that can panic
+// is an index that will. Inside a `const` block it cannot: this runs at COMPILE
+// time, and an out-of-bounds index is a build failure, not a signal in
+// production. `slice::get` is not const-callable, so the alternative is not
+// writing the check at all.
+#[allow(
+    clippy::indexing_slicing,
+    reason = "evaluated at compile time; an out-of-bounds index fails the build \
+              rather than reaching a running process"
+)]
+const _: () = {
+    // A fault name that contained a slash could carry a path fragment, which
+    // would defeat the whole point of an allowlist.
+    let mut i = 0;
+    while i < AWS_FAULTS.len() {
+        let bytes = AWS_FAULTS[i].as_bytes();
+        let mut j = 0;
+        while j < bytes.len() {
+            assert!(
+                bytes[j] != b'/' && bytes[j] != b':' && bytes[j] != b' ',
+                "an AWS fault name must be a closed token; a slash, colon or \
+                 space means it is a sentence and could carry a parameter path"
+            );
+            j += 1;
+        }
+        i += 1;
+    }
+};
+
 /// The value out of a `GetParameter` response.
 ///
 /// # Errors
@@ -641,12 +719,34 @@ pub async fn get_parameter(
         } else {
             SecretError::Unreachable
         };
+        // THE BODY IS NEVER QUOTED, AND THIS IS THE §8 LINE.
+        //
+        // The 300 characters of `text` that used to be spliced here were the
+        // single worst thing this file could say out loud. AWS writes a denial
+        // as a SENTENCE naming the resource: *"User: arn:aws:sts::<account>:
+        // assumed-role/... is not authorized to perform: ssm:GetParameter on
+        // resource: arn:aws:ssm:<region>:<account>:parameter/<org>/<env>/
+        // <vendor>/<field>"*. That single line carries the AWS account id and
+        // the full credential path — the exact literals §8 keeps out of every
+        // tracked file and CI gate 1c exists to enforce.
+        //
+        // And it went everywhere: this detail reaches the log, the autopilot's
+        // trouble note, and the HTTP surface. A repository that is careful
+        // enough to keep the path out of its SOURCE was printing it on the
+        // first IAM misconfiguration.
+        //
+        // Replaced by an ALLOWLIST, so the default is silence. Only a fault
+        // name this build already knows is echoed, and a name is a closed token
+        // — it cannot carry an ARN. Anything unrecognised reports the status
+        // and nothing else, which is strictly less information than the fault
+        // kind above already gives an operator.
+        //
+        // What an operator loses: the AWS sentence. What they keep: the status,
+        // the fault name, and `kind`, which is what they act on. The sentence
+        // is still in CloudTrail, where it belongs and where the account
+        // already controls who reads it.
         return Err(SsmError {
-            detail: format!(
-                "Parameter Store refused with {}: {}",
-                status.as_u16(),
-                text.chars().take(300).collect::<String>()
-            ),
+            detail: refusal_detail(status.as_u16(), &text),
             kind,
         });
     }
@@ -745,6 +845,74 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+    /// §8 — the parameter path never reaches the output, whatever AWS says.
+    #[test]
+    fn a_refusal_never_repeats_the_body_that_names_the_parameter() {
+        // THE REAL SHAPE OF AN IAM DENIAL. This is the sentence AWS composes
+        // for `ssm:GetParameter`, and the 300 characters of it that used to be
+        // spliced into the detail carried the account id and the full path.
+        // The segments here are invented stand-ins -- §8 keeps the real ones
+        // out of every tracked file, including this test.
+        let denial = r#"{"__type":"AccessDeniedException","message":"User: \
+            arn:aws:sts::000000000000:assumed-role/brutex-pull/session is not \
+            authorized to perform: ssm:GetParameter on resource: \
+            arn:aws:ssm:ap-south-1:000000000000:parameter/anorg/anenv/avendor/afield"}"#;
+
+        let said = refusal_detail(403, denial);
+
+        // The fault is named, because a name is a closed token.
+        assert!(said.contains("AccessDeniedException"), "{said}");
+        assert!(said.contains("403"), "{said}");
+
+        // AND NOTHING ELSE FROM THE BODY. Each of these appears in `denial`
+        // and must not survive into what an operator's log receives.
+        for leak in [
+            "parameter/",
+            "anorg",
+            "anenv",
+            "avendor",
+            "afield",
+            "000000000000",
+            "arn:aws",
+            "assumed-role",
+            "not authorized",
+        ] {
+            assert!(
+                !said.contains(leak),
+                "the refusal leaked {leak:?} out of the response body: {said}"
+            );
+        }
+
+        // AN UNRECOGNISED FAULT SAYS EVEN LESS. The default is silence, so a
+        // body this build has never seen cannot leak by being unanticipated --
+        // which is the whole reason this is an allowlist and not a filter.
+        let unknown = "SomeFutureException: on resource \
+                       arn:aws:ssm:ap-south-1:000000000000:parameter/anorg/anenv/x";
+        let said = refusal_detail(400, unknown);
+        assert!(said.contains("400"), "{said}");
+        for leak in ["SomeFutureException", "parameter/", "anorg", "arn:aws"] {
+            assert!(
+                !said.contains(leak),
+                "unrecognised fault leaked {leak:?}: {said}"
+            );
+        }
+
+        // Every name in the table is echoed when it appears, so the allowlist
+        // is not silently empty.
+        for name in AWS_FAULTS {
+            let body = format!(r#"{{"__type":"{name}","message":"parameter/anorg/anenv/x"}}"#);
+            let said = refusal_detail(500, &body);
+            assert!(
+                said.contains(name),
+                "{name} is in the table but was not named: {said}"
+            );
+            assert!(
+                !said.contains("anorg"),
+                "{name} let the path through: {said}"
+            );
+        }
+    }
+
     use super::*;
 
     /// AWS publishes worked `SigV4` examples with every intermediate value. This
