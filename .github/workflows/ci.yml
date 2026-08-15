@@ -4607,9 +4607,23 @@ jobs:
           # `--test-tool=cargo` and the workspace's own suite. The timeout is
           # generous per mutant because a mutant that hangs is a mutant the
           # suite did NOT catch, and killing it early would score it as caught.
+          #
+          # 300 SECONDS WAS BELOW THIS WORKSPACE'S OWN BASELINE, so the gate could
+          # not pass at all. `--timeout` applies to the UNMUTATED run as well as to
+          # each mutant -- cargo-mutants 26.2.0 has no separate baseline bound -- and
+          # `runner::end_to_end::the_ladder_reaches_further_as_support_falls_unless_a_budget_stops_it_first`
+          # walks the combination ladder to extinction and legitimately takes
+          # minutes. At 300 s the BASELINE timed out, cargo-mutants exited 4 having
+          # tested ZERO mutants, and this step refused to call that a pass -- which
+          # is how the tightness was found instead of being scored green.
+          #
+          # 900 s is above the measured baseline with room, and the cost of raising
+          # it is bounded and one-directional: a mutant that HANGS now takes longer
+          # to be declared caught. It is still caught. A gate that cannot pass
+          # catches nothing at all, which is the worse trade.
           set +e
           cargo mutants --in-diff /tmp/changed.diff \
-            --timeout 300 --no-shuffle --colors never
+            --timeout 900 --no-shuffle --colors never
           status=$?
           set -e
 
