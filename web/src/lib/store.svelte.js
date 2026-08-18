@@ -119,8 +119,13 @@ export const RUNG_SECONDS = new Map([
  */
 export const rungSeconds = (t) => RUNG_SECONDS.get(t) ?? null;
 
-/** The shape a census month is written in. One spelling of the test, shared. */
-export const MONTH_KEY = /^\d{4}-\d{2}$/;
+// THE FAULT DETECTOR AND ITS REGEX LIVE IN `$lib/rows.js` so a test can drive
+// them. This module imports `$lib/ask.js`, an alias node cannot resolve, so the
+// one check standing between `/store.json` and every number two pages print was
+// unreachable from `node --test`. Re-exported here because `routes/+page.svelte`
+// imports `MONTH_KEY` from this module and has no reason to care where it moved.
+import { MONTH_KEY, rowFault } from '$lib/rows.js';
+export { MONTH_KEY };
 
 /**
  * Three-way compare, over whatever `sort` is ordering on THIS line.
@@ -145,53 +150,6 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  */
 export const cellKey = (instrument, timeframe, month) => `${instrument}|${timeframe}|${month}`;
 
-/**
- * `Number.isInteger`, restated as the type guard it already is at run time.
- *
- * The standard-library signature is `isInteger(number: unknown): boolean`, so a
- * checked value stays exactly as wide as it arrived and the comparison on the
- * VERY NEXT token — `row.rows < 0` — is then read as a comparison against a
- * count that may not be there. The predicate states what the call has already
- * proved; it adds no test, and at run time this is `Number.isInteger` and
- * nothing else.
- *
- * @param {unknown} v
- * @returns {v is number}
- */
-const isWholeNumber = (v) => Number.isInteger(v);
-
-/**
- * `null` when the row is readable; otherwise the reason it is not, in words.
- *
- * A ROW THAT FAILS IS KEPT, NEVER DROPPED AND NEVER COERCED. A census row whose
- * `rows` is absent, negative or fractional is a row whose count is UNKNOWN.
- * Dropping it makes it indistinguishable from a month that does not exist;
- * writing zero for it prints a measurement nobody took. It goes to `bad` with
- * the reason, and every total computed without it can say so.
- *
- * THE PARAMETER IS `WireRow` AND NOT `StoreRow`, DELIBERATELY. `StoreRow` is
- * what `/store.json` PROMISES; this function exists because a promise is not a
- * proof, and typing its input as the promise would make every test below dead
- * code to the checker — a fault detector the type system believes can never
- * fire. `WireRow` assumes only that the four fields MAY be present, which is
- * the state of knowledge on entry, and each `typeof` here is what carries a
- * field from "may be" to "is". Every `StoreRow` is a `WireRow`, so the two call
- * sites pass without a cast at either of them.
- *
- * @param {WireRow | null | undefined} row
- * @returns {string | null}
- */
-function rowFault(row) {
-  if (typeof row?.instrument !== 'string' || row.instrument === '')
-    return `its \`instrument\` field is ${JSON.stringify(row?.instrument)}, which is not an instrument key`;
-  if (typeof row.month !== 'string' || !MONTH_KEY.test(row.month))
-    return `its \`month\` field is ${JSON.stringify(row.month)}, which is not a YYYY-MM month`;
-  if (typeof row.timeframe !== 'string' || row.timeframe === '')
-    return `its \`timeframe\` field is ${JSON.stringify(row.timeframe)}`;
-  if (!isWholeNumber(row.rows) || row.rows < 0)
-    return `its \`rows\` field is ${JSON.stringify(row.rows)}, which is not a whole number of records`;
-  return null;
-}
 
 /**
  * ONE INSTRUMENT-MONTH ROW, AS `/store.json` SENDS IT.
