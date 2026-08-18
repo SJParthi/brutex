@@ -2461,6 +2461,11 @@
     feedsChosen.flatMap((v) =>
       rungsChosen.map((r) => ({
         dir: r.dir,
+        /* THE FEED THIS BODY BELONGS TO. `runPull` groups on it: the vendor is
+           already inside `body` as a form field, and digging it back out of a
+           URLSearchParams to decide scheduling would be reading the wire to
+           learn something the caller knew. */
+        vendor: v,
         label: feedsChosen.length > 1 ? `${feedName(v)} · ${r.label}` : r.label,
         body: wireBodyFor(r.dir, from, to, v)
       }))
@@ -5150,7 +5155,7 @@
   }
 
   /**
-   * @param {{ dir: string, label: string, body: string }[]} bodies
+   * @param {{ dir: string, label: string, body: string, vendor?: string }[]} bodies
    * @param {Set<string>} asked
    */
   async function runPull(bodies, asked) {
@@ -5193,39 +5198,75 @@
     releaseWatch = watchStore(5000);
 
     controller = new AbortController();
+    // PARALLEL ACROSS FEEDS, SEQUENTIAL WITHIN ONE. The operator's rule, and it
+    // is the shape the rate budget dictates rather than a preference: a budget
+    // is per VENDOR, so two rungs fired at one broker together double the rate
+    // against a single ceiling, while two different brokers share nothing at
+    // all. Firing everything at once is faster right up to the 429 that loses
+    // the run.
+    //
+    // GROUPED IN ONE PASS, in the order the feeds were ticked, so the chains
+    // start in a defined order even though they finish in whatever order the
+    // vendors answer.
+    /** @type {Map<string, typeof bodies>} */
+    const byFeed = new Map();
     for (const b of bodies) {
-      sent = { done: sent.done, of: bodies.length, label: b.label };
-      try {
-        const r = await fetch('/pull/spot', {
-          method: 'POST',
-          headers: { 'content-type': 'application/x-www-form-urlencoded' },
-          body: b.body,
-          signal: controller.signal
-        });
-        const one = {
-          ...readReceipt(
-            await r.text(),
-            r.ok,
-            r.status,
-            r.headers.get('content-type'),
-            r.headers.get(RECEIPT_HEADER)
-          ),
-          rung: b.label
-        };
-        receipts = [...receipts, one];
-        // THE ONE THE CARD SHOWS IS THE FIRST BAD ONE. A later success must not
-        // paint over a rung that refused — the list below it carries all of them.
-        if (!receipt || (receipt.good && !one.good)) receipt = one;
-      } catch (why) {
-        if (controller?.signal.aborted) {
-          aborted = true;
-          break;
-        }
-        netError = String(why);
-        break;
-      }
-      sent = { done: sent.done + 1, of: bodies.length, label: b.label };
+      const k = b.vendor ?? '';
+      const g = byFeed.get(k);
+      if (g) g.push(b);
+      else byFeed.set(k, [b]);
     }
+
+    // ONE CHAIN PER FEED. Each awaits its own requests in turn; the chains
+    // themselves are awaited together.
+    //
+    // A FAILING FEED STOPS ITS OWN CHAIN AND NOT THE OTHERS, which is a change
+    // the fan-out forces and an improvement on its own terms: under the old
+    // single-feed loop `break` ended the run, and ending every vendor's work
+    // because one vendor's socket died would throw away answers already paid
+    // for. `netError` keeps the FIRST reason so the card names a cause rather
+    // than the last thing to go wrong.
+    const chain = async (/** @type {typeof bodies} */ group) => {
+      for (const b of group) {
+        sent = { done: sent.done, of: bodies.length, label: b.label };
+        try {
+          const r = await fetch('/pull/spot', {
+            method: 'POST',
+            headers: { 'content-type': 'application/x-www-form-urlencoded' },
+            body: b.body,
+            signal: controller.signal
+          });
+          const one = {
+            ...readReceipt(
+              await r.text(),
+              r.ok,
+              r.status,
+              r.headers.get('content-type'),
+              r.headers.get(RECEIPT_HEADER)
+            ),
+            rung: b.label
+          };
+          /* APPEND IS SAFE WITHOUT A LOCK and not by luck: JavaScript runs one
+             task at a time, so a read-modify-write between two `await`s cannot
+             interleave with another chain's. The chains are concurrent, never
+             parallel. */
+          receipts = [...receipts, one];
+          // THE ONE THE CARD SHOWS IS THE FIRST BAD ONE. A later success must
+          // not paint over a rung that refused — the list carries all of them.
+          if (!receipt || (receipt.good && !one.good)) receipt = one;
+        } catch (why) {
+          if (controller?.signal.aborted) {
+            aborted = true;
+            return;
+          }
+          if (!netError) netError = String(why);
+          return;
+        }
+        sent = { done: sent.done + 1, of: bodies.length, label: b.label };
+      }
+    };
+
+    await Promise.all([...byFeed.values()].map(chain));
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
