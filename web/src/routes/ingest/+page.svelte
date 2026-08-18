@@ -4906,9 +4906,15 @@
     if (dayNum(isoDay) > dayNum(maxDay)) {
       return `${dayLabel(isoDay)} is after ${dayLabel(maxDay)}. ${ceilReason}`;
     }
-    if (feedFloor.at && isoDay < feedFloor.at) {
-      return `${dayLabel(isoDay)} cannot be asked for: ${floorSentence} Pick a feed or a timeframe that reaches further back, and this day opens up.`;
-    }
+    /* THE FEED'S FLOOR NO LONGER BLOCKS THE DAY, at the operator's instruction:
+       a window is picked ONCE and is asked of every ticked feed, so a floor
+       that moves with the feed made the same calendar offer different days from
+       one press to the next. Now the grid offers the whole span the server's
+       picker offers and the floor is a matter for the PULL -- which already
+       states it: `problems` still refuses a window that starts before the
+       strictest ticked floor, by name and with the date to move to, so nothing
+       under-pulls in silence. `CLAUDE.md` §4 wants the failure loud, not the
+       control narrow. */
     if (dayNum(isoDay) < dayNum(minDay)) {
       return `${dayLabel(isoDay)} is before ${dayLabel(minDay)}, the oldest day the server's own picker offers (crates/api/src/calendar.rs).`;
     }
@@ -4958,7 +4964,8 @@
   /** @param {string} isoDay */
   function clampDay(isoDay) {
     if (!isValidIso(isoDay)) return maxDay;
-    const lo = feedFloor.at && feedFloor.at > minDay ? feedFloor.at : minDay;
+    /* CLAMPED TO THE PAGE'S OWN FLOOR, NOT THE FEED'S -- see `dayBlock`. */
+    const lo = minDay;
     if (dayNum(isoDay) < dayNum(lo)) return lo;
     if (dayNum(isoDay) > dayNum(maxDay)) return maxDay;
     return isoDay;
@@ -7264,7 +7271,6 @@
       <div class="cpick">
         <Picker
           single
-          filter
           label="years"
           summary={String(calYear)}
           title="The year this grid is showing."

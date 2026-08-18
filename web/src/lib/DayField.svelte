@@ -378,7 +378,6 @@
         <div class="cpick">
           <Picker
             single
-            filter
             label="years"
             summary={shown.slice(0, 4)}
             title="The year this grid is showing."
