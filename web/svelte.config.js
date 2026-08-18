@@ -1,4 +1,53 @@
 import adapter from '@sveltejs/adapter-static';
+import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * THE BUILD IS A FUNCTION OF ITS SOURCE, AND UNTIL THIS IT WAS NOT.
+ *
+ * SvelteKit's default `version.name` is `Date.now()`. It is baked into the
+ * client manifest, so it changes the manifest's bytes, so it changes that
+ * chunk's content hash, so it changes every filename that references it.
+ * Measured: rebuilding IDENTICAL source rewrote 18 of 39 tracked files.
+ *
+ * That made the one check this repository most needs impossible to write.
+ * `web/build` is committed under D-0068 and served from disk by the Rust
+ * binary, so the artifact in the tree is what an operator actually runs -- and
+ * nothing verified it corresponds to `web/src`. `31cd9a1` is the standing
+ * proof: 1,150 source lines changed, zero build files, CI green throughout.
+ * Any gate that rebuilt and diffed would have failed on every run for a reason
+ * that was never the source, which trains a reader to ignore it.
+ *
+ * So the version is a DIGEST OF THE SOURCE instead of the clock. Two things
+ * follow. The build becomes reproducible, so `npm run build && git diff
+ * --exit-code web/build` is a real check. And `version.json` becomes a
+ * fingerprint of the tree that produced it, so staleness is legible without a
+ * rebuild at all.
+ *
+ * What it covers is everything that can change the output: `src/`, the
+ * lockfile, and the two config files. `package.json` is not read directly --
+ * `package-lock.json` carries it.
+ */
+function sourceDigest() {
+  const hash = createHash('sha256');
+  const walk = (dir) => {
+    for (const name of readdirSync(dir).sort()) {
+      const full = join(dir, name);
+      if (statSync(full).isDirectory()) walk(full);
+      else {
+        hash.update(full);
+        hash.update(readFileSync(full));
+      }
+    }
+  };
+  walk('src');
+  for (const file of ['package-lock.json', 'svelte.config.js', 'vite.config.js']) {
+    hash.update(file);
+    hash.update(readFileSync(file));
+  }
+  return hash.digest('hex').slice(0, 16);
+}
 
 /**
  * STATIC OUTPUT, AND THAT IS THE WHOLE INTEGRATION STORY.
@@ -38,6 +87,9 @@ export default {
   kit: {
     adapter: adapter({ pages: 'build', assets: 'build', fallback: 'index.html', precompress: false }),
     paths: { relative: false },
+    // Not the clock. See `sourceDigest` above -- this is what makes the build
+    // reproducible, and therefore what makes a stale-bundle gate possible.
+    version: { name: sourceDigest(), pollInterval: 0 },
     prerender: {
       handleHttpError: ({ path, message }) => {
         if (SERVER_RENDERED.has(path)) return;

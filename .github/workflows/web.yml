@@ -1,0 +1,124 @@
+# ============================================================================
+# THE FRONT-END GATES, IN THEIR OWN FILE.
+#
+# `ci.yml` runs no Node at all -- `grep -c 'setup-node\|npm' ci.yml` is zero --
+# and that is deliberate: CLAUDE.md §2 requires `cargo build`, `cargo test` and
+# `cargo clippy` to pass on a machine that has never installed a package
+# manager, and gate 1e proves it by shadowing twelve JS binaries with failing
+# stubs. Nothing here weakens that. This workflow is a SEPARATE file so the
+# engine's gates and the browser's gates cannot be confused for one another,
+# and so that a red front end never reads as a red engine.
+#
+# Three things were true before this file existed, all of them findings:
+#
+#   * NOTHING TIED `web/build` TO `web/src`. The bundle is committed under
+#     D-0068 and served from disk by the Rust binary, so the artifact in the
+#     tree is what an operator runs. `31cd9a1` changed 1,150 source lines and
+#     zero build files and CI stayed green, so the repository served a page
+#     that no longer matched its source, silently.
+#   * `web/tests/*.test.js` WERE TRACKED AND NEVER EXECUTED. Decorative tests
+#     are worse than none: they read as coverage.
+#   * `svelte-check` WAS A SCRIPT NOBODY RAN. 122 errors sat unseen.
+# ============================================================================
+name: Web
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Gate W — the browser tree
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `ci` and NOT `install`. `npm install` may rewrite the lockfile, which
+      # would make the rebuild below a comparison against a dependency set the
+      # repository never agreed to.
+      - name: Install exactly the lockfile
+        run: npm ci --prefix web
+
+      # ----------------------------------------------------------------------
+      # GATE W1 — THE COMMITTED BUNDLE IS THE ONE THIS SOURCE PRODUCES.
+      #
+      # This check is only possible because `svelte.config.js` sets
+      # `version.name` to a digest of the source rather than `Date.now()`.
+      # With the default clock version, rebuilding IDENTICAL source rewrote 18
+      # of 39 tracked files -- the timestamp enters the client manifest, which
+      # changes that chunk's content hash, which changes every filename that
+      # references it. A gate that failed on every run for a reason that was
+      # never the source would train a reader to ignore it.
+      #
+      # Source maps are gitignored, so they cannot enter this diff.
+      # ----------------------------------------------------------------------
+      - name: Gate W1 — web/build matches web/src
+        run: |
+          npm --prefix web run build
+          if ! git diff --exit-code --stat -- web/build; then
+            echo
+            echo "The committed bundle is not what this source builds."
+            echo
+            echo "web/build is served from disk by the Rust binary, so the"
+            echo "artifact in this repository is what an operator actually"
+            echo "runs. A source change committed without a rebuild ships a"
+            echo "page that does not match its own source, and nothing else"
+            echo "in CI would notice."
+            echo
+            echo "Fix: npm --prefix web run build, then commit web/build."
+            exit 1
+          fi
+          echo "The bundle corresponds to the source. Fingerprint:"
+          cat web/build/_app/version.json
+
+      # ----------------------------------------------------------------------
+      # GATE W2 — THE TESTS THAT EXIST ACTUALLY RUN.
+      #
+      # node's own runner, so this needs no dependency beyond the toolchain
+      # already installed above.
+      # ----------------------------------------------------------------------
+      - name: Gate W2 — the front-end tests
+        run: node --test web/tests/*.test.js
+
+      # ----------------------------------------------------------------------
+      # GATE W3 — TYPES DO NOT GET WORSE.
+      #
+      # A RATCHET, NOT A FLOOR, and the distinction is the honest part. The
+      # tree carries 64 errors today. Demanding zero would mean either fixing
+      # 64 errors in the commit that adds this gate -- unrelated work, badly
+      # scoped -- or shipping a gate that is red from birth, which is a gate
+      # nobody reads. Demanding "no worse than today" is enforceable now and
+      # gets stricter every time somebody lowers the number.
+      #
+      # `docs/06-limits.md` is where the fact that this is not zero belongs.
+      # ----------------------------------------------------------------------
+      - name: Gate W3 — svelte-check does not regress
+        run: |
+          CEILING=64
+          npm --prefix web run check 2>&1 | tee /tmp/check.log || true
+          FOUND=$(grep -oE '[0-9]+ ERRORS' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
+          if [ "$FOUND" = missing ]; then
+            echo "svelte-check produced no ERRORS line — it did not run, and a"
+            echo "gate that cannot run must fail rather than pass."
+            exit 1
+          fi
+          echo "svelte-check errors: $FOUND (ceiling $CEILING)"
+          if [ "$FOUND" -gt "$CEILING" ]; then
+            echo "That is more than the tree carried when this gate was written."
+            exit 1
+          fi
+          if [ "$FOUND" -lt "$CEILING" ]; then
+            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
+            echo "the ratchet keeps its meaning."
+          fi
