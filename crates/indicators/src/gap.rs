@@ -587,7 +587,7 @@ mod tests {
         // Today's opening candle, three bars of one shape.
         let opening = |g: &mut GapFib, high: i64, low: i64| {
             for m in 0..3 {
-                let _ = ok(g, &at(30_001, m, high, low, (high + low) / 2));
+                let _ = ok(g, &at(30_001, m, high, low, high.midpoint(low)));
             }
         };
 
