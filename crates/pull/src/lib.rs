@@ -99,6 +99,9 @@ pub mod rate;
 /// Every file in a pass is the same age, and a snapshot is published whole or
 /// not at all.
 pub mod resolve;
+/// THE COUNTER, CHECKED AGAINST THE FILES IT COUNTS -- the one thing in this
+/// crate entitled to say a month is verified rather than merely counted.
+pub mod scrub;
 pub mod secret;
 pub mod session;
 pub mod ssm;
