@@ -783,10 +783,13 @@ mod tests {
         // A boundary in the middle, taken from the column's OWN source indices
         // so it is a real one rather than a guess about the warm-up length.
         let mid = sources.len() / 2;
-        let boundary = match sources.get(mid) {
-            Some(&s) => s,
-            None => unreachable!("mid is inside a slice of length >= 4"),
-        };
+        // `expect` and not `unreachable!`: an unreachable arm is a project
+        // region no test can enter, and CLAUDE.md S9's coverage floor cannot be
+        // met with one. `expect` panics inside std and costs no region here.
+        let boundary = sources
+            .get(mid)
+            .copied()
+            .expect("mid is inside a slice of length >= 4");
         let before: Vec<ConditionMask> = column.bits().to_vec();
 
         let mut cleared = column;
