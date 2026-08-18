@@ -4814,5 +4814,82 @@ Two techniques, and they are not interchangeable: a clause negated at 95 against
 a threshold of 90 kills the `&&` and leaves the comparison alive, because `<` and
 `<=` both refuse 95. The comparison needs the threshold value itself. **OPEN.**
 
+### 2026-08-19: the first crate-wide run, and the seven files that are not `pattern.rs`
+
+Every measurement above is file-scoped over `pattern.rs`. A crate-wide
+`cargo mutants -p indicators --timeout 200` was run for the first time and
+**reached 608 of 1,379 planned mutants before the session ended** — the rest of
+the crate, including the bulk of `pattern.rs`, is unmeasured at this width. That
+number is a partial pass and is not comparable with the totals above; what follows
+is only what was actually decided.
+
+**Twenty survivors are dead**, each confirmed by applying the mutation to the
+source by hand and re-running the suite rather than inferred from the fixture:
+
+| file | site | what was missing |
+|---|---|---|
+| `lib.rs` | `CurDayFib::bits` ×6 | the ladder was never asked to LIGHT |
+| `lib.rs` | `Candle::check` ×1 | a close above the high with the open inside |
+| `daily.rs` | `bits_with` ×2 | the band's own edge, never sat on |
+| `evaluator.rs` | `stepped` ×4 | precedence, and a low that must descend |
+| `gap.rs` | `fold`, `establish` ×3 | the widest bar; a touch is not a gap |
+| `orb.rs` | `fold`, `bits` ×4 | the window widens; `base + n` is not `base` |
+
+**The shape of the `lib.rs` six is worth naming, because it is not a boundary.**
+`only_positions_121_to_131_are_ever_set` walks 400 bars and
+`at_most_one_rung_fires_on_any_bar` walks 600, and **an empty mask satisfies both**
+— "no stray position is set" and "at most one is set" are vacuously true of
+nothing. Two real assertions, and between them the ladder was never once asked to
+fire. `bits` could be replaced wholesale by `Default::default()` with the suite
+green. That is §4's test-that-asserts-nothing wearing assertions, and it is a
+different failure from the boundary shape this section opens with: the boundary
+tests were asking the wrong VALUE, this one was not asking at all.
+
+**`evaluator.rs`'s containment guard was the subtlest.** The file already carries
+`each_of_the_four_containment_failures_is_refused`, moving one field per case,
+and it cannot see the guard at all: `stepped` takes `self` by VALUE and discards
+it on a refusal, and `Candle::check` downstream carries the same four clauses, so
+bypassing the guard still returns the same error and still leaves no torn state.
+What the guard buys is **precedence** — a bar that is mis-assembled AND out of
+order is refused for its ORDER once containment is bypassed, sending a caller to
+the feed when the record is what is broken. A redundant-looking guard can still be
+load-bearing, and the thing it carries may not be the value it returns.
+
+### Twelve equivalents, measured and closed
+
+Each was confirmed the same way — mutation applied, suite still green — and none
+is a gap. **They are not to be chased.**
+
+| file | site | why no assertion can separate it |
+|---|---|---|
+| `pattern.rs` | `Shape::of` ×2, `Shape::top`, `Shape::bottom` | both arms return the same number at `open == close` |
+| `lib.rs` | `CurDayFib::bits` `\|\| → &&` | `!live` with `r > 0` is unreachable — `range()` returns 0 whenever the state is not live — and live with `r <= 0` falls through to a loop where `covers` refuses every rung outright |
+| `evaluator.rs` | `stepped` ×2 | assignment at equality writes the value already held |
+| `fib.rs` | `Prev5::extremes` ×2 | the same, in a fold-max and a fold-min |
+| `gap.rs` | `close_the_session` ×2, `fold` ×2 | the same, in a reduce and in the opening candle |
+| `orb.rs` | `Orb::fold` ×2 | the same, in the window fold |
+
+**One is equivalent for a reason worth stating separately.** `gap.rs:328:28`
+(`today_bars < CANDLE_MINUTES` to `<=`) lets a FOURTH bar into the opening-candle
+block, which is a real behaviour change — but `today_high`/`today_low` are read
+only by `establish`, which runs on the bar where the count REACHES
+`CANDLE_MINUTES` and never again before the session resets. The extra bar writes
+fields nothing goes on to read. Equivalent by reachability, not by symmetry.
+
+### Still open
+
+**`lib.rs:150:9` — `PastPrefix::is_empty -> false` — is UNDECIDED, not equivalent.**
+`upto` returns `None` for an empty history rather than a prefix of nothing, so
+through the constructor `is_empty()` can only ever answer `false` and the mutation
+is invisible. It is killable only by building `PastPrefix { seen: &[] }` directly,
+which the private field allows from inside the crate. Whether that is a contract
+test or a test of a state the type cannot reach is a judgement nobody has made
+yet, and it is recorded here rather than decided quietly.
+
+**Unmeasured at crate width:** `column.rs`, `session.rs`, `trend.rs`, `vwap.rs`,
+most of `pattern.rs`, and the two `daily.rs` timeouts §79's non-terminating class
+already covers. The run that would say is the one that did not finish.
+
+
 ---
 
