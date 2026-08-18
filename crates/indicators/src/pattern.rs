@@ -917,6 +917,76 @@ mod tests {
         );
     }
 
+    /// MATCHING OPENS: THE SHARED PRICE AND BOTH DIRECTIONS ARE ALL REQUIRED.
+    ///
+    /// Bits 208 and 209 fire when two bars open at the identical price and run
+    /// the same way. Three clauses, and unlike most pairs here **all three are
+    /// isolable** — a doji breaks either direction clause without touching the
+    /// shared open, and moving the open one paisa breaks only that.
+    ///
+    /// The equality is what makes this pattern rare and it is also what makes it
+    /// fragile: one paisa either side and it must not fire, which is the
+    /// assertion below.
+    #[test]
+    fn matching_opens_need_the_same_price_and_the_same_direction() {
+        // Both bars open at 100. Prior runs up to 200.
+        let up = at(10, 100, 210, 90, 200);
+        let same_up = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &up);
+            ok(&mut p, bar0).get(208)
+        };
+
+        assert!(
+            same_up(&at(11, 100, 160, 95, 150)),
+            "two bullish bars opening at the identical price fire this bit"
+        );
+        assert!(
+            !same_up(&at(11, 101, 160, 95, 150)),
+            "one paisa above and the opens no longer MATCH; equality is exact \
+             and nothing rounds it"
+        );
+        assert!(
+            !same_up(&at(11, 99, 160, 95, 150)),
+            "and one paisa below is no match either"
+        );
+        assert!(
+            !same_up(&at(11, 100, 160, 95, 100)),
+            "a second bar that closed where it opened has not risen, so the two \
+             do not run the same way"
+        );
+
+        // The prior bar's own direction, negated with a doji so the shared open
+        // and the current bar are untouched.
+        let mut p = Patterns::default();
+        let _prev = ok(&mut p, &at(10, 100, 210, 90, 100));
+        assert!(
+            !ok(&mut p, &at(11, 100, 160, 95, 150)).get(208),
+            "a prior bar that closed where it opened has no direction to share"
+        );
+
+        // 209 is the mirror: two bearish bars from one open.
+        let down = at(10, 200, 210, 90, 100);
+        let same_down = |bar0: &Candle| -> bool {
+            let mut q = Patterns::default();
+            let _prev = ok(&mut q, &down);
+            ok(&mut q, bar0).get(209)
+        };
+
+        assert!(
+            same_down(&at(11, 200, 205, 140, 150)),
+            "two bearish bars opening at the identical price fire the mirror"
+        );
+        assert!(
+            !same_down(&at(11, 201, 205, 140, 150)),
+            "and one paisa off is not a match on this side either"
+        );
+        assert!(
+            !same_down(&at(11, 200, 205, 140, 200)),
+            "nor is a doji a fall"
+        );
+    }
+
     /// THE PARTIAL-RECOVERY PATTERN: THREE PRICE CLAUSES, EACH AT ITS EDGE.
     ///
     /// Bit 212 needs a bar that gapped below the prior low, closed back above
