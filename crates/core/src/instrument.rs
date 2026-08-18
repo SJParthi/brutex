@@ -242,7 +242,7 @@ pub struct InstrumentKey {
 }
 
 impl InstrumentKey {
-    /// The three instruments the engine sweeps.
+    /// The two instruments the engine sweeps.
     ///
     /// `docs/00-charter.md` §1. India VIX is deliberately absent: it is stored
     /// and stamped onto trades, but it never enters the condition vocabulary,
@@ -267,7 +267,7 @@ impl InstrumentKey {
     /// Whether the sweep engine may operate on this instrument.
     ///
     /// Storable and sweepable are different questions. Everything is storable;
-    /// exactly three things are sweepable, and widening that set requires a
+    /// exactly two things are sweepable, and widening that set requires a
     /// `docs/05-decisions.md` entry rather than a different argument here.
     #[must_use]
     pub fn is_sweepable(&self) -> bool {
