@@ -83,6 +83,7 @@
   // against a store in exactly the right state. `web/tests/completeness.test.js`
   // drives them under `node --test`.
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
+  import { basisPoints } from '$lib/bps.js';
 
   /* ======================================================================
      THE SHAPES, NAMED ONCE — imported where they already exist
@@ -3246,6 +3247,16 @@
                 : prevOi === 0
                   ? 'previous_oi_zero'
                   : null;
+        /* THE ENGINE'S ROUNDING AND THE ENGINE'S OVERFLOW VERDICT, BOTH.
+           `basisPoints` rounds half away from zero the way
+           `server.rs::basis_points` does — `Math.round` rounded a half toward
+           +Infinity here, so a gain and its mirror-image loss printed
+           different magnitudes in a column that sorts. It returns `null` where
+           the engine returns `Unknown::Overflow`, and that null has to become
+           a REASON rather than a bare dash: `WHY.overflow` already holds the
+           sentence, and a cell nobody can compute must say why. */
+        const chgBps = chgWhy === null ? basisPoints(before.c, b.c) : null;
+        const oichgBps = oiWhy === null ? basisPoints(prevOi, oi) : null;
         out.push({
           /* THE KEY IS THE SERIES, THE MONTH, THE RUNG AND THE BAR'S OWN
              SECOND. An `{#each}` key: unique across every file on screen and
@@ -3263,11 +3274,11 @@
           l: b.l,
           c: b.c,
           vol: b.v,
-          chg: chgWhy === null ? Math.round(((b.c - before.c) * 10000) / before.c) : null,
-          chgWhy,
+          chg: chgBps,
+          chgWhy: chgWhy ?? (chgBps === null ? 'overflow' : null),
           oi,
-          oichg: oiWhy === null ? Math.round(((oi - prevOi) * 10000) / prevOi) : null,
-          oichgWhy: oiWhy,
+          oichg: oichgBps,
+          oichgWhy: oiWhy ?? (oichgBps === null ? 'overflow' : null),
           /* THE RAW ISO DAY, which is what the sort compares and what the
              expiry arithmetic reads. `dayLabel` is applied at the text node
              and nowhere else. */
@@ -3309,6 +3320,43 @@
     return barRows.filter(
       (b) => (!fromDay || b.day >= fromDay) && (!toDay || b.day <= toDay)
     );
+  });
+
+  /**
+   * THE DAYS THIS STORE ACTUALLY HOLDS — `[oldest, newest]` as `yyyy-mm-dd`,
+   * or `['', '']` when nothing is loaded.
+   *
+   * # Why the calendar needs this and did not have it
+   *
+   * /ingest's day grid draws its bounds: days outside what the field may take
+   * are struck through, and a paragraph under the grid names the window. /db's
+   * grid drew every day plain, because it passed `$lib/DayField.svelte` no
+   * `min` and no `max` — so the two calendars were the same COMPONENT showing
+   * different amounts of truth.
+   *
+   * The bound here is a different fact from /ingest's and that is not an
+   * inconsistency. /ingest's floor is the FEED's — how far back the vendor
+   * answers, a rolling number that moves every day. This one is the STORE's:
+   * the oldest and newest day actually on disk for the current selection. One
+   * says what can be asked for, the other says what is held, which is the
+   * standing difference between the two pages.
+   *
+   * ONE PASS over the rows already in memory, no sort and no new request —
+   * `barRows` is what the table is about to draw anyway.
+   */
+  const dayBounds = $derived.by(() => {
+    let lo = '';
+    let hi = '';
+    for (const b of barRows) {
+      /* String compare is sound and deliberate: `YYYY-MM-DD` is
+         lexicographically ordered, which is the same reason line 216's
+         comparison is written this way. No `Date`, so no timezone can move a
+         day. */
+      if (!b.day) continue;
+      if (lo === '' || b.day < lo) lo = b.day;
+      if (hi === '' || b.day > hi) hi = b.day;
+    }
+    return [lo, hi];
   });
 
   const barSorted = $derived.by(() => {
@@ -5330,16 +5378,22 @@
           <DayField
             label="From date"
             value={fromDay}
-            max={toDay}
+            min={dayBounds[0]}
+            max={toDay || dayBounds[1]}
             onchange={(/** @type {string} */ d) => (fromDay = d)}
-            boundsReason="Only bars on or after this day. Spot only — a contract's window is its expiry, so this is ignored once an expiry is chosen."
+            boundsReason={dayBounds[0]
+              ? `This store holds ${dayLabel(dayBounds[0])} to ${dayLabel(dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or after this day — spot only, since a contract's window is its expiry.`
+              : 'No bar is loaded, so there is no held range to bound this field with. Only bars on or after this day.'}
           />
           <DayField
             label="To date"
             value={toDay}
-            min={fromDay}
+            min={fromDay || dayBounds[0]}
+            max={dayBounds[1]}
             onchange={(/** @type {string} */ d) => (toDay = d)}
-            boundsReason="Only bars on or before this day. Spot only — a contract's window is its expiry, so this is ignored once an expiry is chosen."
+            boundsReason={dayBounds[1]
+              ? `This store holds ${dayLabel(dayBounds[0])} to ${dayLabel(dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or before this day — spot only, since a contract's window is its expiry.`
+              : 'No bar is loaded, so there is no held range to bound this field with. Only bars on or before this day.'}
           />
         </div>
       </div>
