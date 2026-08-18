@@ -225,6 +225,7 @@ fn plan_over(request: &BarRequest) -> Plan<'_> {
         vendor: Vendor::Groww,
         exchange: "NSE",
         segment: "INDEX",
+        contract: None,
     }
 }
 

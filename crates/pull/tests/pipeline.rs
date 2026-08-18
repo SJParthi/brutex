@@ -1100,6 +1100,7 @@ fn plan_over<'a>(request: &'a BarRequest, exchange: &'a str, scale: PriceScale) 
         vendor: Vendor::Groww,
         exchange,
         segment: "INDEX",
+        contract: None,
     }
 }
 

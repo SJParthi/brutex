@@ -44,6 +44,8 @@
               keep panics out of the crate rather than out of its tests"
 )]
 
+use brutex_core::instrument::{Contract, Expiry, Kind, OptionSide};
+use brutex_core::price::Paisa;
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -240,6 +242,21 @@ fn request() -> BarRequest {
 }
 
 /// The plan a spot pull runs under.
+/// The same plan, but for one option contract rather than the spot index.
+///
+/// Only two fields move: the segment, and the contract. That is the whole
+/// difference between filing a bar under `NSE/INDEX/NIFTY/...` and filing it
+/// under `NSE/FNO/NIFTY/<contract>/...`, and it is why the contract is carried
+/// on the plan rather than derived from the vendor's answer — which names no
+/// series at all.
+fn option_plan(request: &BarRequest, contract: Contract) -> Plan<'_> {
+    Plan {
+        segment: "FNO",
+        contract: Some(contract),
+        ..plan(request)
+    }
+}
+
 fn plan(request: &BarRequest) -> Plan<'_> {
     Plan {
         columns: pull::csv::Columns::Gdfl,
@@ -253,6 +270,7 @@ fn plan(request: &BarRequest) -> Plan<'_> {
         vendor: Vendor::Dhan,
         exchange: "NSE",
         segment: "INDEX",
+        contract: None,
     }
 }
 
@@ -910,6 +928,108 @@ fn a_discovery_parameter_in_a_bars_request_is_refused_by_name() {
                 "{feed}'s bars request carries the discovery field {:?}",
                 p.name
             );
+        }
+    }
+}
+
+// ===========================================================================
+// The contract level
+// ===========================================================================
+
+/// **AN OPTION'S BARS LAND UNDER THE CONTRACT, NOT UNDER THE UNDERLYING.**
+///
+/// The store has always had a contract level — `store::path::PathParts` carries
+/// `Option<Contract>` and renders one directory deeper when it is `Some`. What
+/// did not exist was any way for a caller to reach it: `pull::ingest` wrote
+/// `contract: None` at three fixed sites, one of them carrying a note that the
+/// contract path was "not reachable from here yet".
+///
+/// The consequence was not a missing feature, it was a collision. Every
+/// contract of every expiry would have filed into `NSE/FNO/NIFTY/<rung>/` —
+/// the same file — so a month of two hundred contracts would have appended two
+/// hundred series into one, and the next one's pull would have appended to
+/// that. `CLAUDE.md` §3 rule 8 makes such a file unrenameable after the fact.
+///
+/// This asserts the two things that keep them apart: the bars are reachable at
+/// the contract path, and two different contracts of the same underlying do not
+/// share a file.
+#[test]
+fn two_contracts_of_one_underlying_do_not_share_a_file() {
+    let scratch = Scratch::new("contractpath");
+    let store_root = scratch.store();
+    let (url, _seen) = broker(BODY);
+    let raw = fetch(&url);
+    let request = request();
+
+    let expiry = Expiry::new(2026, 9, 24).expect("a real expiry");
+    let call = Contract::of(Kind::Option {
+        expiry,
+        strike: Paisa::from_raw(2_465_000),
+        side: OptionSide::Call,
+    })
+    .expect("it renders");
+    let put = Contract::of(Kind::Option {
+        expiry,
+        strike: Paisa::from_raw(2_465_000),
+        side: OptionSide::Put,
+    })
+    .expect("it renders");
+    assert_ne!(call, put, "a call and a put are different contracts");
+
+    let first = ingest::from_window(
+        &raw,
+        "NIFTY",
+        &url,
+        &store_root,
+        option_plan(&request, call),
+    );
+    assert!(
+        first.bars_stored > 0,
+        "the call's bars reached disk: {first:?}"
+    );
+
+    let second = ingest::from_window(&raw, "NIFTY", &url, &store_root, option_plan(&request, put));
+    assert!(
+        second.bars_stored > 0,
+        "and so did the put's, into its OWN file rather than appending to the \
+         call's: {second:?}"
+    );
+
+    // ── EACH CONTRACT'S OWN DIRECTORY ───────────────────────────────────
+    // Counting files would prove nothing: `derive_all` writes a file per
+    // derived rung, so the tree holds several either way. What distinguishes a
+    // threaded contract from a dropped one is whether the contract's own name
+    // is a directory in the path -- with `None` both writes render the SAME
+    // path and the second appends into the first's file.
+    let mut bins = Vec::new();
+    walk_bins(&store_root, &mut bins);
+    for (what, contract) in [("call", call), ("put", put)] {
+        assert!(
+            bins.iter().any(|p| p.contains(contract.as_str())),
+            "the {what}'s bars are filed under its own contract directory \
+             `{}`; without it both contracts render one path and the second \
+             appends into the first's file. Found: {bins:?}",
+            contract.as_str()
+        );
+    }
+    assert!(
+        bins.iter().any(|p| p.contains("NIFTY")),
+        "and the contract sits BELOW the underlying rather than replacing it: \
+         {bins:?}"
+    );
+}
+
+/// Every `.bin` under a root, as slash-joined strings.
+fn walk_bins(dir: &Path, into: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_bins(&path, into);
+        } else if path.extension().is_some_and(|e| e == "bin") {
+            into.push(path.display().to_string());
         }
     }
 }

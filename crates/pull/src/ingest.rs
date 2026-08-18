@@ -300,6 +300,20 @@ pub struct Plan<'a> {
     /// Also parsed into a [`Segment`], so `INDEX`, `CASH` and `FNO` are the
     /// only three this build stores under, for the same reason.
     pub segment: &'a str,
+    /// The contract these bars belong to, or `None` for spot.
+    ///
+    /// # Why the caller carries it rather than this deriving it
+    ///
+    /// Only the caller knows which contract it asked the broker for. The
+    /// vendor's answer is a list of bars; nothing in it names the series, and
+    /// deriving one from the shape of the request would be inventing an
+    /// identity rather than reading one.
+    ///
+    /// `None` is spot, and it is what makes the path one level shallower —
+    /// `store::path` branches on exactly this absence. A contract that failed
+    /// to arrive here would file an option's bars in the underlying's own
+    /// directory, where the next month's spot pull would append to them.
+    pub contract: Option<brutex_core::instrument::Contract>,
 }
 
 impl Plan<'_> {
@@ -1038,7 +1052,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         exchange: exchange.as_str(),
         segment: segment.as_str(),
         symbol: symbol.as_str(),
-        contract: None,
+        contract: plan.contract,
         timeframe,
         month: ym,
         file: FileKind::Bars,
@@ -1050,7 +1064,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             symbol_id,
             parts,
             EntryKey {
-                contract: None,
+                contract: plan.contract,
                 exchange,
                 segment,
                 symbol,
@@ -1077,10 +1091,13 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         symbol_id,
         timeframe,
         DeriveInto {
-            // SPOT INGEST. The contract path is not reachable from here yet;
-            // when it is, this carries the contract the bars were filed under
-            // and `derive_all` reads the option/future line off it.
-            contract: None,
+            // THE CONTRACT THE BARS WERE FILED UNDER, which is what
+            // `derive_all` reads its option/future line off. This was a
+            // hardcoded `None` carrying a note that the contract path was not
+            // reachable from here yet. It is now, and leaving the note in place
+            // would have filed an option's derived rungs in the underlying's
+            // own directory.
+            contract: plan.contract,
             vendor,
             exchange,
             segment,

@@ -197,6 +197,7 @@ fn run(archive: &Path, store_root: &Path, request: &BarRequest) -> Ingested {
             vendor: Vendor::Groww,
             exchange: "NSE",
             segment: "INDEX",
+            contract: None,
         },
     )
     .expect("the folder is readable and the column shape is right")

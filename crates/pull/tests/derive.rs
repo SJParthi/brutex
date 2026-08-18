@@ -207,6 +207,7 @@ fn plan(request: &pull::fetch::BarRequest) -> pull::ingest::Plan<'_> {
         vendor: brutex_core::vendor::Vendor::TrueData,
         exchange: "NSE",
         segment: "INDEX",
+        contract: None,
     }
 }
 

@@ -3687,6 +3687,7 @@ fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
         // instrument. A literal where a value belongs.
         exchange: landed.exchange,
         segment: landed.segment,
+        contract: landed.contract,
     };
     let mut done = pull::ingest::Ingested::default();
     for (chunk, body) in &landed.bodies {
@@ -4540,6 +4541,15 @@ struct BrokerWindow {
     /// the spec does: the lander would otherwise have to re-state it, and a
     /// re-stated literal here files daily bars under `1min/`.
     pub granularity: pull::vendor::Granularity,
+    /// The contract these bars belong to, or `None` for spot.
+    ///
+    /// Carried rather than derived because only the caller knows which series
+    /// it asked the broker for: the answer is a list of bars and nothing in it
+    /// names the contract. `None` is what makes the store path one level
+    /// shallower, so a derivative that lost this on the way here would file its
+    /// bars in the underlying's own directory — where the next spot pull for
+    /// that month would append to them.
+    contract: Option<brutex_core::instrument::Contract>,
     /// The store prefix these bars belong under, resolved through
     /// [`pull::vendor::Feed::store_vendor`] and never assumed.
     store_vendor: brutex_core::vendor::Vendor,
@@ -5811,6 +5821,9 @@ async fn broker_window(
     // Even `Swept` is two series and this fetches one. Saying which, rather
     // than letting the receipt imply both.
     Ok(BrokerWindow {
+        // SPOT. `broker_window` serves the spot path; the expired-F&O walk
+        // builds its own with the contract discovery returned.
+        contract: None,
         bodies,
         exchange: instrument.exchange.as_str(),
         segment: instrument.segment.as_str(),
@@ -6159,6 +6172,7 @@ fn run_local(
         vendor,
         exchange: Exchange::Nse.as_str(),
         segment: Segment::Fno.as_str(),
+        contract: None,
     };
     pull::ingest::from_dir(std::path::Path::new(folder), store_root, plan)
         .map_err(|why| why.to_string())
@@ -6354,6 +6368,103 @@ impl FnoPage<'_> {
     }
 }
 
+/// One credentialed connection to a feed, and the two facts filing needs
+/// beside it.
+///
+/// Bundled because they are acquired together and always travel together: the
+/// socket, the descriptor whose fields decide every vendor difference, and the
+/// store prefix the bars are filed under. Passing them as three arguments put
+/// the functions below over clippy's argument ceiling, and the ceiling was
+/// right — three parallel parameters that must agree are one value.
+struct Wire {
+    source: pull::http::HttpSource,
+    spec: pull::vendor::HttpSpec,
+    store_vendor: brutex_core::vendor::Vendor,
+}
+
+/// Fetches and files the bars for every contract a walk discovered.
+///
+/// # Why this is a second pass and not part of the walk
+///
+/// Discovery answers *which contracts existed*; this answers *what they did*.
+/// Keeping them apart is what lets the page report a month whose contracts were
+/// all found and none could be fetched as exactly that, rather than as a walk
+/// that failed.
+///
+/// # One contract's failure is not the month's
+///
+/// A contract that will not fetch, or will not land, is counted and its first
+/// reason is kept. It does not abandon the other two hundred — the same rule
+/// `Chain::unreadable` follows for a name that would not parse.
+///
+/// # Cost
+///
+/// One request per contract, each rate-governed. O(1) per contract; nothing
+/// here scans the store.
+async fn fno_land(
+    chain: &pull::chain::Chain,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+) -> (usize, usize, Vec<String>) {
+    let mut stored = 0usize;
+    let mut failed = 0usize;
+    let mut why: Vec<String> = Vec::new();
+    let origin = wire.source.endpoint(asked.granularity);
+
+    for found in &chain.contracts {
+        // THE GOVERNOR BEFORE EACH ONE, not once for the batch. A month of two
+        // hundred contracts is two hundred requests, and a budget charged once
+        // would be a ceiling observed once.
+        if let Err(halt) = await_budget(asked.feed, site).await {
+            why.push(halt);
+            failed = failed.saturating_add(chain.contracts.len().saturating_sub(stored));
+            break;
+        }
+        let request = pull::chain::request(found, asked.window, asked.granularity);
+        let body = match wire.source.window_async(&request).await {
+            Ok(body) => body,
+            Err(refusal) => {
+                failed = failed.saturating_add(1);
+                if why.len() < 5 {
+                    why.push(format!("{}: {refusal}", found.vendor_symbol));
+                }
+                continue;
+            }
+        };
+        // THE UNDERLYING IS THE SYMBOL AND THE CONTRACT IS THE LEVEL BELOW IT.
+        // `pull::ingest` parses `instrument` into a `Symbol` and renders the
+        // contract as its own path segment, so passing the vendor's contract
+        // name here would file `NIFTY-30Sep25-24650-CE` as a symbol and leave
+        // the underlying nowhere in the tree.
+        let landed = BrokerWindow {
+            bodies: vec![(asked.window, body)],
+            instrument: found.underlying.clone(),
+            origin: origin.clone(),
+            spec: wire.spec,
+            exchange: brutex_core::instrument::Exchange::Nse.as_str(),
+            segment: brutex_core::instrument::Segment::Fno.as_str(),
+            window: asked.window,
+            granularity: asked.granularity,
+            store_vendor: wire.store_vendor,
+            contract: Some(found.contract),
+        };
+        let done = land_one(&landed, site);
+        if done.bars_stored == 0 {
+            failed = failed.saturating_add(1);
+            if why.len() < 5 {
+                why.push(format!(
+                    "{}: fetched {} row(s) and stored none",
+                    found.vendor_symbol, done.rows_read
+                ));
+            }
+            continue;
+        }
+        stored = stored.saturating_add(done.bars_stored);
+    }
+    (stored, failed, why)
+}
+
 /// The discovery walk for one accepted expired-series request.
 ///
 /// # Why this is not part of [`fno_answer`]
@@ -6422,8 +6533,12 @@ async fn fno_walk(
         );
     }
 
-    let source = match credentialed_source(asked.feed, &spec).await {
-        Ok((source, _vendor)) => source,
+    let wire = match credentialed_source(asked.feed, &spec).await {
+        Ok((source, store_vendor)) => Wire {
+            source,
+            spec,
+            store_vendor,
+        },
         Err(why) => {
             return page.say(
                 facts,
@@ -6448,47 +6563,89 @@ async fn fno_walk(
     // inside `chain::month` rather than by this call site's good manners. A
     // refused expiries call returns before one contracts URL is built, which is
     // what makes a half-walked month impossible rather than merely unlikely.
-    match pull::chain::month(asked.feed, &ask, &source).await {
+    match pull::chain::month(asked.feed, &ask, &wire.source).await {
         Err(why) => page.say(
             facts,
             axum::http::StatusCode::BAD_GATEWAY,
             audit::Outcome::Failed,
             &why.to_string(),
         ),
-        Ok(chain) => {
-            facts.push(("Expiries in month", chain.expiries.len().to_string()));
-            facts.push(("Contracts discovered", chain.contracts.len().to_string()));
-            // REPORTED, NEVER SILENT. `Chain` keeps the names it could not read
-            // precisely so this line can exist; a count of contracts alone
-            // would render a partly-read month as a whole one, which is the §4
-            // fallback that hides a failure.
-            if !chain.unreadable.is_empty() {
-                facts.push((
-                    "Unreadable names",
-                    format!(
-                        "{} — {}",
-                        chain.unreadable.len(),
-                        chain.unreadable.join(", ")
-                    ),
-                ));
-            }
-            // WHAT THIS DOES NOT DO, SAID ON THE PAGE ITSELF.
-            //
-            // Discovery names the contracts; filing their bars needs an
-            // `InstrumentKey` for a derivative and the bar row that carries the
-            // vendor's own spot and IV, neither of which exists yet. An
-            // operator who read "42 contracts" here and inferred 42 stored
-            // months would be wrong, so the page says so rather than leaving
-            // the inference open.
-            page.say(
-                facts,
-                axum::http::StatusCode::OK,
-                audit::Outcome::Empty,
-                "chain walked; bars not filed — a derivative instrument key and \
-                 the vendor-spot/IV bar row are the next piece",
-            )
-        }
+        Ok(chain) => fno_report(&page, facts, &chain, asked, site, &wire).await,
     }
+}
+
+/// Turns one walked chain into bars on disk and a page that says what happened.
+///
+/// Split from [`fno_walk`] because a walk and a fetch fail for unrelated
+/// reasons, and keeping both in one function put it over the workspace's line
+/// ceiling.
+async fn fno_report(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    chain: &pull::chain::Chain,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+) -> (axum::http::StatusCode, String) {
+    facts.push(("Expiries in month", chain.expiries.len().to_string()));
+    facts.push(("Contracts discovered", chain.contracts.len().to_string()));
+    // REPORTED, NEVER SILENT. `Chain` keeps the names it could not read
+    // precisely so this line can exist; a count of contracts alone
+    // would render a partly-read month as a whole one, which is the §4
+    // fallback that hides a failure.
+    if !chain.unreadable.is_empty() {
+        facts.push((
+            "Unreadable names",
+            format!(
+                "{} — {}",
+                chain.unreadable.len(),
+                chain.unreadable.join(", ")
+            ),
+        ));
+    }
+    if chain.contracts.is_empty() {
+        return page.say(
+            facts,
+            axum::http::StatusCode::OK,
+            audit::Outcome::Empty,
+            "the walk succeeded and the month held no readable contract, \
+             which is not the same as a month that was not walked",
+        );
+    }
+
+    // AND NOW THE BARS. Discovery said which contracts existed; this
+    // fetches what they did and files it.
+    let (stored, failed, why) = fno_land(chain, asked, site, wire).await;
+    facts.push(("Bars stored", stored.to_string()));
+
+    if failed == 0 {
+        return page.say(
+            facts,
+            axum::http::StatusCode::OK,
+            audit::Outcome::Stored,
+            "every discovered contract fetched and filed",
+        );
+    }
+
+    // A PARTIAL MONTH IS REPORTED AS ONE. It is neither a success to
+    // carry on from nor a failure to retry whole, and rendering it as
+    // either is the §4 fallback that hides what happened. The counts
+    // and the first reasons go on the page, and the outcome says
+    // FAILED so the ladder does not read this month as held.
+    facts.push((
+        "Contracts that did not land",
+        format!("{failed} of {}", chain.contracts.len()),
+    ));
+    if !why.is_empty() {
+        facts.push(("First reasons", why.join(" · ")));
+    }
+    page.say(
+        facts,
+        axum::http::StatusCode::BAD_GATEWAY,
+        audit::Outcome::Failed,
+        "some contracts did not land; the month is incomplete and must \
+         not be read as held",
+    )
 }
 
 /// Starting an expired-series pull. **POST only.**

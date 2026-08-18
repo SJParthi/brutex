@@ -192,6 +192,7 @@ fn plan_over<'a>(request: &'a BarRequest, segment: &'a str) -> Plan<'a> {
         vendor: VENDOR,
         exchange: "NSE",
         segment,
+        contract: None,
     }
 }
 
