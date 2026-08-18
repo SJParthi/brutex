@@ -1675,20 +1675,47 @@ pub enum Listing {
     Index,
     /// A cash-segment equity on the main board.
     Equity,
+    /// A derivative contract — one expired future or option, named by
+    /// [`crate::fno::read_contract`] rather than found in any instrument
+    /// master.
+    ///
+    /// # Storing this is not sweeping it
+    ///
+    /// `CLAUDE.md` §1 is explicit on both halves: futures and options **may be
+    /// stored**, and they are **never swept**. This variant exists for the
+    /// first half only. It never reaches the condition vocabulary, ranking or
+    /// run identity, because nothing downstream of the store reads a listing
+    /// class at all — the sweep reads `NSE-NIFTY` and `NSE-BANKNIFTY` and asks
+    /// this enum nothing. `crates/pull/src/fold.rs`'s ladder has carried
+    /// `Segment::Futures` and `Segment::Options` stages since it was written;
+    /// this is the class those stages had no way to name.
+    Derivative,
 }
 
 impl Listing {
     /// The venue whose trading hours govern this listing class.
     ///
-    /// Total, and it stays total by the enum being closed: `CLAUDE.md` §1 pulls
-    /// index and cash only, so there is no derivative arm to get wrong and no
-    /// catch-all to hide a new one. A third variant is a compile error here,
-    /// which is the point.
+    /// Total, and it stays total by the enum being closed — there is no
+    /// catch-all, so a fourth variant is a compile error here and that is the
+    /// point. It NAMES the derivative venue rather than omitting it: this used
+    /// to read "`CLAUDE.md` §1 pulls index and cash only, so there is no
+    /// derivative arm to get wrong", which was true of the SWEEP and never of
+    /// the STORE. §1's own sentence is that futures and options may be stored
+    /// and are never swept, and `fold.rs`'s ladder has always had a stage for
+    /// each. The arm that was missing is the one those stages needed.
     #[must_use]
     pub const fn venue(self) -> Venue {
         match self {
             Self::Index => Venue::NseIndex,
             Self::Equity => Venue::NseCash,
+            // THE DERIVATIVES VENUE, AND IT IS A DIFFERENT CLOCK. NSE extended
+            // equity-derivatives trading by ten minutes with effect from
+            // 2026-08-03 and did not extend the cash market the same way — the
+            // dated regime this module's header describes. Filing a contract
+            // under `NseCash` would have applied the wrong window to every bar
+            // on the far side of that boundary, invisibly, which is exactly
+            // the failure `SessionTable` exists to prevent.
+            Self::Derivative => Venue::NseDerivatives,
         }
     }
 }
@@ -4307,6 +4334,24 @@ const GROWW: Descriptor = Descriptor {
                 segment: "CASH",
                 kind: "",
             },
+            // THE WORD IS THE VENDOR'S OWN, and it is the other half of the
+            // sentence the two rows above quote: Groww documents `segment` as
+            // `CASH` and `FNO`. Without this row `listing_words` answers
+            // `None` for a contract and the request is refused by name — which
+            // was the correct refusal while nothing could discover a contract,
+            // and is a dead end now that `crate::chain` can.
+            //
+            // DHAN GETS NO SUCH ROW. Its descriptor carries `fno: None`
+            // because `/v2/charts/rollingoption` answers an ATM-RELATIVE
+            // series whose underlying contract changes weekly, so there is no
+            // contract name to discover and nothing to ask bars for. A guessed
+            // segment word there would be an invention — `CLAUDE.md` §3 rule 1
+            // — and the refusal is the honest answer.
+            ListingWords {
+                listing: Listing::Derivative,
+                segment: "FNO",
+                kind: "",
+            },
         ],
         params: &[
             Param {
@@ -5912,6 +5957,68 @@ mod tests {
         assert_eq!(named[0].venue(), Venue::NseCash);
         assert_eq!(named[0].start(), start);
         assert_eq!(named[0].verified_from(), Some(resumes));
+    }
+
+    /// A contract keeps the DERIVATIVES clock, not the cash one.
+    ///
+    /// The arm is worth a test rather than being obvious, because the two
+    /// venues stopped agreeing on 2026-08-03: NSE extended equity-derivatives
+    /// trading by ten minutes and turned the cash close into a Closing Auction
+    /// Session on the same date. A contract filed under `NseCash` would have
+    /// had the wrong window applied to every bar past that boundary, and the
+    /// bars would simply not be there — the silent failure `SessionTable`
+    /// exists to prevent. All three arms are asserted so the mapping is pinned
+    /// whole and not just at the new row.
+    #[test]
+    fn a_derivative_keeps_the_derivatives_venue_and_the_other_two_are_unmoved() {
+        assert_eq!(Listing::Index.venue(), Venue::NseIndex);
+        assert_eq!(Listing::Equity.venue(), Venue::NseCash);
+        assert_eq!(Listing::Derivative.venue(), Venue::NseDerivatives);
+    }
+
+    /// Groww names a segment for a contract; Dhan names none, and that is the
+    /// vendor's shape rather than a gap here.
+    ///
+    /// Groww documents `segment` as `CASH` and `FNO`, so the third row quotes
+    /// the vendor. Dhan gets none because its descriptor carries `fno: None` —
+    /// `/v2/charts/rollingoption` answers an ATM-relative series whose
+    /// underlying contract changes weekly, so there is no contract name to
+    /// discover and nothing to ask bars for. `None` is what makes that request
+    /// refuse by name instead of being sent a guessed word, which is
+    /// `CLAUDE.md` §3 rule 1 — and asserting the ABSENCE is what stops a later
+    /// edit from "helpfully" filling it in.
+    #[test]
+    fn groww_names_the_fno_segment_and_dhan_names_no_derivative_at_all() {
+        let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
+            panic!("Groww is an HTTP feed");
+        };
+        let words = groww
+            .listing_words(Listing::Derivative)
+            .expect("Groww documents FNO for `segment`");
+        assert_eq!(words.segment, "FNO");
+        assert_eq!(words.listing, Listing::Derivative);
+
+        // The two that were already there are unchanged by the addition.
+        assert_eq!(
+            groww
+                .listing_words(Listing::Equity)
+                .expect("cash was always named")
+                .segment,
+            "CASH"
+        );
+
+        let Transport::Http(dhan) = Feed::Dhan.descriptor().transport else {
+            panic!("Dhan is an HTTP feed");
+        };
+        assert!(
+            dhan.listing_words(Listing::Derivative).is_none(),
+            "Dhan publishes no expired-contract lookup, so a derivative word \
+             here would be an invention with nothing to spend it on"
+        );
+        assert!(
+            dhan.fno.is_none(),
+            "and the reason it has no word is that it has no discovery"
+        );
     }
 
     /// A sink that accepts `remaining` writes and then refuses.

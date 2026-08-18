@@ -14878,3 +14878,51 @@ describes the generator. Recorded at `docs/06-limits.md` §78.
 
 ---
 
+
+## D-0170 · 2026-08-18 · `Listing::Derivative` — the class a contract had no way to be
+
+`crates/pull/src/vendor.rs`'s `Listing` named two classes, `Index` and `Equity`,
+and `Listing::venue`'s own doc asserted a third was impossible: *"`CLAUDE.md` §1
+pulls index and cash only, so there is no derivative arm to get wrong."*
+
+**That was true of the SWEEP and never of the STORE.** §1's sentence is that
+futures and options *may be stored* and are *never swept*, and
+`crates/pull/src/fold.rs` has carried `Segment::Futures` and `Segment::Options`
+stages in its six-rung ladder since it was written. The class those stages
+needed did not exist, so no contract could be asked for at all: `listing_words`
+answers `None` for a class a descriptor does not name, and a bars request for a
+discovered contract was refused before it could be built.
+
+This adds the third variant, its `Venue::NseDerivatives` arm, and **one** row —
+Groww's, `segment: "FNO"`, which that vendor's own documentation states beside
+the `CASH` the two existing rows quote.
+
+**Dhan gets no row, deliberately.** Its descriptor carries `fno: None` because
+`/v2/charts/rollingoption` answers an ATM-relative series — `strike: "ATM+10"`,
+`expiryFlag: WEEK` — whose underlying contract changes every week, so there is
+no contract name in it to discover and nothing to ask bars for. A guessed
+segment word there would be an invention under §3 rule 1; the refusal is the
+honest answer, and `groww_names_the_fno_segment_and_dhan_names_no_derivative_at_all`
+asserts the ABSENCE so a later edit cannot helpfully fill it in.
+
+The venue is not cosmetic. NSE extended equity-derivatives trading by ten
+minutes with effect from 2026-08-03 and did not extend the cash market the same
+way, so a contract filed under `NseCash` would have had the wrong session window
+applied to every bar past that boundary — and the bars would simply not be
+there, which is the silent failure `SessionTable` exists to prevent.
+
+**This decision widens what may be STORED, not what is swept.** The engine
+surface in §1 is unchanged: two instruments, NSE only. Nothing downstream of the
+store reads a listing class — the sweep reads `NSE-NIFTY` and `NSE-BANKNIFTY`
+and asks this enum nothing — so no condition bit, no ranking input and no run
+identity is touched.
+
+Both arms are proven by mutation rather than by assertion alone: pointing the
+venue at `NseCash` and Groww's word at `CASH` each turn one of the two new tests
+red.
+
+**Still not reachable.** Nothing calls `crates/pull/src/fno.rs` yet, and
+`POST /pull/fno` still answers 503. This removes the type-level blocker that
+sat under that work; the driver and the route are the next units.
+
+---
