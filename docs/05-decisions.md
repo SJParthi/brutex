@@ -15123,3 +15123,41 @@ If that trade is ever made, it is a new entry, not a silent one.
 `docs/06-limits.md` gains nothing here: no bound is claimed and none is met.
 
 ---
+
+## D-0175 · 2026-08-18 · `crates/telemetry` gains a floor-relative budget, and its noise is stated
+
+`crates/telemetry/benches/ratio.rs`.
+
+The second of the nine ratio-only crates, after `core` in D-0173. Same reason:
+every row here divided one emit cost by another, and a uniform slowdown cancels
+in a quotient — the failure that let a mask operation run **174x slower while
+passing its crate's ratio rows at 0.98x**.
+
+**The floor is a filtered event on the same sink.** It enters `Sink::emit` and
+returns at the first level comparison, having touched no clock, no lock and no
+buffer. Same call, same sink, same dispatch — everything except the work being
+measured. The quotient is "how many level checks does one written event cost".
+
+**Measured**, four consecutive runs: **173.5, 298.2, 219.3, 329.5** floors, at a
+floor of 5,895–6,937 ps. Budget **1,000**.
+
+### The 1.9x spread is stated rather than hidden
+
+`core`'s equivalent varies by 1.06x because both its legs are pointer-chasing.
+This one does not: the numerator reaches the filesystem and the denominator does
+not, so the variance is the disk's and no arrangement of the bench removes it.
+
+**This row therefore cannot resolve a regression under about 3x, and does not
+claim to.** What it can do is what no ratio here can: catch a slowdown that moves
+every file size at once. The 174x regression would read about 57,000 floors and
+be refused by a factor of 57. A budget that catches the catastrophic case and
+admits it cannot see the small one is worth more than a tight number that is not
+true.
+
+**An id collision was caught before it shipped.** This row was first written as
+`C-T-01b`, which is already the p99 emit row and already documented. It is
+`C-T-04`. The near-miss is the same shape as D-0104's three duplicated decision
+numbers, and the check that caught it was reading the file rather than assuming.
+
+---
+

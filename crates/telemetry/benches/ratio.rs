@@ -324,6 +324,93 @@ fn loaded(name: &str, preload: u32) -> (Sink, PathBuf) {
     (sink, dir)
 }
 
+/// The per-emit floor: a filtered event on the same sink.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row in this file divides one emit cost by another emit cost, and a
+/// UNIFORM slowdown cancels in a quotient. An audit measured exactly that
+/// elsewhere in this workspace: a mask operation **174x slower passed its
+/// crate's ratio rows at 0.98x-1.00x**, because both legs moved together.
+/// `vocab`, `indicators`, `engine` and now `core` each carry a floor-relative
+/// budget for that reason; this crate did not.
+///
+/// The denominator has to be something that cannot move when the WRITE path
+/// does. A filtered event is that: it enters `Sink::emit` and returns at the
+/// first level comparison, having touched no clock, no lock and no buffer. Same
+/// call, same sink, same dispatch — everything except the work being measured.
+/// So the quotient is "how many level checks does one written event cost".
+fn floor_ps(sink: &Sink) -> u128 {
+    cost_ps(2_000, || {
+        // Below the sink's default minimum, so it returns at the first compare.
+        let event = Event::trace("bench", "the floor");
+        black_box(sink).emit(black_box(&event))
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on how full the file is. A breached
+/// BUDGET says the cost rose for every file size at once, which no ratio in this
+/// file can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<58} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-T-04 — one written emit costs a bounded multiple of the per-emit floor.
+fn emit_stays_within_its_budget() -> bool {
+    /// Floors allowed per written event.
+    ///
+    /// Measured, arm64 laptop, release, four consecutive runs: **173.5, 298.2,
+    /// 219.3, 329.5** floors, at a floor of 5,895–6,937 ps.
+    ///
+    /// # The spread is 1.9x, and that is honest rather than hidden
+    ///
+    /// `crates/core`'s equivalent budget varies by 1.06x between runs because
+    /// both its legs are pointer-chasing. This one does not: the numerator is a
+    /// written event, which reaches the filesystem, and the denominator is a
+    /// level comparison that does not. The variance is the disk's, and no
+    /// arrangement of this bench removes it.
+    ///
+    /// **So this row cannot resolve a regression under about 3x**, and it is not
+    /// claimed to. What it CAN do is what no ratio in this file can: catch a
+    /// slowdown that moves every file size at once. The 174x uniform regression
+    /// measured elsewhere in this workspace — which passed its crate's ratio rows
+    /// at 0.98x — would read about 57,000 floors here and be refused by a factor
+    /// of 57.
+    ///
+    /// **1,000**, sized on the worst observed run with roughly 3x left over,
+    /// which is the same rule `engine` and `core` apply and a wider margin
+    /// because the measurement is noisier.
+    const ALLOWED: u128 = 1_000;
+
+    let (sink, _d) = loaded("emit-budget", MEDIUM);
+    let floor = floor_ps(&sink);
+    println!("  the per-emit floor is {floor} ps — one filtered event, same sink");
+    let written = cost_ps(200, || {
+        let event = Event::info("bench", "one timed event").with("k", 1_i64);
+        black_box(&sink).emit(black_box(&event))
+    });
+    budget(
+        "C-T-04 written emit against the floor",
+        floor,
+        written,
+        ALLOWED,
+    )
+}
+
 /// The claim: one emit does not get more expensive as the file fills.
 fn emit_cost_does_not_grow_with_the_file() -> bool {
     let (small, _d1) = loaded("emit-small", SMALL);
@@ -428,6 +515,7 @@ fn main() {
     println!("gate 8 — crates/telemetry, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
     ok &= emit_cost_does_not_grow_with_the_file();
+    ok &= emit_stays_within_its_budget();
     ok &= a_filtered_event_touches_nothing_and_stays_flat();
     ok &= the_tail_is_flat_in_the_size_of_the_file();
     ok &= the_tail_is_flat_in_the_size_of_the_file_too();
