@@ -10,7 +10,12 @@ import assert from 'node:assert/strict';
 
 import { ask, ASK_MS } from '../src/lib/ask.js';
 
-/** Swap in a fake `fetch` for one call, and always put the real one back. */
+/**
+ * Swap in a fake `fetch` for one call, and always put the real one back.
+ *
+ * @param {typeof globalThis.fetch} fake
+ * @param {() => Promise<any>} body
+ */
 async function withFetch(fake, body) {
   const real = globalThis.fetch;
   globalThis.fetch = fake;
@@ -30,10 +35,12 @@ test('an ordinary answer passes straight through', async () => {
 
 test('a request that never settles is given up, and the message names why', async () => {
   const err = await withFetch(
-    (_url, init) =>
-      new Promise((_resolve, reject) => {
-        init.signal.addEventListener('abort', () => reject(init.signal.reason));
-      }),
+    /** @type {any} */ (
+      (/** @type {any} */ _url, /** @type {RequestInit} */ init) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+        })
+    ),
     () => ask('/bars.json', { ms: 20 }).then(() => null).catch((e) => e)
   );
   assert.ok(err instanceof Error, 'it throws');
@@ -45,11 +52,13 @@ test('a request that never settles is given up, and the message names why', asyn
 test("an operator's own cancel is reported as a cancel, not as a timeout", async () => {
   const mine = new AbortController();
   const err = await withFetch(
-    (_url, init) =>
-      new Promise((_resolve, reject) => {
-        init.signal.addEventListener('abort', () => reject(init.signal.reason));
-        mine.abort(new Error('cancelled by the operator'));
-      }),
+    /** @type {any} */ (
+      (/** @type {any} */ _url, /** @type {RequestInit} */ init) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+          mine.abort(new Error('cancelled by the operator'));
+        })
+    ),
     () => ask('/pull/spot', { signal: mine.signal }).then(() => null).catch((e) => e)
   );
   assert.match(err.message, /cancelled by the operator/);

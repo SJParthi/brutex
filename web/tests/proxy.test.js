@@ -29,12 +29,21 @@ function proxied() {
   return [...block.matchAll(/^\s*'([^']+)'/gm)].map((m) => m[1]);
 }
 
-/** Every file under `web/src`, at any depth. */
+/**
+ * Every file under `web/src`, at any depth.
+ *
+ * @param {string} dir
+ * @returns {string[]}
+ */
 function sources(dir) {
-  return readdirSync(dir).flatMap((name) => {
+  /** @type {string[]} */
+  const out = [];
+  for (const name of readdirSync(dir)) {
     const full = join(dir, name);
-    return statSync(full).isDirectory() ? sources(full) : [full];
-  });
+    if (statSync(full).isDirectory()) out.push(...sources(full));
+    else out.push(full);
+  }
+  return out;
 }
 
 /**

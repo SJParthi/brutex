@@ -4586,3 +4586,45 @@ comment and names no row is invisible to it. **OPEN.**
 
 ---
 
+
+## 82. The browser tree is gated at last, and two of its three gates are ratchets rather than floors
+
+`.github/workflows/web.yml`, `web/svelte.config.js`.
+
+Gate W1, W2 and W3 close three findings — the committed bundle was tied to
+nothing, the tracked tests never ran, and `svelte-check` was a script nobody
+executed. What they do **not** claim is worth stating here rather than leaving a
+reader to assume it.
+
+**Gate W1 is exact, and it is exact only because the build was made
+reproducible.** SvelteKit's default `version.name` is `Date.now()`; it enters
+the client manifest, changes that chunk's content hash, and cascades. Measured
+before the change: rebuilding **identical** source rewrote **18 of 39** tracked
+files. After it: **0**. So `npm run build && git diff --exit-code -- web/build`
+is now a real check, and `web/build/_app/version.json` is a fingerprint of the
+tree that produced the bundle. The digest covers `web/src`, `package-lock.json`,
+`svelte.config.js` and `vite.config.js`. **It does not cover the installed
+`node_modules`.** A dependency resolved outside the lockfile — an `npm install`
+rather than an `npm ci` — could change the output without changing the
+fingerprint. The gate itself uses `npm ci`; a developer's machine may not.
+
+**Gate W3 is a RATCHET pinned at 64, not a floor at zero, and this is the
+honest part.** `svelte-check` reported **122** errors on the tree before this
+work and had never run in CI. Adding `@types/node` cleared 68 of them; the
+remaining **64** are real and unfixed. Demanding zero would mean either fixing
+64 unrelated errors inside the commit that adds the gate, or shipping a gate
+that is red from birth — and a gate nobody can read green is a gate nobody
+reads. "No worse than today" is enforceable now and tightens whenever the
+number is lowered.
+
+**Front-end line coverage is ~1% and there is no mutation testing.** 294 of
+31,517 lines in `web/src` are driven by a test — `bps.js`, `ask.js`,
+`completeness.js`, `fold.js` and `receipt.js`. §9's 100% floor and its
+no-surviving-mutant rule apply to **crates**, and nothing equivalent exists for
+the browser. Gate W2 proves the tests that exist run; it proves nothing about
+how much they cover.
+
+**`web` is not yet in `ci-ok`'s `needs` list.** That list lives in `ci.yml`, so
+until one line is added there, a red Gate W does not block a merge.
+
+---
