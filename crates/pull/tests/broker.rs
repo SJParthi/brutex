@@ -138,7 +138,7 @@ fn spec(base_url: &'static str) -> HttpSpec {
         // shipped descriptor in
         // `groww_declares_the_expired_fno_lookup_and_the_others_declare_none`,
         // where it can be checked against the vendor's own pages.
-        fno: None,
+        fno: pull::vendor::FnoAccess::None,
         // DHAN'S REAL REQUIRED FIELDS, read first-hand from
         // dhanhq.co/docs/v2/historical-data. This is what `DH-905 securityId
         // is required` was reporting the absence of.
@@ -832,7 +832,10 @@ fn groww_declares_the_expired_fno_lookup_and_the_others_declare_none() {
     let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
         panic!("Groww is an HTTP broker");
     };
-    let fno = groww.fno.expect("Groww publishes the contract lookup");
+    let fno = groww
+        .fno
+        .by_name()
+        .expect("Groww is addressed by contract name");
     assert_eq!(joined(fno.expiries_path), "v1/historical/expiries");
     assert_eq!(joined(fno.contracts_path), "v1/historical/contracts");
     assert_eq!(fno.expiries_field, "expiries");
@@ -861,7 +864,19 @@ fn groww_declares_the_expired_fno_lookup_and_the_others_declare_none() {
     let Transport::Http(dhan) = Feed::Dhan.descriptor().transport else {
         panic!("Dhan is an HTTP broker");
     };
-    assert!(dhan.fno.is_none(), "no contract lookup at this vendor");
+    // NO NAME LOOKUP, AND THAT IS NOT NO DATA. See D-0193: this assertion used
+    // to read `dhan.fno.is_none()`, and the field could only say "no
+    // discovery", so "no discovery" was read as "serves nothing" for months
+    // while the vendor was serving five years of expired options by strike
+    // offset.
+    assert!(
+        dhan.fno.by_name().is_none(),
+        "Dhan publishes no contract NAME to discover"
+    );
+    assert!(
+        dhan.fno.by_offset().is_some(),
+        "and it does serve expired options, addressed by distance from the money"
+    );
 }
 
 /// A DISCOVERY FIELD CANNOT REACH A BARS REQUEST.

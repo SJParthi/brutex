@@ -2023,7 +2023,7 @@ mod tests {
             base_url: "https://vendor.invalid",
             bars_path: &[crate::vendor::PathSegment::Literal("bars")],
             rung_routes: &[],
-            fno: None,
+            fno: crate::vendor::FnoAccess::None,
             method: Method::Post,
             auth: crate::vendor::Auth {
                 header: "x-token",

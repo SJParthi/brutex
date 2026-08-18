@@ -120,7 +120,11 @@ impl core::fmt::Display for FnoError {
 ///
 /// [`FnoError::NoLookup`] where the descriptor records none.
 pub const fn lookup(spec: &HttpSpec) -> Result<FnoDiscovery, FnoError> {
-    match spec.fno {
+    // BY-NAME ONLY, AND THE REFUSAL IS NOW MORE PRECISE THAN IT WAS. This
+    // module builds the two NAME-discovery requests; a feed addressed by strike
+    // offset has no name to discover and is not served here, which is a
+    // different sentence from "this vendor has no expired data". D-0193.
+    match spec.fno.by_name() {
         Some(d) => Ok(d),
         None => Err(FnoError::NoLookup),
     }
@@ -658,9 +662,9 @@ mod tests {
     #[test]
     fn a_value_segment_in_a_discovery_path_resolves_like_any_other_field() {
         let base = groww();
-        let d = base.fno.expect("Groww has a lookup");
+        let d = base.fno.by_name().expect("Groww is addressed by name");
         let spec = HttpSpec {
-            fno: Some(FnoDiscovery {
+            fno: crate::vendor::FnoAccess::ByName(FnoDiscovery {
                 expiries_path: &[
                     PathSegment::Literal("v1"),
                     PathSegment::Value {
@@ -684,7 +688,7 @@ mod tests {
         // rather than emitting an empty segment — `//` in a path is a different
         // URL, and a vendor would answer it differently.
         let unfillable = HttpSpec {
-            fno: Some(FnoDiscovery {
+            fno: crate::vendor::FnoAccess::ByName(FnoDiscovery {
                 expiries_path: &[PathSegment::Value {
                     placeholder: "expiry_date",
                     value: ParamValue::ExpiryDate,
@@ -714,7 +718,9 @@ mod tests {
             let Transport::Http(spec) = feed.descriptor().transport else {
                 continue;
             };
-            let Some(d) = spec.fno else { continue };
+            let Some(d) = spec.fno.by_name() else {
+                continue;
+            };
             for p in d.expiries_params.iter().chain(d.contracts_params) {
                 assert!(
                     resolve(

@@ -2497,7 +2497,7 @@ pub enum Pooling {
 /// one feed and another is a ROW IN A TABLE, never an `if vendor ==`. A third
 /// vendor arriving with a third shape adds a variant here and a row there, and
 /// edits no driver.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RollingSpec {
     /// The path this vendor answers rolling-option requests on.
     pub path: &'static [PathSegment],
@@ -2535,7 +2535,7 @@ pub struct RollingSpec {
 /// A feed carrying it publishes no expired-contract route this build can use,
 /// and the refusal that follows names the vendor rather than apologising for
 /// the code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FnoAccess {
     /// This vendor serves no expired contract by any route.
     None,
@@ -2703,7 +2703,14 @@ pub struct HttpSpec {
     /// recoverable; that one did not fail at all.
     pub rung_routes: &'static [RungRoute],
     /// How this feed is asked which expired contracts exist, if it can be.
-    pub fno: Option<FnoDiscovery>,
+    /// How this feed is asked for an expired contract, if it can be.
+    ///
+    /// Was `Option<FnoDiscovery>`, which could only express ONE of the two ways
+    /// a vendor sells expired data — and D-0193 records what that cost: Dhan's
+    /// `None` meant "no NAME lookup" and was read for months as "serves
+    /// nothing", while the vendor was in fact serving five years of expired
+    /// options by strike offset.
+    pub fno: FnoAccess,
     /// The verb.
     pub method: Method,
     /// Which header carries the credential, and how.
@@ -4087,7 +4094,12 @@ const DHAN: Descriptor = Descriptor {
         // wrong conclusion this comment previously invited and the two-model
         // shape that replaces it. Source: Dhan Docs 14-expired-options-data.md
         // and 20-annexure.md, read 2026-08-18.
-        fno: None,
+        // NO NAME LOOKUP, AND THAT IS NOT NO DATA. See D-0193 and the comment
+        // above: `rollingoption` answers five years of expired options at
+        // minute level, addressed by distance from the money rather than by a
+        // contract name, and carrying implied volatility, open interest, spot
+        // and the realised strike.
+        fno: FnoAccess::ByStrikeOffset(DHAN_ROLLING),
         rung_routes: &[RungRoute {
             rung: Granularity::Minute1,
             path: &[
@@ -4306,7 +4318,7 @@ const GROWW: Descriptor = Descriptor {
         // groww.in/trade-api/docs/curl/backtesting. An expired option is in no
         // instrument master — it expired — so its name has to be discovered
         // before its bars can be asked for.
-        fno: Some(FnoDiscovery {
+        fno: FnoAccess::ByName(FnoDiscovery {
             expiries_path: &[
                 PathSegment::Literal("v1"),
                 PathSegment::Literal("historical"),
@@ -4861,7 +4873,10 @@ const ZERODHA: Descriptor = Descriptor {
     transport: Transport::Http(HttpSpec {
         base_url: "https://api.kite.trade",
         // No contract lookup recorded for this vendor.
-        fno: None,
+        // No expired-contract route this build has read. `None` here is a
+        // recorded absence, not an unread vendor -- see D-0193 for why the two
+        // must never be spelled the same way.
+        fno: FnoAccess::None,
         // NO OVERRIDE: this vendor puts the rung in `bars_path` itself as a
         // PathSegment — D-0133 — so the endpoint already varies with the rung
         // and there is nothing for a route table to add.
@@ -6262,9 +6277,22 @@ mod tests {
              options, by strike offset rather than by name — so this asserts the \
              absence of the `fno` FIELD, never the absence of the capability"
         );
+        // AND THE FULL TRUTH, NOW THAT THE TYPE CAN EXPRESS IT. Dhan has no
+        // NAME lookup and does serve expired options, by strike offset. The
+        // earlier form of this assertion was `dhan.fno.is_none()`, which was
+        // the very conflation D-0193 was written to correct: the field could
+        // only say "no discovery", so "no discovery" got read as "no data".
         assert!(
-            dhan.fno.is_none(),
-            "and the reason it has no word is that it has no discovery"
+            dhan.fno.by_name().is_none(),
+            "Dhan publishes no contract NAME to discover"
+        );
+        assert!(
+            dhan.fno.by_offset().is_some(),
+            "and it does serve expired options, addressed by distance from the money"
+        );
+        assert!(
+            dhan.fno.serves(),
+            "so it serves expired contracts — the claim D-0193 corrects"
         );
     }
 
