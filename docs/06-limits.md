@@ -204,7 +204,7 @@ repair merged through it green. What it enforces today, honestly bounded:
 | C-08 | yes | the block checksum against the bit-by-bit kernel it replaced |
 | C-09 | yes | one vendor row's decode at a 28-byte, 64-byte, 6.4 KB and 4 MiB field |
 | C-10 | yes | that the 4 MiB row is **refused**, not merely fast |
-| C-02, C-03, C-04 | **no** | `crates/engine` does not exist |
+| C-02, C-03, C-04 | **stale — see below** | ~~`crates/engine` does not exist~~ |
 
 Four things it still does not prove.
 
@@ -1268,7 +1268,11 @@ predicate the request uses cannot.
   124.916 ms at 50,000) were taken against a running server in a debug build and
   are not comparable in absolute terms to the release figures above — only the
   **shape** is, and the shape is what is asserted.
-- **No mutation testing has been run on `crates/api`.** 100 % line and region
+- ~~**No mutation testing has been run on `crates/api`.**~~ **STALE — D-0038 ran
+  367 mutants over four files** (`ingest.rs` + `census.rs` 105, `render.rs` 101,
+  `server.rs` 161) and killed ten survivors at their cause. What remains true is
+  narrower and worth keeping: **18 of `api`'s 22 source files have still never
+  been mutated.** 100 % line and region
   coverage is not evidence that the assertions are load-bearing. `crates/store`
   carries the same admission in §22.
 
@@ -4444,6 +4448,53 @@ exceed `ConditionMask::BITS` while the walk is sound, which the code comment at
 :714 already argues. What is claimed is only that one mutation of it is beyond
 the reach of an assertion, and that this is now written down instead of being a
 number nobody looked at.
+
+---
+
+## 80. Gate 20 counted another crate's uncovered lines as the logger's, and its declaration is stale by three times
+
+`.github/workflows/ci.yml`, gate 20. Both defects measured on this tree at
+`a2b912f` with the CI-pinned `cargo-llvm-cov 0.8.4`.
+
+### The misattribution, now fixed
+
+Gate 20 walks `cargo llvm-cov report --text` and counts uncovered lines per
+telemetry file. Its `awk` set `f` on a telemetry file header and **never cleared
+it on any other file header**. The report is emitted in PATH order, so from the
+last telemetry file to the end of the report every uncovered line in every crate
+was attributed to `telemetry/src/value.rs`.
+
+Measured before the fix:
+
+| | reported | actually |
+|---|---|---|
+| `telemetry/src/value.rs` | 1 uncovered | **0 uncovered** |
+| `crates/vocab/src/mask.rs` | not counted | **1 uncovered** |
+
+An operator following that message would have been sent to the wrong crate and
+asked to declare a telemetry limit that does not exist. Both `awk` blocks now
+clear `f` on any `^/.*\.rs:$` header — the sanity-ratio block had the same flaw
+and was folding other crates into the "is this profile usable" fraction. D-0167.
+
+### The declaration is stale, and is NOT silently corrected
+
+With the misattribution removed the gate still fails, and now for the right
+reason:
+
+| file | declared | measured |
+|---|---|---|
+| `clock.rs` | 1 | 1 |
+| `level.rs` | 1 | 1 |
+| `lib.rs` | 6 | **17** |
+| `sink.rs` | 8 | **24** |
+| `tail.rs` | 3 | 3 |
+
+`lib.rs` and `sink.rs` have drifted by roughly three times. **The numbers are
+deliberately not bumped here.** Gate 20's whole premise is that every uncovered
+line in the logger is declared *with its reason* — raising a count to match a
+measurement, without reading the twenty-seven new lines and saying why each
+cannot be covered, would convert the gate from a control into a rubber stamp.
+That is the work this section exists to name, and it is **OPEN**.
 
 ---
 

@@ -22,7 +22,19 @@ jobs:
     name: Gate 1+2 — one language
     runs-on: ubuntu-24.04
     steps:
+      # `fetch-depth: 0`, AND IT IS GATE 1E THAT NEEDS IT. This job used the
+      # default shallow clone for its whole life, which was fine while every
+      # step here read `git ls-files`. Gate 1e now runs `cargo test` under a
+      # shadowed PATH, and `crates/core/tests/findings.rs` asserts
+      # `rev-parse --is-shallow-repository` is not "true" — it refuses rather
+      # than pass vacuously, because on a shallow clone it cannot tell "this
+      # commit hash is wrong" from "this clone has no history". Without this
+      # line gate 1e would go red for a reason that has nothing to do with §2,
+      # which is the worst shape of failure: red for the wrong reason trains a
+      # reader to ignore the gate. The `build`, `coverage` and `mutants` jobs
+      # already check out this way and say so for the same reason.
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
 
       - name: Gate 1 — extension allowlist
         run: |
@@ -144,7 +156,58 @@ jobs:
             printf '%s\n' "$out" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
             exit 1
           fi
-          echo "OK — the workspace builds with node, npm, yarn, pnpm and five bundlers shadowed."
+
+          # §2's SENTENCE NAMES THREE COMMANDS AND THIS STEP SHADOWED ONE. The
+          # quote at the top of this gate is "`cargo build`, `cargo test` and
+          # `cargo clippy` must pass on a machine with no Node" -- and everything
+          # above it tested `cargo build`. That is not a pedantic gap. `cargo
+          # build --all-targets` COMPILES the test binaries and never runs them,
+          # so a `#[test]` that does `Command::new("npm")` at RUNTIME was
+          # invisible to every clause above: the stub is on PATH, but nothing
+          # ever reached the line that would have invoked it.
+          #
+          # THE COST IS THE TEST RUN, NOT A REBUILD, and that is worth saying
+          # because this job is the cheap one everything else waits on. The build
+          # above already compiled every test target into the same target
+          # directory, so this invocation links nothing new and spends its time
+          # executing. It does duplicate the `Tests` step in the `build` job --
+          # deliberately, because that run has no stub on PATH and therefore
+          # proves nothing about §2.
+          #
+          # `cargo clippy` IS STILL NOT SHADOWED, and the reason is that it would
+          # buy nothing rather than that it was forgotten: clippy compiles and
+          # does not execute, so every point at which it could reach a toolchain
+          # is a point `cargo build --all-targets` has already walked with the
+          # same stub directory in front of PATH.
+          set +e
+          tout="$(PATH="$stub:$PATH" cargo test --workspace --locked 2>&1)"
+          tstatus=$?
+          set -e
+
+          # `$invoked` accumulates across both runs and the build clause already
+          # exited on a non-empty file, so anything in it now was written while
+          # the tests ran.
+          if [ -s "$invoked" ]; then
+            echo "FORBIDDEN: a crate invoked a front-end toolchain while its tests ran:"
+            sort -u "$invoked" | sed 's/^/  /'
+            echo "The build was clean and the test run was not, which means the"
+            echo "call is in test code rather than in a build script."
+            exit 1
+          fi
+          if [ "$tstatus" -ne 0 ]; then
+            echo "GATE 1E FAILED: cargo test exited $tstatus with the front-end"
+            echo "toolchain shadowed. §2 requires it to pass on a machine with no"
+            echo "Node and no package manager. The tail of the run:"
+            printf '%s\n' "$tout" | tail -40
+            exit 1
+          fi
+          if printf '%s' "$tout" | grep -qiE 'node_modules|yarn\.lock|pnpm-lock|package\.json'; then
+            echo "FORBIDDEN: the test run read front-end package metadata."
+            printf '%s\n' "$tout" | grep -iE 'node_modules|yarn\.lock|pnpm-lock|package\.json'
+            exit 1
+          fi
+          echo "OK — the workspace builds AND tests with node, npm, yarn, pnpm and"
+          echo "     five bundlers shadowed, and no stub was ever invoked."
       - name: Gate 1b — .json and .yml are confined
         run: |
           set -euo pipefail
@@ -1045,15 +1108,73 @@ jobs:
       - name: Gate 2 — no build script shells out
         run: |
           set -euo pipefail
+          bad=0
           hits=$(git ls-files '*build.rs' | xargs -r grep -ln \
                  -e 'Command::new' -e 'std::process' || true)
           if [ -n "$hits" ]; then
             printf 'BUILD SCRIPT INVOKES AN EXTERNAL PROCESS:\n%s\n' "$hits"
             echo "A build script is Rust, so gate 1 passes it — and then it runs"
             echo "something else. That is the side door. See CLAUDE.md section 2."
-            exit 1
+            bad=1
           fi
-          echo "OK — no build script invokes an external process."
+
+          # THE GLOB ABOVE KEYS ON A FILENAME, AND THE FILENAME IS ONLY A
+          # DEFAULT. `build.rs` is what cargo looks for when a manifest says
+          # nothing; a manifest that says `build = "gen.rs"` gets a build script
+          # called `gen.rs`, and every check in this repository that spells the
+          # name out walks straight past it. Two of them do: this glob, and gate
+          # 13 layer 3's `$NF == "build.rs"`. One `build =` line defeats both,
+          # and the file it names is a `.rs` that gate 1's extension allowlist
+          # welcomes.
+          #
+          # So the KEY is refused, not just the name. `build =` is refused
+          # because CLAUDE.md §2 bans "any `build.rs` that invokes an external
+          # process" and gate 13 layer 3 goes further and bans the script
+          # existing at all -- neither ban means anything if the script can be
+          # renamed out of sight. `links =` is refused with it because a `links`
+          # key declares that the package links a native library and cargo
+          # REQUIRES a build script to accompany it: it is a build script and a
+          # foreign-language dependency announced in one line.
+          #
+          # Comments stripped first, the same way gate 13 layer 1 strips them and
+          # for the same reason -- these manifests discuss the rules they obey,
+          # at length, and a rule that refuses its own justification is a rule
+          # somebody deletes. The cost, stated: a `#` inside a quoted value
+          # truncates its line, which can only cause a MISS and never a false
+          # refusal.
+          #
+          # WHAT THIS DOES NOT COVER. A build script cargo picks up from the
+          # DEFAULT path with no manifest key is caught by the glob above and by
+          # gate 13 layer 3, not by this clause; the two halves are complementary
+          # and neither is sufficient alone.
+          #
+          # The path list is narrowed with grep and not with a `case`, because a
+          # `case` pattern's `)` inside a `$( ... )` is a bash 3.2 parse error --
+          # `syntax error near unexpected token ;;`. The runner has bash 5, so
+          # this would have been green in CI and red on the operator's own Mac,
+          # which is the worst way for a gate to disagree with itself. The glob
+          # `*Cargo.toml` also matches `NotCargo.toml`; the grep pins the
+          # basename exactly.
+          keys=$( { git ls-files '*Cargo.toml' \
+                    | { grep -E '(^|/)Cargo\.toml$' || true; } \
+                    | while IFS= read -r m; do
+                        awk -v F="$m" '{ l = $0; sub(/#.*$/, "", l); print F ":" NR ":" l }' "$m"
+                      done \
+                    | grep -E ':[[:space:]]*(build|links)[[:space:]]*=' || true; } )
+          if [ -n "$keys" ]; then
+            printf 'A MANIFEST NAMES A BUILD SCRIPT OR A NATIVE LIBRARY:\n%s\n' "$keys"
+            echo 'A `build =` key renames the script out of every filename check'
+            echo 'in this file, and a `links =` key requires one to exist at all.'
+            echo 'Nothing here needs either: there is no C to compile, no protocol'
+            echo 'to generate from, and no version to stamp that'
+            echo 'env!("CARGO_PKG_VERSION") does not already carry.'
+            echo "See CLAUDE.md section 2 and gate 13 layer 3."
+            bad=1
+          fi
+
+          [ "$bad" -eq 0 ] || exit 1
+          echo "OK — no build script invokes an external process, and no manifest"
+          echo "     names one under another filename."
 
       - name: Gate 9 — core depends on nothing
         run: |
@@ -1063,17 +1184,88 @@ jobs:
           # so a dependency added to core is silently forced into a wasm32
           # build where the filesystem does not exist. Without this gate the
           # architecture's most load-bearing arrow is a convention.
+          #
+          # AND FOR THE WHOLE LIFE OF THIS GATE IT READ ONE SPELLING OF FOUR.
+          # The parse was `name =` at line start inside a flat `[dependencies]`
+          # table. Cargo accepts four ways to say the same thing:
+          #
+          #   store = { path = "../store" }    the only form the awk could see
+          #   store.path = "../store"          a dotted key, same meaning
+          #   [dependencies.store]             a table header, same meaning
+          #   [dev-dependencies] / [build-dependencies] /
+          #   [target.'cfg(unix)'.dependencies]      all three LINK
+          #
+          # THIS IS MEASURED, NOT FEARED. `crates/core/tests/graph.rs` records
+          # that one `[dependencies.store]` stanza "defeated NINE guarantees at
+          # once", and names gate 9 as one of the nine: the awk printed nothing
+          # for that stanza, and printing nothing is exactly how this step used
+          # to say "core depends on nothing". A pass and a bypass spelled
+          # identically is the worst shape a gate can have.
+          #
+          # A shell cannot parse TOML and this gate is not going to pretend it
+          # can. It does what gate 22 clause A1 does instead: REFUSE every
+          # spelling the extractor cannot read, so that with the refusal held
+          # the extractor is a COMPLETE parse rather than a hopeful one. Here
+          # refusing is doubly right -- three of those four spellings declare a
+          # dependency and core may declare none of any kind. The authoritative
+          # parser is Rust: `declarations` in crates/core/tests/graph.rs handles
+          # all four and is tested against all four.
           f=crates/core/Cargo.toml
           [ -f "$f" ] || { echo "skip — crate not created yet"; exit 0; }
-          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
-                 | grep -v '^$' || true)
+          # Comments stripped first, and this manifest needs it: the empty
+          # `[dependencies]` table is introduced by a comment block that spells
+          # the rule out at length. Text in a comment is text -- the defect that
+          # took gate 17, gate 1d and gate 22 clause A1 red in turn. The limit is
+          # the one graph.rs states about itself: a `#` inside a quoted value
+          # truncates its line. No manifest here has one, and a dependency name
+          # cannot contain one.
+          code=$(sed 's/#.*//' "$f")
+          bad=0
+          for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
+                          '^\[build-dependencies' '^\[target\.'; do
+            if printf '%s\n' "$code" | grep -qE "$spelling"; then
+              printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
+                "$f" "$spelling"
+              bad=1
+            fi
+          done
+          # A dotted key inside the flat table declares a dependency the
+          # extractor below would read as a crate named `store.path` and then
+          # fail to match against anything.
+          if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+             | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+            printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
+            bad=1
+          fi
+          # With those held, this is every dependency the manifest declares.
+          # `|| true` is load-bearing: core declares NOTHING, so grep exits 1,
+          # and under `set -o pipefail` that killed the step before it printed a
+          # line -- an exit 1 with no output, indistinguishable from a real
+          # refusal. Gate 22 clause A2 was red for precisely that.
+          deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+                 | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
+                 | sed 's/ *=//' | sort -u)
           if [ -n "$deps" ]; then
             printf 'crates/core MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
+            bad=1
+          fi
+          if [ "$bad" -ne 0 ]; then
             echo "core is compiled to wasm32 through crates/web. See D-0009."
+            echo "THE DEV-DEPENDENCY REFUSAL IS NOT A TECHNICALITY. This step had"
+            echo "no dev-dependency clause at all, so a flat [dev-dependencies]"
+            echo "table in crates/core passed it in silence. A dev-dependency is"
+            echo "compiled into every test and every bench, so a crate that"
+            echo "declares one CAN REACH IT whatever the shipping graph says --"
+            echo "which is why graph.rs reads all three linking tables and why"
+            echo "all three are refused here."
             exit 1
           fi
-          echo "OK — core depends on nothing."
-
+          # WHAT THIS STILL CANNOT SEE, because a gate that oversells itself is
+          # worse than no gate: a dependency inherited from the workspace root by
+          # a member that names it, and any dependency reached through a
+          # `[patch]` or `[replace]` rename. Gate 13 layers 1 and 2 are what walk
+          # the root manifest and the lock; this step reads one file.
+          echo "OK — core declares no dependency of any kind, in any spelling."
       - name: Gate 9b — greeks depends on nothing
         run: |
           set -euo pipefail
@@ -1095,22 +1287,69 @@ jobs:
           # No untrusted input reaches this step: the inputs are a tracked
           # manifest path, `git ls-files` and static patterns. Nothing from the
           # event payload is expanded.
+          #
+          # AND IT INHERITED GATE 9'S PARSE, SO IT INHERITED GATE 9'S HOLE. The
+          # extraction read `name =` at line start inside a flat `[dependencies]`
+          # table, which is one of the four spellings Cargo accepts; a
+          # `[dependencies.serde]` stanza printed NOTHING and this step said
+          # "greeks depends on nothing" over a greeks that did.
+          # `crates/core/tests/graph.rs` names gate 9b among the nine guarantees
+          # a single such stanza defeated. The dev-dependency clause below had
+          # the same shape and therefore the same hole.
+          #
+          # The repair is gate 22 clause A1's, carried across unchanged in
+          # spirit: REFUSE the spellings a shell cannot parse instead of
+          # pretending to parse them. For this crate the refusal is not a
+          # compromise at all -- greeks may declare NO dependency in ANY table,
+          # so a `[dev-dependencies]` or `[target.'cfg(unix)'.dependencies]`
+          # header is itself the violation and there is nothing left to read
+          # inside it. That is why the separate dev-dependency parse below is
+          # gone rather than fixed: it is now one line in the refusal list, and
+          # `[build-dependencies]` and `[target.*]` came free with it.
+          #
+          # A DEV-DEPENDENCY IS NOT A LESSER VIOLATION HERE, which is the reason
+          # the old clause existed and the reason its replacement must be at
+          # least as strong: it is not forced on a consumer, but it IS forced on
+          # anyone who runs this crate's tests, and this crate's tests are part
+          # of what `tickvault` takes by git URL.
           f=crates/greeks/Cargo.toml
           [ -f "$f" ] || { echo "skip — crate not created yet"; exit 0; }
-          deps=$(awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
-                 | grep -v '^$' || true)
+          # Comments stripped first. This manifest's comment block discusses
+          # `[dependencies]` and `[dev-dependencies]` by name, at length, and
+          # explains why both are empty -- so an unstripped scan would refuse the
+          # crate over its own justification. Text in a comment is text. The
+          # limit is the one graph.rs states: a `#` inside a quoted value
+          # truncates its line, and no manifest here has one.
+          code=$(sed 's/#.*//' "$f")
+          bad=0
+          for spelling in '^\[dependencies\.' '^\[dev-dependencies' \
+                          '^\[build-dependencies' '^\[target\.'; do
+            if printf '%s\n' "$code" | grep -qE "$spelling"; then
+              printf 'REFUSED  %s uses a dependency table this gate refuses outright: %s\n' \
+                "$f" "$spelling"
+              bad=1
+            fi
+          done
+          if printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+             | grep -qE '^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+ *='; then
+            printf 'REFUSED  %s declares a dependency with a dotted key\n' "$f"
+            bad=1
+          fi
+          # With those held this is a complete parse. `|| true` is load-bearing
+          # for the same reason it is in gate 22 clause A2: greeks declares
+          # nothing, grep exits 1, and `set -o pipefail` would kill the step with
+          # no output at all -- a silent exit 1 that reads exactly like a real
+          # refusal, and had the polarity been the other way it would have passed
+          # forever having checked nothing.
+          deps=$(printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+                 | { grep -oE '^[A-Za-z0-9_-]+ *=' || true; } \
+                 | sed 's/ *=//' | sort -u)
           if [ -n "$deps" ]; then
             printf 'crates/greeks MUST DEPEND ON NOTHING. Found:\n%s\n' "$deps"
-            echo "It is shared with another repository by git URL. See D-0046."
-            exit 1
+            bad=1
           fi
-          # And no dev-dependency either: a dev-dependency is not forced on a
-          # consumer, but it is forced on anyone who runs this crate's tests,
-          # and this crate's tests are part of what is shared.
-          dev=$(awk '/^\[dev-dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}' "$f" \
-                 | grep -v '^$' || true)
-          if [ -n "$dev" ]; then
-            printf 'crates/greeks MUST DECLARE NO DEV-DEPENDENCY. Found:\n%s\n' "$dev"
+          if [ "$bad" -ne 0 ]; then
+            echo "It is shared with another repository by git URL. See D-0046."
             exit 1
           fi
           # The public surface names no type from this workspace. Every other
@@ -1399,8 +1638,25 @@ jobs:
           # allowlist below is the escape, and taking it should come with a
           # decisions entry.
           bh=$( { git ls-files | awk -F/ '$NF == "build.rs" { print $0 ":1:a build script exists" }'; } || true )
+          # AND THE SCRIPT NEED NOT BE CALLED `build.rs`. `$NF == "build.rs"`
+          # reads the DEFAULT filename; a manifest that says `build = "gen.rs"`
+          # renames the script straight out of this layer, and the file it names
+          # is a `.rs` that gate 1's extension allowlist welcomes. Gate 2's
+          # `*build.rs` glob had the identical hole and is closed in the same
+          # commit -- one `build =` line used to defeat both checks at once.
+          #
+          # `$decl` is already the comment-stripped corpus of every tracked
+          # manifest that layer 1 walks, so the key costs one grep and arrives in
+          # the `path:line:text` shape `verdict` reads. `links =` rides along
+          # because a package that declares one is a package cargo REQUIRES a
+          # build script for -- it is this layer's subject announced in a
+          # different word.
+          bk=$( { grep -E ':[[:space:]]*(build|links)[[:space:]]*=' "$decl" || true; } )
+          if [ -n "$bk" ]; then
+            bh=$( { printf '%s\n%s\n' "$bh" "$bk" | grep . || true; } )
+          fi
           echo
-          echo "layer 3: a build script exists anywhere in the tree"
+          echo "layer 3: a build script exists anywhere in the tree, by file or by manifest key"
           if [ -z "$( { printf '%s\n' "$bh" | grep . || true; } )" ]; then
             echo "  none"
           fi
@@ -2529,9 +2785,48 @@ jobs:
           # from a test — `api::emitted` and gate 12 cover those. It answers one
           # question: did anybody write an event here at all.
           #
-          # Test code is skipped from the first `#[cfg(test)]` onward. Every
-          # file in this workspace puts its test module last, and a test that
-          # constructs a `Failure` fixture is not a production failure path.
+          # IT USED TO SKIP FROM THE FIRST `#[cfg(test)]` ONWARD, AND THAT LINE
+          # SAID "Every file in this workspace puts its test module last". That
+          # was not true and the cost was measurable: `crates/api/src/server.rs`
+          # is 15,654 lines and its first `#[cfg(test)]` is at 7,717, so 7,937
+          # lines of PRODUCTION code sat past the cut and this gate reported
+          # success over every one of them. `crates/api/src/audit.rs` hid 797
+          # more the same way.
+          #
+          # THIS IS THE EXACT BUG CLASS GATE 11 ALREADY FIXED, and the reasoning
+          # there applies here unchanged: truncating at an attribute hides every
+          # line after it, and a `#[cfg(test)]` is not only ever a test module --
+          # it sits on const fns and on statements inside shipping bodies. One
+          # attribute shrinks the scan exactly as silently as two.
+          #
+          # So the boundary is a SUBTRACTION now, not a cut. The stripper below
+          # is gate 11's, character for character, and it is duplicated rather
+          # than shared because a `run:` step cannot import from another step and
+          # the alternative -- a tracked shell script -- is a file extension
+          # gate 1 refuses. From a `#[cfg(test)]`, skip blank lines, `//`
+          # comments and attributes to find the item it covers; if that item is
+          # an inline `mod NAME {`, drop through to the matching `}` at the same
+          # indent; otherwise keep the attribute and the item and carry on. A
+          # file may hold as many test modules as it likes, in any position, and
+          # none of them hides a line. D-0065.
+          #
+          # THE SUBTRACTION DID NOT CHANGE TODAY'S VERDICT AND THAT IS THE POINT.
+          # Both sites the old cut hid -- `audit.rs:1796` and `server.rs:15626`
+          # -- turn out to be inside `#[cfg(test)] mod` blocks, so the count is
+          # 11 sites before and 11 after. The gate was right by luck over 8,734
+          # lines it could not see, and luck is not a boundary.
+          #
+          # A FILE THIS SCANNER CANNOT DELIMIT IS A REFUSAL, not a guess, for the
+          # reason gate 11 gives: "I could not tell where this module ends" is a
+          # thing a gate may say; quietly scanning half of it is not.
+          #
+          # WHOLE-FILE TEST MODULES ARE DROPPED, decided by reading the CRATE
+          # ROOT and never the file's own name or contents, so a file cannot
+          # exempt itself. `pull/src/emit_sites.rs` and `api/src/emitted.rs` are
+          # that shape. Neither records a failure today, so this changes no
+          # count -- it is here so a `Failure` FIXTURE added to one of them is
+          # not read as a production failure path.
+          #
           # ONE EMIT SATISFIES ONE FAILURE, AND ONLY THE NEAREST ONE ABOVE IT.
           #
           # The first version of this gate asked "is there an emit within twelve
@@ -2542,20 +2837,117 @@ jobs:
           # So each event is claimed at most once, nearest-first. Five failures
           # and four events is a failure, wherever the four happen to sit.
           #
+          # THE WINDOW IS COUNTED IN ORIGINAL SOURCE LINES, not in corpus lines.
+          # The stripper stamps every kept line with the line number it had in
+          # the file, and the arithmetic below reads that stamp -- so a comment
+          # block or a test module between an emit and a failure still costs its
+          # full height, exactly as it did before. Twelve means twelve lines of
+          # file, which is the only reading a person checking the diff can make.
+          #
           # A `fn note_*(` DEFINITION is not a call. Counting the helper's own
           # signature would let a file satisfy itself by declaring helpers.
+          #
+          # WHAT IT STILL CANNOT SEE. `/* ... */` block comments are not
+          # stripped; only whole lines whose first non-blank characters are `//`.
+          # A `telemetry::emit(` named inside a block comment or a string
+          # literal within the window therefore still satisfies a failure site,
+          # which is the false-NEGATIVE direction and is the one this gate has
+          # always had. And `#[cfg(test)] mod tests {` written on ONE line is not
+          # recognised as a module, so its body is scanned -- loud, never silent.
           window=12
           work="$(mktemp -d)"
           found="$work/missing"; : > "$found"
           counted="$work/counted"; : > "$counted"
-          for f in $(git ls-files 'crates/pull/src/*.rs' 'crates/api/src/*.rs'); do
-            cut=$( { grep -n '^#\[cfg(test)\]' "$f" || true; } | head -1 | cut -d: -f1 )
-            if [ -z "$cut" ]; then cut=$(awk 'END{print NR+1}' "$f"); fi
-            awk -v cut="$cut" -v window="$window" -v name="$f" '
-              NR >= cut { next }
-              /^[[:space:]]*fn[[:space:]]+note_[a-z_]+\(/ { next }
-              /telemetry::emit\(|note_[a-z_]+\(/ { e[++ne] = NR; next }
-              /failures\.push\(|failures: vec!\[/ { p[++np] = NR }
+
+          strip='
+            function emit(line, no,   t) {
+              print F ":" no ":" line > SCOPE
+              t = line; sub(/^[ \t]+/, "", t)
+              if (t !~ /^\/\//) print F ":" no ":" line
+            }
+            function flush(  i) { for (i = 1; i <= nb; i++) emit(bl[i], bn[i]); nb = 0 }
+            function hold(line, no) { nb++; bl[nb] = line; bn[nb] = no }
+            BEGIN { st = 0; depth = 0; nb = 0; drop = 0 }
+            {
+              if (st == 2) {
+                drop++
+                if ($0 ~ CLOSE) { st = 0; next }
+                # INSIDE THE MODULE, EVERY LINE IS DEEPER THAN THE `mod`
+                # KEYWORD OR IT IS BLANK. A line at the module indent or
+                # shallower that is NOT the closing brace means the brace this
+                # scanner is waiting for is not the one that closes the module,
+                # and matching a later brace at the same indent would swallow
+                # whatever lies between them -- silently, which is the whole
+                # defect this boundary replaced. Refuse instead.
+                #
+                # Blank lines and whole-line comments are exempt, and that
+                # costs nothing: neither can hide a construct, and the first
+                # line of actual code past the module still trips the check.
+                lead = $0; sub(/[^ \t].*$/, "", lead)
+                t = $0; sub(/^[ \t]+/, "", t)
+                if (t != "" && t !~ /^\/\// && length(lead) <= length(IND)) exit 3
+                next
+              }
+              t = $0; sub(/^[ \t]+/, "", t)
+              if (st == 0) {
+                if (t ~ /^#\[cfg\(test\)\][ \t]*$/) { st = 1; depth = 0; nb = 0; hold($0, NR); next }
+                emit($0, NR); next
+              }
+              if (depth > 0) { depth += gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
+              if (t == "" || t ~ /^\/\//) { hold($0, NR); next }
+              if (t ~ /^#\[/) { depth = gsub(/\[/, "[") - gsub(/\]/, "]"); hold($0, NR); next }
+              if ($0 ~ /^[ \t]*(pub([ \t]*\([^)]*\))?[ \t]+)?mod[ \t]+[A-Za-z0-9_]+[ \t]*\{[ \t]*$/) {
+                IND = $0; sub(/[^ \t].*$/, "", IND)
+                CLOSE = "^" IND "\\}[ \t]*$"
+                drop += nb + 1; nb = 0; st = 2; next
+              }
+              flush(); emit($0, NR); st = 0
+            }
+            # A module still open at EOF, or an attribute with no item under
+            # it, is the same refusal for the same reason: this scanner will
+            # not guess where test code ends.
+            END { print drop > SUM; if (st != 0) exit 3 }
+          '
+
+          # A FUNCTION, and not an inline filter, because bash's process
+          # substitution parser fails on `#` comments inside `<( ... )`.
+          # `grep -A 1` means the attribute has to sit immediately above the
+          # declaration to count.
+          whole_file_test_module() {
+            stem="${1##*/}"; stem="${stem%.rs}"
+            root="${1%/src/*}/src/lib.rs"
+            [ -f "$root" ] \
+              && grep -A 1 '^#\[cfg(test)\]$' "$root" \
+                 | grep -Eq "^(pub(\([a-z]+\))? )?mod ${stem};$"
+          }
+
+          walked=0; kept=0; dropped=0; undelimited=0
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            walked=$((walked + 1))
+            # `wc -l` counts newlines, not lines. `awk END{print NR}` is the
+            # count that survives a file whose last line is unterminated -- the
+            # same correction gate 11 carries.
+            tot=$(awk 'END{print NR}' "$f")
+            : > "$work/one.scope"; : > "$work/one.sum"
+            # NOTHING IS SCANNED UNTIL THE FILE PARSES. The corpus is the
+            # comment-stripped half; `one.scope` is written by the stripper and
+            # is deliberately not read here, because this gate matches code and
+            # a `//` line cannot hold a call.
+            if awk -v F="$f" -v SCOPE="$work/one.scope" -v SUM="$work/one.sum" \
+                   "$strip" "$f" > "$work/one.corpus"; then
+              d=$(cat "$work/one.sum")
+              dropped=$((dropped + d)); kept=$((kept + tot - d))
+            else
+              printf 'UNDELIMITED TEST MODULE  %s\n' "$f"
+              undelimited=$((undelimited + 1))
+              continue
+            fi
+            awk -F: -v window="$window" -v name="$f" '
+              { n = $2 + 0; t = $0; sub(/^[^:]*:[0-9]+:/, "", t) }
+              t ~ /^[[:space:]]*fn[[:space:]]+note_[a-z_]+\(/ { next }
+              t ~ /telemetry::emit\(|note_[a-z_]+\(/ { e[++ne] = n; next }
+              t ~ /failures\.push\(|failures: vec!\[/ { p[++np] = n }
               END {
                 for (i = 1; i <= np; i++) {
                   print "counted" > "/dev/stderr"
@@ -2568,8 +2960,30 @@ jobs:
                   }
                   if (!ok) print name ":" p[i]
                 }
-              }' "$f" >> "$found" 2>>"$counted"
-          done
+              }' "$work/one.corpus" >> "$found" 2>>"$counted"
+          done < <(git ls-files 'crates/pull/src/*.rs' 'crates/api/src/*.rs' \
+                   | while IFS= read -r cand; do
+                       whole_file_test_module "$cand" || printf %s\\n "$cand"
+                     done || true)
+
+          # A gate must say what it walked. A glob that matches nothing is the
+          # failure mode gate 8 shipped with for the whole life of the
+          # repository, and it reported success the entire time.
+          echo "walked ${walked} production source file(s) under crates/{pull,api}/src/"
+          echo "  ${kept} line(s) in scope, ${dropped} inside a #[cfg(test)] module"
+          if [ "$walked" -eq 0 ]; then
+            echo "GATE 19 WALKED NOTHING. A gate that scans no file is not a gate."
+            exit 1
+          fi
+          if [ "$undelimited" -ne 0 ]; then
+            echo
+            echo 'A #[cfg(test)] module above has no closing brace at the same'
+            echo 'indent as its own `mod` keyword, so this scanner cannot tell'
+            echo 'where it ends and will not guess. `cargo fmt` does not emit'
+            echo 'that shape; if it is deliberate, the boundary is what has to'
+            echo 'change, not this message.'
+            exit 1
+          fi
 
           echo "checked $(wc -l < "$counted" | tr -d ' ') production failure-recording site(s)"
           if [ -s "$found" ]; then
@@ -3534,8 +3948,32 @@ jobs:
           # silently disarms the deny across the whole workspace with every
           # other gate still green. These two steps guard the guard.
           echo
+          # `indexing_slicing` IS IN THIS LIST AND WAS IN NO GATE AT ALL. It is
+          # denied at the workspace root beside the other five and it is
+          # panic-capable in exactly the same way -- `xs[i]` on a short slice is
+          # an index-out-of-bounds panic, which is the §4 breach "degrade loudly
+          # or refuse, never die" names. An audit found the string
+          # `indexing_slicing` appeared NOWHERE in this file, so deleting its one
+          # line from Cargo.toml disarmed it across twelve crates with every gate
+          # here still green. Rule 5's grep cannot cover it -- `[i]` is not a
+          # spelling a text scan can separate from an array literal or an
+          # attribute -- so the lint table is the only place it can be held, and
+          # this is that place.
+          #
+          # IT IS DELIBERATELY *NOT* IN RULE 5c BELOW, and the number is the
+          # reason rather than the taste. Rule 5c refuses a LOCAL `#[allow]` that
+          # switches a lint off in shipping code; adding `indexing_slicing` to
+          # its pattern was measured over this workspace's own production scope
+          # and produces 16 hits across 10 files -- `core/src/universe.rs` 4,
+          # `costs/src/expiry.rs` 4, and one each in seven more. Pinning sixteen
+          # counts, several of them in files another line of work is editing
+          # right now, would turn this into an allowlist nobody re-reads and a
+          # red build somebody else has to fix. The honest statement is that the
+          # TABLE is guarded and the local allows are NOT, and it is written here
+          # rather than discovered later. Raising it to rule 5c is a separate
+          # change that should read those sixteen sites one at a time.
           echo "rule 5b: the lint table that denies rule 5 workspace-wide"
-          for lint in unwrap_used expect_used panic todo unimplemented; do
+          for lint in unwrap_used expect_used panic todo unimplemented indexing_slicing; do
             if ! grep -qE "^${lint}[[:space:]]*=[[:space:]]*\"deny\"" Cargo.toml; then
               printf '  REFUSED  Cargo.toml no longer denies clippy::%s\n' "$lint"
               bad=1
@@ -4495,8 +4933,16 @@ jobs:
           # the fraction: a real profile leaves ~1% of this crate uncovered, a
           # degraded one leaves most of it. Anything past 50% is not a
           # regression somebody introduced, it is a profile nobody can read.
+          # `f` IS CLEARED BY ANY FILE HEADER, NOT ONLY BY A TELEMETRY ONE.
+          # `cargo llvm-cov report --text` emits an absolute path at column zero
+          # ending `.rs:` before each file's lines, and lists files in PATH
+          # order. Without the clear, `f` stayed set from the last telemetry
+          # file to the end of the report, so every crate sorting after
+          # `telemetry/` was counted as telemetry. Measured on this tree: it
+          # swept in `crates/vocab`. See D-0167.
           read -r total zero <<EOF
           $(awk '
+            /^\/.*\.rs:$/ { f=0 }
             /telemetry\/src\/[a-z_]+\.rs:/ { f=1; next }
             f && /^ *[0-9]+\| *[0-9]+\|/ { t++; if ($0 ~ /^ *[0-9]+\| *0\|/) z++ }
             END { printf "%d %d\n", t+0, z+0 }
@@ -4513,7 +4959,18 @@ jobs:
             exit 1
           fi
 
+          # THE CLEAR IS THE WHOLE CORRECTNESS OF THIS BLOCK, AND IT WAS MISSING.
+          # `f` held the last telemetry file name until the next telemetry file
+          # replaced it -- never until the next file of ANY kind. Since the
+          # report is in path order, every uncovered line in every crate sorting
+          # after `crates/telemetry/` was attributed to
+          # `telemetry/src/value.rs`. MEASURED on this tree before the fix:
+          # `value.rs 1`, where `value.rs` has ZERO uncovered lines and the line
+          # belongs to `crates/vocab/src/mask.rs`. The gate would have sent an
+          # operator to the wrong crate and asked them to declare a telemetry
+          # limit that does not exist. D-0167.
           actual=$(awk '
+            /^\/.*\.rs:$/ { f="" }
             /telemetry\/src\/[a-z_]+\.rs:/ { f=$0; sub(".*/crates/telemetry/src/","",f); sub(":","",f); next }
             f && /^ *[0-9]+\| *0\|/ { n[f]++ }
             END { for (k in n) printf "%s %d\n", k, n[k] }

@@ -14747,3 +14747,38 @@ mutated by nothing. Running the file rather than the diff is what surfaced them.
 
 ---
 
+## D-0167 · 2026-08-18 · Gate 20 blamed the logger for another crate's uncovered lines
+
+`.github/workflows/ci.yml`, gate 20.
+
+The gate counts uncovered lines per telemetry file out of
+`cargo llvm-cov report --text`. Its `awk` set `f` when a telemetry file header
+appeared and **never cleared it when any other file header appeared**. The report
+is emitted in PATH order, so `f` stayed set from the last telemetry file to the
+end of the run and every uncovered line in every crate sorting after
+`crates/telemetry/` was counted as `telemetry/src/value.rs`.
+
+**Measured on this tree before the fix:** the gate reported `value.rs 1`.
+`value.rs` has **zero** uncovered lines; the line belongs to
+`crates/vocab/src/mask.rs`.
+
+Both `awk` blocks now clear `f` on any `^/.*\.rs:$` header. The second block was
+the misattribution; the FIRST had the same flaw and was folding other crates into
+the "is this coverage profile usable at all" ratio, which is the check that
+decides whether the gate's own input can be trusted.
+
+**Why this mattered more than one miscounted line.** The gate's failure message
+names a file and tells the operator to declare the line in
+`docs/06-limits.md` §54. Following it would have documented a telemetry limit
+that does not exist, while the real uncovered line in `vocab` stayed unexamined —
+a control that manufactures false work and hides true work at the same time.
+
+**What is deliberately NOT changed.** With the misattribution removed the gate
+still fails: `lib.rs` declares 6 uncovered lines against 17 measured, `sink.rs`
+declares 8 against 24. Those counts are not bumped. The gate exists so that every
+uncovered line in the logger is declared *with its reason*, and raising a number
+to match a measurement without reading the twenty-seven new lines would turn the
+control into a rubber stamp. Recorded OPEN at `docs/06-limits.md` §80.
+
+---
+
