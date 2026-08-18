@@ -1707,4 +1707,99 @@ mod tests {
         assert_ne!(DEGRADED, FAILED, "the run worked; its ANSWER is refused");
         assert_ne!(DEGRADED, MISUSED);
     }
+
+    use brutex_core::instrument::{Exchange, InstrumentKey, Kind, Segment};
+    use brutex_core::symbol::Symbol;
+    use brutex_core::vendor::VendorSet;
+
+    /// An entry in a named universe, listed by the given vendors.
+    fn entry(universe: Universe, vendors: &[Vendor]) -> merge::Entry {
+        let mut set = VendorSet::EMPTY;
+        for &v in vendors {
+            set = set.with(v);
+        }
+        merge::Entry {
+            vendors: set,
+            isin: None,
+            conflict: None,
+            universe,
+        }
+    }
+
+    /// A merged map holding exactly the given entries, keyed apart by symbol.
+    fn merged_of(entries: &[merge::Entry]) -> merge::Merged {
+        let mut by_key = std::collections::HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            let key = InstrumentKey {
+                exchange: Exchange::Nse,
+                segment: Segment::Cash,
+                underlying: Symbol::new(&format!("S{i}")).expect("valid"),
+                kind: Kind::Equity,
+            };
+            by_key.insert(key, *e);
+        }
+        merge::Merged {
+            by_key,
+            conflicts: Vec::new(),
+            eligibility: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_summary_counts_every_field_and_counts_it_once() {
+        // EVERY field asserted at a distinct, non-zero value. A count that is
+        // accumulated but never asserted is a count that can be accumulated
+        // wrongly -- `+= 1` mutated to `*= 1` leaves a counter that starts at
+        // zero sitting at zero forever, and nothing here noticed until every
+        // number below had a value written down beside it.
+        //
+        // The four entries are deliberately all different shapes:
+        //   0  Total Market, both vendors      tracked, confirmed
+        //   1  Total Market + F&O, both        tracked, confirmed, the only fno
+        //   2  Index, ONE vendor               tracked, NOT confirmed
+        //   3  no universe, both vendors       counted only in `everything`
+        let both = [Vendor::Groww, Vendor::Dhan];
+        let merged = merged_of(&[
+            entry(Universe::TOTAL_MARKET, &both),
+            entry(Universe::TOTAL_MARKET.union(Universe::FNO), &both),
+            entry(Universe::INDEX, &[Vendor::Groww]),
+            entry(Universe::NONE, &both),
+        ]);
+        let s = Summary::of(&merged);
+
+        // Everything the gate accepted, which is what `?all=1` reports.
+        assert_eq!(s.everything.all, 4, "every entry is counted once");
+        assert_eq!(s.everything.fno, 1);
+        assert_eq!(s.everything.ntm, 2);
+        assert_eq!(s.everything.index, 1);
+
+        // The tracked universe excludes the entry in no universe at all.
+        assert_eq!(s.tracked.all, 3, "the untracked entry is not tracked");
+        assert_eq!(s.tracked.fno, 1);
+        assert_eq!(s.tracked.ntm, 2);
+        assert_eq!(s.tracked.index, 1);
+
+        // BOTH vendors, not either: entry 2 is tracked and named by Groww
+        // alone, so it is not cross-checked identity and must not be counted
+        // as though it were.
+        assert_eq!(
+            s.confirmed_by_both, 2,
+            "a single-vendor member is not confirmed by both"
+        );
+
+        // The view switch returns the set it names, and they differ.
+        assert_eq!(s.for_view(true).all, 4);
+        assert_eq!(s.for_view(false).all, 3);
+        assert_ne!(s.for_view(true).all, s.for_view(false).all);
+    }
+
+    #[test]
+    fn an_empty_universe_summarises_to_zero_rather_than_to_nothing() {
+        // The degenerate case has its own answer: every field zero, which is
+        // a different statement from "no summary was taken".
+        let s = Summary::of(&merged_of(&[]));
+        assert_eq!(s.everything.all, 0);
+        assert_eq!(s.tracked.all, 0);
+        assert_eq!(s.confirmed_by_both, 0);
+    }
 }
