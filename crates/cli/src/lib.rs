@@ -209,6 +209,18 @@ pub fn sweep(sessions: i64, min_hits: u64) -> String {
               caller and put the unreachable refusal arm back in a public \
               function. One move of 1.7 KB happens once per process."
 )]
+// `Evaluator` measures 1,744 bytes (`docs/10-shared-core.md`), so this trips
+// `large_types_passed_by_value` at its 256-byte limit. Taken by value anyway, and the
+// allow is narrowed to the two functions that do it rather than relaxed at the crate
+// root: the body needs OWNERSHIP — `Sweeper::run` takes `&mut ev` — so a reference
+// would only move the move to the caller, and `Box` would buy an allocation and an
+// indirection to avoid a memcpy that happens ONCE per CLI invocation, before any bar is
+// read. This is not the sweep's hot path; `ConditionMask::hits` is, and nothing here is
+// on it. If either function is ever called in a loop, this allow is the thing to revisit.
+#[allow(
+    clippy::large_types_passed_by_value,
+    reason = "the body needs ownership; one 1,744-byte move per CLI invocation"
+)]
 fn sweep_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64) -> String {
     let mut ev = match ev {
         Ok(e) => e,
@@ -237,6 +249,11 @@ pub fn auto(sessions: i64) -> String {
               call, so a reference would only move the ownership problem to the \
               caller and put the unreachable refusal arm back in a public \
               function. One move of 1.7 KB happens once per process."
+)]
+// Same trade as `sweep_with`, and the same reasoning — see the comment there.
+#[allow(
+    clippy::large_types_passed_by_value,
+    reason = "the body needs ownership; one 1,744-byte move per CLI invocation"
 )]
 fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
     let mut ev = match ev {
