@@ -15662,3 +15662,60 @@ rest fixed, which is the difference between a measurement and a reassurance.
 
 ---
 
+## D-0192 · 2026-08-18 · The ladder's gaps telescope, because eleven mutants were equivalent
+
+`crates/vocab/src/tolerance.rs`.
+
+`cargo-mutants` over this crate — never run on it before — found 24 survivors,
+and **eleven were here**: ten `-` turned into `+` in the gap fold, and one `<`
+turned into `<=` in `lesser`.
+
+### Every one was equivalent, and the arithmetic says why
+
+`LADDER_NUMERATORS` is `[0, 236, 382, 500, 618, 786, 1000, 1272, 1618, 2000,
+2618]`. Its adjacent gaps are `236, 146, **118, 118**, 168, 214, 272, 346, 382,
+618`.
+
+**118 occurs twice** — `500 - 382` and `618 - 500`. Mutating either minimum term
+into a sum leaves the OTHER 118 as the minimum, so `SMALLEST_LADDER_GAP` is still
+118, the `== 118` assertion still holds, and nothing anywhere observes a
+difference. The eight non-minimum terms were never the minimum to begin with, so
+enlarging them changes nothing either.
+
+`lesser`'s `<` -> `<=` is equivalent for the same kind of reason: on equal `i64`
+values both versions return the same number. `lesser_returns_the_smaller_width_whichever_side_it_is_on`
+already tries `lesser(7, 7)`, which is precisely the case that CANNOT tell them
+apart.
+
+**No runtime test can kill an equivalent mutant.** Only a stronger invariant can
+stop it being equivalent.
+
+### The invariant
+
+Adjacent differences **telescope**: every interior rung is added once and
+subtracted once, so their sum is exactly `last - first` whatever the rungs are.
+Turn any single `-` into a `+` and two terms stop cancelling, the total moves,
+and `LADDER_GAPS_TELESCOPE` fails to COMPILE.
+
+**One array, two facts.** A first version of this gave the new check its own
+subtractions, which would have been worthless — a mutation in the original would
+not have touched the copy. The gaps are now computed once into `LADDER_GAPS`, and
+both `SMALLEST_LADDER_GAP` and the telescoping check read that same array, so a
+defect in one subtraction reaches both.
+
+**Proven by injection**, not by argument: flipping `r3 - r2` to `r3 + r2` — one
+of the two 118s, the exact mutation that had survived — now fails to build with
+`error[E0080]` naming the telescoping assertion.
+
+This is a real property of the ladder rather than a trick played on the mutation
+tool. A fold of adjacent gaps that does not telescope is not reading adjacent
+gaps.
+
+### What stays equivalent
+
+`lesser`'s comparison. `<` and `<=` compute the same function on `i64`, and no
+assertion and no invariant can separate them. It is recorded here rather than
+chased.
+
+---
+

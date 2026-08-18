@@ -147,27 +147,81 @@ const fn lesser(a: i64, b: i64) -> i64 {
 /// -- correct for 382 to 500 and 500 to 618 -- and nothing tied it to the rungs,
 /// so inflating it silently disarmed the only guard on [`TOL_FIB_MILLI`]. Now a
 /// rung change moves the bound with it, or fails to compile.
-pub const SMALLEST_LADDER_GAP: i64 = {
-    // DESTRUCTURED, not indexed. `clippy::indexing_slicing` is denied in this
-    // workspace, and destructuring buys the same thing `MAX_VENDOR_LEN` buys by
-    // the same means: adding or removing a rung makes THIS a compile error
-    // rather than a bound that quietly loosens.
+/// The ten adjacent gaps on [`LADDER_NUMERATORS`], computed once.
+///
+/// **One array, two facts derived from it**, and that is the whole point.
+/// `SMALLEST_LADDER_GAP` and [`LADDER_GAPS_TELESCOPE`] both read THIS, so a
+/// defect in one subtraction reaches both — a separate copy of the arithmetic in
+/// each would let a mutation break one while the other kept passing.
+///
+/// DESTRUCTURED, not indexed. `clippy::indexing_slicing` is denied in this
+/// workspace, and destructuring buys the same thing `MAX_VENDOR_LEN` buys by the
+/// same means: adding or removing a rung makes THIS a compile error rather than
+/// a bound that quietly loosens.
+const LADDER_GAPS: [i64; 10] = {
     let [r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10] = LADDER_NUMERATORS;
-    let gap = lesser(
+    [
         r1 - r0,
+        r2 - r1,
+        r3 - r2,
+        r4 - r3,
+        r5 - r4,
+        r6 - r5,
+        r7 - r6,
+        r8 - r7,
+        r9 - r8,
+        r10 - r9,
+    ]
+};
+
+/// The adjacent gaps must sum to the ladder's whole span.
+///
+/// # What this catches that `SMALLEST_LADDER_GAP` cannot
+///
+/// `cargo-mutants` turned each `-` in the gap computation into a `+` — **ten of
+/// them, and every one survived.** The reason is arithmetic rather than
+/// carelessness: the ladder's smallest gap is 118 and it occurs **twice**,
+/// `500 - 382` and `618 - 500`. Mutating either into a sum leaves the other as
+/// the minimum, so the constant is still 118, the `== 118` assertion still
+/// holds, and nothing anywhere observes a difference.
+///
+/// No runtime test can kill an equivalent mutant. Only a stronger invariant can
+/// stop it being equivalent, and this is that invariant: adjacent differences
+/// **telescope**, because every interior rung is added once and subtracted once,
+/// so their sum is exactly `last - first` whatever the rungs are. Turn any
+/// single `-` into a `+` and two terms stop cancelling — the total moves and
+/// this fails to COMPILE.
+///
+/// It is a real property of the ladder rather than a trick played on the
+/// mutation tool: a fold of adjacent gaps that does not telescope is a fold that
+/// is not reading adjacent gaps.
+const LADDER_GAPS_TELESCOPE: () = {
+    let [r0, .., r10] = LADDER_NUMERATORS;
+    let [g0, g1, g2, g3, g4, g5, g6, g7, g8, g9] = LADDER_GAPS;
+    assert!(
+        g0 + g1 + g2 + g3 + g4 + g5 + g6 + g7 + g8 + g9 == r10 - r0,
+        "the adjacent gaps must telescope to the ladder's span; a term that \
+         adds where it should subtract breaks this and nothing else notices"
+    );
+};
+
+/// The smallest gap between two adjacent numerators on [`LADDER_NUMERATORS`].
+///
+/// **Computed from the ladder, not written beside it.** It was a hand-kept `118`
+/// -- correct for 382 to 500 and 500 to 618 -- and nothing tied it to the rungs,
+/// so inflating it silently disarmed the only guard on [`TOL_FIB_MILLI`]. Now a
+/// rung change moves the bound with it, or fails to compile.
+pub const SMALLEST_LADDER_GAP: i64 = {
+    let [g0, g1, g2, g3, g4, g5, g6, g7, g8, g9] = LADDER_GAPS;
+    let gap = lesser(
+        g0,
         lesser(
-            r2 - r1,
+            g1,
             lesser(
-                r3 - r2,
+                g2,
                 lesser(
-                    r4 - r3,
-                    lesser(
-                        r5 - r4,
-                        lesser(
-                            r6 - r5,
-                            lesser(r7 - r6, lesser(r8 - r7, lesser(r9 - r8, r10 - r9))),
-                        ),
-                    ),
+                    g3,
+                    lesser(g4, lesser(g5, lesser(g6, lesser(g7, lesser(g8, g9))))),
                 ),
             ),
         ),
