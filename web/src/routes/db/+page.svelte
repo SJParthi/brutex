@@ -1671,6 +1671,41 @@
     return [...c.entries()].sort((a, b) => b[1] - a[1] || txt(a[0], b[0]));
   });
 
+  /**
+   * THE THREE SEGMENTS THE STORE KEYS ON, ALWAYS ALL THREE.
+   *
+   * `kinds` below counts what is PRESENT, which is the right input for a total
+   * and the wrong one for a menu: with one segment stored the rung offered one
+   * row, so "does this store hold any CASH?" was a question the control could
+   * not be asked. The comment above the rung already states the intended shape —
+   * "/ingest draws Segments unconditionally — three rows, two of them refusing
+   * with their reason on their face" — and this is the half of it that was
+   * missing.
+   *
+   * The names are the store's own second field, not the mockup's
+   * spot/futures/options taxonomy: relabelling would rename three sets into
+   * three other sets that do not have the same members.
+   */
+  const SEGMENT_KEYS = ['INDEX', 'CASH', 'FNO'];
+
+  /** Every segment the store keys on, with what this selection holds of it. */
+  const segmentRows = $derived.by(() => {
+    const held = new Map(kinds);
+    return SEGMENT_KEYS.map((k) => {
+      const n = held.get(k) ?? 0;
+      return {
+        key: k,
+        name: k,
+        detail: n > 0 ? `${fmt(n)} held` : 'none held',
+        /* NOT `disabled`. A segment with nothing stored is a legitimate thing to
+           select — the answer is an empty table, which is the answer to "do I
+           hold any of these". Disabling it would refuse the question. `why` is
+           what says the table will be empty before the click. */
+        why: n === 0 ? 'nothing stored under this segment for the current selection' : undefined
+      };
+    });
+  });
+
   /** Text and kind: the base the month cards roll up. */
   const segmented = $derived(kind ? textMatched.filter((r) => r.kind === kind) : textMatched);
 
@@ -4175,18 +4210,28 @@
    * and that was the visible half of "these are not the same control". The
    * other half was a five-pixel height difference, fixed in `DayField`.
    *
-   * IT IS /ingest's RULE, NOT ITS VALUE. There the window is the ASK, so it
-   * seeds from what the feed can answer for. Here the window is a VIEW over
-   * what is already on disk, so it seeds from `dayBounds` — the first and last
-   * day this selection actually holds. Same principle the operator insisted on
-   * for /ingest: mapped to what is really there, never to a date typed into a
-   * source file.
+   * IT IS /ingest's RULE, NOT ITS VALUE, AND THAT DISTINCTION IS FORCED HERE.
    *
-   * SEEDED ONCE PER SPAN, NOT PINNED. `dayBounds` moves when the feed, the
-   * instrument or the rung moves, and re-running this would overwrite a window
-   * the reader had narrowed — the silent change §4 bans. The guard is that both
-   * fields are empty, so a choice is never touched, and `stranded` is what
-   * speaks up if a chosen day stops being held.
+   * On /ingest the window is the ASK and its bounds are the server picker's
+   * whole span, so it can open on 01 Jan 2015. Here the two fields are BOUNDED
+   * BY WHAT THE STORE HOLDS — `min={dayBounds[0]}` on the From field — because
+   * the calendar's job on this page is to strike the days with no bar behind
+   * them, which is how a reader sees where the store starts and stops.
+   *
+   * Seeding this to 01 Jan 2015 was tried and reverted: it puts a value in the
+   * field that the field's own `min` refuses, so it renders `aria-invalid` and
+   * the control contradicts itself on load. A window that opens refused is worse
+   * than one that opens narrow.
+   *
+   * So it opens on the whole span the store holds — `dayBounds[0]` to
+   * `dayBounds[1]`, both measured off the rows, never a date typed into this
+   * file. That is the same PRINCIPLE /ingest follows: mapped to what is really
+   * there.
+   *
+   * SEEDED ONCE, NOT PINNED. The guard is that both fields are empty, so this
+   * fires when the store first answers and never again — a window the reader
+   * narrowed is his, and `stranded` speaks up if a chosen day stops being held
+   * rather than this quietly moving him.
    */
   $effect(() => {
     if (fromDay === '' && toDay === '' && dayBounds[0] && dayBounds[1]) {
@@ -5249,7 +5294,9 @@
               ? picked
               : typed
                 ? `Typed · ${fmt(instrumentRows.length)} held`
-                : `All · ${fmt(instrumentRows.length)} held`}
+                : instrumentRows.length === 1
+                  ? instrumentRows[0].key
+                  : `All · ${fmt(instrumentRows.length)} held`}
             rows={[
               { key: '', name: 'All instruments', detail: `${fmt(instrumentRows.length)} held` },
               ...instrumentRows.map((r) => ({
@@ -5337,10 +5384,14 @@
           title={kinds.length < 2
             ? `${kinds.length === 1 ? kinds[0][0] : 'Nothing'} is the only segment this store holds, so there is nothing to narrow. The store's own second field — INDEX, CASH, FNO.`
             : `${fmt(segmented.length)} instrument-month(s) across ${fmt(kinds.length)} segment(s). The store's own second field — INDEX, CASH, FNO.`}
-          summary={kind ? kind : `All \u00b7 ${fmt(kinds.length)}`}
+          summary={kind
+            ? kind
+            : kinds.length === 1
+              ? kinds[0][0]
+              : `All \u00b7 ${fmt(kinds.length)}`}
           rows={[
             { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
-            ...kinds.map(([k, n]) => ({ key: k, name: k, detail: `${fmt(n)} held` }))
+            ...segmentRows
           ]}
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}

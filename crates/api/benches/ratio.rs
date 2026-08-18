@@ -281,6 +281,63 @@ fn gate(label: &str, m: &Measured) -> bool {
 /// The dashboard draws no rows at all, so the raw ratio between the smallest
 /// and the largest universe is the whole story here and no per-row correction
 /// applies.
+/// The per-render floor: the cheapest possible touch of the same `Read`.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row here divides one render cost by another, and a UNIFORM slowdown
+/// cancels in a quotient. An audit measured exactly that elsewhere in this
+/// workspace: a mask operation **174x slower passed its crate's ratio rows at
+/// 0.98x-1.00x**, because both legs moved together. This was the last of the
+/// thirteen crates without a floor-relative budget.
+///
+/// The denominator has to be something that cannot move when a page render
+/// does. This formats a single integer into a `String` — one allocation and one
+/// integer-to-text conversion, the smallest unit of work any HTML page here is
+/// built from. The quotient is "how many one-number writes does a whole page
+/// cost".
+fn floor_ps() -> u128 {
+    cost_ps(2_000, || {
+        let mut out = String::with_capacity(8);
+        use std::fmt::Write as _;
+        let _ignored = write!(out, "{}", black_box(50_000_u32));
+        black_box(out)
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<44} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<44} {at_ps:>9} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-27 — one dashboard render costs a bounded multiple of the per-render floor.
+fn the_dashboard_stays_within_its_budget(f: &Fixtures) -> bool {
+    /// Floors allowed per render. Measured below, then pinned.
+    const ALLOWED: u128 = 0;
+
+    let floor = floor_ps();
+    println!("  the per-render floor is {floor} ps — one number written to a String");
+    let at = cost_ps(50, || dashboard_html(black_box(&f.big)));
+    budget(
+        "C-27 dashboard against the per-render floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 fn the_dashboard_is_flat(f: &Fixtures) -> bool {
     let small = cost_ps(50, || dashboard_html(black_box(&f.small)));
     let base = cost_ps(50, || dashboard_html(black_box(&f.base)));
@@ -381,6 +438,7 @@ fn main() {
     );
     let mut ok = true;
     ok &= the_dashboard_is_flat(&f);
+    ok &= the_dashboard_stays_within_its_budget(&f);
     ok &= every_order_and_pill_is_flat(&f);
     ok &= the_hatch_and_the_last_page_are_flat(&f);
     search_is_measured_and_named(&f);
