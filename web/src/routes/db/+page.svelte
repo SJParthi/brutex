@@ -3080,7 +3080,14 @@
     },
     { key: 'side', label: 'Type', w: 72, why: 'CE or PE, from the stored name' },
     { key: 'strike', label: 'Strike', w: 96, num: true, why: 'paisa integer, from the stored name' },
-    { key: 'mny', label: 'Moneyness', w: 106, none: NO_SPOT },
+    /* `num: true` — MEASURED, NOT ASSUMED. Every neighbour on this side of the
+       table carries it (`dte`, `strike`, `intr`, `extr`, `iv`, and the four
+       Greeks) and this one did not, so its HEADER rendered left-aligned over a
+       CELL that rendered right: the only column on the table whose label and
+       value face opposite edges. Found by reading the computed styles of all
+       twenty-four columns rather than by looking, which is also how the two
+       "clipped" columns turned out not to be clipped at all. */
+    { key: 'mny', label: 'Moneyness', w: 106, num: true, none: NO_SPOT },
     { key: 'intr', label: 'Intrinsic', w: 100, num: true, none: NO_INTRINSIC },
     { key: 'extr', label: 'Extrinsic', w: 100, num: true, none: NO_EXTRINSIC },
     { key: 'iv', label: 'IV %', w: 86, num: true, none: NO_GREEK },
