@@ -14,7 +14,7 @@
 //! | [`path`] | the only way a store path is built |
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //!
-//! # Six properties the types enforce rather than document
+//! # Seven properties the types enforce rather than document
 //!
 //! 1. **A record never straddles a checksum block.** The block length is a
 //!    whole multiple of the record stride, so verifying a record reads exactly
@@ -59,7 +59,7 @@ pub mod header;
 pub mod layout;
 pub mod path;
 
-/// Proof that this crate's six `telemetry::emit` sites reach a file, driven
+/// Proof that this crate's seven `telemetry::emit` sites reach a file, driven
 /// through the production calls that own them. Compiled only under `cfg(test)`
 /// — it installs the process-wide sink, which is a property of the test binary
 /// and not of the store.

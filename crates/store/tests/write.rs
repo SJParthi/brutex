@@ -689,14 +689,120 @@ fn a_ragged_tail_is_refused_by_length() {
         .set_len(len)
         .unwrap();
 
+    // The counter says four records and the bytes stop 39 short of the fourth,
+    // so `Header::validate` rejects generation 1 and the header search walks
+    // back to generation 0, whose counter is zero. That is what has to be
+    // refused: the walk-back is a recovery for a header that outran its
+    // records, and applying it here would reclassify three records a commit
+    // published as scratch the next append overwrites.
     assert_eq!(
         outcome(open(scratch.root())),
-        Err(StoreError::RaggedTail {
+        Err(StoreError::Format {
             path: bars,
-            len,
-            extra: 17
+            source: FormatError::CounterExceedsFile,
         }),
-        "17 bytes past the last whole record: interrupted mid-record"
+        "`CounterExceedsFile`, not `RaggedTail`, and the variant changed on \
+         purpose: what is wrong with this file is the 39 bytes MISSING below \
+         the commit, not the 17 that happen to be extra above the last whole \
+         record. Cut the same file to a record boundary and `RaggedTail`'s own \
+         `extra` would read zero while the same three records are just as \
+         lost, so the length-shaped variant could not even state the condition"
+    );
+}
+
+#[test]
+fn a_counter_behind_its_bytes_opens_and_a_counter_ahead_of_them_is_refused() {
+    // THE TWO FILES BELOW ARE THE SAME LENGTH AND THE SAME SHAPE, AND THEY ARE
+    // OPPOSITE CONDITIONS. Both end up 32,953 bytes: the 32,768-byte header
+    // region, three whole records, and seventeen bytes that are not a record.
+    // Every function of the length agrees about them — `ragged_tail_bytes` is
+    // 17 for both, `capacity_for` is 3 for both — so a check written against
+    // the length has to collapse one into the other, and this file's history
+    // is that mistake made in both directions in turn: first every ragged file
+    // was refused, which bricked a month for an interrupted append; then every
+    // ragged file was accepted, which silently un-committed three bars.
+    //
+    //   * BEHIND — three records committed, then seventeen bytes of a fourth
+    //     that no header slot ever published. The commit counter is behind the
+    //     bytes. An append died before its commit; the next append writes at
+    //     `offset_of(3)` and covers them. Accept, and log the count.
+    //   * AHEAD — four records committed, then the file cut 39 bytes short of
+    //     the fourth. The commit counter is ahead of the bytes. Truncation or
+    //     corruption, and `CLAUDE.md` §4 forbids the fallback that would make
+    //     it look like the first case. Refuse.
+    //
+    // Asserted side by side, in one test, so a future edit cannot satisfy one
+    // of them and discover the other only in production.
+    let torn = HEADER_LEN + 3 * RECORD_STRIDE + 17;
+
+    let behind = Scratch::new("counter-behind");
+    {
+        let mut file = open(behind.root()).expect("create");
+        assert!(file.append(&batch(0, 3)).is_ok());
+    }
+    let behind_bars = bars_path().to_path_buf(behind.root());
+    let mut bytes = fs::read(&behind_bars).unwrap();
+    bytes.extend_from_slice(&[9u8; 17]);
+    fs::write(&behind_bars, &bytes).unwrap();
+    assert_eq!(
+        u64::try_from(bytes.len()).unwrap(),
+        torn,
+        "the premise: this is the length the other file will also have"
+    );
+
+    let opened = open(behind.root()).expect("a month is not lost to bytes no commit claims");
+    assert_eq!(opened.records(), 3, "the counter is untouched");
+    assert_eq!(opened.read_record(2), Ok(bar(2)), "and so are the bars");
+    drop(opened);
+
+    let ahead = Scratch::new("counter-ahead");
+    {
+        let mut file = open(ahead.root()).expect("create");
+        assert!(file.append(&batch(0, 4)).is_ok());
+    }
+    let ahead_bars = bars_path().to_path_buf(ahead.root());
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&ahead_bars)
+        .unwrap()
+        .set_len(torn)
+        .unwrap();
+
+    assert_eq!(
+        outcome(open(ahead.root())),
+        Err(StoreError::Format {
+            path: ahead_bars.clone(),
+            source: FormatError::CounterExceedsFile,
+        }),
+        "same length and same raggedness as the month above, and the opposite \
+         answer: a slot still claims four records, so the three whole ones on \
+         disk were published and are not scratch"
+    );
+
+    // AND THE REFUSAL IS NOT ABOUT THE SEVENTEEN BYTES. Cut the same file to a
+    // record boundary: the remainder is zero, which is the only quantity the
+    // refusal this replaced could measure, and the three committed records are
+    // exactly as gone. The old length-shaped check opened this one without a
+    // word — it is the case that variant was structurally unable to state.
+    let aligned = HEADER_LEN + 3 * RECORD_STRIDE;
+    assert_eq!(
+        Layout::V2.ragged_tail_bytes(aligned),
+        0,
+        "the premise: nothing about this length is ragged"
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&ahead_bars)
+        .unwrap()
+        .set_len(aligned)
+        .unwrap();
+    assert_eq!(
+        outcome(open(ahead.root())),
+        Err(StoreError::Format {
+            path: ahead_bars,
+            source: FormatError::CounterExceedsFile,
+        }),
+        "a truncation that lands on a record boundary is still a truncation"
     );
 }
 

@@ -33,10 +33,31 @@
 //! and each file's rows are decoded and handed on rather than accumulated
 //! across the whole directory. Peak memory is one file, not one archive.
 //!
-//! The cap is the only positive bound this paragraph claims, and
-//! `pull::pipeline::a_directory_past_the_member_cap_is_refused_at_the_cap` is
-//! where it is held — a directory one member past [`MAX_MEMBERS`] is refused at
-//! the cap rather than walked to the end and then complained about.
+//! Ordering the members is O(n log n) and **it happens once per walk**, at the
+//! foot of [`walk`] rather than at the foot of each directory. It used to sit
+//! in `descend`, which is entered once per directory and sorts the accumulator
+//! the whole walk shares — O(d · n log n) where O(n log n) was wanted.
+//!
+//! HOW BIG `d` IS DIFFERS BY VENDOR, AND ONLY ONE OF THE TWO IS MEASURED. GDFL
+//! puts its members two and three levels below the feed folder — the layout
+//! recorded on `descend`, seven directories for one day. `TrueData` declares
+//! `Nesting::ZipOfDailyZips` with `MemberPattern::SymbolAtRoot`, one member per
+//! instrument at the archive's own root, so its `d` is smaller and nobody has
+//! counted it. An earlier draft of this paragraph said the members of BOTH
+//! vendors sat two and three levels down; `crate::vendor` says otherwise and is
+//! the record. The factor is superlinear either way and measured on one of
+//! them, which is the most this can claim under `CLAUDE.md` §3 rule 1.
+//!
+//! The order that comes out is the same one either way, which is why no
+//! ordering test caught it and why the test that does is a call count.
+//!
+//! Those two are the positive bounds this section claims, and each is held
+//! rather than asserted here:
+//! `pull::pipeline::a_directory_past_the_member_cap_is_refused_at_the_cap` for
+//! the cap — a directory one member past [`MAX_MEMBERS`] is refused at the cap
+//! rather than walked to the end and then complained about — and
+//! `tests::the_members_are_sorted_once_per_walk_not_once_per_directory` for the
+//! ordering.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -464,7 +485,52 @@ fn walk(
     on_malformed: Malformed,
     rejected: &mut Vec<Rejected>,
 ) -> Result<(), ArchiveError> {
-    descend(dir, columns, out, passed, on_malformed, rejected, 0)
+    descend(dir, columns, out, passed, on_malformed, rejected, 0)?;
+    // ═══ ONE ORDERING PER WALK, NOT ONE PER DIRECTORY ═══
+    //
+    // THE FINAL ORDER IS THE SAME ONE, and that is stated first because it is a
+    // reader's first worry. This line used to sit at the foot of `descend`, so
+    // the outermost call ordered the whole accumulator *after* every nested
+    // call had returned — its result was already "every member, by path". The
+    // inner sorts only re-ordered a prefix that the outer one was about to
+    // order again, and nothing between them reads a position: the loop only
+    // pushes, and the `MAX_MEMBERS` guard reads `out.len()`. `sort_by` is
+    // stable, so even two members carrying the same path — which a filesystem
+    // cannot yield, though the type permits it — come out in the same relative
+    // order either way. CLAUDE.md §3 rule 5, same inputs same outputs byte for
+    // byte, is untouched by this move.
+    //
+    // WHAT IT COSTS INSTEAD. With `d` directories the old placement paid
+    // O(d · n log n) over the accumulator the whole walk shares, not over the
+    // directory's own members. Counted off the layout recorded on `descend`
+    // above — the feed folder, `GFDLNFO_TICK_01072025`, `Options`, `Futures`
+    // and its `-I`/`-II`/`-III` month folders — that is seven directories over
+    // one day's 12,132 contracts, so seven orderings where one was needed.
+    //
+    // HOW LARGE EACH OF THE SEVEN WAS IS A RANGE, NOT A NUMBER. Each sorted the
+    // accumulator as it stood when that directory finished, so the sizes turn
+    // on the order `fs::read_dir` handed back `Options` and `Futures` — the
+    // very order this sort exists because nobody can predict. At least three of
+    // the seven are over the full 12,132 whichever way it falls, because the
+    // last group folder, the stem above it and the feed folder all finish after
+    // the final push; the rest are smaller by an amount nobody has measured. An
+    // earlier draft of this comment said all seven were twelve-thousand-element
+    // sorts, which was one measurement more than anybody took. SEVEN IS THE
+    // NUMBER THAT IS CERTAIN, and seven-to-one is the whole claim.
+    //
+    // WHAT IT DOES NOT FIX: the walk is still O(members). It opens every file
+    // and that is inherent — the module doc says so plainly. This removes a
+    // superlinear factor from the ORDERING alone.
+    //
+    // ON A REFUSAL NOTHING IS ORDERED NOW, where before each directory that had
+    // completed had ordered a prefix before a later one refused. That is
+    // unobservable rather than merely unlikely: the `?` above hands the error
+    // to `read_dir` and `read_dir_reporting`, both of which drop `out` and pass
+    // it only to `note_refused`, which reads its length. Held by
+    // `tests::a_malformed_member_below_the_root_still_refuses_the_whole_walk`,
+    // because "unobservable" is a claim.
+    sort_members(out);
+    Ok(())
 }
 
 /// One directory level of [`walk`], and its own subdirectories under
@@ -547,7 +613,8 @@ fn descend(
         // not a question for anybody.
         //
         // DEPTH-FIRST, IN DIRECTORY ORDER, and the ordering does not matter
-        // because `out` is sorted by path at the end for exactly this reason.
+        // because `sort_members` orders the accumulator by path once the whole
+        // recursion has returned — in `walk`, for exactly this reason.
         if path.is_dir() {
             descend(
                 &path,
@@ -612,16 +679,255 @@ fn descend(
         });
     }
 
-    // `read_dir` yields in filesystem order, which differs between machines and
-    // between runs. Sorting by path makes an import reproducible — CLAUDE.md
-    // §3 rule 5, same inputs same outputs. This orders the MEMBERS, never the
-    // rows inside one, whose file order carries information.
-    out.sort_by(|a, b| a.path.cmp(&b.path));
+    // NO ORDERING HERE, DELIBERATELY. The members do have to be ordered by path
+    // — `fs::read_dir` yields in filesystem order and CLAUDE.md §3 rule 5 wants
+    // the same vector twice — but this function is entered once per directory,
+    // so ordering here ordered the whole walk's accumulator once per directory.
+    // It happens exactly once now, in `walk`, after this recursion unwinds.
     Ok(())
+}
+
+/// Order a walk's members by path — the ONE place it happens, and the one
+/// place a test can count.
+///
+/// [`fs::read_dir`] yields in filesystem order. That is not a stable order: it
+/// differs between machines and between runs, so two operators pointed at the
+/// same folder get two different vectors and neither is wrong. Sorting by path
+/// makes an import reproducible — CLAUDE.md §3 rule 5, same inputs same outputs
+/// byte for byte.
+///
+/// This orders the MEMBERS, never the rows inside one. These feeds are
+/// snapshots with several rows sharing a second and no tiebreaker, so a re-sort
+/// of the rows would destroy arrival order that was never written down;
+/// [`Member::rows`] says the same thing where the field is declared.
+///
+/// It takes `&mut [Member]` rather than `&mut Vec<Member>` because it never
+/// changes the length, which is the only thing a caller could get wrong here.
+fn sort_members(out: &mut [Member]) {
+    // HOW OFTEN THIS RUNS IS THE THING THAT WAS WRONG, and it cannot be seen in
+    // the answer: an ordering performed once and an ordering performed seven
+    // times return the identical vector. So the test holds a COUNT, and this is
+    // where the count comes from — the same device
+    // `crates/greeks/src/bsm.rs::MODEL_EVALUATIONS` uses, for the same reason.
+    //
+    // IT DOES NOT EXIST OUTSIDE `cargo test`. `#[cfg(test)]` on a statement
+    // removes the statement, so a release walk pays nothing at all for it.
+    #[cfg(test)]
+    SORTS.with(|n| n.set(n.get().saturating_add(1)));
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times [`sort_members`] has run on THIS thread.
+    ///
+    /// Exists so that
+    /// `tests::the_members_are_sorted_once_per_walk_not_once_per_directory`
+    /// can hold a number the walker does not report. A test that only reads the
+    /// vector cannot see the vector being ordered seven times over, which is
+    /// exactly how a per-directory sort survived every ordering test this crate
+    /// already had.
+    ///
+    /// Thread-local because `cargo test` runs tests in parallel and a shared
+    /// counter would measure other tests' walks. The reader resets it rather
+    /// than assuming zero, so it also holds under `--test-threads=1`, where
+    /// every test shares one thread.
+    static SORTS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
 /// How many rows a walk produced, across every member.
 #[must_use]
 pub fn total_rows(members: &[Member]) -> usize {
     members.iter().map(|m| m.rows.len()).sum()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    reason = "a test that cannot panic cannot fail, and these lints exist to \
+              keep panics out of the crate rather than out of its tests"
+)]
+mod tests {
+    use super::{ArchiveError, SORTS, read_dir};
+    use crate::csv::Columns;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// One `TrueData` index row — `YYYYMMDD,HH:MM:SS,price,volume,open_interest`,
+    /// five fields and no header. Copied from `tests/folder.rs` rather than
+    /// shared: an integration test's helpers are not visible from a unit test
+    /// module, and this crate has no dev-dependency to put them in.
+    const ONE_ROW: &str = "20221003,09:15:01,38445.65,0,0\n";
+
+    /// Scratch roots must not collide between tests running at the same time.
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+
+    /// A temporary directory that removes itself, mirroring `Scratch` in
+    /// `tests/folder.rs`.
+    ///
+    /// Hand-rolled because `crates/pull/Cargo.toml` declares no
+    /// dev-dependencies and states why, so there is no `tempfile` to reach for.
+    /// The drop is best-effort: a scratch directory that outlives a crashed
+    /// test is litter, and failing a test on litter reports the wrong thing.
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new() -> Self {
+            let serial = NEXT.fetch_add(1, Ordering::Relaxed);
+            let mut root = std::env::temp_dir();
+            root.push(format!(
+                "brutex-archive-sort-{}-{serial}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&root).expect("a scratch root");
+            Self { root }
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _best_effort = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// THE FIXTURE, and its shape carries the whole argument.
+    ///
+    /// ```text
+    /// feed/ALPHA.csv
+    /// feed/Futures/C.csv
+    /// feed/Futures/D.csv
+    /// feed/Options/A.csv
+    /// feed/Options/B.csv
+    /// feed/ZULU.csv
+    /// ```
+    ///
+    /// Three directories, which is what makes the sort count of 1 different
+    /// from the sort count of 3 the old placement produced.
+    ///
+    /// And the two members that live in the ROOT sort on either side of the
+    /// four below it: as path components `ALPHA.csv` < `Futures` < `Options` <
+    /// `ZULU.csv`. Any scheme that ordered each level and appended the levels
+    /// would put `ALPHA.csv` and `ZULU.csv` next to each other; only an
+    /// ordering over the whole accumulator interleaves them. That is the
+    /// property the ordering test holds, and it is the reason the fixture is
+    /// not simply two flat directories.
+    ///
+    /// The names are written in the wrong order on purpose, so the fixture does
+    /// not lean on whatever order the filesystem hands back.
+    fn two_levels(scratch: &Scratch) -> PathBuf {
+        let root = scratch.root.join("feed");
+        let options = root.join("Options");
+        let futures = root.join("Futures");
+        fs::create_dir_all(&options).expect("Options");
+        fs::create_dir_all(&futures).expect("Futures");
+        for (dir, names) in [
+            (&root, ["ZULU", "ALPHA"]),
+            (&options, ["B", "A"]),
+            (&futures, ["D", "C"]),
+        ] {
+            for name in names {
+                fs::write(dir.join(format!("{name}.csv")), ONE_ROW).expect("a member");
+            }
+        }
+        root
+    }
+
+    /// THE ORDER IS OVER THE WHOLE WALK, NOT OVER ONE DIRECTORY.
+    ///
+    /// This is the behaviour-preserving half of moving the sort out of
+    /// `descend`: the vector this pins is the vector the per-directory
+    /// placement produced, byte for byte, because the outermost `descend`
+    /// ordered everything last anyway. CLAUDE.md §3 rule 5 is a claim about
+    /// THIS vector, so it is written down rather than described.
+    ///
+    /// It asserts the interleaving specifically — the root's own two members
+    /// land at the ends with the nested four between them — because a walk that
+    /// ordered each level separately would still return something sorted-looking
+    /// and would fail here.
+    #[test]
+    fn the_walk_orders_members_by_path_across_every_level() {
+        let scratch = Scratch::new();
+        let root = two_levels(&scratch);
+
+        let members = read_dir(&root, Columns::TrueDataIndex).expect("a two-level folder walks");
+
+        let paths: Vec<PathBuf> = members.iter().map(|m| m.path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                root.join("ALPHA.csv"),
+                root.join("Futures").join("C.csv"),
+                root.join("Futures").join("D.csv"),
+                root.join("Options").join("A.csv"),
+                root.join("Options").join("B.csv"),
+                root.join("ZULU.csv"),
+            ],
+            "the root's own members belong at either end, which only one \
+             ordering over the whole accumulator produces"
+        );
+    }
+
+    /// THE ACCUMULATOR IS ORDERED ONCE PER WALK, NOT ONCE PER DIRECTORY.
+    ///
+    /// The defect this test exists for could not be seen in the answer. The
+    /// sort sat at the foot of `descend`, which is entered once per directory,
+    /// so a walk over `d` directories sorted the whole shared accumulator `d`
+    /// times — O(d · n log n) where O(n log n) was needed — and returned the
+    /// identical vector every time. Every ordering test this crate had passed
+    /// throughout. So the assertion here is a COUNT, not a shape.
+    ///
+    /// Three directories in the fixture, so this read 3 before the sort moved
+    /// into `walk` and reads 1 after. The counter is reset here rather than
+    /// assumed zero, which is what makes it hold under `--test-threads=1` as
+    /// well, where every test shares one thread.
+    #[test]
+    fn the_members_are_sorted_once_per_walk_not_once_per_directory() {
+        let scratch = Scratch::new();
+        let root = two_levels(&scratch);
+
+        SORTS.with(|n| n.set(0));
+        let members = read_dir(&root, Columns::TrueDataIndex).expect("a two-level folder walks");
+        let sorts = SORTS.with(std::cell::Cell::get);
+
+        assert_eq!(
+            members.len(),
+            6,
+            "the fixture itself, so a walk that found nothing cannot pass by \
+             sorting nothing"
+        );
+        assert_eq!(
+            sorts, 1,
+            "one ordering for the walk; 3 — one per directory — is the \
+             superlinear shape this moved out of `descend`"
+        );
+    }
+
+    /// A REFUSAL BELOW THE ROOT STILL REFUSES THE WHOLE WALK, AND STILL NAMES
+    /// THE MEMBER.
+    ///
+    /// Moving the sort also removed the partial orderings the completed
+    /// directories used to perform before a later one refused. The comment in
+    /// `walk` argues that is unobservable — `read_dir` drops the accumulator on
+    /// `Err` and `note_refused` reads only its length — and an argument is not
+    /// a check, so the refusal itself is held here. The happy path above is the
+    /// other half: this pair is what says the move changed neither outcome.
+    #[test]
+    fn a_malformed_member_below_the_root_still_refuses_the_whole_walk() {
+        let scratch = Scratch::new();
+        let root = two_levels(&scratch);
+        let odd = root.join("Options").join("WRONG.csv");
+        fs::write(&odd, "20221003,09:15:01,38445.65\n").expect("three fields, not five");
+
+        let why = read_dir(&root, Columns::TrueDataIndex).expect_err("three fields is not five");
+
+        assert!(
+            matches!(why, ArchiveError::MemberMalformed { ref path, .. } if *path == odd),
+            "the refusal must name the member a level down, not the folder: {why}"
+        );
+    }
 }

@@ -55,6 +55,18 @@
 //! [`Cell::optimistic`] as the target. The gap between them is the uncertainty
 //! the data genuinely carries, and reporting one number would be choosing which
 //! lie to tell.
+//!
+//! **The trailing exit has the same ambiguity and, until now, told the lie.**
+//! When the bar that fires a trail is also the bar that raised the peak, the
+//! order was hanging from the old peak under one ordering and from the new one
+//! under the other, and the two price the fill differently. Both readings used
+//! the raised peak, so the flattering answer was taken silently and
+//! [`Cell::uncertainty`] reported zero for it. It is now resolved by the same
+//! machinery: `ended_by` carries both anchors and the pessimism flag picks one,
+//! exactly as it already picks between the stop and the target. See
+//! [`crate::excursion`]'s header for the half of the fix that lives there —
+//! *whether* the rung fired is settled there, order-independently, and only the
+//! *price* reaches here.
 
 use indicators::Candle;
 use indicators::column::Column;
@@ -91,10 +103,24 @@ pub struct Cell {
     pub targeted: u64,
     /// Trades that ran to the horizon or the 15:10 square-off.
     pub timed_out: u64,
-    /// Bars where a stop and a target were both reachable, summed over trades.
+    /// Bars whose intra-bar ordering the data cannot settle, summed over
+    /// trades.
+    ///
+    /// Two kinds, and both are counted here because both move the two readings
+    /// apart in the same way:
+    ///
+    /// * a bar where a stop and a target were both reachable, and
+    /// * on a variant that carries a trailing rung, a bar that fired the trail
+    ///   AND raised the peak the trail was priced off.
+    ///
+    /// The second was missing and so was the uncertainty it causes: a trailing
+    /// exit was priced off the raised peak in both readings, which agreed by
+    /// construction.
     ///
     /// The size of the uncertainty. A variant with none of these has a
-    /// pessimistic and an optimistic figure that agree exactly.
+    /// pessimistic and an optimistic figure that agree exactly. The converse is
+    /// not claimed — the count is a bound, taken over the whole path rather than
+    /// only up to the exit.
     pub ambiguous_bars: u64,
     /// Mean adverse excursion of the trades that ENDED PROFITABLE, in basis
     /// points.
@@ -186,6 +212,12 @@ impl Cell {
     /// unknowable from this data. [`Self::pessimistic`] resolves that as the
     /// stop and [`Self::optimistic`] as the target, and **the gap between them
     /// is the measurement error**, not an estimate to prefer.
+    ///
+    /// A trailing exit fired by the bar that raised its own level is the second
+    /// case, and it used to report zero here: both readings priced it off the
+    /// raised peak, so the flattering ordering was taken and the gap it should
+    /// have opened was never opened. The pessimistic reading now anchors that
+    /// fill at the peak the bar opened with.
     ///
     /// Reporting only the worst case would lose it. Two setups with the same
     /// pessimistic total, one with a spread of 200 paisa and one with 8,000,
@@ -620,7 +652,10 @@ fn one_variant(
         // The trailing exit competes with the other two: whichever fires first
         // ends the position, and a trail that never fires is NEVER.
         let trail_at = trail.map_or(NEVER, |r| c.cross.trail_at(r));
-        let trail_peak = trail.and_then(|r| c.cross.trail_peak_at(r));
+        // BOTH anchors, because a trail crossed by the bar that raised the peak
+        // could have filled off either and the bar does not say which. Equal
+        // whenever the crossing bar left the peak alone.
+        let trail_peak = TrailPeaks::of(&c.cross, trail);
 
         // ONE EXIT BAR, TWO ATTRIBUTIONS.
         //
@@ -694,7 +729,7 @@ fn one_variant(
         }
         cell.ambiguous_bars = cell
             .ambiguous_bars
-            .saturating_add(u64::try_from(c.cross.ambiguous().len()).unwrap_or(0));
+            .saturating_add(unorderable_bars(&c.cross, trail));
         match ended {
             // A trailing exit IS a stop -- it gives back part of a gain to
             // protect the rest -- so it is counted as one. Reporting it as a
@@ -796,25 +831,89 @@ fn realised(
     }
 }
 
+/// The two anchors a trailing exit could have hung from on its crossing bar.
+///
+/// One field per intra-bar ordering, straight out of
+/// [`crate::excursion::Crossings`]: `before` is the peak the bar opened with,
+/// `raised` the peak that bar's own favourable extreme left behind. They are
+/// equal on every crossing bar that did not raise the peak, which is most of
+/// them, and both are `None` for a rung the path never crossed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TrailPeaks {
+    /// The peak as it stood BEFORE the crossing bar — the pessimistic anchor.
+    before: Option<i64>,
+    /// The peak including the crossing bar's own extreme — the optimistic one.
+    raised: Option<i64>,
+}
+
+impl TrailPeaks {
+    /// The anchors for `trail`'s rung on this path, or none at all.
+    ///
+    /// Both fields are `None` for a variant with no trailing rung, which is
+    /// what makes the trail inert in [`ended_by`] rather than needing a second
+    /// guard there: nothing anchors an exit that cannot fire.
+    fn of(cross: &Crossings, trail: Option<usize>) -> Self {
+        Self {
+            before: trail.and_then(|r| cross.trail_peak_at(r)),
+            raised: trail.and_then(|r| cross.trail_peak_raised_at(r)),
+        }
+    }
+}
+
+/// Bars of one candidate's path whose intra-bar ordering the data cannot
+/// settle.
+///
+/// The stop-versus-target set always. The trail's own set ONLY on a variant
+/// that carries a trailing rung: a variant without one has `trail_at == NEVER`
+/// on every candidate, so nothing in that set can reach its two readings, and
+/// counting it would report an uncertainty the variant does not carry.
+///
+/// Loose in the direction the stop/target count is already loose — every such
+/// bar on the path, not only those at or before the exit, and every rung rather
+/// than the one rung this variant holds. It over-states the count and never
+/// under-states it, so `ambiguous_bars == 0` still implies the two readings
+/// agree, which is what
+/// `the_uncertainty_is_zero_exactly_when_no_bar_was_ambiguous` pins. Tightening
+/// it needs the exit offset, which this field has never used.
+fn unorderable_bars(cross: &Crossings, trail: Option<usize>) -> u64 {
+    let stop_target = u64::try_from(cross.ambiguous().len()).unwrap_or(0);
+    if trail.is_none() {
+        return stop_target;
+    }
+    stop_target.saturating_add(u64::try_from(cross.trail_ambiguous().len()).unwrap_or(0))
+}
+
 /// Which exit fired first, with ties broken by the caller's pessimism.
 ///
-/// `stop_wins` is the whole pessimistic/optimistic split: when a stop and a
-/// target were both reachable on the same bar, minute data cannot say which
-/// came first, so the pessimistic reading takes the stop and the optimistic one
-/// takes the target.
+/// `pessimistic` is the whole pessimistic/optimistic split, and it now decides
+/// **two** things rather than one.
+///
+/// 1. When a stop and a target were both reachable on the same bar, minute data
+///    cannot say which came first, so the pessimistic reading takes the stop and
+///    the optimistic one takes the target.
+/// 2. When a trailing rung was crossed by the bar that raised the peak, minute
+///    data cannot say whether the order was still hanging from the old peak or
+///    already from the new one. The pessimistic reading anchors it at
+///    [`TrailPeaks::before`], the optimistic at [`TrailPeaks::raised`].
+///
+/// The parameter was called `stop_wins`, which named only the first job. The
+/// second was not being done at all: `crate::excursion` handed over one peak,
+/// the one the crossing bar itself had made, and both readings priced the trail
+/// off it — so a trailing exit's fill was settled by an ordering assumption
+/// neither reading ever tested. See that module's header.
 fn ended_by(
     stop_at: usize,
     target_at: usize,
     trail_at: usize,
-    trail_peak: Option<i64>,
+    trail_peak: TrailPeaks,
     chosen: usize,
-    stop_wins: bool,
+    pessimistic: bool,
 ) -> Ended {
     let stop_fired = stop_at != NEVER && stop_at <= chosen;
     let target_fired = target_at != NEVER && target_at <= chosen;
     let trail_fired = trail_at != NEVER && trail_at <= chosen;
     if stop_fired && target_fired {
-        return if stop_wins {
+        return if pessimistic {
             Ended::Stop
         } else {
             Ended::Target
@@ -825,11 +924,22 @@ fn ended_by(
     } else if target_fired {
         Ended::Target
     } else if trail_fired {
-        // Priced from the PEAK it was measured against, which the crossings
+        // Priced from the PEAK the order hung from, which the crossings
         // recorded at the moment the rung was crossed. Reading the peak at the
         // end of the walk instead would price the exit against a high the
         // position never saw, because `peak` only ever improves.
-        Ended::Trail(trail_peak.unwrap_or(0))
+        //
+        // Which of the two anchors is the fill is the intra-bar ordering, and
+        // this is the only place it is decided. A rung crossed on a bar that did
+        // not raise the peak carries the same value in both, so the choice is
+        // inert there and the two readings agree — which is what keeps
+        // `Cell::uncertainty` at zero unless something genuinely was unknowable.
+        let anchor = if pessimistic {
+            trail_peak.before
+        } else {
+            trail_peak.raised
+        };
+        Ended::Trail(anchor.unwrap_or(0))
     } else {
         Ended::Time
     }
@@ -1282,6 +1392,177 @@ mod tests {
                  that lost one"
             );
         }
+    }
+
+    /// One bar, as `Candle::new` orders its fields.
+    ///
+    /// Local to the test below, which is the only one in this module that
+    /// builds a path by hand rather than sweeping a synthetic slice — the
+    /// intra-bar case it exercises is one the synthetic generator does not
+    /// produce on demand, which is the same reason `swept_with_wide_bars`
+    /// exists above.
+    fn candle(minute: i64, open: i64, high: i64, low: i64, close: i64) -> indicators::Candle {
+        indicators::Candle::new(
+            minute.saturating_mul(60_000_000),
+            open,
+            high,
+            low,
+            close,
+            100,
+            indicators::OI_NULL,
+        )
+    }
+
+    #[test]
+    fn a_trailing_fill_is_priced_off_the_pre_bar_peak_pessimistically() {
+        // THE UNIT OF THE FIX. `ended_by` is the one place the intra-bar
+        // ordering is decided, and it decided only the stop-versus-target half:
+        // the trail arrived with a single peak -- the one its own crossing bar
+        // had made -- so both readings priced it identically and the flattering
+        // ordering was taken silently.
+        //
+        // A rung crossed on a bar that opened with the peak at 105,000 and
+        // left it at 107,000: 40,000 ppm of give-back off 105,000 is 4,200
+        // paisa and off 107,000 is 4,280, so the two fills are 100,800 and
+        // 102,720 against a 100,000 entry. Both are real prices inside that bar.
+        let peaks = super::TrailPeaks {
+            before: Some(105_000),
+            raised: Some(107_000),
+        };
+        let pess = super::ended_by(super::NEVER, super::NEVER, 1, peaks, 1, true);
+        let opt = super::ended_by(super::NEVER, super::NEVER, 1, peaks, 1, false);
+        assert_eq!(
+            pess,
+            super::Ended::Trail(105_000),
+            "the pessimistic reading anchors the order where it hung when the \
+             bar opened"
+        );
+        assert_eq!(
+            opt,
+            super::Ended::Trail(107_000),
+            "the optimistic reading anchors it at the peak the bar itself made"
+        );
+
+        let priced_pess = super::realised(&[], 0, 1, 100_000, Side::Long, pess, Some(40_000));
+        let priced_opt = super::realised(&[], 0, 1, 100_000, Side::Long, opt, Some(40_000));
+        assert_eq!(
+            priced_pess, 800,
+            "105,000 less 4,200, less the 100,000 entry"
+        );
+        assert_eq!(priced_opt, 2_720, "107,000 less 4,280, less the same entry");
+        assert!(
+            priced_pess < priced_opt,
+            "the pessimistic anchor must be the worse fill, or the two readings \
+             are labelled backwards"
+        );
+    }
+
+    #[test]
+    fn a_trail_fired_by_the_bar_that_raised_the_peak_opens_the_two_readings() {
+        // THE DEFECT, END TO END THROUGH ONE VARIANT. Bar 1 opens with the peak
+        // at 105,000, dips to 101,000 -- exactly the 40,000-ppm rung below it --
+        // and also prints a new high at 107,000. Whether the trail fired is not
+        // in doubt: 105,000 - 4,000 is at the low, so the low reaches it under
+        // either ordering. WHAT IT FILLED AT is, and this used to report a
+        // single number with `uncertainty()` of zero beside it.
+        //
+        // THIS CHANGES BACKTEST RESULTS. The pessimistic total for a trailing
+        // variant falls to the pre-bar anchor wherever this case occurs, and it
+        // is the pessimistic total that `Grid::best` and `Grid::sharpest` rank
+        // on. Nothing here is a haircut applied for safety -- it is the reading
+        // the data supports.
+        let bars = vec![
+            candle(0, 100_000, 105_000, 100_000, 105_000),
+            candle(1, 104_000, 107_000, 101_000, 106_000),
+            candle(2, 106_000, 106_500, 105_500, 106_000),
+        ];
+        // Stops and targets far enough out that neither ever fires, so the only
+        // exit competing with the clock is the trail and the only ambiguity in
+        // the cell is the one under test.
+        let never = crate::excursion::Ladder::new(vec![900_000]).expect("an ascending ladder");
+        let trails = crate::excursion::Ladder::new(vec![40_000]).expect("an ascending ladder");
+        let cross = crate::excursion::crossings(
+            &bars,
+            0,
+            2,
+            100_000,
+            Side::Long,
+            crate::excursion::Ladders {
+                stops: &never,
+                targets: &never,
+                trails: &trails,
+            },
+        );
+        assert_eq!(
+            cross.trail_ambiguous(),
+            &[1],
+            "the fixture must produce the case, or this test asserts nothing"
+        );
+        let candidates = vec![super::Candidate {
+            signal: 0,
+            entry: 0,
+            time_exit: 2,
+            cross,
+        }];
+        let rungs = (never.rungs(), never.rungs(), trails.rungs());
+
+        let trailed = super::one_variant(
+            &bars,
+            &candidates,
+            rungs,
+            super::Variant {
+                stop: None,
+                target: None,
+                trail: Some(0),
+            },
+            Side::Long,
+        );
+        assert_eq!(trailed.trades, 1, "one candidate, one round trip");
+        assert_eq!(
+            trailed.ambiguous_bars, 1,
+            "the bar that fired the trail and raised the peak must be counted, \
+             or the uncertainty is reported with nothing behind it"
+        );
+        assert_eq!(
+            trailed.pessimistic, 800,
+            "priced off 105,000, the peak the resting order hung from"
+        );
+        assert_eq!(
+            trailed.optimistic, 2_720,
+            "priced off 107,000, the peak that bar itself made"
+        );
+        assert_eq!(
+            trailed.uncertainty(),
+            1_920,
+            "the gap the two orderings genuinely carry -- zero before, because \
+             both readings used the raised peak"
+        );
+        assert!(trailed.depends_on_unknowable_ordering());
+
+        // THE SAME PATH WITH NO TRAILING RUNG. Nothing in the trail's ambiguity
+        // set can reach a variant whose `trail_at` is NEVER, so counting it
+        // there would report an uncertainty the variant does not carry.
+        let timed = super::one_variant(
+            &bars,
+            &candidates,
+            rungs,
+            super::Variant {
+                stop: None,
+                target: None,
+                trail: None,
+            },
+            Side::Long,
+        );
+        assert_eq!(
+            timed.ambiguous_bars, 0,
+            "a variant with no trailing rung cannot be moved by a trailing \
+             ambiguity"
+        );
+        assert_eq!(timed.uncertainty(), 0);
+        assert_eq!(
+            timed.pessimistic, 6_000,
+            "held to bar 2 and squared off at its close of 106,000"
+        );
     }
 
     #[test]

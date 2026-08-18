@@ -1144,9 +1144,20 @@ async fn instruments_json(
 ///
 /// Now: one pass over the entries, a hash probe per symbol, `CLAUDE.md` §3
 /// rule 4. The per-request cost is O(entries + universe) and no longer their
-/// product. `api::unit::instrument_bar_counts_are_one_pass_over_the_census`
+/// product. `api::server::instrument_bar_counts_are_one_pass_over_the_census`
 /// holds the pass count at one for two universe sizes, so a future edit that
 /// reintroduces the inner scan fails by cost and not by taste.
+///
+/// THE NAME WAS WRONG AND THE TEST BENEATH IT WAS EMPTY, and the two failures
+/// were one. It read `api::unit::…`, and there is no `unit` module anywhere in
+/// this crate — the test is in `server.rs`'s own `mod tests` — while the test
+/// itself folded an entries vector of length ZERO and asserted `0 == 0`. Gate
+/// 12 was satisfied by both, because it resolves the crate and the final
+/// segment and asks whether a proof is NAMED; its own log says it cannot ask
+/// whether the claim is true. The module segment is `server` rather than
+/// `server::tests` for that resolver's sake: it matches on `crate::mod::fn` and
+/// a fourth segment makes it look for an `fn tests`, which is the form every
+/// other citation in this file already avoids.
 ///
 /// The iterator is taken generically for that test: it counts what it yields.
 fn bars_by_symbol<'a>(
@@ -1175,6 +1186,41 @@ fn bars_by_symbol<'a>(
         }
     }
     held
+}
+
+/// The sentence every route answers with when `feed=` names a vendor this
+/// build cannot read.
+///
+/// # One sentence, three surfaces
+///
+/// `/universes.json`, `/store.json` and `/store` refuse the same input for the
+/// same reason. Three spellings of "no such feed" is three sentences that
+/// drift, and an operator who reads two of them learns two different things
+/// about one rule — the second-definition failure `CLAUDE.md` §3 rule 1 and
+/// D-0013 are both about. The list is built from `Vendor::ALL`, so a fifth
+/// vendor is named here with no edit.
+///
+/// It takes no argument on purpose: what was ASKED FOR belongs to the caller's
+/// envelope — a JSON field on one surface, a receipt row on the other — and
+/// folding it in here would make the sentence unshareable again.
+fn no_such_feed() -> String {
+    let known: Vec<&str> = Vendor::ALL.into_iter().map(Vendor::as_str).collect();
+    format!(
+        "this build reads no feed called that. The feeds it knows are {}.",
+        known.join(", ")
+    )
+}
+
+/// [`no_such_feed`] as the body a JSON route answers with, naming what arrived.
+///
+/// Both halves are `render::json_string`d: `asked` is whatever was in the query
+/// string, so it is untrusted text going onto a wire a browser parses.
+fn no_such_feed_json(asked: &str) -> String {
+    format!(
+        r#"{{"refused":{},"feed":{}}}"#,
+        render::json_string(&no_such_feed()),
+        render::json_string(asked),
+    )
 }
 
 /// One sentence saying how much of a target the chosen feed can actually name.
@@ -1279,18 +1325,13 @@ async fn universe_reach_json(
     let json = "application/json; charset=utf-8";
     let asked = param(uri.query().unwrap_or(""), "feed");
     let Some(feed) = ingest::parse_vendor(&asked) else {
-        let known: Vec<&str> = Vendor::ALL.into_iter().map(Vendor::as_str).collect();
+        // THE SENTENCE IS NOT WRITTEN HERE ANY MORE. It moved to
+        // [`no_such_feed_json`] when `/store.json` and `/store` stopped
+        // answering an unknown feed as Dhan and needed the same words.
         return (
             axum::http::StatusCode::BAD_REQUEST,
             [(axum::http::header::CONTENT_TYPE, json)],
-            format!(
-                r#"{{"refused":{},"feed":{}}}"#,
-                render::json_string(&format!(
-                    "this build reads no feed called that. The feeds it knows are {}.",
-                    known.join(", ")
-                )),
-                render::json_string(&asked),
-            ),
+            no_such_feed_json(&asked),
         );
     };
     (
@@ -2382,6 +2423,16 @@ fn store_body(
     let Some(census) = censuses.iter().find(|c| c.vendor == feed) else {
         return String::from("[]");
     };
+    // THE ANSWER SAYS WHO PRODUCED IT. Until this field existed no byte of a
+    // `/store.json` body named the feed, so a reader that got the wrong one had
+    // no way to notice — which is half of why substituting Dhan for an unknown
+    // feed went unseen for as long as it did. The other half is now a `400`;
+    // see `store_json`.
+    //
+    // ENCODED ONCE, not once per row. `Vendor::as_str` is a fixed token, and
+    // allocating its quoted form again for each of the 43,422 entries
+    // `docs/06-limits.md` §34 projects is a per-row cost with no reader.
+    let feed_json = render::json_string(feed.as_str());
     let mut out = String::from("[");
     let mut n = 0usize;
     for (series, month) in entries {
@@ -2424,7 +2475,7 @@ fn store_body(
         // applied to time rather than money.
         let _ = write!(
             out,
-            r#"{{"instrument":{},"month":{},"timeframe":{},"rows":{},"first_ts":{},"last_ts":{}"#,
+            r#"{{"feed":{feed_json},"instrument":{},"month":{},"timeframe":{},"rows":{},"first_ts":{},"last_ts":{}"#,
             render::json_string(&series.to_string()),
             render::json_string(&month.to_string()),
             render::json_string(series.timeframe.as_str()),
@@ -2497,15 +2548,62 @@ fn store_body(
 /// * [`CENSUS_STATE_HEADER`], [`CENSUS_NOTE_HEADER`] and
 ///   [`CENSUS_DEGRADED_HEADER`] carry `/audit.json`'s own three words.
 ///
-/// A consumer expecting an array still receives an array, in every state.
-/// D-0124.
+/// A consumer expecting an array still receives an array, in every state **of
+/// the store**. D-0124.
+///
+/// # The one answer that is not an array, and why it is not a state of the store
+///
+/// A `feed=` this build cannot read is refused: `400`, and
+/// [`no_such_feed_json`]'s `{"refused":…,"feed":…}` — the same body
+/// `/universes.json` has answered since D-0120. Nothing was looked at, because
+/// there was nothing to look at, so there is no census state to report and the
+/// array shape has nothing to carry.
+///
+/// It used to be answered as **Dhan**, at `200`, with no field on the wire
+/// saying which feed replied. That made "the store holds nothing for Groww" and
+/// "you spelled Groww wrong" byte-identical — a real vendor's counters under
+/// another vendor's label, which is the fallback that hides a failure
+/// `CLAUDE.md` §4 bans and exactly what [`bars_html`] already refuses for
+/// `?vendor=`.
+///
+/// The array promise survives where it is load-bearing. `/db` reads this body
+/// as `rows = Array.isArray(j) ? j : []` (see [`census_headers`]), so the
+/// object lands as an empty list rather than as a parse error, and `r.ok` is
+/// already false at `400`. What it does NOT survive is a reader that parses the
+/// body before checking the status and indexes it as an array; nothing here
+/// measures whether such a reader exists, and `web/src` is not one.
+///
+/// An **absent** `feed=` is untouched and still means Dhan.
+/// [`ingest::parse_vendor`] answers the empty string itself, so the `None` this
+/// arm matches is only ever a feed that was NAMED and is not one this build
+/// reads. Every row now carries `"feed"` as well, so the default states itself
+/// instead of being assumed.
 async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
     let query = uri.query().unwrap_or("");
-    let feed =
-        ingest::parse_vendor(&param(query, "feed")).unwrap_or(brutex_core::vendor::Vendor::Dhan);
+    // REFUSED BY NAME, NEVER SUBSTITUTED. The `.unwrap_or(Vendor::Dhan)` that
+    // stood here was unreachable for an ABSENT feed — `parse_vendor` answers
+    // the empty string with Dhan itself — so the only input it ever caught was
+    // a feed somebody NAMED and this build does not read. See the doc block
+    // above for what answering it as Dhan cost.
+    let asked = param(query, "feed");
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        // The census headers are deliberately NOT stamped: they describe a
+        // feed's counter, and there is no feed here to have one. Only the
+        // content type, so a browser parses the refusal as what it is.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            headers,
+            no_such_feed_json(&asked),
+        );
+    };
 
     // FRESH, NOT THE STARTUP SNAPSHOT. See `census_now`.
     let (censuses, entries) = census_now(&site);
@@ -6263,27 +6361,77 @@ async fn store_get(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
+    // THE STATUS COMES OUT OF THE PAGE NOW, the way `/bars` has always taken
+    // it out of `bars_html`: this route can refuse, and a refusal answered
+    // under `200` is a refusal a monitor cannot see.
+    let query = uri.query().unwrap_or("");
     let (code, body) = dated(ingest::today_ist(), "Store", |today| {
-        (
-            axum::http::StatusCode::OK,
-            store_html(
-                &site,
-                today,
-                page_number(uri.query().unwrap_or("")),
-                uri.query().unwrap_or(""),
-            ),
-        )
+        store_html(&site, today, page_number(query), query)
     });
     (code, axum::response::Html(body))
 }
 
-/// The store page, from a site already loaded.
+/// The page `/store` answers when `feed=` names a vendor this build cannot read.
+///
+/// [`render::receipt_page`] rather than the store page, and not for want of
+/// trying: [`render::StoreView`] has to name a `Vendor` to draw its column and
+/// its counter cards, and the whole content of this arm is that there is no
+/// vendor to name. Rendering it under Dhan to keep the shape is the defect
+/// being removed, one layer down.
+///
+/// The receipt is the same shape [`refusal_html`] answers a bad window with, so
+/// this server has one refusal page and not two. The scope is a literal because
+/// there is one caller: a parameter here would be generality nothing asked for.
+fn store_feed_refusal(asked: &str) -> (axum::http::StatusCode, String) {
+    // THROUGH `note_alphabet` BEFORE IT IS RENDERED. The value came off a query
+    // string, and while `render::receipt_page` escapes it for HTML, the
+    // 400-character ceiling is what stops a page-length "feed" from being drawn
+    // into a table cell.
+    let facts = [("Feed asked for", note_alphabet(asked))];
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        render::receipt_page(&render::Receipt {
+            scope: "Store",
+            verdict: "REFUSED",
+            reason: &no_such_feed(),
+            good: false,
+            facts: &facts,
+            footnote: "Nothing was counted and nothing was written. The feed \
+                       picker on /store lists every name this build reads.",
+        }),
+    )
+}
+
+/// The store page, from a site already loaded, and the status it answers under.
 ///
 /// An absent manifest renders; it never fails. Before the first ingest there is
 /// no file, and a page that 500s on a fresh install is a page that is broken
 /// exactly when an operator most needs to look at it.
+///
+/// # Why it returns a status now
+///
+/// The same shape [`bars_html`] has: one arm of this page is a REFUSAL — a
+/// `feed=` this build cannot read — and a refusal is not a `200`. The status
+/// used to be a literal `200` written in [`store_get`], which is a caller
+/// asserting something about a body it has not looked at.
 #[must_use]
-pub fn store_html(site: &Site, today: Day, page: usize, query: &str) -> String {
+pub fn store_html(
+    site: &Site,
+    today: Day,
+    page: usize,
+    query: &str,
+) -> (axum::http::StatusCode, String) {
+    // THE FEED IS RESOLVED FIRST, BEFORE ANYTHING IS COUNTED. An unknown name
+    // used to fall to Dhan here, so `/store?feed=growww` drew Dhan's counters
+    // under a page an operator had asked to be about Groww — the same wrong
+    // answer in the shape of a right one that `bars_html` refuses for
+    // `?vendor=`, and that `CLAUDE.md` §4 bans. An ABSENT feed is untouched:
+    // `ingest::parse_vendor` answers the empty string with Dhan itself and says
+    // so, so `/store` with no query is the page it always was.
+    let asked = param(query, "feed");
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        return store_feed_refusal(&asked);
+    };
     // ── THE PAGE OPENS ON WHAT IS HELD, NOT ON THE PRODUCT ───────────────
     //
     // It used to render `series × 36 months` unconditionally: 7,056 cells on
@@ -6374,24 +6522,26 @@ pub fn store_html(site: &Site, today: Day, page: usize, query: &str) -> String {
     // set, once per request; the prepared line is what the page draws and is
     // bounded. D-0130.
     notes.extend_from(&site.read.notes_view);
-    render::store_page(&render::StoreView {
-        // ONE FEED PER VIEW. Parsed through the same function the pull form
-        // uses, so "groww" means the same thing on both pages, and an unknown
-        // name falls to the verified default rather than to whichever vendor
-        // happens to be first in the table.
-        feed: ingest::parse_vendor(&param(query, "feed"))
-            .unwrap_or(brutex_core::vendor::Vendor::Dhan),
-        today,
-        censuses: &site.censuses,
-        rows: &rows,
-        page,
-        last_page,
-        total,
-        notes: &notes,
-        filter: Some(&filter),
-        held: site.entries.len(),
-        held_only,
-    })
+    (
+        axum::http::StatusCode::OK,
+        render::store_page(&render::StoreView {
+            // ONE FEED PER VIEW, resolved at the top of this function through
+            // the same parser the pull form uses — so "groww" means the same
+            // thing on both pages, and a name this build does not read never
+            // reaches here at all.
+            feed,
+            today,
+            censuses: &site.censuses,
+            rows: &rows,
+            page,
+            last_page,
+            total,
+            notes: &notes,
+            filter: Some(&filter),
+            held: site.entries.len(),
+            held_only,
+        }),
+    )
 }
 
 /// The four narrowings, out of a query string.
@@ -6766,9 +6916,177 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
             let assets = std::sync::Arc::clone(&assets);
             async move { assets.respond(request.method(), request.uri().path()) }
         })
+        // WHO ASKED, NOT ONLY WHICH VERB. `post` stops a crawler; it does not
+        // stop the other tab in the operator's browser. Registered INSIDE
+        // `note_request` — a later `.layer` on an `axum::Router` wraps the
+        // earlier one, so the log sees the 403 — and inside the body limit, so
+        // an oversized body is still refused by length first. See
+        // [`same_origin_writes_only`] for what this stops and what it does not.
+        .layer(axum::middleware::from_fn(same_origin_writes_only))
         .layer(axum::middleware::from_fn(crate::logs::note_request))
         .layer(axum::extract::DefaultBodyLimit::max(MAX_FORM_BYTES))
         .with_state(site)
+}
+
+/// The fetch-metadata header a browser stamps on every request it issues.
+///
+/// Lower case because that is how `HeaderMap` stores and matches a name, and
+/// spelled once so the lookup and the refusal sentence cannot disagree about
+/// which header decided.
+const SEC_FETCH_SITE: &str = "sec-fetch-site";
+
+/// The one `Sec-Fetch-Site` value that is this server's own page.
+const SEC_FETCH_SAME_ORIGIN: &str = "same-origin";
+
+/// Refuses a state-changing request that did not come from this server's own
+/// page.
+///
+/// # What "POST, AND THERE IS NO GET" does and does not buy
+///
+/// [`router_serving`] carries that sentence over `/universe/resolve` and the
+/// two `/pull` routes, citing D-0128, and it is right about CRAWLERS: a link
+/// preview, a health check and a browser's back button all issue `GET`, and a
+/// `GET` on those paths reaches no handler that spends anything.
+///
+/// It is not a guard against another PAGE. An HTML form posting
+/// `application/x-www-form-urlencoded` is a CORS **simple** request: no
+/// preflight, no opt-in required from this server, and it fires from any
+/// origin the operator happens to have open. Every handler behind these routes
+/// takes a bare `body: String` — see [`pull_spot`] and [`autopilot::control`] —
+/// so not even the content type narrows what is accepted. [`DEFAULT_ADDR`] is
+/// loopback and loopback is not a boundary here: the browser running the
+/// hostile page is on the loopback interface too.
+///
+/// What that reaches is not a read — a cross-origin caller cannot see the
+/// response — it is the **write**: `/universe/resolve` opens roughly 300
+/// sockets to a third party against the shared token D-0128 exists to protect,
+/// `/autopilot/resume` restarts a twelve-hour run, `/pull/spot` begins an
+/// ingest. Fire-and-forget is exactly the class this reaches.
+///
+/// # The rule
+///
+/// `GET` and `HEAD` pass untouched. They change nothing, and refusing them
+/// would take down every page and every JSON route on the site.
+///
+/// Anything else is decided by `Sec-Fetch-Site`, which the **user agent** sets
+/// and page script cannot write — which is the only reason it is worth reading.
+/// `same-origin` passes. `cross-site`, `same-site`, `none` and any token this
+/// build has never heard of are refused: a value nobody here recognises is not
+/// evidence of anything, and defaulting it open is the fallback `CLAUDE.md` §4
+/// bans.
+///
+/// # An ABSENT `Sec-Fetch-Site` is allowed, deliberately, and here is the cost
+///
+/// `curl` sends none. Every socket test in this crate sends none. A client that
+/// is not a browser has no origin to compare in the first place. So an absent
+/// header falls through to `Origin` against `Host`, and a request carrying
+/// neither passes.
+///
+/// Stated plainly, because a guard that is not honest about its hole is worse
+/// than none: **a browser that sends neither header on a cross-origin form POST
+/// is not stopped by this.** Every engine shipping today sends `Origin` on such
+/// a POST and all three send `Sec-Fetch-Site`; that is read from the
+/// specifications and NOTHING HERE MEASURES IT, so it is a claim about the
+/// world and not about this code. This defends against the browser an operator
+/// already has open. It does not defend against a hand-written client, and it
+/// cannot: such a client can reach this port directly and needs no page's help.
+///
+/// The `Origin`/`Host` fallback compares **authorities** and cannot compare
+/// schemes, because `Host` carries none — `http://t` and `https://t` are one
+/// origin to this check. That is the blind spot a plain-HTTP loopback
+/// deployment already has, and this does not widen it. An HTTP/2 request
+/// carries its authority in the URI rather than in a `Host` header; one that
+/// also carries an `Origin` is therefore refused, which is the safe direction
+/// and is not a state `axum::serve` over plain TCP reaches from a browser.
+async fn same_origin_writes_only(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    // DECIDED WHILE THE BORROW IS LIVE. `Next::run` takes the request by value,
+    // so the verdict is an owned `String` and nothing of the request is held
+    // across the move.
+    let Some(why) = cross_origin_refusal(request.method(), request.headers()) else {
+        return next.run(request).await;
+    };
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; charset=utf-8",
+        )],
+        why,
+    )
+        .into_response()
+}
+
+/// Why a request is refused as cross-origin, or `None` when it may proceed.
+///
+/// Split from [`same_origin_writes_only`] so every arm is reachable from a test
+/// without a socket — the argument [`store_body`] makes about the same split,
+/// and the reason the middleware above holds no logic of its own.
+fn cross_origin_refusal(
+    method: &axum::http::Method,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    // A READ IS NEVER REFUSED. `HEAD` rides with `GET` for the reason
+    // `assets::respond` pairs them: it is a `GET` whose body is dropped.
+    if method == axum::http::Method::GET || method == axum::http::Method::HEAD {
+        return None;
+    }
+    // A header value that is not visible ASCII reads as NO value, not as a
+    // pass: `to_str` refusing tells us nothing about where the request came
+    // from, so it falls to the `Origin` comparison below.
+    if let Some(site) = headers.get(SEC_FETCH_SITE).and_then(|v| v.to_str().ok()) {
+        if site == SEC_FETCH_SAME_ORIGIN {
+            return None;
+        }
+        return Some(cross_origin_sentence(method, "Sec-Fetch-Site", site));
+    }
+    let Some(origin) = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    else {
+        // NO FETCH METADATA AND NO ORIGIN. This is `curl`, this crate's own
+        // socket tests, and any non-browser client. See the doc block for why
+        // this is a pass and what it costs.
+        return None;
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    // The scheme is dropped because `Host` has none to compare against.
+    // `Origin: null` — a sandboxed frame's opaque origin — carries no `://`,
+    // so it stays `null`, matches no host, and is refused. An empty authority
+    // is refused for the same reason rather than matching an absent `Host`.
+    let authority = origin
+        .split_once("://")
+        .map_or(origin, |(_scheme, rest)| rest);
+    if !authority.is_empty() && authority == host {
+        return None;
+    }
+    Some(cross_origin_sentence(method, "Origin", origin))
+}
+
+/// The `403` body: which header decided, and what it actually said.
+///
+/// The observed value goes through [`note_alphabet`] — this file's existing
+/// reducer to visible ASCII with a 400-character ceiling. It is echoed because
+/// an operator debugging a reverse proxy needs to see what arrived, not because
+/// it is trusted; the content type is `text/plain`, so nothing here is markup.
+fn cross_origin_sentence(method: &axum::http::Method, header: &str, value: &str) -> String {
+    format!(
+        "REFUSED — a {method} on this server is answered only for its own \
+         pages, and {header} says this one came from somewhere else: {}.\n\
+         \n\
+         No vendor was contacted, no autopilot state moved, and nothing was \
+         written. These routes are POST-only so a crawler cannot start them \
+         (D-0128); this check is for the other tab in your browser, which \
+         POST-only does not stop.\n",
+        note_alphabet(value)
+    )
 }
 
 /// Serves on an already-bound listener until `shutdown` resolves.
@@ -7749,6 +8067,24 @@ mod tests {
         store::path::YearMonth::new(year, month).expect("a real month")
     }
 
+    /// The `/store` page body, for a request whose feed this build reads.
+    ///
+    /// `store_html` answers a status now, because one of its arms is a refusal
+    /// — a `feed=` naming a vendor this build has no reader for. Every test
+    /// below is about the PAGE, so each one asserts here, once, that it did not
+    /// get the refusal instead. Threading `.1` through them would have thrown
+    /// that away silently: a test reading the body of a 400 as if it were the
+    /// page is exactly the shape this helper exists to make impossible.
+    fn store_ok(site: &Site, today: Day, page: usize, query: &str) -> String {
+        let (code, html) = store_html(site, today, page, query);
+        assert_eq!(
+            code,
+            axum::http::StatusCode::OK,
+            "this fixture names a feed the build reads, so the page is the answer: {html}"
+        );
+        html
+    }
+
     /// A census holding ONE index-month at DAY level, and nothing else.
     ///
     /// In memory, at a path nothing writes: the ladder gate reads the census
@@ -8435,34 +8771,174 @@ mod tests {
     /// lines below the sentence. The two DURATIONS quoted -- 15.5 ms and 819.2 ms
     /// -- are measurements and are not asserted anywhere, which is what the
     /// paragraph above says and why the pass count is the thing pinned.
+    ///
+    /// # What this asserted before, and why it asserted nothing
+    ///
+    /// `entries` was `Vec::new()`. The load-bearing line was
+    /// `assert_eq!(visits.get(), entries.len(), ...)` with BOTH SIDES ZERO —
+    /// `0 == 0`, under a message reading "one visit per entry, and the universe
+    /// is not a factor in it". Nothing about a per-symbol scan can fail against
+    /// an empty vector, so the O(entries x universe) regression the doc block
+    /// on `bars_by_symbol` cites this test against would have walked straight
+    /// through it. `CLAUDE.md` §4's "a test that asserts nothing" is the row it
+    /// was sitting on.
+    ///
+    /// It runs at TWO sizes now, and the sizes differ in the UNIVERSE — three
+    /// symbols and ten, over the same four months each — because the whole
+    /// claim is that the universe is not a factor. A reintroduced inner scan
+    /// yields `entries.len() * symbols` and misses at both.
     #[test]
     fn instrument_bar_counts_are_one_pass_over_the_census() {
-        let entries: Vec<(census::Series, store::path::YearMonth)> = Vec::new();
-        let visits = std::cell::Cell::new(0_usize);
-        let counted = || {
-            entries.iter().inspect(|_| {
-                visits.set(visits.get() + 1);
-            })
-        };
+        // Two universes, four months each. The month count is held fixed so the
+        // only thing moving between the passes is the number of distinct
+        // symbols -- which is the factor the claim says is absent.
+        let small = ["NIFTY", "BANKNIFTY", "RELIANCE"];
+        let large = [
+            "NIFTY",
+            "BANKNIFTY",
+            "RELIANCE",
+            "TCS",
+            "INFY",
+            "HDFCBANK",
+            "ITC",
+            "SBIN",
+            "WIPRO",
+            "ONGC",
+        ];
+        for symbols in [small.as_slice(), large.as_slice()] {
+            let entries = one_pass_entries(symbols, 4);
+            assert_eq!(
+                entries.len(),
+                symbols.len().saturating_mul(4),
+                "the fixture must not be empty, which is the defect this replaces"
+            );
+            let census = one_pass_census(&entries);
+            let visits = std::cell::Cell::new(0_usize);
+            let counted = || {
+                entries.iter().inspect(|_| {
+                    visits.set(visits.get() + 1);
+                })
+            };
 
-        // NO CENSUS IS AN EMPTY MAP, not a map of zeroes: the caller reads a
-        // missing key as "no count", which is the distinction D-0124 put on the
-        // wire.
-        let none = bars_by_symbol(None, counted());
-        assert!(none.is_empty(), "an unreadable census counts nothing");
-        assert_eq!(visits.get(), 0, "and it does not even walk the entries");
+            // THE COST. One visit per entry, at both universe sizes. A scan
+            // reintroduced inside the per-symbol path reads
+            // `entries.len() * symbols` here -- 36 for the small pass and 400
+            // for the large one -- and fails by COST rather than by taste.
+            let held = bars_by_symbol(Some(&census), counted());
+            assert_eq!(
+                visits.get(),
+                entries.len(),
+                "one visit per entry, and the universe is not a factor in it"
+            );
 
-        let census = census::read_vendor(
-            &crate::scratch::path("bars-by-symbol"),
-            brutex_core::vendor::Vendor::Dhan,
-        );
-        let held = bars_by_symbol(Some(&census), counted());
-        assert!(held.is_empty(), "an absent manifest holds nothing");
-        assert_eq!(
-            visits.get(),
-            entries.len(),
-            "one visit per entry, and the universe is not a factor in it"
-        );
+            // AND THE FOLD IS RIGHT, not merely cheap. A pass count on its own
+            // is satisfied by a function that walks the entries and counts
+            // nothing, so the map is checked too: one key per symbol, and each
+            // key carrying every month that symbol holds.
+            assert_eq!(
+                held.len(),
+                symbols.len(),
+                "one key per symbol, and no key for a symbol nobody holds"
+            );
+            for name in symbols {
+                let symbol = brutex_core::symbol::Symbol::new(name).expect("a symbol");
+                assert_eq!(
+                    held.get(&symbol),
+                    Some(&(4 * ONE_PASS_ROWS)),
+                    "{name} holds four months of {ONE_PASS_ROWS} rows"
+                );
+            }
+
+            // NO CENSUS IS AN EMPTY MAP, not a map of zeroes: the caller reads a
+            // missing key as "no count", which is the distinction D-0124 put on
+            // the wire. It does not walk the entries at all -- which is the one
+            // assertion here that the old empty fixture could still make.
+            visits.set(0);
+            let none = bars_by_symbol(None, counted());
+            assert!(none.is_empty(), "an unreadable census counts nothing");
+            assert_eq!(visits.get(), 0, "and it does not even walk the entries");
+
+            // AN ABSENT MANIFEST OVER THE SAME ENTRIES. The entries are walked
+            // -- once each, still -- and every probe misses, so the map is
+            // empty rather than a row of zeroes. With the old fixture this arm
+            // never entered the loop body at all.
+            visits.set(0);
+            let absent = census::read_vendor(
+                &crate::scratch::path("bars-by-symbol"),
+                brutex_core::vendor::Vendor::Dhan,
+            );
+            let nothing = bars_by_symbol(Some(&absent), counted());
+            assert!(nothing.is_empty(), "an absent manifest holds nothing");
+            assert_eq!(
+                visits.get(),
+                entries.len(),
+                "and it is still one visit per entry when every probe misses"
+            );
+        }
+    }
+
+    /// The rows every fixture month in [`one_pass_census`] is recorded with.
+    ///
+    /// A regular NSE session, so a wrong fold reads as a wrong number of
+    /// sessions rather than as an anonymous integer.
+    const ONE_PASS_ROWS: u64 = 375;
+
+    /// `symbols x months` index entries, oldest month first.
+    ///
+    /// Real [`census::Series`] values and real months: a fixture of the right
+    /// SHAPE is what the test this feeds did not have.
+    fn one_pass_entries(
+        symbols: &[&str],
+        months: u8,
+    ) -> Vec<(census::Series, store::path::YearMonth)> {
+        let mut out = Vec::with_capacity(symbols.len().saturating_mul(usize::from(months)));
+        for name in symbols {
+            for m in 1..=months {
+                out.push((
+                    census::Series {
+                        exchange: brutex_core::instrument::Exchange::Nse,
+                        segment: brutex_core::instrument::Segment::Index,
+                        symbol: brutex_core::symbol::Symbol::new(name).expect("a symbol"),
+                        timeframe: store::path::Timeframe::MINUTE_1,
+                    },
+                    month_of(2026, m),
+                ));
+            }
+        }
+        out
+    }
+
+    /// A census holding [`ONE_PASS_ROWS`] for every entry it is handed.
+    ///
+    /// In memory, at a path nothing ever writes -- the same fixture discipline
+    /// `percentage_tests::census_of` states: every number the test reads came
+    /// out of the manifest, and a change that reached for a bar file would fail
+    /// rather than pass slowly.
+    fn one_pass_census(
+        entries: &[(census::Series, store::path::YearMonth)],
+    ) -> census::VendorCensus {
+        let mut manifest =
+            pull::manifest::Manifest::open(Vendor::Dhan, &[], &[]).expect("a genesis census");
+        for &(series, at) in entries {
+            manifest
+                .record_held(pull::manifest::Held::new(
+                    pull::manifest::Entry {
+                        key: series.at(at),
+                        rows: ONE_PASS_ROWS,
+                        first_ts_micros: 1_751_350_800_000_000,
+                        last_ts_micros: 1_751_363_940_000_000,
+                    },
+                    pull::manifest::Closes::UNKNOWN,
+                ))
+                .expect("records");
+        }
+        census::VendorCensus {
+            vendor: Vendor::Dhan,
+            path: PathBuf::from("/nonexistent/bars-by-symbol/dhan.man"),
+            state: census::Census::Held {
+                manifest: Box::new(manifest),
+            },
+        }
     }
 
     #[test]
@@ -9338,6 +9814,221 @@ mod tests {
             .expect("a graceful shutdown is not a failure");
     }
 
+    /// One form POST carrying whatever a browser would have stamped on it.
+    ///
+    /// [`post`] sends no fetch metadata and no `Origin`, which is what `curl`
+    /// does and is the case `same_origin_writes_only` deliberately lets
+    /// through. Proving the refusal needs a request that says where it came
+    /// from, so this one lets the caller say it. `extra` carries its own
+    /// trailing CRLF, because a header list that is sometimes empty cannot own
+    /// a separator.
+    async fn post_as(addr: SocketAddr, path: &str, form: &str, extra: &str) -> String {
+        let request = format!(
+            "POST {path} HTTP/1.1\r\nHost: t\r\n{extra}\
+             Content-Type: application/x-www-form-urlencoded\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{form}",
+            form.len()
+        );
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read as _;
+            let mut s = std::net::TcpStream::connect(addr).expect("connect");
+            s.write_all(request.as_bytes()).expect("write");
+            let mut buf = String::new();
+            s.read_to_string(&mut buf).expect("read");
+            buf
+        })
+        .await
+        .expect("the client thread must not panic")
+    }
+
+    /// **A WRITE FROM ANOTHER ORIGIN IS REFUSED, OVER A REAL SOCKET.**
+    ///
+    /// The unit test below proves what [`cross_origin_refusal`] decides. This
+    /// one proves the layer is actually INSTALLED — a decision function nothing
+    /// calls is the shape of defect this repository keeps finding, and the
+    /// registration in [`router_serving`] is the only thing that makes it a
+    /// guard rather than an opinion.
+    ///
+    /// `/pull/spot` is the hostile target because a refused request does
+    /// nothing by definition. The allowed request goes to `/ingest/queue`,
+    /// which queues nothing by design (`ingest::queue`), so the positive half
+    /// of this test starts no ingest and touches no vendor.
+    #[tokio::test]
+    async fn a_cross_origin_write_is_refused_and_this_page_s_own_is_not() {
+        with_server("csrf", |addr| async move {
+            let form = "target=nifty&from=2024-01-01&to=2024-01-02";
+
+            let hostile = post_as(addr, "/pull/spot", form, "Sec-Fetch-Site: cross-site\r\n").await;
+            assert!(hostile.contains("403 Forbidden"), "{hostile}");
+            assert!(hostile.contains("REFUSED"), "{hostile}");
+            assert!(
+                hostile.contains("Sec-Fetch-Site says this one came from somewhere else"),
+                "the refusal names the header that decided: {hostile}"
+            );
+            assert!(
+                !hostile.contains("NOT STARTED"),
+                "it must not reach the ingest parser at all: {hostile}"
+            );
+
+            // AND THE OLDER SIGNAL, for a client that sends no fetch metadata.
+            let elsewhere =
+                post_as(addr, "/pull/spot", form, "Origin: http://evil.example\r\n").await;
+            assert!(elsewhere.contains("403 Forbidden"), "{elsewhere}");
+            assert!(elsewhere.contains("evil.example"), "{elsewhere}");
+
+            // THE THREE THAT MUST STILL WORK. `Host` is `t`, so `http://t` IS
+            // this origin; a browser posting this server's own form says
+            // `same-origin`; and a client that says neither is `curl`.
+            for extra in [
+                "Sec-Fetch-Site: same-origin\r\n",
+                "Origin: http://t\r\n",
+                "",
+            ] {
+                let ours = post_as(addr, "/ingest/queue", form, extra).await;
+                assert!(
+                    !ours.contains("403 Forbidden"),
+                    "[{extra}] this server's own page still posts: {ours}"
+                );
+            }
+
+            // AND A READ IS NEVER REFUSED, whoever asked for it. A page that
+            // could not be fetched cross-origin would break nothing an attacker
+            // can see and everything a link can.
+            let read = get(addr, "/store.json?feed=groww").await;
+            assert!(!read.contains("403 Forbidden"), "{read}");
+        })
+        .await;
+    }
+
+    /// **THE SAME-ORIGIN RULE, ARM BY ARM, WITHOUT A SOCKET.**
+    ///
+    /// Every branch of [`cross_origin_refusal`] is here, including the two that
+    /// deliberately PASS: a request with no fetch metadata and no `Origin` at
+    /// all, which is `curl` and is every other socket test in this file. That
+    /// hole is documented on the function and it is asserted here, so it cannot
+    /// be closed or widened without this test saying so.
+    #[test]
+    fn only_a_same_origin_write_passes_and_a_read_always_does() {
+        let head = |pairs: &[(&str, &str)]| {
+            let mut headers = axum::http::HeaderMap::new();
+            for &(name, value) in pairs {
+                headers.insert(
+                    axum::http::HeaderName::from_bytes(name.as_bytes()).expect("a header name"),
+                    axum::http::HeaderValue::from_str(value).expect("a header value"),
+                );
+            }
+            headers
+        };
+        let post = axum::http::Method::POST;
+
+        // A READ IS NEVER REFUSED, whatever it says about itself.
+        for method in [axum::http::Method::GET, axum::http::Method::HEAD] {
+            assert!(
+                cross_origin_refusal(&method, &head(&[("sec-fetch-site", "cross-site")])).is_none(),
+                "{method} changes nothing and must not be gated"
+            );
+        }
+
+        // THE BROWSER'S OWN WORD. One value passes and every other refuses,
+        // including a token this build has never heard of.
+        assert!(
+            cross_origin_refusal(&post, &head(&[("sec-fetch-site", "same-origin")])).is_none(),
+            "this server's own form is the only thing this check exists to admit"
+        );
+        for hostile in ["cross-site", "same-site", "none", "nonsense"] {
+            let why = cross_origin_refusal(&post, &head(&[("sec-fetch-site", hostile)]))
+                .expect("a write that is not from this origin is refused");
+            assert!(why.contains("Sec-Fetch-Site"), "{why}");
+            assert!(why.contains(hostile), "it names what arrived: {why}");
+            assert!(why.contains("REFUSED"), "{why}");
+        }
+
+        // NO METADATA AT ALL PASSES, and that is the documented cost: curl
+        // sends none, and neither does `post` above.
+        assert!(cross_origin_refusal(&post, &head(&[])).is_none());
+        assert!(cross_origin_refusal(&post, &head(&[("host", "t")])).is_none());
+
+        // ORIGIN AGAINST HOST IS THE FALLBACK, on authority alone.
+        for (host, origin) in [
+            ("t", "http://t"),
+            ("127.0.0.1:8080", "http://127.0.0.1:8080"),
+        ] {
+            assert!(
+                cross_origin_refusal(&post, &head(&[("host", host), ("origin", origin)])).is_none(),
+                "{origin} IS {host}"
+            );
+        }
+        for hostile in ["http://evil.example", "http://t.evil.example", "null", ""] {
+            let why = cross_origin_refusal(&post, &head(&[("host", "t"), ("origin", hostile)]))
+                .expect("an Origin that is not this host is refused");
+            assert!(why.contains("Origin"), "{why}");
+        }
+        assert!(
+            cross_origin_refusal(&post, &head(&[("origin", "http://t")])).is_some(),
+            "an Origin with no Host to compare it against decides nothing, and \
+             deciding nothing is a refusal here"
+        );
+
+        // A HEADER VALUE THAT IS NOT TEXT IS NO VALUE. `to_str` refusing says
+        // nothing about where the request came from, so it falls to `Origin`
+        // rather than passing.
+        let mut opaque = head(&[("host", "t"), ("origin", "http://evil.example")]);
+        opaque.insert(
+            axum::http::HeaderName::from_static("sec-fetch-site"),
+            axum::http::HeaderValue::from_bytes(&[0xff_u8]).expect("an opaque header value"),
+        );
+        let why = cross_origin_refusal(&post, &opaque)
+            .expect("an unreadable fetch-site header is not a pass");
+        assert!(
+            why.contains("Origin"),
+            "the unreadable header is skipped and Origin decides: {why}"
+        );
+    }
+
+    /// **AN UNKNOWN FEED IS REFUSED BY NAME, ON BOTH STORE SURFACES.**
+    ///
+    /// `/store.json` and `/store` both answered `.unwrap_or(Vendor::Dhan)`, so
+    /// `?feed=growww` was served Dhan's counters under HTTP 200 with no field
+    /// on the wire saying so. `/universes.json` has refused the same input
+    /// since D-0120 and its own doc block said the other two did not copy it;
+    /// they do now, through one sentence.
+    ///
+    /// The last two assertions are the ones that keep the fix honest: a feed
+    /// this build DOES read is not refused, and an ABSENT feed still means Dhan
+    /// — `ingest::parse_vendor` answers the empty string itself, so refusing
+    /// `None` cannot have taken the default away.
+    #[tokio::test]
+    async fn an_unknown_feed_is_refused_rather_than_answered_as_dhan() {
+        with_server("unknownfeed", |addr| async move {
+            let json = get(addr, "/store.json?feed=growww").await;
+            assert!(json.contains("400 Bad Request"), "{json}");
+            assert!(json.contains("reads no feed called that"), "{json}");
+            assert!(
+                json.contains(r#""feed":"growww""#),
+                "it names what arrived, not what it guessed: {json}"
+            );
+            assert!(
+                !json.contains(r#""instrument":"#),
+                "and no vendor's rows are on it: {json}"
+            );
+
+            let page = get(addr, "/store?feed=growww").await;
+            assert!(page.contains("400 Bad Request"), "{page}");
+            assert!(page.contains("REFUSED"), "{page}");
+            assert!(page.contains("reads no feed called that"), "{page}");
+            assert!(page.contains("growww"), "the receipt names it: {page}");
+
+            for asked in ["/store.json?feed=groww", "/store.json", "/store"] {
+                let fine = get(addr, asked).await;
+                assert!(
+                    !fine.contains("400 Bad Request") && !fine.contains("reads no feed called"),
+                    "{asked} names a feed this build reads: {fine}"
+                );
+            }
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn a_malformed_or_backwards_window_is_refused_with_the_reason_named() {
         with_server("badwindow", |addr| async move {
@@ -9763,7 +10454,7 @@ mod tests {
         // be an error — this is the page you look at to find out why.
         let dir = agreeing("storeabsent");
         let site = site("storeabsent", &dir);
-        let html = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let html = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
 
         assert!(html.starts_with("<!doctype html>"));
         assert!(html.ends_with("</html>"));
@@ -9807,7 +10498,7 @@ mod tests {
         let dir = agreeing("storezero");
         let site = Site::new(universe(&dir), census::read_all(&root), root);
 
-        let html = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let html = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(
             html.contains("<div class=\"cv\">0</div>"),
             "zero months: {html}"
@@ -9826,8 +10517,8 @@ mod tests {
 
         // PAGING PAST THE END CLAMPS. `?page=999` is a stale bookmark, not an
         // attack, and it must land somewhere real.
-        let first = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
-        let past = store_html(&site, day(2026, 8, 7), 999, "show=gaps");
+        let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
+        let past = store_ok(&site, day(2026, 8, 7), 999, "show=gaps");
         assert_eq!(past, first, "an out-of-range page clamps to the last one");
         assert!(
             past.contains("NSE-INDEX-NIFTY"),
@@ -9857,21 +10548,21 @@ mod tests {
             .collect();
         assert_eq!(census::grid_rows(site.series.len()), 360);
 
-        let first = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let first = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(first.contains("page 1 of 2"), "{first}");
         assert!(first.contains("next"), "{first}");
         assert!(!first.contains("previous"), "no previous to nowhere");
         assert!(first.contains("360 instrument-month(s)"), "{first}");
         assert!(first.contains("showing 200"), "{first}");
 
-        let last = store_html(&site, day(2026, 8, 7), 1, "show=gaps");
+        let last = store_ok(&site, day(2026, 8, 7), 1, "show=gaps");
         assert!(last.contains("page 2 of 2"), "{last}");
         assert!(last.contains("previous"), "{last}");
         assert!(!last.contains("next &rarr;"), "{last}");
         assert!(last.contains("showing 160"), "the remainder: {last}");
 
         // And past the end clamps onto that last page exactly.
-        assert_eq!(store_html(&site, day(2026, 8, 7), 99, "show=gaps"), last);
+        assert_eq!(store_ok(&site, day(2026, 8, 7), 99, "show=gaps"), last);
     }
 
     /// THE REGRESSION THIS PINS. `log_dir_from`'s first version probed for
@@ -10564,7 +11255,7 @@ mod tests {
              eighth cannot be forgotten here"
         );
 
-        let html = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let html = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(
             html.contains("NSE-INDEX-NIFTY") && html.contains("NSE-INDEX-BANKNIFTY"),
             "{html}"
@@ -13083,7 +13774,7 @@ mod tests {
         let page = audit_html(&site, day(2026, 8, 7), 0);
         assert!(page.contains("UNREADABLE —"), "{page}");
         assert!(page.contains("ATTENTION"), "the badge is loud: {page}");
-        let store = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let store = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(store.contains("UNAVAILABLE — audit journal"), "{store}");
 
         // AND THE RECEIPT NAMES THE LOST RECORD. A run whose 256 bytes could
@@ -13367,7 +14058,7 @@ mod tests {
         std::fs::write(&path, manifest.image()).expect("writes");
 
         let site = Site::load(&dir, &root);
-        let html = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let html = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
 
         // The counter card reads the file, not a guess.
         assert!(
@@ -13421,7 +14112,7 @@ mod tests {
     fn the_store_page_says_when_its_counters_are_older_than_the_last_pull() {
         let dir = agreeing("storestale");
         let site = site("storestale", &dir);
-        let fresh = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let fresh = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(
             !fresh.contains("these manifests were read at"),
             "nothing has happened yet: {fresh}"
@@ -13439,7 +14130,7 @@ mod tests {
                 "",
             ))
             .expect("appends");
-        let stale = store_html(&site, day(2026, 8, 7), 0, "show=gaps");
+        let stale = store_ok(&site, day(2026, 8, 7), 0, "show=gaps");
         assert!(
             stale.contains("UNCHECKED — a pull ran at"),
             "the staleness is named, not left to be discovered: {stale}"

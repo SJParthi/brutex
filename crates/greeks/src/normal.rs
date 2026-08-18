@@ -81,9 +81,35 @@ const B7: f64 = 0.088_388_347_648_318_4;
 
 /// The standard normal density, `n(x)`.
 ///
-/// A non-finite argument yields a non-finite result. Every caller inside this
-/// crate validates its inputs before reaching here; a caller outside it is
-/// expected to do the same, or to check the answer.
+/// # A non-finite argument, and why `is_finite` on the RESULT is not a check
+///
+/// `NaN` propagates: `n(NaN)` is `NaN`. **`±infinity` does not.** `n(±inf)` is
+/// `0.0`, because `exp(-inf)` is `0.0` — the density's exact limit, not a
+/// fallback standing in for one. So a caller that passes a garbage argument
+/// and then asks `is_finite()` of the answer is told everything is fine.
+/// **The argument is the thing to check; the result cannot report it.** This
+/// paragraph previously claimed the opposite. **The behaviour did not change**
+/// -- the documentation was wrong, and a consumer that built an argument check
+/// on the old wording never had one.
+///
+/// The limits are kept rather than refused because they are reachable from
+/// inputs this crate has already accepted, and they are correct there.
+/// `Checked::greeks` forms `d1` by dividing by `volatility * sqrt(years)`; a
+/// near-zero `years` drives that quotient to `±infinity` while spot, strike,
+/// rate, carry and volatility are all still inside their bounds. `n(±inf) = 0`
+/// is exactly what makes gamma, vega and theta go to zero as expiry closes.
+/// Returning `NaN` there would turn a correct degenerate answer into
+/// `GreeksError::NotRepresentable` — a refusal at the moment the model does
+/// have a value — and would put a branch in a 3.3 ns function that `solver`
+/// calls dozens of times per solve.
+///
+/// What this does NOT buy: nothing here makes a non-finite argument harmless.
+/// `NaN` still propagates into every product a caller forms. The crate's own
+/// entry points still refuse a non-finite input by name
+/// (`GreeksError::NotFinite`, raised by `crate::bsm::finite`) before it can
+/// reach this function, and that refusal is still the only place a bad
+/// argument is actually caught. Pinned by
+/// `a_non_finite_argument_propagates_only_when_it_is_nan`.
 #[must_use]
 pub fn standard_normal_pdf(x: f64) -> f64 {
     (-0.5 * x * x).exp() * INV_ROOT_TWO_PI
@@ -96,8 +122,16 @@ pub fn standard_normal_pdf(x: f64) -> f64 {
 /// digits in the far tail — see the module documentation for the measurement
 /// and for what that rules out.
 ///
-/// A non-finite argument yields a non-finite result, for the same reason as
-/// [`standard_normal_pdf`].
+/// # A non-finite argument, and the same warning
+///
+/// `NaN` propagates, but not by the route a reader expects: `NaN` **misses**
+/// the `z > TAIL` comparison below — every comparison against `NaN` is false
+/// — falls through the continued-fraction branch and comes back out `NaN`.
+/// **`±infinity` does not propagate.** `N(+inf)` is `1.0` and `N(-inf)` is
+/// `0.0`: the saturating branch below, entered because `inf > TAIL`, returning
+/// the exact limits rather than an approximation to them. `is_finite()` on the
+/// result therefore does **not** detect an infinite argument. See
+/// [`standard_normal_pdf`] for why the limits are kept rather than refused.
 #[must_use]
 pub fn standard_normal_cdf(x: f64) -> f64 {
     let z = x.abs();
@@ -304,6 +338,48 @@ pub(crate) mod tests {
             step > 1e-10,
             "the split is not at {SPLIT}: {below:e} and {at_split:e} came from one branch"
         );
+    }
+
+    #[test]
+    fn a_non_finite_argument_propagates_only_when_it_is_nan() {
+        // The contract both doc comments state, written down where it can
+        // fail. The paragraphs these assertions replace said a non-finite
+        // argument yields a non-finite result, which invites `is_finite()` on
+        // the ANSWER as an argument check. It is not one, and a doc paragraph
+        // cannot be run to find that out.
+
+        // NaN is the only argument that comes back out. In the CDF it gets
+        // there by MISSING `z > TAIL` -- every comparison against NaN is false
+        // -- and falling through the continued-fraction branch, not by the
+        // saturating return a reader would expect it to take.
+        assert!(standard_normal_pdf(f64::NAN).is_nan());
+        assert!(standard_normal_cdf(f64::NAN).is_nan());
+
+        // The infinities give the mathematical limits, exactly. These four
+        // are what a change to "refuse a non-finite argument with NaN" would
+        // have to break, and breaking them would refuse a contract whose
+        // `d1` is legitimately infinite -- `volatility * sqrt(years)` at a
+        // near-zero `years`, every input still inside its bound -- by turning
+        // its correct degenerate price into `GreeksError::NotRepresentable`.
+        assert_eq!(standard_normal_pdf(f64::INFINITY), 0.0);
+        assert_eq!(standard_normal_pdf(f64::NEG_INFINITY), 0.0);
+        assert_eq!(standard_normal_cdf(f64::INFINITY), 1.0);
+        assert_eq!(standard_normal_cdf(f64::NEG_INFINITY), 0.0);
+
+        // The consequence, asserted rather than left to be inferred. It IS
+        // implied by the four equalities above -- `0.0` and `1.0` are finite
+        // -- but it is the claim a caller actually needs, and an implication
+        // nobody writes down is a sentence in a comment, which cannot fail.
+        for x in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                standard_normal_pdf(x).is_finite(),
+                "n({x}) is finite, so is_finite() on the result hides the argument"
+            );
+            assert!(
+                standard_normal_cdf(x).is_finite(),
+                "N({x}) is finite, so is_finite() on the result hides the argument"
+            );
+        }
     }
 
     #[test]

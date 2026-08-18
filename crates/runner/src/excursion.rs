@@ -54,6 +54,43 @@
 //! bars, and [`crate::trade`]'s pessimistic case resolves them as **the stop
 //! first**. The optimistic case resolves them as the target first, and the gap
 //! between the two is reported rather than averaged away.
+//!
+//! # The trailing stop had the same problem and did not say so
+//!
+//! The trail took its peak AND its give-back from the same bar: the bar's own
+//! favourable extreme raised the peak, and the retreat was then measured from
+//! the raised peak against the *same* bar's adverse extreme. That is the
+//! favourable-first ordering assumed silently, on every bar, and it is the
+//! look-ahead class of error — it fires a trail on bars where the other
+//! ordering would not have fired one at all, and prices it off a high the
+//! order had not yet seen. Stop-versus-target was resolved both ways and
+//! reported; the trail was resolved one way and not reported.
+//!
+//! Two things follow, and this module now separates them.
+//!
+//! **Whether the rung fired is settled by measuring the retreat against the
+//! peak AS IT STOOD BEFORE THE BAR.** That test is order-independent: if the
+//! pre-bar peak `P` satisfies `P - low >= d` then the level `P - d` sits at or
+//! above the bar's low, so the low reaches it whichever extreme came first —
+//! under favourable-first the level is only higher and is reached the sooner.
+//! So a crossing recorded here happened under **both** orderings, and the
+//! crossings the old rule invented out of the favourable-first assumption are
+//! simply not recorded. They are not deferred to a later bar's *price* either;
+//! the give-back is a running maximum and picks them up on whatever later bar
+//! genuinely retreats that far, or never.
+//!
+//! **What the fill is priced off is still unknown**, and only on a bar that
+//! raised the peak: favourable-first anchors the order at the raised peak,
+//! retreat-first at the pre-bar peak, and both prices lie inside the bar's own
+//! range. Both are recorded — [`Crossings::trail_peak_at`] and
+//! [`Crossings::trail_peak_raised_at`] — and [`Crossings::trail_ambiguous`]
+//! names the offsets where they differ, so [`crate::grid`] can price the trail
+//! twice exactly as it already prices stop-versus-target twice.
+//!
+//! **This changes backtest results**, in both directions: a trail that used to
+//! fire on the bar that made the peak now fires later or not at all, which is
+//! sometimes worse and sometimes better for the position. It is not a strict
+//! haircut and is not offered as one.
 
 use indicators::Candle;
 
@@ -184,16 +221,40 @@ pub struct Crossings {
     /// for the same reason -- the largest retreat so far is monotone even though
     /// the retreat itself is not.
     trailing: Vec<usize>,
-    /// The running peak at the moment each trailing rung was crossed.
+    /// The peak each trailing rung's order hung from, as it stood BEFORE the
+    /// crossing bar.
     ///
     /// A trailing stop fills at `peak - distance`, and the peak MOVES -- so the
     /// rung alone cannot price the exit the way a fixed stop's can. Without
     /// this the fill fell back to the bar's close, which on a bar that ran far
     /// past the level is not the price the order got.
+    ///
+    /// **Pre-bar and not in-bar.** This is the anchor under the retreat-first
+    /// ordering, which is the one reading a minute bar can be held to: the
+    /// crossing test itself is made against this peak, so a rung recorded here
+    /// was reached whichever extreme came first. See the module header.
     trail_peak: Vec<i64>,
+    /// The same crossing's peak INCLUDING that bar's own favourable extreme.
+    ///
+    /// Equal to `trail_peak` on every bar that did not raise the peak. Where it
+    /// differs, the two are the two intra-bar orderings: favourable-first
+    /// anchors the order here, retreat-first at `trail_peak`, and one-minute
+    /// data cannot say which. Both prices sit inside the bar -- the pre-bar
+    /// anchor at or above the low by the crossing test, the raised anchor at or
+    /// below the extreme that raised it.
+    trail_peak_raised: Vec<i64>,
     /// Offsets on which BOTH a stop and a target rung were newly reached, so
     /// the bar's own order decides and one-minute data does not carry it.
     ambiguous: Vec<usize>,
+    /// Offsets on which a trailing rung was newly crossed by a bar that ALSO
+    /// raised the peak, so the give-back is priced off an anchor the bar's own
+    /// ordering decides.
+    ///
+    /// Separate from `ambiguous` rather than folded into it because the two
+    /// resolve differently and only one of them applies to a variant: a cell
+    /// with no trailing rung cannot be moved by anything in here, and counting
+    /// it there would report an uncertainty that variant does not carry.
+    trail_ambiguous: Vec<usize>,
     /// The last offset walked, so a lookup can say "held to the end".
     last: usize,
 }
@@ -229,18 +290,41 @@ impl Crossings {
         self.trailing.get(rung).copied().unwrap_or(NEVER)
     }
 
-    /// The running peak when trailing rung `i` was crossed, or `None`.
+    /// The peak trailing rung `i`'s order hung from, or `None`.
     ///
-    /// What a trailing exit actually fills at: `peak - distance` for a long,
+    /// What a trailing exit fills at: `peak - distance` for a long,
     /// `peak + distance` for a short. The rung alone cannot say, because the
     /// level follows the best price seen rather than sitting a fixed distance
     /// from entry.
+    ///
+    /// **The PESSIMISTIC anchor**, being the peak as it stood before the
+    /// crossing bar. On a bar that raised the peak the favourable-first
+    /// ordering would have anchored higher; that reading is
+    /// [`Self::trail_peak_raised_at`], and the offsets where the two differ are
+    /// [`Self::trail_ambiguous`].
     #[must_use]
     pub fn trail_peak_at(&self, rung: usize) -> Option<i64> {
         if self.trail_at(rung) == NEVER {
             return None;
         }
         self.trail_peak.get(rung).copied()
+    }
+
+    /// The same crossing's anchor under the favourable-first ordering, or
+    /// `None`.
+    ///
+    /// **The OPTIMISTIC anchor.** Equal to [`Self::trail_peak_at`] except where
+    /// the crossing bar raised the peak itself, which is exactly the set
+    /// [`Self::trail_ambiguous`] names. `None` for a rung the path never
+    /// crossed, for the same reason the other accessor refuses one: an anchor
+    /// for a crossing that never happened would price an exit that never
+    /// happened.
+    #[must_use]
+    pub fn trail_peak_raised_at(&self, rung: usize) -> Option<i64> {
+        if self.trail_at(rung) == NEVER {
+            return None;
+        }
+        self.trail_peak_raised.get(rung).copied()
     }
 
     /// Offsets where a stop and a target were both newly reached on one bar.
@@ -251,6 +335,19 @@ impl Crossings {
     #[must_use]
     pub fn ambiguous(&self) -> &[usize] {
         &self.ambiguous
+    }
+
+    /// Offsets where a trailing rung was crossed by the bar that raised the
+    /// peak.
+    ///
+    /// One entry per BAR, not per rung, so several rungs crossing together
+    /// count once — the same convention [`Self::ambiguous`] uses, and the one
+    /// [`crate::grid::Cell::ambiguous_bars`] sums. Empty means every trailing
+    /// crossing hung from a peak set on an earlier bar, so its fill price is
+    /// not in doubt and the two readings agree on it.
+    #[must_use]
+    pub fn trail_ambiguous(&self) -> &[usize] {
+        &self.trail_ambiguous
     }
 
     /// The last offset the path was walked to.
@@ -306,7 +403,9 @@ pub fn crossings(
         favourable: vec![NEVER; targets.len()],
         trailing: vec![NEVER; trails.len()],
         trail_peak: vec![0; trails.len()],
+        trail_peak_raised: vec![0; trails.len()],
         ambiguous: Vec::new(),
+        trail_ambiguous: Vec::new(),
         last: 0,
     };
     if entry <= 0 || from > to {
@@ -355,36 +454,43 @@ pub fn crossings(
         mae = mae.max(ppm_of(adverse_move, entry));
         mfe = mfe.max(ppm_of(favourable_move, entry));
 
-        // The peak improves first, then the retreat is measured FROM it. Order
-        // matters: measuring the retreat before updating the peak would compare
-        // this bar's low against the previous bar's high and report a give-back
-        // one bar late on every new high.
-        peak = match side {
+        // THE RETREAT IS MEASURED AGAINST THE PRE-BAR PEAK, AND THE PEAK IS
+        // RAISED AFTERWARDS. The peak used to improve first, which measured
+        // this bar's retreat from a high this bar itself had just made -- the
+        // favourable-first ordering, assumed silently on every bar. See the
+        // module header: that fires rungs the retreat-first ordering never
+        // fires, which is look-ahead and flatters the result.
+        //
+        // `anchor` is where the resting order sat when the bar opened, so
+        // `anchor - low >= d` means the low reached the level under EITHER
+        // ordering -- favourable-first only raises the level further above the
+        // low. A crossing recorded below therefore happened either way, and
+        // that is the whole reason this is the conservative reading rather than
+        // merely the other guess.
+        let anchor = peak;
+        let raised = match side {
             Side::Long => peak.max(favourable_price),
             Side::Short => peak.min(favourable_price),
         };
         let retreat = match side {
-            Side::Long => peak.saturating_sub(adverse_price),
-            Side::Short => adverse_price.saturating_sub(peak),
+            Side::Long => anchor.saturating_sub(adverse_price),
+            Side::Short => adverse_price.saturating_sub(anchor),
         };
         give_back = give_back.max(ppm_of(retreat, entry));
-        while trails
-            .rungs()
-            .get(trail_cursor)
-            .is_some_and(|&rung| give_back >= rung)
-        {
-            if let Some(slot) = out.trailing.get_mut(trail_cursor) {
-                *slot = offset;
-            }
-            // The peak AS IT STOOD when this rung was crossed. Recorded here
-            // rather than derived later because `peak` only improves -- reading
-            // it at the end of the walk would price the exit against a peak the
-            // position never saw.
-            if let Some(slot) = out.trail_peak.get_mut(trail_cursor) {
-                *slot = peak;
-            }
-            trail_cursor = trail_cursor.saturating_add(1);
+        let trail_crossed_here = cross_trail_rungs(
+            &mut out,
+            trails.rungs(),
+            &mut trail_cursor,
+            give_back,
+            (offset, anchor, raised),
+        );
+        // The bar both raised the peak and fired the trail, so which anchor
+        // priced the fill is the bar's own order to decide and minute data does
+        // not carry it. Recorded once per bar, like `ambiguous` below it.
+        if trail_crossed_here && raised != anchor {
+            out.trail_ambiguous.push(offset);
         }
+        peak = raised;
 
         let stop_before = stop_cursor;
         while stops
@@ -417,6 +523,50 @@ pub fn crossings(
         }
     }
     out
+}
+
+/// Advance the trailing cursor over every rung this bar's give-back reached.
+///
+/// One step of [`crossings`]'s single pass, holding no state of its own: the
+/// cursor belongs to the caller and only advances, because the give-back is a
+/// running maximum and a crossed rung stays crossed. It is a function rather
+/// than an inline block only so that walk stays under `clippy::too_many_lines`
+/// -- splitting it hides nothing, which is why it was worth splitting.
+///
+/// `at` is `(offset, anchor, raised)`: the bar, the peak the order hung from
+/// before it, and the peak its own favourable extreme left behind. Both anchors
+/// are recorded for every crossing; they differ exactly on the bars
+/// [`Crossings::trail_ambiguous`] names.
+///
+/// Returns whether any rung was newly crossed here, which is what that
+/// ambiguity record turns on.
+fn cross_trail_rungs(
+    out: &mut Crossings,
+    rungs: &[Ppm],
+    cursor: &mut usize,
+    give_back: Ppm,
+    at: (usize, i64, i64),
+) -> bool {
+    let (offset, anchor, raised) = at;
+    let mut crossed = false;
+    while rungs.get(*cursor).is_some_and(|&rung| give_back >= rung) {
+        if let Some(slot) = out.trailing.get_mut(*cursor) {
+            *slot = offset;
+        }
+        // The two anchors THIS crossing could have hung from, recorded at the
+        // crossing rather than derived later: the peak only improves, so
+        // reading it at the end of the walk would price the exit against a high
+        // the position never saw.
+        if let Some(slot) = out.trail_peak.get_mut(*cursor) {
+            *slot = anchor;
+        }
+        if let Some(slot) = out.trail_peak_raised.get_mut(*cursor) {
+            *slot = raised;
+        }
+        crossed = true;
+        *cursor = cursor.saturating_add(1);
+    }
+    crossed
 }
 
 /// A price move as parts per million of the entry price.
@@ -577,11 +727,12 @@ mod tests {
         // because the peak only ever improves.
         let entry = 100_000_i64;
         // FLAT bars where each peak is set, so the retreat is measured ACROSS
-        // bars rather than inside one. Within a single bar the high and the low
-        // carry no order, and this walk assumes the HIGH came first for a long
-        // -- the pessimistic reading, and the same assumption the ambiguous-bar
-        // rule makes. A fixture whose first bar spanned the whole move would be
-        // testing that assumption rather than the peak recording.
+        // bars rather than inside one. That is deliberate and is now a property
+        // of the walk rather than an accident of the fixture: the retreat is
+        // measured against the peak as it stood BEFORE the bar, so a bar that
+        // sets a peak can never also price the give-back off it. Bar 1's own
+        // high (101,500) is below the standing peak, so nothing here is
+        // ambiguous and this test measures the peak recording alone.
         let bars = vec![
             bar(0, entry + 2_000, entry + 2_000), // peak set at 102,000
             bar(1, entry + 1_000, entry + 1_500), // retreat of 1,000 from it
@@ -610,6 +761,168 @@ mod tests {
             "the peak recorded must be the one at the CROSSING (102,000), not \
              the higher peak the path reached afterwards (105,000)"
         );
+        assert_eq!(
+            c.trail_peak_raised_at(0),
+            Some(entry + 2_000),
+            "bar 1 did not raise the peak, so both orderings anchor the order in \
+             the same place and there is nothing for the two readings to differ \
+             about"
+        );
+        assert!(
+            c.trail_ambiguous().is_empty(),
+            "no crossing bar raised the peak, so no fill price is in doubt"
+        );
+    }
+
+    #[test]
+    fn the_bar_that_makes_a_peak_can_never_also_price_the_give_back_off_it() {
+        // THE LOOK-AHEAD THIS FILE SHIPPED. The peak used to improve first and
+        // the retreat was then measured from it, so ONE bar supplied both the
+        // high and the give-back from that high -- the favourable-first
+        // ordering, assumed silently on every bar. A backtester that does that
+        // reports exits it could not have had.
+        //
+        // Entry 100,000, and a single bar that runs to 110,000 and dips to
+        // 99,500. Against the in-bar peak the retreat is 10,500 paisa, which
+        // clears a 5% rung four times over. Against the peak the resting order
+        // actually hung from -- 100,000, the entry -- it is 500 paisa and clears
+        // nothing.
+        let entry = 100_000_i64;
+        let trails = ladder(&[50_000]);
+        let other = ladder(&[900_000]);
+        let one_bar = vec![bar(0, entry - 500, entry + 10_000)];
+        let c = crossings(
+            &one_bar,
+            0,
+            0,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &other,
+                targets: &other,
+                trails: &trails,
+            },
+        );
+        assert_eq!(
+            c.trail_at(0),
+            NEVER,
+            "the trail fired on the bar that made the peak it was measured \
+             from, which is the ordering the data does not carry"
+        );
+        assert_eq!(
+            c.trail_peak_at(0),
+            None,
+            "a crossing that did not happen must carry no anchor to price it"
+        );
+        assert!(c.trail_ambiguous().is_empty(), "nothing crossed at all");
+
+        // NOT SUPPRESSED, DEFERRED TO A BAR THAT ACTUALLY RETREATS. The
+        // give-back is a running maximum, so the same rung is picked up by the
+        // next bar whose low falls that far below the settled peak -- priced
+        // off 110,000, which by then is a high the position genuinely saw.
+        let two_bars = vec![
+            bar(0, entry - 500, entry + 10_000),
+            bar(1, entry + 4_000, entry + 5_000),
+        ];
+        let d = crossings(
+            &two_bars,
+            0,
+            1,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &other,
+                targets: &other,
+                trails: &trails,
+            },
+        );
+        assert_eq!(d.trail_at(0), 1, "the retreat from 110,000 is on bar 1");
+        assert_eq!(d.trail_peak_at(0), Some(entry + 10_000));
+    }
+
+    #[test]
+    fn a_trail_fired_by_the_bar_that_raised_the_peak_records_both_anchors() {
+        // THE SIBLING OF THE AMBIGUOUS-BAR RULE. When the bar that fires the
+        // trail is also the bar that raised the peak, WHETHER it fired is not
+        // in doubt -- the pre-bar level sits at or above the low, so the low
+        // reaches it under either ordering -- but WHAT IT FILLED AT is. The
+        // retreat-first ordering anchors the order at the peak the bar opened
+        // with; the favourable-first ordering at the peak the bar itself made.
+        // Both anchors are recorded and the offset is named, so `crate::grid`
+        // can price the exit twice the way it already prices stop-versus-target
+        // twice.
+        let entry = 100_000_i64;
+        let trails = ladder(&[40_000]);
+        let other = ladder(&[900_000]);
+        // Bar 1 opens with the peak at 105,000, dips 4,000 below it -- exactly
+        // the 40,000-ppm rung -- and also makes a new high at 107,000.
+        let bars = vec![
+            bar(0, entry, entry + 5_000),
+            bar(1, entry + 1_000, entry + 7_000),
+        ];
+        let c = crossings(
+            &bars,
+            0,
+            1,
+            entry,
+            Side::Long,
+            Ladders {
+                stops: &other,
+                targets: &other,
+                trails: &trails,
+            },
+        );
+        assert_eq!(c.trail_at(0), 1, "the give-back cleared the rung on bar 1");
+        assert_eq!(
+            c.trail_peak_at(0),
+            Some(entry + 5_000),
+            "the pessimistic anchor is the peak the bar OPENED with"
+        );
+        assert_eq!(
+            c.trail_peak_raised_at(0),
+            Some(entry + 7_000),
+            "the optimistic anchor is the peak the bar itself made"
+        );
+        assert_eq!(
+            c.trail_ambiguous(),
+            &[1],
+            "a trail fired by the bar that raised its own level must be named, \
+             or the better of the two fills is taken silently"
+        );
+        assert!(
+            c.ambiguous().is_empty(),
+            "no stop and no target were reachable, so the OTHER ambiguity set \
+             must stay empty -- the two are counted separately because a \
+             variant with no trailing rung cannot be moved by this one"
+        );
+
+        // THE MIRROR. A sign error in the short arm would swap which anchor is
+        // pessimistic, and every short trail would report the flattering fill.
+        let short_bars = vec![
+            bar(0, entry - 5_000, entry),
+            bar(1, entry - 7_000, entry - 1_000),
+        ];
+        let s = crossings(
+            &short_bars,
+            0,
+            1,
+            entry,
+            Side::Short,
+            Ladders {
+                stops: &other,
+                targets: &other,
+                trails: &trails,
+            },
+        );
+        assert_eq!(s.trail_at(0), 1);
+        assert_eq!(
+            s.trail_peak_at(0),
+            Some(entry - 5_000),
+            "a short's peak is its LOW, and the pessimistic anchor is still the \
+             one the bar opened with"
+        );
+        assert_eq!(s.trail_peak_raised_at(0), Some(entry - 7_000));
+        assert_eq!(s.trail_ambiguous(), &[1]);
     }
 
     #[test]
@@ -635,6 +948,12 @@ mod tests {
             None,
             "a peak for a crossing that never happened would price an exit that \
              never happened"
+        );
+        assert_eq!(
+            c.trail_peak_raised_at(0),
+            None,
+            "and the optimistic anchor refuses on the same grounds -- both are \
+             gated on the crossing, not on the vector's default zero"
         );
         assert_eq!(
             c.last(),

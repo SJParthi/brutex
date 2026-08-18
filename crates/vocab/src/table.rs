@@ -39,6 +39,23 @@
 //! | 19 `near_fib_0` | 17 `near_pdh` | rung 0 of a `PDH`-anchored ladder *is* the `PDH` |
 //! | 25 `near_fib_100` | 18 `near_pdl` | rung 1.0 of that same ladder *is* the `PDL` |
 //!
+//! **Rows 19 and 25 declare a different band family from the rows they
+//! duplicate**, and the table now says so rather than only this paragraph. They
+//! are `near_fib_*` rows on the session range; 17 and 18 are built from the
+//! daily levels and measure against the CPR width. "Rung 0 *is* the PDH" is a
+//! claim about the LEVEL, and the two are the same centre with different
+//! half-widths — so "exactly" above is exact about where, not about how wide.
+//! An index is never reissued, so this is recorded and not corrected.
+//!
+//! # Two band families
+//!
+//! A `near_*` row is not decidable by a width alone: it needs to know what the
+//! width is a fraction of. Every one of the 97 declares it in
+//! [`BitDef::band`] — [`Base::CprWidth`] for the pivot ladder, the CPR edges and
+//! the previous day's high and low; [`Base::SessionRange`] for everything else.
+//! [`set_near`] refuses a tolerance from the other family, which it could not do
+//! while the two arrived as indistinguishable numbers. See [`Base`].
+//!
 //! A tombstone **keeps its index forever** and always evaluates false.
 //! Retiring frees nothing: position 6 is still position 6, and the next
 //! condition appends at [`NEXT_FREE`], which is 280 today and only ever grows.
@@ -56,7 +73,7 @@
 
 use crate::error::VocabError;
 use crate::mask::ConditionMask;
-use crate::tolerance::Tolerance;
+use crate::tolerance::{Base, Tolerance};
 
 /// Whether a position still evaluates, or is a tombstone.
 ///
@@ -90,14 +107,48 @@ pub enum BitStatus {
 }
 
 /// Whether a position needs a measured band to be decided.
+///
+/// # This is a view of [`BitDef::band`], not an independent field
+///
+/// A row needs a tolerance exactly when it declares a [`Base`], so `Kind` is
+/// computed from `band` by [`kind_of`] inside the four row constructors and is
+/// never passed in beside it. The two therefore cannot disagree, which is the
+/// only way a `Kind::Near` row with no declared band -- or a `Kind::Plain` row
+/// with one -- could have come about.
+///
+/// **The base is deliberately not a payload on [`Kind::Near`].** That is where
+/// it belongs on the merits: `Near { base }` makes an unclassified `near_*` row
+/// impossible to write rather than merely checked. It is not there because
+/// `Kind::Near` is compared as a bare unit value in eight files outside this
+/// crate's `src/` -- seven modules of `crates/indicators` and this crate's own
+/// `tests/table.rs` -- and a struct variant is a compile error at every one.
+/// Moving the payload onto `Kind` is a mechanical follow-up that has to touch
+/// those files in the same commit; until then `band` carries the same
+/// information one field over, and [`kind_of`] is what keeps the pair honest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
     /// A relation that is true or false on its own -- above, below, inside.
     Plain,
     /// A `near_*` condition. Undecidable without a tolerance, and the
     /// tolerance is [`crate::tolerance::TOL_FIB_MILLI`] or
-    /// [`crate::tolerance::TOL_PIVOT_MILLI`] depending on the family.
+    /// [`crate::tolerance::TOL_PIVOT_MILLI`] according to the [`Base`] the row
+    /// declares in [`BitDef::band`].
     Near,
+}
+
+/// The [`Kind`] a row with this band is, which is the only way a `Kind` is
+/// produced in this file.
+///
+/// Declaring a base and needing a tolerance are the same statement, so deriving
+/// one from the other removes the channel by which they could drift apart. It
+/// was a real channel: before this, `retired` and `void` took a `Kind` argument
+/// with no band beside it, so a tombstone could claim `Kind::Near` while naming
+/// no family at all and nothing would have noticed.
+const fn kind_of(band: Option<Base>) -> Kind {
+    match band {
+        Some(_) => Kind::Near,
+        None => Kind::Plain,
+    }
 }
 
 /// One row of the table.
@@ -109,8 +160,20 @@ pub struct BitDef {
     pub index: u16,
     /// The condition's name. Unique among live rows.
     pub name: &'static str,
-    /// Whether deciding it needs a tolerance.
+    /// Whether deciding it needs a tolerance. Derived from `band` by
+    /// [`kind_of`]; see [`Kind`] for why it is not the field that carries the
+    /// base.
     pub kind: Kind,
+    /// Which quantity this row's band is a fraction of, or `None` when it needs
+    /// no band.
+    ///
+    /// **This is the row's half of the check [`set_near`] performs.** A
+    /// `near_pivot_*` position measures against the CPR width and a
+    /// `near_fib_*` position against the session range; the two widths are
+    /// fifty times apart at today's pins, and until this field existed
+    /// [`set_near`] accepted either for either. See [`Base`] for why the
+    /// resulting mask is indistinguishable from a correct one.
+    pub band: Option<Base>,
     /// Live, or a tombstone and what it duplicated.
     pub status: BitStatus,
 }
@@ -120,39 +183,54 @@ const fn plain(index: u16, name: &'static str) -> BitDef {
     BitDef {
         index,
         name,
-        kind: Kind::Plain,
+        kind: kind_of(None),
+        band: None,
         status: BitStatus::Live,
     }
 }
 
-/// A live row that needs the tolerance.
-const fn near(index: u16, name: &'static str) -> BitDef {
+/// A live row that needs a tolerance, measured against `band`.
+///
+/// **There is no `near` that does not name a base.** The argument is not
+/// defaulted and has no `Option`, so appending a `near_*` row without deciding
+/// which family it belongs to is a compile error rather than a row that
+/// silently joins whichever family the caller happened to pass a width from.
+const fn near(index: u16, name: &'static str, band: Base) -> BitDef {
     BitDef {
         index,
         name,
-        kind: Kind::Near,
+        kind: kind_of(Some(band)),
+        band: Some(band),
         status: BitStatus::Live,
     }
 }
 
 /// A definitionally-constant position. It keeps `index` and `name`, always
 /// evaluates false, and its index is never reissued.
-const fn void(index: u16, name: &'static str, kind: Kind, reason: &'static str) -> BitDef {
+const fn void(index: u16, name: &'static str, band: Option<Base>, reason: &'static str) -> BitDef {
     BitDef {
         index,
         name,
-        kind,
+        kind: kind_of(band),
+        band,
         status: BitStatus::Void { reason },
     }
 }
 
 /// A tombstone. It keeps `index` and `name` -- the history is the point -- and
 /// names the position that made it redundant.
-const fn retired(index: u16, name: &'static str, kind: Kind, duplicate_of: u16) -> BitDef {
+///
+/// It keeps its `band` too, for the same reason it keeps its name: a retired row
+/// is a record of what the position **was**, and "it was a `near_*` row" is only
+/// half of that when there are two families. [`set_near`] never reads it -- the
+/// [`BitStatus::Retired`] arm refuses first -- so this is documentation the type
+/// carries rather than a value anything decides on.
+const fn retired(index: u16, name: &'static str, band: Option<Base>, duplicate_of: u16) -> BitDef {
     BitDef {
         index,
         name,
-        kind,
+        kind: kind_of(band),
+        band,
         status: BitStatus::Retired { duplicate_of },
     }
 }
@@ -167,34 +245,52 @@ pub const TABLE: [BitDef; 280] = [
     plain(4, "ema20_above_ema200"),
     plain(5, "ema20_below_ema200"),
     // ---- 6–12. Classic pivots. Shipped. ---------------------------------
-    // 6 is the first tombstone: the pivot's own zone is the CPR body.
-    retired(6, "near_pivot_p", Kind::Near, 62),
-    near(7, "near_pivot_r1"),
-    near(8, "near_pivot_r2"),
-    near(9, "near_pivot_r3"),
-    near(10, "near_pivot_s1"),
-    near(11, "near_pivot_s2"),
-    near(12, "near_pivot_s3"),
+    // 6 is the first tombstone: the pivot's own zone is the CPR body. That
+    // identity holds only at `TOL_PIVOT_MILLI` = 500 on `Base::CprWidth`, which
+    // is what this row now declares -- see the paragraph on that constant for
+    // why a global width of 10 would have retired it on a false premise.
+    retired(6, "near_pivot_p", Some(Base::CprWidth), 62),
+    near(7, "near_pivot_r1", Base::CprWidth),
+    near(8, "near_pivot_r2", Base::CprWidth),
+    near(9, "near_pivot_r3", Base::CprWidth),
+    near(10, "near_pivot_s1", Base::CprWidth),
+    near(11, "near_pivot_s2", Base::CprWidth),
+    near(12, "near_pivot_s3", Base::CprWidth),
     // ---- 13–18. Previous-day high / low. Shipped. -----------------------
     plain(13, "close_above_pdh"),
     plain(14, "close_below_pdh"),
     plain(15, "close_above_pdl"),
     plain(16, "close_below_pdl"),
-    near(17, "near_pdh"),
-    near(18, "near_pdl"),
+    near(17, "near_pdh", Base::CprWidth),
+    near(18, "near_pdl", Base::CprWidth),
     // ---- 19–29. Fibonacci, bearish anchor (PDH). Shipped. ---------------
     // Rung 0 of a PDH-anchored ladder is the PDH, and rung 1.0 is the PDL.
-    retired(19, "near_fib_0", Kind::Near, 17),
-    near(20, "near_fib_236"),
-    near(21, "near_fib_382"),
-    near(22, "near_fib_50"),
-    near(23, "near_fib_618"),
-    near(24, "near_fib_786"),
-    retired(25, "near_fib_100", Kind::Near, 18),
-    near(26, "near_fib_1272"),
-    near(27, "near_fib_1618"),
-    near(28, "near_fib_200"),
-    near(29, "near_fib_2618"),
+    //
+    // THE BAND DECLARED HERE DOES NOT MATCH THE BAND OF THE ROW IT DUPLICATES,
+    // and that is recorded rather than reconciled. 19 and 25 are Fibonacci rows
+    // and measure against `Base::SessionRange`; 17 and 18 are built by
+    // `crates/indicators/src/daily.rs` from the daily levels and measure against
+    // `Base::CprWidth`. So the retirement premise -- "rung 0 *is* the PDH" -- is
+    // a claim about the LEVEL, and as PREDICATES the two were never exactly
+    // identical: same centre, different half-width. Position 19 is nonetheless
+    // still position 19 forever (§3.8), so there is nothing to undo. Declaring
+    // these two as anything other than what they were would rewrite history to
+    // make the table look consistent, which is the opposite of the point.
+    //
+    // Nothing reads these bands: `set_near`'s `BitStatus::Retired` arm refuses
+    // before the band is consulted. They are here so the discrepancy is visible
+    // in the type instead of only in this comment.
+    retired(19, "near_fib_0", Some(Base::SessionRange), 17),
+    near(20, "near_fib_236", Base::SessionRange),
+    near(21, "near_fib_382", Base::SessionRange),
+    near(22, "near_fib_50", Base::SessionRange),
+    near(23, "near_fib_618", Base::SessionRange),
+    near(24, "near_fib_786", Base::SessionRange),
+    retired(25, "near_fib_100", Some(Base::SessionRange), 18),
+    near(26, "near_fib_1272", Base::SessionRange),
+    near(27, "near_fib_1618", Base::SessionRange),
+    near(28, "near_fib_200", Base::SessionRange),
+    near(29, "near_fib_2618", Base::SessionRange),
     // ---- 30–36. Bar shape. Shipped. -------------------------------------
     plain(30, "bar_bullish"),
     plain(31, "bar_bearish"),
@@ -226,8 +322,8 @@ pub const TABLE: [BitDef; 280] = [
     plain(52, "close_above_vwap"),
     plain(53, "close_below_vwap"),
     // ---- 54–55. Extended pivots. Shipped. -------------------------------
-    near(54, "near_pivot_r5"),
-    near(55, "near_pivot_s5"),
+    near(54, "near_pivot_r5", Base::CprWidth),
+    near(55, "near_pivot_s5", Base::CprWidth),
     // ---- 56–59. Market structure. Shipped. ------------------------------
     plain(56, "bos_bullish"),
     plain(57, "bos_bearish"),
@@ -244,15 +340,15 @@ pub const TABLE: [BitDef; 280] = [
     // ---- 66–68. Gap midpoint. Shipped. ----------------------------------
     plain(66, "close_above_gap_mid"),
     plain(67, "close_below_gap_mid"),
-    near(68, "near_gap_mid"),
+    near(68, "near_gap_mid", Base::SessionRange),
     // ---- 69–70. Fibonacci, bullish anchor (PDL). Shipped. ---------------
-    near(69, "near_fib_bull_236"),
-    near(70, "near_fib_bull_786"),
+    near(69, "near_fib_bull_236", Base::SessionRange),
+    near(70, "near_fib_bull_786", Base::SessionRange),
     // ---- 71. Fibonacci extension. Shipped. ------------------------------
-    near(71, "near_fib_424"),
+    near(71, "near_fib_424", Base::SessionRange),
     // ---- 72–73. Swing levels. Shipped. ----------------------------------
-    near(72, "near_swing_high"),
-    near(73, "near_swing_low"),
+    near(72, "near_swing_high", Base::SessionRange),
+    near(73, "near_swing_low", Base::SessionRange),
     // =====================================================================
     // Everything below appends at 74. Nothing above it moved.
     // =====================================================================
@@ -281,76 +377,76 @@ pub const TABLE: [BitDef; 280] = [
     plain(86, "orb5_close_above_high"),
     plain(87, "orb5_close_below_low"),
     plain(88, "orb5_close_inside"),
-    near(89, "orb5_near_high"),
-    near(90, "orb5_near_low"),
+    near(89, "orb5_near_high", Base::SessionRange),
+    near(90, "orb5_near_low", Base::SessionRange),
     plain(91, "orb15_close_above_high"),
     plain(92, "orb15_close_below_low"),
     plain(93, "orb15_close_inside"),
-    near(94, "orb15_near_high"),
-    near(95, "orb15_near_low"),
+    near(94, "orb15_near_high", Base::SessionRange),
+    near(95, "orb15_near_low", Base::SessionRange),
     plain(96, "orb30_close_above_high"),
     plain(97, "orb30_close_below_low"),
     plain(98, "orb30_close_inside"),
-    near(99, "orb30_near_high"),
-    near(100, "orb30_near_low"),
+    near(99, "orb30_near_high", Base::SessionRange),
+    near(100, "orb30_near_low", Base::SessionRange),
     plain(101, "orb60_close_above_high"),
     plain(102, "orb60_close_below_low"),
     plain(103, "orb60_close_inside"),
-    near(104, "orb60_near_high"),
-    near(105, "orb60_near_low"),
+    near(104, "orb60_near_high", Base::SessionRange),
+    near(105, "orb60_near_low", Base::SessionRange),
     // ---- 106–109. Fibonacci, bullish anchor, extensions only. -----------
     // The retracement rungs of this ladder shipped at 69 and 70. These are
     // the four extensions beyond 1.0, and no rung already shipped repeats.
-    near(106, "near_fib_bull_1272"),
-    near(107, "near_fib_bull_1618"),
-    near(108, "near_fib_bull_200"),
-    near(109, "near_fib_bull_2618"),
+    near(106, "near_fib_bull_1272", Base::SessionRange),
+    near(107, "near_fib_bull_1618", Base::SessionRange),
+    near(108, "near_fib_bull_200", Base::SessionRange),
+    near(109, "near_fib_bull_2618", Base::SessionRange),
     // ---- 110–120. Fibonacci over the last five sessions, static. --------
     // Anchored to the high and low of the previous five sessions and fixed
     // for the whole of today, so every bar of the day sees the same ladder.
-    near(110, "near_fib_prev5_0"),
-    near(111, "near_fib_prev5_236"),
-    near(112, "near_fib_prev5_382"),
-    near(113, "near_fib_prev5_50"),
-    near(114, "near_fib_prev5_618"),
-    near(115, "near_fib_prev5_786"),
-    near(116, "near_fib_prev5_100"),
-    near(117, "near_fib_prev5_1272"),
-    near(118, "near_fib_prev5_1618"),
-    near(119, "near_fib_prev5_200"),
-    near(120, "near_fib_prev5_2618"),
+    near(110, "near_fib_prev5_0", Base::SessionRange),
+    near(111, "near_fib_prev5_236", Base::SessionRange),
+    near(112, "near_fib_prev5_382", Base::SessionRange),
+    near(113, "near_fib_prev5_50", Base::SessionRange),
+    near(114, "near_fib_prev5_618", Base::SessionRange),
+    near(115, "near_fib_prev5_786", Base::SessionRange),
+    near(116, "near_fib_prev5_100", Base::SessionRange),
+    near(117, "near_fib_prev5_1272", Base::SessionRange),
+    near(118, "near_fib_prev5_1618", Base::SessionRange),
+    near(119, "near_fib_prev5_200", Base::SessionRange),
+    near(120, "near_fib_prev5_2618", Base::SessionRange),
     // ---- 121–131. Fibonacci over the current session, running. ----------
     // Anchored to the session high and low SO FAR, so the ladder moves as the
     // day extends. At bar N it is computed from bars 0..=N of today and no
     // later bar -- `docs/03-vocabulary.md` §3, and the reason this group is
     // separate from the static one above rather than a mode of it.
-    near(121, "near_fib_curday_0"),
-    near(122, "near_fib_curday_236"),
-    near(123, "near_fib_curday_382"),
-    near(124, "near_fib_curday_50"),
-    near(125, "near_fib_curday_618"),
-    near(126, "near_fib_curday_786"),
-    near(127, "near_fib_curday_100"),
-    near(128, "near_fib_curday_1272"),
-    near(129, "near_fib_curday_1618"),
-    near(130, "near_fib_curday_200"),
-    near(131, "near_fib_curday_2618"),
+    near(121, "near_fib_curday_0", Base::SessionRange),
+    near(122, "near_fib_curday_236", Base::SessionRange),
+    near(123, "near_fib_curday_382", Base::SessionRange),
+    near(124, "near_fib_curday_50", Base::SessionRange),
+    near(125, "near_fib_curday_618", Base::SessionRange),
+    near(126, "near_fib_curday_786", Base::SessionRange),
+    near(127, "near_fib_curday_100", Base::SessionRange),
+    near(128, "near_fib_curday_1272", Base::SessionRange),
+    near(129, "near_fib_curday_1618", Base::SessionRange),
+    near(130, "near_fib_curday_200", Base::SessionRange),
+    near(131, "near_fib_curday_2618", Base::SessionRange),
     // ---- 132–142. Fibonacci over the opening gap leg. -------------------
     // Anchored to the two ends of the overnight gap: yesterday's close and
     // today's open. On a day with no gap the leg has zero length and every
     // rung collapses onto one price; that is a degenerate ladder, and the
     // evaluator's job is to abstain rather than to set eleven bits at once.
-    near(132, "near_fib_gap_0"),
-    near(133, "near_fib_gap_236"),
-    near(134, "near_fib_gap_382"),
-    near(135, "near_fib_gap_50"),
-    near(136, "near_fib_gap_618"),
-    near(137, "near_fib_gap_786"),
-    near(138, "near_fib_gap_100"),
-    near(139, "near_fib_gap_1272"),
-    near(140, "near_fib_gap_1618"),
-    near(141, "near_fib_gap_200"),
-    near(142, "near_fib_gap_2618"),
+    near(132, "near_fib_gap_0", Base::SessionRange),
+    near(133, "near_fib_gap_236", Base::SessionRange),
+    near(134, "near_fib_gap_382", Base::SessionRange),
+    near(135, "near_fib_gap_50", Base::SessionRange),
+    near(136, "near_fib_gap_618", Base::SessionRange),
+    near(137, "near_fib_gap_786", Base::SessionRange),
+    near(138, "near_fib_gap_100", Base::SessionRange),
+    near(139, "near_fib_gap_1272", Base::SessionRange),
+    near(140, "near_fib_gap_1618", Base::SessionRange),
+    near(141, "near_fib_gap_200", Base::SessionRange),
+    near(142, "near_fib_gap_2618", Base::SessionRange),
     // ---- 143–152. Session-anchored VWAP. --------------------------------
     // NAMED HERE FOR THE FIRST TIME. The shipped bits 52 and 53 are a bare
     // above/below on a VWAP whose anchor the vocabulary never stated. These
@@ -369,7 +465,7 @@ pub const TABLE: [BitDef; 280] = [
     // 144 close is below it
     plain(144, "close_below_vwap_session"),
     // 145 close is within tolerance of it
-    near(145, "near_vwap_session"),
+    near(145, "near_vwap_session", Base::SessionRange),
     // 146 close is above the first upper band (one deviation)
     plain(146, "close_above_vwap_band1_upper"),
     // 147 close is below the first lower band (one deviation)
@@ -379,9 +475,9 @@ pub const TABLE: [BitDef; 280] = [
     // 149 close is below the second lower band (two deviations)
     plain(149, "close_below_vwap_band2_lower"),
     // 150 close is within tolerance of the first upper band
-    near(150, "near_vwap_band1_upper"),
+    near(150, "near_vwap_band1_upper", Base::SessionRange),
     // 151 close is within tolerance of the first lower band
-    near(151, "near_vwap_band1_lower"),
+    near(151, "near_vwap_band1_lower", Base::SessionRange),
     // 152 close is between the two first-deviation bands
     plain(152, "inside_vwap_band1"),
     // ---- 153–177. Candlestick patterns. ---------------------------------
@@ -473,8 +569,8 @@ pub const TABLE: [BitDef; 280] = [
     // R4 and S4 get all three relations. R5 and S5 get only the two band
     // sides, because their `near_` positions are 54 and 55 and an index is
     // never reissued.
-    near(178, "near_pivot_r4"),
-    near(179, "near_pivot_s4"),
+    near(178, "near_pivot_r4", Base::CprWidth),
+    near(179, "near_pivot_s4", Base::CprWidth),
     plain(180, "close_above_pivot_r4_band"),
     plain(181, "close_below_pivot_r4_band"),
     plain(182, "close_above_pivot_s4_band"),
@@ -489,21 +585,21 @@ pub const TABLE: [BitDef; 280] = [
     // 61) and whether it is inside (62). It never asks whether price is AT
     // either edge. The design source plots both as tracked-price lines, so both
     // are levels a trader watches, not merely the boundary of a fill.
-    near(188, "near_cpr_tc"),
-    near(189, "near_cpr_bc"),
+    near(188, "near_cpr_tc", Base::CprWidth),
+    near(189, "near_cpr_bc", Base::CprWidth),
     // ---- 190–197. VWAP bands 2 and 3, completed. -------------------------
     //
     // `docs/09-design-sources.md` §2 ships THREE band multipliers — 1.0, 2.0,
     // 3.0. Positions 143–152 gave band 1 all five relations and band 2 only its
     // two outer sides; band 3 had nothing at all. A band the design draws and
     // the vocabulary cannot name is a level the sweep can never test.
-    near(190, "near_vwap_band2_upper"),
-    near(191, "near_vwap_band2_lower"),
+    near(190, "near_vwap_band2_upper", Base::SessionRange),
+    near(191, "near_vwap_band2_lower", Base::SessionRange),
     plain(192, "inside_vwap_band2"),
     plain(193, "close_above_vwap_band3_upper"),
     plain(194, "close_below_vwap_band3_lower"),
-    near(195, "near_vwap_band3_upper"),
-    near(196, "near_vwap_band3_lower"),
+    near(195, "near_vwap_band3_upper", Base::SessionRange),
+    near(196, "near_vwap_band3_lower", Base::SessionRange),
     plain(197, "inside_vwap_band3"),
     // ---- 198–234. The rest of the classical candlestick set. -------------
     //
@@ -579,235 +675,235 @@ pub const TABLE: [BitDef; 280] = [
     void(
         235,
         "near_forming_pivot_pivot",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         236,
         "close_above_forming_pivot_pivot_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         237,
         "close_below_forming_pivot_pivot_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         238,
         "near_forming_pivot_cpr_bc",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         239,
         "close_above_forming_pivot_cpr_bc_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         240,
         "close_below_forming_pivot_cpr_bc_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         241,
         "near_forming_pivot_cpr_tc",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant true except on a single-price day: |C - tc| equals the band exactly",
     ),
     void(
         242,
         "close_above_forming_pivot_cpr_tc_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         243,
         "close_below_forming_pivot_cpr_tc_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         244,
         "near_forming_pivot_r1",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         245,
         "close_above_forming_pivot_r1_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         246,
         "close_below_forming_pivot_r1_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         247,
         "near_forming_pivot_r2",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         248,
         "close_above_forming_pivot_r2_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         249,
         "close_below_forming_pivot_r2_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         250,
         "near_forming_pivot_r3",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         251,
         "close_above_forming_pivot_r3_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         252,
         "close_below_forming_pivot_r3_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         253,
         "near_forming_pivot_r4",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         254,
         "close_above_forming_pivot_r4_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         255,
         "close_below_forming_pivot_r4_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         256,
         "near_forming_pivot_r5",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         257,
         "close_above_forming_pivot_r5_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         258,
         "close_below_forming_pivot_r5_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         259,
         "near_forming_pivot_s1",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         260,
         "close_above_forming_pivot_s1_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         261,
         "close_below_forming_pivot_s1_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         262,
         "near_forming_pivot_s2",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         263,
         "close_above_forming_pivot_s2_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         264,
         "close_below_forming_pivot_s2_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         265,
         "near_forming_pivot_s3",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         266,
         "close_above_forming_pivot_s3_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         267,
         "close_below_forming_pivot_s3_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         268,
         "near_forming_pivot_s4",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         269,
         "close_above_forming_pivot_s4_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         270,
         "close_below_forming_pivot_s4_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         271,
         "near_forming_pivot_s5",
-        Kind::Near,
+        Some(Base::CprWidth),
         "constant false: |C - level| is a fixed multiple of the band on every bar",
     ),
     void(
         272,
         "close_above_forming_pivot_s5_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     void(
         273,
         "close_below_forming_pivot_s5_band",
-        Kind::Plain,
+        None,
         "carries only sign(v - u), the running-range axis bits 40-43 already hold",
     ),
     // ---- 274–275. The CPR's width, appended. ------------------------------
@@ -984,11 +1080,22 @@ pub fn set_exact(mask: ConditionMask, index: u16) -> Result<ConditionMask, Vocab
 /// a [`Tolerance`] cannot be built from the unpinned sentinel, so no `near_*`
 /// bit can be set from an invented number.
 ///
+/// **And it must be the right *kind* of number, not merely a pinned one.** The
+/// tolerance names the [`Base`] it was measured on and the row names the one it
+/// requires; a mismatch is [`VocabError::WrongBand`]. Before that check existed
+/// this function asked only whether the position was a `near_*` row, so the
+/// pivot width on a Fibonacci rung -- fifty times too wide at today's pins --
+/// returned `Ok`, and the resulting mask was indistinguishable from a correct
+/// one for the rest of the run's life.
+///
 /// # Errors
 ///
 /// [`VocabError::NoSuchBit`] past the end of the table;
-/// [`VocabError::Retired`] for a tombstone; [`VocabError::NotNear`] for a
-/// position that decides on its own, which takes [`set_exact`].
+/// [`VocabError::Retired`] for a tombstone; [`VocabError::Void`] for a
+/// definitionally-constant position; [`VocabError::NotNear`] for a position
+/// that decides on its own, which takes [`set_exact`];
+/// [`VocabError::WrongBand`] when the tolerance measures against the other
+/// family's quantity, or against none.
 pub fn set_near(
     mask: ConditionMask,
     index: u16,
@@ -1007,8 +1114,38 @@ pub fn set_near(
     if let BitStatus::Void { reason } = def.status {
         return Err(VocabError::Void { index, reason });
     }
-    if def.kind == Kind::Plain {
+    // `def.band` and not `def.kind`: the two say the same thing -- `kind_of`
+    // derives one from the other -- but only `band` carries the value the next
+    // check needs. Reading `kind` here and `band` below would be two lookups of
+    // one fact, and a `let ... else` on `band` after a `kind` test writes an arm
+    // no input can reach, which `cargo llvm-cov` counts forever as a region no
+    // test closed. The `else` here IS reachable: every plain row takes it.
+    let Some(expected) = def.band else {
         return Err(VocabError::NotNear { index });
+    };
+    // THE BAND FAMILY IS CHECKED BEFORE THE BAND IS APPLIED.
+    //
+    // Without this the function accepted either width for any `near_*` row, so
+    // a caller handing the CPR-width band to a Fibonacci rung -- fifty times too
+    // wide at today's pins -- got `Ok` and a set bit. `CLAUDE.md` §4: degrade
+    // loudly and name the reason, or refuse. This refuses, and the refusal
+    // carries both bases so the message says which side was wrong.
+    //
+    // It has to be here rather than in `Tolerance::covers`, which sees only two
+    // `i64` spans and cannot tell a session range from a CPR width. The position
+    // is the only thing that knows which family it belongs to.
+    //
+    // WHAT THIS DOES NOT CATCH: `range_paisa`. A caller can still pass the right
+    // TOLERANCE and the wrong SPAN -- the session range where the CPR width
+    // belongs -- and every type here is satisfied. That failure is a bar wrong
+    // rather than a vocabulary wrong, and it stays with the seven modules of
+    // `crates/indicators` that derive the span.
+    if tolerance.base() != Some(expected) {
+        return Err(VocabError::WrongBand {
+            index,
+            expected,
+            got: tolerance.base(),
+        });
     }
     if tolerance.covers(value_paisa, level_paisa, range_paisa) {
         return Ok(mask.with_bit(u32::from(index)));
@@ -1038,6 +1175,17 @@ mod tests {
     fn test_tolerance() -> Tolerance {
         crate::tolerance::pinned_fib()
             .expect("the pinned width is neither the sentinel nor negative")
+    }
+
+    /// The other family's width, on [`Base::CprWidth`].
+    ///
+    /// A second helper and not a parameter on the first, because the whole
+    /// content of the tests below is that these two are **not**
+    /// interchangeable: a test that could reach either through one call would
+    /// be one argument away from proving nothing.
+    fn pivot_tolerance() -> Tolerance {
+        crate::tolerance::pinned_pivot()
+            .expect("the pinned pivot width is neither the sentinel nor negative")
     }
 
     #[test]
@@ -1143,15 +1291,21 @@ mod tests {
         assert!(m.get(0) && m.popcount() == 1);
     }
 
+    /// 22 and not 17. Both are live `near_*` rows and the arithmetic is
+    /// identical, but 17 `near_pdh` declares [`Base::CprWidth`] -- it is built
+    /// from the daily levels by `crates/indicators/src/daily.rs` and measured
+    /// against the CPR width -- so the session-range width this test carries is
+    /// now refused there. 22 `near_fib_50` is the same shape on the family the
+    /// width belongs to.
     #[test]
     fn set_near_needs_the_band_to_actually_cover() {
         let tol = test_tolerance();
         let level = 2_500_000i64;
-        let hit = set_near(ConditionMask::ZERO, 17, tol, level + 200, level, 20_000)
-            .expect("17 is live and near");
-        assert!(hit.get(17));
-        let miss = set_near(ConditionMask::ZERO, 17, tol, level + 200_000, level, 20_000)
-            .expect("17 is live and near");
+        let hit = set_near(ConditionMask::ZERO, 22, tol, level + 200, level, 20_000)
+            .expect("22 is live and near on the session range");
+        assert!(hit.get(22));
+        let miss = set_near(ConditionMask::ZERO, 22, tol, level + 200_000, level, 20_000)
+            .expect("22 is live and near on the session range");
         assert!(miss.is_empty(), "outside the band sets nothing");
     }
 
@@ -1185,6 +1339,12 @@ mod tests {
         assert_eq!(definition(NEXT_FREE), None);
         let d = definition(6).expect("position 6 exists; it is retired, which is not absent");
         assert_eq!(d.kind, Kind::Near);
+        assert_eq!(
+            d.band,
+            Some(Base::CprWidth),
+            "a tombstone keeps the family it was in, the same way it keeps its \
+             name; the retirement premise for 6 holds only on the CPR width"
+        );
         assert_eq!(d.status, BitStatus::Retired { duplicate_of: 62 });
         assert!(format!("{d:?}").contains("near_pivot_p"));
     }
@@ -1195,15 +1355,16 @@ mod tests {
         assert_eq!(usize::from(NEXT_FREE), COUNT);
     }
 
-    /// **A row constructor carries the `kind` and the `reason` it is handed, and
-    /// does not substitute the answer today's rows happen to want.**
+    /// **A row constructor carries the `band` and the `reason` it is handed,
+    /// derives `kind` from the `band`, and does not substitute the answer
+    /// today's rows happen to want.**
     ///
     /// [`TABLE`] is a `const`, so until this test existed the four constructors
     /// were only ever evaluated by the compiler and no test ever called one.
-    /// That hid two mistakes that no table-wide check can see:
+    /// That hid three mistakes that no table-wide check can see:
     ///
     /// * All three tombstones are [`Kind::Near`] today, so a [`retired`] that
-    ///   ignored its `kind` argument and wrote `Kind::Near` would pass every
+    ///   ignored its band argument and hardcoded a near row would pass every
     ///   test in this crate -- until the first plain position is retired, at
     ///   which point a position that decides on its own starts demanding a
     ///   tolerance.
@@ -1212,11 +1373,20 @@ mod tests {
     ///   one fixed sentence for all 39 rows would pass that too -- and every
     ///   void row would then explain itself with another row's identity, which
     ///   is the reason travelling in [`VocabError::Void`] to whoever asked.
+    /// * **The band a constructor stores decides which tolerance [`set_near`]
+    ///   accepts for that position.** A constructor that dropped it and wrote
+    ///   one family for every row would pass every count in
+    ///   `crates/vocab/tests/table.rs`, because those count [`Kind`] and `Kind`
+    ///   is *derived* -- so it would still come out `Near` -- while half the
+    ///   table quietly started accepting a fifty-times-wrong width again. Each
+    ///   case below therefore hands in the band that is **not** what the row
+    ///   shape suggests: the near row is built on the pivot family, the void
+    ///   row on the session range.
     ///
     /// The indices are [`NEXT_FREE`] on purpose: this is the constructors' own
     /// contract and not a claim about any shipped row.
     #[test]
-    fn the_row_constructors_carry_the_kind_and_the_reason_they_are_handed() {
+    fn the_row_constructors_carry_the_band_and_the_reason_they_are_handed() {
         let synthetic = NEXT_FREE;
 
         assert_eq!(
@@ -1225,42 +1395,63 @@ mod tests {
                 index: synthetic,
                 name: "a_plain_row",
                 kind: Kind::Plain,
+                band: None,
                 status: BitStatus::Live,
             },
-            "`plain` builds a live row that decides on its own"
+            "`plain` builds a live row that decides on its own and needs no band"
         );
         assert_eq!(
-            near(synthetic, "a_near_row"),
+            near(synthetic, "a_near_row", Base::CprWidth),
             BitDef {
                 index: synthetic,
                 name: "a_near_row",
                 kind: Kind::Near,
+                band: Some(Base::CprWidth),
                 status: BitStatus::Live,
             },
-            "`near` differs from `plain` in exactly one field, and it is `kind`"
+            "`near` differs from `plain` in exactly two fields, and `kind` is \
+             the one it computes rather than the one it is told"
+        );
+        // The band handed in is `SessionRange` while the name says nothing about
+        // a family, so a `near` that hardcoded `CprWidth` -- the value the case
+        // above uses -- is caught here and not there.
+        assert_eq!(
+            near(synthetic, "another_near_row", Base::SessionRange).band,
+            Some(Base::SessionRange),
+            "`near` must store the base it was handed; it is the value that \
+             decides which tolerance `set_near` will accept for the row"
         );
         assert_eq!(
-            retired(synthetic, "a_retired_row", Kind::Plain, 62),
+            retired(synthetic, "a_retired_row", None, 62),
             BitDef {
                 index: synthetic,
                 name: "a_retired_row",
                 kind: Kind::Plain,
+                band: None,
                 status: BitStatus::Retired { duplicate_of: 62 },
             },
-            "`retired` must pass `kind` through; no shipped tombstone is plain, \
-             so hardcoding `Kind::Near` here would go unnoticed"
+            "`retired` must pass its band through; no shipped tombstone is \
+             plain, so hardcoding a near row here would go unnoticed"
         );
         assert_eq!(
-            void(synthetic, "a_void_row", Kind::Near, "this exact sentence"),
+            void(
+                synthetic,
+                "a_void_row",
+                Some(Base::SessionRange),
+                "this exact sentence"
+            ),
             BitDef {
                 index: synthetic,
                 name: "a_void_row",
                 kind: Kind::Near,
+                band: Some(Base::SessionRange),
                 status: BitStatus::Void {
                     reason: "this exact sentence"
                 },
             },
-            "`void` must carry the reason verbatim, not a fixed stand-in"
+            "`void` must carry the reason verbatim and the band verbatim; all \
+             thirteen shipped void near rows are `CprWidth`, so a hardcoded \
+             family would go unnoticed in the table"
         );
     }
 
@@ -1278,13 +1469,22 @@ mod tests {
     /// them for the wrong reason -- it would answer
     /// [`VocabError::NeedsTolerance`] if the void arm were gone, so it cannot
     /// see this. [`set_near`] is the only entry point that can.
+    ///
+    /// **Void also outranks [`VocabError::WrongBand`], and 238 is the row that
+    /// proves it.** It is a `near_forming_pivot_*` row, so its declared band is
+    /// [`Base::CprWidth`], while `tol` here is the session-range width -- both
+    /// refusals are available and only one is right. Void is: `WrongBand` tells
+    /// a caller to come back with the other width, and 238 refuses that call
+    /// too, so it would send them after a call that cannot exist. Same rule as
+    /// the `NotNear` case below, same reason.
     #[test]
     fn set_near_refuses_a_void_position_even_where_the_band_would_cover() {
         let tol = test_tolerance();
         let level = 2_500_000i64;
 
-        // 238 is `near_forming_pivot_cpr_bc`: void AND near, so `set_near` is
-        // the only door it has.
+        // 238 is `near_forming_pivot_cpr_bc`: void AND near AND on the other
+        // band family, so `set_near` is the only door it has and three arms
+        // could answer. Void is the one that must.
         assert_eq!(
             set_near(ConditionMask::ZERO, 238, tol, level, level, 20_000),
             Err(VocabError::Void {
@@ -1306,13 +1506,227 @@ mod tests {
             "a void row is refused as void, not redirected to a call that refuses it too"
         );
 
-        // The control: 17 is live, near, and the very same arguments set it. So
-        // the two refusals above are the void arm and not a band that missed.
-        let live = set_near(ConditionMask::ZERO, 17, tol, level, level, 20_000)
-            .expect("17 is live and near");
+        // The control: 22 is live, near, on `tol`'s own family, and the very
+        // same arguments set it. So the two refusals above are the void arm and
+        // not a band that missed -- nor, now, a band family that mismatched.
+        let live = set_near(ConditionMask::ZERO, 22, tol, level, level, 20_000)
+            .expect("22 is live, near, and on the session range");
         assert!(
-            live.get(17),
+            live.get(22),
             "these arguments do cover, so the refusals above are the void arm"
+        );
+    }
+
+    /// **The other family's width is refused, in both directions, on arguments
+    /// that would otherwise have set the bit.**
+    ///
+    /// Every call below passes `value_paisa == level_paisa`, which
+    /// [`Tolerance::covers`] answers true for at any legal width. So the band
+    /// test cannot be what refuses these: delete the band-family check and all
+    /// four calls return `Ok` with the bit set. That is what [`set_near`] did
+    /// before, and it is why this is a test about `Err` values rather than
+    /// about masks -- the mask a wrong band produces is byte for byte the mask
+    /// a right one produces, and no assertion on it could tell them apart.
+    ///
+    /// Both directions, because a check written `expected == Base::CprWidth`
+    /// rather than `expected == tolerance.base()` would refuse one family and
+    /// wave the other through, and one direction cannot see that.
+    #[test]
+    fn set_near_refuses_the_other_familys_band_and_still_takes_its_own() {
+        let fib = test_tolerance();
+        let pivot = pivot_tolerance();
+        let level = 2_500_000i64;
+        let range = 20_000i64;
+
+        // 7 `near_pivot_r1` measures against the CPR width. The session-range
+        // width is fifty times narrower and means something else entirely.
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 7, fib, level, level, range),
+            Err(VocabError::WrongBand {
+                index: 7,
+                expected: Base::CprWidth,
+                got: Some(Base::SessionRange),
+            }),
+            "a pivot row must refuse the Fibonacci width even on an exact hit"
+        );
+        // 22 `near_fib_50` measures against the session range, and the pivot
+        // width is the fifty-times-too-wide direction of the same mistake.
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 22, pivot, level, level, range),
+            Err(VocabError::WrongBand {
+                index: 22,
+                expected: Base::SessionRange,
+                got: Some(Base::CprWidth),
+            }),
+            "a Fibonacci row must refuse the pivot width even on an exact hit"
+        );
+
+        // The happy paths, on the same two rows and the same arguments, so the
+        // refusals above are the family check and not the rows being unusable.
+        let on_pivot = set_near(ConditionMask::ZERO, 7, pivot, level, level, range)
+            .expect("7 is live, near, and this is its own family's width");
+        assert!(on_pivot.get(7), "the right band still sets the bit");
+        let on_fib = set_near(ConditionMask::ZERO, 22, fib, level, level, range)
+            .expect("22 is live, near, and this is its own family's width");
+        assert!(on_fib.get(22), "the right band still sets the bit");
+
+        // A width with no base at all. `Tolerance::from_milli` produces one and
+        // it is a legal width -- the refusal has to be about the missing base,
+        // and has to carry `got: None` so the message can say so rather than
+        // naming a family the caller never chose.
+        let baseless = Tolerance::from_milli(crate::tolerance::TOL_FIB_MILLI)
+            .expect("a width of TOL_FIB_MILLI is neither the sentinel nor negative");
+        assert_eq!(baseless.milli(), fib.milli(), "same number, no base");
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 22, baseless, level, level, range),
+            Err(VocabError::WrongBand {
+                index: 22,
+                expected: Base::SessionRange,
+                got: None,
+            }),
+            "the right number with no stated base is not the right band"
+        );
+    }
+
+    /// **What the wrong band actually did, in paisa.**
+    ///
+    /// The test above proves the refusal; this one proves the refusal was worth
+    /// having, because "50x" is a ratio and a ratio does not say whether any bar
+    /// ever landed between the two.
+    ///
+    /// One bar, 40.00 points off a level on a 200.00-point session. Its own
+    /// band -- 22 `near_fib_50` on [`Base::SessionRange`] at
+    /// [`TOL_FIB_MILLI`] -- is 2.00 points, so the bit is **false**. The pivot
+    /// width over the same span is 100.00 points, so before the family check the
+    /// same call set the bit and the mask reported `near_fib_50` on a bar twenty
+    /// times outside the band that name refers to.
+    ///
+    /// [`Tolerance::covers`] is called directly for both widths first. That is
+    /// the part that has not changed and must not: the refusal has to come from
+    /// the family check, not from the arithmetic quietly starting to disagree.
+    #[test]
+    fn the_wrong_band_would_have_set_a_bit_on_a_bar_its_own_band_excludes() {
+        let fib = test_tolerance();
+        let pivot = pivot_tolerance();
+        let level = 2_500_000i64;
+        let range = 20_000i64;
+        let off_by = 4_000i64;
+
+        assert!(
+            !fib.covers(level + off_by, level, range),
+            "40.00 points is outside the 2.00-point session-range band"
+        );
+        assert!(
+            pivot.covers(level + off_by, level, range),
+            "and inside the 100.00-point band the CPR width would give, which \
+             is the whole of the discrepancy"
+        );
+
+        assert_eq!(
+            set_near(ConditionMask::ZERO, 22, pivot, level + off_by, level, range),
+            Err(VocabError::WrongBand {
+                index: 22,
+                expected: Base::SessionRange,
+                got: Some(Base::CprWidth),
+            }),
+            "this is the call that used to return Ok with bit 22 set"
+        );
+
+        let honest = set_near(ConditionMask::ZERO, 22, fib, level + off_by, level, range)
+            .expect("22 is live and near on the session range");
+        assert!(
+            honest.is_empty(),
+            "on its own band the bar is outside, so the bit is false -- which \
+             is the answer the wrong band replaced with true"
+        );
+    }
+
+    /// **Every `near_*` row declares the family its name belongs to, and the two
+    /// families have the sizes the modules that set them have.**
+    ///
+    /// The band is a per-row declaration, so nothing but this reads all 97 of
+    /// them together. Without it a single row typed into the wrong family is
+    /// invisible: `crates/vocab/tests/table.rs` counts [`Kind`], and `Kind` is
+    /// derived from the band, so a `near_fib_*` row declared `CprWidth` still
+    /// counts as near and every count there still passes -- while that one
+    /// position silently starts demanding, and accepting, a fifty-times-wrong
+    /// width.
+    ///
+    /// The rule is the name, with **two positions the name does not decide**.
+    /// 17 `near_pdh` and 18 `near_pdl` are Fibonacci-sounding rungs by name and
+    /// pivot-family by construction: `crates/indicators/src/daily.rs` builds
+    /// them from the same `DailyLevels` as R1–R5 and hands its whole plan one
+    /// width, the CPR width. They are named here rather than folded into the
+    /// name rule, because an exception inside a rule is an exception nobody
+    /// reads.
+    ///
+    /// The counts are the second half. A name rule alone is satisfied by a table
+    /// with no `near_*` rows at all.
+    #[test]
+    fn every_near_row_declares_the_family_its_name_belongs_to() {
+        // The two rows whose family their name does not give away.
+        let pivot_by_construction = ["near_pdh", "near_pdl"];
+
+        let mut live_cpr = 0;
+        let mut live_range = 0;
+        let mut all_near = 0;
+
+        for def in &TABLE {
+            let Some(band) = def.band else {
+                assert_eq!(
+                    def.kind,
+                    Kind::Plain,
+                    "position {} declares no band, so it cannot need one",
+                    def.index
+                );
+                continue;
+            };
+            all_near += 1;
+            assert_eq!(
+                def.kind,
+                Kind::Near,
+                "position {} declares a band, so it needs a tolerance",
+                def.index
+            );
+
+            let named_pivot = def.name.contains("pivot") || def.name.contains("cpr");
+            let want = if named_pivot || pivot_by_construction.contains(&def.name) {
+                Base::CprWidth
+            } else {
+                Base::SessionRange
+            };
+            assert_eq!(band, want, "position {} is `{}`", def.index, def.name);
+
+            if def.status == BitStatus::Live {
+                match band {
+                    Base::CprWidth => live_cpr += 1,
+                    Base::SessionRange => live_range += 1,
+                }
+            }
+        }
+
+        assert_eq!(
+            live_cpr, 14,
+            "the fourteen live positions `crates/indicators/src/daily.rs` sets \
+             from one plan on the CPR width: 7-12, 17, 18, 54, 55, 178, 179, \
+             188, 189"
+        );
+        assert_eq!(
+            live_range, 67,
+            "every other live near position: the four Fibonacci ladders, the \
+             eight opening-range edges, the seven VWAP bands, the gap mid and \
+             the two swing levels"
+        );
+        assert_eq!(
+            live_cpr + live_range,
+            81,
+            "and together they are the 81 live near positions \
+             `crates/vocab/tests/table.rs` counts by `Kind`"
+        );
+        assert_eq!(
+            all_near, 97,
+            "the 81 live, the three tombstones, and the thirteen void \
+             forming-pivot rows"
         );
     }
 }

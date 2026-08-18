@@ -776,8 +776,32 @@ mod tests {
     /// used it would decide the answer for every other test in the binary and
     /// would pass or fail on ordering. `Sink::open` takes a config and owns its
     /// directory, which is why [`json_over`] and [`page_over`] take a path.
+    ///
+    /// # Why the path comes from `crate::scratch::path` and not from here
+    ///
+    /// It used to be `std::env::temp_dir().join(format!("brutex-logs-{name}"))`
+    /// — one fixed directory per test name, in a directory every process on the
+    /// machine shares — and the first thing this helper does to it is
+    /// `remove_dir_all`. Two `api` test binaries alive at once therefore delete
+    /// each other's sink mid-test: two `cargo test` runs, a `cargo llvm-cov`
+    /// beside a `cargo test`, or two agents working one checkout are each
+    /// enough. The failure it produces is not a clear one — the loser's events
+    /// are gone by the time `json_over` reads the directory back, so it surfaces
+    /// as a rendered page missing a row that was demonstrably emitted, which
+    /// reads as a bug in the renderer and is not one.
+    ///
+    /// `crate::scratch::path` stamps the process id into the name and adds the
+    /// `brutex-` prefix, so no two live processes name the same directory. That
+    /// is the failure `crate::scratch` was written for; this call site was
+    /// simply missed when the rest of the crate moved over.
+    ///
+    /// **It does not make `name` optional.** The stamp is the process, not the
+    /// test, so two tests in this module passing the same `name` still share one
+    /// sink and still delete each other's events — the collision just moves
+    /// inside the binary, where it is at least deterministic. Every caller below
+    /// passes a name no other one does, and a new caller must too.
     fn sink_in(name: &str) -> (std::path::PathBuf, telemetry::Sink) {
-        let dir = std::env::temp_dir().join(format!("brutex-logs-{name}"));
+        let dir = crate::scratch::path(&format!("logs-{name}"));
         let _ignored = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a scratch directory");
         let sink = telemetry::Sink::open(
@@ -785,6 +809,30 @@ mod tests {
         )
         .expect("opens");
         (dir, sink)
+    }
+
+    /// THE FIXTURE DIRECTORY NAMES THE PROCESS THAT OPENED IT.
+    ///
+    /// This is the one property of [`sink_in`] no other test in this module can
+    /// observe, because the collision it prevents is between two *processes* and
+    /// every test here runs in one. Without the `crate::scratch::path` call the
+    /// directory is `brutex-logs-pid-stamp` for every process on the machine, a
+    /// name this helper opens by deleting — so the assertion below is the only
+    /// thing standing between a future edit and the intermittent, misattributed
+    /// failure described on `sink_in`.
+    ///
+    /// The rest of the naming contract — that two names differ, that the parent
+    /// is the temporary directory, that one name asked for twice is one path —
+    /// belongs to `crate::scratch` and is asserted there. Restating it here
+    /// would be a second copy of a rule that already has one.
+    #[test]
+    fn a_sink_directory_names_the_process_that_opened_it() {
+        let (dir, _sink) = sink_in("pid-stamp");
+        let text = dir.to_string_lossy().into_owned();
+        assert!(
+            text.contains(&std::process::id().to_string()),
+            "a fixture two processes can both name is one they can both delete: {text}"
+        );
     }
 
     /// The whole path: emit, roll to disk, read back, render both surfaces.

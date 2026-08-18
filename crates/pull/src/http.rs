@@ -838,11 +838,50 @@ fn numbers(root: &serde_json::Value, name: &str) -> Result<Vec<i64>, FetchError>
 
 /// One count, whatever shape carried it.
 ///
+/// # `i64::MIN` IS THE NULL SENTINEL, SO IT IS NOT A COUNT THIS CAN CARRY
+///
+/// `CLAUDE.md` §7 makes `i64::MIN` the open-interest **null** and zero a real
+/// zero. [`crate::fetch::land`] writes that sentinel for a field the vendor did
+/// not send — `row.open_interest.unwrap_or(i64::MIN)` — so a vendor that sends
+/// the literal `-9223372036854775808` in its open-interest column used to decode
+/// here as an ordinary number, satisfy every check below, land on disk, and read
+/// back as *no open interest at all*. The reinterpretation was silent in both
+/// directions: nothing said the number had been swallowed, and nothing said the
+/// null had been invented.
+///
+/// It is refused HERE, at the vendor boundary, for the same reason a negative
+/// price is refused in [`one_price`]: this is the last place the field's name
+/// and the vendor's own JSON are both still in hand. By the append it is one
+/// `i64` among millions with nothing left to say where it came from.
+///
+/// **Refused for every field this function reads, not only open interest.** A
+/// volume of `i64::MIN` is not a volume and a timestamp of `i64::MIN` is not a
+/// time, so one rule costs nothing and is cheaper to keep true than three. What
+/// it costs: no field read through here can ever carry that one value. The
+/// sentinel already spent it.
+///
+/// The second arm below cannot produce it — it divides by 100, and no `i64`
+/// divided by 100 is `i64::MIN`. There is no check there because there is no
+/// reachable branch to check, and an unreachable branch is a coverage hole with
+/// a comment on it.
+///
 /// # Errors
 ///
 /// [`FetchError::TransportFailed`] naming the field and the value.
 fn one_number(v: &serde_json::Value, name: &str) -> Result<i64, FetchError> {
     if let Some(n) = v.as_i64() {
+        if n == i64::MIN {
+            return Err(FetchError::TransportFailed {
+                detail: format!(
+                    "{name:?} holds {v}, which is the value this store reserves \
+                     for a field the vendor did NOT send (CLAUDE.md §7: \
+                     i64::MIN is the open-interest null and zero means zero). \
+                     Stored, it would read back as an absence rather than as \
+                     the number that arrived, so it is refused here where the \
+                     vendor's own value is still visible."
+                ),
+            });
+        }
         return Ok(n);
     }
     let refuse = || FetchError::TransportFailed {
@@ -915,10 +954,30 @@ fn container<'a>(
 /// `>=` and `==` mutants can only be killed by a test that allocates 64 MiB —
 /// which is a test nobody should write and which therefore never got written.
 /// Split out, the same boundary is three assertions and no allocation at all.
+///
+/// Its argument is now the count [`body_within`] returns, which is the body's
+/// length when it fitted and a lower bound on it when it did not — so the
+/// question is the same one and the answer no longer requires holding the
+/// answer. One socket test does move a body past the cap end to end, because
+/// *where* the check now runs is not something an arithmetic assertion can
+/// prove; the arithmetic assertions below still own the boundary itself.
 #[must_use]
 const fn too_large(len: usize) -> bool {
     len > MAX_RESPONSE_BYTES
 }
+
+/// The most of a **refusal** body this build will take off the socket.
+///
+/// [`trim`] already cuts what reaches the error to 500 characters, but it can
+/// only cut a `String` that has already been built — so a vendor answering 500
+/// with a gigabyte cost a gigabyte of memory to produce half a kilobyte of log.
+/// The read stops here instead. Eight kibibytes is far more than any broker's
+/// JSON error object, and it is two orders of magnitude more than `trim` will
+/// keep, so nothing an operator would have read is lost.
+///
+/// Deliberately **not** [`MAX_RESPONSE_BYTES`]: that cap is sized for a window
+/// of bars, and a refusal is a sentence.
+const MAX_REFUSAL_BYTES: usize = 8 * 1024;
 
 /// As much of a vendor's refusal as belongs in an error.
 ///
@@ -927,6 +986,141 @@ const fn too_large(len: usize) -> bool {
 /// the cut cannot land inside one.
 fn trim(body: &str) -> String {
     body.chars().take(500).collect()
+}
+
+/// Reads a body a frame at a time, keeping at most `cap` bytes of it.
+///
+/// Returns what was kept and **how many bytes were seen** — which is the body's
+/// true length when it fitted, and a lower bound on it when it did not, because
+/// the read stops rather than continuing to measure something it has already
+/// refused. [`too_large`] applied to the second value is therefore the same
+/// question the old `text().len()` check asked, answered before the memory is
+/// committed rather than after.
+///
+/// # Why not [`reqwest::Response::text`]
+///
+/// `text()` reads the WHOLE body and then hands it over. Every size check
+/// written after it is a check on memory already spent: honest about the number
+/// and useless about the cost. A vendor — or anything answering on the vendor's
+/// address — that replies to a one-day request with a stream that does not end
+/// took the process down long before the comparison ran. `Content-Length` is
+/// checked before this is called, but that is a CLAIM the host may omit and may
+/// get wrong; these are the bytes, and the bytes are the fact.
+///
+/// # What this bounds, and what it does not
+///
+/// Memory: the kept buffer never exceeds `cap`, because a frame that would
+/// carry it past is appended only as far as the room left. Peak is `cap` plus
+/// whatever single frame hyper hands over, which the sender does not choose.
+///
+/// It does **not** bound time. An endless stream of zero-length data frames
+/// grows nothing and returns nothing; what ends that is the client's own
+/// [`REQUEST_TIMEOUT_SECS`], which `reqwest` applies to the body read as well as
+/// to the connect. There is no second timer here and this comment is the whole
+/// of the claim about it.
+///
+/// Decoded lossily, which is what `text()` does for a body that declares no
+/// charset. JSON is UTF-8 by definition, so a replacement character means a
+/// malformed body — and that becomes a decode refusal one call later, naming
+/// what could not be read.
+///
+/// # Errors
+///
+/// [`FetchError::TransportFailed`] if a frame never arrives.
+async fn body_within(
+    answer: &mut reqwest::Response,
+    cap: usize,
+) -> Result<(String, usize), FetchError> {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut seen: usize = 0;
+    while let Some(frame) = answer
+        .chunk()
+        .await
+        .map_err(|why| FetchError::TransportFailed {
+            detail: format!("the answer could not be read: {why}"),
+        })?
+    {
+        // SATURATING, because `seen` is a count of bytes from outside and
+        // `overflow-checks` is on in both profiles: a wrapped total would be a
+        // plausible small number that passes the cap, which is the one failure
+        // this whole function exists to remove.
+        seen = seen.saturating_add(frame.len());
+        let room = cap.saturating_sub(kept.len());
+        if frame.len() > room {
+            // AS MUCH AS FITS, THEN STOP. Dropping the whole frame instead
+            // would leave a refusal body empty whenever the vendor sent it in
+            // one piece — the operator would lose the sentence that explains
+            // the failure, which is the only reason a refusal body is read.
+            kept.extend_from_slice(frame.get(..room).unwrap_or_default());
+            break;
+        }
+        kept.extend_from_slice(&frame);
+    }
+    Ok((String::from_utf8_lossy(&kept).into_owned(), seen))
+}
+
+/// Everything a [`FetchError::VendorRefused`] says beyond its status number.
+///
+/// Called only when the status is not a success, and it consumes as much of the
+/// body as [`MAX_REFUSAL_BYTES`] allows — so a caller must not read the body
+/// again afterwards. There is nothing left to read.
+async fn refusal_words(answer: &mut reqwest::Response) -> String {
+    // A REDIRECT IS A REFUSAL, SO IT HAS TO SAY SO IN WORDS.
+    //
+    // The client does not follow one (see `HttpSource::new`), which means a 3xx
+    // arrives here instead of silently becoming a request to another host
+    // carrying the credential. Its body is almost always empty, so without this
+    // the operator would get `302` and nothing else. The `Location` is named —
+    // it is the vendor's own routing, not a secret — and the credential is not,
+    // because it never appears in anything this function can reach.
+    let hint = answer.status().is_redirection().then(|| {
+        let target = answer
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map_or_else(
+                || "no Location header".to_owned(),
+                |v| v.chars().take(200).collect(),
+            );
+        format!(
+            "this build does not follow redirects, because the credential \
+             travels in a header no HTTP client knows to strip. The vendor \
+             wanted to send this request to: {target}"
+        )
+    });
+    // A REFUSAL BODY IS UNBOUNDED INPUT TOO, AND IT USED TO BE READ WHOLE.
+    //
+    // This was `answer.text()`, so the cut `trim` performs ran on a `String`
+    // that had already been materialised at whatever size the far end chose —
+    // and on this path there was no size check at all, only the one on the
+    // success path. A 500 carrying a gigabyte was a gigabyte held to print 500
+    // characters of it.
+    //
+    // `unwrap_or_default` for the same reason `text()` carried one: a refusal
+    // whose body could not be read is still a refusal, and the status is the
+    // part the rate governor acts on.
+    let (body, seen) = body_within(answer, MAX_REFUSAL_BYTES)
+        .await
+        .unwrap_or_default();
+    // AND A CUT BODY SAYS IT WAS CUT. Otherwise an operator reads 500
+    // characters of a vendor's error and cannot tell whether the sentence that
+    // would have explained it was on line 6 or line 6,000. This does not fire
+    // for any refusal a broker actually sends; it fires for the answers that
+    // are not really refusals.
+    let said = if seen > MAX_REFUSAL_BYTES {
+        format!(
+            "{} […] and it ran past {MAX_REFUSAL_BYTES} bytes, which is as much \
+             of a refusal as this build reads",
+            trim(&body)
+        )
+    } else {
+        trim(&body)
+    };
+    match hint {
+        Some(why) if body.is_empty() => why,
+        Some(why) => format!("{why} — and it said: {said}"),
+        None => said,
+    }
 }
 
 /// The keys of a JSON object, for a refusal that tells an operator what to fix.
@@ -1064,7 +1258,10 @@ impl HttpSource {
             builder = builder.header(*header, *word);
         }
 
-        let answer = builder.header(name, value).send().await.map_err(|why| {
+        // `mut` because the body is now read frame by frame rather than in one
+        // `text()` call — see `body_within` for why the size check cannot come
+        // after the whole answer is already in memory.
+        let mut answer = builder.header(name, value).send().await.map_err(|why| {
             FetchError::TransportFailed {
                 // `why` is reqwest's own words and never carries the header we
                 // set, so the token cannot reach this string.
@@ -1075,51 +1272,51 @@ impl HttpSource {
         let status = answer.status().as_u16();
         note_answer(&url, status, answer.status().is_success(), request);
         if !answer.status().is_success() {
-            // A REDIRECT IS NOW A REFUSAL, SO IT HAS TO SAY SO IN WORDS.
-            //
-            // The client does not follow one (see `new`), which means a 3xx
-            // arrives here instead of silently becoming a request to another
-            // host carrying the credential. Its body is almost always empty, so
-            // without this the operator would get `302` and nothing else. The
-            // `Location` is named — it is the vendor's own routing, not a
-            // secret — and the credential is not, because it never appears in
-            // anything this function can reach.
-            let hint = answer.status().is_redirection().then(|| {
-                let target = answer
-                    .headers()
-                    .get(reqwest::header::LOCATION)
-                    .and_then(|v| v.to_str().ok())
-                    .map_or_else(
-                        || "no Location header".to_owned(),
-                        |v| v.chars().take(200).collect(),
-                    );
-                format!(
-                    "this build does not follow redirects, because the \
-                     credential travels in a header no HTTP client knows to \
-                     strip. The vendor wanted to send this request to: {target}"
-                )
+            // Lifted into its own function, and NOT for tidiness: reading the
+            // refusal body under a bound (rather than whole, which is what this
+            // used to do) took `window_async` past `clippy::too_many_lines`.
+            // The behaviour is unchanged by the move and `refusal_words` states
+            // what it is.
+            return Err(FetchError::VendorRefused {
+                status,
+                detail: refusal_words(&mut answer).await,
             });
-            let body: String = answer.text().await.unwrap_or_default();
-            let detail = match hint {
-                Some(why) if body.is_empty() => why,
-                Some(why) => format!("{why} — and it said: {}", trim(&body)),
-                None => trim(&body),
-            };
-            return Err(FetchError::VendorRefused { status, detail });
         }
 
-        let text = answer
-            .text()
-            .await
-            .map_err(|why| FetchError::TransportFailed {
-                detail: format!("the answer could not be read: {why}"),
-            })?;
-        if too_large(text.len()) {
+        // THE CLAIM FIRST, AND THEN THE BYTES.
+        //
+        // `Content-Length` is a courtesy the host may decline to offer and may
+        // get wrong, so it can never be the check that binds — but when it IS
+        // offered and it already names more than this build will hold, reading
+        // the body to discover that costs exactly what the bound exists to
+        // prevent. These are the same three lines as
+        // `resolve::HttpDocuments::get_async`, against this module's own cap.
+        if let Some(declared) = answer.content_length() {
+            let cap = MAX_RESPONSE_BYTES as u64;
+            if declared > cap {
+                return Err(FetchError::TransportFailed {
+                    detail: format!(
+                        "the vendor declares {declared} bytes and this build \
+                         accepts at most {cap}. Refused before the body was read."
+                    ),
+                });
+            }
+        }
+
+        // AND THE BYTES ARE THE FACT. This was `text()` followed by
+        // `too_large(text.len())` — a comparison made only once the whole answer
+        // was in memory, which reports the cost rather than avoiding it. An
+        // answer that declares no length at all (chunked, or closed-delimited)
+        // never met the check above, so on that shape the late one was the only
+        // one there was. The boundary is unchanged; only when it is applied is.
+        let (text, seen) = body_within(&mut answer, MAX_RESPONSE_BYTES).await?;
+        if too_large(seen) {
             return Err(FetchError::TransportFailed {
                 detail: format!(
-                    "the vendor answered with {} bytes; this build accepts at \
-                     most {MAX_RESPONSE_BYTES}",
-                    text.len()
+                    "the vendor's answer ran past {MAX_RESPONSE_BYTES} bytes — \
+                     at least {seen} arrived before the read was abandoned, and \
+                     the rest was left on the socket. This build accepts at most \
+                     {MAX_RESPONSE_BYTES}."
                 ),
             });
         }
@@ -2089,6 +2286,48 @@ mod tests {
         (format!("http://{addr}"), rx, addr)
     }
 
+    /// A server that sends `header` and then floods, until the client stops
+    /// reading or `chunks` writes of `frame` bytes have gone out.
+    ///
+    /// Separate from [`listener`], which answers with one `String`. The body
+    /// this exists to send is 64 MiB, and a 64 MiB `String` built in the test
+    /// process to prove that the client will not build one is the wrong shape
+    /// of proof. This holds `frame` bytes and writes them over and over, so the
+    /// client is the only side that has to decide when to stop.
+    ///
+    /// **No `Content-Length` is sent by any caller of this.** That is the point:
+    /// with no declared length the pre-read check has nothing to check, and
+    /// what the answer costs is decided entirely by the read loop.
+    fn flooding_listener(header: &'static str, frame: usize, chunks: usize) -> String {
+        use std::io::{Read as _, Write as _};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+        let addr = socket.local_addr().expect("an address");
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = socket.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 4096];
+            let _request = stream.read(&mut buf);
+            if stream.write_all(header.as_bytes()).is_err() {
+                return;
+            }
+            let filler = vec![b'x'; frame];
+            for _ in 0..chunks {
+                // THE CLIENT HANGING UP IS THE EXPECTED END, NOT A FAILURE.
+                // Once it has seen more than it will hold it drops the
+                // response, the connection resets, and this write fails — which
+                // is the signal to stop rather than something to report. Rust
+                // ignores SIGPIPE at startup, so this is an `Err` and not a
+                // killed test process.
+                if stream.write_all(&filler).is_err() {
+                    return;
+                }
+            }
+            let _flushed = stream.flush();
+        });
+        format!("http://{addr}")
+    }
+
     /// **THE CREDENTIAL MUST NOT FOLLOW A REDIRECT.**
     ///
     /// `reqwest` follows up to ten by default and strips only the headers it
@@ -2212,6 +2451,210 @@ mod tests {
         assert!(
             !detail.contains("redirect"),
             "and no redirect wording: {detail}"
+        );
+    }
+
+    /// **THE CAP IS CHECKED BEFORE THE BODY IS READ, NOT AFTER IT IS HELD.**
+    ///
+    /// The size check used to run on `text.len()` — that is, on a `String` the
+    /// whole answer had already been decoded into. It named the right number
+    /// and it named it having already paid for it, which is not a bound.
+    ///
+    /// A declared length past the cap is the cheap half: nothing is gained by
+    /// reading a body to discover a number the header already gave. The body
+    /// here is two bytes and the assertion is that they are never asked for —
+    /// visible in the refusal's own words, which say where it happened.
+    #[test]
+    fn a_declared_length_past_the_cap_is_refused_before_the_body_is_read() {
+        let declared = MAX_RESPONSE_BYTES.saturating_add(1);
+        let (url, seen, _) = listener(Some(format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Content-Length: {declared}\r\nConnection: close\r\n\r\n{{}}"
+        )));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..spec(PriceScale::Rupees)
+        };
+        let outcome = source_of(spec, "SUPERSECRET").block_on_window();
+
+        // The vendor WAS reached — otherwise this would pass by refusing to
+        // send the request at all, which is a different function's job.
+        assert!(
+            seen.recv_timeout(core::time::Duration::from_secs(5))
+                .is_ok(),
+            "the request has to go out, or this proves nothing"
+        );
+        let Err(FetchError::TransportFailed { detail }) = outcome else {
+            panic!("an answer declaring more than the cap is refused, not decoded")
+        };
+        assert!(
+            detail.contains(&declared.to_string()),
+            "the vendor's own claim is quoted back: {detail}"
+        );
+        assert!(
+            detail.contains("Refused before the body was read"),
+            "and WHERE it was refused is the whole point: {detail}"
+        );
+    }
+
+    /// **AND WITH NO DECLARED LENGTH, THE READ ITSELF STOPS.**
+    ///
+    /// `Content-Length` is a claim a host may decline to make. A chunked or
+    /// close-delimited answer declares nothing, so the pre-read check above has
+    /// nothing to check and the bound has to live in the read loop — which is
+    /// the case the old `text()` handled by holding the entire body first.
+    ///
+    /// This is the one test in this module that moves 64 MiB, and it is here
+    /// because *where* the check runs is not something an arithmetic assertion
+    /// can prove. The boundary itself is still owned by
+    /// `the_stated_bounds_are_the_numbers_they_are_written_as`, which allocates
+    /// nothing. The server holds one 64 KiB buffer; the client holds the cap and
+    /// then stops.
+    #[test]
+    fn an_answer_with_no_declared_length_is_abandoned_once_it_runs_past_the_cap() {
+        const FRAME: usize = 64 * 1024;
+        // One frame more than the cap holds, so the last one is the one that
+        // crosses it — the boundary, not a body ten times too big.
+        let chunks = MAX_RESPONSE_BYTES.div_euclid(FRAME).saturating_add(1);
+        let url = flooding_listener(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+             Connection: close\r\n\r\n",
+            FRAME,
+            chunks,
+        );
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..spec(PriceScale::Rupees)
+        };
+        let Err(FetchError::TransportFailed { detail }) =
+            source_of(spec, "SUPERSECRET").block_on_window()
+        else {
+            panic!("an answer past the cap is refused, not decoded")
+        };
+        assert!(
+            detail.contains("ran past"),
+            "the refusal says the read was stopped, not that a held body was \
+             measured: {detail}"
+        );
+        assert!(
+            detail.contains(&MAX_RESPONSE_BYTES.to_string()),
+            "and it names the cap: {detail}"
+        );
+    }
+
+    /// A refusal body is read only as far as it will ever be quoted.
+    ///
+    /// The refusal path had **no** size check at all — `trim` cut the error
+    /// string to 500 characters, but only after `text()` had built the whole
+    /// body, so a 5xx carrying a gigabyte cost a gigabyte to print half a
+    /// kilobyte. This drives 32 KiB against an 8 KiB cap: the operator still
+    /// gets the vendor's opening words, and the sentence says the rest was
+    /// never read rather than leaving them to wonder what was cut.
+    #[test]
+    fn a_refusal_body_is_read_only_as_far_as_it_will_ever_be_quoted() {
+        let body = "z".repeat(MAX_REFUSAL_BYTES.saturating_mul(4));
+        let (url, _seen, _) = listener(Some(format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\n\
+             Connection: close\r\n\r\n{body}",
+            body.len()
+        )));
+        let spec = HttpSpec {
+            base_url: Box::leak(url.into_boxed_str()),
+            ..spec(PriceScale::Rupees)
+        };
+        let Err(FetchError::VendorRefused { status, detail }) =
+            source_of(spec, "SUPERSECRET").block_on_window()
+        else {
+            panic!("500 is a refusal, however long its body")
+        };
+        assert_eq!(status, 500, "the status still reaches the caller");
+        assert!(
+            detail.starts_with("zzz"),
+            "the vendor's opening words survive: {detail}"
+        );
+        assert!(
+            detail.contains(&format!("ran past {MAX_REFUSAL_BYTES} bytes")),
+            "and the operator is told the rest was never read: {detail}"
+        );
+        assert!(
+            detail.chars().count() < 700,
+            "trim still owns what reaches the log; this is the read, not the \
+             cut: {} characters",
+            detail.chars().count()
+        );
+    }
+
+    /// **`i64::MIN` IS THIS STORE'S NULL, SO NO VENDOR MAY SEND IT AS A COUNT.**
+    ///
+    /// `CLAUDE.md` §7: `i64::MIN` is the open-interest null and zero means zero.
+    /// `fetch::land` writes that sentinel for a field the vendor did not send —
+    /// so a vendor sending it literally decoded here as an ordinary number,
+    /// passed every check below, landed, and read back off disk as *no open
+    /// interest at all*. Nothing recorded the reinterpretation in either
+    /// direction.
+    ///
+    /// Its neighbour still passes, because a rule that refuses the value next to
+    /// the one it means is a second defect wearing the first one's clothes.
+    #[test]
+    fn the_null_sentinel_is_refused_where_the_vendor_still_owns_the_value() {
+        let why = one_number(&serde_json::json!(i64::MIN), "open_interest")
+            .expect_err("the store's null is not a number a vendor may send");
+        let FetchError::TransportFailed { detail } = why else {
+            panic!("the variant a bad field already uses, not a new one")
+        };
+        assert!(
+            detail.contains("open_interest"),
+            "the field is named: {detail}"
+        );
+        assert!(
+            detail.contains("-9223372036854775808"),
+            "and so is the value that arrived: {detail}"
+        );
+
+        // The neighbour, zero, and an ordinary count all still decode.
+        assert_eq!(
+            one_number(&serde_json::json!(i64::MIN + 1), "open_interest")
+                .expect("one above the sentinel is an ordinary count"),
+            i64::MIN + 1
+        );
+        assert_eq!(
+            one_number(&serde_json::json!(0), "volume").expect("zero is a real zero"),
+            0
+        );
+        assert_eq!(
+            one_number(&serde_json::json!(41), "open_interest").expect("an ordinary count"),
+            41
+        );
+    }
+
+    /// And the refusal reaches the whole decode, not just the leaf.
+    ///
+    /// One bar, seven arrays, and the sentinel in the open-interest column: the
+    /// window must not come back. Asserted through `decode_body` rather than
+    /// through `one_number` alone because the leaf being right is worth nothing
+    /// if the caller swallows it.
+    #[test]
+    fn a_window_carrying_the_null_sentinel_does_not_decode() {
+        let named = HttpSpec {
+            fields: FieldNames {
+                open_interest: Some("open_interest"),
+                ..spec(PriceScale::Rupees).fields
+            },
+            ..spec(PriceScale::Rupees)
+        };
+        let sane = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                       "close":[24500.75],"volume":[250],"timestamp":[1751337900],
+                       "open_interest":[41]}"#;
+        let window = decode_body(sane, &named).expect("an ordinary open interest decodes");
+        assert_eq!(window.rows.len(), 1, "the happy path still decodes");
+
+        let sentinel = r#"{"open":[24500.75],"high":[24500.75],"low":[24500.75],
+                          "close":[24500.75],"volume":[250],"timestamp":[1751337900],
+                          "open_interest":[-9223372036854775808]}"#;
+        let why = decode_body(sentinel, &named).expect_err("the sentinel is refused");
+        assert!(
+            format!("{why}").contains("open_interest"),
+            "and the refusal names the column: {why}"
         );
     }
 

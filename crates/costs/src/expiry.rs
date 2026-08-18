@@ -17,9 +17,17 @@
 //!
 //! So the cost is bounded by two compile-time constants and by nothing else:
 //! at most **two** month resolutions, each of at most **three** calendar probes,
-//! plus at most **two** table lookups of `dated::MAX_LATER_ROWS`
+//! plus at most **three** table lookups of `dated::MAX_LATER_ROWS`
 //! iterations. No input can raise any of those numbers. There is no loop over
 //! days, weeks or months anywhere on the path.
+//!
+//! Three lookups rather than two because the monthly path asks two different
+//! questions. One is *"is the day the caller named inside a verified window?"*,
+//! asked once at that day. The other is *"which weekday does month M expire
+//! on?"*, asked once per month resolved — at that month's own reference day,
+//! never at the day the caller happened to ask on. See [`next_monthly_on`] for
+//! why those cannot be collapsed into one lookup without either splitting a
+//! contract month in two or answering for a day the table refuses.
 //!
 //! # What this does not know
 //!
@@ -65,12 +73,17 @@ const EXPIRY_REMEDIATION: &str = "source the NSE circular fixing the expiry week
 /// upgraded to a fact here.
 pub const EXPIRY_VERIFIED_FROM: TradeDay = boundary!(2020 - 1 - 1);
 
-/// Which day of a month the rolled regime is read on.
+/// Which day of a month that month's monthly regime is read on.
 ///
 /// Fifteen — the source's own choice (`expiry_calendar.py`). It matters that it
 /// is mid-month: a regime that took effect on the 1st and one that took effect
 /// on the 20th would be read differently by the 1st or the last day, and the
 /// source's answer is the one being ported.
+///
+/// It is read on **every** month resolved, not only a rolled one. Reading the
+/// caller's own day for the caller's own month and the 15th for a rolled month
+/// is two rules, and two rules gave one contract month two settlement dates —
+/// see [`next_monthly_on`].
 const MONTHLY_REGIME_REFERENCE_DAY: u8 = 15;
 
 /// The prose carried by every expiry-weekday refusal row.
@@ -340,13 +353,22 @@ pub fn next_weekly_expiry(slot: SweptSlot, on: TradeDay) -> Result<Option<TradeD
 /// single-lookup implementation would answer with December's weekday applied to
 /// January.
 ///
+/// Whichever month is resolved, its weekday is read at
+/// [`MONTHLY_REGIME_REFERENCE_DAY`] of *that* month and never at `on`, so the
+/// answer for a given contract month does not depend on which day of it the
+/// question was asked — see [`next_monthly_on`] for the regime change that made
+/// the difference visible.
+///
 /// The result is the *calendar* expiry: trading holidays are not accounted for.
 ///
 /// # Errors
 ///
 /// * [`CostError::Unverified`] for a day before [`EXPIRY_VERIFIED_FROM`], or —
-///   reachable only for a table with a later refusal row — for the rolled
-///   month.
+///   both reachable only for a table with a later refusal row — for either
+///   month's reference day. On the shipped tables the only refusal row is the
+///   anchor and it ends on a month boundary, so the reference days of a
+///   verified day's own month can never be the refusing one; the refusal a
+///   caller actually sees is always the one naming the day they asked about.
 /// * [`CostError::YearOutsideWindow`] when the roll would leave the
 ///   representable window: December 2100 has no January after it.
 ///
@@ -398,18 +420,86 @@ fn next_weekly_on(
 }
 
 /// The monthly law, against any table. Separate for the same reason.
+///
+/// # One contract month, one date
+///
+/// Both arms read the weekday at [`MONTHLY_REGIME_REFERENCE_DAY`] of the month
+/// they are resolving. That is the whole of the rule, and it is deliberately
+/// **not** "read it at the day the caller asked on, and at the 15th only after
+/// a roll" — which is what this did until the two rules were found to disagree.
+///
+/// A monthly regime boundary can fall strictly inside a month. NSE's
+/// standardisation put both swept indices on the last Tuesday from 2025-09-02,
+/// the *second* day of that month, and under the two-rule version September
+/// 2025 then resolved two ways:
+///
+/// * asked on 2025-08-29, August's last Thursday has passed, so the month rolls
+///   and September is read at the 15th — Tuesday, giving 2025-09-30;
+/// * asked on 2025-09-02, the day itself is already in the Tuesday regime,
+///   giving 2025-09-30;
+/// * asked on 2025-09-01, the day itself is still in the Thursday regime,
+///   giving 2025-09-**25**.
+///
+/// One contract month with two settlement dates, chosen by which day the
+/// question was put, is not a rounding difference — it is two different
+/// contracts, and any cost or moneyness computed against the wrong one is wrong
+/// by a whole expiry. Reading the reference day on both arms removes the choice:
+/// every day of September 2025 now answers 2025-09-30, which
+/// `a_regime_change_inside_a_month_does_not_split_it_into_two_contracts` pins on
+/// both underlyings and
+/// `one_contract_month_has_one_expiry_whichever_day_it_is_asked_on` states over
+/// the whole verified window.
+///
+/// September 2025 is the only month the shipped tables can express this in —
+/// every other boundary falls on the 1st, where the day asked and the 15th are
+/// in the same regime — so it is the *rule* that is tested over the window and
+/// not just the one month that happened to expose it.
+///
+/// # Why the day asked is still looked up
+///
+/// The first lookup is not the regime read and is not redundant with it. It
+/// answers a different question — *is the day the caller named inside a
+/// verified window at all?* — and the reference day cannot answer it: a table
+/// whose refusal window opens after the 15th leaves the reference verified and
+/// the day asked unverified, and answering from the reference would be the
+/// silent extrapolation `docs/00-charter.md` prohibition 6 and `CLAUDE.md` §4
+/// forbid. It is also what keeps this function and [`monthly_regime`] refusing
+/// with the same refusal, word for word, on the same day.
+///
+/// # What this does not fix
+///
+/// The reference day remains a *choice*, and a boundary landing after the 15th
+/// would still hand the whole month to the superseded regime. That is the
+/// source's rule (`expiry_calendar.py`) being ported rather than second-guessed,
+/// and no boundary in the shipped tables lands after the 15th. The four monthly
+/// transitions land on the 1st (BANKNIFTY 2024-03-01), the 1st (BANKNIFTY
+/// 2025-01-01), the 2nd (NIFTY 2025-09-02) and the 2nd (BANKNIFTY 2025-09-02);
+/// the two remaining rows open the verified window on 2020-01-01 and change no
+/// weekday. Nor does this know anything about trading holidays: the answer is
+/// still the *calendar* expiry.
 fn next_monthly_on(table: &DatedTable<Weekday>, on: TradeDay) -> Result<TradeDay, CostError> {
-    let this_month = table.value_on(on)?;
-    let candidate = last_weekday_of_month(on, this_month);
+    // The window gate. Discarding the weekday is the point: what is wanted here
+    // is the refusal, if there is one, naming the day the caller named.
+    table.value_on(on)?;
+    // Total, not fallible. The 15th is a real day of every month of every year,
+    // exactly as the 28th is in `TradeDay::last_of_its_month`, so this meets
+    // `with_day_in_same_month`'s obligation by a fact rather than by a check.
+    // `TradeDay::new` would be the same value behind an error arm no input
+    // could reach, and `CLAUDE.md` §9 does not allow an uncoverable branch.
+    let reference = on.with_day_in_same_month(MONTHLY_REGIME_REFERENCE_DAY);
+    let this_month = table.value_on(reference)?;
+    let candidate = last_weekday_of_month(reference, this_month);
     if !candidate.before(on) {
         return Ok(candidate);
     }
     // It has passed. Roll once — and re-read the regime for the rolled month,
-    // because a transition can sit between the two.
+    // because a transition can sit between the two. Here the construction
+    // really can fail: December 2100 rolls to a year outside the window, and
+    // that is named rather than hidden.
     let (year, month) = on.next_month();
-    let reference = TradeDay::new(year, month, MONTHLY_REGIME_REFERENCE_DAY)?;
-    let next_month = table.value_on(reference)?;
-    Ok(last_weekday_of_month(reference, next_month))
+    let rolled = TradeDay::new(year, month, MONTHLY_REGIME_REFERENCE_DAY)?;
+    let next_month = table.value_on(rolled)?;
+    Ok(last_weekday_of_month(rolled, next_month))
 }
 
 /// The last `weekday` of the month `any_day` falls in.
@@ -619,6 +709,16 @@ mod tests {
             // August 2025's last Thursday has passed, so it rolls into
             // September — which is the TUESDAY regime, not August's Thursday.
             ("NIFTY", (2025, 8, 29), (2025, 9, 30)),
+            // 2025-09-01 is the day the two reference rules disagreed on, and
+            // it is pinned here so the single rule is the contract rather than
+            // a comment. September's regime is read at its own 15th, which is
+            // already Tuesday, so the answer is the last Tuesday and not
+            // September's last Thursday (2025-09-25). Both underlyings moved
+            // on 2025-09-02, so both are pinned — BANKNIFTY reaches Thursday
+            // by a different route (its 2025-01-01 row) and could have
+            // regressed on its own.
+            ("NIFTY", (2025, 9, 1), (2025, 9, 30)),
+            ("BANKNIFTY", (2025, 9, 1), (2025, 9, 30)),
             ("NIFTY", (2025, 9, 2), (2025, 9, 30)),
             // The BANKNIFTY year-boundary rollover: December 2024 is the last
             // Wednesday, January 2025 is back to the last Thursday.
@@ -669,20 +769,26 @@ mod tests {
                 }
                 let got = next_monthly_expiry(subject, today).expect("inside the window");
                 assert!(!got.before(today), "{underlying} answered in the past");
-                // The regime is read at the day asked, or — if the month
-                // rolled — at the 15th of the rolled month. That reference rule
-                // is re-derived here rather than taken from the implementation;
-                // the arithmetic that follows from it is what is being checked.
-                let reference = if got.month() == today.month() {
-                    today
-                } else {
+                // ONE reference rule, not two: the weekday an expiry carries is
+                // the regime in force on the 15th of the expiry's OWN month,
+                // whether the month rolled or not. Re-derived here rather than
+                // taken from the implementation; the arithmetic that follows
+                // from it is what is being checked.
+                //
+                // This is where the superseded two-rule version — the day asked
+                // for the caller's own month, the 15th only after a roll —
+                // fails: on 2025-09-01 it answered with September's last
+                // Thursday while September's 15th is already Tuesday. It is
+                // stated as one rule so it cannot disagree with itself.
+                if got.month() != today.month() {
                     assert_eq!(
                         (got.year(), got.month()),
                         today.next_month(),
                         "the roll must be exactly one month"
                     );
-                    day(got.year(), got.month(), MONTHLY_REGIME_REFERENCE_DAY)
-                };
+                    rolled += 1;
+                }
+                let reference = day(got.year(), got.month(), MONTHLY_REGIME_REFERENCE_DAY);
                 let regime = monthly_regime(subject, reference).expect("in window");
                 assert_eq!(got.weekday(), regime, "{underlying} on {today}");
                 // Nothing later in the answer's own month shares that weekday.
@@ -691,9 +797,6 @@ mod tests {
                     last.ordinal() - got.ordinal() < 7,
                     "{got} is not the LAST {regime} of its month"
                 );
-                if got.month() != today.month() {
-                    rolled += 1;
-                }
                 checked += 1;
             }
         }
@@ -741,6 +844,179 @@ mod tests {
             Ok(day(2025, 9, 30))
         );
         assert_eq!(MONTHLY_REGIME_REFERENCE_DAY, 15);
+    }
+
+    #[test]
+    fn a_regime_change_inside_a_month_does_not_split_it_into_two_contracts() {
+        // The defect, named at the one month in the shipped tables that can
+        // express it. `next_monthly_on` used to read the regime at the day the
+        // caller asked on for the caller's own month, and at the 15th only
+        // after a roll. Two rules, and NSE's standardisation took effect on
+        // 2025-09-02 — the SECOND day of a month — so September 2025 settled on
+        // the 25th if the question was put on the 1st and on the 30th if it was
+        // put on the 2nd. That is not a rounding difference: it is two
+        // contracts, and a cost or a moneyness computed against the wrong one
+        // is wrong by a whole expiry.
+        //
+        // Every day of the month now answers with the one date. The 1st is the
+        // day that moves; the rest were already right and are here so a fix
+        // that traded one wrong day for another cannot pass.
+        for underlying in ["NIFTY", "BANKNIFTY"] {
+            let subject = slot(underlying);
+            for asked_on in 1u8..=30 {
+                assert_eq!(
+                    next_monthly_expiry(subject, day(2025, 9, asked_on)),
+                    Ok(day(2025, 9, 30)),
+                    "{underlying} asked on 2025-09-{asked_on}"
+                );
+            }
+        }
+        // The EVIDENCE did not move — only the resolution rule did. 2025-09-01
+        // is still inside the Thursday regime and the 15th is still Tuesday,
+        // exactly as the rows say. Without this pair the loop above could be
+        // passing because a dated row was quietly edited, which is the
+        // invention `CLAUDE.md` §3 rule 1 forbids outright.
+        let nifty = slot("NIFTY");
+        assert_eq!(
+            monthly_regime(nifty, day(2025, 9, 1)),
+            Ok(Weekday::Thursday)
+        );
+        assert_eq!(
+            monthly_regime(nifty, day(2025, 9, 15)),
+            Ok(Weekday::Tuesday)
+        );
+        assert_eq!(
+            monthly_regime(slot("BANKNIFTY"), day(2025, 9, 1)),
+            Ok(Weekday::Thursday)
+        );
+        // And the superseded answer by name, so a regression reads as itself
+        // rather than as an arbitrary wrong date. 2025-09-25 is September's
+        // last Thursday and was what reading the day asked produced.
+        assert_eq!(day(2025, 9, 25).weekday(), Weekday::Thursday);
+        assert_eq!(
+            last_weekday_of_month(day(2025, 9, 1), Weekday::Thursday),
+            day(2025, 9, 25)
+        );
+        assert_ne!(
+            next_monthly_expiry(nifty, day(2025, 9, 1)),
+            Ok(day(2025, 9, 25)),
+            "September's last Thursday is the answer the two-rule version gave"
+        );
+    }
+
+    #[test]
+    fn one_contract_month_has_one_expiry_whichever_day_it_is_asked_on() {
+        // The law the test above pins at one month, stated over the whole
+        // verified window: for a month whose own expiry has not yet passed,
+        // every day of it answers with the same date. Only the day AFTER that
+        // month's expiry may answer differently, and when it does it answers
+        // with the next month's — a different contract, correctly.
+        //
+        // The trip count is fixed by construction — 81 years x 12 months x at
+        // most 31 days x 2 underlyings — and no ordinal drives it, so a broken
+        // ordinal fails an assertion rather than spinning.
+        assert_eq!(EXPIRY_VERIFIED_FROM, day(2020, 1, 1));
+        let mut months = 0u32;
+        let mut days = 0u32;
+        for underlying in ["NIFTY", "BANKNIFTY"] {
+            let subject = slot(underlying);
+            for year in 2020u16..=2100 {
+                for month in 1u8..=12 {
+                    // Asked on the 1st, no month has yet rolled: the answer is
+                    // this month's own expiry. December 2100 is not excluded —
+                    // its own last Tuesday is the 28th, so nothing here rolls
+                    // off the end of the window.
+                    let first = day(year, month, 1);
+                    let expiry = next_monthly_expiry(subject, first).expect("inside the window");
+                    assert_eq!(
+                        (expiry.year(), expiry.month()),
+                        (year, month),
+                        "{underlying} {year}-{month} rolled when asked on the 1st"
+                    );
+                    for asked_on in 1u8..=expiry.day() {
+                        assert_eq!(
+                            next_monthly_expiry(subject, day(year, month, asked_on)),
+                            Ok(expiry),
+                            "{underlying} {year}-{month} moved when asked on day {asked_on}"
+                        );
+                        days += 1;
+                    }
+                    months += 1;
+                }
+            }
+        }
+        assert_eq!(months, 2 * 81 * 12);
+        // The last <weekday> of a month is at least its 22nd — the 28th, which
+        // every month has, less a walk back of at most six — and at most its
+        // 31st. So the day count is bounded on both sides by facts about the
+        // calendar rather than by re-running the thing under test.
+        assert!(days >= 22 * months, "{days} days over {months} months");
+        assert!(days <= 31 * months, "{days} days over {months} months");
+    }
+
+    #[test]
+    fn a_day_the_table_refuses_stays_refused_when_its_reference_day_is_verified() {
+        // The first lookup in `next_monthly_on` is the window gate and it is
+        // NOT the regime read, so it cannot be folded into it. This is the
+        // table shape that separates them: the refusal window opens on
+        // 2050-01-20, which leaves the 15th — the reference day — verified
+        // while the 25th is not. Without the gate the 25th would be answered
+        // from the 15th's weekday, and answering for a day the table refuses is
+        // the silent extrapolation `docs/00-charter.md` prohibition 6 and
+        // `CLAUDE.md` §4 forbid.
+        //
+        // The shipped tables cannot express this — their only refusal row is
+        // the anchor and it ends on a month boundary — which is why this drives
+        // `next_monthly_on` against a built table rather than the public entry.
+        let table = DatedTable::<Weekday> {
+            subject: "a monthly regime whose hole opens after the 15th",
+            exchange: Some(Exchange::Nse),
+            remediation: "fill the hole",
+            anchor: DatedRow::verified(TradeDay::MIN, Weekday::Thursday, "the anchor"),
+            later: [
+                Some(DatedRow::unverified(day(2050, 1, 20), "the hole")),
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+        assert!(table.is_shipping_shape());
+        // The premise. If the reference day were refusing too this would prove
+        // nothing about which lookup produced the refusal.
+        assert_eq!(
+            table.value_on(day(2050, 1, MONTHLY_REGIME_REFERENCE_DAY)),
+            Ok(Weekday::Thursday)
+        );
+        let refusal = next_monthly_on(&table, day(2050, 1, 25)).expect_err("the 25th has no row");
+        // The table's own refusal, unchanged, naming the day the CALLER asked
+        // about — byte for byte the one a direct lookup on that day gives,
+        // which is what `the_pre_history_window_refuses_...` requires of the
+        // shipped tables and what the reference day would have broken.
+        assert_eq!(
+            refusal,
+            CostError::Unverified(
+                table
+                    .value_on(day(2050, 1, 25))
+                    .expect_err("the 25th has no row")
+            )
+        );
+        let rendered = refusal.to_string();
+        assert!(rendered.contains("2050-01-25"), "{rendered}");
+        assert!(
+            !rendered.contains("2050-01-15"),
+            "the refusal must not name the reference day: {rendered}"
+        );
+        // The happy path through the same table is untouched: the 15th is
+        // inside the verified part, and January 2050's last Thursday is the
+        // 27th. That the answer itself falls after the hole opens is the limit
+        // `next_monthly_on`'s "What this does not fix" states — the table dates
+        // a WEEKDAY regime, not a settlement date.
+        assert_eq!(day(2050, 1, 27).weekday(), Weekday::Thursday);
+        assert_eq!(
+            next_monthly_on(&table, day(2050, 1, MONTHLY_REGIME_REFERENCE_DAY)),
+            Ok(day(2050, 1, 27))
+        );
     }
 
     #[test]

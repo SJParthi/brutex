@@ -2372,6 +2372,156 @@ jobs:
             fi
           done
 
+          # CLAUSE C — a temporary path names the process that made it.
+          #
+          # WHY THIS IS IN A LOGGING GATE. It is here because this is the step
+          # that already walks every tracked `.rs` under crates/ INCLUDING test
+          # code, and the failure is a test-code failure. Clause A's glob is the
+          # only machinery in this file that looks at test sources at all.
+          #
+          # THE FAILURE, MEASURED AND REPRODUCED. D-0042:
+          # `master::tests::a_master_larger_than_this_reader_holds_is_refused_before_it_is_read`
+          # failed about one run in three with `cleanup: NotFound` on the line
+          # deleting its own fixture. The fixture was
+          # `temp_dir().join("brutex-master-toobig.csv")` -- ONE FIXED NAME in a
+          # directory shared by every process on the machine. The test creates a
+          # 256 MiB sparse file there, reads all of it, then deletes it; any
+          # second process running the same binary deletes the file inside that
+          # window. It was reproduced deliberately: two copies of the test binary
+          # started together, one failed and one passed. Two concurrent
+          # `cargo test` runs, a `cargo llvm-cov` beside a `cargo test`, or two
+          # agents on one checkout are each enough, and all three happen here.
+          #
+          # The assertions were never wrong. The FIXTURE was. `api::scratch`
+          # exists to be the answer -- it stamps `process::id()` into every
+          # temporary path -- and nothing made the rest of the workspace use it.
+          #
+          # THE RULE. A line naming `env::temp_dir()` must have `process::id()`
+          # within WINDOW lines at or below it. Below and not above, because the
+          # two shapes in this workspace are
+          #
+          #   let dir = temp_dir().join(format!("x-{}", process::id()));   same line
+          #   let mut root = temp_dir();                                   then
+          #   root.push(format!("x-{}", process::id()));                   the next
+          #
+          # A WINDOW IS A HEURISTIC AND THIS ONE IS DELIBERATELY SMALL. Three
+          # lines is what the second shape needs and no more. It can be satisfied
+          # by an UNRELATED `process::id()` that happens to sit within three
+          # lines -- gate 19 documents the same weakness about its own window and
+          # solves it by claiming each event once; that machinery is not
+          # justified here, where the two tokens are almost always on one line.
+          # What the window CANNOT do is miss the collision this gate is named
+          # for: a fixed name has no `process::id()` anywhere near it.
+          #
+          # WHAT IT CANNOT SEE, stated rather than discovered later:
+          #   * `use std::env::temp_dir;` and then a bare `temp_dir()`. This
+          #     matches the qualified spelling only, which is the one all 41
+          #     current sites use.
+          #   * A unique name built some other way -- a nonce, a counter, a
+          #     `TempDir` crate. Each would read as a violation here and would
+          #     need a line below, which is the reviewable part.
+          #   * Whether the path is ever CREATED. A path asserted absent is
+          #     harmless and several of the entries below are exactly that; the
+          #     gate cannot tell, so a human wrote down which is which.
+          #
+          # THE CEILING IS A CEILING, NOT AN EXACT MATCH, and that is a departure
+          # from clause A above. Clause A fails when a count DROPS, on the ground
+          # that a stale declaration is a lie. Here a count drops precisely when
+          # somebody FIXES a fixture, and turning that into a red build for a
+          # second contributor -- on a tree two sessions share -- would teach
+          # people to leave the fixtures alone. A drop is a warning; only a rise
+          # is a refusal. Same mechanism as gate 11 and gate 13.
+          #
+          #   api/src/logs.rs      1  `sink_in` builds `brutex-logs-{name}` and
+          #                           then `remove_dir_all` + `create_dir_all` on
+          #                           it. THIS IS THE LIVE HAZARD, identical in
+          #                           shape to D-0042's. It is declared rather
+          #                           than fixed because the file belongs to
+          #                           another line of work; the entry is the
+          #                           report, and it is meant to be removed.
+          #   pull/tests/unit.rs   4  Two are `brutex-pull`, a fixed directory,
+          #                           and the same hazard. The other two --
+          #                           `brutex-pull-there-is-no-such-file.toml`
+          #                           and `brutex-no-such-dir-ever` -- are paths
+          #                           asserted ABSENT, which cannot collide
+          #                           because nothing creates them.
+          #   pull/src/ssm.rs      1  `brutex-ssm-no-such-file-ever/credentials`,
+          #                           the same absent-path probe.
+          #   api/src/scratch.rs   1  The assertion `a.parent() ==
+          #                           Some(temp_dir().as_path())` inside the test
+          #                           that proves `path()` stamps the pid. It
+          #                           names the directory, never a file in it.
+          #   api/tests/binary.rs  1  Passes the bare temp dir to a binary that
+          #                           refuses its argument and exits 2 before
+          #                           opening anything.
+          #   telemetry/src/lib.rs 1  `read_dir(temp_dir())` enumerates the
+          #                           directory to find this crate's own sink
+          #                           dirs. It creates no path.
+          allow_fixed='
+          api/src/logs.rs 1
+          api/src/scratch.rs 1
+          api/tests/binary.rs 1
+          pull/src/ssm.rs 1
+          pull/tests/unit.rs 4
+          telemetry/src/lib.rs 1
+          '
+          #
+          # AND YES, THE SCRATCH FILE BELOW IS ITSELF A FIXED /tmp NAME. It is
+          # the convention clauses A and B already use -- `/tmp/prints.txt`,
+          # `/tmp/code.txt` -- and on a runner this step is the only process
+          # that exists, so the collision this clause polices cannot happen to
+          # it there. Run two copies of this gate on one developer machine and
+          # they WILL fight over it. Said out loud rather than left for somebody
+          # to find, because a gate that exempts itself from its own rule
+          # without saying so is the shape gate 12 exists to refuse.
+          tmp_window=3
+          : > /tmp/fixed-temp.txt
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            awk -v W="$tmp_window" -v name="$(printf '%s' "$f" | sed 's|crates/||')" '
+              { line[NR] = $0 }
+              END {
+                for (i = 1; i <= NR; i++) {
+                  t = line[i]; sub(/^[ \t]+/, "", t)
+                  if (t ~ /^(\/\/|\*)/) continue
+                  if (line[i] !~ /env::temp_dir\(\)/) continue
+                  ok = 0
+                  for (j = i; j <= NR && j <= i + W; j++) {
+                    if (line[j] ~ /process::id\(\)/) { ok = 1; break }
+                  }
+                  if (!ok) print name ":" i
+                }
+              }' "$f" >> /tmp/fixed-temp.txt
+          done < <(git ls-files 'crates/**/*.rs')
+
+          echo "  clause C: $(wc -l < /tmp/fixed-temp.txt | tr -d ' ') temporary path(s)"
+          echo "            that do not name their process, over"
+          echo "            $(git ls-files 'crates/**/*.rs' | wc -l | tr -d ' ') tracked source file(s)"
+          for p in $( { cut -d: -f1 /tmp/fixed-temp.txt | sort -u; } || true ); do
+            c=$( { grep -c "^${p}:" /tmp/fixed-temp.txt || true; } | tr -d ' ')
+            a=$( { printf '%s\n' "$allow_fixed" | awk -v F="$p" '$1==F{print $2; exit}'; } || true)
+            [ -n "$a" ] || a=0
+            if [ "$c" -gt "$a" ]; then
+              printf '  REFUSED  %s — %s fixed temporary path(s), %s allowed\n' "$p" "$c" "$a"
+              { grep "^${p}:" /tmp/fixed-temp.txt | sed 's/^/             crates\//' | head -6; } || true
+              fail=1
+            else
+              printf '  allowed  %s — %s of %s\n' "$p" "$c" "$a"
+            fi
+          done
+          # An entry naming a file that is gone makes this clause read stronger
+          # than it is, so it is a failure. An entry whose file no longer matches
+          # is only loose, and says so — somebody fixed a fixture.
+          for p in $( { printf '%s\n' "$allow_fixed" | awk 'NF{print $1}'; } || true ); do
+            if ! git ls-files --error-unmatch "crates/$p" >/dev/null 2>&1; then
+              printf '  STALE ENTRY — crates/%s is not a tracked file\n' "$p"
+              fail=1
+            elif ! grep -q "^${p}:" /tmp/fixed-temp.txt; then
+              printf '::warning title=Gate 23 clause C is loose::'
+              printf 'crates/%s no longer names a fixed temporary path — drop the entry\n' "$p"
+            fi
+          done
+
           # WHAT THIS DOES NOT PROVE, said plainly so nobody reads more into a
           # green gate than it earned: it fixes the SET of prints and forces a
           # human to write down what each one is. It does not itself decide
@@ -2426,6 +2576,8 @@ jobs:
           # 1d and 20.
           #
           #   sink.rs  OpenOptions::new  x2  the sink's own append target
+          #   sink.rs  create_dir_all    x1  making its own directory, at open
+          #   sink.rs  fs::metadata      x1  stat by PATH, for the roll decision
           #   sink.rs  fs::remove_file   x1  dropping the oldest rolled file
           #   sink.rs  fs::rename        x1  rolling within its own directory
           #   tail.rs  File::open        x2  reading back its own file set
@@ -2433,11 +2585,38 @@ jobs:
           # Every one takes a path built from the sink's own dir plus BASENAME
           # and EXTENSION. A NEW site is not necessarily wrong, but it is never
           # invisible: declare it here with the path it opens and why.
+          #
+          # THE PROBE LIST HAD SIX ENTRIES AND TWO OF THE SITES ABOVE WERE NOT
+          # AMONG THEM. `create_dir_all` and `fs::metadata` are production code
+          # in `sink.rs` today -- `sink.rs:697` creates the sink's directory and
+          # `sink.rs:1198` stats a path to decide a roll -- and this clause
+          # walked straight past both while printing "the logger's file-opening
+          # surface is the declared one". A declared surface that omits two of
+          # its own members reads as a stronger statement than it is, which is
+          # the exact failure gate 1d exists to refuse. `fs::read` is added with
+          # them and finds NOTHING today; it is here because it is the plainest
+          # way to read a bar file and its absence from the list was the reason
+          # it would not have been seen.
+          #
+          # `fs::read(` CARRIES ITS OPENING PAREN and that is load-bearing. The
+          # probes are matched with `grep -cF`, a SUBSTRING test, so a bare
+          # `fs::read` would also count every `fs::read_dir` and every
+          # `fs::read_to_string` -- inflating two declared counts and refusing
+          # the crate over an arithmetic artefact of its own probe list. The
+          # paren cannot appear in either longer name.
+          #
+          # `.metadata()` ON AN OPEN HANDLE IS DELIBERATELY NOT PROBED. There are
+          # two of them -- `sink.rs:245` and `tail.rs:399` -- and neither names a
+          # path: they stat a `File` this crate has already opened through one of
+          # the declared sites, so they cannot reach anything the sites above did
+          # not already reach. `fs::metadata` takes a PATH and is the one that
+          # can, which is why the list separates them.
           declared='sink.rs:OpenOptions::new:2
+          sink.rs:create_dir_all:1
+          sink.rs:fs::metadata:1
           sink.rs:fs::remove_file:1
           sink.rs:fs::rename:1
           tail.rs:File::open:2'
-
           : > /tmp/io-sites.txt
           for f in crates/telemetry/src/*.rs; do
             base=$(basename "$f")
@@ -2510,7 +2689,8 @@ jobs:
             # Drop comment lines, so a construct merely NAMED in prose above is
             # not counted as a call to it.
             grep -vE '^[[:space:]]*(//|\*|/\*)' /tmp/body.txt > /tmp/code.txt || true
-            for probe in OpenOptions::new fs::remove_file fs::rename File::open fs::read_dir fs::read_to_string; do
+            for probe in OpenOptions::new create_dir_all fs::metadata fs::remove_file \
+                         fs::rename File::open fs::read_dir fs::read_to_string 'fs::read('; do
               c=$(grep -cF "$probe" /tmp/code.txt || true)
               if [ "$c" -gt 0 ]; then
                 printf '%s:%s:%s\n' "$base" "$probe" "$c" >> /tmp/io-sites.txt

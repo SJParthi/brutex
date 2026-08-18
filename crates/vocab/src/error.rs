@@ -6,7 +6,24 @@
 //! never been measured* -- are exactly the two a caller would otherwise be
 //! tempted to paper over with a `false`.
 
+use crate::tolerance::Base;
 use core::fmt;
+
+/// How a band base reads inside a refusal.
+///
+/// A free function over `Option<Base>` and not a `Display` on [`Base`] itself,
+/// because the thing that has to be readable is the **absent** case as much as
+/// the two present ones: an operator handed "the tolerance measures against
+/// None" learns nothing, and that arm is the one a caller reaches by building a
+/// width with no base at all. All three arms are read by
+/// `every_refusal_says_what_happened`.
+const fn base_name(base: Option<Base>) -> &'static str {
+    match base {
+        Some(Base::SessionRange) => "the session range",
+        Some(Base::CprWidth) => "the CPR width",
+        None => "no stated quantity",
+    }
+}
 
 /// A refusal from the bit table or from the tolerance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -51,6 +68,28 @@ pub enum VocabError {
         /// The position that takes no tolerance.
         index: u16,
     },
+    /// A `near_*` position was offered a band measured against the **other**
+    /// family's quantity.
+    ///
+    /// The two are not interchangeable and not comparable:
+    /// [`crate::tolerance::TOL_FIB_MILLI`] is thousandths of the session range,
+    /// [`crate::tolerance::TOL_PIVOT_MILLI`] is thousandths of the CPR width,
+    /// and at today's pins one is fifty times the other. Before this variant
+    /// existed the mismatch returned `Ok` and set the bit, and **nothing
+    /// downstream could find it** -- a [`crate::ConditionMask`] records which
+    /// positions held and not what width decided them, so a result set built on
+    /// the wrong band is byte for byte a correct one. `CLAUDE.md` §4: degrade
+    /// loudly and name the reason, or refuse.
+    WrongBand {
+        /// The position that was asked for.
+        index: u16,
+        /// The base its row declares in [`crate::table::TABLE`].
+        expected: Base,
+        /// The base the offered tolerance was measured on, or `None` when it
+        /// was built by [`crate::tolerance::Tolerance::from_milli`] and named
+        /// no base at all.
+        got: Option<Base>,
+    },
     /// The tolerance has never been measured. See [`crate::tolerance`].
     ToleranceUnpinned,
     /// A tolerance was pinned to a negative width, which is not a band.
@@ -86,6 +125,18 @@ impl fmt::Display for VocabError {
             Self::NotNear { index } => write!(
                 f,
                 "bit {index} is not a near_* condition and takes no tolerance"
+            ),
+            Self::WrongBand {
+                index,
+                expected,
+                got,
+            } => write!(
+                f,
+                "bit {index} measures its band against {}, and the tolerance \
+                 offered measures against {}; the two are fractions of \
+                 different quantities and neither width is the other's",
+                base_name(Some(expected)),
+                base_name(got)
             ),
             Self::ToleranceUnpinned => write!(
                 f,
@@ -142,6 +193,33 @@ mod tests {
                 "measured tolerance",
             ),
             (VocabError::NotNear { index: 0 }, "takes no tolerance"),
+            // Both `base_name` arms that name a real quantity, in one message
+            // and in the right roles. A `Display` that printed `expected`
+            // twice, or that swapped the two, renders a sentence that is still
+            // grammatical and still names both bands -- so the expectation
+            // pins the ORDER, which is the only thing that tells an operator
+            // which side was wrong.
+            (
+                VocabError::WrongBand {
+                    index: 7,
+                    expected: Base::CprWidth,
+                    got: Some(Base::SessionRange),
+                },
+                "bit 7 measures its band against the CPR width, and the \
+                 tolerance offered measures against the session range",
+            ),
+            // The absent base. This is what `Tolerance::from_milli` produces,
+            // and "measures against no stated quantity" is the whole of what
+            // the caller did wrong.
+            (
+                VocabError::WrongBand {
+                    index: 22,
+                    expected: Base::SessionRange,
+                    got: None,
+                },
+                "bit 22 measures its band against the session range, and the \
+                 tolerance offered measures against no stated quantity",
+            ),
             (VocabError::ToleranceUnpinned, "UNPINNED"),
             (
                 VocabError::ToleranceNegative { milli: -1 },

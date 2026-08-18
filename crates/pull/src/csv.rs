@@ -179,6 +179,21 @@ pub enum CsvError {
         /// What was there.
         got: String,
     },
+    /// An open-interest field carries the value §7 spends on ABSENCE.
+    ///
+    /// `CLAUDE.md` §7 makes `i64::MIN` the open-interest null sentinel, and
+    /// [`crate::fetch::land`] performs that substitution one layer down —
+    /// `row.open_interest.unwrap_or(i64::MIN)`. A vendor that literally sends
+    /// -9223372036854775808 would therefore land as the null and be
+    /// indistinguishable from a vendor that sent no open interest at all,
+    /// which is the silent substitution §4 bans. The decoder is the last place
+    /// the two are still different values, so it is where they are told apart.
+    OpenInterestSentinel {
+        /// One-based line number.
+        line: usize,
+        /// What was there, as the file spells it.
+        got: String,
+    },
     /// More rows than [`MAX_ROWS`].
     TooManyRows {
         /// How many were found before stopping.
@@ -208,6 +223,13 @@ impl core::fmt::Display for CsvError {
             Self::PriceMalformed { line, ref got } => {
                 write!(f, "line {line}: price {got:?} is not a decimal")
             }
+            Self::OpenInterestSentinel { line, ref got } => write!(
+                f,
+                "line {line}: open interest {got:?} is the null sentinel — \
+                 `CLAUDE.md` §7 spends i64::MIN on an ABSENT open interest, so \
+                 a vendor that sends it could not be told apart from one that \
+                 sent no open interest at all"
+            ),
             Self::TooManyRows { rows, cap } => {
                 write!(f, "the file holds at least {rows} rows; the cap is {cap}")
             }
@@ -561,6 +583,64 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
         let epoch_utc =
             i64::from(day.days_from_epoch()) * 86_400 + secs - crate::session::IST_OFFSET_SECS;
 
+        // OPEN INTEREST IS READ HERE AND NOT IN THE ROW LITERAL BELOW, because
+        // one of its two outcomes is a refusal, and a refusal spelled inside a
+        // struct field is a `return` in the middle of a struct literal.
+        //
+        // A field that will not parse is ABSENT rather than zero: `None` and
+        // `Some(0)` are different facts, because zero open interest is a
+        // measurement and an unreadable field is not. That degrade is counted
+        // rather than silent — `Tally::unreadable_open_interest`, §4.
+        //
+        // THE SENTINEL COLLISION, REFUSED AT THE LAST PLACE THE TWO FACTS ARE
+        // STILL TWO. §7 spends `i64::MIN` on "there is no open interest", and
+        // [`crate::fetch::land`] performs that substitution one layer down:
+        // `row.open_interest.unwrap_or(i64::MIN)`. A vendor that literally
+        // sends -9223372036854775808 therefore reaches the bar as the null, and
+        // from the bar onward the measurement and the omission are the same
+        // eight bytes — `store::format::Bar` holds an `i64` and has no third
+        // state to read them back into. This line still holds both, so it is
+        // this line or nowhere.
+        //
+        // WHY A REFUSAL AND NOT THE COUNT-AND-DEGRADE ITS NEIGHBOUR USES. The
+        // unreadable degrade records something TRUE — the value is not known,
+        // so the field is stored absent, and the counter says how often that
+        // happened. Storing a value the vendor DID send as absent records
+        // something FALSE, and a counter beside it does not unrecord it: the
+        // bar on disk still asserts an omission that did not occur, which is
+        // the fallback hiding a failure §4 bans rather than the loud degrade it
+        // allows. Volume has no choice in the matter — `RawRow::volume` is
+        // `i64` and cannot express absence without a store-format change — and
+        // this field has one, for free.
+        //
+        // It also closes the single hole in a rule already written down. D-0148
+        // (`store::format::Bar::counts_are_sane`) refuses every negative open
+        // interest EXCEPT `OI_NULL`, so a vendor sending -5 is caught at the
+        // store's survey; `i64::MIN` is the one negative value that walks past
+        // that check, precisely because it is spelled exactly like the null.
+        //
+        // WHAT THIS DOES NOT FIX. Rows that reach `fetch::land` by the HTTP
+        // path build `open_interest` from a `Vec<i64>` rather than from this
+        // decoder (`RawWindow::decode`), and can still carry `i64::MIN` in; the
+        // guard for that belongs beside that decode in `crates/pull/src/fetch.rs`
+        // and is not this module's to place. Nor does this make an open
+        // interest OF `i64::MIN` storable — §7 has spent that value, and an
+        // open interest is a contract count, which is never negative at all.
+        let open_interest = {
+            let text = fields.get(at.open_interest).copied().unwrap_or_default();
+            let parsed = text.trim().parse::<i64>().ok();
+            if parsed == Some(i64::MIN) {
+                return Err(CsvError::OpenInterestSentinel {
+                    line: line_no,
+                    got: text.trim().to_owned(),
+                });
+            }
+            if parsed.is_none() {
+                tally.unreadable_open_interest = tally.unreadable_open_interest.saturating_add(1);
+            }
+            parsed
+        };
+
         // A snapshot row carries ONE price, not four. Open, high, low and close
         // are all that price, and that is honest for a snapshot: nothing in the
         // row claims a range, so nothing here invents one.
@@ -570,11 +650,11 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
             high: price,
             low: price,
             close: price,
-            // THE VENDOR SENT THESE AND THEY WERE BEING DISCARDED. A field that
+            // THE VENDOR SENT THIS AND IT WAS BEING DISCARDED. A field that
             // will not parse is zero for volume — a count this build could not
-            // read is not a trade — and ABSENT for open interest, because
-            // `None` and `Some(0)` are different facts: zero open interest is a
-            // measurement, an unreadable field is not.
+            // read is not a trade — and the substitution is counted where it
+            // cannot be avoided. Open interest is read above instead, because
+            // absence IS expressible there and one of its outcomes refuses.
             volume: {
                 let parsed = fields
                     .get(at.volume)
@@ -584,16 +664,7 @@ fn decode_rows(body: &str, columns: Columns, tally: &mut Tally) -> Result<Vec<Ra
                 }
                 parsed.unwrap_or(0)
             },
-            open_interest: {
-                let parsed = fields
-                    .get(at.open_interest)
-                    .and_then(|v| v.trim().parse::<i64>().ok());
-                if parsed.is_none() {
-                    tally.unreadable_open_interest =
-                        tally.unreadable_open_interest.saturating_add(1);
-                }
-                parsed
-            },
+            open_interest,
         });
     }
 
@@ -888,6 +959,254 @@ mod tests {
                 day_of(&text, format),
                 None,
                 "{text:?} is refused rather than sliced through a character"
+            );
+        }
+    }
+
+    /// An open interest of exactly `i64::MIN` refuses the file rather than
+    /// landing as the §7 null.
+    ///
+    /// `i64::MIN` is the value [`crate::fetch::land`] substitutes for an
+    /// ABSENT open interest, so a row carrying it would be stored as a column
+    /// the vendor never filled in and nothing downstream could tell the two
+    /// apart again. Every other negative open interest is caught later, by
+    /// `Bar::counts_are_sane` at the store's survey (D-0148); this one value
+    /// walks past that check because it IS the null's bit pattern, which is
+    /// why the refusal has to be at the decoder.
+    #[test]
+    fn an_open_interest_of_exactly_the_null_sentinel_refuses_the_file() {
+        // Assembled, not spelled, for the module note above: a bare quoted
+        // eight-digit date is segment-shaped to CI gate 1d and so is a bare
+        // quoted count. A whole row carries commas and is neither.
+        let date = format!("{:04}{:02}{:02}", 2022, 10, 3);
+        let row = |oi: &str| format!("{date},09:15:01,38445.65,250,{oi}\n");
+
+        // THE HAPPY PATH FIRST, so that what refuses below is the value and not
+        // the fixture. An ordinary contract count decodes and stays a
+        // measurement.
+        let ordinary = decode(&row(&2_000.to_string()), Columns::TrueDataIndex)
+            .expect("an ordinary contract count is not a sentinel");
+        assert_eq!(ordinary.len(), 1);
+        assert_eq!(ordinary[0].open_interest, Some(2_000));
+        assert_eq!(ordinary[0].volume, 250, "and the volume beside it");
+
+        // ONE PAST THE SENTINEL IS AN ORDINARY NUMBER HERE. The guard is the
+        // single value §7 spends, never a range near it: an absurd count is the
+        // store's business — D-0148 refuses a negative one at `survey` — and
+        // not this decoder's to widen into.
+        let near = decode(&row(&(i64::MIN + 1).to_string()), Columns::TrueDataIndex)
+            .expect("only the sentinel itself is refused at this boundary");
+        assert_eq!(near[0].open_interest, Some(i64::MIN + 1));
+
+        // THE COLLISION. Stored, this row would reach the bar as exactly the
+        // value `unwrap_or(i64::MIN)` produces for a field that was never sent.
+        let sentinel = i64::MIN.to_string();
+        let refused = decode(&row(&sentinel), Columns::TrueDataIndex)
+            .expect_err("the null sentinel is not a measurement");
+        assert_eq!(
+            refused,
+            CsvError::OpenInterestSentinel {
+                line: 1,
+                got: sentinel.clone(),
+            },
+            "refused by line and by value, never degraded into an absent field"
+        );
+        let sentence = refused.to_string();
+        assert!(
+            sentence.contains("line 1"),
+            "a per-line refusal names its line — {sentence}"
+        );
+        assert!(
+            sentence.contains(&sentinel),
+            "and the value it refused, so the row can be found in the file — {sentence}"
+        );
+
+        // AND THE NEIGHBOURING DEGRADE IS UNCHANGED. A field that will not
+        // parse at all is still ABSENT and still counted: "this build could not
+        // read it" and "the vendor sent the null" are different claims, and
+        // only the second would be a lie on disk.
+        let unreadable = decode(&row("NOT A COUNT"), Columns::TrueDataIndex)
+            .expect("an unreadable count degrades rather than refusing the file");
+        assert_eq!(unreadable[0].open_interest, None);
+        assert_eq!(
+            unreadable[0].volume, 250,
+            "and the volume beside it still reads"
+        );
+    }
+
+    /// One data row in the given layout, its volume and open-interest columns
+    /// spelled by the caller, and the one-based line that row lands on.
+    ///
+    /// The three shipped layouts disagree about two things the sentinel guard
+    /// depends on, and neither is visible from a single-layout fixture. Open
+    /// interest is field 4 in both `TrueData` shapes and field 9 in GDFL —
+    /// `Columns::offsets` — and GDFL opens with a header, so its one data row
+    /// is line TWO. A guard that read a column number written into the decoder,
+    /// or that reported line 1 because that is where the first fixture put the
+    /// row, passes two of the three cases below.
+    ///
+    /// The dates come from `rendered` rather than being spelled out, for the
+    /// module note above: a bare quoted eight-digit date is segment-shaped as
+    /// far as CI gate 1d is concerned.
+    fn one_row(columns: Columns, volume: &str, open_interest: &str) -> (String, usize) {
+        let ymd = rendered(2022, 10, 3, DateFormat::CompactYmd);
+        let dmy = rendered(2022, 10, 3, DateFormat::SlashedDmy);
+        match columns {
+            // date, time, price, volume, open_interest.
+            Columns::TrueDataIndex => (
+                format!("{ymd},09:15:01,38445.65,{volume},{open_interest}\n"),
+                1,
+            ),
+            // The same five, then the four carrying bid/ask depth.
+            Columns::TrueDataFutures => (
+                format!("{ymd},09:15:01,38445.65,{volume},{open_interest},0,0,0,0\n"),
+                1,
+            ),
+            // Ticker, Date, Time, LTP, BuyPrice, BuyQty, SellPrice, SellQty,
+            // LTQ, OpenInterest — a day-first date, and a header row, so the
+            // data lands on line two.
+            Columns::Gdfl => (
+                format!(
+                    "Ticker,Date,Time,LTP,BuyPrice,BuyQty,SellPrice,SellQty,LTQ,OpenInterest\n\
+                     NIFTY,{dmy},09:15:01,38445.65,0,0,0,0,{volume},{open_interest}\n"
+                ),
+                2,
+            ),
+        }
+    }
+
+    /// The sentinel is refused in every declared layout, at that layout's own
+    /// open-interest column — and at that column only.
+    ///
+    /// The refusal reads `at.open_interest`, which is the layout's number and
+    /// not the decoder's. Proved by running the same value through all three
+    /// shipped layouts, two of which put open interest in one column and one of
+    /// which puts it five columns further along behind a header row. See
+    /// `one_row` for why a single-layout fixture cannot show this.
+    #[test]
+    fn the_sentinel_guard_reads_each_layouts_own_open_interest_column() {
+        let sentinel = i64::MIN.to_string();
+        let ordinary = 2_000.to_string();
+
+        for columns in [
+            Columns::TrueDataIndex,
+            Columns::TrueDataFutures,
+            Columns::Gdfl,
+        ] {
+            // THE FIXTURE FIRST, in each layout. If this did not decode, what
+            // refuses below would be the shape and not the value.
+            let (readable, _) = one_row(columns, &ordinary, &ordinary);
+            let rows =
+                decode(&readable, columns).expect("a well-formed row in every declared layout");
+            assert_eq!(rows.len(), 1, "{columns:?} carries one data row");
+            assert_eq!(
+                rows.first().map(|row| row.open_interest),
+                Some(Some(2_000)),
+                "{columns:?} reads open interest from its own column"
+            );
+
+            let (poisoned, line) = one_row(columns, &ordinary, &sentinel);
+            assert_eq!(
+                decode(&poisoned, columns),
+                Err(CsvError::OpenInterestSentinel {
+                    line,
+                    got: sentinel.clone(),
+                }),
+                "{columns:?}: the sentinel in the open-interest column refuses \
+                 the file, and the refusal names the line that column was on"
+            );
+
+            // AND ONLY THAT COLUMN. §7 spends `i64::MIN` on an absent OPEN
+            // INTEREST and on nothing else, so the same value in the VOLUME
+            // column is not this refusal — widening the guard to the whole row
+            // would be inventing a rule nothing has written down. An impossible
+            // volume is caught where the rule for it already lives:
+            // `store::format::Bar::counts_are_sane` requires `volume >= 0`
+            // (D-0148), at the store's survey rather than here.
+            let (odd_volume, _) = one_row(columns, &sentinel, &ordinary);
+            let carried = decode(&odd_volume, columns)
+                .expect("the guard is scoped to the one field §7 spends the value on");
+            assert_eq!(
+                carried.first().map(|row| row.volume),
+                Some(i64::MIN),
+                "{columns:?}: carried past this boundary rather than refused at it"
+            );
+        }
+    }
+
+    /// A sentinel on a later line refuses the WHOLE file, and names that line.
+    ///
+    /// Both halves need a fixture of their own. The first sentinel test puts
+    /// the value on line 1, which a hardcoded `line: 1` would satisfy; and
+    /// `decode`'s contract is that a malformed line refuses the whole file
+    /// rather than returning the rows before it, because a file missing an
+    /// arbitrary subset of its rows is not a shorter file — it is a wrong one,
+    /// and the manifest would record it as complete.
+    #[test]
+    fn a_sentinel_on_a_later_line_refuses_the_whole_file_and_names_that_line() {
+        let ymd = rendered(2022, 10, 3, DateFormat::CompactYmd);
+        let ordinary = 2_000.to_string();
+        let sentinel = i64::MIN.to_string();
+        let row = |second: u8, oi: &str| format!("{ymd},09:15:{second:02},38445.65,250,{oi}\n");
+
+        // Four readable rows. This is what the refusal below is measured
+        // against, so a truncated answer cannot pass for a correct one.
+        let clean: String = (1..=4).map(|second| row(second, &ordinary)).collect();
+        assert_eq!(
+            decode(&clean, Columns::TrueDataIndex).map(|rows| rows.len()),
+            Ok(4),
+            "every row of the fixture reads before one of them is poisoned"
+        );
+
+        let poisoned: String = (1..=4)
+            .map(|second| row(second, if second == 3 { &sentinel } else { &ordinary }))
+            .collect();
+        assert_eq!(
+            decode(&poisoned, Columns::TrueDataIndex),
+            Err(CsvError::OpenInterestSentinel {
+                line: 3,
+                got: sentinel.clone(),
+            }),
+            "the line is counted rather than assumed, and the two readable rows \
+             before it do not come back as a shorter file"
+        );
+    }
+
+    /// The guard compares the parsed VALUE, not the bytes the vendor spelled it
+    /// with.
+    ///
+    /// Three spellings of one number: bare, wrapped in the whitespace the field
+    /// trim removes, and written with a leading zero. All three parse to
+    /// `i64::MIN` and all three would land as the §7 null. A guard written as a
+    /// string comparison against `i64::MIN.to_string()` would refuse the first
+    /// and pass the other two — and the two that passed are the dangerous ones,
+    /// because nothing downstream would ever see them as anything but absent.
+    ///
+    /// This is not a claim that a vendor spells it either of the last two ways.
+    /// It is the reason the check sits after the parse rather than before it,
+    /// pinned so a later edit cannot quietly move it.
+    #[test]
+    fn the_sentinel_guard_compares_the_parsed_value_not_its_spelling() {
+        let ymd = rendered(2022, 10, 3, DateFormat::CompactYmd);
+        let row = |oi: &str| format!("{ymd},09:15:01,38445.65,250,{oi}\n");
+        let bare = i64::MIN.to_string();
+        // `unsigned_abs` rather than a negation: `-i64::MIN` overflows, and
+        // `overflow-checks` is on in BOTH profiles, so that would be a panic
+        // rather than a wrap.
+        let leading_zero = format!("-0{}", i64::MIN.unsigned_abs());
+
+        for spelling in [bare.clone(), format!("  {bare} "), leading_zero] {
+            let refused = decode(&row(&spelling), Columns::TrueDataIndex)
+                .expect_err("every spelling of the null sentinel is the null sentinel");
+            assert_eq!(
+                refused,
+                CsvError::OpenInterestSentinel {
+                    line: 1,
+                    got: spelling.trim().to_owned(),
+                },
+                "{spelling:?} parses to the sentinel and is refused as one — and \
+                 the refusal quotes the field as the file spells it, so the row \
+                 can be found again"
             );
         }
     }

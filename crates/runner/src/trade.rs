@@ -130,8 +130,17 @@ pub struct Trades {
     pub signals: u64,
     /// Signals ignored because a position was already open.
     pub while_open: u64,
-    /// Signals that could not be entered: at or past the square-off, at the end
-    /// of a session, or at the end of the slice.
+    /// Signals that produced no trade: at or past the square-off, at the end
+    /// of a session, or at the end of the slice — and signals whose ENTRY the
+    /// slice allowed but whose EXIT it did not, which is RULE 1c below.
+    ///
+    /// That last case is not a lateness of the signal at all; it is the data
+    /// stopping mid-session. It is counted here rather than in a bucket of its
+    /// own because [`Self::reconciles`] admits exactly three outcomes and a
+    /// fourth would be a format change to every caller of this struct. What it
+    /// costs is stated rather than hidden: a slice cut mid-day inflates
+    /// `too_late` by however many signals its tail carried, and nothing here
+    /// separates them from the 15:10 refusals.
     pub too_late: u64,
 }
 
@@ -208,7 +217,10 @@ pub fn walk(
             continue;
         };
         // RULE 1. The entry bar must itself be inside the tradeable window of
-        // its own session, and the exit must exist.
+        // its own session, and the exit must exist. `forced` names the last bar
+        // of that window a fill can land in; whether the MARKET gave that bar,
+        // or the slice merely stopped there, is RULE 1c's question and not this
+        // one's.
         let Some(forced) = exits.get(entry).copied().flatten() else {
             out.too_late = out.too_late.saturating_add(1);
             continue;
@@ -241,7 +253,51 @@ pub fn walk(
             continue;
         }
         let wanted = entry.saturating_add(h);
-        let exit = wanted.min(forced);
+
+        // RULE 1c. THE HOLD ENDS AT THE HORIZON OR AT THE 15:10 SQUARE-OFF,
+        // WHICHEVER COMES FIRST — AND "THE SLICE RAN OUT" IS NEITHER.
+        //
+        // This was `wanted.min(forced)`, which is right for the first two and
+        // fabricates the third. `forced_exits` answers "the last bar of this
+        // bar's session a fill can land in", and on the final session of a
+        // slice that was cut mid-day that bar is THE CUT. A slice ending at
+        // 10:54 therefore exited at 10:54 and stamped `forced: true` on it: a
+        // 15:10 square-off on a bar where no square-off happened, at a price
+        // the position was never closed at.
+        //
+        // That is worse than a missing trade. A missing trade is a smaller `n`;
+        // this one arrives in the table with a best/worst pair, a return and a
+        // `forced` flag, indistinguishable from a real round trip — a
+        // manufactured fill in a backtester, which `CLAUDE.md` §4 calls a
+        // fallback that hides a failure.
+        //
+        // Three cases, and the third is a refusal rather than a guess:
+        //
+        //   * the horizon fits inside the tradeable window — an ordinary exit;
+        //   * it does not, and `forced.bar` genuinely ENDS that window — the
+        //     square-off, which is a real measured outcome;
+        //   * it does not, and `forced.bar` is only where the data stopped —
+        //     no exit price exists, so the signal is counted `too_late` and
+        //     nothing is traded.
+        //
+        // The same three-way branch, and the same reason, as
+        // [`crate::outcome::forward`]. That module refused the truncated tail
+        // and this one invented it, so the two disagreed about the same slice:
+        // `edge` reported no observation where `walk` reported a trade.
+        //
+        // WHAT THIS DOES NOT FIX: a slice cut at 15:05 still loses the five
+        // minutes to the square-off, and every signal in them is now
+        // `too_late`. The trades that DO survive are unchanged — the tail is
+        // dropped, not re-priced — so this narrows the sample and never moves a
+        // number that was already measured.
+        let exit = if wanted <= forced.bar {
+            wanted
+        } else if forced.real {
+            forced.bar
+        } else {
+            out.too_late = out.too_late.saturating_add(1);
+            continue;
+        };
         if exit <= entry {
             out.too_late = out.too_late.saturating_add(1);
             continue;
@@ -317,27 +373,65 @@ fn paisa(raw: i64) -> brutex_core::price::Paisa {
     brutex_core::price::Paisa::from_raw(raw)
 }
 
-/// For each bar, the last bar of its own session that a fill can still land in.
+/// Where one bar's position is squared off, and whether the market gave that
+/// bar or the file merely ended on it.
+///
+/// The two are the same INDEX and a different fact, which is exactly why they
+/// were confused: a bar at 15:09 and the last bar of a truncated slice are both
+/// "the last bar of this session a fill can land in", and only one of them has
+/// a closing price the position was actually exited at.
+// `Clone` and `Copy` are load-bearing -- `vec![None; n]` needs the one and
+// `Option::copied` the other. `Debug`, `PartialEq` and `Eq` were derived here
+// too and are not: nothing compares two of these and nothing prints one. A
+// derived impl that no call site reaches is an instrumented region no test can
+// cover, and `CLAUDE.md` §9 asks for 100% on every touched crate, so they are
+// gone rather than carried. The tests below read `bar` and `real` as fields for
+// the same reason. Add either back WITH the code that uses it.
+#[derive(Clone, Copy)]
+struct SquareOff {
+    /// The last bar of this bar's own session a fill can still land in.
+    bar: usize,
+    /// True when [`is_window_end`] holds at [`Self::bar`]: a bar after it exists
+    /// and lies in another session or past the square-off, so the tradeable
+    /// window genuinely ENDED there.
+    ///
+    /// False when `bar` is only where the slice stopped. There is then no 15:10
+    /// price at all, and a hold that overruns its horizon has no exit rather
+    /// than an exit here — [`walk`]'s RULE 1c.
+    real: bool,
+}
+
+/// For each bar, where a position opened on it is squared off — and whether
+/// that square-off is a fact about the session or about the file.
 ///
 /// One backward pass, so every bar gets its answer in O(1) amortised rather than
-/// searching its session. `None` where the bar is at or past the square-off, or
-/// where the session's bars simply run out before it — see
-/// [`crate::outcome`]'s note on why the end of the data is not a square-off.
+/// searching its session. `None` where the bar is at or past the square-off:
+/// nothing entered there can be exited inside its own session at all.
+///
+/// Where the session's bars simply run out first the answer is
+/// `Some(SquareOff { real: false, .. })` and deliberately NOT `None`. That bar
+/// is still a legitimate exit for a hold whose horizon lands on or before it —
+/// that price printed and that trade completed — and it is only the OVERRUN
+/// that has nowhere to go. Refusing the whole truncated session here would
+/// discard round trips that finished inside the slice, which is a second wrong
+/// answer rather than a fix for the first. [`walk`] makes the distinction, and
+/// [`crate::outcome`] carries the same note on why the end of the data is not a
+/// square-off.
 ///
 /// UNVERIFIED as a measured figure, and no bench row covers it. What is claimed
-/// is the SHAPE: the loop body is a fixed number of integer operations and one
-/// `Option` copy, and the answer for bar `i` is inherited from bar `i + 1`
-/// whenever they share a day, so nothing re-walks a session. A forward search
-/// per bar would be O(H) with `H` caller-supplied — constant only by accident,
-/// which is the kind of bound `CLAUDE.md` §3 rule 6 asks to be labelled rather
-/// than asserted.
-fn forced_exits(bars: &[Candle]) -> Vec<Option<usize>> {
+/// is the SHAPE: the loop body is a fixed number of integer operations, one
+/// `Option` copy and one [`is_window_end`], which reads at most one neighbouring
+/// stamp; and the answer for bar `i` is inherited from bar `i + 1` whenever they
+/// share a day, so nothing re-walks a session. A forward search per bar would be
+/// O(H) with `H` caller-supplied — constant only by accident, which is the kind
+/// of bound `CLAUDE.md` §3 rule 6 asks to be labelled rather than asserted.
+fn forced_exits(bars: &[Candle]) -> Vec<Option<SquareOff>> {
     let stamps: Vec<(i64, i64)> = bars
         .iter()
         .map(|b| (indicators::ist_day(b.ts_micros), minute_of_day(b.ts_micros)))
         .collect();
 
-    let mut out: Vec<Option<usize>> = vec![None; bars.len()];
+    let mut out: Vec<Option<SquareOff>> = vec![None; bars.len()];
     for i in (0..bars.len()).rev() {
         let Some(&(day, minute)) = stamps.get(i) else {
             continue;
@@ -347,7 +441,17 @@ fn forced_exits(bars: &[Candle]) -> Vec<Option<usize>> {
             .filter(|&j| stamps.get(j).is_some_and(|&(d, _)| d == day))
             .and_then(|j| out.get(j).copied().flatten());
         let mine = if minute <= LAST_FILL_MINUTE {
-            Some(i)
+            Some(SquareOff {
+                bar: i,
+                // Asked HERE, while the table is built, and not once per signal:
+                // the answer depends only on the bar, so paying for it per
+                // signal would put a lookup that a hot mask performs millions of
+                // times behind a table that already exists. `inherited` then
+                // carries the flag of the bar it NAMES rather than of the bar
+                // inheriting it, which is the only pairing that stays true as
+                // the chain walks backwards.
+                real: is_window_end(&stamps, i),
+            })
         } else {
             None
         };
@@ -356,6 +460,35 @@ fn forced_exits(bars: &[Candle]) -> Vec<Option<usize>> {
         }
     }
     out
+}
+
+/// Is bar `j` the genuine last tradeable bar of its window, or just the last bar
+/// in the slice?
+///
+/// The difference is a fill that happened against one that did not. A position
+/// squared off at 15:10 has a real exit price and a real return; a slice that
+/// simply stops at 10:54 has neither, and treating its final bar as a forced
+/// close would report an exit the market never gave.
+///
+/// `j` ends the window when the bar after it belongs to another day, or is at or
+/// past the forced close. When there is no bar after it, the data ran out and
+/// the answer is no.
+///
+/// A SECOND COPY of [`crate::outcome`]'s function of the same name -- its BODY
+/// character for character, and only the examples in this comment differ -- and
+/// that is stated rather than tidied away. The rule belongs to both modules —
+/// `outcome` measures the tail and `trade` fills in it — and unifying them means
+/// a shared home for a rule that neither module owns.
+/// Deferred rather than done here; until then the two must be changed together,
+/// and the tests below pin this copy independently so a drift shows up as a
+/// failure rather than as a quiet disagreement about the same slice.
+fn is_window_end(stamps: &[(i64, i64)], j: usize) -> bool {
+    let Some(&(day, _)) = stamps.get(j) else {
+        return false;
+    };
+    j.checked_add(1)
+        .and_then(|k| stamps.get(k))
+        .is_some_and(|&(next_day, next_minute)| next_day != day || next_minute > LAST_FILL_MINUTE)
 }
 
 /// The last bar whose interval ends at or before the 15:10 square-off.
@@ -627,5 +760,238 @@ mod tests {
         );
         assert_eq!(t, Trades::default());
         assert!(t.reconciles());
+    }
+
+    /// Sessions that STOP MID-DAY: 300 bars each, so the last bar of every one
+    /// of them is stamped 14:14 IST -- inside the tradeable window, and nowhere
+    /// near the 15:10 square-off.
+    ///
+    /// # Eight sessions, and not the two the defect needs
+    ///
+    /// `Evaluator::warmed_up` requires **five completed sessions** before
+    /// `Column::build` sweeps a single bar. A two-session fixture -- the obvious
+    /// way to write "one whole session and one cut short" -- sweeps NOTHING, and
+    /// every assertion below would then hold over an empty trade list while
+    /// proving nothing. The count is eight to match `swept`, so the two fixtures
+    /// differ only in session length.
+    ///
+    /// # Only the LAST cut is detectable, and that asymmetry is the point
+    ///
+    /// Sessions 0 through 6 each end at 14:14 with another day's bar after them,
+    /// so as far as anything here can tell their window ended -- which is also
+    /// the right answer for a session that really was short (the 2025 Muhurat
+    /// session was sixty bars), and the two cannot be told apart without an
+    /// exchange calendar this repository does not have. Session 7's last bar is
+    /// followed by nothing, and THAT is what a slice cut mid-session produces.
+    fn sessions_cut_mid_day() -> (Vec<indicators::Candle>, Column) {
+        let bars = crate::synthetic::session_of(8, 300);
+        let column = Column::build(&bars, &mut evaluator());
+        (bars, column)
+    }
+
+    /// The IST day of bar `at`, or zero where the slice has no such bar.
+    fn day_of(bars: &[indicators::Candle], at: usize) -> i64 {
+        bars.get(at).map_or(0, |b| indicators::ist_day(b.ts_micros))
+    }
+
+    /// Did the tradeable window genuinely end on bar `at`?
+    ///
+    /// Read off the BARS, deliberately, rather than by calling
+    /// `super::is_window_end`. A test that asks the walk's own predicate whether
+    /// the walk was right compares a function to itself; this one goes back to
+    /// the timestamps that predicate was supposed to be derived from. Only the
+    /// square-off constant is shared, because a second spelling of 15:10 would
+    /// be a different rule rather than an independent check of this one.
+    fn window_ends_at(bars: &[indicators::Candle], at: usize) -> bool {
+        let here = day_of(bars, at);
+        bars.get(at.saturating_add(1)).is_some_and(|next| {
+            indicators::ist_day(next.ts_micros) != here
+                || super::minute_of_day(next.ts_micros) > super::LAST_FILL_MINUTE
+        })
+    }
+
+    #[test]
+    fn a_slice_that_stops_mid_session_fabricates_no_square_off() {
+        // THE DEFECT, as the fixture that produced it. `exit =
+        // wanted.min(forced)` treated the last bar of a truncated slice as the
+        // 15:10 close, so a hold that overran its horizon in the final session
+        // exited at 14:14 and reported `forced: true` -- a square-off on a bar
+        // where none happened, arriving in the table with a best/worst pair and
+        // a return, indistinguishable from a real round trip.
+        //
+        // H=400 against 300-bar sessions so that EVERY hold overruns. No trade
+        // in this fixture can reach its horizon, so the only thing a trade can
+        // be here is a square-off, and the sessions then differ in exactly one
+        // respect: sessions 0..=6 end because the day did, session 7 because the
+        // file did.
+        let (bars, column) = sessions_cut_mid_day();
+        let t = walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(400),
+            Direction::Long,
+        );
+
+        assert!(
+            t.signals > 0,
+            "the fixture swept nothing, so every assertion below would hold \
+             over an empty list and prove nothing: {t:?}"
+        );
+        assert!(t.reconciles(), "every signal lands in one bucket: {t:?}");
+
+        let cut = bars.len().saturating_sub(1);
+        for trade in &t.trades {
+            assert_ne!(
+                trade.exit_bar, cut,
+                "a trade exited on the last bar of the slice, 14:14 IST: the \
+                 data ran out there, the session did not"
+            );
+            // The general form of the assertion above, and the one that keeps
+            // holding if the fixture ever grows a gap in its middle: an exit the
+            // walk CALLS a square-off must be a bar the window really ended on.
+            assert!(
+                !trade.forced || window_ends_at(&bars, trade.exit_bar),
+                "trade exited at bar {} and flagged it a 15:10 square-off, but \
+                 the tradeable window did not end there",
+                trade.exit_bar
+            );
+        }
+
+        assert!(
+            t.too_late > 0,
+            "the signals in the truncated tail have no exit, so they must be \
+             counted as refusals rather than traded: {t:?}"
+        );
+        // WITHOUT THIS the loop above is vacuous. An empty trade list satisfies
+        // "no trade is wrongly forced" perfectly, so a fix that refused the
+        // whole fixture would pass it. The real square-offs, on the sessions
+        // that genuinely ended, must survive.
+        assert!(
+            t.trades.iter().any(|x| x.forced),
+            "the square-offs on the sessions that genuinely ended must still be \
+             taken and still be flagged: {t:?}"
+        );
+    }
+
+    #[test]
+    fn a_horizon_that_fits_inside_the_truncated_session_is_still_traded() {
+        // THE SECOND WRONG ANSWER, refused. Dropping the final session whole
+        // would have been the easier fix and a worse one: a five-bar hold
+        // entered at 11:00 on a slice that stops at 14:14 COMPLETED -- both its
+        // prices printed and both fills are real -- and discarding it would
+        // shrink `n` for a reason that has nothing to do with the data.
+        //
+        // Only the OVERRUN has nowhere to go. This pins that difference, and it
+        // is why `forced_exits` answers `real: false` rather than `None` for a
+        // session the file cut short.
+        let (bars, column) = sessions_cut_mid_day();
+        let t = walk(
+            &bars,
+            &column,
+            &ConditionMask::default(),
+            h(5),
+            Direction::Long,
+        );
+        assert!(t.reconciles(), "every signal lands in one bucket: {t:?}");
+
+        let cut_day = day_of(&bars, bars.len().saturating_sub(1));
+        let mut in_cut_session = 0_usize;
+        for trade in &t.trades {
+            if day_of(&bars, trade.entry_bar) != cut_day {
+                continue;
+            }
+            in_cut_session = in_cut_session.saturating_add(1);
+            assert!(
+                !trade.forced,
+                "the trade entered at bar {} was flagged a square-off in a \
+                 session that has no 15:10 bar at all",
+                trade.entry_bar
+            );
+        }
+        assert!(
+            in_cut_session > 0,
+            "a session the slice cut short is still tradeable up to the cut, \
+             and refusing all of it would be a second wrong answer: {t:?}"
+        );
+    }
+
+    #[test]
+    fn the_window_ends_where_the_session_does_and_not_where_the_file_does() {
+        // `is_window_end` is a SECOND COPY of a rule `crate::outcome` also
+        // holds, so it is pinned here independently. If the two ever drift, one
+        // of the two tests fails -- rather than the two modules quietly
+        // disagreeing about the same slice, which is the failure the
+        // duplication was accepted to keep visible.
+        //
+        // One case per branch of the function, including the two that answer
+        // "no" for entirely different reasons.
+        let close = super::LAST_FILL_MINUTE;
+
+        let then_past_the_close = [(0_i64, close), (0_i64, close.saturating_add(1))];
+        assert!(
+            super::is_window_end(&then_past_the_close, 0),
+            "a bar followed, same day, by one past 15:10 ends the window"
+        );
+
+        let then_tomorrow = [(0_i64, close), (1_i64, 555_i64)];
+        assert!(
+            super::is_window_end(&then_tomorrow, 0),
+            "a bar followed by the next session's 09:15 ends the window"
+        );
+
+        let mid_session = [(0_i64, 600_i64), (0_i64, 601_i64)];
+        assert!(
+            !super::is_window_end(&mid_session, 0),
+            "a bar with a tradeable same-day bar after it is mid-window"
+        );
+        assert!(
+            !super::is_window_end(&mid_session, 1),
+            "the last stamp in the slice is where the FILE ended, and the end \
+             of a file is not a square-off"
+        );
+        assert!(
+            !super::is_window_end(&mid_session, 9),
+            "an index past the end names no bar, so it ends no window"
+        );
+    }
+
+    #[test]
+    fn the_forced_exit_table_flags_a_real_window_end_and_refuses_the_cut() {
+        // The table `walk` reads, asserted directly rather than through the
+        // trades it produces. Both fields matter and a trade only ever shows
+        // one of them: `bar` is what the existing square-off tests check, `real`
+        // is what RULE 1c branches on, and a table naming the right bar with the
+        // wrong flag would refuse every genuine square-off or fabricate every
+        // truncated one -- while every assertion about `exit_bar` still passed.
+        let bars = crate::synthetic::session_of(8, 300);
+        let table = super::forced_exits(&bars);
+
+        // Bar 0 inherits session 0's square-off, and that session ended because
+        // the next day started.
+        let first = table
+            .first()
+            .copied()
+            .flatten()
+            .expect("bar 0 is inside the tradeable window, so it has an exit");
+        assert_eq!(first.bar, 299, "session 0's last bar is index 299");
+        assert!(first.real, "another day follows 299, so that window ended");
+
+        // The same question in the final session, where the file stops instead.
+        let cut_session = table
+            .get(2_100)
+            .copied()
+            .flatten()
+            .expect("the final session's first bar is tradeable too");
+        assert_eq!(
+            cut_session.bar,
+            bars.len().saturating_sub(1),
+            "the final session's exit is the last bar the slice has"
+        );
+        assert!(
+            !cut_session.real,
+            "nothing follows the last bar of the slice, so the window did not \
+             end there -- the file did"
+        );
     }
 }

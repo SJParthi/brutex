@@ -18,7 +18,7 @@
 //! | [`BarFile::open_or_create`] on an **existing** month | nothing new; it only reads |
 //! | [`BarFile::open_existing`] | nothing, ever — it creates no directory, no bar file and no lock, and a month that is absent is [`StoreError::Missing`] naming the path |
 //! | [`BarFile::append`] returning [`Appended::Committed`] | every appended record **and** the header slot that publishes them, in that order, with an `fsync` after each |
-//! | [`BarFile::append`] returning [`Appended::AlreadyPresent`] | nothing was written; the batch was already the file's tail, byte for byte |
+//! | [`BarFile::append`] returning [`Appended::AlreadyPresent`] | nothing was written; the month already held every offered bar, byte for byte, at the index the answer names |
 //! | [`BarFile::read_record`] | nothing; it writes nothing |
 //!
 //! The order inside [`BarFile::append`] is `docs/02-store-format.md` §5, and
@@ -294,13 +294,29 @@ pub enum StoreError {
     /// The file's length is not the header region plus a whole number of
     /// records.
     ///
-    /// The file was interrupted mid-record. `docs/02-store-format.md` §7
-    /// describes truncating to the last whole record and logging the discarded
-    /// count; this module refuses instead, and the reason is that truncation is
-    /// a **destructive write** performed on an operator's file at open time,
-    /// and this crate has no logging sink to be loud through. `CLAUDE.md` §4
-    /// admits either half — degrade loudly, *or* refuse — and refusing is the
-    /// half that cannot lose a byte.
+    /// **NO DOOR IN THIS MODULE CONSTRUCTS THIS ANY MORE, AND THAT IS THE
+    /// POINT.** It was returned for a remainder anywhere in the file, which
+    /// bricked a month for bytes no commit claimed: an append interrupted
+    /// before its header slot was written leaves a partial record *past*
+    /// `offset_of(n_valid)`, and refusing there cost every committed bar in
+    /// the month to protect a tail nothing reads. `BarFile::validated` now
+    /// measures the committed extent instead and reports the remainder through
+    /// the log — see the comment there, and `docs/04-invariants.md` S-07.
+    ///
+    /// The other half — a file SHORTER than its own counter claims — is still
+    /// refused, as [`StoreError::Format`] carrying
+    /// [`FormatError::CounterExceedsFile`]. Usually that happens one layer up,
+    /// in [`crate::header::Header::validate`], which is where it was always
+    /// caught first; when the header search answers it by walking back to an
+    /// older slot instead, `BarFile::validated` catches it, because the
+    /// walk-back turns a counter that is ahead of the bytes into one that is
+    /// behind them and the two mean opposite things.
+    ///
+    /// The variant is kept rather than deleted because deleting a public
+    /// variant is an API change that wants a `docs/05-decisions.md` entry
+    /// behind it, and because the refusal-rendering test in
+    /// `crates/store/tests/write.rs` still builds one and asserts its sentence.
+    /// Removing it is a separate change, not a side effect of this one.
     RaggedTail {
         /// The bar file.
         path: PathBuf,
@@ -533,13 +549,18 @@ pub enum Appended {
         /// The commit counter after the append.
         n_valid: u64,
     },
-    /// The batch was already the file's tail, byte for byte. Nothing was
-    /// written and no generation was spent.
+    /// The month already held every bar of the batch, byte for byte, starting
+    /// at `first_index`. Nothing was written and no generation was spent.
     ///
     /// This is what makes a re-run of the same pull safe: the second append
     /// leaves the file byte-identical, which
     /// `store::write::re_appending_the_same_batch_leaves_the_file_byte_identical`
     /// proves by checksumming the whole file either side.
+    ///
+    /// **`first_index` is where the bars actually are, not `n_valid - count`.**
+    /// It used to be the second of those, because the check could only ever
+    /// answer for the file's tail; a re-pull of a window in the middle of a
+    /// month is now answered at the index it really occupies.
     AlreadyPresent {
         /// The index the first record of the batch already sits at.
         first_index: u64,
@@ -593,11 +614,16 @@ impl BarFile {
     /// [`StoreError::Denied`], [`StoreError::ReadOnly`],
     /// [`StoreError::IsADirectory`], [`StoreError::NotADirectory`],
     /// [`StoreError::DiskFull`] or [`StoreError::Io`] from the host.
-    /// [`StoreError::RaggedTail`] for a file interrupted mid-record,
     /// [`StoreError::Format`] for a header that disagrees with the file's
-    /// length or is damaged in every slot, and
+    /// length — [`FormatError::CounterExceedsFile`] is the file that is
+    /// *shorter* than its counter claims, including when an older slot would
+    /// otherwise have covered for it — or is damaged in every slot, and
     /// [`StoreError::SymbolMismatch`] or [`StoreError::TimeframeMismatch`] for
     /// a file written for something else.
+    ///
+    /// **Not [`StoreError::RaggedTail`].** Bytes past the committed extent are
+    /// an interrupted append, and this door opens the month and logs them
+    /// rather than refusing it; see `Self::validated`.
     pub fn open_or_create(
         root: &Path,
         path: StorePath<'_>,
@@ -779,16 +805,110 @@ impl BarFile {
         symbol_id: u32,
         timeframe_secs: u32,
     ) -> Result<Self, StoreError> {
-        let header = read_header(&bars, &bars_path, len)?;
+        let (header, claimed) = read_header(&bars, &bars_path, len)?;
         let layout = refused(Layout::for_version(header.format_version), &bars_path)?;
-        let extra = layout.ragged_tail_bytes(len);
-        if extra != 0 {
-            return Err(StoreError::RaggedTail {
-                path: bars_path,
-                len,
-                extra,
-            });
+
+        // A TORN TAIL PAST THE COUNTER BRICKED THE WHOLE MONTH, PERMANENTLY.
+        //
+        // This measured `layout.ragged_tail_bytes(len)` — the raggedness of the
+        // WHOLE FILE — and refused any non-zero remainder. But the remainder
+        // that reaches this line is not the file's, it is the part of the file
+        // NO COMMIT COVERS. `read_header` has already put every slot through
+        // `Header::validate`, which refuses `n_valid > capacity_for(len)` as
+        // `FormatError::CounterExceedsFile` and otherwise walks back to an
+        // older generation — so by here the bytes the counter claims are all
+        // present, and everything past `offset_of(n_valid)` is an append that
+        // died before its header slot was written.
+        //
+        // Those bytes are not data, and they are not in anything's way: the
+        // next append writes at exactly `offset_of(n_valid)` and overwrites
+        // them. Refusing cost the entire month — every committed bar in it —
+        // to protect a tail no reader can reach, and `CLAUDE.md` §3 rule 8
+        // means nothing in this repository may rewrite the file to clear it.
+        // One interrupted pull and the month was unopenable by every process,
+        // forever. `docs/04-invariants.md` S-07 and `docs/02-store-format.md`
+        // §7 both promise the opposite: discard the remainder, log the byte
+        // count, continue.
+        //
+        // The old refusal's own justification has expired. It read "this crate
+        // has no logging sink to be loud through", which was true when it was
+        // written; `crates/store` has depended on `telemetry` since D-0075, and
+        // `note_tail_past_the_commit` is the loud half `CLAUDE.md` §4 asks for.
+        //
+        // WHAT THIS DOES NOT DO, stated rather than implied: it does not
+        // truncate. §7's pseudocode does, and the module doc above argues
+        // against performing a destructive write on an operator's file at open
+        // time. Ignoring the bytes and naming them is the same outcome for
+        // every reader — nothing at or past `n_valid` is readable, which is
+        // S-03 — without the write. It also leaves the remainder there across
+        // reopens, so the line repeats once per open until an append covers it.
+        //
+        // AND THE `len < committed_end` ARM IS BACK, BECAUSE THE FALLBACK
+        // LAUNDERED IT. This comment used to say that arm was unreachable —
+        // "refused one layer up as `CounterExceedsFile`" — and that was true of
+        // the newest *commit* and false of the *file*. When the newest slot
+        // fails `Header::validate`, `Header::read_region` does not refuse: it
+        // walks back to an older slot and returns that one. Commit four
+        // records, cut the file 39 bytes short of the fourth, and generation 1
+        // is rejected for `CounterExceedsFile`, generation 0 comes back with
+        // `n_valid == 0`, and 185 bytes — three whole records a commit
+        // published, plus a torn fourth — arrive on this line looking exactly
+        // like an interrupted append. Accepting them demotes three committed
+        // bars to scratch that the next append overwrites, which is `CLAUDE.md`
+        // §4's fallback that hides a failure, one layer removed.
+        //
+        // `claimed` — the largest counter any slot of the region still decodes
+        // as — is what separates the two, and it is the only thing that can.
+        // Both files are 32,953 bytes and both are 17 bytes ragged, so no
+        // function of the length can tell them apart:
+        //
+        //   * `claimed == n_valid`: no header slot ever published these bytes.
+        //     An append died before its commit. Accept, and log them.
+        //   * `claimed > n_valid`: a slot DID publish records this counter
+        //     drops, and their bytes are still on the disk. The counter is
+        //     ahead of the file, not behind it. Refuse.
+        //
+        // `store::write::a_counter_behind_its_bytes_opens_and_a_counter_ahead_of_them_is_refused`
+        // asserts the two side by side so a later edit cannot collapse them
+        // again, which is what both halves of this line's history did in turn.
+        //
+        // `CounterExceedsFile` and not `RaggedTail`, deliberately: what is
+        // wrong is the 39 bytes MISSING below the commit, not the 17 that
+        // happen to be extra above the last whole record. Truncate to a record
+        // boundary instead and `RaggedTail`'s own `extra` is zero while the
+        // three records are just as lost — the length-shaped refusal cannot
+        // even state this condition, which is half of why it was the wrong one.
+        //
+        // WHAT THIS DOES NOT FIX, stated rather than implied: a truncation that
+        // lands exactly on an older commit's extent. Cut the file to
+        // `offset_of` of the generation the fallback returns and there is
+        // nothing left over to notice — `discarded` is zero and the bytes are
+        // byte-for-byte what a header published before its records became
+        // durable looks like. Those two files are the same file, so no rule
+        // over these bytes can separate them, and the recovery is the half
+        // worth keeping: `store::write::a_header_that_outran_its_file_falls_back_one_generation`
+        // is that file and it still opens. Catching it needs the block
+        // checksums this build does not write, which the module doc names.
+        //
+        // The subtraction is written through `capacity_for` and
+        // `ragged_tail_bytes` rather than `offset_of`, because those two are
+        // infallible and `offset_of` is not: with `n_valid <= capacity_for(len)`
+        // already proven, its overflow arm is unreachable too, and a `?` on it
+        // would smuggle one back in. The identity is
+        //   len − offset_of(n_valid) = (capacity − n_valid)·stride + ragged
+        // and `store::file::the_discarded_count_is_the_bytes_past_the_counter`
+        // pins it against `offset_of` directly.
+        let discarded = bytes_past_the_counter(layout, len, header.n_valid);
+        if discarded != 0 {
+            if claimed > header.n_valid {
+                return Err(StoreError::Format {
+                    path: bars_path,
+                    source: FormatError::CounterExceedsFile,
+                });
+            }
+            note_tail_past_the_commit(&bars_path, len, header.n_valid, discarded);
         }
+
         if header.symbol_id != symbol_id {
             return Err(StoreError::SymbolMismatch {
                 path: bars_path,
@@ -844,12 +964,19 @@ impl BarFile {
     /// until the batch has been surveyed and the next header computed, so a
     /// refusal leaves the file byte-identical.
     ///
-    /// **Re-appending the file's own tail is a no-op, not a duplicate.** A
-    /// batch whose first timestamp does not follow the committed range is
-    /// compared, record by record, against the records already at those
-    /// indices: identical means [`Appended::AlreadyPresent`] and no write at
+    /// **Re-appending bars the month already holds is a no-op, not a
+    /// duplicate — wherever in the month they sit.** A batch whose first
+    /// timestamp does not follow the committed range is located by that
+    /// timestamp and compared, record by record, against the records already
+    /// there: identical means [`Appended::AlreadyPresent`] and no write at
     /// all, different means a refusal. A re-pull of the same day is therefore
     /// safe and leaves the same bytes, which is `CLAUDE.md` §3 rule 5.
+    ///
+    /// The location used to be assumed rather than found — the batch was
+    /// compared against the file's last `count` records and nothing else — so
+    /// re-offering a day from the *middle* of a month was refused as a
+    /// conflict, which is the ordinary shape of a re-pull of one day inside a
+    /// month already backfilled.
     ///
     /// # Errors
     ///
@@ -905,9 +1032,21 @@ impl BarFile {
                 //
                 // ONE: exactly what is already there, byte for byte — a re-run
                 // of the same pull. Write nothing.
-                if self.tail_matches(batch, count)? {
+                //
+                // THE BATCH IS LOCATED, NOT ASSUMED TO BE THE TAIL. This asked
+                // `tail_matches`, which compared the batch against the LAST
+                // `count` committed records and nothing else. A day re-pulled
+                // from the middle of a month therefore compared 2026-08-04's
+                // bars against 2026-08-29's, found them different, and the
+                // month refused the whole window as a vendor restating history
+                // — for bars it already held, byte for byte. Only a re-pull
+                // that happened to end at the file's last record could answer.
+                let located = already_stored(batch, first_ts, self.header.n_valid, |index| {
+                    self.read_record(index)
+                })?;
+                if let Some(first_index) = located {
                     return Ok(Appended::AlreadyPresent {
-                        first_index: self.header.n_valid.saturating_sub(count),
+                        first_index,
                         n_valid: self.header.n_valid,
                     });
                 }
@@ -1060,6 +1199,19 @@ impl BarFile {
         // EVERY overlapping bar must be the one already stored. The stored
         // records are strictly increasing too, so the overlap ends at
         // `n_valid` and begins that many records back.
+        //
+        // THIS ANCHOR IS STILL THE TAIL, AND DELIBERATELY. The check above it
+        // no longer is — `already_stored` locates the batch by timestamp —
+        // but the two are not the same question, and this one cannot be wrong
+        // in the accepting direction: a bar carries its own `ts_micros`, so a
+        // comparison that matches at some index proves that index holds that
+        // timestamp. Anchoring wrongly can only make the comparison FAIL, and
+        // a failure here is a refusal, never a silent drop. What it costs is
+        // an overlap that is not a contiguous run ending at the last held bar
+        // — a vendor that skipped a bar inside the held range — which is
+        // refused rather than resumed. Locating it by timestamp would refuse
+        // it too, at the gap instead of at the anchor, so the bisection buys
+        // nothing here and is not spent.
         let Some(start) = self.header.n_valid.checked_sub(len_u64(overlap.len())) else {
             return Ok(None);
         };
@@ -1070,23 +1222,6 @@ impl BarFile {
             }
         }
         Ok(Some(suffix))
-    }
-    /// Whether the last `count` committed records are exactly this batch.
-    ///
-    /// Reads `count` records, so it costs the batch and not the file. It runs
-    /// only when a batch overlaps the committed range, which is the re-pull
-    /// case; an ordinary forward append never enters it.
-    fn tail_matches(&self, batch: &[Bar], count: u64) -> Result<bool, StoreError> {
-        let Some(start) = self.header.n_valid.checked_sub(count) else {
-            return Ok(false);
-        };
-        for (offset, bar) in batch.iter().enumerate() {
-            let stored = self.read_record(start.saturating_add(len_u64(offset)))?;
-            if stored != *bar {
-                return Ok(false);
-            }
-        }
-        Ok(true)
     }
 }
 
@@ -1139,6 +1274,121 @@ fn survey(batch: &[Bar]) -> Result<(i64, i64), StoreError> {
     Ok((first.ts_micros, previous.unwrap_or(first.ts_micros)))
 }
 
+/// Where `batch` already sits among `n_valid` committed records, when the file
+/// holds **every** bar of it, byte for byte, in one run.
+///
+/// `None` when the file does not hold them there — a timestamp it has no
+/// record for, a bar whose values differ from the record at that timestamp, or
+/// a batch that runs past the last committed record. Each of those is the
+/// caller's problem to refuse or to resume from; answering "already present"
+/// for any of them is the fallback `CLAUDE.md` §4 bans.
+///
+/// `first_ts` is the batch's first timestamp, which [`survey`] has already
+/// computed and already proven is the smallest. Taking it as an argument
+/// rather than re-reading `batch[0]` is what keeps this function free of an
+/// empty-batch arm that [`survey`] makes unreachable.
+///
+/// # Cost, stated exactly
+///
+/// `O(log n_valid)` reads to locate the run, then one read per offered bar —
+/// so it is bounded by the batch plus a bisection, never by the month. It runs
+/// only when a batch overlaps the committed range, which is the re-pull case;
+/// an ordinary forward append never enters it.
+///
+/// **This is NOT an O(1) path and does not claim to be.** `CLAUDE.md` §3 rule
+/// 4's constant-cost list is bar lookup, condition lookup, mask evaluation,
+/// duplicate rejection and result append — the per-bar sweep path — and
+/// `docs/07-o1-architecture.md` layer 4 bans a search on it, membership above
+/// all. This is the ingest boundary: it runs once per offered batch, off the
+/// sweep entirely, and the alternative it replaced was not O(1) either — it
+/// read `count` records unconditionally and answered the wrong question. The
+/// bisection is written as a loop over [`BarFile::read_record`] rather than
+/// spelled `binary_search`, because there is no slice to call that on: the
+/// records are on disk.
+///
+/// # Reader
+///
+/// `read` is [`BarFile::read_record`] at the call site. It is a parameter so
+/// this function can be driven from a table in memory — the same reason
+/// [`Positional`] exists in this module, and the reason
+/// `store::file::locating_a_batch_costs_a_bisection_and_not_a_scan` can assert
+/// the read COUNT rather than assert the cost in a comment.
+fn already_stored<R>(
+    batch: &[Bar],
+    first_ts: i64,
+    n_valid: u64,
+    read: R,
+) -> Result<Option<u64>, StoreError>
+where
+    R: Fn(u64) -> Result<Bar, StoreError>,
+{
+    let at = first_at_or_after(n_valid, first_ts, &read)?;
+
+    // THE RUN MUST LIE WHOLLY INSIDE WHAT IS COMMITTED. Without this the
+    // comparison below would ask for a record past the counter and get
+    // `StoreError::NotCommitted` back — turning a batch that merely EXTENDS
+    // the month, which is the resume the caller handles next, into a hard
+    // refusal naming an index nobody asked about.
+    //
+    // Saturating rather than checked, for `len_u64`'s reason: a sum that
+    // saturates is `u64::MAX`, which exceeds every real `n_valid` and lands on
+    // the `None` below — a refusal by the ordinary door instead of an arm no
+    // input can reach.
+    let end = at.saturating_add(len_u64(batch.len()));
+    if end > n_valid {
+        return Ok(None);
+    }
+
+    for (offset, bar) in batch.iter().enumerate() {
+        if read(at.saturating_add(len_u64(offset)))? != *bar {
+            return Ok(None);
+        }
+    }
+    Ok(Some(at))
+}
+
+/// The first of `n_valid` committed records whose timestamp is at or after
+/// `ts`, or `n_valid` when every one of them is older.
+///
+/// A bisection, because the records are strictly increasing in `ts_micros` —
+/// that is what [`survey`] enforces at the write boundary and what
+/// [`Header::advance`] enforces between batches, so it is a property of the
+/// file and not an assumption made here.
+///
+/// The answer is an INSERTION POINT and is not claimed to hold `ts`: a caller
+/// that needs that compares the record there, which [`already_stored`] does as
+/// part of the comparison it was going to make anyway. Confirming it here
+/// would be one more read for an answer the caller already computes.
+///
+/// # Errors
+///
+/// Whatever `read` refuses. A truncated file answers
+/// [`StoreError::ShortRead`], which is the honest outcome: the bytes this
+/// question is about are gone, and "not present" would be a claim about bytes
+/// nobody can see.
+fn first_at_or_after<R>(n_valid: u64, ts: i64, read: R) -> Result<u64, StoreError>
+where
+    R: Fn(u64) -> Result<Bar, StoreError>,
+{
+    let mut low = 0u64;
+    let mut high = n_valid;
+    while low < high {
+        // `low + (high - low) / 2` rather than `(low + high) / 2`: the second
+        // overflows for a counter past half of `u64`, and `overflow-checks` is
+        // on in both profiles, so that is a panic and not a wrong answer.
+        // Saturating spellings on both, which cannot bite — `low < high`
+        // makes the subtraction exact and the sum is below `high`.
+        let mid = low.saturating_add(high.saturating_sub(low) / 2);
+        if read(mid)?.ts_micros < ts {
+            // `mid < high`, so this cannot pass `n_valid` and cannot wrap.
+            low = mid.saturating_add(1);
+        } else {
+            high = mid;
+        }
+    }
+    Ok(low)
+}
+
 /// Writes a fresh header region: zeros, then the genesis commit.
 ///
 /// The zeros are written rather than left as a hole, so the whole region is
@@ -1159,16 +1409,123 @@ fn initialise(
     fault(dst.sync_all(), path, Action::Sync)
 }
 
-/// Reads the header region and returns the committed header.
+/// Reads the header region: the committed header, and the largest record count
+/// any intact slot in it claims.
 ///
 /// Reads at most [`REGION_LEN`] bytes — never the whole file. A longer read
 /// would let record bytes audition as header slots, which is the reason
 /// [`Header::read_region`] bounds itself at [`MAX_SLOT_COUNT`] positions.
-fn read_header(src: &File, path: &Path, len: u64) -> Result<Header, StoreError> {
+///
+/// # Why the second number exists
+///
+/// [`Header::read_region`] does not always return the newest commit. When the
+/// newest slot fails [`Header::validate`] it walks back to an older one and
+/// returns **that**, which is the right recovery for a header that became
+/// durable before the records it counts — `crate::header`'s crash table, row
+/// four. The counter that comes back is therefore not always the largest one
+/// the file's own bytes claim, and the gap between the two is the only thing
+/// that separates an interrupted append from a truncation. The comparison and
+/// the refusal live in `BarFile::validated`, next to the acceptance they are
+/// the other half of; this function only carries the number over.
+///
+/// It costs a second decode of at most two 64-byte slots, once per open. It is
+/// not a second *search*: no generation ordering, no slot-position rule and no
+/// fallback are reproduced here — see [`highest_claim`].
+fn read_header(src: &File, path: &Path, len: u64) -> Result<(Header, u64), StoreError> {
     let want = len.min(REGION_LEN_U64);
     let mut region = vec![0u8; usize::try_from(want).unwrap_or(REGION_LEN)];
     read_fully(src, path, 0, &mut region)?;
-    refused(Header::read_region(&region, len), path)
+    let header = refused(Header::read_region(&region, len), path)?;
+    Ok((header, highest_claim(&region)))
+}
+
+/// The largest `n_valid` any slot of the region still decodes as.
+///
+/// "Decodes" is the whole test, and it is not a weak one: the magic, a version
+/// this build knows, the stride that version defines, and the slot's own CRC
+/// over all sixty-four of its bytes. A slot that passes those was written by a
+/// commit, so the counter it carries is evidence that records up to it were
+/// once **published** — whatever a reader ends up trusting afterwards.
+///
+/// **Slot position is deliberately not checked here, and that direction is the
+/// safe one.** [`Header::read_region`] discards a decodable slot sitting where
+/// its own generation does not put it; this counts its claim anyway. The
+/// consequence is that a file whose header slots are shuffled is refused rather
+/// than opened — it is a corrupt file on either reading — and the alternative
+/// is a second copy of `generation % slot_count` in this module, which is the
+/// duplicated-check drift `BarFile::validated`'s own history is a monument to.
+///
+/// Zero when nothing decodes, and that is not a fallback that hides anything:
+/// the only caller compares this against a counter it already holds, and a
+/// region where no slot decodes never yields one — [`Header::read_region`]
+/// refuses first, above.
+///
+/// The walk is bounded by arithmetic rather than by a `take`: the region was
+/// read at [`REGION_LEN`] bytes at most and slots are [`SLOT_STRIDE`] apart, so
+/// there are at most [`MAX_SLOT_COUNT`] chunks to begin with.
+fn highest_claim(region: &[u8]) -> u64 {
+    let stride = usize::try_from(SLOT_STRIDE).unwrap_or(REGION_LEN);
+    region
+        .chunks(stride)
+        .filter_map(|slot| Header::decode(slot).ok())
+        .map(|header| header.n_valid)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Bytes the file holds past the extent the commit counter covers.
+///
+/// Exactly `len - layout.offset_of(n_valid)` for every file that got past
+/// [`Header::validate`], written as two infallible calls instead: the whole
+/// records the bytes can hold but the counter does not claim, plus the partial
+/// record at the very end. See `BarFile::validated` for why the fallible
+/// spelling was not taken.
+///
+/// Saturating on both arms, and neither is a disguised refusal. `n_valid`
+/// above the capacity is the file `Header::validate` already refused as
+/// [`FormatError::CounterExceedsFile`]; were it ever reached here it would
+/// report only the partial record, which is a wrong number and not a wrong
+/// decision, and the decision is made by the refusal upstream.
+fn bytes_past_the_counter(layout: Layout, len: u64, n_valid: u64) -> u64 {
+    layout
+        .capacity_for(len)
+        .saturating_sub(n_valid)
+        .saturating_mul(layout.record_stride())
+        .saturating_add(layout.ragged_tail_bytes(len))
+}
+
+/// An interrupted append still sitting past the counter, on the rolling log.
+///
+/// # What was invisible
+///
+/// Nothing, because the month did not open at all: this condition used to be
+/// [`StoreError::RaggedTail`], and the operator's month was gone. Now the file
+/// opens and the bytes are named — the path, the length, the counter that
+/// bounds what is readable, and how many bytes lie past it — because
+/// `docs/02-store-format.md` §7 says the discarded count is logged and
+/// `CLAUDE.md` §4 admits degrading loudly, never quietly.
+///
+/// # Why `Warn` and not `Error`
+///
+/// The same argument [`crate::header`]'s fall-back reporter makes: nothing
+/// failed. Every bar this file returns is real and was committed, and the
+/// remainder was never published to anybody. It is worth a line and not worth
+/// a refusal.
+///
+/// # What it costs
+///
+/// One event per **open of a file that has one**, never per record and never
+/// on the ordinary path, where `discarded` is zero and this is not called. It
+/// repeats on every reopen until an append covers those bytes, because nothing
+/// here rewrites the file to make it stop.
+fn note_tail_past_the_commit(path: &Path, len: u64, n_valid: u64, discarded: u64) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::warn("store.open", "bytes past the commit counter")
+            .with("file", telemetry::Value::Str(&path.display().to_string()))
+            .with("file_len", telemetry::Value::Uint(len))
+            .with("n_valid", telemetry::Value::Uint(n_valid))
+            .with("discarded", telemetry::Value::Uint(discarded)),
+    );
 }
 
 /// Flushes a directory, so a newly created file's **name** is durable.
@@ -1357,14 +1714,17 @@ fn len_u64(len: usize) -> u64 {
     clippy::panic
 )]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     use super::{
-        Action, Positional, StoreError, classify, len_u64, lock_fault, read_fully, write_fully,
+        Action, Appended, Bar, BarFile, FormatError, Layout, Positional, StoreError,
+        already_stored, bytes_past_the_counter, classify, first_at_or_after, initialise, len_u64,
+        lock_fault, open_rw, read_fully, write_fully,
     };
+    use crate::format::OI_NULL;
     use std::fs::TryLockError;
     use std::io::{self, ErrorKind};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// What the fake host should do on the next call.
     #[derive(Debug, Clone, Copy)]
@@ -1613,5 +1973,320 @@ mod tests {
         assert_eq!(len_u64(0), 0);
         assert_eq!(len_u64(56), 56);
         assert_eq!(len_u64(usize::MAX), u64::MAX);
+    }
+
+    // =======================================================================
+    // The two doors' shared check, and the duplicate check behind `append`
+    //
+    // Two of the five below touch a REAL filesystem, unlike everything above,
+    // and the reason is the one the `Script` fake's own comment gives: an
+    // interrupted append and a month re-pulled from its middle are conditions
+    // that CAN be made, so they are made rather than simulated. They go
+    // through `BarFile::validated` — the door `open_or_create` and
+    // `open_existing` both funnel into — with no directory tree and no
+    // advisory lock, because neither is what is under test here and rendering
+    // a `StorePath` to get one would put the path module in the failure
+    // surface of a question about bytes.
+    //
+    // The other three take a reader as a parameter and never open anything.
+    // That is the same trade `Positional` makes above: a refusal arm no test
+    // enters is a refusal arm that is wrong the first time it runs, and "the
+    // record at index 3 is gone" is not a state a developer's disk produces on
+    // request.
+    // =======================================================================
+
+    /// The symbol id every month below is written and reopened under.
+    const SYMBOL: u32 = 26_000;
+
+    /// One minute, in microseconds.
+    const MINUTE: i64 = 60_000_000;
+
+    /// The open of the first one-minute bar of 2024-06-03, in microseconds.
+    const T0: i64 = 1_717_386_300_000_000;
+
+    /// The `index`-th one-minute bar of the session, in paisa.
+    fn bar(index: i64) -> Bar {
+        Bar {
+            ts_micros: T0 + index * MINUTE,
+            open: 2_345_600 + index,
+            high: 2_345_900 + index,
+            low: 2_345_100 + index,
+            close: 2_345_700 + index,
+            volume: 1_000 + index,
+            open_interest: OI_NULL,
+        }
+    }
+
+    /// A temporary month no other live process will name.
+    ///
+    /// The process id is not a random number and is not meant to be: it is
+    /// unique among *live* processes, which is exactly the set that can
+    /// collide. The tag separates the tests in this binary, which `cargo test`
+    /// runs in parallel threads over one temp directory.
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "brutex-store-file-{tag}-{}.bin",
+            std::process::id()
+        ))
+    }
+
+    /// A fresh month, initialised and open.
+    fn month(tag: &str) -> (PathBuf, BarFile) {
+        let path = scratch(tag);
+        let _ignored = std::fs::remove_file(&path);
+        let bars = open_rw(&path).expect("a temp path opens");
+        initialise(&bars, &path, SYMBOL, 60).expect("a fresh header region is written");
+        (path.clone(), reopen(&path).expect("and reads back"))
+    }
+
+    /// Reopens a month at whatever length it now has.
+    fn reopen(path: &Path) -> Result<BarFile, StoreError> {
+        let bars = open_rw(path).expect("the month is there");
+        let len = bars.metadata().expect("a length").len();
+        BarFile::validated(bars, path.to_path_buf(), None, len, SYMBOL, 60)
+    }
+
+    #[test]
+    fn the_discarded_count_is_the_bytes_past_the_counter() {
+        // The identity `bytes_past_the_counter` is written to satisfy, against
+        // the `offset_of` it deliberately does not call. Both ends of every
+        // record and the whole of a checksum block, so a remainder that is a
+        // whole number of records is not confused with a torn one.
+        let v2 = Layout::V2;
+        for n_valid in [0u64, 1, 72, 73, 74, 375] {
+            let committed_end = v2.offset_of(n_valid).expect("an offset inside u64");
+            for extra in [0u64, 1, 17, 55, 56, 57, 112, 4_088] {
+                assert_eq!(
+                    bytes_past_the_counter(v2, committed_end + extra, n_valid),
+                    extra,
+                    "n_valid {n_valid}, {extra} bytes past its end"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_torn_tail_past_the_commit_counter_opens_the_month_rather_than_bricking_it() {
+        // THIS TEST WRITES TO A LOG IT DOES NOT OWN, AND IT IS NOT ALONE.
+        //
+        // The four production calls below reach two emit sites — two commits
+        // are two `store.append` records, two reopens of a file with a torn
+        // tail are two `store.open` records — and they go to whatever sink the
+        // *process* has installed, because `telemetry::install` writes a
+        // `OnceLock` and `cargo test` runs this crate's unit tests as one
+        // process on N threads.
+        //
+        // The only thing that installs a sink in this binary is
+        // `crate::emits`, whose test asserts that the file holds EXACTLY one
+        // record per emit site in the crate. Running beside it, these four
+        // records landed inside that count: five consecutive runs gave 12, 8,
+        // 11, 12 and 12 records against six sites, and `--test-threads=1` gave
+        // six every time.
+        //
+        // Neither test is wrong about the crate. They are two tests sharing one
+        // global, and `hold_the_sink` makes their windows disjoint. **Any
+        // future test in this binary that reaches a `telemetry::emit` must take
+        // it too** — otherwise that count goes back to depending on the
+        // scheduler, and it fails on a machine with a different core count
+        // rather than on a defect.
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("torn");
+        assert_eq!(
+            file.append(&[bar(0), bar(1), bar(2)]),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 3,
+            })
+        );
+        drop(file);
+
+        // 17 bytes of a fourth record whose header slot never got written —
+        // the crash `docs/02-store-format.md` §7 describes. This used to be
+        // `StoreError::RaggedTail`, and the three committed bars below were
+        // unreachable to every process from then on, permanently: §3 rule 8
+        // forbids rewriting the file to clear it.
+        let mut bytes = std::fs::read(&path).expect("the month reads");
+        bytes.extend_from_slice(&[9u8; 17]);
+        std::fs::write(&path, &bytes).expect("the month writes");
+        let len = u64::try_from(bytes.len()).expect("a length fits u64");
+
+        let reopened = reopen(&path).expect("a month is not lost to bytes no commit claims");
+        assert_eq!(reopened.records(), 3, "the counter is untouched");
+        assert_eq!(reopened.read_record(2), Ok(bar(2)), "and so are the bars");
+        assert_eq!(
+            bytes_past_the_counter(reopened.layout(), len, 3),
+            17,
+            "and the discarded count the log carries is the torn remainder"
+        );
+
+        drop(reopened);
+
+        // The next append lands at `offset_of(n_valid)` and covers them, which
+        // is the whole reason ignoring them is safe rather than merely quiet.
+        let mut writer = reopen(&path).expect("reopens");
+        assert_eq!(
+            writer.append(&[bar(3), bar(4)]),
+            Ok(Appended::Committed {
+                first_index: 3,
+                n_valid: 5,
+            })
+        );
+        assert_eq!(writer.read_record(3), Ok(bar(3)), "over the torn bytes");
+        drop(writer);
+        let grown = std::fs::metadata(&path).expect("a length").len();
+        assert_eq!(
+            bytes_past_the_counter(Layout::V2, grown, 5),
+            0,
+            "and nothing is left past the counter"
+        );
+        let _ignored = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_re_pull_from_the_middle_of_a_month_is_already_present_not_a_conflict() {
+        // Two of the appends below commit, so two `store.append` records go to
+        // the process-wide sink `crate::emits` installs and counts. See the
+        // torn-tail test above for what that cost and why the lock is the fix;
+        // the three `AlreadyPresent` appends emit nothing, which is itself a
+        // silence that test asserts.
+        let _sink_is_mine = crate::emits::hold_the_sink();
+
+        let (path, mut file) = month("middle");
+        let held: Vec<Bar> = (0..20).map(bar).collect();
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::Committed {
+                first_index: 0,
+                n_valid: 20,
+            })
+        );
+
+        // FIVE BARS FROM THE MIDDLE OF THE MONTH. Refused before this change,
+        // as `TimestampsOutOfOrder`: the check compared them against records
+        // 15..=19 — the file's tail — found them different, and reported a
+        // vendor restating history for bars the file already held.
+        assert_eq!(
+            file.append(&held[5..10]),
+            Ok(Appended::AlreadyPresent {
+                first_index: 5,
+                n_valid: 20,
+            }),
+            "a day re-pulled from inside a backfilled month"
+        );
+        // The tail still answers, and still names its own index.
+        assert_eq!(
+            file.append(&held[15..]),
+            Ok(Appended::AlreadyPresent {
+                first_index: 15,
+                n_valid: 20,
+            })
+        );
+        // So does the whole month, offered again.
+        assert_eq!(
+            file.append(&held),
+            Ok(Appended::AlreadyPresent {
+                first_index: 0,
+                n_valid: 20,
+            })
+        );
+        assert_eq!(file.records(), 20, "and not one of the three wrote a byte");
+
+        // A BAR THE MONTH HOLDS DIFFERENTLY IS STILL A CONFLICT, from the
+        // middle exactly as from the tail. Locating the batch is not the same
+        // as trusting it.
+        let mut altered = held[5..10].to_vec();
+        altered[2].close += 1;
+        assert_eq!(
+            file.append(&altered),
+            Err(StoreError::Format {
+                path: path.clone(),
+                source: FormatError::TimestampsOutOfOrder {
+                    previous: bar(19).ts_micros,
+                    next: bar(5).ts_micros,
+                },
+            }),
+            "a vendor restating history is refused, not absorbed"
+        );
+
+        // And a batch that starts inside the month and runs past its end is a
+        // resume: the duplicate check declines it — it is not WHOLLY held —
+        // and only the part that follows is written.
+        let resumed: Vec<Bar> = (15..25).map(bar).collect();
+        assert_eq!(
+            file.append(&resumed),
+            Ok(Appended::Committed {
+                first_index: 20,
+                n_valid: 25,
+            }),
+            "five duplicates and five new bars, and only the five landed"
+        );
+        let _ignored = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn locating_a_batch_costs_a_bisection_and_not_a_scan() {
+        // The cost claim in `already_stored`'s doc, asserted as a number
+        // rather than written down. A scan for record 900 of 1,024 would read
+        // 901 records; eleven is the ceiling of log2(1024) plus the step that
+        // closes an interval of one.
+        let held: Vec<Bar> = (0..1_024).map(bar).collect();
+        let reads = Cell::new(0u32);
+        let read = |index: u64| -> Result<Bar, StoreError> {
+            reads.set(reads.get() + 1);
+            Ok(held[usize::try_from(index).expect("an index fits a usize")])
+        };
+
+        assert_eq!(first_at_or_after(1_024, bar(900).ts_micros, read), Ok(900));
+        assert!(
+            reads.get() <= 11,
+            "1,024 records is at most eleven probes, not {}",
+            reads.get()
+        );
+
+        // The three edges, each of which `already_stored` reads differently.
+        assert_eq!(first_at_or_after(1_024, bar(0).ts_micros, read), Ok(0));
+        assert_eq!(
+            first_at_or_after(1_024, bar(1_023).ts_micros + 1, read),
+            Ok(1_024),
+            "every held bar is older: the insertion point is past the end"
+        );
+        assert_eq!(
+            first_at_or_after(1_024, bar(500).ts_micros + 1, read),
+            Ok(501),
+            "a timestamp between two records is not claimed to be either"
+        );
+
+        reads.set(0);
+        assert_eq!(first_at_or_after(0, T0, read), Ok(0));
+        assert_eq!(reads.get(), 0, "an empty month is not probed at all");
+    }
+
+    #[test]
+    fn a_read_that_refuses_mid_comparison_comes_back_out_rather_than_answering_no() {
+        // "The month does not hold these" and "I could not look" are different
+        // answers, and only the first lets `append` fall through to a write.
+        // Record 3 is the one the bisection does not touch on the way to
+        // record 1 — it probes 2, 1, 0 — so this refusal can only come from
+        // the comparison loop.
+        let held: Vec<Bar> = (0..4).map(bar).collect();
+        let read = |index: u64| -> Result<Bar, StoreError> {
+            if index == 3 {
+                return Err(StoreError::NotCommitted {
+                    index: 3,
+                    n_valid: 4,
+                });
+            }
+            Ok(held[usize::try_from(index).expect("an index fits a usize")])
+        };
+
+        assert_eq!(
+            already_stored(&held[1..4], bar(1).ts_micros, 4, read),
+            Err(StoreError::NotCommitted {
+                index: 3,
+                n_valid: 4,
+            }),
+            "the read's refusal travels, and is not flattened into None"
+        );
     }
 }

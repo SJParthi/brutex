@@ -169,7 +169,10 @@ impl LakeFile {
     ///
     /// # Errors
     ///
-    /// [`LakeError::NoSuchRowGroup`] past the end; [`LakeError::UnknownCodec`]
+    /// [`LakeError::NoSuchRowGroup`] past the end;
+    /// [`LakeError::ImpossibleLength`] if the group's declared row count is
+    /// negative or wider than the file that holds it;
+    /// [`LakeError::UnknownCodec`]
     /// for a compression this reader does not implement;
     /// [`LakeError::PageDecode`] if a page will not decode;
     /// [`LakeError::UnexpectedNull`] if a column that must not be null is;
@@ -180,10 +183,72 @@ impl LakeFile {
             return Err(LakeError::NoSuchRowGroup { asked: index, held });
         }
         let group = self.meta.row_group(index);
-        let rows = usize::try_from(group.num_rows()).map_err(|_| LakeError::ImpossibleLength {
+        let declared_rows = group.num_rows();
+        let rows = usize::try_from(declared_rows).map_err(|_| LakeError::ImpossibleLength {
             what: "row group row count",
-            value: group.num_rows(),
+            value: declared_rows,
         })?;
+
+        // THE ROW COUNT IS A NUMBER THE FILE CHOSE, AND SEVEN RESERVATION
+        // SITES BELOW SPEND IT UNREAD. `Columns::int64`, `int32` and `double`
+        // each open with `Vec::with_capacity(self.rows)` twice — once for
+        // values, once for definition levels — and `Columns::greeks` does it
+        // once more for its output. Until this bound existed the only thing
+        // between a corrupt footer and those calls was the `usize::try_from`
+        // above, which rejects a negative and nothing else. `num_rows = 1 << 40`
+        // is a perfectly positive `i64`, and it asks for an 8 TiB `Vec<i64>`.
+        //
+        // AN OVERSIZED RESERVATION IS NOT A REFUSAL. `Vec::with_capacity`
+        // reports nothing: when the allocator says no it calls
+        // `std::alloc::handle_alloc_error`, which aborts. That is not a panic,
+        // so `catch_unwind` and a test harness cannot see it either, and the
+        // root `Cargo.toml`'s `panic = "abort"` in `[profile.release]` removes
+        // even the theoretical unwind. Whether a request that large is refused
+        // outright or handed back as address space the kernel cannot back is
+        // the machine's overcommit policy and not this reader's choice — that
+        // second outcome is UNMEASURED here, and neither of them is a refusal
+        // an operator can read. It is the same death parquet's own
+        // `ColumnChunkMetaData::byte_range` assert delivers, which the comment
+        // in `Self::pages` below describes and refuses; this is the second door
+        // into it. `CLAUDE.md` §4 — degrade loudly and name the reason, or
+        // refuse — and an abort does neither.
+        //
+        // `Vec::try_reserve` would return an error instead, but it would return
+        // it at the reservation, several frames from the footer field that
+        // lied, with only a byte count to report. The refusal belongs here,
+        // where the impossible number can still be named against the file it
+        // came from.
+        //
+        // THE CEILING IS THE FILE'S OWN LENGTH, AND IT IS DELIBERATELY CRUDE.
+        // `LakeFile` holds every byte of the file in memory — the module header
+        // says why — so `self.bytes.len()` is exact and free to read. Past this
+        // check every reservation in this function is at most a small constant
+        // multiple of bytes already resident, which is the property worth
+        // having: peak memory becomes proportional to the file, not to a number
+        // the file asked for.
+        //
+        // WHAT THIS IS NOT. It is not a proof of Parquet legality. A column of
+        // pure nulls RLE-encodes an arbitrarily long run of levels in a handful
+        // of bytes, so a *legal* Parquet file can declare more rows than it has
+        // bytes, and this refuses one. No such file is in the lake: every lake
+        // leaf is an unnested OPTIONAL primitive, `timestamp`, `open`, `high`,
+        // `low`, `close` and `volume` are null in none of the 170,547 F&O rows
+        // and 78,448 cash/index rows measured — the measurement
+        // `LakeError::UnexpectedNull` cites — and the largest file measured is
+        // a few megabytes against row counts in the thousands. The margin on
+        // every real file is orders of magnitude, and if a file ever does sit
+        // the other side of it, this names the file instead of dying on it.
+        //
+        // Nor does it make allocation failure impossible. A multi-megabyte
+        // group still reserves tens of megabytes here and a machine already at
+        // its limit can still lose that. What it removes is the case where one
+        // corrupt footer field demands terabytes.
+        if rows > self.bytes.len() {
+            return Err(LakeError::ImpossibleLength {
+                what: "row group row count wider than the file that holds it",
+                value: declared_rows,
+            });
+        }
 
         let mut cols = Columns::new(self, index, rows);
 
@@ -636,6 +701,23 @@ fn unwrap_present(v: Option<f64>, column: &'static str, row: usize) -> Result<f6
 mod tests {
     use super::*;
 
+    use std::io::Cursor;
+    use std::sync::Arc;
+
+    // The writer half of `parquet`, and the thrift codec from
+    // `parquet-format-safe`. Both are ordinary dependencies of this crate
+    // rather than dev-dependencies, so a unit test inside the library can
+    // reach them; neither pulls a feature `Cargo.toml` refused. The writer is
+    // available with no cargo features enabled, which is why it does not
+    // reintroduce the C zstd binding `CLAUDE.md` §2 bans.
+    use parquet::basic::{Repetition, Type as PhysicalType};
+    use parquet::column::writer::ColumnWriter;
+    use parquet::file::properties::WriterProperties;
+    use parquet::file::writer::SerializedFileWriter;
+    use parquet::schema::types::Type;
+    use parquet_format_safe::FileMetaData;
+    use parquet_format_safe::thrift::protocol::{TCompactInputProtocol, TCompactOutputProtocol};
+
     #[test]
     fn a_file_that_is_not_parquet_is_refused_by_name() {
         // A JPEG header, which is emphatically not Parquet.
@@ -848,6 +930,193 @@ mod tests {
             unwrap_present(Some(1.5), "iv", 0).unwrap().to_bits(),
             1.5_f64.to_bits()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // A FOOTER THAT LIES ABOUT `num_rows` USED TO KILL THE PROCESS.
+    //
+    // `read_row_group` hands the row group's declared `num_rows` to seven
+    // `Vec::with_capacity` sites, and before the bound above the only guard was
+    // a sign check. `Vec::with_capacity` cannot refuse: the allocator's "no"
+    // becomes `std::alloc::handle_alloc_error`, which aborts rather than
+    // panics, so no harness catches it. One edited footer field therefore
+    // replaced a named refusal with a process that stops.
+    //
+    // The fixture is built and corrupted IN MEMORY. CI gate 1 walks every
+    // tracked file and allows no `.parquet` in this repository, so neither the
+    // sound file nor the lying one can be committed. This is the same
+    // write-then-patch-the-thrift-footer pattern `tests/refusals.rs` uses; it
+    // is repeated here rather than shared because an integration test cannot
+    // reach a private helper and this refusal is one line of `reader.rs`.
+    // -----------------------------------------------------------------------
+
+    /// The seven cash columns, in the order `crate::schema::detect` insists on.
+    const CASH: [(&str, PhysicalType); 7] = [
+        ("timestamp", PhysicalType::INT64),
+        ("open", PhysicalType::DOUBLE),
+        ("high", PhysicalType::DOUBLE),
+        ("low", PhysicalType::DOUBLE),
+        ("close", PhysicalType::DOUBLE),
+        ("volume", PhysicalType::INT64),
+        ("open_interest", PhysicalType::INT64),
+    ];
+
+    /// Writes an uncompressed seven-column cash file of `rows` rows, every
+    /// value present.
+    ///
+    /// Uncompressed because the codec is not what is under test here and the
+    /// ZSTD path is exercised by `tests/real_lake.rs` against the real lake.
+    fn cash_file(rows: usize) -> Vec<u8> {
+        let fields: Vec<Arc<Type>> = CASH
+            .iter()
+            .map(|(name, ty)| {
+                Arc::new(
+                    Type::primitive_type_builder(name, *ty)
+                        .with_repetition(Repetition::OPTIONAL)
+                        .build()
+                        .expect("a primitive field builds"),
+                )
+            })
+            .collect();
+        let schema = Arc::new(
+            Type::group_type_builder("schema")
+                .with_fields(fields)
+                .build()
+                .expect("the group type builds"),
+        );
+        let props = Arc::new(
+            WriterProperties::builder()
+                .set_compression(Compression::UNCOMPRESSED)
+                .build(),
+        );
+
+        // Every level is 1 — PRESENT — so this file exercises no null path and
+        // cannot fail for a reason other than the one under test.
+        let defs = vec![1_i16; rows];
+        let ints: Vec<i64> =
+            (0..i64::try_from(rows).expect("a test row count fits an i64")).collect();
+        let doubles: Vec<f64> = vec![100.5_f64; rows];
+
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut writer = SerializedFileWriter::new(&mut out, schema, props).expect("writer");
+            let mut group = writer.next_row_group().expect("row group");
+            while let Some(mut column) = group.next_column().expect("column") {
+                match column.untyped() {
+                    ColumnWriter::Int64ColumnWriter(typed) => {
+                        typed.write_batch(&ints, Some(&defs), None).expect("i64");
+                    }
+                    ColumnWriter::DoubleColumnWriter(typed) => {
+                        typed.write_batch(&doubles, Some(&defs), None).expect("f64");
+                    }
+                    _ => panic!("the cash layout is INT64 and DOUBLE only"),
+                }
+                column.close().expect("close column");
+            }
+            group.close().expect("close row group");
+            writer.close().expect("close writer");
+        }
+        out
+    }
+
+    /// Re-serialises a file's footer after `edit` has changed it.
+    ///
+    /// The footer length is the four bytes before the trailing `PAR1`, and it
+    /// is rewritten because an edited field almost never re-encodes to the same
+    /// number of varint bytes.
+    fn patch_footer(bytes: &[u8], edit: impl FnOnce(&mut FileMetaData)) -> Vec<u8> {
+        let n = bytes.len();
+        let declared: [u8; 4] = bytes[n - 8..n - 4]
+            .try_into()
+            .expect("four bytes of footer length");
+        let flen =
+            usize::try_from(u32::from_le_bytes(declared)).expect("a footer length fits a usize");
+        let start = n - 8 - flen;
+        let mut meta = {
+            let mut cursor = Cursor::new(&bytes[start..n - 8]);
+            let mut proto = TCompactInputProtocol::new(&mut cursor, flen * 64 + 1_000_000);
+            FileMetaData::read_from_in_protocol(&mut proto)
+                .expect("the footer this test just wrote parses")
+        };
+        edit(&mut meta);
+
+        let mut out = bytes[..start].to_vec();
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut proto = TCompactOutputProtocol::new(&mut buf);
+            meta.write_to_out_protocol(&mut proto)
+                .expect("the edited footer re-serialises");
+        }
+        let rewritten = u32::try_from(buf.len()).expect("a footer is far under 4 GiB");
+        out.extend_from_slice(&buf);
+        out.extend_from_slice(&rewritten.to_le_bytes());
+        out.extend_from_slice(b"PAR1");
+        out
+    }
+
+    /// **A DECLARED ROW COUNT WIDER THAN THE WHOLE FILE IS REFUSED BY NAME.**
+    ///
+    /// `1 << 40` is chosen because it is the shape of the fault rather than an
+    /// arbitrary large number: it is positive, so the sign check that used to
+    /// be the only guard passes it, it fits a `usize` on every 64-bit target,
+    /// so `usize::try_from` passes it too, and `Vec::<i64>::with_capacity` of
+    /// it asks for 8 TiB.
+    ///
+    /// **What the unbounded reader does with this input was not run**, and the
+    /// honest statement is that it is not a failed assertion either way: the
+    /// allocator either refuses and `handle_alloc_error` aborts the test
+    /// binary, or the kernel hands back address space it cannot back and the
+    /// process is at the mercy of the first page it touches. Neither is a
+    /// refusal, which is the whole point of bounding the count instead.
+    ///
+    /// The sound half of the assertion is not decoration. If the fixture stopped
+    /// decoding — a writer change, a schema drift — the refusal below would
+    /// still fire and would prove nothing, because a file that cannot be read
+    /// at all is refused for other reasons first.
+    #[test]
+    fn a_row_count_wider_than_the_file_is_refused_rather_than_reserved() {
+        const ROWS: usize = 8;
+        /// Positive, `usize`-representable, and 8 TiB of `i64` wide.
+        const ABSURD: i64 = 1 << 40;
+
+        let sound = cash_file(ROWS);
+        let opened = LakeFile::from_bytes(sound.clone()).expect("a seven-column cash file opens");
+        assert_eq!(opened.layout(), Layout::Cash);
+        assert_eq!(
+            opened
+                .read_row_group(0)
+                .expect("the sound group decodes")
+                .len(),
+            ROWS,
+            "the fixture must decode, or the refusal below proves nothing"
+        );
+
+        // ONLY `num_rows` CHANGES. Every page byte is the one the writer
+        // produced, so this is a footer that lies rather than a file that is
+        // short — the two are different faults and only the first is under test.
+        let lying = patch_footer(&sound, |meta| {
+            meta.row_groups[0].num_rows = ABSURD;
+        });
+        assert!(
+            ABSURD > i64::try_from(lying.len()).expect("a test fixture fits an i64"),
+            "the fixture must be smaller than the lie, or the bound is not what refuses"
+        );
+
+        let file = LakeFile::from_bytes(lying)
+            .expect("the footer still parses; it is the VALUE that is impossible");
+        match file.read_row_group(0) {
+            Err(LakeError::ImpossibleLength { what, value }) => {
+                assert_eq!(
+                    value, ABSURD,
+                    "the refusal must report the number the file gave"
+                );
+                assert!(
+                    what.contains("row count"),
+                    "the refusal must name the field, got {what:?}"
+                );
+            }
+            other => panic!("expected ImpossibleLength, got {:?}", other.err()),
+        }
     }
 
     #[test]

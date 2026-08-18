@@ -64,6 +64,13 @@
 //!
 //! # Why it is a token and not a number
 //!
+//! [`Tolerance`] carries **which of the two bases it measures** ([`Base`]) as
+//! well as the width. Both facts are needed: the width alone cannot be checked
+//! against anything, because 10 and 500 are each correct for one family and
+//! wrong by fifty times for the other, and a [`Tolerance`] that had only the
+//! number was accepted by [`crate::table::set_near`] for any `near_*` position
+//! at all. See [`Base`] for the failure that could not be detected downstream.
+//!
 //! [`Tolerance`] cannot be constructed from the sentinel, and
 //! [`crate::table::set_near`] cannot be called without one. The refusal path
 //! stays alive now that the values are pinned: returning either constant to
@@ -206,16 +213,97 @@ const _: () = assert!(
     "a pivot band wider than half the CPR width swallows tc and bc"
 );
 
-/// A measured tolerance. The only key that opens [`crate::table::set_near`].
+/// Which quantity a band is a fraction of.
 ///
-/// It is a newtype and not an `i64` so that the check happens once, at the
+/// # Why the base is a type and not a paragraph
+///
+/// [`TOL_FIB_MILLI`] is 10 and [`TOL_PIVOT_MILLI`] is 500, and those two
+/// numbers are not on one scale: the first is thousandths of the **session
+/// range**, the second thousandths of the **CPR width**. The paragraph above
+/// [`TOL_PIVOT_MILLI`] has said so since D-0079, and saying so was all that
+/// stood between a caller and the wrong band -- because both widths arrived at
+/// [`crate::table::set_near`] as a bare [`Tolerance`], indistinguishable once
+/// constructed, and that function checked only that the position was a `near_*`
+/// row. Handing the pivot width to a Fibonacci rung returned `Ok` and set the
+/// bit; so did handing the Fibonacci width to a pivot level.
+///
+/// **The result is undetectable downstream, which is what makes it worth a
+/// type.** A [`crate::ConditionMask`] is a set of positions and carries no
+/// record of the band that decided them, so a stored result set built on a
+/// fifty-times-wrong width is byte for byte a correct one. There is no later
+/// check that could find it and no test on the mask that could fail.
+/// `CLAUDE.md` §4 bans a fallback that hides a failure: this enum is what makes
+/// the two families different *values*, so a mismatch is
+/// [`VocabError::WrongBand`] at the call rather than a silent `Ok`.
+///
+/// # What it does not fix
+///
+/// Nothing about *which* base a position should have. That is declared once per
+/// row in [`crate::table::TABLE`] and this type only makes the declaration
+/// checkable. A row declared into the wrong family is still wrong, and is still
+/// caught only by reading it against the module that sets it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Base {
+    /// Thousandths of the session's high minus its low.
+    ///
+    /// Every Fibonacci ladder (previous-day, five-session, current-day, gap),
+    /// the opening-range bands, the VWAP bands, the gap mid and the swing levels
+    /// measure against this. [`TOL_FIB_MILLI`] is its pinned width and the sweep
+    /// in this module's documentation is the measurement behind it.
+    SessionRange,
+    /// Thousandths of the CPR width, which is `tc - bc`.
+    ///
+    /// The pivot ladder R1–R5 / S1–S5, the CPR's own two edges, and the previous
+    /// day's high and low measure against this -- the last two because
+    /// `crates/indicators/src/daily.rs` builds them from the same daily levels
+    /// and hands the whole plan one width. [`TOL_PIVOT_MILLI`] is its pinned
+    /// width and D-0079 is where it comes from.
+    CprWidth,
+}
+
+/// A measured tolerance, and the quantity it is measured against.
+///
+/// It is a struct and not an `i64` so that the check happens once, at the
 /// boundary, and every `near_*` evaluation downstream is holding proof that
 /// somebody pinned the number.
+///
+/// # The base rides on the value, and that is deliberate
+///
+/// The width alone was the whole type until the defect [`Base`] documents. A
+/// width with no base is a number that cannot be checked against anything --
+/// `500` is right for a pivot band and fifty times too wide for a Fibonacci
+/// rung, and the value carried nothing that could tell the two apart. Now it
+/// does, and [`crate::table::set_near`] compares it against the base the row
+/// declares.
+///
+/// `base` is an `Option` because [`Tolerance::from_milli`] exists and states a
+/// width without saying what it is a fraction of. `None` is not a default base;
+/// it is the absence of one, and it sets no `near_*` bit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Tolerance(i64);
+pub struct Tolerance {
+    /// The width, in thousandths of whatever `base` names.
+    milli: i64,
+    /// What the width is a fraction of, or `None` when it was never stated.
+    base: Option<Base>,
+}
 
 impl Tolerance {
-    /// Pin the tolerance to `milli` thousandths of the anchor's range.
+    /// Pin a width of `milli` thousandths **without saying what of**.
+    ///
+    /// # This cannot set a `near_*` bit, and that is the point
+    ///
+    /// Every position in [`crate::table::TABLE`] that needs a band declares
+    /// which quantity the band is a fraction of, so a tolerance that names no
+    /// base matches no position: [`crate::table::set_near`] refuses it with
+    /// [`VocabError::WrongBand`] carrying `got: None`. Use
+    /// [`Tolerance::from_milli_on`], or the two pinned constructors below, to
+    /// build one that can decide a bit.
+    ///
+    /// The constructor stays because it is where the width itself is validated
+    /// -- one law for the sentinel and one for a negative band, called by
+    /// everything else here rather than copied -- and because a caller that only
+    /// wants to ask *is this width legal* should not have to invent a base to
+    /// find out.
     ///
     /// # Errors
     ///
@@ -228,13 +316,43 @@ impl Tolerance {
         if milli < 0 {
             return Err(VocabError::ToleranceNegative { milli });
         }
-        Ok(Self(milli))
+        Ok(Self { milli, base: None })
     }
 
-    /// The pinned width, in thousandths of the anchor's range.
+    /// Pin a width of `milli` thousandths **of `base`**.
+    ///
+    /// The width is validated by [`Tolerance::from_milli`] and this adds the
+    /// base to the result, so there is exactly one place that decides whether a
+    /// width is legal and exactly one place that decides what it measures.
+    ///
+    /// # Errors
+    ///
+    /// As [`Tolerance::from_milli`]. The base is not validated because there is
+    /// nothing to validate -- [`Base`] has two variants and both are real.
+    pub const fn from_milli_on(base: Base, milli: i64) -> Result<Self, VocabError> {
+        match Self::from_milli(milli) {
+            Ok(Self { milli, .. }) => Ok(Self {
+                milli,
+                base: Some(base),
+            }),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The pinned width, in thousandths of whatever [`Tolerance::base`] names.
+    ///
+    /// **A bare number, and comparing two of them across bases is meaningless.**
+    /// 10 and 500 are not 50x apart in any sense a caller can use; they are
+    /// fractions of different quantities.
     #[must_use]
     pub const fn milli(self) -> i64 {
-        self.0
+        self.milli
+    }
+
+    /// What the width is a fraction of, or `None` when it was never stated.
+    #[must_use]
+    pub const fn base(self) -> Option<Base> {
+        self.base
     }
 
     /// Is `value` inside the band around `level`? All three are paisa integers
@@ -250,6 +368,13 @@ impl Tolerance {
     /// a pivot band. **It is the base, and the level is not.** See the module
     /// documentation for the measurement that settled that.
     ///
+    /// **It does not check that `range_paisa` is the quantity
+    /// [`Tolerance::base`] names, and it cannot.** A caller passing the session
+    /// range with a pivot-based tolerance hands this function two `i64` that are
+    /// both spans, and no arithmetic here can tell them apart. That check lives
+    /// one level up, in [`crate::table::set_near`], where the *position* says
+    /// which family it belongs to.
+    ///
     /// A non-positive range yields `false` rather than an error: a zero-range
     /// anchor is a real market state (a circuit-frozen session), and
     /// `docs/03-vocabulary.md` §4 requires a bit that cannot be evaluated to be
@@ -260,12 +385,13 @@ impl Tolerance {
             return false;
         }
         let delta = (i128::from(value_paisa) - i128::from(level_paisa)).abs();
-        let band = i128::from(self.0) * i128::from(range_paisa);
+        let band = i128::from(self.milli) * i128::from(range_paisa);
         delta * 1000 <= band
     }
 }
 
-/// The Fibonacci band as pinned today. See [`TOL_FIB_MILLI`].
+/// The Fibonacci band as pinned today, on [`Base::SessionRange`]. See
+/// [`TOL_FIB_MILLI`].
 ///
 /// # Errors
 ///
@@ -274,16 +400,25 @@ impl Tolerance {
 /// can happen at the value pinned today; the function keeps the refusal path
 /// alive so that unpinning stays possible without a type change.
 pub const fn pinned_fib() -> Result<Tolerance, VocabError> {
-    Tolerance::from_milli(TOL_FIB_MILLI)
+    Tolerance::from_milli_on(Base::SessionRange, TOL_FIB_MILLI)
 }
 
-/// The pivot band as pinned today. See [`TOL_PIVOT_MILLI`].
+/// The pivot band as pinned today, on [`Base::CprWidth`]. See
+/// [`TOL_PIVOT_MILLI`].
+///
+/// # What changed here, and what it costs a caller
+///
+/// These two used to differ **only** by which constant they read, so their
+/// results were interchangeable at every call site that took a [`Tolerance`].
+/// They now differ in the type's own value as well, which is what lets
+/// [`crate::table::set_near`] tell them apart. A caller that was passing the
+/// wrong one has not been slowed down; it has been stopped.
 ///
 /// # Errors
 ///
 /// As [`pinned_fib`].
 pub const fn pinned_pivot() -> Result<Tolerance, VocabError> {
-    Tolerance::from_milli(TOL_PIVOT_MILLI)
+    Tolerance::from_milli_on(Base::CprWidth, TOL_PIVOT_MILLI)
 }
 
 #[cfg(test)]
