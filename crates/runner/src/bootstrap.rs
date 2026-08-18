@@ -495,18 +495,39 @@ fn summarise(series: &[i64]) -> Performance {
     }
 }
 
-/// A statistic divided by its standard error, or the raw statistic when that
-/// error is zero.
+/// A statistic divided by its standard error, or **zero** when that error is
+/// zero.
 ///
 /// A zero standard error means the series never varied. Dividing would give
 /// infinity, which reads as the strongest result ever recorded rather than as a
 /// degenerate one — the same trap `crate::outcome` documents about its own
 /// t-statistic.
+///
+/// # It used to return the RAW statistic here, and that was the same trap wearing
+/// a different hat
+///
+/// The guard avoided `inf` and then handed the raw paisa mean into a maximum
+/// otherwise taken over t-RATIOS. Nothing could beat it: every recentred draw for
+/// a constant series is exactly zero, so the observed value stood unopposed and
+/// both [`reality_check`] and [`spa`] returned p = 0.0 for a strategy whose
+/// returns never moved. Measured on this tree, `spa` over a constant series of 7
+/// paisa beside real noise reported statistic 7.0, p 0.0000, `clears() == true`.
+///
+/// That it was a UNIT error rather than a defensible reading is settled by two
+/// runs of the same shape: a constant of 1 scored p = 0.065 and failed, a
+/// constant of 2 scored p = 0.017 and passed. Two qualitatively identical
+/// zero-risk strategies, opposite verdicts, decided by paisa magnitude alone —
+/// and at 1 the riskless strategy ranked BELOW an insignificant noise series.
+///
+/// `crate::outcome` had already answered this question for its own t-statistic:
+/// "not an infinitely strong result -- it is a degenerate sample, and reporting
+/// it as zero refuses to dress one up as the other." This is that same answer.
+/// A degenerate sample is not evidence, so it contributes none.
 fn studentized(statistic: f64, standard_error: f64) -> f64 {
     if standard_error > 0.0 {
         statistic / standard_error
     } else {
-        statistic
+        0.0
     }
 }
 
@@ -626,6 +647,72 @@ mod tests {
     /// A series with a genuine positive edge on top of the same noise.
     fn edged(n: usize, seed: u64, edge: i64) -> Vec<i64> {
         noise(n, seed).into_iter().map(|x| x + edge).collect()
+    }
+
+    /// A STRATEGY THAT NEVER VARIED IS DEGENERATE, NOT UNBEATABLE — IN THE
+    /// STUDENTIZED TESTS.
+    ///
+    /// `studentized` used to return the RAW statistic when the standard error was
+    /// zero. [`spa`] and [`romano_wolf`] take a maximum over t-RATIOS, so that fed
+    /// a paisa mean into a comparison of dimensionless quantities; and since every
+    /// recentred draw for a constant series is exactly zero, the observed value
+    /// could not be beaten. Measured before the fix: `spa` over a constant series
+    /// of 7 paisa beside real noise reported statistic 7.0, p 0.0000, and cleared.
+    ///
+    /// The give-away that it was a UNIT error rather than a defensible "a riskless
+    /// edge really is significant" reading is that the verdict moved with
+    /// MAGNITUDE: a constant of 1 failed at p = 0.065 while a constant of 2 passed
+    /// at p = 0.017 — same strategy shape, opposite answers — and at 1 the riskless
+    /// series ranked below insignificant noise. Several magnitudes are asserted
+    /// here for exactly that reason: a test at one magnitude would have passed
+    /// against the broken function at another.
+    ///
+    /// # Why [`reality_check`] is deliberately NOT asserted here
+    ///
+    /// It never called `studentized`. White's statistic is `sqrt(n) * mean`,
+    /// un-studentized, so both the observed value and every bootstrap draw are in
+    /// paisa and the comparison is already in one unit. A riskless positive mean
+    /// genuinely does beat what resampling noise produces, and rejecting the null
+    /// there is the right answer rather than a scale artefact. Asserting the
+    /// opposite would pin a bug into the suite.
+    #[test]
+    fn a_zero_variance_strategy_does_not_clear_the_studentized_tests() {
+        for constant in [1_i64, 2, 7, 500] {
+            let set = vec![vec![constant; 200], noise(200, 1)];
+
+            let v = spa(&set, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            assert!(
+                !v.clears(),
+                "SPA cleared a constant series of {constant} paisa at statistic \
+                 {}: a sample with no spread carries no t-ratio, whatever its mean",
+                v.statistic
+            );
+
+            // Romano–Wolf reaches the same `studentized` and decides PER strategy,
+            // so the constant series must not be among those it names.
+            // 50_000 ppm = 5% FWER, the alpha every other row here uses.
+            let named = romano_wolf(&set, 1_000, 3, DEFAULT_BLOCK, 50_000);
+            assert!(
+                !named.iter().any(|r| r.strategy == 0),
+                "Romano-Wolf named the zero-variance strategy at {constant} paisa; \
+                 it reaches the same `studentized` and must reach the same answer"
+            );
+        }
+    }
+
+    /// The fix must not have made the tests unable to find a REAL edge.
+    ///
+    /// A guard that refuses everything passes the test above and is worthless.
+    /// This is the other side of it: genuine signal still clears.
+    #[test]
+    fn a_real_edge_still_clears_after_the_degenerate_guard() {
+        let set = vec![edged(200, 2, 60), noise(200, 3)];
+        assert!(
+            spa(&set, 1_000, 5, DEFAULT_BLOCK)
+                .expect("a verdict")
+                .clears(),
+            "a genuine edge over real noise must still be found"
+        );
     }
 
     #[test]

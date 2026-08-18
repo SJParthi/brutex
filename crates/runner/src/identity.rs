@@ -50,7 +50,7 @@
 //! bench yet, and saying so is cheaper than a number nobody took.
 
 use brutex_core::blake3::{Hasher, OUT_LEN};
-use brutex_core::instrument::InstrumentKey;
+use brutex_core::instrument::{Expiry, InstrumentKey, Kind, OptionSide};
 use engine::Ladder;
 use indicators::Candle;
 use vocab::{ConditionMask, VOCAB_VERSION};
@@ -224,6 +224,17 @@ pub fn data_digest(bars: &[Candle]) -> [u8; OUT_LEN] {
     hasher.finalize()
 }
 
+/// One expiry, little-endian, at fixed width: year, month, day.
+///
+/// Fixed width rather than a string so `2024-01-04` and `2024-1-4` cannot be two
+/// identities for one date, and so the blob a caller reads back has no separator
+/// to disagree about.
+fn push_expiry(out: &mut Vec<u8>, expiry: Expiry) {
+    out.extend_from_slice(&expiry.year().to_le_bytes());
+    out.push(expiry.month());
+    out.push(expiry.day());
+}
+
 /// Writes one tagged, length-prefixed term.
 fn term(hasher: &mut Hasher, tag: u8, bytes: &[u8]) {
     hasher.update(&[tag]);
@@ -263,7 +274,15 @@ pub fn identity(run: &Run<'_>) -> RunId {
 
     // 3. instrument — every field of the key, each framed in turn, so two keys
     //    differing only in where one field ends cannot collide.
-    let mut instrument = Vec::with_capacity(64);
+    //
+    // THE FOURTH FIELD WAS MISSING AND THE COMMENT ABOVE STILL CLAIMED IT WAS
+    // NOT. `InstrumentKey` has four fields; this framed three. `kind` is the one
+    // that carries `expiry`, `strike` and `side`, so every option on one
+    // underlying — every strike, both sides, every expiry — hashed to the SAME
+    // `RunId`. `CLAUDE.md` §3 rule 3 makes the identity the thing a run is
+    // recorded under, and an identity that cannot tell two contracts apart is
+    // not one. See `two_contracts_that_differ_only_in_kind_do_not_collide`.
+    let mut instrument = Vec::with_capacity(96);
     for part in [
         run.instrument.exchange.as_str(),
         run.instrument.segment.as_str(),
@@ -272,6 +291,37 @@ pub fn identity(run: &Run<'_>) -> RunId {
         instrument.extend_from_slice(&u32::try_from(part.len()).unwrap_or(u32::MAX).to_le_bytes());
         instrument.extend_from_slice(part.as_bytes());
     }
+    // 3b. kind — a discriminant byte, then that variant's own fields at fixed
+    //     width. The discriminant comes FIRST and the widths are fixed per
+    //     variant, so the reader of these bytes never has to guess where one
+    //     field ends; the whole blob is length-prefixed like the parts above so
+    //     it cannot run into a later term either.
+    let mut kind = Vec::with_capacity(16);
+    match run.instrument.kind {
+        Kind::Index => kind.push(0),
+        Kind::Equity => kind.push(1),
+        Kind::Future { expiry } => {
+            kind.push(2);
+            push_expiry(&mut kind, expiry);
+        }
+        Kind::Option {
+            expiry,
+            strike,
+            side,
+        } => {
+            kind.push(3);
+            push_expiry(&mut kind, expiry);
+            kind.extend_from_slice(&strike.raw().to_le_bytes());
+            // `as_str` is the vendor spelling and is two bytes for both sides,
+            // so a byte each is enough and no length prefix is needed.
+            kind.push(match side {
+                OptionSide::Call => b'C',
+                OptionSide::Put => b'P',
+            });
+        }
+    }
+    instrument.extend_from_slice(&u32::try_from(kind.len()).unwrap_or(u32::MAX).to_le_bytes());
+    instrument.extend_from_slice(&kind);
     term(&mut hasher, tag::INSTRUMENT, &instrument);
 
     // 4. timeframe
@@ -314,12 +364,28 @@ pub fn identity(run: &Run<'_>) -> RunId {
 mod tests {
     use super::{Direction, Params, Run, RunId, data_digest, identity};
     use crate::synthetic;
-    use brutex_core::instrument::{Exchange, InstrumentKey};
+    use brutex_core::instrument::{Exchange, Expiry, InstrumentKey, Kind, OptionSide};
+    use brutex_core::price::Paisa;
     use engine::Ladder;
     use vocab::ConditionMask;
 
     fn key() -> InstrumentKey {
         InstrumentKey::index(Exchange::Nse, "NIFTY").expect("NIFTY is a swept index")
+    }
+
+    /// The swept index key with only its `kind` replaced.
+    ///
+    /// Every other field is held fixed on purpose: the defect this covers was
+    /// that `kind` reached the hasher not at all, so a test that also varied the
+    /// underlying would pass against the broken function.
+    fn keyed(kind: Kind) -> InstrumentKey {
+        let mut k = key();
+        k.kind = kind;
+        k
+    }
+
+    fn expiry(day: u8) -> Expiry {
+        Expiry::new(2024, 1, day).expect("a real January date")
     }
 
     fn run_over(instrument: &InstrumentKey, digest: [u8; 32], mask: ConditionMask) -> Run<'_> {
@@ -332,6 +398,66 @@ mod tests {
             data_digest: digest,
             commit: "0123456789abcdef",
         }
+    }
+
+    /// TWO CONTRACTS THAT DIFFER ONLY IN `kind` MUST NOT SHARE A `RunId`.
+    ///
+    /// `InstrumentKey` has four fields and the instrument term framed three. So
+    /// every option on one underlying — every strike, both sides, every expiry —
+    /// hashed identically, and so did a future against the spot index. `CLAUDE.md`
+    /// §3 rule 3 makes the identity what a run is recorded under; an identity
+    /// that cannot separate two contracts records the second one over the first.
+    ///
+    /// Each pair below moves exactly ONE field of `kind` and nothing else.
+    #[test]
+    fn two_contracts_that_differ_only_in_kind_do_not_collide() {
+        let d = data_digest(&synthetic::sessions(2));
+        let m = ConditionMask::default().with_bit(3);
+        let id = |k: &InstrumentKey| identity(&run_over(k, d, m));
+
+        let call = |strike: i64, day: u8| {
+            keyed(Kind::Option {
+                expiry: expiry(day),
+                strike: Paisa::from_raw(strike),
+                side: OptionSide::Call,
+            })
+        };
+
+        let base = id(&call(2_400_000, 4));
+        assert_ne!(
+            base,
+            id(&call(2_500_000, 4)),
+            "a different STRIKE is a different contract"
+        );
+        assert_ne!(
+            base,
+            id(&call(2_400_000, 11)),
+            "a different EXPIRY is a different contract"
+        );
+        assert_ne!(
+            base,
+            id(&keyed(Kind::Option {
+                expiry: expiry(4),
+                strike: Paisa::from_raw(2_400_000),
+                side: OptionSide::Put,
+            })),
+            "a different SIDE is a different contract"
+        );
+        assert_ne!(
+            id(&keyed(Kind::Index)),
+            id(&keyed(Kind::Equity)),
+            "index and equity are different instruments at the same name"
+        );
+        assert_ne!(
+            id(&keyed(Kind::Index)),
+            id(&keyed(Kind::Future { expiry: expiry(25) })),
+            "the spot index and its future are not one instrument"
+        );
+
+        // And the identity is still a FUNCTION of the key: the same kind twice
+        // is the same id, so the assertions above measure the field and not the
+        // hasher's state.
+        assert_eq!(base, id(&call(2_400_000, 4)), "still deterministic");
     }
 
     #[test]
