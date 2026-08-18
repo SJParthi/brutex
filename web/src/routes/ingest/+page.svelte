@@ -1698,6 +1698,26 @@
    * more ticks than it can send.
    */
   let rungSet = $state(new Set(['1min']));
+
+  /**
+   * WHICH FEEDS THIS RUN ASKS — a set, because the operator asked for several.
+   *
+   * # Why this is not `feeds.active`
+   *
+   * `feeds.active` is the page's SCOPE: every count, every census and every
+   * reach number on this page is measured for one vendor, and /db and
+   * `+layout.svelte` read the same value. Widening it to a set would change
+   * what those pages mean. This is the ASK, which is a different question, and
+   * keeping them apart is what lets the strip go on counting one feed while the
+   * run fans out over several.
+   *
+   * EMPTY MEANS "the scope feed", so the control needs no seeding and cannot
+   * drift out of step with the page when the operator changes scope.
+   */
+  let pullFeeds = $state(new Set());
+  const feedsChosen = $derived(
+    pullFeeds.size > 0 ? [...pullFeeds] : feeds.active ? [feeds.active] : []
+  );
   /**
    * WHETHER THE OPERATOR HAS TOUCHED THE TIMEFRAME HIMSELF.
    *
@@ -2394,10 +2414,14 @@
    * looks like.
    */
   /** @param {string} dir @param {string} a @param {string} b */
-  function wireBodyFor(dir, a, b) {
+  function wireBodyFor(dir, a, b, vendor = null) {
     const p = new URLSearchParams();
     p.set('target', target);
-    p.set('vendor', feeds.active ?? '');
+    /* THE VENDOR IS AN ARGUMENT NOW, NOT A READ OF THE PAGE'S SCOPE. With one
+       feed the two are the same value; with several, reading `feeds.active`
+       here would have sent N identical requests for the scope feed and
+       reported them as N different ones. */
+    p.set('vendor', vendor ?? feeds.active ?? '');
     p.set('from', a);
     p.set('to', b);
     p.set('granularity', dir);
@@ -2428,7 +2452,20 @@
     return p.toString();
   }
   /** One body per ticked rung, in the ladder's order — what Start would send. */
-  const wireBodies = $derived(rungsChosen.map((r) => ({ dir: r.dir, label: r.label, body: wireBodyFor(r.dir, from, to) })));
+  /* ONE REQUEST PER (FEED x RUNG), which is what `runPull` has always walked:
+     it takes an ARRAY of bodies and POSTs each in turn, and until now that
+     array was one entry per ticked timeframe. Adding the feed to the product
+     is the whole of the fan-out -- nothing about the loop, the receipts or the
+     abort changes, because they were already written for N. */
+  const wireBodies = $derived(
+    feedsChosen.flatMap((v) =>
+      rungsChosen.map((r) => ({
+        dir: r.dir,
+        label: feedsChosen.length > 1 ? `${feedName(v)} · ${r.label}` : r.label,
+        body: wireBodyFor(r.dir, from, to, v)
+      }))
+    )
+  );
 
   // -------------------------------------------------------------- validation
   //
@@ -7096,120 +7133,74 @@
 <!-- ===================================================================== -->
 {#snippet feedRung()}
   <div class="field">
-    <!-- THE LABEL IS THE LABEL. Everything the sub-clause used to say — that
-         this is the page's whole scope, what a change costs, and where the
-         counts are read from — is on the button's `title`, one hover from the
-         control it is about. A two-line label in one cell and a one-line label
-         in the next is what broke this row's baseline. -->
     <span class="lab">Broker feed</span>
-    <div class="dd">
-      <button
-        class="ddb"
-        type="button"
-        aria-expanded={drop === 'feed'}
-        title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone — no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing. What this feed does not carry is not measured here.`}
-        onclick={(e) => {
-          e.stopPropagation();
-          drop = drop === 'feed' ? null : 'feed';
-        }}>{active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}</button
-      >
-      {#if drop === 'feed'}
-        <div class="ddm" role="group" aria-label="Broker feed — the page's whole scope">
-          <!-- SAME DRAWER RULE AS THE UNIVERSE AND THE PICKERS. TrueData and
-               GDFL are `ready: false` -- samples were supplied and the real
-               archives were never bought -- so they sat dead at the TOP of this
-               menu, above the feeds that work. They are folded below now, with
-               /feeds.json's own reason intact on each. -->
-          {#each feeds.all.filter((f) => f.ready === true) as f (f.wire)}
-            {@const ready = true}
-            <button
-              class="ddr"
-              type="button"
-              class:off={!ready}
-              disabled={!ready}
-              aria-pressed={feeds.active === f.wire}
-              title={ready
-                ? `Selects ${f.display}. Every count and every bar below becomes this feed's, measured again from /instruments.json?feed=${f.wire} and /store.json — nothing is deleted and nothing is merged with the feed you are leaving.`
-                : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
-              onclick={() => {
-                feeds.active = f.wire;
-                drop = null;
-              }}
-            >
-              <span class="tk">{feeds.active === f.wire ? '✓' : ''}</span>
-              <span class="nm">{f.display}</span>
-              <span class="ct" class:warn={!ready}
-                >{f.kind_label ?? 'kind not stated'}{ready ? '' : ' · unavailable'}</span
-              >
-            </button>
-          {/each}
-          <!-- THE PROMOTED SELECTION. An operator CAN select a not-ready feed —
-               the page carries blank states for exactly that — and when he has,
-               the row rides above the drawer so the menu still shows a tick
-               without opening anything. -->
-          {#if activeNotReady}
-            <button
-              class="ddr off"
-              type="button"
-              disabled
-              aria-pressed={true}
-              title={`${activeNotReady.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${activeNotReady.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
-            >
-              <span class="tk">✓</span>
-              <span class="nm">{activeNotReady.display}</span>
-              <span class="ct warn"
-                >{activeNotReady.kind_label ?? 'kind not stated'} · unavailable</span
-              >
-            </button>
-          {/if}
-          {#if tuckedFeeds.length > 0}
-            <button
-              class="ddr tuck"
-              type="button"
-              aria-expanded={feedOpen}
-              onclick={() => (feedTuck = !feedOpen)}
-            >
-              <span class="tk">{feedOpen ? '▾' : '▸'}</span>
-              <span class="nm">{n(tuckedFeeds.length)} feed(s) this build cannot pull</span>
-              <span class="ct">{feedOpen ? 'hide' : 'show why'}</span>
-            </button>
-            {#if feedOpen}
-              {#each tuckedFeeds as f (f.wire)}
-                <button
-                  class="ddr off"
-                  type="button"
-                  disabled
-                  title={`${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
-                >
-                  <span class="tk"></span>
-                  <span class="nm">{f.display}</span>
-                  <span class="ct warn"
-                    >{f.kind_label ?? 'kind not stated'} · unavailable</span
-                  >
-                </button>
-              {/each}
-            {/if}
-          {/if}
-          {#if feeds.all.length === 0}
-            <p class="insnone">
-              The server answered <span class="mono">/feeds.json</span> with an empty list, so there
-              is no vendor to select and nothing to pull. A feed appears here the day its descriptor
-              row exists on the Rust side — nothing in this file names one.
-            </p>
-          {/if}
-        </div>
-      {/if}
-    </div>
-    <!-- THE SCOPE SENTENCE, KEPT WORD FOR WORD. It was a paragraph in a
-         full-width block; it is this control's clause now, which is where every
-         other fact on this strip lives. A `.note` CLIPS, so the whole of it is
-         on the clause's own `title` as well — the page's standing rule. -->
+    <!-- THE SAME CONTROL THE SEGMENTS RUNG DRAWS, and that is the whole point:
+         the operator named Segments as the wanted look -- checkboxes, bulk
+         buttons, a detail column, the panel that rises -- and asked why the
+         feed rung was not it. It is now.
+
+         MULTI-SELECT, AND IT REACHES THE WIRE. This was single until now, on
+         the correct reasoning that `api::ingest::SpotRequest` carries ONE
+         `feed` so a second tick could not be sent. That reasoning was right
+         about the REQUEST and wrong about the RUN: `runPull` has always taken
+         an ARRAY of bodies and POSTed each in turn, and `wireBodies` was
+         already one entry per ticked TIMEFRAME. Adding the feed to that
+         product is the whole fan-out -- N requests, one per (feed x rung),
+         each naming its own vendor, each with its own receipt. Nothing about
+         the loop, the abort or the receipts changed, because they were written
+         for N from the start.
+
+         EMPTY MEANS "the feed this page is scoped to". So the control starts
+         agreeing with the strip above it and needs no seeding, and clearing
+         every tick is not an empty run -- it is the ordinary one. -->
+    <Picker
+      filter
+      label="feeds"
+      summary={feedsChosen.length === 0
+        ? 'No feeds'
+        : feedsChosen.length === 1
+          ? feedName(feedsChosen[0])
+          : `${n(feedsChosen.length)} feeds · ${n(wireBodies.length)} request(s)`}
+      title={`Which vendors this run asks. ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) = ${n(wireBodies.length)} request(s), each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
+      rows={feeds.all.map((f) => ({
+        key: f.wire,
+        name: f.display,
+        detail: f.ready === true
+          ? (f.kind_label ?? 'kind not stated')
+          : `${f.kind_label ?? 'kind not stated'} · unavailable`,
+        disabled: f.ready !== true,
+        /* NOT `skipBulk`. A ready feed is a feed "Select all" may tick: unlike
+           the two segments that answer 503, every ready feed here can be sent. */
+        why: f.ready === true
+          ? undefined
+          : (f.why ??
+            'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
+        title: f.ready === true
+          ? `Adds ${f.display} to this run. Its bars are pulled from ${f.display} alone and filed under it — nothing is merged with another feed.`
+          : `${f.display} is refused by the server: ${f.why ?? 'no reason stated.'}`
+      }))}
+      selected={new Set(feedsChosen)}
+      onchange={(/** @type {Set<string>} */ sel) => {
+        /* BACK TO EMPTY WHEN THE PICK IS JUST THE SCOPE FEED, so the control
+           returns to "follows the page" rather than pinning a value that then
+           stops tracking a scope change. */
+        pullFeeds =
+          sel.size === 1 && [...sel][0] === feeds.active ? new Set() : new Set(sel);
+      }}
+    />
     <span
-      class="note quiet"
+      class="pknote"
       class:warn={!reachKnown}
       title={`everything below is this feed's answer · ${scopeNote}`}
-      >everything below is this feed's answer · {scopeNote}</span
     >
+      {#if feedsChosen.length > 1}
+        {n(feedsChosen.length)} feed(s) · {n(wireBodies.length)} request(s) · counts below are {feedName(
+          feeds.active
+        )}'s
+      {:else}
+        everything below is this feed's answer · {scopeNote}
+      {/if}
+    </span>
   </div>
 {/snippet}
 
