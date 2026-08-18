@@ -1143,13 +1143,45 @@ mod tests {
         );
     }
 
-    /// The `SuperTrend` stop ratchets and never retreats while the trend holds.
+    /// The `SuperTrend` stop ratchets while the trend holds, and the reference is
+    /// DROPPED when it does not.
+    ///
+    /// # Why the fixture now breaks and recovers
+    ///
+    /// It used to rise 2,000 paisa a candle for sixty candles and stop there, so
+    /// `s.trend()` was `Up` on every one of them and the `else` arm below never ran once.
+    /// That arm is not bookkeeping. A short stop sits ABOVE price and a long stop below
+    /// it, so carrying `previous` across a flip compares two levels that mean opposite
+    /// things -- and the first candle back on the long side would then be measured
+    /// against a stop the market has already taken out, which is a comparison that can
+    /// only pass by accident.
+    ///
+    /// So the fixture does the round trip: sixty candles up, twenty down at 20,000 a
+    /// candle (far enough through the trailing stop to flip it), then back up at the same
+    /// speed and through the short stop. Deleting `previous = None` makes the last
+    /// assertion below fail, because the long stop resumes far under the level it held
+    /// before the break and the ratchet would report that as a retreat.
+    ///
+    /// The DOWN-side ratchet is deliberately not re-asserted here --
+    /// `the_stop_on_both_sides::a_short_stop_tightens_holds_and_then_flips` owns it, and
+    /// two tests failing for one defect names the defect no better than one.
     #[test]
     fn the_stop_ratchets_and_does_not_retreat() {
         let mut s = SuperTrend::new(TrendThresholds::CLASSICAL);
         let mut previous: Option<i64> = None;
-        for i in 0..60_i64 {
-            let price = 2_000_000 + i * 2_000;
+        // The last long stop before the market broke it, and the first long stop after
+        // it came back. Both are long stops, and the second must be BELOW the first:
+        // the ratchet is not allowed to survive the flip that invalidated it.
+        let mut before_the_break: Option<i64> = None;
+        let mut after_the_break: Option<i64> = None;
+        let mut went_short = false;
+
+        for i in 0..100_i64 {
+            let price = match i {
+                0..=59 => 2_000_000 + i * 2_000,
+                60..=79 => 2_118_000 - (i - 59) * 20_000,
+                _ => 1_718_000 + (i - 79) * 20_000,
+            };
             s.fold(&candle(i * 60_000_000, price + 1_000, price - 1_000, price));
             if s.trend() == Trend::Up {
                 if let (Some(now), Some(before)) = (s.stop(), previous) {
@@ -1159,10 +1191,31 @@ mod tests {
                     );
                 }
                 previous = s.stop();
+                if went_short && after_the_break.is_none() {
+                    after_the_break = previous;
+                }
             } else {
+                if !went_short {
+                    before_the_break = previous;
+                }
+                went_short = true;
                 previous = None;
             }
         }
+
+        assert!(
+            went_short,
+            "the fixture never closed through the trailing stop, so the arm that drops \
+             the reference never ran and the ratchet was tested in one direction only"
+        );
+        let broke = before_the_break.expect("a long stop was established before the break");
+        let resumed = after_the_break.expect("the market recovered back through the short stop");
+        assert!(
+            resumed < broke,
+            "the long stop resumed at {resumed}, at or above the {broke} it held before \
+             the market took it out -- the ratchet carried across a flip, so a level the \
+             market has already cleared is still being defended"
+        );
     }
 
     /// A five-bar fractal peak is confirmed, and only two bars later.

@@ -568,6 +568,64 @@ mod tests {
         }
     }
 
+    /// **Naming a base does not make an illegal width legal.**
+    ///
+    /// [`Tolerance::from_milli_on`] is one law and one addition:
+    /// [`Tolerance::from_milli`] decides whether a width is legal, and this adds
+    /// the base to what came back. Only the *addition* was ever executed. The
+    /// two callers in this workspace are [`pinned_fib`] and [`pinned_pivot`],
+    /// both handing it a constant that is legal today, so the `Err` arm was a
+    /// refusal nothing had ever taken -- `cargo llvm-cov` measured it as the one
+    /// uncovered line in this module.
+    ///
+    /// **What an unwitnessed arm can quietly become.** Written
+    /// `Err(_) => Ok(Self { milli, base: Some(base) })` it compiles, and the
+    /// only difference is that a [`Tolerance`] can now be minted from
+    /// [`UNPINNED`] or from a negative width. That value goes to
+    /// [`crate::table::set_near`], which checks the *base* and never re-checks
+    /// the width, so a `near_*` bit would be decided by a band nobody measured
+    /// -- the invention `CLAUDE.md` §3 rule 1 forbids and the whole reason this
+    /// module holds a sentinel instead of a default. A [`crate::ConditionMask`]
+    /// carries no record of the band that set its bits, so nothing downstream
+    /// could ever find it.
+    ///
+    /// Both refusals are checked through **both** bases, because the base is
+    /// precisely the argument the arm is declining to attach; and the accepting
+    /// arm is checked in the same loop, so this cannot pass by refusing
+    /// everything.
+    #[test]
+    fn a_width_with_a_base_is_refused_by_the_same_law_as_a_bare_one() {
+        for base in [Base::SessionRange, Base::CprWidth] {
+            assert_eq!(
+                Tolerance::from_milli_on(base, UNPINNED),
+                Err(VocabError::ToleranceUnpinned),
+                "the sentinel still means no measurement fixed the band, and \
+                 saying which quantity it would have been a fraction of does \
+                 not fix it"
+            );
+            for milli in [-1i64, -500, i64::MIN + 1] {
+                assert_eq!(
+                    Tolerance::from_milli_on(base, milli),
+                    Err(VocabError::ToleranceNegative { milli }),
+                    "the refusal has to survive the base being added, and it \
+                     still has to name the width it was offered"
+                );
+            }
+            // The other arm, in the same loop: a legal width DOES come back
+            // wearing the base it was handed. Without this the four assertions
+            // above would be satisfied by a constructor that refuses
+            // everything, which is the failure mode a refusal test invites.
+            with_pin(Tolerance::from_milli_on(base, 0), |exact| {
+                assert_eq!(exact.milli(), 0, "zero is a band: exact equality");
+                assert_eq!(
+                    exact.base(),
+                    Some(base),
+                    "the base the caller named is the base the value carries"
+                );
+            });
+        }
+    }
+
     /// [`lesser`] is reached only from a `const` initializer, so nothing ever
     /// executed it and neither side of its comparison was covered.
     ///

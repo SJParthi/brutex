@@ -281,14 +281,49 @@ mod tests {
         // the pair to zero, the rest contribute nothing, and `is_empty` wrongly
         // answers true.
         for k in 0..WORDS - 1 {
+            // The successor word, NAMED rather than written `k + 1` twice as a
+            // trailing argument to the two messages below. An expression that
+            // appears only in a failure message is evaluated only when the
+            // assertion fails, so `cargo llvm-cov` records a region that a
+            // passing run can never close -- the identical defect the `FOLDS`
+            // const in `hits_does_the_same_work_for_every_input` was introduced
+            // to remove, left standing here. A capture interpolates by name and
+            // says the same thing to whoever reads the failure.
+            //
+            // Naming it would not be enough on its own -- a binding no assertion
+            // reads is a line that runs and notices nothing -- so the word check
+            // below reads it, and that check is worth having for its own sake.
+            // The paragraph above states the fixture's premise in three parts:
+            // the two words the operator joins are non-zero, they are EQUAL so
+            // `^` folds them away, and every other word contributes nothing.
+            // `popcount() == 2` says none of it. Two bits in ONE word satisfies
+            // it, so does a pair straddling words 0 and 3, and either would
+            // leave the operator at position k untested while the loop reported
+            // that it had covered it.
+            let high = k + 1;
             let low = u32::try_from(k).unwrap_or(0) * 64 + 7;
             let pair = ConditionMask::default().with_bit(low).with_bit(low + 64);
-            assert_eq!(pair.popcount(), 2, "two bits, in words {k} and {}", k + 1);
+            let shared = 1u64 << 7;
+            for (index, word) in pair.words().into_iter().enumerate() {
+                let want = if index == k || index == high {
+                    shared
+                } else {
+                    0
+                };
+                assert_eq!(
+                    word, want,
+                    "word {index} of the pair reads {word:#018x} and must be \
+                     {want:#018x}: only words {k} and {high} may be set, they \
+                     must hold the SAME value or `^` does not cancel them, and \
+                     any other non-zero word keeps the fold non-zero whatever \
+                     the operator at position {k} does"
+                );
+            }
+            assert_eq!(pair.popcount(), 2, "two bits, in words {k} and {high}");
             assert!(
                 !pair.is_empty(),
-                "words {k} and {} both hold bit 7; a fold that cancels them \
-                 reads this as empty, and it is not",
-                k + 1
+                "words {k} and {high} both hold bit 7; a fold that cancels them \
+                 reads this as empty, and it is not"
             );
         }
 
@@ -502,13 +537,20 @@ mod tests {
         // And nothing else is in there. The two checks above say what must be
         // present; this says that is ALL that is present, which is what stops a
         // branch being inserted between two of the differences.
+        //
+        // `WORDS + 1` was written TWICE -- once as the value compared and once
+        // as a trailing argument to the message. The second copy is evaluated
+        // only when the assertion fails, which is a region `cargo llvm-cov`
+        // counts and a passing run can never close: the same defect `FOLDS`
+        // above was introduced to remove. Naming it once and capturing it by
+        // name is also what the paragraph above the previous check asks for --
+        // removing the second copy beats testing that two copies agree.
+        let want = WORDS + 1;
         let lines = body.lines().filter(|l| !l.trim().is_empty()).count();
         assert_eq!(
-            lines,
-            WORDS + 1,
-            "`hits` is {lines} lines of code and must be exactly {}: {WORDS} \
-             differences and one fold, nothing between them: {body}",
-            WORDS + 1
+            lines, want,
+            "`hits` is {lines} lines of code and must be exactly {want}: {WORDS} \
+             differences and one fold, nothing between them: {body}"
         );
     }
 

@@ -2730,12 +2730,21 @@ mod tests {
                         // satisfied — it turned all twenty diagonal shorts into
                         // profits, which is what dropped `losses` to 100.
                         if entry == exit {
+                            // Bound once, then both tested and reported. A
+                            // trailing `charges.gross_pnl().raw()` argument
+                            // would be a SECOND call, evaluated only on the
+                            // failing path — so the number the message printed
+                            // was never provably the number the predicate
+                            // rejected, and the line was unreachable in a green
+                            // build. `{name} was negative` above and
+                            // `lot.rs`/`strike.rs`'s table assertions already
+                            // name a place rather than a call for this reason.
+                            let gross = charges.gross_pnl().raw();
                             assert!(
-                                charges.gross_pnl().raw() < 0,
+                                gross < 0,
                                 "a {direction} trip that opened and closed at \
-                                 {entry} paisa reported {} — a flat market cannot \
-                                 pay for two adverse fills",
-                                charges.gross_pnl().raw()
+                                 {entry} paisa reported {gross} — a flat market \
+                                 cannot pay for two adverse fills"
                             );
                             diagonal_losses += 1;
                         }
@@ -2752,11 +2761,11 @@ mod tests {
                             // tally alone would happily count trips that were
                             // never profitable in the first place, which is
                             // precisely what it did while shorts were inverted.
+                            let net = charges.net_pnl().raw();
                             assert!(
-                                charges.net_pnl().raw() < 0,
+                                net < 0,
                                 "a trip whose charges exceed its gross must net \
-                                 negative, and this one netted {}",
-                                charges.net_pnl().raw()
+                                 negative, and this one netted {net}"
                             );
                             swamped += 1;
                         }

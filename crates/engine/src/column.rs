@@ -343,12 +343,18 @@ mod tests {
                 for candidate in candidates {
                     let row_major = crate::support(&rows, &candidate);
                     let bitmaps = vertical.support(&candidate);
+                    // Read once, into a name the message interpolates. Spelled
+                    // inside the message, `candidate.words()` is an expression only
+                    // a FAILING run evaluates -- and this comparison is the module's
+                    // whole justification, so it is the one assertion that must
+                    // never fail. `crates/engine/src/lib.rs` hoists `kept_count` out
+                    // of E-02's comparison for the same reason; the numbers are the
+                    // same and the message keeps them.
+                    let shown = candidate.words();
                     assert_eq!(
-                        bitmaps,
-                        row_major,
+                        bitmaps, row_major,
                         "layouts disagree at {bars} bar(s), {set} bit(s) per bar, \
-                         candidate {:?}",
-                        candidate.words()
+                         candidate {shown:?}"
                     );
                     checked = checked.saturating_add(1);
                 }
@@ -430,6 +436,80 @@ mod tests {
         assert_eq!(vertical.bars(), 0);
         assert_eq!(vertical.support(&ConditionMask::ZERO), 0);
         assert_eq!(vertical.support(&ConditionMask::ZERO.with_bit(5)), 0);
+    }
+
+    /// The fixture generator cannot divide by zero, and does not draw when asked
+    /// for nothing.
+    ///
+    /// # What this is guarding, and why nothing else here reaches it
+    ///
+    /// `Lcg::below` is the only arithmetic in this module's fixtures, and `% n` on
+    /// `n == 0` is not a wrong answer -- it is a panic, in a test helper, which
+    /// reports as a failing assertion in whatever test happened to call it. The
+    /// `n == 0` arm is the guard against that, and every other test here hands
+    /// `column` a non-empty `live` slice, so the guard has never once run: the one
+    /// branch written specifically to keep the fixtures from crashing was the one
+    /// branch nothing exercised.
+    ///
+    /// The second half is the part that is easy to get wrong. The guard returns
+    /// early WITHOUT calling `next`, so asking for a draw below zero must not
+    /// advance the stream -- otherwise a caller that happens to pass an empty slice
+    /// perturbs every later draw, and two fixtures written to the same seed stop
+    /// agreeing. §3 rule 5 is the reason the generator is written down here at all
+    /// rather than taken from the environment, and a guard that silently consumed a
+    /// draw would undo that. Compared against a second generator on the same seed
+    /// that was never asked, which is the only way to see it.
+    #[test]
+    fn asking_the_fixture_generator_for_a_draw_below_zero_yields_zero_without_consuming_one() {
+        let mut guarded = Lcg(7);
+        assert_eq!(
+            guarded.below(0),
+            0,
+            "below(0) has no value it could return but 0, and `% 0` is a panic"
+        );
+        assert_eq!(
+            guarded.below(0),
+            0,
+            "and it stays 0, however often it is asked"
+        );
+
+        let mut untouched = Lcg(7);
+        assert_eq!(
+            guarded.below(1_000),
+            untouched.below(1_000),
+            "the two zero-width draws advanced the stream, so an empty `live` slice \
+             would change every later draw and two fixtures on one seed would stop \
+             agreeing"
+        );
+
+        // AND THE GUARD IS REACHED THROUGH THE REAL CALLER, not only by hand.
+        // `column` computes the argument as `live.len()`, so an empty slice is what
+        // puts a zero there. The masks it then builds fall back on position 0 for
+        // every bar -- `live.get(0)` is `None` and `unwrap_or(0)` supplies the bit --
+        // so the column is degenerate but well formed, and both layouts must still
+        // agree about it.
+        let rows = column(11, 130, &[], 3);
+        assert_eq!(
+            rows.len(),
+            130,
+            "the generator must still produce every bar"
+        );
+        let vertical = Column::transpose(&rows);
+        assert_eq!(
+            vertical.support(&ConditionMask::ZERO.with_bit(0)),
+            130,
+            "with no live position to draw from, every bar falls back to bit 0"
+        );
+        assert_eq!(
+            vertical.support(&ConditionMask::ZERO.with_bit(1)),
+            0,
+            "and no other position was ever set"
+        );
+        assert_eq!(
+            vertical.support(&ConditionMask::ZERO.with_bit(0)),
+            crate::support(&rows, &ConditionMask::ZERO.with_bit(0)),
+            "the two layouts must agree on the degenerate column as well"
+        );
     }
 
     /// The padding bits in the last word are zero, and stay uncounted.

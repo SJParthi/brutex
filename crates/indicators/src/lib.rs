@@ -633,10 +633,17 @@ mod tests {
             );
             previous = day;
         }
+        // BOUND FIRST, and not for tidiness. An argument in an assert's format list is
+        // evaluated only when the assertion FAILS, so while the code is correct it is a
+        // region no run can enter and llvm-cov reports the line uncovered forever.
+        // `docs/06-limits.md` §55 records the same defect leaking into `pattern.rs` from
+        // the coverage work itself, and the same repair -- hoist the value to a local.
+        // It also removes a second call that could, in principle, answer differently
+        // from the one that was tested.
+        let at_ceiling = ist_day(i64::MAX);
         assert!(
-            ist_day(i64::MAX) > 0,
-            "ist_day(i64::MAX) is {}, and a positive stamp cannot be a negative day",
-            ist_day(i64::MAX)
+            at_ceiling > 0,
+            "ist_day(i64::MAX) is {at_ceiling}, and a positive stamp cannot be a negative day"
         );
     }
 

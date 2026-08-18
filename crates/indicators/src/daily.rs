@@ -727,11 +727,17 @@ mod tests {
     /// has to happen where a `Result` still exists, which is the constructor.
     #[test]
     fn a_close_outside_the_session_range_is_refused_rather_than_narrowing_the_band() {
-        assert!(
-            matches!(
-                DailyLevels::from_previous_session(i64::MIN + 1, i64::MIN, i64::MAX),
-                Err(Unusable::CloseOutsideRange)
-            ),
+        // `assert_eq!` rather than `assert!(matches!(..))`, and the reason is the
+        // instrument. A `matches!` spread across four lines puts its `_ => false` arm --
+        // the arm a passing test never takes -- alone on the line the macro opens, so
+        // llvm-cov reports that line uncovered for exactly as long as the refusal keeps
+        // working. The equality asserts the same thing, prints the value that actually
+        // came back instead of "false", and leaves behind no line that only a broken
+        // build could execute. The one-line `matches!` uses below are unaffected: their
+        // line carries the `assert!` region too.
+        assert_eq!(
+            DailyLevels::from_previous_session(i64::MIN + 1, i64::MIN, i64::MAX),
+            Err(Unusable::CloseOutsideRange),
             "the audit's witness must be refused, and by this name rather than another"
         );
         // Both directions, adjacent by one, so the boundary is exact rather than roughly
@@ -770,11 +776,15 @@ mod tests {
                 i64::try_from(i128::midpoint(i128::from(low), i128::from(high))).unwrap_or(low);
             for close in [low, high, mid] {
                 if let Ok(levels) = DailyLevels::from_previous_session(high, low, close) {
+                    // Bound before the assert. A format argument is evaluated only on
+                    // failure, so `levels.band_half()` sitting in the message list was a
+                    // region a green run could never enter -- the same defect
+                    // `docs/06-limits.md` §55 records in `pattern.rs`, and the same fix.
+                    let half = levels.band_half();
                     assert!(
-                        levels.band_half().checked_mul(2).is_some(),
-                        "({high}, {low}, {close}) built with band_half {} and doubling it \
-                         leaves the type, so the emit's band base would clamp",
-                        levels.band_half()
+                        half.checked_mul(2).is_some(),
+                        "({high}, {low}, {close}) built with band_half {half} and doubling \
+                         it leaves the type, so the emit's band base would clamp"
                     );
                 }
             }

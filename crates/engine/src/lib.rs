@@ -1265,14 +1265,23 @@ mod tests {
                 let sweep = Ladder::with_min_hits(min_hits).walk(&column, &live);
                 for level in &sweep.levels {
                     for set in &level.frequent {
+                        // Read once, into names both the comparison and the message
+                        // use. `set.mask.popcount()` was spelled a SECOND time inside
+                        // the message, and a message argument only runs when the
+                        // assertion fails -- so that second call sat on a path no
+                        // passing run executes. Same reason `kept_count` and
+                        // `brute_count` are hoisted out of E-02's comparison below,
+                        // and `depth` out of the extinction assertion in
+                        // `mod caller_input`. Hoisted, the numbers are identical and
+                        // the message keeps every one of them.
+                        let bits = set.mask.popcount();
+                        let k = level.k;
                         assert_eq!(
-                            set.mask.popcount(),
-                            level.k,
-                            "level k={} emitted a {}-bit itemset at min_hits={min_hits}, \
-                             assignment={assignment}: the prefix join is the only thing \
-                             standing in for the popcount filter it replaced",
-                            level.k,
-                            set.mask.popcount()
+                            bits, k,
+                            "level k={k} emitted a {bits}-bit itemset at \
+                             min_hits={min_hits}, assignment={assignment}: the prefix \
+                             join is the only thing standing in for the popcount \
+                             filter it replaced"
                         );
                         checked = checked.saturating_add(1);
                     }
@@ -1410,6 +1419,17 @@ mod tests {
     /// executed once: two walks that disagreed **only** in their exclusions —
     /// a different order, a different reason, a missing entry — rendered
     /// identically and this test reported them equal.
+    ///
+    /// # And why 240 is in it
+    ///
+    /// 3 and 9 are both MEASURED exclusions, so `Excluded::support` was `Some` on
+    /// every entry the render ever saw and the `None` half of the field's spelling
+    /// went unrendered. §3 rule 6 forbids naming a measurement nobody took, which
+    /// is the whole reason that field is an `Option` and the whole reason `render`
+    /// prints the word `unmeasured` rather than a zero — and a spelling no test
+    /// reads is a spelling a rerun can change silently. 240 is one of the void
+    /// rows, so it is [`Why::NotLive`], its support is `None`, and the third
+    /// branch of the exclusion line is now part of what "byte for byte" covers.
     #[test]
     fn a_rerun_with_identical_inputs_produces_an_identical_sweep() {
         let column = bars(&[
@@ -1422,7 +1442,7 @@ mod tests {
             &[0, 9],
             &[1, 9],
         ]);
-        let live = [0_u32, 1, 2, 3, 5, 9];
+        let live = [0_u32, 1, 2, 3, 5, 9, 240];
 
         let first = Ladder::with_min_hits(2).walk(&column, &live);
         let second = Ladder::with_min_hits(2).walk(&column, &live);
@@ -1465,13 +1485,19 @@ mod tests {
             "two walks over identical inputs rendered differently, so the output \
              depends on something outside the inputs -- CLAUDE.md §3 rule 5"
         );
-        // The comparison above is only as wide as what `render` prints. These two
+        // The comparison above is only as wide as what `render` prints. These three
         // lines are the proof that it prints the exclusions at all: position 3 is
         // false on every bar and 9 is true on every bar, so both must appear with
-        // their measured support and their reason.
+        // their measured support and their reason -- and 240 is not live, so it must
+        // appear with the word that stands in for a measurement nobody took. A
+        // render that printed `0` there instead would be claiming 240 was tested
+        // against the bars and found absent, which is exactly what §3 rule 6 and the
+        // `Option` on `Excluded::support` exist to prevent.
         assert!(
-            text.contains("excluded 3 0 AlwaysFalse") && text.contains("excluded 9 8 AlwaysTrue"),
-            "`render` did not name the two excluded positions, so a rerun could \
+            text.contains("excluded 3 0 AlwaysFalse")
+                && text.contains("excluded 9 8 AlwaysTrue")
+                && text.contains("excluded 240 unmeasured NotLive"),
+            "`render` did not name the three excluded positions, so a rerun could \
              differ in its exclusions and still compare equal:\n{text}"
         );
         assert!(
@@ -1626,6 +1652,19 @@ mod tests {
             [] as [&str; 0],
             "a commented-out dependency is not a dependency"
         );
+        // A KEY WITH NO NAME IS NOT A DEPENDENCY EITHER, and this is the only guard
+        // between a malformed line and a phantom entry. The scanner takes everything
+        // left of the first `=` as the name, so a line that opens with one -- junk, a
+        // half-finished edit, a continuation nobody closed -- yields the empty
+        // string. Without the `!name.is_empty()` filter that empty string joins
+        // `found`, and the exact-equality assertion at the top of this test then
+        // reads `["", "vocab"]`: a dependency with no name, failing a check whose
+        // whole value is that it says what IS there.
+        assert_eq!(
+            declared_dependencies("[dependencies]\n= \"1\"\nvocab = \"0.1.0\""),
+            ["vocab"],
+            "a nameless key must be dropped, not admitted as a dependency called \"\""
+        );
 
         // And the entry point takes bits, not bars. A signature change to accept
         // candles would make recomputation constructible again.
@@ -1770,10 +1809,14 @@ mod tests {
 
         // Level k's `generated` must equal the pairs of level k-1 whose union has
         // popcount k. Recomputed here from the frontier, not from the counter.
-        for pair in s.levels.windows(2) {
-            let (Some(prev), Some(level)) = (pair.first(), pair.last()) else {
-                continue;
-            };
+        // Zipped against its own tail rather than walked as `windows(2)`. A window
+        // is a SLICE, so reading its two ends costs a `first()`/`last()` pair and an
+        // arm for the `None` a width-2 window cannot produce -- a `continue` no run
+        // can take, which is a branch the suite can never show working. Zipping the
+        // levels with `skip(1)` yields exactly the same consecutive pairs already
+        // unwrapped, so the pair is a value instead of a slice and there is no dead
+        // arm left to reason about.
+        for (prev, level) in s.levels.iter().zip(s.levels.iter().skip(1)) {
             // Recomputed for the PREFIX join: the pairs it walks are exactly the
             // pairs sharing a (k−2)-prefix. The older form counted every pair
             // whose union had popcount k, which is the same SET of k-sets
@@ -1805,20 +1848,52 @@ mod tests {
         // invisible at every threshold. `Frontier::reconciles` is what sees it:
         // `generated` must equal duplicates + excluded + pruned + infrequent +
         // frequent, and a truncated survivor list makes that sum too small.
+        let mut survivors = 0_u64;
         for level in &s.levels {
+            // Read once, into a name the message interpolates and the running total
+            // consumes. `level.frequent.len()` was spelled only inside the failure
+            // message, where it runs on the panic path alone -- the same hoist E-02
+            // makes for `kept_count`.
+            let frequent = len_u64(level.frequent.len());
             assert!(
                 level.reconciles(),
                 "level {} does not reconcile: {} generated against \
-                 {} duplicates + {} pruned + {} infrequent + {} frequent. A \
+                 {} duplicates + {} pruned + {} infrequent + {frequent} frequent. A \
                  survivor list was truncated after the join.",
                 level.k,
                 level.generated,
                 level.duplicates,
                 level.pruned,
                 level.infrequent,
-                level.frequent.len()
             );
+            survivors = survivors.saturating_add(frequent);
         }
+
+        // AND THE FIXTURE MUST HAVE PRODUCED A FRONTIER TO CHECK IN THE FIRST PLACE.
+        //
+        // Every assertion above this point lives inside a `for` over `s.levels`. A
+        // walk that returned no level -- or one, which makes the zipped pair loop
+        // empty too -- runs neither body, and this test then passes having asserted
+        // nothing at all: §4's banned test, arriving by accident rather than by
+        // authorship. The same hole is why
+        // `every_generated_candidate_has_exactly_k_bits` counts what it checked and
+        // why E-02 pins its column count.
+        //
+        // The numbers are the fixture's, not a floor. Ten co-occurring bits give a
+        // frequent set for every non-empty subset of them -- 2^10 - 1 = 1023 -- and
+        // 11, true on the other two bars, adds its singleton at k=1 for 1024. The
+        // ladder therefore runs k=1..10 and dies at k=11: 11 levels. That 1024 is the
+        // same total the header quotes when it says the injected `break 'join` lost
+        // 454 of them, so a truncation this exact count would miss is one the header
+        // has never seen.
+        let depth = s.levels.len();
+        assert_eq!(
+            (depth, survivors),
+            (11, 1024),
+            "the fixture produced {depth} level(s) and {survivors} frequent set(s), so \
+             the two loops above walked a frontier that is not the one this test was \
+             written against"
+        );
     }
 
     /// A cap keyed on ANY scale is caught, not just one keyed on `k`.

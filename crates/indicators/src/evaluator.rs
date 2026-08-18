@@ -2105,9 +2105,9 @@ mod tests {
     #[test]
     fn the_structure_in_force_is_reported_between_breaks_and_not_before_the_first() {
         let mut e = Evaluator::new(widths(), Availability::Absent, Thresholds::CLASSICAL);
-        let mut saw_event_without_regime = false;
         let mut saw_regime_without_event = false;
         let mut ever_set = false;
+        let mut saw_break_event = false;
 
         for m in 0..90_i64 {
             let within = m % 22;
@@ -2135,8 +2135,19 @@ mod tests {
                     saw_regime_without_event = true;
                 }
             }
-            if event && !regime {
-                saw_event_without_regime = true;
+            // CHECKED HERE, not latched into a flag and asserted after the loop. The
+            // flag's assignment was a line no correct run could ever execute -- the
+            // whole claim is that this case never occurs -- so llvm-cov reported it
+            // uncovered for as long as the invariant held, and a line that only a
+            // regression can reach is a line nobody can be held to. Asserting on the
+            // spot proves the same property, and names the bar that broke it.
+            if event {
+                saw_break_event = true;
+                assert!(
+                    regime,
+                    "bar {m}: a break event fired on a bar where no direction was in \
+                     force, so the latch is advancing after the emit rather than before"
+                );
             }
             assert!(
                 !(mask.get(278) && mask.get(279)),
@@ -2155,9 +2166,9 @@ mod tests {
              reason they were appended"
         );
         assert!(
-            !saw_event_without_regime,
-            "a break event fired on a bar where no direction was in force, so the latch is \
-             advancing after the emit rather than before"
+            saw_break_event,
+            "no break event fired in 90 bars, so the check inside the loop -- that every \
+             event lands on a bar with a direction in force -- never ran"
         );
     }
 
@@ -2278,12 +2289,18 @@ mod tests {
             // The regime must AGREE with the direction of the most recent break.
             if let Some(up) = last_break_up {
                 compared += 1;
+                // Both message values are bound before the assert. An argument in a
+                // format list is evaluated only when the assertion fails, so while the
+                // mapping is correct those two expressions are regions no run can enter
+                // -- `docs/06-limits.md` §55, same defect, same repair. Binding also
+                // makes the bit named in the message the bit that was compared, rather
+                // than a second read that could in principle disagree.
+                let in_force = mask.get(278);
+                let direction = if up { "UPWARD" } else { "downward" };
                 assert_eq!(
-                    mask.get(278),
-                    up,
-                    "bar {m}: the last break was {} and 278 `structure_up_in_force` is {}",
-                    if up { "UPWARD" } else { "downward" },
-                    mask.get(278)
+                    in_force, up,
+                    "bar {m}: the last break was {direction} and 278 \
+                     `structure_up_in_force` is {in_force}"
                 );
                 assert_eq!(
                     mask.get(279),
