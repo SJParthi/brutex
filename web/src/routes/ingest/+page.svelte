@@ -7476,16 +7476,6 @@
     text-transform: uppercase;
     color: var(--faint);
   }
-  .lbl i {
-    font-style: normal;
-    /* --faint, not --n7. `--n7` is theme.css's "hairline, strong / disabled
-       edge" -- a BORDER step, 1.57:1 as text. The seven --n0..--n7 steps are
-       surfaces and rules; the four text tokens are --ink, --ink-2, --dim and
-       --faint. */
-    color: var(--faint);
-    letter-spacing: 0;
-    text-transform: none;
-  }
   .hint {
     font-size: var(--fs-xs);
     line-height: var(--lh-base);
@@ -7745,11 +7735,7 @@
   /* ONE HEIGHT FOR EVERY BUTTON IN THE STRIP, INCLUDING THE TWO THAT ARE NOT
      OURS. `$lib/Picker.svelte`'s `.pbtn` already agrees with `.ddb` on every
      metric — 15px semibold mono, 11px/14px padding, 9px radius — but it does
-     not clip, so a long summary wraps to a second line and that ONE control
-     becomes taller than its four neighbours. That is the row broken again, by
-     a string rather than by a rule. It was measured on a summary the timeframe
-     control can no longer produce — the ladder is three rungs now — and the
-     clip stays because it is a RULE about this strip, not a reaction to one
+     not clip, not a reaction to one
      string: Instruments and Universe reach the same width on a long name.
      Picker is shared and is not edited from here; the clip is applied from
      this page, to Pickers inside this strip only. */
@@ -7846,11 +7832,6 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .ddr .tk {
-    flex: 0 0 12px;
-    color: var(--acc);
-    font-weight: var(--w-bold);
-  }
   .ddr .nm {
     flex: 1;
     min-width: 0;
@@ -7873,11 +7854,6 @@
   }
   .ddr .ct.warn {
     color: var(--warn);
-  }
-  .ddm hr {
-    border: 0;
-    border-top: 1px solid var(--line);
-    margin: 5px 8px;
   }
 
   /* ---- the two days ----
@@ -8321,10 +8297,7 @@
   }
 
   /* THE FOLDED CAUTIONS. Same chrome as `.wire` below it — one disclosure
-     idiom on this page, not two — with the warn hue on the summary so a closed
-     fold still reads as something to open rather than as a section heading.
-     The paragraphs inside drop their own `caution` tag: the summary already
-     carries one, and repeating it on every line was the stutter that made five
+     idiom on this page, and repeating it on every line was the stutter that made five
      of these unreadable. */
   .cautions {
     border: 1px solid var(--warn);
@@ -8332,30 +8305,11 @@
     padding: var(--s4) var(--s5);
     background: var(--warn-soft);
   }
-  .cautions summary {
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    color: var(--warn);
-    display: flex;
-    align-items: center;
-    gap: var(--s3);
-  }
   .cautions .caution {
     margin: var(--s4) 0 0;
     background: none;
     border: 0;
     padding: 0;
-  }
-  /* THE FOLDED FOOTER. Same disclosure chrome as `.wire` and `.cautions`{
-    border-top: 1px solid var(--line-soft);
-    padding-top: var(--s4);
-  }
-  .foothold summary.warn {
-    color: var(--warn);
-  }
-  .foothold .foot {
-    margin-top: var(--s4);
   }
   /* THE TILE ROW. `auto-fit` rather than a fixed four, so the row reflows
      instead of overflowing on a narrow window — and `minmax` keeps a tile from
@@ -8377,12 +8331,6 @@
     border-radius: var(--r3);
     padding: var(--s4) var(--s5);
     background: var(--well);
-  }
-  .wire summary {
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    color: var(--dim);
   }
   .wirebody {
     margin: var(--s4) 0 var(--s3);
@@ -8433,12 +8381,6 @@
     border-radius: var(--r-full);
     background: var(--well);
     overflow: hidden;
-  }
-  .meter i {
-    display: block;
-    height: 100%;
-    background: var(--acc);
-    border-radius: var(--r-full);
   }
   .gov.hot {
     border-color: var(--warn);

@@ -7560,11 +7560,6 @@
   .opt .ct .pip {
     margin-right: var(--s2);
   }
-  .menu hr {
-    border: 0;
-    border-top: 1px solid var(--line);
-    margin: var(--s2) var(--s4);
-  }
   /* ---- THE FIND BOX'S LISTBOX ----------------------------------------
      THE SAME `.menu` AS EVERY OTHER POPUP IN THE STRIP, so the combobox's
      suggestions and the month menu are one object two cells apart — which is
@@ -7609,13 +7604,6 @@
   /* The month field is the same face at the same height — it is a button rather
      than a text box, for the reason stated at the snippet, but nothing about
      that should be visible in the row. */
-  /* NO `min-width` ON THE MONTH FIELD INSIDE THE STRIP, a floor of 5.4rem plus the button is a cell that cannot shrink{
-    font-size: var(--fs-base);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
   /* ---- THE ANCHOR -----------------------------------------------------
      What the query is looking at, the one headline figure, the two presses that
      are actions rather than filters, and the counted line under all three.
@@ -7734,12 +7722,6 @@
   .anchor .note .meter {
     width: 84px;
     flex: none;
-  }
-
-  /* The hint sits INSIDE the input's right padding{
-    margin-left: calc(-1 * var(--s6));
-    opacity: 0.55;
-    pointer-events: none;
   }
 
   .asof {
