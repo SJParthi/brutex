@@ -15,6 +15,7 @@ import { survey, surveyStores } from '$lib/store.svelte.js';
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
 import { ask } from '$lib/ask.js';
+import { pickDefaultFeed } from '$lib/pick.js';
 
 /**
  * ONE FEED, AS `/feeds.json` SENDS IT.
@@ -104,11 +105,10 @@ async function loadFeedsNow() {
     const held = feeds.all.map(
       (f) => survey.byFeed.get(f.wire) ?? { wire: f.wire, ready: f.ready, bars: 0 }
     );
-    const best =
-      held.filter((f) => f.bars > 0).sort((a, b) => b.bars - a.bars)[0] ??
-      held.find((f) => f.ready) ??
-      held[0];
-    feeds.active = best?.wire ?? null;
+    // THE RULE ITSELF IS IN `$lib/pick.js` so a test can drive it. This module
+    // imports `$lib/ask.js`, which node cannot resolve, so the choice that
+    // decides which feed every page opens on was unreachable from `node --test`.
+    feeds.active = pickDefaultFeed(held);
   } catch (why) {
     // LOUD, NOT SILENT. A feed list that quietly fails leaves a picker with no
     // options and no reason, which is the shape CLAUDE.md section 4 bans.

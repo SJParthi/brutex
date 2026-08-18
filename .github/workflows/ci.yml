@@ -6215,7 +6215,7 @@ jobs:
       # ----------------------------------------------------------------------
       - name: Gate W3 — svelte-check does not regress
         run: |
-          CEILING=64
+          CEILING=63
           npm --prefix web run check 2>&1 | tee /tmp/check.log || true
           FOUND=$(grep -oE '[0-9]+ ERRORS' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
           if [ "$FOUND" = missing ]; then
