@@ -491,6 +491,30 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
         "  The first two ask whether ANYTHING here is real. Only Romano-Wolf \
          says WHICH, and it names {named}."
     );
+
+    // WHAT THE SAMPLE SIZE WAS WORTH, BESIDE THE P-VALUE IT PRODUCED.
+    //
+    // A p-value keeps no record of how much evidence produced it, so the two
+    // rows above render identically at three periods and at three hundred while
+    // meaning entirely different things. `docs/06-limits.md` §77 measures the
+    // gap -- 37.1% false positives at three periods against a nominal 5%.
+    //
+    // This crate picks no minimum-period floor: which floor is a number
+    // `CLAUDE.md` §3 rule 1 forbids it inventing, with no charter source to take
+    // it from. §3 rule 6 asks instead that the limit be stated where it will be
+    // read, and a limit recorded only in a document is not stated to the person
+    // looking at the verdict. So it prints here. D-0172.
+    if let Some(v) = rc.or(spa) {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "  sample: {}", v.calibration());
+        if v.periods < 100 {
+            let _ = writeln!(
+                out,
+                "  READ THE TWO ROWS ABOVE WITH THAT IN MIND -- at this sample \
+                 size these tests fire falsely far more often than 5%."
+            );
+        }
+    }
     let _ = writeln!(out);
 }
 
@@ -500,6 +524,42 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
+
+    /// THE VERDICT'S SAMPLE SIZE IS PRINTED WHERE IT WILL BE READ.
+    ///
+    /// A limit recorded only in `docs/06-limits.md` is not stated to the person
+    /// looking at the p-value. At a short sample the render must say so beside
+    /// the number, not somewhere else.
+    #[test]
+    fn a_short_sample_is_named_beside_the_p_value_it_produced() {
+        let short = crate::bootstrap::Verdict {
+            statistic: 3.0,
+            p_value: 0.01,
+            draws: 1_000,
+            strategies: 2,
+            periods: 3,
+        };
+        let mut out = String::new();
+        bootstrap(&mut out, Some(&short), None, 1);
+        assert!(out.contains("37.1%"), "the measured rate is shown:\n{out}");
+        assert!(
+            out.contains("READ THE TWO ROWS ABOVE"),
+            "and a short sample is called out rather than left to the reader:\n{out}"
+        );
+
+        let long = crate::bootstrap::Verdict {
+            periods: 400,
+            ..short
+        };
+        let mut out = String::new();
+        bootstrap(&mut out, Some(&long), None, 1);
+        assert!(out.contains("nominal"), "a long sample says so:\n{out}");
+        assert!(
+            !out.contains("READ THE TWO ROWS ABOVE"),
+            "and is NOT warned about -- a warning on every verdict is a warning \
+             nobody reads:\n{out}"
+        );
+    }
 
     /// A LOSING VARIANT MUST NOT BE ABLE TO KILL THE PROCESS.
     ///
@@ -975,12 +1035,14 @@ mod tests {
             statistic: 3.42,
             p_value: 0.004,
             draws: 1_000,
+            periods: 250,
             strategies: 20,
         };
         let fails = crate::bootstrap::Verdict {
             statistic: 0.81,
             p_value: 0.612,
             draws: 1_000,
+            periods: 250,
             strategies: 20,
         };
         let mut out = String::new();

@@ -14956,3 +14956,40 @@ nonetheless constant, and 37 hot paths with no bench at all.
 
 ---
 
+## D-0172 · 2026-08-18 · The bootstrap discloses its sample size rather than inventing a floor
+
+`crates/runner/src/bootstrap.rs`, `crates/runner/src/audit.rs`.
+
+These tests are badly miscalibrated on short samples. Measured on pure noise
+against a nominal 5% (`docs/06-limits.md` §77): **73.5% false positives at 1
+period, 45.9% at 2, 37.1% at 3, 26.1% at 5, 21.2% at 10, 13.3% at 30, 7.4% at
+100**, reaching nominal by about 300.
+
+The repair a reader expects is a minimum-period floor. **There is none, and that
+is the decision.** *Which* floor is a number `CLAUDE.md` §3 rule 1 forbids this
+crate inventing and no source in `docs/00-charter.md` supplies; the operator was
+asked directly and did not name one. Picking 30 or 100 to look decisive would be
+inventing a market fact, which is the one thing golden rule 1 exists to stop.
+
+What §3 rule 6 requires instead is that the limit be **stated**. So:
+
+* `Verdict` gains **`periods`**. Until now the number that decides whether
+  `p_value` can be believed was not carried with it — a verdict from three
+  periods and one from three hundred rendered identically.
+* `Verdict::calibration()` names the measured rate for the sample actually used.
+  The bands are the measured rows, not interpolation, and a sample between two
+  rows takes the **worse** of them: rounding a false-positive rate toward the
+  flattering side is the error this module exists to avoid.
+* `audit::bootstrap` prints it beside the p-value, and adds an explicit "read the
+  two rows above with that in mind" below 100 periods. **A limit recorded only in
+  a document is not stated to the person looking at the verdict.**
+
+The warning fires only below 100, deliberately: a caution printed on every
+verdict is a caution nobody reads.
+
+**What this does not do.** It does not make a three-period verdict trustworthy,
+and it does not stop a caller acting on one. It stops the caller doing so without
+being told. The floor remains the operator's to set.
+
+---
+

@@ -146,6 +146,16 @@ pub struct Verdict {
     pub draws: usize,
     /// Strategies compared.
     pub strategies: usize,
+    /// Periods each strategy's return series held.
+    ///
+    /// # Why the sample size travels WITH the verdict
+    ///
+    /// It is the number that decides whether `p_value` can be believed, and
+    /// until this field a caller could not see it. A p-value carries no record
+    /// of how much evidence produced it, so a verdict from three periods and one
+    /// from three hundred render identically and mean entirely different things.
+    /// [`Self::calibration`] is what turns this into a sentence.
+    pub periods: usize,
 }
 
 impl Verdict {
@@ -158,6 +168,39 @@ impl Verdict {
     #[must_use]
     pub fn clears(&self) -> bool {
         self.draws > 0 && self.p_value < 0.05
+    }
+
+    /// What this verdict's sample size is worth, in measured terms.
+    ///
+    /// # Disclosure rather than a threshold, and that is deliberate
+    ///
+    /// These tests are badly miscalibrated on short samples. Measured on pure
+    /// noise against a nominal 5% (`docs/06-limits.md` §77): **73.5% false
+    /// positives at 1 period, 45.9% at 2, 37.1% at 3, 26.1% at 5, 21.2% at 10,
+    /// 13.3% at 30, 7.4% at 100**, reaching nominal by about 300.
+    ///
+    /// The repair a reader expects is a minimum-period floor. **This crate does
+    /// not have one**, because *which* floor is a number `CLAUDE.md` §3 rule 1
+    /// forbids it inventing and no source in `docs/00-charter.md` supplies. What
+    /// §3 rule 6 DOES require is that the limit be stated rather than hidden —
+    /// so the verdict names the measured rate for the sample it actually had,
+    /// and the operator decides.
+    ///
+    /// The bands are the measured rows, not interpolation. A sample between two
+    /// rows takes the WORSE of them, because rounding a false-positive rate
+    /// toward the flattering side is the error the whole module exists to avoid.
+    #[must_use]
+    pub const fn calibration(&self) -> &'static str {
+        match self.periods {
+            0 | 1 => "1 period: no resolution at all -- refused, p forced to 1.0",
+            2 => "2 periods: measured 45.9% false positives against a nominal 5%",
+            3..=4 => "3 periods: measured 37.1% false positives against a nominal 5%",
+            5..=9 => "5 periods: measured 26.1% false positives against a nominal 5%",
+            10..=29 => "10 periods: measured 21.2% false positives against a nominal 5%",
+            30..=99 => "30 periods: measured 13.3% false positives against a nominal 5%",
+            100..=299 => "100 periods: measured 7.4% false positives against a nominal 5%",
+            _ => "300+ periods: measured at the nominal 5%",
+        }
     }
 }
 
@@ -233,6 +276,7 @@ pub fn reality_check(
     }
 
     Some(Verdict {
+        periods,
         statistic: observed,
         // NOTHING TO COMPARE AGAINST READS AS NO EVIDENCE, NOT AS CERTAINTY.
         //
@@ -350,6 +394,7 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
     }
 
     Some(Verdict {
+        periods,
         statistic: observed,
         // NOTHING TO COMPARE AGAINST READS AS NO EVIDENCE, NOT AS CERTAINTY.
         //
@@ -646,7 +691,7 @@ fn quantile(values: &mut [f64], q_ppm: u64) -> Option<f64> {
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
-    use super::{DEFAULT_BLOCK, reality_check, romano_wolf, spa};
+    use super::{DEFAULT_BLOCK, Verdict, reality_check, romano_wolf, spa};
 
     /// Two f64 statistics that must be the same number.
     ///
@@ -772,6 +817,55 @@ mod tests {
             v.p_value <= 1.0,
             "two periods still produce a computed p-value, not the guard's 1.0"
         );
+    }
+
+    /// THE VERDICT CARRIES WHAT ITS SAMPLE SIZE IS WORTH.
+    ///
+    /// A p-value keeps no record of how much evidence produced it, so a verdict
+    /// from three periods and one from three hundred render identically and mean
+    /// entirely different things. `docs/06-limits.md` §77 measures the gap:
+    /// 37.1% false positives at three periods against a nominal 5%.
+    ///
+    /// This crate does not pick a minimum-period floor — that number is one
+    /// `CLAUDE.md` §3 rule 1 forbids it inventing, with no charter source to take
+    /// it from. What §3 rule 6 requires instead is that the limit be STATED, and
+    /// this is where it is stated.
+    #[test]
+    fn a_verdict_reports_the_sample_size_it_had_and_what_that_is_worth() {
+        for periods in [2_usize, 3, 5, 10, 30, 100, 400] {
+            let set = vec![noise(periods, 4), noise(periods, 5)];
+            let v = spa(&set, 200, 6, DEFAULT_BLOCK).expect("a verdict");
+            assert_eq!(v.periods, periods, "the sample size travels with it");
+            assert!(
+                v.calibration().contains("period"),
+                "and is described in measured terms: {}",
+                v.calibration()
+            );
+        }
+
+        // The bands take the WORSE of two measured rows rather than
+        // interpolating, because rounding a false-positive rate toward the
+        // flattering side is the error this whole module exists to avoid.
+        let band = |n: usize| {
+            Verdict {
+                statistic: 0.0,
+                p_value: 1.0,
+                draws: 1,
+                strategies: 1,
+                periods: n,
+            }
+            .calibration()
+        };
+        assert!(band(29).contains("21.2%"), "29 takes the 10-period row");
+        assert!(band(30).contains("13.3%"), "30 takes its own row");
+        assert!(band(99).contains("13.3%"), "99 still takes the 30 row");
+        assert!(band(100).contains("7.4%"), "100 takes its own row");
+        assert!(
+            band(1).contains("refused"),
+            "one period is refused outright"
+        );
+        assert!(band(0).contains("refused"), "and so is none");
+        assert!(band(10_000).contains("nominal"), "a long sample is nominal");
     }
 
     /// The fix must not have made the tests unable to find a REAL edge.
