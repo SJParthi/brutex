@@ -42,6 +42,21 @@
 /.claude/*
 !/.claude/launch.json
 
+# SCRATCH AT THE REPOSITORY ROOT, WHICH GATE 1 CANNOT SURVIVE.
+#
+# `a.txt` and `b.txt` have sat here since 2026-08-14 holding a 60-line copy of
+# `normal_cdf` lifted out of `crates/greeks/src/normal.rs`. `.txt` is on NO
+# allowlist — not CLAUDE.md section 2's, not gate 1's `allowed_names` — so a
+# single `git add -A` stages them and gate 1 goes red on a file nobody meant to
+# track. Nothing but nobody-typing-that-command was keeping the build green.
+#
+# Ignored rather than deleted, the same way `.claude/` is: a scratch copy of a
+# function being edited is somebody's working state, and the hazard here is
+# TRACKING it, not having it. Rooted with a leading slash so a `.txt` fixture
+# under `crates/` or `web/` is still a deliberate decision rather than a silent
+# omission.
+/*.txt
+
 # macOS.
 .DS_Store
 
