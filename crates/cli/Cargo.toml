@@ -50,6 +50,26 @@ indicators = { path = "../indicators", version = "0.1.0" }
 # and the graph stays acyclic: cli -> costs -> core, beside the cli -> runner ->
 # costs that already exists.
 costs      = { path = "../costs", version = "0.1.0" }
+# THE ARROW D-0169 DECLINED, AND THE OPERATOR HAS NOW ASKED FOR.
+#
+# That entry read: "NO ARROW TO `store`: the operator's standing rule forbids
+# both a vendor pull and the bars already on disk, so the only honest input is
+# runner::synthetic." The two halves of that were never the same rule. Not
+# pulling from a vendor is a constraint on what a SESSION may do; being unable
+# to read bars already written is a constraint on what the BINARY can be, and it
+# is the reason `cli sweep` has only ever swept generated data.
+#
+# `crates/api` has `store` and no `runner`; `crates/cli` had `runner` and no
+# `store`. No crate in the workspace could do both, so nothing connected a
+# pulled bar to a ranked result -- the gap CLAUDE.md section 5 calls the live
+# one. This arrow is that connection.
+#
+# IT ADDS NO CAPABILITY TO THE SWEEP ITSELF. Gate 22 pins `indicators` and
+# `engine` to `vocab` alone and `cli` is not on its list, which D-0169 states
+# outright. The graph stays acyclic: cli -> store -> core, beside the existing
+# cli -> runner -> costs -> core.
+store      = { path = "../store", version = "0.1.0" }
+brutex_core = { path = "../core", package = "core", version = "0.1.0" }
 
 [lints]
 workspace = true

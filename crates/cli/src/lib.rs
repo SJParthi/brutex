@@ -40,6 +40,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+/// Reading real bars out of the store — the join `CLAUDE.md` §5 calls the live
+/// gap. `crates/api` declared `store` and no `runner`; this crate declared
+/// `runner` and no `store`, so nothing in the workspace connected a pulled bar
+/// to a ranked result.
+pub mod stored;
+
 use costs::fill::Direction;
 use engine::Ladder;
 use indicators::column::Column;
