@@ -2050,3 +2050,72 @@ th.num .sort {
   inherits: false;
   initial-value: 0;
 }
+
+/* ---- print ------------------------------------------------------------ */
+/*
+  THE APP OWNS ITS SCROLL REGIONS, AND A PRINTER HAS NONE.
+
+  `body`, `.shell` and `.main` pin themselves to the viewport and hide their
+  overflow, which is right on screen and wrong on paper: a print took the first
+  viewport, cropped everything below it, and produced a page that LOOKED
+  complete. A record that is silently short is worse than no record, and every
+  grid on this product is a record.
+
+  Two halves, and the second is the load-bearing one.
+
+  Releasing the heights fixes the ordinary tables. It CANNOT fix the virtual
+  ones. `/db`, `/ingest` and `/audit` render a window of rows and a spacer --
+  the rows outside the window are not clipped, they DO NOT EXIST in the
+  document, and no stylesheet can print an element the DOM does not hold.
+  Un-virtualising for print would need a render pass, which is a page change
+  and not a stylesheet's business.
+
+  So the sheet says so. A banner is printed at the top of the first page naming
+  the limit and pointing at the export that has no limit, because CLAUDE.md
+  section 4 allows a degraded answer that names its reason and forbids a
+  silent one. The operator learns the sheet is partial from the sheet itself,
+  which is the only place they can learn it after the paper leaves the machine.
+*/
+@media print {
+  html,
+  body,
+  .shell,
+  .main {
+    height: auto;
+    max-height: none;
+    overflow: visible;
+  }
+
+  body {
+    background: #fff;
+    color: #000;
+  }
+
+  /* Controls do not survive the trip to paper: nothing on a sheet can be
+     pressed, and a printed dropdown is an inkblot that means nothing. */
+  .topbar,
+  .combo-pop,
+  .themer {
+    display: none !important;
+  }
+
+  /* THE SHEET NAMES ITS OWN LIMIT. `position: static` so it joins the flow of
+     the first page rather than repeating on every one. */
+  body::before {
+    content: 'PARTIAL RECORD — this console renders long tables one window at a time, so a printed sheet contains only the rows that were on screen. Use the CSV export for the complete set.';
+    display: block;
+    padding: 8pt 10pt;
+    margin: 0 0 10pt;
+    border: 1pt solid #000;
+    font: 700 9pt/1.4 ui-monospace, Menlo, monospace;
+    color: #000;
+    background: #fff;
+  }
+
+  /* A link is a dead end on paper unless the sheet carries its target. */
+  a[href^='/']::after {
+    content: ' (' attr(href) ')';
+    font-size: 8pt;
+    font-weight: 400;
+  }
+}
