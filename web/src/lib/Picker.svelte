@@ -105,7 +105,25 @@
      * Off by default. `/db` does not pass it, so nothing about that page's
      * menus changes.
      */
-    tuck = false
+    tuck = false,
+    /**
+     * The CLOSED button's `title` — the long sentence about what this rung
+     * means, for the reader who hovers.
+     *
+     * # Why this had to exist before the hand-rolled menus could go
+     *
+     * Every rung this component replaced carried one. /ingest's feed button
+     * explained that the rung is the page's whole scope and that changing it
+     * changes what is pulled rather than how it is viewed; /db's said the
+     * equivalent about its store; the universe button carries `universeTitle`.
+     * `Picker` had per-ROW titles and nothing for the button, so the first
+     * conversion silently dropped all three — a regression that no check
+     * catches, because a missing tooltip renders as a control that simply says
+     * less.
+     *
+     * Defaults to `null` so a rung that has nothing to add is unchanged.
+     */
+    title = null
   } = $props();
 
   const id = nextId();
@@ -265,6 +283,7 @@
     type="button"
     bind:this={btn}
     {disabled}
+    title={title ?? undefined}
     aria-expanded={open}
     aria-haspopup="listbox"
     onclick={(e) => {

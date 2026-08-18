@@ -5397,284 +5397,75 @@
                      the same sentence the deleted paragraph printed, on the
                      row it is about. -->
                 <div class="field">
-                  <!-- THE SUB-CLAUSE IS ON THE CONTROL, NOT IN THE LABEL. "The
-                       set this feed is asked for" is a true and useful sentence
-                       and it is the FIRST thing `universeTitle` now says. In the
-                       label it was a second line in one cell and no line in the
-                       next, which is half of why this row had no baseline. -->
                   <span class="lab">Universe</span>
-                  <div class="dd">
-                    <button
-                      class="ddb"
-                      type="button"
-                      aria-expanded={drop === 'uni'}
-                      title={universeTitle}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        drop = drop === 'uni' ? null : 'uni';
-                      }}>{universeSpec.label}</button
-                    >
-                    {#if drop === 'uni'}
-                      <div class="ddm" role="group" aria-label="Universe — the set to pull">
-                        <!-- SAME RULE AS THE PICKERS: a set no request can
-                             name is folded behind one line rather than listed
-                             dead.
-                             This comment used to name `F&O underlyings` and
-                             `Everything` as the two rows that could never be
-                             clicked, "because api::ingest::SpotTarget spells
-                             swept, indices and equities only". Both are
-                             requestable as of D-0136, and the enum has nine
-                             variants rather than three. The rule stays because
-                             a future row may still arrive without a target;
-                             the two examples are gone, and no count of the
-                             enum is stated here — this page cannot see it, so
-                             any number it gives goes stale in silence. -->
-                        {#each UNIVERSES.filter((u) => universeRefusal(u) === null) as u (u.id)}
-                          {@const why = null}
-                          <button
-                            class="ddr"
-                            type="button"
-                            class:off={why !== null}
-                            disabled={why !== null}
-                            aria-pressed={universe === u.id}
-                            title={why ??
-                              `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.${u.note ? ` ${u.note}.` : ''}`}
-                            onclick={() => {
-                              universe = u.id;
-                              drop = null;
-                            }}
-                          >
-                            <span class="tk">{universe === u.id ? '✓' : ''}</span>
-                            <span class="nm">{u.label}</span>
-                            <!-- THE WIRE SLUG IS NOT DRAWN BESIDE THE NAME.
-                                 It read `target=n50` in a second column on
-                                 every row — the value the form POSTs, which is
-                                 an implementation detail of the request and
-                                 not a property of the SET the reader is
-                                 choosing between. Removed at the operator's
-                                 instruction, 14 Aug 2026. It is still on the
-                                 wire, still in the request body the "What goes
-                                 on the wire" fold prints, and still the row's
-                                 `u.target`; what is gone is restating it in
-                                 the picker, where the only question is which
-                                 set. A row that CANNOT be requested keeps its
-                                 word, because there the absence is the fact. -->
-                            {#if why !== null}
-                              <span class="ct warn">no target</span>
-                            {/if}
-                          </button>
-                        {/each}
+                  <!-- THE SECOND OF /ingest'S THREE HAND-ROLLED MENUS, and it
+                       goes the same way the feed rung went in 5ff0d14: 281
+                       lines of `.dd`/`.ddb`/`.ddm`/`.ddr` with its own tick
+                       glyph, its own drawer and no filter box, answering a
+                       question `$lib/Picker.svelte` already answers for every
+                       rung on /db.
 
-                        <!-- THE DRAWER. It holds the SWEEP PAIR and the
-                             refusals, in that order, and it deletes neither.
-                             The operator asked for the NSE families to lead the
-                             menu; §1 still names NSE-NIFTY and NSE-BANKNIFTY as
-                             the whole engine surface, and it is still the only
-                             set a broker path can serve, so it moves DOWN
-                             rather than out. Removing it would leave this form
-                             unable to build a legal request at all.
-                             The refusals keep their reasons; each names whether
-                             the gap is membership or the wire. -->
-                        <!-- THE SWEEP PAIR IS NO LONGER OFFERED. The operator
-                             asked for it gone three times; §1 still names it as
-                             the engine surface and `api::ingest::SpotTarget`
-                             still spells only swept, indices and equities, so
-                             this menu can now name NO set a broker pull can
-                             serve until that enum grows. Recorded in the commit
-                             rather than argued here. -->
-                        {#if false}
-                          <button
-                            class="ddr"
-                            type="button"
-                            aria-pressed={true}
-                            title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface. It is the only set a broker path can serve: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                            onclick={() => (drop = null)}
-                          >
-                            <span class="tk">✓</span>
-                            <span class="nm">{SWEPT.label}</span>
-                            <span class="ct">the pair this engine sweeps</span>
-                          </button>
-                        {/if}
-                        {#if uniTucked.length > 0}
-                          <button
-                            class="ddr tuck"
-                            type="button"
-                            aria-expanded={uniOpen}
-                            onclick={() => (uniTuck = !uniOpen)}
-                          >
-                            <span class="tk">{uniOpen ? '▾' : '▸'}</span>
-                            <span class="nm">{uniTuckLabel}</span>
-                            <span class="ct">{uniOpen ? 'hide' : 'show'}</span>
-                          </button>
-                          {#if uniOpen}
-                            {#if false}
-                              <!-- LIVE, and only here while it is NOT the
-                                   selection. When it IS, it is promoted above
-                                   the drawer instead — see `uniTucked`. -->
-                              <button
-                                class="ddr"
-                                type="button"
-                                aria-pressed={false}
-                                title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                                onclick={() => {
-                                  universe = SWEPT.id;
-                                  drop = null;
-                                }}
-                              >
-                                <span class="tk"></span>
-                                <span class="nm">{SWEPT.label}</span>
-                                <span class="ct">the pair this engine sweeps</span>
-                              </button>
-                            {/if}
-                            {#each refusedUniverses as x (x.u.id)}
-                              <button class="ddr off" type="button" disabled title={x.why}>
-                                <span class="tk"></span>
-                                <span class="nm">{x.u.label}</span>
-                                <span class="ct warn">no target</span>
-                              </button>
-                            {/each}
-                          {/if}
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                  <!-- NARRATION CUT, REFUSAL KEPT. This drew
-                       "N reachable · target=n50" on every load — a count the
-                       control's own face already carries and a wire slug the
-                       operator did not ask about. It is a REMARK, not a
-                       refusal: it names nothing anybody could act on and it
-                       cost a line under every field on the strip.
-                       `reachWhy` is the other half and it stays, because that
-                       one IS a refusal — §4 requires it named, and it is drawn
-                       only when there is something to name. -->
-                  {#if !reachKnown}
+                       THE DRAWER IS `tuck`, NOT A REIMPLEMENTATION. `uniTuck`,
+                       `uniOpen`, `uniTucked` and `uniTuckLabel` existed to fold
+                       the sets no request can name behind one counted line —
+                       which is exactly what `tuck` does, and what the Segments
+                       rung on this page already uses it for. A refused set is
+                       still DRAWN, still DISABLED and still carries
+                       `universeRefusal`'s own sentence: `CLAUDE.md` §4, and the
+                       reason a row is never deleted is that its absence would
+                       read as "this set does not exist".
+
+                       FILTERED, at nine rows. The standing rule is a filter box
+                       past a screenful; nine sets with names as similar as
+                       NIFTY 100 / NIFTY 200 / NIFTY 500 is where typing starts
+                       to beat scanning, and it is the threshold the operator
+                       chose for long lists.
+
+                       THE SWEPT PAIR MOVES OUT OF THE DRAWER, and this is the
+                       one behaviour that is not carried across unchanged. It
+                       was tucked beside the refusals while being a perfectly
+                       requestable set — the operator asked for the NSE families
+                       to lead, which is satisfied by ORDER, not by hiding. It
+                       is the last row now, after the eight families and before
+                       the tucked refusals, and it is one press closer than it
+                       was. Nothing else about it changed: same id, same target,
+                       same label. -->
+                  <Picker
+                    single
+                    filter
+                    tuck
+                    label="universes"
+                    summary={universeSpec.label}
+                    title={universeTitle}
+                    rows={[...UNIVERSES, SWEPT].map((u) => {
+                      const why = universeRefusal(u);
+                      return {
+                        key: u.id,
+                        name: u.label,
+                        /* THE WIRE SLUG IS STILL NOT DRAWN BESIDE THE NAME.
+                           `target=n50` is an implementation detail of the
+                           request, not a property of the SET being chosen
+                           between; removed at the operator's instruction on
+                           14 Aug 2026 and not reinstated by this move. The
+                           swept pair states what it IS, which is the one row
+                           whose identity is not its name. */
+                        detail: u.id === 'swept' ? 'the pair this engine sweeps' : undefined,
+                        disabled: why !== null,
+                        why: why ?? undefined,
+                        title: why ??
+                          `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.${u.note ? ` ${u.note}.` : ''}`
+                      };
+                    })}
+                    selected={new Set([universe])}
+                    onchange={(/** @type {Set<string>} */ sel) => {
+                      const next = [...sel][0];
+                      if (next) universe = next;
+                    }}
+                  />
+                  {#if reachKnown}
+                    <span class="note quiet" title={universeTitle}>of {n(reach)} tracked</span>
+                  {:else}
                     <span class="note warn" title={reachWhy}>{reachWhy}</span>
-                  {/if}
-
-                  <!-- ═══════ WHAT AN ARCHIVE HAS INSTEAD OF A UNIVERSE ═══════
-
-                       The line above counts what a MASTER reaches, and the two
-                       archive feeds publish none — `Vendor::MASTERED` is the
-                       three REST feeds and nothing else, so every tier resolves
-                       to nothing for TrueData and GDFL and the count above is
-                       an honest zero about the wrong question.
-
-                       The right question for a folder is what is IN it, and the
-                       only way to answer it is to walk it. `/folder.json` did
-                       that walk the moment this feed was chosen, and its six
-                       facts were being spent on one line at the foot of a
-                       calendar popover. They are the closest thing this feed
-                       HAS to a universe, so they belong on the universe control.
-
-                       NOTHING HERE IS DECLARED. Every number is off the wire,
-                       and the state a folder is in decides which sentence gets
-                       drawn — empty, blank and days are three different answers
-                       and a halt is not an answer at all. D-0141. -->
-                  {#if archiveCensus}
-                    {@const c = archiveCensus}
-                    {#if c.state === 'reading'}
-                      <span class="note quiet">reading {active.display}'s folder…</span>
-                    {:else if c.state === 'halted'}
-                      <span class="note wrap warn" title={c.why}>
-                        the folder could not be read{c.path ? ` — ${c.path}` : ''}. This is a HALT
-                        and not an empty folder: nothing was counted, so nothing below is a census
-                        of anything.
-                      </span>
-                    {:else if c.state === 'days'}
-                      <span
-                        class="note quiet wrap"
-                        title={`Walked by GET /folder.json?feed=${feeds.active ?? ''} when this feed was selected — pull::folder::read_reach, O(members). ${c.path ?? ''}`}
-                      >
-                        {n(c.files)} file(s) · {n(c.rows)} row(s) · {dayLabel(c.earliest)} – {dayLabel(
-                          c.latest
-                        )} — {c.segment
-                          ? `the ${c.segment} archive`
-                          : "this feed's universe is the folder"}, read from it
-                      </span>
-                    {:else if c.state === 'blank'}
-                      <span class="note wrap warn">
-                        {n(c.files)} file(s) are there and not one carries a row. They were bought
-                        and they are blank — which is a different thing from not having bought them,
-                        and this is the only place the two are told apart.
-                      </span>
-                    {:else}
-                      <span class="note wrap warn">
-                        the folder is there and holds nothing{c.path ? ` — ${c.path}` : ''}. That is
-                        an ANSWER, not a failure: the months have not been bought and put there yet.
-                      </span>
-                    {/if}
-                    <!-- THE NAMES. `/folder.json` carries `instruments` since
-                         D-0141: `pull::folder::read_census` collects what
-                         `pull::archive::Member` already took off each file
-                         name, sorted, whole, never truncated.
-
-                         THREE STATES AND THEY ARE NOT TWO. `null` is a server
-                         that sent no such field — a running binary that
-                         predates it, which names its own fix. `[]` is a folder
-                         that names nothing, which is an ANSWER. A list is a
-                         list. Collapsing the first two would print "0
-                         instruments" at a server that was never asked. -->
-                    {#if c.instruments === null}
-                      <span
-                        class="note wrap warn"
-                        title="GET /folder.json emits `instruments` — every distinct name pull::archive::Member took off a file name in that folder, sorted. This server sent no such field, so this page cannot name what is in the folder and does not guess: the file names are the ONLY identity an archive has, and there is no ISIN, no security id and no master to fall back on. Restart the API on a build that emits it."
-                      >
-                        this server sends no instrument list for the folder — what is in it is not
-                        known here, and this page will not synthesise names from a file count
-                      </span>
-                    {:else if c.instruments.length > 0}
-                      <span
-                        class="note quiet wrap"
-                        title={`${c.instruments.length} distinct name(s), read off the file names in ${c.path ?? 'the folder'} and sorted. This is the whole identity an archive has — there is no ISIN, no security id and no master — so it is also the whole of what a universe could mean for this feed. First twenty: ${c.instruments.slice(0, 20).join(', ')}`}
-                      >
-                        {n(c.instruments.length)} instrument(s) named — {c.instruments
-                          .slice(0, 6)
-                          .join(', ')}{c.instruments.length > 6
-                          ? ` and ${n(c.instruments.length - 6)} more`
-                          : ''}
-                      </span>
-                      <!-- TWO FILES CLAIMING ONE NAME, SAID RATHER THAN
-                           DEDUPLICATED IN SILENCE. It is the `ambiguous` bucket
-                           of D-0141 on the folder side, and a reader who saw
-                           only the distinct list could not tell a clean folder
-                           from a colliding one. -->
-                      <!-- FILES OF ANOTHER PRODUCT, NAMED. One of these used to
-                           halt the whole folder: a loose BACKADJUSTED CSV of
-                           nine OHLC fields beside a TICK archive of ten made
-                           GDFL answer nothing at all, and the page said so
-                           about the folder. The census reads past it now and
-                           the file is a finding rather than the end. Each
-                           carries the decoder's own words, so the operator sees
-                           WHICH file and WHY. -->
-                      {#if c.rejected.length > 0}
-                        <span
-                          class="note wrap warn"
-                          title={c.rejected
-                            .slice(0, 8)
-                            .map((r) => `${r.path} — ${r.why}`)
-                            .join('\n')}
-                        >
-                          {n(c.rejected.length)} file(s) in this folder are a DIFFERENT PRODUCT and
-                          were read past, not counted — hover for each one and the decoder's own
-                          reason. They are not a broken folder; they are files this vendor's
-                          declared layout does not describe.
-                        </span>
-                      {/if}
-                      {#if c.collisions > 0}
-                        <span
-                          class="note wrap warn"
-                          title="pull::folder::census_of counts the members whose instrument name a previous member had already claimed, rather than deduplicating in silence. GDFL nests Options/ and Futures/, so one stem can appear under both. Two files claiming one instrument is the `ambiguous` case D-0141 names on the folder side: it is not resolved by whichever was walked first."
-                        >
-                          {n(c.collisions)} file(s) name an instrument another file already named —
-                          two members claiming one name are not resolved by walk order
-                        </span>
-                      {/if}
-                    {:else}
-                      <span class="note wrap warn">
-                        the folder names no instrument at all — this is the list being EMPTY, which
-                        the server answered, and not a list it failed to send
-                      </span>
-                    {/if}
                   {/if}
                 </div>
               {/if}
@@ -7142,6 +6933,7 @@
       tuck
       label="feeds"
       summary={active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}
+      title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone — no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing. What this feed does not carry is not measured here.`}
       rows={feeds.all.map((f) => ({
         key: f.wire,
         name: f.display,
@@ -7404,6 +7196,12 @@
 {/snippet}
 
 <style>
+  /* `.ddr` IS GONE WITH THE LAST MENU THAT DREW A ROW BY HAND. It styled one
+     option inside `.ddm` -- tick, name, count -- for the feed and universe
+     rungs. Both are `$lib/Picker.svelte` now, which draws its own row, so
+     nothing in this file builds a `.ddr` any more. `.ddm` itself stays: the
+     Instruments rung is still hand-rolled, and it is the last one. */
+
   /* Everything below is built from the tokens in $lib/theme.css. No colour,
      radius, duration or step is spelled twice — a hex code here would be a
      second theme that the toggle does not reach. */
@@ -7849,65 +7647,9 @@
     min-width: 420px;
     padding: var(--s5);
   }
-  .ddr {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    width: 100%;
-    appearance: none;
-    border: 0;
-    background: none;
-    text-align: left;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-md);
-    padding: 9px 12px;
-    min-height: 38px;
-    border-radius: 7px;
-    cursor: pointer;
-  }
-  .ddr:hover:not(:disabled) {
-    background: var(--panel2);
-  }
-  .ddr:focus-visible {
-    outline: 2px solid var(--acc);
-    outline-offset: -2px;
-  }
   /* Drawn and refused, never absent: a row missing from the list reads as a
      set that does not exist rather than one this route cannot spell. The whole
      reason is on the row's own `title`. */
-  .ddr.off {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .ddr .tk {
-    flex: 0 0 12px;
-    color: var(--acc);
-    font-weight: var(--w-bold);
-  }
-  .ddr .nm {
-    flex: 1;
-    min-width: 0;
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ddr .ct {
-    flex: 0 0 auto;
-    max-width: 220px;
-    text-align: right;
-    color: var(--dim);
-    font-size: var(--fs-base);
-    font-family: var(--mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ddr .ct.warn {
-    color: var(--warn);
-  }
   .ddm hr {
     border: 0;
     border-top: 1px solid var(--line);
