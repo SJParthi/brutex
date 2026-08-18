@@ -30,3 +30,8 @@ tokio  = { workspace = true }
 
 [lints]
 workspace = true
+
+[[bench]]
+name    = "ratio"
+harness = false
+test    = false

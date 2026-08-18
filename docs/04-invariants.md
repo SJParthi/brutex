@@ -65,6 +65,7 @@ reachable (the crate does not exist).
 | C-08 | The block checksum beats the bit-by-bit kernel it replaced by at least 3×, measured in the same process | `store::bench::checksum_beats_the_bit_loop` | ✓ |
 | C-09 | Decoding one vendor row costs the same whether a field is 28 bytes or 4 MiB | `core::bench::decode_is_flat_in_field_width` | ✓ |
 | C-10 | An over-wide vendor field is **refused**, not merely decoded quickly | `core::bench::an_over_wide_row_is_refused` | ✓ |
+| C-11 | Rendering the dashboard costs the same at 1×, 10× and 100× the instrument count | `api::bench::dashboard_is_flat_in_universe_size` | ✓ |
 
 C-01 was previously stated as "bar read cost is flat from 1× to 100× file size"
 and proven by `store::bench::read_ratio`, which did not exist — there is no bar

@@ -160,7 +160,20 @@ repair merged through it green. What it enforces today, honestly bounded:
 | C-08 | yes | the block checksum against the bit-by-bit kernel it replaced |
 | C-09 | yes | one vendor row's decode at a 28-byte, 64-byte, 6.4 KB and 4 MiB field |
 | C-10 | yes | that the 4 MiB row is **refused**, not merely fast |
+| C-11 | yes | `dashboard_html` at 1×, 10×, 100× the instrument count |
 | C-02, C-03, C-04 | **no** | `crates/engine` does not exist |
+
+**`crates/api` carried no bench at all until C-11.** Gate 8 runs
+`cargo bench --workspace`, so it measured whichever crates happened to have
+one — `core` and `store` — and reported green while the only crate that answers
+a request had never been timed. It was not constant: `dashboard_html` folded
+four times over the whole merged map on every hit of `/`, measuring **6.48×**
+at ten times the instruments and **97.18×** at a hundred, against a 3× ceiling.
+At the real 90,623 instruments that was 376.6 µs per request to recompute six
+numbers fixed at load. `server::Summary` now takes them once and the same
+measurement reads 0.86×. The gap this closes is not the slow page — it is that
+a workspace-wide gate is only as wide as the benches that exist, and nothing
+said which crates those were.
 
 Four things it still does not prove.
 
@@ -187,6 +200,16 @@ checks it on whichever host runs — but the *timings* on `x86_64` are
 **That a bench is a good bench.** A harness measuring the wrong thing passes
 just as loudly as one measuring the right thing. These measure what two
 specific defects did; they are not a general proof of constancy.
+
+**The instruments page.** C-11 covers `/` and nothing else. `/instruments`
+filters, sorts and pages the merged map per request, which is O(matched · log
+matched) and **cannot** be made constant: a substring search over n rows is
+Ω(n) without a prepared index, and there is no index. What was fixed there is
+narrower — its universe counts came from the same per-request fold and are now
+read from `Summary` — so the page no longer walks the map an extra time to
+count what it is about to filter. The filter, the sort and the search remain
+linear, deliberately and on the record. If that ever needs to be constant it
+needs an index, and an index is a decision-ledger entry, not a patch.
 
 ---
 
