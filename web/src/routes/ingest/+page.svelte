@@ -7314,28 +7314,56 @@
            at a time is how a reader ends up thirty clicks from where they meant
            to be; these two reach any day in the span in two picks, and they
            carry the same bounds the grid does. -->
-      <select
-        class="calsel"
-        aria-label="Month"
-        value={String(calMonthNo)}
-        onchange={(e) => pickView(`${pad(calYear, 4)}-${pad(Number(e.currentTarget.value))}`)}
-      >
-        {#each MON as label, i (label)}
-          <option value={String(i + 1)} disabled={`${pad(calYear, 4)}-${pad(i + 1)}` < minMonth || `${pad(calYear, 4)}-${pad(i + 1)}` > maxMonth}>
-            {label}
-          </option>
-        {/each}
-      </select>
-      <select
-        class="calsel"
-        aria-label="Year"
-        value={String(calYear)}
-        onchange={(e) => pickView(`${pad(Number(e.currentTarget.value), 4)}-${pad(calMonthNo)}`)}
-      >
-        {#each calYears as y (y)}
-          <option value={String(y)}>{y}</option>
-        {/each}
-      </select>
+      <!-- `Picker`, NOT `<select>`, AND THE REASON IS A BROWSER LIMIT.
+           `.calsel` carried `appearance: none`, so the CLOSED control looked
+           right; a `<select>`'s OPEN list is drawn by the operating system and
+           no CSS reaches it, so on macOS it rendered the OS blue highlight and
+           its own tick -- a control from a different product in the middle of
+           this one. $lib/DayField.svelte's header was changed for the same
+           reason, and these two are the other half of it: until now /db's
+           calendar drew its own menus and /ingest's borrowed the OS's.
+           A month outside the span stays DRAWN AND DISABLED, exactly as the
+           `disabled` attribute on the old `<option>` did. -->
+      <div class="cpick">
+        <Picker
+          single
+          label="months"
+          summary={MON[calMonthNo - 1] ?? 'Month'}
+          title="The month this grid is showing."
+          rows={MON.map((label, i) => ({
+            key: String(i + 1),
+            name: label,
+            disabled:
+              `${pad(calYear, 4)}-${pad(i + 1)}` < minMonth ||
+              `${pad(calYear, 4)}-${pad(i + 1)}` > maxMonth,
+            why:
+              `${pad(calYear, 4)}-${pad(i + 1)}` < minMonth ||
+              `${pad(calYear, 4)}-${pad(i + 1)}` > maxMonth
+                ? 'outside the span this field may take'
+                : undefined
+          }))}
+          selected={new Set([String(calMonthNo)])}
+          onchange={(/** @type {Set<string>} */ sel) => {
+            const m = [...sel][0];
+            if (m) pickView(`${pad(calYear, 4)}-${pad(Number(m))}`);
+          }}
+        />
+      </div>
+      <div class="cpick">
+        <Picker
+          single
+          filter
+          label="years"
+          summary={String(calYear)}
+          title="The year this grid is showing."
+          rows={calYears.map((y) => ({ key: String(y), name: String(y) }))}
+          selected={new Set([String(calYear)])}
+          onchange={(/** @type {Set<string>} */ sel) => {
+            const y = [...sel][0];
+            if (y) pickView(`${pad(Number(y), 4)}-${pad(calMonthNo)}`);
+          }}
+        />
+      </div>
       <button
         type="button"
         class="nav"
@@ -8179,6 +8207,21 @@
     opacity: 0.3;
     cursor: not-allowed;
   }
+  /* THE HEADER MENUS, SIZED AS `$lib/DayField.svelte` sizes its own so the two
+     calendars in this product are one design rather than two. */
+  .cpick {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .cpick :global(.pbtn) {
+    padding: 5px 22px 5px 8px;
+    font-size: var(--fs-xs);
+    border-radius: var(--r1);
+    text-align: center;
+    background-position:
+      calc(100% - 11px) 55%,
+      calc(100% - 7px) 55%;
+  }
   .calsel {
     flex: 1 1 auto;
     min-width: 0;
@@ -8386,18 +8429,9 @@
     border: 0;
     padding: 0;
   }
-  /* THE FOLDED FOOTER. Same disclosure chrome as `.wire` and `.cautions`, so
-     this page has ONE fold idiom rather than three that look like three
-     different kinds of thing. */
-  .foothold {
+  /* THE FOLDED FOOTER. Same disclosure chrome as `.wire` and `.cautions`{
     border-top: 1px solid var(--line-soft);
     padding-top: var(--s4);
-  }
-  .foothold summary {
-    cursor: pointer;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    color: var(--dim);
   }
   .foothold summary.warn {
     color: var(--warn);
@@ -8488,31 +8522,12 @@
     background: var(--acc);
     border-radius: var(--r-full);
   }
-  .meter.indet i {
-    position: absolute;
-    inset: 0;
-    width: 34%;
-    background: linear-gradient(90deg, transparent, var(--acc), transparent);
-  }
-  .gov {
-    display: flex;
-    gap: var(--s4);
-    align-items: flex-start;
-    padding: var(--s4) var(--s5);
-    border: 1px dashed var(--line-hard);
-    border-radius: var(--r3);
-    background: var(--bg-2);
-  }
   .gov.hot {
     border-color: var(--warn);
     background: var(--warn-soft);
   }
   .gov .dot {
     margin-top: 5px;
-  }
-  .gov b {
-    display: block;
-    font-size: var(--fs-sm);
   }
 
   .verdict {
@@ -8574,32 +8589,6 @@
     padding: var(--s4) var(--s5);
     border-bottom: 1px solid var(--line);
     background: var(--bg-2);
-  }
-  .lstrip .lq {
-    flex: 1 1 22rem;
-    min-width: 0;
-  }
-  .lstrip .lq b {
-    display: block;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-bold);
-    letter-spacing: -0.01em;
-  }
-  .lstrip.good .lq b {
-    color: var(--up);
-  }
-  .lstrip.warn .lq b {
-    color: var(--warn);
-  }
-  .lstrip.bad .lq b {
-    color: var(--down);
-  }
-  .lstrip .lq span {
-    display: block;
-    margin-top: var(--s1);
-    font-size: var(--fs-xs);
-    line-height: var(--lh-base);
-    color: var(--dim);
   }
   .lpills {
     display: flex;

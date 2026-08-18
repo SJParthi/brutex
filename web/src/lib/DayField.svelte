@@ -54,6 +54,7 @@
    * on the input with the bound stated under the grid.
    */
   import { MON, istMonth } from '$lib/dates.js';
+  import Picker from '$lib/Picker.svelte';
 
   let {
     /** `yyyy-mm-dd`, or `''` for "no bound". The caller owns it. */
@@ -347,26 +348,48 @@
           disabled={atFloor}
           onclick={() => (view = addMonths(shown, -1))}>‹</button
         >
-        <select
-          class="csel"
-          aria-label="Month"
-          value={shown.slice(5, 7)}
-          onchange={(e) => (view = `${shown.slice(0, 4)}-${e.currentTarget.value}`)}
-        >
-          {#each MON as name, i (name)}
-            <option value={String(i + 1).padStart(2, '0')}>{name}</option>
-          {/each}
-        </select>
-        <select
-          class="csel"
-          aria-label="Year"
-          value={shown.slice(0, 4)}
-          onchange={(e) => (view = `${e.currentTarget.value}-${shown.slice(5, 7)}`)}
-        >
-          {#each years as y (y)}
-            <option value={String(y)}>{y}</option>
-          {/each}
-        </select>
+        <!-- MONTH AND YEAR ARE `Picker`S, NOT `<select>`S, AND THE REASON IS A
+             LIMIT RATHER THAN A PREFERENCE.
+
+             `.csel` already carried `appearance: none`, so the CLOSED control
+             was styled and looked right. What could never be styled is the OPEN
+             option list: a `<select>`'s popup is drawn by the operating system,
+             not the page, so on macOS it renders the OS blue highlight and its
+             own tick -- a control from a different product appearing in the
+             middle of this one, and no amount of CSS reaches it. That is not a
+             thing to tune; it is a thing to stop using.
+
+             `Picker` draws its own list, so the calendar's two menus now match
+             every other menu in this product, including inside a popover. -->
+        <div class="cpick">
+          <Picker
+            single
+            label="months"
+            summary={MON[Number(shown.slice(5, 7)) - 1] ?? 'Month'}
+            title="The month this grid is showing."
+            rows={MON.map((name, i) => ({ key: String(i + 1).padStart(2, '0'), name }))}
+            selected={new Set([shown.slice(5, 7)])}
+            onchange={(/** @type {Set<string>} */ sel) => {
+              const m = [...sel][0];
+              if (m) view = `${shown.slice(0, 4)}-${m}`;
+            }}
+          />
+        </div>
+        <div class="cpick">
+          <Picker
+            single
+            filter
+            label="years"
+            summary={shown.slice(0, 4)}
+            title="The year this grid is showing."
+            rows={years.map((y) => ({ key: String(y), name: String(y) }))}
+            selected={new Set([shown.slice(0, 4)])}
+            onchange={(/** @type {Set<string>} */ sel) => {
+              const y = [...sel][0];
+              if (y) view = `${y}-${shown.slice(5, 7)}`;
+            }}
+          />
+        </div>
         <button
           type="button"
           class="nav"
@@ -526,6 +549,22 @@
   .nav:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+  /* THE TWO HEADER MENUS. `Picker` sizes its button for a strip rung; inside a
+     calendar header it has to sit on one line with two arrows, so the wrapper
+     takes the width `.csel` used to and the button is scaled down to match. */
+  .cpick {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .cpick :global(.pbtn) {
+    padding: 5px 22px 5px 8px;
+    font-size: var(--fs-xs);
+    border-radius: var(--r1);
+    text-align: center;
+    background-position:
+      calc(100% - 11px) 55%,
+      calc(100% - 7px) 55%;
   }
   .csel {
     flex: 1 1 auto;
