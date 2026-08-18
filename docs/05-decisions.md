@@ -16034,3 +16034,49 @@ That is a change to `render.rs`, and it is a new entry, not a silent one.
 stands.
 
 ---
+
+## D-0199 · 2026-08-18 · `cli audit` — the institutional stack gets a caller
+
+`crates/cli`. D-0169 gave the sweep an entry point. This gives the half of it
+that measures MONEY one.
+
+`report::render` shows the census, the ladder and the significance bar —
+everything the SEARCH produced. It says nothing about money, because the engine
+has no notion of it: an `Itemset` carries a mask and a hit count.
+
+`audit::render` is the other half — trades, the exit grid, the walk-forward, PBO
+and the bootstrap — and **until now it had no caller anywhere in the workspace.**
+The entire institutional stack was reachable only from its own tests, which
+`docs/06-limits.md` §78 recorded when `cli` first landed.
+
+**Measured, first run:** `cli audit 12 300` renders the sweep report, then 119
+exit-grid variants with their trade counts, win rates, adverse and favourable
+excursions, and the sharpest-stop ratio.
+
+### What is filled in, and what is honestly absent
+
+Trades and the exit grid, from the first **closed** combination — closed rather
+than merely frequent, because `closed::closed` removes the combinations carrying
+no information a larger one does not, and the first of those is a better subject
+than the first of everything.
+
+The walk-forward, PBO and bootstrap are passed as `None`. They are not broken:
+each needs a fold count, a draw count and a seed that §3 rule 1 will not let this
+crate invent, with no charter source to take them from. `audit::render` prints
+**"NOT SUPPLIED to this render. Absent from the report is not the same as absent
+from the run"** for each — the difference between *not measured* and *measured as
+nothing*, which is the distinction §4 exists to protect.
+
+### One new arrow
+
+`cli -> costs`, for `fill::Direction` alone. `trade::walk` takes one, so a caller
+cannot name a long or a short without it. No new capability — `costs` declares
+`brutex_core` and nothing else — and the graph stays acyclic beside the
+`cli -> runner -> costs` that already existed.
+
+`an_audit_with_no_closed_combination_says_that_is_extinction` pins the empty
+case: an answer with nothing in it must be distinguishable from one that was
+never measured.
+
+---
+

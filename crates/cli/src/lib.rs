@@ -40,11 +40,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+use costs::fill::Direction;
 use engine::Ladder;
+use indicators::column::Column;
 use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::Availability;
-use runner::{Sweeper, synthetic};
+use runner::excursion::Side;
+use runner::outcome::Horizon;
+use runner::{Sweeper, audit, closed, grid, synthetic, trade};
 
 /// Everything went as asked.
 pub const OK: u8 = 0;
@@ -77,6 +81,7 @@ It is not a backtest, and no result in it is evidence about any market.
 pub const USAGE: &str = "\
 usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli auto     SESSIONS            let the search choose the threshold
+       cli audit    SESSIONS MIN_HITS   sweep, then trade the best combination
 
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
@@ -101,6 +106,15 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
             }
             (Err(why), _) | (_, Err(why)) => refuse(out, why),
         },
+        ["audit", sessions, min_hits] => {
+            match (parse_sessions(sessions), parse_min_hits(min_hits)) {
+                (Ok(s), Ok(m)) => {
+                    out.push_str(&audit_run(s, m));
+                    OK
+                }
+                (Err(why), _) | (_, Err(why)) => refuse(out, why),
+            }
+        }
         ["auto", sessions] => match parse_sessions(sessions) {
             Ok(s) => {
                 out.push_str(&auto(s));
@@ -268,6 +282,89 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
     out
 }
 
+/// The sweep, then what its best combination actually did.
+///
+/// # What this reaches that `sweep` does not
+///
+/// `report::render` shows the census, the ladder and the significance bar —
+/// everything the SEARCH produced. It says nothing about money, because the
+/// engine has no notion of it: `Itemset` carries a mask and a hit count.
+///
+/// `audit::render` is the other half — trades, the exit grid, the walk-forward,
+/// PBO and the bootstrap — and **until this function it had no caller anywhere
+/// in the workspace.** The whole institutional stack was reachable only from its
+/// own tests.
+///
+/// # What is filled in, and what is honestly `None`
+///
+/// Trades and the exit grid, from the first CLOSED combination the sweep kept —
+/// closed rather than merely frequent, because `closed::closed` removes the
+/// combinations that carry no information a larger one does not, and the first
+/// of those is a better subject than the first of everything.
+///
+/// The walk-forward, PBO and bootstrap are passed as `None`. They are not
+/// unavailable — `validate::walk_forward` and the three bootstrap tests all
+/// work — but each needs a fold count, a draw count and a seed that
+/// `CLAUDE.md` §3 rule 1 will not let this crate invent, and no charter source
+/// supplies them. `audit::render` prints an explicit absence for each rather
+/// than a zero, which is the difference between "not measured" and "measured as
+/// nothing".
+#[must_use]
+pub fn audit_run(sessions: i64, min_hits: u64) -> String {
+    audit_with(evaluator(), sessions, min_hits)
+}
+
+/// The audit, from an evaluator the caller supplies. Split for the same reason
+/// [`sweep_with`] is.
+#[allow(
+    clippy::needless_pass_by_value,
+    clippy::large_types_passed_by_value,
+    reason = "the body needs ownership: `Column::build` and `Sweeper::run` both \
+              take `&mut`, and the value must outlive them. One 1,744-byte move \
+              per CLI invocation, in a function called once per process."
+)]
+fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64) -> String {
+    let mut ev = match ev {
+        Ok(e) => e,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let bars = synthetic::sessions(sessions);
+    let column = Column::build(&bars, &mut ev);
+    let mut ev2 = match evaluator() {
+        Ok(e) => e,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let outcome = Sweeper::new(Ladder::with_min_hits(min_hits)).run(&bars, &mut ev2);
+
+    let mut out = String::from(PROVENANCE);
+    out.push('\n');
+    out.push_str(&runner::report::render(&outcome, None));
+
+    // The first CLOSED combination, or nothing to trade.
+    let distinct = closed::closed(&outcome.sweep);
+    let Some(first) = distinct.kept.first() else {
+        out.push_str(
+            "\nAUDIT\n  no closed combination survived, so there is nothing to \
+             trade. This is extinction, not a failure.\n",
+        );
+        return out;
+    };
+
+    let horizon = Horizon::DEFAULT;
+    let taken = trade::walk(&bars, &column, &first.mask, horizon, Direction::Long);
+    let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, 4);
+    out.push('\n');
+    out.push_str(&audit::render(
+        Some(&taken),
+        Some(&exits),
+        None,
+        None,
+        None,
+        12,
+    ));
+    out
+}
+
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -278,7 +375,7 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
 )]
 mod tests {
     use super::{
-        MISUSED, OK, PROVENANCE, USAGE, auto, auto_with, evaluator_from, parse_min_hits,
+        MISUSED, OK, PROVENANCE, USAGE, audit_run, auto, auto_with, evaluator_from, parse_min_hits,
         parse_sessions, run, sweep, sweep_with,
     };
 
@@ -405,6 +502,43 @@ mod tests {
         assert!(
             evaluator_from(indicators::evaluator::Widths::pinned().ok()).is_ok(),
             "and the shipped tolerances do build one"
+        );
+    }
+
+    /// THE AUDIT SURFACE HAS A CALLER NOW, AND SAYS WHAT IT DID NOT RENDER.
+    ///
+    /// `audit::render` shows trades, the exit grid, the walk-forward, PBO and
+    /// the bootstrap, and until `audit_run` existed **nothing in the workspace
+    /// called it** — the whole institutional stack was reachable only from its
+    /// own tests.
+    ///
+    /// The three stages this build does not supply are asserted to be NAMED as
+    /// absent rather than rendered as zero. `CLAUDE.md` §4 bans a failure
+    /// wearing a success's clothes, and a walk-forward printed as 0.0 would be
+    /// exactly that.
+    #[test]
+    fn the_audit_names_the_stages_it_did_not_render() {
+        let text = audit_run(12, 300);
+        assert!(text.starts_with(PROVENANCE), "provenance leads it too");
+        assert!(text.contains("BARS"), "the sweep report is still there");
+        assert!(
+            text.contains("NOT SUPPLIED"),
+            "the stages this build does not drive must be named absent, not \
+             rendered as zero:\n{text}"
+        );
+    }
+
+    /// A threshold nothing can meet reaches the audit and says so plainly.
+    #[test]
+    fn an_audit_with_no_closed_combination_says_that_is_extinction() {
+        let text = audit_run(1, u64::MAX);
+        assert!(
+            text.contains("nothing to trade"),
+            "an empty answer must be distinguishable from an unmeasured one:\n{text}"
+        );
+        assert!(
+            text.contains("extinction, not a failure"),
+            "and must say which it is"
         );
     }
 

@@ -44,6 +44,12 @@ description  = "The operator entry point for the sweep: bars in, ladder walked, 
 runner     = { path = "../runner", version = "0.1.0" }
 engine     = { path = "../engine", version = "0.1.0" }
 indicators = { path = "../indicators", version = "0.1.0" }
+# THE FILL DIRECTION, and nothing else. `trade::walk` takes a
+# `costs::fill::Direction`, so a caller cannot name a long or a short without
+# this arrow. It adds no capability -- `costs` declares `brutex_core` alone --
+# and the graph stays acyclic: cli -> costs -> core, beside the cli -> runner ->
+# costs that already exists.
+costs      = { path = "../costs", version = "0.1.0" }
 
 [lints]
 workspace = true
