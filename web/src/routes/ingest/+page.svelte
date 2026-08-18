@@ -7098,84 +7098,112 @@
   <div class="field">
     <!-- THE LABEL IS THE LABEL. Everything the sub-clause used to say — that
          this is the page's whole scope, what a change costs, and where the
-         counts are read from — is on the control's `title`, one hover from the
-         thing it is about. -->
+         counts are read from — is on the button's `title`, one hover from the
+         control it is about. A two-line label in one cell and a one-line label
+         in the next is what broke this row's baseline. -->
     <span class="lab">Broker feed</span>
-    <!-- ONE COMPONENT, AND THIS RUNG IS WHY THE TWO PAGES NEVER MATCHED.
-         This was 117 lines of hand-rolled `.dd` / `.ddb` / `.ddm` / `.ddr`: its
-         own button, its own menu, its own tick glyph, its own ready/not-ready
-         drawer and NO FILTER BOX. `/db` drew the same question with
-         `$lib/Picker.svelte`. Two implementations of one control is why the
-         labels could be made identical and the menus still looked nothing
-         alike — the reader's eye lands on the menu.
-
-         EVERY BEHAVIOUR IS KEPT, none of it re-implemented:
-
-         * The drawer is `tuck`. TrueData and GDFL are `ready: false` — samples
-           were supplied and the real archives never bought — and they used to
-           sit dead at the TOP of the menu, above the feeds that work. `tuck`
-           folds exactly those behind one counted line, which is the same
-           decision this snippet already made, now made by the shared control.
-         * A refused feed is DRAWN AND DISABLED carrying `/feeds.json`'s own
-           reason, never omitted. `CLAUDE.md` §4, and `Picker`'s `disabled` +
-           `why` is the same shape the universe rung uses.
-         * The promoted selection survives: `Picker` never tucks a row that is
-           selected, so an operator who HAS chosen a not-ready feed still sees
-           its tick without opening the drawer.
-
-         FILTERED, THOUGH IT IS FIVE ROWS. The operator asked for this rung to
-         be searchable by name. The standing rule elsewhere is "a filter box
-         past a screenful, noise below it", and five rows is below it — so this
-         is the specific instruction overriding the general one, recorded here
-         rather than silently generalised into the other rungs.
-
-         STILL SINGLE-SELECT, AND THAT IS NOT THE END STATE. The operator asked
-         for multi-select here too. It is not in this commit because
-         `api::ingest::SpotRequest` carries ONE `feed`, so a second tick could
-         not be sent — and a control that ticks what it cannot send is the
-         §4 fallback that hides a failure, which is the defect the Timeframe
-         rung on this page already has. Multi lands with the fan-out that gives
-         it somewhere to go. -->
-    <Picker
-      single
-      filter
-      tuck
-      label="feeds"
-      summary={active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}
-      title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing.`}
-      rows={feeds.all.map((f) => ({
-        key: f.wire,
-        name: f.display,
-        detail: f.ready === true
-          ? (f.kind_label ?? 'kind not stated')
-          : `${f.kind_label ?? 'kind not stated'} · unavailable`,
-        disabled: f.ready !== true,
-        /* `/feeds.json`'s OWN reason, never a paraphrase — and the sentence
-           that says a server marked a feed dead without saying why is itself
-           the thing to fix. */
-        why: f.ready === true
-          ? undefined
-          : (f.why ??
-            'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
-        title: f.ready === true
-          ? `Selects ${f.display}. Every count and every bar below becomes this feed's, measured again from /instruments.json?feed=${f.wire} and /store.json — nothing is deleted and nothing is merged with the feed you are leaving.`
-          : `${f.display} is refused by the server: ${f.why ?? 'no reason stated.'}`
-      }))}
-      selected={new Set([feeds.active])}
-      onchange={(/** @type {Set<string>} */ sel) => {
-        const next = [...sel][0];
-        if (next) feeds.active = next;
-      }}
-    />
-    {#if feeds.all.length === 0}
-      <p class="insnone">
-        The server answered <span class="mono">/feeds.json</span> with an empty list, so there is no
-        vendor to select and nothing to pull. A feed appears here the day its descriptor row exists
-        on the Rust side — nothing in this file names one.
-      </p>
-    {/if}
-    <!-- THE SCOPE SENTENCE, KEPT WORD FOR WORD. A `.note` CLIPS, so the whole
-         of it is on the clause's own `title` as well — the page's standing rule. -->
+    <div class="dd">
+      <button
+        class="ddb"
+        type="button"
+        aria-expanded={drop === 'feed'}
+        title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone — no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing. What this feed does not carry is not measured here.`}
+        onclick={(e) => {
+          e.stopPropagation();
+          drop = drop === 'feed' ? null : 'feed';
+        }}>{active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}</button
+      >
+      {#if drop === 'feed'}
+        <div class="ddm" role="group" aria-label="Broker feed — the page's whole scope">
+          <!-- SAME DRAWER RULE AS THE UNIVERSE AND THE PICKERS. TrueData and
+               GDFL are `ready: false` -- samples were supplied and the real
+               archives were never bought -- so they sat dead at the TOP of this
+               menu, above the feeds that work. They are folded below now, with
+               /feeds.json's own reason intact on each. -->
+          {#each feeds.all.filter((f) => f.ready === true) as f (f.wire)}
+            {@const ready = true}
+            <button
+              class="ddr"
+              type="button"
+              class:off={!ready}
+              disabled={!ready}
+              aria-pressed={feeds.active === f.wire}
+              title={ready
+                ? `Selects ${f.display}. Every count and every bar below becomes this feed's, measured again from /instruments.json?feed=${f.wire} and /store.json — nothing is deleted and nothing is merged with the feed you are leaving.`
+                : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+              onclick={() => {
+                feeds.active = f.wire;
+                drop = null;
+              }}
+            >
+              <span class="tk">{feeds.active === f.wire ? '✓' : ''}</span>
+              <span class="nm">{f.display}</span>
+              <span class="ct" class:warn={!ready}
+                >{f.kind_label ?? 'kind not stated'}{ready ? '' : ' · unavailable'}</span
+              >
+            </button>
+          {/each}
+          <!-- THE PROMOTED SELECTION. An operator CAN select a not-ready feed —
+               the page carries blank states for exactly that — and when he has,
+               the row rides above the drawer so the menu still shows a tick
+               without opening anything. -->
+          {#if activeNotReady}
+            <button
+              class="ddr off"
+              type="button"
+              disabled
+              aria-pressed={true}
+              title={`${activeNotReady.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${activeNotReady.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+            >
+              <span class="tk">✓</span>
+              <span class="nm">{activeNotReady.display}</span>
+              <span class="ct warn"
+                >{activeNotReady.kind_label ?? 'kind not stated'} · unavailable</span
+              >
+            </button>
+          {/if}
+          {#if tuckedFeeds.length > 0}
+            <button
+              class="ddr tuck"
+              type="button"
+              aria-expanded={feedOpen}
+              onclick={() => (feedTuck = !feedOpen)}
+            >
+              <span class="tk">{feedOpen ? '▾' : '▸'}</span>
+              <span class="nm">{n(tuckedFeeds.length)} feed(s) this build cannot pull</span>
+              <span class="ct">{feedOpen ? 'hide' : 'show why'}</span>
+            </button>
+            {#if feedOpen}
+              {#each tuckedFeeds as f (f.wire)}
+                <button
+                  class="ddr off"
+                  type="button"
+                  disabled
+                  title={`${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
+                >
+                  <span class="tk"></span>
+                  <span class="nm">{f.display}</span>
+                  <span class="ct warn"
+                    >{f.kind_label ?? 'kind not stated'} · unavailable</span
+                  >
+                </button>
+              {/each}
+            {/if}
+          {/if}
+          {#if feeds.all.length === 0}
+            <p class="insnone">
+              The server answered <span class="mono">/feeds.json</span> with an empty list, so there
+              is no vendor to select and nothing to pull. A feed appears here the day its descriptor
+              row exists on the Rust side — nothing in this file names one.
+            </p>
+          {/if}
+        </div>
+      {/if}
+    </div>
+    <!-- THE SCOPE SENTENCE, KEPT WORD FOR WORD. It was a paragraph in a
+         full-width block; it is this control's clause now, which is where every
+         other fact on this strip lives. A `.note` CLIPS, so the whole of it is
+         on the clause's own `title` as well — the page's standing rule. -->
     <span
       class="note quiet"
       class:warn={!reachKnown}
