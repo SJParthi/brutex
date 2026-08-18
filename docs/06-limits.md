@@ -4661,7 +4661,28 @@ deciding that needs someone who knows whether the markup is coming back.
 `ingest` is also unpruned: its edit was overwritten by a concurrent session
 writing that file, and the work is a short repeat once it is free.
 
-**`web` is not yet in `ci-ok`'s `needs` list.** That list lives in `ci.yml`, so
-until one line is added there, a red Gate W does not block a merge.
+**A comment that swallows its rule leaves styling inert while the build stays
+green**, and three of these existed. A comment's closing `*/` and the selector
+line beneath it were deleted together, fusing the two — `/* The hint sits INSIDE
+the input's right padding{` — so the comment ran to the next `*/` further down
+and every declaration between became prose. **36 lines in `/db` and a whole
+`.foothold` block in `/ingest` were inert this way.** No tool objected: the CSS
+parses, `svelte-check` cannot see it, and Gate W4 cannot count it. Gate W5 now
+refuses both an unterminated comment and one whose first line ends in `{`.
+
+The rules were deleted rather than repaired — their selectors are unrecoverable,
+since the deleted line was the only place the name existed, and they had been
+inert for as long as the defect existed, so removing them changes nothing on
+screen.
+
+*This is also why three attempts at the CSS cleanup failed at the same byte.
+Each rewrite of the pruner's scanner was a guess at a bug in the scanner; the
+bug was in the source. The third attempt printed the offending line instead of
+another hypothesis, and the answer was immediate.*
+
+**Gate W is binding.** The job lives in `ci.yml` and `ci-ok` names it, so branch
+protection's existing requirement covers all five browser gates. It was briefly
+a separate workflow, which could never have been made blocking by any file in
+this tree: `needs:` cannot name a job in another workflow.
 
 ---

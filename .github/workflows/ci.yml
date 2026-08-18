@@ -5483,6 +5483,69 @@ jobs:
       # Counted DISTINCT, because the client and server passes each report the
       # same selector once.
       # ----------------------------------------------------------------------
+      # ----------------------------------------------------------------------
+      # GATE W5 — A COMMENT DOES NOT SWALLOW THE RULE BENEATH IT.
+      #
+      # Three times in this tree a comment's closing `*/` and the selector line
+      # under it were deleted together, fusing the two:
+      #
+      #     /* The hint sits INSIDE the input's right padding{
+      #       margin-left: calc(-1 * var(--s6));
+      #
+      # The comment then runs to the next `*/` further down, so those
+      # declarations -- and every rule and comment between -- sit inside a
+      # comment. THE CSS STILL PARSES AND THE BUILD STAYS GREEN. The styling
+      # simply stops applying, `svelte-check` cannot see it, and Gate W4 cannot
+      # count it, because to every tool involved the text is prose. 36 lines in
+      # /db and a whole `.foothold` block in /ingest were inert this way.
+      #
+      # Two checks, because either alone misses cases. The count catches an
+      # unterminated comment anywhere; the shape catches a fused one whose
+      # imbalance happens to cancel out against another. Neither can be fooled
+      # by a comment that merely CONTAINS a brace, because the test is that the
+      # comment's own first line ENDS in one.
+      # ----------------------------------------------------------------------
+      - name: Gate W5 — no comment swallows a CSS rule
+        run: |
+          node -e '
+            const fs = require("fs");
+            const files = process.argv.slice(1);
+            let bad = 0;
+            for (const f of files) {
+              const src = fs.readFileSync(f, "utf8");
+              const css = src.split("<style>")[1]?.split("</style>")[0];
+              if (!css) continue;
+              const opens = (css.match(/\/\*/g) || []).length;
+              const closes = (css.match(/\*\//g) || []).length;
+              let i = 0;
+              while (true) {
+                const a = css.indexOf("/*", i);
+                if (a === -1) break;
+                const b = css.indexOf("*/", a + 2);
+                const line = css.slice(a, b === -1 ? undefined : b).split("\n")[0];
+                if (b === -1) {
+                  console.log(`${f}: UNTERMINATED comment: ${line.slice(0, 70)}`);
+                  bad++;
+                  break;
+                }
+                if (line.trimEnd().endsWith("{")) {
+                  console.log(`${f}: comment swallows the rule under it: ${line.slice(0, 70)}`);
+                  bad++;
+                }
+                i = b + 2;
+              }
+              if (opens !== closes) console.log(`${f}: ${opens} "/*" against ${closes} "*/"`);
+            }
+            if (bad) {
+              console.log("");
+              console.log("A comment that runs past its rule leaves that styling INERT while the");
+              console.log("build stays green: svelte-check cannot see it and Gate W4 cannot count");
+              console.log("it, because to every tool involved the text is prose.");
+              process.exit(1);
+            }
+            console.log("no comment swallows a rule");
+          ' web/src/routes/*/+page.svelte web/src/routes/+layout.svelte web/src/lib/*.svelte
+
       - name: Gate W4 — unused CSS does not grow
         run: |
           CEILING=33
