@@ -79,6 +79,8 @@
 #![forbid(unsafe_code)]
 
 pub mod archive;
+/// THE CALLER `crate::fno` NEVER HAD -- expiries, then contracts, then bars.
+pub mod chain;
 pub mod config;
 pub mod csv;
 pub mod fetch;
