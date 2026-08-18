@@ -5212,6 +5212,14 @@
     releaseWatch = watchStore(5000);
 
     controller = new AbortController();
+    // CAPTURED ONCE, AND THAT IS WHAT MAKES IT TYPE. `controller` is a
+    // module-scope `AbortController | null` that teardown sets back to null, and
+    // TypeScript cannot narrow such a binding across the awaits in the chains
+    // below -- so every `controller.signal` in them read as possibly-null and
+    // `svelte-check` was right to say so. The signal is the only thing those
+    // chains need and it cannot change for the life of this run, so reading it
+    // here is both the narrower type and the more honest statement of intent.
+    const signal = controller.signal;
     // PARALLEL ACROSS FEEDS, SEQUENTIAL WITHIN ONE. The operator's rule, and it
     // is the shape the rate budget dictates rather than a preference: a budget
     // is per VENDOR, so two rungs fired at one broker together double the rate
@@ -5253,7 +5261,7 @@
             method: 'POST',
             headers: { 'content-type': 'application/x-www-form-urlencoded' },
             body: b.body,
-            signal: controller.signal
+            signal
           });
           const one = {
             ...readReceipt(
