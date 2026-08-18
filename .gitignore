@@ -42,6 +42,12 @@
 /.claude/*
 !/.claude/launch.json
 
+# Source maps: built by `vite build`, never tracked. Measured at 3.0 MB across
+# 26 files against a 940 kB artifact, rewritten whole on every rebuild, in a
+# tree that already commits `web/build` under D-0068. `vite.config.js` sets
+# `sourcemap: 'hidden'` so nothing requests the files that are not here.
+web/build/**/*.map
+
 # SCRATCH AT THE REPOSITORY ROOT, WHICH GATE 1 CANNOT SURVIVE.
 #
 # `a.txt` and `b.txt` have sat here since 2026-08-14 holding a 60-line copy of

@@ -19,7 +19,6 @@
     "vite": "^6.2.0"
   },
   "dependencies": {
-    "@tanstack/svelte-virtual": "^3.13.2",
     "lightweight-charts": "^5.0.5"
   }
 }

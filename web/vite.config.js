@@ -64,11 +64,48 @@ const ROUTES = [
 	'/autopilot.json',
 	'/autopilot/pause',
 	'/autopilot/resume',
-	'/autopilot/control'
+	'/autopilot/control',
+	// THE THIRD AND FOURTH TIME THIS LIST DRIFTED, found by diffing it against
+	// what `web/src` actually calls. Both are real routes -- `server.rs:6844`
+	// and `server.rs:6891` -- and both were missing here, so in `npm run dev`
+	// they were answered by the dev server's own HTML fallback with a 200.
+	//
+	// A 200 is the worst possible answer: `r.ok` is true, the page proceeds,
+	// and `r.json()` throws on `<!doctype html>` -- so `/ingest` reported a
+	// JSON parse error for what was a routing gap, and the folder picker
+	// reported the same. Neither of these two has a content-type guard, which
+	// is exactly why they were the two that hurt.
+	//
+	// `web/tests/proxy.test.js` now diffs this list against every `fetch` in
+	// `web/src` on every run, so a fifth drift fails a test rather than
+	// producing a plausible error message about JSON.
+	'/folder.json',
+	'/ingest/status.json'
 ];
 
 export default {
 	plugins: [sveltekit()],
+	// SOURCE MAPS ARE BUILT AND NOT COMMITTED, AND `hidden` IS WHY THAT WORKS.
+	//
+	// The bundle is minified and `web/build` is committed, so the artifact in
+	// this repository is the thing that actually runs -- and debugging it meant
+	// reading single-letter identifiers. Building maps fixes that for anyone
+	// who runs `npm run build`.
+	//
+	// Committing them does not. Measured: 26 map files, 3.0 MB, against a 940
+	// kB artifact -- 4.2x the tracked tree, rewritten in full on every rebuild,
+	// in a repository that already commits its build output under D-0068. That
+	// is a large permanent cost for a file only a developer opens, and a
+	// developer can rebuild.
+	//
+	// So they are generated, gitignored, and `hidden` rather than `true`.
+	// `true` appends a `//# sourceMappingURL=` comment; with the maps absent
+	// from a fresh clone every chunk would request one, take a 404 from
+	// `assets.rs`, and enter its missing-asset log -- turning a deliberate
+	// omission into a recurring false alarm about a broken build. `hidden`
+	// emits the same maps and omits the comment, so nothing asks for what is
+	// not there.
+	build: { sourcemap: 'hidden' },
 	server: {
 		proxy: Object.fromEntries(ROUTES.map((route) => [route, API]))
 	}
