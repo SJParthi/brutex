@@ -83,7 +83,7 @@
   // against a store in exactly the right state. `web/tests/completeness.test.js`
   // drives them under `node --test`.
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
-  import { basisPoints } from '$lib/bps.js';
+  import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -596,19 +596,17 @@
    *
    * @param {number} bps INTEGER basis points off the wire; 125 is +1.25%
    */
-  function bpsText(bps) {
-    const sign = bps > 0 ? '+' : bps < 0 ? '-' : '';
-    const mag = Math.abs(bps);
-    const frac = mag % 100;
-    return `${sign}${(mag - frac) / 100}.${String(frac).padStart(2, '0')}%`;
-  }
+  // `bpsText` and `dirOf` live in `$lib/bps.js` beside `basisPoints`, because
+  // the three are one rule: what a ratio rounds to, how it reads, and what
+  // colour it earns. The `-0` note there explains why this formatter is safe
+  // only while that producer rounds away from zero.
 
   /** up / down / flat / none — the direction green and red are reserved for.
       `none` is its own word rather than `flat`, because a cell nobody can
       compute and a month that did not move are different facts and must not
       share a colour. */
   /** @param {number | null} bps */
-  const dirOf = (bps) => (bps === null ? 'none' : bps > 0 ? 'up' : bps < 0 ? 'down' : 'flat');
+
 
   /**
    * WHY a percentage is a dash. One sentence per server reason code.

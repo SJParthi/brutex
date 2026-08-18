@@ -69,3 +69,47 @@ export function basisPoints(base, later) {
   // `base - magnitude` safe, and the doubling would not be.
   return magnitude >= base - magnitude ? whole + step : whole;
 }
+
+/**
+ * Integer basis points as a signed percentage. `125` -> `+1.25%`.
+ *
+ * BUILT FROM THE INTEGER, NEVER FROM A DIVIDE. `(mag - frac) / 100` divides a
+ * number already known to be a multiple of 100, so the quotient is exact and
+ * there is no float to round. `bps / 100` with two fraction digits would look
+ * identical and would be a second rounding rule beside `basisPoints`'s.
+ *
+ * ZERO CARRIES NO SIGN, because it has no direction — the cell reads `0.00%`
+ * and is neutral-coloured, which is a real answer and not an unknown.
+ *
+ * `-0` IS RENDERED AS `0.00%`, AND THAT IS ONLY SAFE BECAUSE OF `basisPoints`.
+ * JavaScript's `-0` is a negative that lost its magnitude, and this formatter
+ * cannot tell it from a true zero — `Math.abs(-0)` is `0` and the sign test
+ * `bps < 0` is false. It reached here once: `/db` computed its change with
+ * `Math.round`, `Math.round(-0.5)` is `-0`, and a real loss printed as a flat
+ * month. The formatter was not the fault and is not the fix. `basisPoints`
+ * rounds away from zero in both directions, so a negative can never arrive with
+ * zero magnitude, and `-0` is now genuinely unreachable from the only producer
+ * this page has. Any future producer owes the same guarantee.
+ *
+ * @param {number} bps INTEGER basis points; 125 is +1.25%
+ * @returns {string}
+ */
+export function bpsText(bps) {
+  const sign = bps > 0 ? '+' : bps < 0 ? '-' : '';
+  const mag = Math.abs(bps);
+  const frac = mag % 100;
+  return `${sign}${(mag - frac) / 100}.${String(frac).padStart(2, '0')}%`;
+}
+
+/**
+ * `up` / `down` / `flat` / `none` — the direction green and red are reserved for.
+ *
+ * `none` IS ITS OWN WORD RATHER THAN `flat`. A cell nobody can compute and a
+ * month that did not move are different facts and must not share a colour: one
+ * is an absence with a reason beside it, the other is a measurement.
+ *
+ * @param {number | null | undefined} bps
+ * @returns {'up' | 'down' | 'flat' | 'none'}
+ */
+export const dirOf = (bps) =>
+  bps === null || bps === undefined ? 'none' : bps > 0 ? 'up' : bps < 0 ? 'down' : 'flat';
