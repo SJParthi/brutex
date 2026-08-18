@@ -16143,3 +16143,32 @@ after.
 
 ---
 
+## D-0202 · 2026-08-18 · `crates/store` gains a floor-relative budget — six of thirteen
+
+The sixth of the nine ratio-only crates. `store` holds **bar lookup**, the first
+operation `CLAUDE.md` §3 rule 4 names, so it is the one where a uniform slowdown
+matters most and the one where a ratio is least able to see it.
+
+**The floor** is `Layout::offset_of` — the address arithmetic the read is built
+on, one multiply and one add, no syscall. The quotient is "how many address
+computations does one record read cost".
+
+**Measured**, three consecutive runs: **199.721, 191.483, 205.049** floors at a
+floor of 1,229–1,270 ps. The 1.07x spread is **tighter than expected for a path
+that reaches the filesystem** — the page is resident by the second trial, so this
+measures the read and not the disk.
+
+**Budget 800**, sized on the worst observed with about 4x left over.
+
+### A first draft read 4,000, and measuring is what corrected it
+
+That number came from assuming a syscall would be noisy. It is not: the spread is
+1.07x. **A budget with 19x headroom is not a bound, it is a number that would
+never fire** — it would pass a read that had become eighteen times dearer and
+report the crate as healthy. Sized on the measurement rather than the assumption,
+it still refuses the 174x regression by a factor of 43.
+
+**Three crates remain ratio-only**: `api`, `pull`, `runner`.
+
+---
+

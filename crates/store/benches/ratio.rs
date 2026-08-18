@@ -179,6 +179,79 @@ fn bench_path() -> StorePath<'static> {
     }
 }
 
+/// The per-read floor: the cheapest possible touch of the same file handle.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row here divides one cost by another of the same operation, and a
+/// UNIFORM slowdown cancels in a quotient. An audit measured exactly that
+/// elsewhere in this workspace: a mask operation **174x slower passed its
+/// crate's ratio rows at 0.98x-1.00x**, because both legs moved together.
+///
+/// The denominator has to be something that cannot move when `read_record`
+/// does. `Layout::offset_of` is the address arithmetic the read is built on —
+/// one multiply and one add, no syscall — so the quotient is "how many address
+/// computations does one record read cost".
+fn floor_ps(layout: Layout) -> u128 {
+    cost_ps(2_000, || black_box(layout).offset_of(black_box(7)))
+}
+
+/// Prints one budget in floors and returns whether it held.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<52} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<52} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-17 — one record read costs a bounded multiple of the address arithmetic.
+fn record_read_stays_within_its_budget() -> bool {
+    /// Floors allowed per record read.
+    ///
+    /// A read reaches the filesystem and the floor does not, so this ratio
+    /// carries the disk's variance the way `telemetry`'s does — it cannot
+    /// resolve a small regression and is not claimed to. What it CAN do is what
+    /// no ratio here can: catch a slowdown that moves every file size at once.
+    ///
+    /// Measured, arm64 laptop, release, three consecutive runs: **199.721,
+    /// 191.483, 205.049** floors, at a floor of 1,229–1,270 ps. The spread is
+    /// 1.07x — tighter than expected for a path that reaches the filesystem,
+    /// because the page is already resident by the second trial.
+    ///
+    /// **800**, sized on the worst observed with roughly 4x left over — the same
+    /// rule the other seven budgets in this workspace apply. A first draft of
+    /// this row read 4,000 on the assumption that a syscall would be noisy;
+    /// measuring showed it was not, and a budget with 19x headroom is not a
+    /// bound, it is a number that would never fire.
+    ///
+    /// It still refuses the 174x uniform regression: such a read would land near
+    /// 35,000 floors and be refused by a factor of 43.
+    const ALLOWED: u128 = 800;
+
+    let (file, _d) = loaded("read-budget", 10_000);
+    let Ok(layout) = Layout::for_version(2) else {
+        refuse("format version 2 has a layout")
+    };
+    let floor = floor_ps(layout);
+    println!("  the per-read floor is {floor} ps — one offset computation");
+    let at = cost_ps(2_000, || file.read_record(black_box(9_999)));
+    budget(
+        "C-17 read_record against the address floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 /// C-16 — reading one record costs the same whatever the file holds.
 ///
 /// # Why this row did not exist until now
@@ -344,6 +417,7 @@ fn main() {
     ok &= block_seal_is_flat();
     ok &= checksum_beats_the_bit_loop();
     ok &= record_read_is_flat_in_the_file();
+    ok &= record_read_stays_within_its_budget();
     if ok {
         println!("all ratios within the ceiling");
     } else {
