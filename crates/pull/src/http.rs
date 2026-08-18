@@ -127,6 +127,34 @@ pub struct HttpSource {
     /// hand-written `Debug`.
     header_value: String,
     client: reqwest::Client,
+    /// THE BUDGET, ENFORCED RATHER THAN MERELY DECLARED.
+    ///
+    /// # What was wrong before this field
+    ///
+    /// Every descriptor has carried a [`crate::vendor::Budget`] since it was
+    /// written -- Dhan 5/sec and 100,000/day, Groww ~8/sec and 500/min -- and
+    /// `crate::rate::Governor` has enforced budgets correctly, with tests, for
+    /// just as long. Nothing connected them. `Governor::new` was constructed in
+    /// tests and in one emit-sites helper and **never on the path that opens a
+    /// socket**, so every request this build has ever sent went out ungoverned.
+    ///
+    /// That became urgent rather than merely wrong when the ingest page began
+    /// running feeds concurrently: serial-within-one-feed was the only thing
+    /// holding a vendor under its per-second ceiling, and it was doing that by
+    /// accident of network latency rather than by design.
+    ///
+    /// # Why a `std::sync::Mutex` and not `tokio::sync`
+    ///
+    /// The lock is taken, `admit` is called, and the guard is DROPPED BEFORE
+    /// ANY `.await`. Holding a lock across an await is how a concurrent fan-out
+    /// deadlocks; a std mutex held only for the arithmetic cannot, and it keeps
+    /// `tokio::sync` out of a crate that has needed no interior mutability
+    /// until now.
+    ///
+    /// `None` for a feed whose descriptor names no bound at all -- an absent
+    /// budget is a recorded fact (`CLAUDE.md` §3 rule 1) and must not read as a
+    /// ceiling of zero.
+    governor: Option<std::sync::Mutex<crate::rate::Governor>>,
 }
 
 // The token is the reason this is hand-written. A derived `Debug` prints every
@@ -282,11 +310,88 @@ impl HttpSource {
             .map_err(|why| FetchError::TransportFailed {
                 detail: format!("the HTTPS client could not be built: {why}"),
             })?;
+        // THE GOVERNOR IS BUILT FROM THE DESCRIPTOR'S OWN BUDGET, so a feed
+        // cannot be governed to a number nobody wrote down. A budget naming no
+        // span at all yields `None` -- ungoverned by declaration rather than by
+        // omission, which is the distinction `CLAUDE.md` §3 rule 1 wants kept.
+        let governor = match crate::rate::Governor::new(
+            spec.budget.per_second,
+            spec.budget.per_minute,
+            spec.budget.per_day,
+        ) {
+            Ok(g) => Some(std::sync::Mutex::new(g)),
+            // A ceiling outside the governor's own bounds is a WIRING FAULT in
+            // the descriptor, not a runtime condition, and it is refused here
+            // rather than silently dropped -- an unenforced budget that reads as
+            // an enforced one is the §4 fallback that hides a failure.
+            Err(why) => {
+                return Err(FetchError::TransportFailed {
+                    detail: format!(
+                        "{} declares a rate budget this build cannot enforce: {why}.                          Nothing was sent -- a budget that cannot be enforced must not                          read as one that is.",
+                        spec.base_url
+                    ),
+                });
+            }
+        };
         Ok(Self {
             spec,
             header_value,
             client,
+            governor,
         })
+    }
+
+    /// Waits until this feed's budget admits one more request.
+    ///
+    /// # Why the wait is here and not at the call site
+    ///
+    /// Every caller would otherwise have to remember it, and the one that
+    /// forgot would be indistinguishable from one that had no budget. The
+    /// socket is opened in exactly one place, so the ceiling is enforced in
+    /// exactly one place.
+    ///
+    /// # The lock is never held across an await
+    ///
+    /// `admit` is arithmetic over three windows; the guard is dropped before
+    /// the sleep. A `std::sync::Mutex` held only for that cannot deadlock a
+    /// concurrent fan-out, which a lock held across `.await` can.
+    ///
+    /// # Cost
+    ///
+    /// One `admit` per attempt, and `admit` walks [`crate::rate::WINDOW_COUNT`]
+    /// windows -- a constant three -- so this is O(1) per request and does not
+    /// grow with how many requests came before it.
+    async fn wait_for_permit(&self) {
+        let Some(lock) = self.governor.as_ref() else {
+            return;
+        };
+        loop {
+            let wait = {
+                let now = Self::now_micros();
+                // POISON IS NOT A REASON TO STOP GOVERNING. A panic in another
+                // chain must not turn the ceiling off for every remaining one,
+                // so the guard is taken either way.
+                let mut g = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                match g.admit(now) {
+                    crate::rate::Verdict::Admit => return,
+                    crate::rate::Verdict::Deny { wait_micros, .. } => wait_micros,
+                }
+            };
+            // A DENY THAT ASKS FOR NO WAIT WOULD SPIN. The governor does not
+            // emit one, and this floor means a future change to it cannot turn
+            // this loop into a busy wait.
+            let at_least = wait.max(1);
+            tokio::time::sleep(core::time::Duration::from_micros(at_least)).await;
+        }
+    }
+
+    /// Microseconds since the epoch, for the governor's windows.
+    fn now_micros() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX))
     }
 
     /// This feed's endpoint with every value segment left as its placeholder —
@@ -1261,6 +1366,11 @@ impl HttpSource {
         // `mut` because the body is now read frame by frame rather than in one
         // `text()` call — see `body_within` for why the size check cannot come
         // after the whole answer is already in memory.
+        // THE BUDGET IS SPENT BEFORE THE SOCKET IS OPENED, never after. Asking
+        // permission afterwards would already have made the request the ceiling
+        // exists to prevent.
+        self.wait_for_permit().await;
+
         let mut answer = builder.header(name, value).send().await.map_err(|why| {
             FetchError::TransportFailed {
                 // `why` is reqwest's own words and never carries the header we
@@ -1271,6 +1381,27 @@ impl HttpSource {
 
         let status = answer.status().as_u16();
         note_answer(&url, status, answer.status().is_success(), request);
+
+        // THE FEEDBACK HALF, AND IT IS WHAT MAKES THE GOVERNOR ADAPTIVE RATHER
+        // THAN A FIXED CEILING. A clean answer tightens every span back toward
+        // the declared bound; a throttle relaxes them all multiplicatively and
+        // says so at `Warn`, because a run that slowed behind a vendor's refusal
+        // must not look merely slow.
+        //
+        // 429 IS THE ONLY STATUS READ AS RATE. Treating every refusal as a
+        // throttle would back off for a bad credential or a malformed window and
+        // hide the real cause behind an ever-slower run.
+        if let Some(lock) = self.governor.as_ref() {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status == 429 {
+                g.record_throttled();
+            } else if answer.status().is_success() {
+                g.record_success();
+            }
+        }
+
         if !answer.status().is_success() {
             // Lifted into its own function, and NOT for tidiness: reading the
             // refusal body under a bound (rather than whole, which is what this
@@ -1665,6 +1796,144 @@ fn local_seconds(text: &str) -> Option<i64> {
               keep panics out of the crate rather than out of its tests"
 )]
 mod tests {
+
+    /// A descriptor's budget reaches the source that enforces it.
+    ///
+    /// The defect this pins is that the two existed side by side and never met:
+    /// every `Descriptor` carried a `Budget`, `rate::Governor` enforced budgets
+    /// correctly with its own tests, and `Governor::new` was never called on the
+    /// path that opens a socket. A budgeted feed whose source holds no governor
+    /// is a ceiling that is decoration.
+    #[test]
+    fn a_budgeted_feed_builds_a_source_that_holds_a_governor() {
+        for feed in [crate::vendor::Feed::Dhan, crate::vendor::Feed::Groww] {
+            let crate::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                panic!("{feed:?} is an HTTP feed");
+            };
+            assert!(
+                spec.budget.per_second.is_some(),
+                "{feed:?} declares a ceiling"
+            );
+            let source = HttpSource::new(spec, Credential::token("t".to_owned()))
+                .expect("a budgeted feed builds");
+            assert!(
+                source.governor.is_some(),
+                "{feed:?} declares a budget, so its source must enforce one"
+            );
+        }
+    }
+
+    /// The governor holds the DESCRIPTOR'S numbers, never a default.
+    ///
+    /// A governor built from the wrong ceiling is worse than none: it enforces a
+    /// bound nothing in this tree wrote down.
+    #[test]
+    fn the_governor_carries_the_descriptors_own_ceilings() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let source = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = source.governor.as_ref().expect("Dhan is budgeted");
+        let g = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            g.ceiling(crate::rate::WindowSpan::Second),
+            spec.budget.per_second
+        );
+        assert_eq!(g.ceiling(crate::rate::WindowSpan::Day), spec.budget.per_day);
+    }
+
+    /// The permit DENIES past the ceiling, and names a wait the caller can sleep.
+    ///
+    /// This is the assertion that makes the wiring worth having. `admit` is
+    /// driven directly rather than through a socket: the clock is an argument to
+    /// the governor precisely so a test can hold time still, and holding it
+    /// still is what proves a ceiling is a ceiling rather than a suggestion.
+    #[test]
+    fn the_permit_denies_once_the_second_is_spent_and_names_the_wait() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let per_second = spec.budget.per_second.expect("Dhan declares one");
+        let source = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = source.governor.as_ref().expect("Dhan is budgeted");
+        let mut g = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        // TIME DOES NOT MOVE, so every admission lands in one second's window.
+        let now = 1_700_000_000_000_000_u64;
+        for i in 0..per_second {
+            assert!(
+                matches!(g.admit(now), crate::rate::Verdict::Admit),
+                "request {i} is inside the ceiling of {per_second}"
+            );
+        }
+        match g.admit(now) {
+            crate::rate::Verdict::Admit => {
+                panic!("request {} in one second was admitted", per_second + 1)
+            }
+            // A DENY ASKING FOR NO WAIT WOULD SPIN in `wait_for_permit`.
+            crate::rate::Verdict::Deny { wait_micros, .. } => {
+                assert!(
+                    wait_micros > 0,
+                    "a denial names a wait the caller can sleep"
+                );
+            }
+        }
+    }
+
+    /// A throttle lowers the allowance; clean answers raise it again.
+    ///
+    /// The incremental/decremental behaviour, asserted as a NUMBER rather than
+    /// trusted: after a 429 the governor permits strictly fewer than its
+    /// ceiling, and success must not leave it there forever.
+    #[test]
+    fn a_throttle_lowers_the_allowance_and_success_raises_it_again() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        let ceiling = spec.budget.per_second.expect("Dhan declares one");
+        let source = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = source.governor.as_ref().expect("Dhan is budgeted");
+        let mut g = held
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        assert_eq!(
+            g.permitted(crate::rate::WindowSpan::Second),
+            Some(ceiling),
+            "it starts at the declared ceiling"
+        );
+
+        g.record_throttled();
+        let after = g
+            .permitted(crate::rate::WindowSpan::Second)
+            .expect("a bounded span still reports one");
+        assert!(
+            after < ceiling,
+            "a throttle must lower it: {after} !< {ceiling}"
+        );
+
+        // The step size is the governor's business; what is asserted is that
+        // success moves it UPWARD, which is what makes this incremental rather
+        // than a one-way ratchet down.
+        for _ in 0..64 {
+            g.record_success();
+        }
+        let recovered = g
+            .permitted(crate::rate::WindowSpan::Second)
+            .expect("bounded");
+        assert!(
+            recovered > after,
+            "success must raise it: {recovered} !> {after}"
+        );
+    }
+
     use super::*;
     use crate::vendor::{Budget, FieldNames, Pooling, TimestampEncoding};
 
