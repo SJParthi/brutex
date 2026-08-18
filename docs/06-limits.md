@@ -4566,6 +4566,18 @@ the source arrays with the crate's own hash:
   Total Market names is 7.6 steps, and 8.4 over 5,000 non-members — nothing is
   measurably slow, the constant is real, the number is wrong.
 
+### Floor-relative budgets: four of thirteen crates, was three
+
+`vocab`, `indicators` and `engine` carried one. **`core` now does too** (C-09b,
+D-0173): measured 33.8–36.0 floors against a budget of 110, sized on the worst
+observed run.
+
+**Eight crates remain ratio-only** — `api`, `costs`, `greeks`, `lake`, `pull`,
+`runner`, `store`, `telemetry` — and a ratio cannot see a uniform slowdown, which
+is the regression that passed at 0.98x while running 174x slower. **OPEN**, and
+six of the eight were being edited by a second session at the time of writing, so
+they are not merely undone but currently untouchable.
+
 ### 37 hot paths have no bench at all
 
 Including `Paisa::from_rupees_half_up`, the one float boundary, called per bar.
