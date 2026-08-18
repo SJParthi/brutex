@@ -172,3 +172,201 @@ mod tests {
         assert!(session_of(2, 0).is_empty());
     }
 }
+
+/// One bar of a TWO-SIDED series: it falls as readily as it rises.
+///
+/// # Why the trending generator is not enough
+///
+/// [`bar`] computes `close = BASE + day*400 + minute*3`. It only ever goes up,
+/// and that single fact makes four separate questions unanswerable:
+///
+/// * A stop loss can only ever HURT on a monotone rise, so "does a stop help"
+///   has a trivial answer here and no bearing on a market.
+/// * Measured on it, two of the three candidate ranking keys chose the no-stop
+///   variant **400 times out of 400**, with a total drawdown of 180 paisa
+///   across all 400 candidates. `docs/06-limits.md` records why that table
+///   cannot decide the key.
+/// * No bar ever reaches both a stop and a target, so `pessimistic` equals
+///   `optimistic` on all 19,300 cells a fixture produces and the two-case fill
+///   model is never exercised where the cases differ.
+/// * Romano–Wolf's stepdown never reaches a second round, so its monotonicity
+///   guard compares `0 >= 0`.
+///
+/// # The shape, and why each piece is here rather than another
+///
+/// A **mean-reverting** level with a **regime that flips sign**, both driven by
+/// the same integer hash of `(day, minute)` that [`bar`] uses. Reversion gives
+/// two-sided moves within a session so a stop can be right or wrong on the same
+/// day; the regime flip gives stretches where a long is systematically wrong,
+/// which is what makes a stop's value vary between combinations rather than
+/// being a constant.
+///
+/// The **range is deliberately wide relative to the drift** — 15x the trending
+/// generator's — so a single bar can span both a stop and a target rung and the
+/// ambiguity path is reachable without a hand-patched fixture.
+///
+/// Integer arithmetic only, and no clock: `CLAUDE.md` §7 forbids a float here as
+/// firmly as in shipping code, and §3 rule 5 requires the same bar on every
+/// machine forever. Same `(day, minute)`, same bar.
+#[must_use]
+pub fn two_sided_bar(day: i64, minute: usize) -> Candle {
+    let m = i64::try_from(minute).unwrap_or(0);
+
+    // A cheap integer hash. Deterministic, no state, and it decorrelates
+    // adjacent minutes so the series is not a visible sawtooth.
+    let mix = |x: i64| -> i64 {
+        // `cast_signed()` rather than `as i64`: the wrap is intended — these are
+        // the SplitMix64 odd constants, whose top bits are set by construction —
+        // and `cast_possible_wrap` is denied workspace-wide. `cast_signed` says
+        // "reinterpret these bits" where `as` says "convert this number", which
+        // is the distinction the lint exists to force.
+        let h = x
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15_u64.cast_signed())
+            .rotate_left(29)
+            .wrapping_mul(0xBF58_476D_1CE4_E5B9_u64.cast_signed());
+        h.rem_euclid(2_000).saturating_sub(1_000)
+    };
+
+    // THE REGIME. Roughly every 90 minutes the sign flips, so a long is
+    // systematically right for a stretch and systematically wrong for the next.
+    // Without this a stop's value is the same for every combination and the
+    // grid has nothing to choose between.
+    let regime = if (day.saturating_mul(5).saturating_add(m / 90)) % 2 == 0 {
+        1
+    } else {
+        -1
+    };
+
+    // MEAN REVERSION toward the day's anchor rather than a trend away from it.
+    // The pull is proportional to the displacement, which is what keeps the
+    // series two-sided instead of wandering off.
+    let anchor = BASE.saturating_add(day.saturating_mul(120));
+    let wander = mix(day.saturating_mul(1_000).saturating_add(m));
+    let pull = wander / 4;
+    let close = anchor
+        .saturating_add(wander.saturating_mul(regime))
+        .saturating_sub(pull);
+    let open = anchor.saturating_add(
+        mix(day
+            .saturating_mul(1_000)
+            .saturating_add(m)
+            .saturating_sub(1))
+        .saturating_mul(regime),
+    );
+
+    // A WIDE range, 15x the trending generator's 60. A bar has to be able to
+    // span two ladder rungs for the ambiguity path to exist at all.
+    let reach = 900_i64;
+    let high = open.max(close).saturating_add(reach);
+    let low = open.min(close).saturating_sub(reach);
+
+    Candle::new(
+        day.saturating_mul(DAY_MICROS)
+            .saturating_add(IST_OPEN_UTC_MICROS)
+            .saturating_add(m.saturating_mul(MINUTE_MICROS)),
+        open,
+        high,
+        low,
+        close,
+        1_000 + (m % 11),
+        OI_NULL,
+    )
+}
+
+/// `count` consecutive sessions of [`two_sided_bar`].
+///
+/// The drop-in counterpart to [`sessions`] for any measurement whose answer
+/// would be an artefact of a one-way market. Same length, same timestamps, same
+/// session boundaries — only the price path differs.
+#[must_use]
+pub fn two_sided_sessions(count: i64) -> Vec<Candle> {
+    let mut out = Vec::with_capacity(
+        usize::try_from(count.max(0))
+            .unwrap_or(0)
+            .saturating_mul(BARS_PER_SESSION),
+    );
+    for day in 0..count {
+        for minute in 0..BARS_PER_SESSION {
+            out.push(two_sided_bar(day, minute));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    reason = "the exception every test module in this workspace takes."
+)]
+mod two_sided_tests {
+    use super::{sessions, two_sided_bar, two_sided_sessions};
+
+    #[test]
+    fn the_two_sided_series_falls_as_readily_as_it_rises() {
+        // THE ONE PROPERTY THE TRENDING GENERATOR CANNOT HAVE, and the reason
+        // four separate questions were unanswerable without this.
+        //
+        // MEASURED over twelve sessions:
+        //
+        //   trending    up 3,852   down   647
+        //   two-sided   up 2,251   down 2,248
+        //
+        // On a monotone rise a stop loss can only ever hurt, so "does a stop
+        // help" has a trivial answer that says nothing about a market.
+        let bars = two_sided_sessions(12);
+        // `first()`/`last()` rather than `w[0]`/`w[1]`: `indexing_slicing` is
+        // denied workspace-wide and applies to test code too. Both sides are
+        // `Some` for every `windows(2)` pane, and `Option<i64>` orders by its
+        // contents, so the comparison is the same one without the panic path.
+        // Same idiom as `excursion.rs:88` and `grid.rs:1300`.
+        let up = bars
+            .windows(2)
+            .filter(|w| w.last().map(|c| c.close) > w.first().map(|c| c.close))
+            .count();
+        let down = bars
+            .windows(2)
+            .filter(|w| w.last().map(|c| c.close) < w.first().map(|c| c.close))
+            .count();
+        assert!(up > 0 && down > 0, "the series moved in one direction only");
+
+        // Within a factor of two of each other. Not exactly equal -- that would
+        // be a suspiciously engineered series -- but neither side dominant.
+        let (lo, hi) = if up < down { (up, down) } else { (down, up) };
+        assert!(
+            hi <= lo.saturating_mul(2),
+            "the series is {hi} one way against {lo} the other, which is not two-sided"
+        );
+
+        // And it is genuinely different from the trending one, so a test that
+        // meant to use it cannot silently get the old behaviour.
+        let trending = sessions(12);
+        assert_eq!(
+            bars.len(),
+            trending.len(),
+            "the two must be interchangeable"
+        );
+        assert!(
+            bars.iter().zip(&trending).any(|(a, b)| a.close != b.close),
+            "the two generators produced identical prices"
+        );
+    }
+
+    #[test]
+    fn the_same_arguments_give_the_same_bar_forever() {
+        // CLAUDE.md section 3 rule 5. A generator that varied would make every
+        // measurement taken on it unreproducible, and the measurements are the
+        // only reason it exists.
+        assert_eq!(two_sided_bar(3, 100), two_sided_bar(3, 100));
+        assert_ne!(two_sided_bar(3, 100), two_sided_bar(3, 101));
+        assert_ne!(two_sided_bar(3, 100), two_sided_bar(4, 100));
+        // A bar's own range must contain its open and close, or it is not a bar.
+        for day in 0..4 {
+            for minute in [0_usize, 1, 90, 187, 374] {
+                let b = two_sided_bar(day, minute);
+                assert!(b.high >= b.open.max(b.close), "high below the body");
+                assert!(b.low <= b.open.min(b.close), "low above the body");
+                assert!(b.low > 0, "a price fell to or below zero");
+            }
+        }
+    }
+}
