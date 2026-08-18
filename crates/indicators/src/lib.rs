@@ -1613,6 +1613,63 @@ mod candle {
         );
     }
 
+    /// EACH OF THE FOUR PRICE CLAUSES REFUSES ON ITS OWN, AND EACH IS STRICT.
+    ///
+    /// The guard is `open > high || close > high || open < low || close < low`, and
+    /// `&&` binds tighter than `||` — so flipping the *k*-th operator does not disable
+    /// the chain, it fuses operand *k* with operand *k+1* into one conjunct. Killing
+    /// that mutation needs a bar where operand *k* is true and operand *k+1* is false,
+    /// which is one bar per clause with the other three satisfied.
+    ///
+    /// `close > high` with the open INSIDE the range is the one nothing had written,
+    /// and the bar it accepts is not exotic: a close above the session high makes
+    /// `upper` negative, which satisfies every `_at_most` shadow predicate in
+    /// `pattern` and turns the bar into whatever shape is asked of it.
+    ///
+    /// Each clause is then asked at its boundary. `open == high` is a marubozu open
+    /// and a real bar; `>=` would refuse it, and refusing it silently drops the
+    /// strongest bars in a trend from every run.
+    #[test]
+    fn each_price_clause_refuses_alone_and_admits_its_own_boundary() {
+        let sane = |open: i64, close: i64| {
+            Candle::new(0, open, 2_500_000, 2_400_000, close, 0, OI_NULL).check()
+        };
+        assert_eq!(
+            sane(2_450_000, 2_460_000),
+            Ok(()),
+            "the fixture must be accepted first -- breaking one clause of a bar \
+             that was already refused proves nothing about that clause"
+        );
+
+        for (open, close, clause) in [
+            (2_500_001, 2_460_000, "an open ABOVE the high"),
+            (2_450_000, 2_500_001, "a close ABOVE the high"),
+            (2_399_999, 2_460_000, "an open BELOW the low"),
+            (2_450_000, 2_399_999, "a close BELOW the low"),
+        ] {
+            assert_eq!(
+                sane(open, close),
+                Err(Corrupt::PriceOutsideRange),
+                "{clause} was accepted, and every other clause of this bar holds"
+            );
+        }
+
+        // The four boundaries themselves. All four comparisons are strict, and a bar
+        // that opens or closes exactly ON an extreme is the commonest bar there is.
+        for (open, close, edge) in [
+            (2_500_000, 2_460_000, "an open exactly AT the high"),
+            (2_450_000, 2_500_000, "a close exactly AT the high"),
+            (2_400_000, 2_460_000, "an open exactly AT the low"),
+            (2_450_000, 2_400_000, "a close exactly AT the low"),
+        ] {
+            assert_eq!(
+                sane(open, close),
+                Ok(()),
+                "{edge} is a real bar; `>` must not become `>=`, nor `<` become `<=`"
+            );
+        }
+    }
+
     /// A defaulted candle carries a **real** zero open interest, not the null.
     ///
     /// `Candle` derives `Default`, and §7 reserves `i64::MIN` for "absent" while zero

@@ -1099,6 +1099,50 @@ mod tests {
         }
     }
 
+    /// THE BAND SIDES ARE STRICT AT THE EDGE, WHICH ONLY THE EDGE ITSELF CAN SHOW.
+    ///
+    /// `a_price_above_everything_sets_only_the_above_relations` puts the close far
+    /// outside every band, and `a_price_below_everything...` far below. Both are
+    /// answered the same way by `>` and by `>=`: a close well past the edge is past it
+    /// under either. The distinction lives at ONE value per side — the edge itself —
+    /// and no fixture had ever sat on it.
+    ///
+    /// The ladder is read off the constructor rather than restated: with
+    /// `h = 2_500_000`, `l = 2_400_000`, `c = 2_470_000` the pivot is `2_456_666`, the
+    /// CPR's centre `2_450_000`, so the band half-width is `6_666` and R1 is
+    /// `2_513_332`. The two edges are therefore `2_519_998` above and `2_506_666`
+    /// below, and each is asserted twice: ON the edge, where the bit must stay dark,
+    /// and one paisa past it, where it must light.
+    ///
+    /// "Above the band" that includes its own edge is not a wider band — it is a
+    /// different claim about the same price, and 74 and 75 would then both hold for a
+    /// close sitting on neither side.
+    #[test]
+    fn the_band_sides_admit_nothing_on_their_own_edge() {
+        let l = levels(2_500_000, 2_400_000, 2_470_000);
+        assert_eq!(l.band_half(), 6_666, "the band half-width moved");
+        assert_eq!(l.r[0], 2_513_332, "R1 moved");
+        let (above, below) = (l.r[0] + l.band_half(), l.r[0] - l.band_half());
+        assert_eq!((above, below), (2_519_998, 2_506_666), "the edges moved");
+
+        assert!(
+            !bits(&l, above, tol()).get(74),
+            "a close exactly ON the upper edge is not above the band; `>=` accepts it"
+        );
+        assert!(
+            bits(&l, above + 1, tol()).get(74),
+            "a close one paisa past the upper edge is above the band"
+        );
+        assert!(
+            !bits(&l, below, tol()).get(75),
+            "a close exactly ON the lower edge is not below the band; `<=` accepts it"
+        );
+        assert!(
+            bits(&l, below - 1, tol()).get(75),
+            "a close one paisa past the lower edge is below the band"
+        );
+    }
+
     /// The default cuts are the declared set, and `bits` uses them.
     ///
     /// Two things break without this. A `Default` that drifted from `CLASSICAL` would
