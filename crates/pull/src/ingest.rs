@@ -480,6 +480,45 @@ fn note_not_landed(member: &Member, why: &str) {
 /// it was asked for and could not fold one of them into thirty is not a run
 /// that failed, and reporting it as one would send an operator to re-pull data
 /// he already has. `CLAUDE.md` §4 still requires it NAMED, which is this.
+/// A member whose folded rungs did not all land, or [`None`] when they did.
+///
+/// # The failure this exists to stop being silent
+///
+/// `derive` returning `Err` fed [`note_not_derived`] and nothing else — a
+/// telemetry line, and no entry in `failures`. So a disk that filled, or a
+/// permission lost, AFTER the pulled rung landed but before the folded ones did
+/// produced a run that reported SUCCESS: `Outcome::Stored` journalled, the
+/// receipt reading "every row accounted for", and seven of eight timeframes
+/// simply absent. The books balanced because nothing had asked them this.
+///
+/// # The expected count is a rule, never a list
+///
+/// [`derived_count_in`] is what `derive_rungs` itself walks, so a rung added to
+/// `Timeframe::KNOWN` moves both sides at once and this cannot go stale against
+/// it. It already knows the one case where zero is correct: an option contract
+/// folds into no rung at all.
+///
+/// # Cost
+///
+/// Two integers compared. O(1) per member, and it opens nothing: both counts
+/// were established while the member was being written.
+fn derived_shortfall(member: &Member, landed: &Landed) -> Option<Failure> {
+    if landed.derived == landed.derived_expected {
+        return None;
+    }
+    Some(Failure {
+        instrument: member.instrument.clone(),
+        why: format!(
+            "{} of {} derived rung(s) landed. The pulled rung is on disk and the \
+             folded ones are not, so this instrument-month reads as held at one \
+             timeframe and missing at the rest. Why each rung failed is on the \
+             log at `pull.derive`; this is the count that stops the run \
+             reporting itself clean.",
+            landed.derived, landed.derived_expected
+        ),
+    })
+}
+
 fn note_not_derived(instrument: &str, rung: Timeframe, why: &str) {
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::warn("pull.derive", "rung not derived")
@@ -596,6 +635,10 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                 // store disagreeing with its own counter in the direction that
                 // makes a later run refetch a month already on disk.
                 done.derived_files += landed.derived;
+                // A DERIVED RUNG THAT DID NOT LAND IS A FAILURE, NOT A NOTE.
+                if let Some(short) = derived_shortfall(member, &landed) {
+                    done.failures.push(short);
+                }
                 for held in landed.entries {
                     match count(&mut census, held) {
                         Ok(changed) => {
@@ -785,6 +828,12 @@ struct Landed {
     entries: Vec<Held>,
     /// How many of `entries` were derived rather than pulled.
     derived: usize,
+    /// How many SHOULD have been, by the rule `derive_rungs` itself walks.
+    ///
+    /// Carried rather than recomputed by the caller because the contract and
+    /// the source rung are known here and are on neither `Member` nor `Plan`.
+    /// See `derived_shortfall` for what the difference means.
+    derived_expected: usize,
 }
 
 /// The month's two closes, when the batch just appended **is** the whole file.
@@ -914,6 +963,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             census: landed.census,
             entries: Vec::new(),
             derived: 0,
+            derived_expected: 0,
         });
     }
 
@@ -957,6 +1007,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
             census: landed.census,
             entries: Vec::new(),
             derived: 0,
+            derived_expected: 0,
         });
     };
     // THE MONTH, AND THE REFUSAL IF THE BARS CROSS ONE. See `month_of`.
@@ -1040,12 +1091,18 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     );
 
     let derived = entries.len().saturating_sub(1);
+    // THE RULE, NOT A LIST. `derived_count_in` is what `derive_rungs` walks, so
+    // a rung added to `Timeframe::KNOWN` moves both sides at once and this
+    // expectation cannot go stale against it. It already knows the one case
+    // where zero is correct: an option contract folds into no rung.
+    let derived_expected = derived_count_in(None, timeframe);
     Ok(Landed {
         bars: landed.bars.len(),
         folded,
         census: landed.census,
         entries,
         derived,
+        derived_expected,
     })
 }
 
