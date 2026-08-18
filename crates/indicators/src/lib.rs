@@ -910,6 +910,81 @@ mod tests {
         }
     }
 
+    /// A RUNG FIRES, WHICH IS THE ONE THING NEITHER TEST ABOVE ASKS FOR.
+    ///
+    /// `only_positions_121_to_131_are_ever_set` and `at_most_one_rung_fires_on_any_bar`
+    /// carry real assertions, and **an empty mask satisfies both of them**: "no stray
+    /// position is set" and "at most one is set" are vacuously true of nothing. A
+    /// four-hundred-bar walk and a six-hundred-bar walk both passed without the ladder
+    /// ever lighting. That is the §4 shape — a test that asserts nothing — wearing two
+    /// assertions, and it is what let `bits` be replaced wholesale by
+    /// `Default::default()` with the suite green, along with the loop bound, the
+    /// liveness guard and the index arithmetic that reaches the vocabulary.
+    ///
+    /// So this names a level and asks for the bit at it. The ladder is built to be read
+    /// off by hand: a low of `2_400_000` and a LATER high of `2_500_000` leave `Leg::Up`
+    /// with a range of `100_000`, so rung `p` sits at `2_500_000 - p * 100` and the band
+    /// is `TOL_FIB_MILLI * range / 1000` = `1_000` paisa either side.
+    ///
+    /// The emit bar is FLAT at its close. `step` emits before it folds, so the bar's
+    /// own shape cannot reach the ladder it is measured against — and a flat bar says
+    /// that in the fixture rather than in a comment.
+    #[test]
+    fn a_close_on_a_rung_lights_that_rung_and_nothing_else() {
+        // Bar 0 opens the session: hi 2_450_000, lo 2_400_000, leg Undetermined.
+        // Bar 1 makes a new high and NO new low, which is the only route to `Leg::Up`.
+        let ladder = || {
+            let mut s = CurDayFib::new();
+            let _ = ok(&mut s, &bar(0, 2_420_000, 2_450_000, 2_400_000, 2_440_000));
+            let _ = ok(
+                &mut s,
+                &bar(60_000_000, 2_440_000, 2_500_000, 2_420_000, 2_490_000),
+            );
+            s
+        };
+        let mut s = ladder();
+        assert_eq!(s.leg(), Leg::Up, "the later extreme was not the high");
+        assert_eq!(s.range(), 100_000, "the session range is not hi - lo");
+
+        // Rung 618 of an Up leg retraces DOWN from the high: 2_500_000 - 61_800.
+        let level = 2_438_200;
+        assert_eq!(
+            s.level(618),
+            Some(level),
+            "rung 618 is not where this test reads it"
+        );
+        let emit = |s: &mut CurDayFib, close: i64| -> ConditionMask {
+            ok(s, &bar(120_000_000, close, close, close, close))
+        };
+        let rung_618 = u32::from(CURDAY_FIRST) + 4;
+        let m = emit(&mut s, level);
+        assert!(
+            m.get(rung_618),
+            "a close exactly on rung 618 did not light position 125"
+        );
+        assert_eq!(
+            m.popcount(),
+            1,
+            "one close on one rung lit more than one rung"
+        );
+
+        // The band's far edge, and one paisa past it.
+        assert!(
+            emit(&mut ladder(), level - 1_000).get(rung_618),
+            "a close on the band's own edge is covered; `<=` must not become `<`"
+        );
+        assert!(
+            !emit(&mut ladder(), level - 1_001).get(rung_618),
+            "a close one paisa outside the band lit the rung anyway"
+        );
+
+        // And the anchor itself is rung 0, at the other end of the same ladder.
+        assert!(
+            emit(&mut ladder(), 2_500_000).get(u32::from(CURDAY_FIRST)),
+            "a close at the session high did not light rung 0"
+        );
+    }
+
     /// The barrier cannot name a bar past `n`, and refuses an out-of-range `n`
     /// rather than clamping.
     #[test]
