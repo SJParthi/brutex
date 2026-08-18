@@ -51,6 +51,9 @@ pub mod master;
 pub mod merge;
 pub mod render;
 pub mod server;
+/// THE SCRUB, over a whole vendor -- the only thing entitled to say a store
+/// is verified rather than merely counted.
+pub mod verify;
 
 /// Temporary fixture paths, unique per process. Compiled only under `cfg(test)`
 /// — it exists so two concurrent test processes cannot delete each other's
