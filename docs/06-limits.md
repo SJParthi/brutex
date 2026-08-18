@@ -4744,11 +4744,36 @@ are now dead — `a_doji_is_neither_bullish_nor_bearish` and
 same number, so `>` and `>=` compute the same function. The two inside
 `Shape::of` have the same shape.
 
-**What would close the rest:** for the boundary class, one table-driven test per
-predicate covering `t-1`, `t`, `t+1`. For `Patterns::bits`, a fixture per pattern
-with one clause negated at a time — the work is mechanical but it is roughly
-fifty hand-built bars, and it has not been done. **OPEN, and larger than one
-sitting.**
+**Progress, and a caveat about how it is counted.** Four rounds of tests have
+landed. `Shape`'s twenty predicate mutants are dead — the ratios asserted at their
+exact thresholds and one step past, and a zero-range bar (a halted minute, where
+`open == high == low == close`) proving the `range > 0` guard refuses only that
+and not every bar. Bits 161, 202 and 203 are covered clause by clause.
+
+**Do not read the survivor TOTAL as progress.** Successive runs over this file
+tested 294, 295 and 277 mutants — cargo-mutants does not enumerate an identical
+set each time, so totals are not comparable between runs and a count can rise
+while real defects are being removed. What is comparable is WHICH mutants appear:
+the twenty `Shape` lines are gone and stay gone.
+
+**Standing at the last measurement** — 39 survivors, of which:
+
+| where | count | note |
+|---|---|---|
+| `Patterns::bits` | 34 | the `&&` chains, one clause per candlestick pattern |
+| `Shape::of`, `Shape::top`, `Shape::bottom` | 4 | **equivalent — unkillable** |
+| `Patterns::step` | 1 | |
+
+**The four equivalents are not a gap.** `if open > close { open } else { close }`
+returns the same number from both arms when `open == close`, so `>` and `>=`
+compute the same function. No assertion can separate them, and chasing them would
+mean writing a test that cannot fail.
+
+**What closes the 34:** one fixture per clause, built so exactly ONE conjunct is
+false and every other holds — that is the only input separating `&&` from `||`.
+Two techniques, and they are not interchangeable: a clause negated at 95 against
+a threshold of 90 kills the `&&` and leaves the comparison alive, because `<` and
+`<=` both refuse 95. The comparison needs the threshold value itself. **OPEN.**
 
 ---
 
