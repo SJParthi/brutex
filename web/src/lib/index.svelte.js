@@ -20,7 +20,10 @@
 // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
 // threaded through every call site.
 import { ask } from '$lib/ask.js';
-const MAX_PREFIX = 4;
+// THE ARITHMETIC LIVES IN `$lib/prefix.js` so a test can drive it. This module
+// imports `$lib/ask.js`, which node cannot resolve, so the O(1) claim in the
+// opening comment was unreachable from `node --test` even in principle.
+import { build, probe } from '$lib/prefix.js';
 
 // `feed` IS NOT BOOKKEEPING — IT IS THE GATE. /ingest:1449 and /db:1013 both
 // derive `catalogueIsThisFeed = catalogue.ready && catalogue.feed === feeds.active`
@@ -63,17 +66,7 @@ export async function loadCatalogue(feed) {
       throw new Error(`HTTP ${r.status}`);
     }
     const rows = await r.json();
-    const next = new Map();
-    for (const row of rows) {
-      const s = row.symbol;
-      if (typeof s !== 'string') continue;
-      for (let n = 1; n <= Math.min(MAX_PREFIX, s.length); n += 1) {
-        const key = s.slice(0, n);
-        let bucket = next.get(key);
-        if (!bucket) next.set(key, (bucket = []));
-        bucket.push(row);
-      }
-    }
+    const next = build(rows);
     // A response for a feed the operator has already left is DISCARDED, never
     // stamped.
     if (inFlight !== feed) return;
@@ -95,8 +88,5 @@ export async function loadCatalogue(feed) {
 
 /** One probe for 1..4 characters; a filter over one bucket beyond that. */
 export function search(typed) {
-  const q = (typed ?? '').trim().toUpperCase();
-  if (!q) return catalogue.rows;
-  if (q.length <= MAX_PREFIX) return byPrefix.get(q) ?? [];
-  return (byPrefix.get(q.slice(0, MAX_PREFIX)) ?? []).filter((r) => r.symbol.startsWith(q));
+  return probe(byPrefix, catalogue.rows, typed);
 }
