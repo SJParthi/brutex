@@ -5538,6 +5538,88 @@ async fn read_credential(
     }
 }
 
+/// The credential and the socket for one HTTP feed, in the order that costs
+/// least when it fails.
+///
+/// # Why this is a function rather than two copies
+///
+/// Two callers need a credentialed source now — the spot window and expired
+/// F&O discovery — and the sequence between them is not incidental: HOME, then
+/// the configuration file, then the AWS identity, then the store prefix, then
+/// Parameter Store, then the client. A second hand-written copy would drift on
+/// the first vendor whose auth shape changed, and the drift would show up as
+/// one route working and the other refusing for a reason neither names.
+///
+/// `spec` is taken rather than looked up so the caller keeps its own transport
+/// refusal, which each places FIRST for its own reason — an archive feed that
+/// reaches either one pays no clock, no HOME, no credentials file, no AWS
+/// identity and no socket.
+///
+/// # Cost
+///
+/// O(1). One file read, one identity discovery, one Parameter Store read, one
+/// client build — none of which grows with the store or the request.
+async fn credentialed_source(
+    feed: pull::vendor::Feed,
+    spec: &pull::vendor::HttpSpec,
+) -> Result<(pull::http::HttpSource, brutex_core::vendor::Vendor), String> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Err("HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned());
+    };
+    let config_path = pull::config::default_config_path(std::path::Path::new(&home));
+    let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
+        format!(
+            "the credential configuration at {} is not usable: {why}",
+            config_path.display()
+        )
+    })?;
+
+    let identity =
+        pull::ssm::AwsIdentity::discover().map_err(|why| format!("no AWS identity: {why}"))?;
+
+    // WHICH BROKER, FROM THE REQUEST — not hardcoded. `CLAUDE.md`: adding a
+    // vendor is a row in `pull::vendor`, and a route that names one defeats
+    // that. Dhan when unstated, because it is the one whose descriptor has been
+    // verified against a live body.
+    // THE FEED CAME FROM THE REQUEST; NOTHING HERE MAPS A NAME TO A ROW.
+    //
+    // This was a seven-arm `match asked.vendor { Dhan => Feed::Dhan, Groww =>
+    // Feed::Groww, other => refuse }`. It was well argued — it refused by name
+    // rather than falling back — but it was still a hand-written table that a
+    // fifth feed would have had to be added to, and forgetting meant a refusal
+    // for a feed that existed. The parse now yields the `Feed` directly, so the
+    // table is `DESCRIPTORS` and there is no second copy to fall behind it.
+
+    // THE STORE PREFIX — a different question from the transport, asked
+    // separately now that the transport has its own answer above.
+    //
+    // `store_vendor` is `None` for a feed with no `core::Vendor` row. For an
+    // HTTP feed that is not "you picked an archive", it is "this broker has
+    // nowhere to file its bars yet", and saying the first would misdirect. The
+    // message names the real gap.
+    let vendor = feed.store_vendor().ok_or_else(|| {
+        format!(
+            "{} has no store prefix. Bars are filed under bars/<vendor>/, and \
+             filing one broker's prices under another's path destroys the \
+             per-vendor independence D-0019 exists for — so nothing is pulled \
+             until {} has a row in brutex_core::vendor::Vendor.",
+            feed.display(),
+            feed.display()
+        )
+    })?;
+    let credential = read_credential(&identity, &config, vendor, spec.auth).await?;
+
+    // The descriptor is the single source of every vendor difference — URL,
+    // auth header, date format, response shape, field names, timestamp
+    // encoding, price scale. `CLAUDE.md`: adding a broker is a row in
+    // `crate::vendor`, not an edit here, and this is the line that keeps that
+    // true — Groww and Dhan differ in six of those fields and share every line
+    // of code below.
+    let source = pull::http::HttpSource::new(*spec, credential).map_err(|why| why.to_string())?;
+
+    Ok((source, vendor))
+}
+
 async fn broker_window(
     asked: &ingest::SpotRequest,
     instrument: &brutex_core::instrument::InstrumentKey,
@@ -5637,60 +5719,10 @@ async fn broker_window(
     // None of those is a target check, and none of them is weakened here.
     // D-0136.
 
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err("HOME is unset, so ~/.brutex/credentials.toml cannot be located".to_owned());
-    };
-    let config_path = pull::config::default_config_path(std::path::Path::new(&home));
-    let config = pull::config::CredentialConfig::load(&config_path).map_err(|why| {
-        format!(
-            "the credential configuration at {} is not usable: {why}",
-            config_path.display()
-        )
-    })?;
-
-    let identity =
-        pull::ssm::AwsIdentity::discover().map_err(|why| format!("no AWS identity: {why}"))?;
-
-    // WHICH BROKER, FROM THE REQUEST — not hardcoded. `CLAUDE.md`: adding a
-    // vendor is a row in `pull::vendor`, and a route that names one defeats
-    // that. Dhan when unstated, because it is the one whose descriptor has been
-    // verified against a live body.
-    // THE FEED CAME FROM THE REQUEST; NOTHING HERE MAPS A NAME TO A ROW.
-    //
-    // This was a seven-arm `match asked.vendor { Dhan => Feed::Dhan, Groww =>
-    // Feed::Groww, other => refuse }`. It was well argued — it refused by name
-    // rather than falling back — but it was still a hand-written table that a
-    // fifth feed would have had to be added to, and forgetting meant a refusal
-    // for a feed that existed. The parse now yields the `Feed` directly, so the
-    // table is `DESCRIPTORS` and there is no second copy to fall behind it.
     let feed = asked.feed;
-
-    // THE STORE PREFIX — a different question from the transport, asked
-    // separately now that the transport has its own answer above.
-    //
-    // `store_vendor` is `None` for a feed with no `core::Vendor` row. For an
-    // HTTP feed that is not "you picked an archive", it is "this broker has
-    // nowhere to file its bars yet", and saying the first would misdirect. The
-    // message names the real gap.
-    let vendor = feed.store_vendor().ok_or_else(|| {
-        format!(
-            "{} has no store prefix. Bars are filed under bars/<vendor>/, and \
-             filing one broker's prices under another's path destroys the \
-             per-vendor independence D-0019 exists for — so nothing is pulled \
-             until {} has a row in brutex_core::vendor::Vendor.",
-            feed.display(),
-            feed.display()
-        )
-    })?;
-    let credential = read_credential(&identity, &config, vendor, spec.auth).await?;
-
-    // The descriptor is the single source of every vendor difference — URL,
-    // auth header, date format, response shape, field names, timestamp
-    // encoding, price scale. `CLAUDE.md`: adding a broker is a row in
-    // `crate::vendor`, not an edit here, and this is the line that keeps that
-    // true — Groww and Dhan differ in six of those fields and share every line
-    // of code below.
-    let source = pull::http::HttpSource::new(spec, credential).map_err(|why| why.to_string())?;
+    // THE CREDENTIAL AND THE SOCKET, in one place shared with expired F&O
+    // discovery. The sequence this replaced is unchanged; it moved.
+    let (source, vendor) = credentialed_source(feed, &spec).await?;
     // THE ENDPOINT, NOT ONE REQUEST'S URL. This receipt covers every window of
     // one instrument, and a feed that carries its instrument or its rung as a
     // path segment has a different URL per window — so the honest single value
@@ -6232,7 +6264,7 @@ async fn pull_spot(
 ///
 /// Split from the handler so the expiry gate is driven by a value rather than
 /// by the machine's clock — `CLAUDE.md` §3 rule 5.
-fn fno_answer(
+async fn fno_answer(
     body: &str,
     today: Day,
     now: std::time::SystemTime,
@@ -6240,6 +6272,11 @@ fn fno_answer(
     // Which sentence this process is entitled to print. Taken rather than
     // assumed, for the reason `halt_for` documents.
     broker: Broker,
+    // THE SITE, FOR THE CREDENTIAL AND THE FEED. Discovery is a vendor call and
+    // a vendor call needs a token, which is read from Parameter Store — async,
+    // and reachable only from here. This is the argument that turned the 503
+    // into a walk.
+    site: &Site,
 ) -> (axum::http::StatusCode, String) {
     match ingest::parse_fno(body, today) {
         Err(why) => {
@@ -6255,28 +6292,182 @@ fn fno_answer(
                 refused_and_recorded("Expired F&O pull", &why, journal, &record),
             )
         }
-        Ok(asked) => {
-            let mut facts = vec![
-                ("Underlying", asked.underlying.as_str().to_owned()),
-                ("Series", asked.series.label().to_owned()),
-                (
-                    "Expiry",
-                    format!("{} — expired, checked against {today}", asked.expiry),
-                ),
-            ];
-            facts.extend(window_facts(asked.window));
-            let record = audit::Record::refused(
-                audit::Scope::Fno,
-                audit::Outcome::NotStarted,
-                now,
-                asked.underlying.as_str(),
-                "expired F&O has no local-archive path and no HTTP transport in this build",
-            )
-            .with_window(asked.window);
-            facts.push(recorded_fact(journal, &record));
-            (
+        Ok(asked) => fno_walk(&asked, today, now, journal, broker, site).await,
+    }
+}
+
+/// The context every expired-F&O answer is written against, and the one place
+/// that stamps the journal.
+///
+/// # Why a type rather than four copies of twelve lines
+///
+/// Every way this route can end — archive feed, no budget, no credential, a
+/// vendor that refused, a chain that walked — ends the same way: record the
+/// outcome, push the receipt, render. Written out per arm it was the same block
+/// four times, and the failure mode of that shape is not verbosity, it is the
+/// fifth arm that renders without recording. Here an arm cannot produce a page
+/// without producing the record, because there is no other way to produce one.
+struct FnoPage<'a> {
+    asked: &'a ingest::FnoRequest,
+    now: std::time::SystemTime,
+    journal: &'a audit::Journal,
+    broker: Broker,
+}
+
+impl FnoPage<'_> {
+    /// One outcome, recorded and rendered.
+    fn say(
+        &self,
+        mut facts: Vec<(&'static str, String)>,
+        code: axum::http::StatusCode,
+        outcome: audit::Outcome,
+        why: &str,
+    ) -> (axum::http::StatusCode, String) {
+        let record = audit::Record::refused(
+            audit::Scope::Fno,
+            outcome,
+            self.now,
+            self.asked.underlying.as_str(),
+            why,
+        )
+        .with_window(self.asked.window);
+        facts.push(recorded_fact(self.journal, &record));
+        (code, accepted_html("Expired F&O pull", facts, self.broker))
+    }
+}
+
+/// The discovery walk for one accepted expired-series request.
+///
+/// # Why this is not part of [`fno_answer`]
+///
+/// A parse refusal and a vendor walk fail for unrelated reasons and are read by
+/// unrelated people: the first is the operator's form, the second is the
+/// vendor's answer.
+///
+/// # Cost
+///
+/// One request for the month's expiries, then one per expiry. O(1) per request;
+/// nothing here scans the store.
+async fn fno_walk(
+    asked: &ingest::FnoRequest,
+    today: Day,
+    now: std::time::SystemTime,
+    journal: &audit::Journal,
+    broker: Broker,
+    site: &Site,
+) -> (axum::http::StatusCode, String) {
+    let page = FnoPage {
+        asked,
+        now,
+        journal,
+        broker,
+    };
+    let mut facts = vec![
+        ("Underlying", asked.underlying.as_str().to_owned()),
+        ("Series", asked.series.label().to_owned()),
+        (
+            "Expiry",
+            format!("{} — expired, checked against {today}", asked.expiry),
+        ),
+    ];
+    facts.extend(window_facts(asked.window));
+    facts.push(("Feed", asked.feed.display().to_owned()));
+
+    // THE TRANSPORT DECIDES THE PATH, AND IT IS ASKED FIRST.
+    //
+    // An archive feed's expired contracts are already on disk in the operator's
+    // folder; there is no expiries endpoint to call and never was. Refusing
+    // here names that rather than letting a feed with no `HttpSpec` reach a
+    // credential read it has no use for.
+    let pull::vendor::Transport::Http(spec) = asked.feed.descriptor().transport else {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            "this feed is a local archive; its expired contracts are read from \
+             the operator's folder, not discovered over HTTP",
+        );
+    };
+
+    // THE GOVERNOR ADMITS DISCOVERY TOO, and charging it here is not a
+    // formality. One walk is 1 + N requests against a vendor whose ceiling is
+    // five a second, so a discovery path that skipped the budget would be the
+    // one path in this process able to earn a 429 that every other path then
+    // pays for. Waited for rather than refused, for the reason the spot path's
+    // comment gives.
+    if let Err(why) = await_budget(asked.feed, site).await {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            &why,
+        );
+    }
+
+    let source = match credentialed_source(asked.feed, &spec).await {
+        Ok((source, _vendor)) => source,
+        Err(why) => {
+            return page.say(
+                facts,
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                accepted_html("Expired F&O pull", facts, broker),
+                audit::Outcome::NotStarted,
+                &why,
+            );
+        }
+    };
+
+    // THE MONTH IS THE EXPIRY'S OWN MONTH. Discovery is keyed on (underlying,
+    // year, month) because that is what both vendors publish an expiry list
+    // for; the operator's single expiry is what the answer is filtered to.
+    let ask = pull::fno::Ask {
+        underlying: asked.underlying.as_str().to_owned(),
+        year: asked.expiry.year(),
+        month: asked.expiry.month(),
+        expiry: String::new(),
+    };
+
+    // EXPIRIES FIRST, THEN CONTRACTS — and the ordering is enforced by `?`
+    // inside `chain::month` rather than by this call site's good manners. A
+    // refused expiries call returns before one contracts URL is built, which is
+    // what makes a half-walked month impossible rather than merely unlikely.
+    match pull::chain::month(asked.feed, &ask, &source).await {
+        Err(why) => page.say(
+            facts,
+            axum::http::StatusCode::BAD_GATEWAY,
+            audit::Outcome::Failed,
+            &why.to_string(),
+        ),
+        Ok(chain) => {
+            facts.push(("Expiries in month", chain.expiries.len().to_string()));
+            facts.push(("Contracts discovered", chain.contracts.len().to_string()));
+            // REPORTED, NEVER SILENT. `Chain` keeps the names it could not read
+            // precisely so this line can exist; a count of contracts alone
+            // would render a partly-read month as a whole one, which is the §4
+            // fallback that hides a failure.
+            if !chain.unreadable.is_empty() {
+                facts.push((
+                    "Unreadable names",
+                    format!(
+                        "{} — {}",
+                        chain.unreadable.len(),
+                        chain.unreadable.join(", ")
+                    ),
+                ));
+            }
+            // WHAT THIS DOES NOT DO, SAID ON THE PAGE ITSELF.
+            //
+            // Discovery names the contracts; filing their bars needs an
+            // `InstrumentKey` for a derivative and the bar row that carries the
+            // vendor's own spot and IV, neither of which exists yet. An
+            // operator who read "42 contracts" here and inferred 42 stored
+            // months would be wrong, so the page says so rather than leaving
+            // the inference open.
+            page.say(
+                facts,
+                axum::http::StatusCode::OK,
+                audit::Outcome::Empty,
+                "chain walked; bars not filed — a derivative instrument key and \
+                 the vendor-spot/IV bar row are the next piece",
             )
         }
     }
@@ -6289,9 +6480,18 @@ async fn pull_fno(
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
     let now = std::time::SystemTime::now();
     let journal = site.journal();
-    let (code, page) = dated(ingest::ist_day(now), "Expired F&O pull", |today| {
-        fno_answer(&body, today, now, &journal, site.broker)
-    });
+    // THE SAME SHAPE `pull_spot` USES, and for the same reason its comment
+    // gives: `dated` takes a SYNCHRONOUS closure and this answer is now async,
+    // because discovery awaits a credential. Making `dated` generic over
+    // futures would touch every page that uses it for one caller's benefit, so
+    // the day is resolved first and the refusal arm is spelled out here.
+    let (code, page) = match ingest::ist_day(now) {
+        Ok(today) => fno_answer(&body, today, now, &journal, site.broker, &site).await,
+        Err(why) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            refusal_html("Expired F&O pull", &why),
+        ),
+    };
     (code, axum::response::Html(page))
 }
 
@@ -10279,7 +10479,8 @@ mod tests {
             let expired = post(
                 addr,
                 "/pull/fno",
-                "underlying=nifty&series=fut&expiry=2020-01-30&from=2020-01-01&to=2020-01-30",
+                "underlying=nifty&series=fut&expiry=2020-01-30&from=2020-01-01&to=2020-01-30\
+                 &vendor=truedata",
             )
             .await;
             assert!(expired.contains("503"), "expired is acceptable: {expired}");
@@ -11390,20 +11591,30 @@ mod tests {
         assert!(wire.contains("not inclusive"), "{wire}");
     }
 
-    #[test]
-    fn an_expiry_gate_driven_by_value_answers_both_ways_without_a_clock() {
+    #[tokio::test]
+    async fn an_expiry_gate_driven_by_value_answers_both_ways_without_a_clock() {
         // `fno_answer` is the half of the handler the expiry rule lives in, and
         // it takes the day rather than reading one, so both outcomes are pinned
         // rather than being properties of when the suite ran.
         let root = store_root("fnogate");
         let journal = audit::Journal::at(&root);
+        let site = Site::new(universe(&root), census::read_all(&root), root.clone());
+        // AN ARCHIVE FEED, DELIBERATELY. This test is about the expiry gate, and
+        // the gate is upstream of the transport — but an HTTP feed would carry
+        // this body on to a credential read and a discovery socket, which is a
+        // live vendor request inside a unit test. Naming the archive feed keeps
+        // every assertion below about the gate and makes the network
+        // unreachable from here rather than merely unlikely.
         let (code, page) = fno_answer(
-            "underlying=NIFTY&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30",
+            "underlying=NIFTY&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30\
+             &vendor=truedata",
             day(2026, 8, 7),
             moment(),
             &journal,
             Broker::Refused,
-        );
+            &site,
+        )
+        .await;
         assert_eq!(code, axum::http::StatusCode::SERVICE_UNAVAILABLE);
         assert!(page.contains("NOT STARTED"), "{page}");
         assert!(
@@ -11416,12 +11627,15 @@ mod tests {
         );
 
         let (code, page) = fno_answer(
-            "underlying=NIFTY&series=fut&expiry=2026-08-07&from=2026-08-01&to=2026-08-07",
+            "underlying=NIFTY&series=fut&expiry=2026-08-07&from=2026-08-01&to=2026-08-07\
+             &vendor=truedata",
             day(2026, 8, 7),
             moment(),
             &journal,
             Broker::Refused,
-        );
+            &site,
+        )
+        .await;
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
         assert!(page.contains("LIVE CONTRACT IS NEVER STORED"), "{page}");
 
@@ -13154,14 +13368,36 @@ mod tests {
         // clock assertion started passing because the needle was absent rather
         // than because the order was right. A test that passes when the thing
         // it names has left the building asserts nothing.
+        // THE CALLEE IS INLINED AT ITS CALL SITE, and that is what keeps this
+        // test honest across the extraction that moved four of the needles
+        // below out of `broker_window` and into `credentialed_source`.
+        //
+        // The property was never "these lines live in this function". It is
+        // "nothing that costs a vendor anything runs before the transport is
+        // known", and that is a property of the ORDER CONTROL REACHES THEM. So
+        // the searched text is broker_window's body with the helper's body
+        // spliced in where the call is, which is exactly the sequence a request
+        // executes. Had the extraction been allowed to simply delete the
+        // needles, every assertion below would have started passing for free —
+        // which is the failure mode this test's own header names.
         let me = include_str!("server.rs");
-        let body = me
-            .split_once("async fn broker_window")
-            .expect("broker_window exists")
-            .1;
-        let body = &body[..body
-            .find("\n}\n")
-            .expect("broker_window's body ends at a column-0 brace")];
+        let span = |after: &str, what: &str| -> String {
+            let tail = me
+                .split_once(after)
+                .unwrap_or_else(|| panic!("{what} exists"))
+                .1;
+            tail[..tail
+                .find("\n}\n")
+                .unwrap_or_else(|| panic!("{what}'s body ends at a column-0 brace"))]
+                .to_owned()
+        };
+        let outer = span("async fn broker_window", "broker_window");
+        let helper = span("async fn credentialed_source", "credentialed_source");
+        let call = outer
+            .find("credentialed_source(feed, &spec)")
+            .expect("broker_window reaches its credential and socket through the helper");
+        let body = format!("{}{helper}{}", &outer[..call], &outer[call..]);
+        let body = body.as_str();
 
         let transport = body
             .find("Transport::Http(spec)")

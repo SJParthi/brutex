@@ -982,6 +982,18 @@ pub struct FnoRequest {
     pub expiry: Day,
     /// The operator's inclusive range.
     pub window: Window,
+    /// WHICH FEED IS BEING ASKED. Not inferable and not defaulted to a name in
+    /// this file: discovery is a vendor call, the two brokers publish different
+    /// endpoints and different JSON field names, and `pull::vendor::DESCRIPTORS`
+    /// is the only table entitled to say which. Parsed with the same rule spot
+    /// uses — absent defaults, present-but-unknown refuses — so a body that
+    /// omits it behaves exactly as it did before this field existed.
+    pub feed: pull::vendor::Feed,
+    /// Which bar size the contracts will be fetched at once discovery names
+    /// them. Carried here rather than assumed at the fetch, because
+    /// `CLAUDE.md` §6's argument against a defaulted parameter applies to a
+    /// defaulted rung just as squarely.
+    pub granularity: pull::vendor::Granularity,
 }
 
 /// One `YYYY-MM-DD` form field, as a validated day.
@@ -1433,6 +1445,18 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         series,
         expiry,
         window,
+        // THE SAME TWO PARSES SPOT USES, character for character. Sharing the
+        // rule rather than the code is deliberate here — the refusals name the
+        // field that was wrong, and a shared helper would have to be told which
+        // one it was serving to do that.
+        feed: {
+            let raw = param(body, "vendor");
+            parse_feed(&raw).ok_or(Refusal::UnknownVendor { got: raw })?
+        },
+        granularity: {
+            let raw = param(body, "granularity");
+            parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
+        },
     })
 }
 
