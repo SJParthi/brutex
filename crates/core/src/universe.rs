@@ -1571,4 +1571,26 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn union_is_idempotent_on_a_bit_both_sides_already_hold() {
+        // Overlap is the ONLY case that separates union from symmetric
+        // difference: on disjoint sets `|` and `^` return the same answer,
+        // and every other union test here happens to use disjoint sets. A
+        // stock that is both an F&O underlying and a Total Market
+        // constituent is the real shape this protects.
+        let fno = Universe::FNO;
+        let both = Universe::FNO.union(Universe::TOTAL_MARKET);
+
+        assert_eq!(fno.union(fno), fno, "union with itself is itself");
+        assert_eq!(
+            both.union(fno),
+            both,
+            "re-adding a bit the set already holds must not clear it"
+        );
+        assert!(
+            both.union(fno).contains(Universe::FNO),
+            "FNO survived being added twice"
+        );
+    }
 }

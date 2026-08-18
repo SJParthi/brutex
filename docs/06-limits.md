@@ -443,3 +443,35 @@ field measured 28 bytes across 333,840 rows of real data. If a vendor
 legitimately grows past 64, this refuses real rows — loudly, naming the field
 and the length, which is the intended failure. It is a number to revisit, not a
 law.
+
+---
+
+## 16. The mutation floor is five, not zero
+
+X-07 asks that no mutant survive on a touched module. Measured over
+`crates/core` with `cargo-mutants 26.2.0`, 252 mutants, 15 survived. Ten were
+real test gaps and are now killed by tests written for them. **Five cannot be
+killed by any test, because they do not change what the program computes.**
+They are recorded here so a future run reads a floor of five rather than
+concluding the suite regressed.
+
+| Mutant | Why no test can kill it |
+|---|---|
+| `isin.rs` — `(n - 1 - i) % 2` → `(n + 1 - i) % 2` | The two expressions differ by exactly 2, and parity is invariant under adding 2. The branch is chosen identically for every `n` and every `i`. |
+| `isin.rs` — `(n - 1 - i) % 2` → `(n - 1 + i) % 2` | The two differ by `2i`, which is even for every `i`. Same parity, same branch, always. |
+| `universe.rs` — `1 << 0` → `1 >> 0` | Shifting by zero is the identity in either direction. Both are `1`. |
+| `vendor.rs` — `1 << 0` → `1 >> 0` | The same shape, in `Vendor::bit`. Both are `1`. |
+| `symbol.rs` — `is_empty` → `false` | `Symbol::new` refuses an empty symbol, so `self.len == 0` is unreachable and the function already returns `false` for every value that can exist. Its own doc comment says so. |
+
+The first three of these are arithmetic identities, not weak assertions. A test
+written to catch one would have to observe a difference that is not there.
+
+**One survivor looked equivalent and was not.** `doubled / 10 + doubled % 10` →
+`doubled / 10 + doubled + 10` changes each doubled term by 10 or by 20 — always
+a multiple of ten — and the function ends `(10 - sum % 10) % 10`, so the check
+digit is unchanged. It is nonetheless observable, because `sum` is a `u8`: at
+the widest expansion the mutant reaches 264 and overflows. That is what
+`the_widest_expansion_stays_inside_the_eight_bit_accumulator` now exercises,
+and it is the reason the count above is five and not six. The lesson is that
+"equivalent modulo the result" and "equivalent" are different claims, and only
+the second one is a floor.
