@@ -4415,3 +4415,35 @@ only sweep generated bars should be built deliberately rather than by default.
 
 ---
 
+## 79. One mutant in the ladder cannot be killed by an assertion, because it does not terminate
+
+`crates/engine/src/lib.rs:713`. Measured 2026-08-18, `cargo-mutants 26.2.0` over
+that file: **64 mutants, 58 caught, 0 missed, 5 unviable, 1 timed out.**
+
+The survivor is `delete ! in Ladder::walk` — the loop condition
+`while !current.frequent.is_empty()`. Inverted, the walk runs only when the
+frontier is EMPTY, and `next_level` over an empty frontier produces another empty
+frontier, so the loop never exits and no budget can fire: `admitted` and
+`pairs_walked` both stay at zero because nothing is generated to count.
+
+**It cannot be killed the way the other 58 were.** A test kills a mutant by
+failing an assertion. This mutant hangs the suite instead, which `cargo-mutants`
+reports as `Timeout` rather than `MissedMutant` — and gate 18 treats a non-zero
+exit as a failure, so it does not pass silently.
+
+**Why it is recorded rather than fixed.** §33 of this file sets the precedent:
+non-terminating mutants are repaired by making the test's trip count independent
+of the mutated expression, or removed structurally. Both would mean restructuring
+the extinction loop — the mechanism `CLAUDE.md` §6 puts in place OF a depth
+parameter. A bound on `k` would terminate the mutant and would also be the thing
+§6 forbids, or would look enough like it to need its own decision entry. That is
+an operator's call, not a repair to make in passing.
+
+**What is not claimed:** that the loop is wrong. It is correct — `k` cannot
+exceed `ConditionMask::BITS` while the walk is sound, which the code comment at
+:714 already argues. What is claimed is only that one mutation of it is beyond
+the reach of an assertion, and that this is now written down instead of being a
+number nobody looked at.
+
+---
+

@@ -1140,6 +1140,90 @@ mod tests {
             .collect()
     }
 
+    /// THREE MUTANTS NOTHING WAS STANDING BETWEEN.
+    ///
+    /// `cargo-mutants` over this file on 2026-08-18 tested 34 mutants and three
+    /// survived, all of them here:
+    ///
+    /// * `replace Frontier::reconciles -> bool with true`
+    /// * `replace Ladder::min_hits -> u64 with 1`
+    /// * `delete field bars from struct Sweep expression in Ladder::walk`
+    ///
+    /// Each is a value the suite READ and never ASSERTED. `reconciles` was
+    /// called in tests only ever expecting `true`, so a version that can never
+    /// say `false` passed every one. `min_hits` was only ever set to 1 in the
+    /// paths that then read it back. And `bars` was carried through the whole
+    /// sweep without one assertion that it equals the column it was walked over.
+    ///
+    /// `CLAUDE.md` §9 blocks a build on a surviving mutant in a touched module.
+    /// These are what that clause is for: three accessors that could return a
+    /// constant and nothing would have noticed.
+    #[test]
+    fn the_frontier_summary_refuses_counters_that_do_not_add_up() {
+        // `generated` must equal duplicates + excluded + pruned + infrequent +
+        // the frequent set's own length. `excluded` is in that list because a
+        // position D-0080 rejects at k=1 was still generated.
+        let mut f = Frontier {
+            k: 1,
+            generated: 10,
+            duplicates: 2,
+            excluded: 3,
+            pruned: 1,
+            infrequent: 4,
+            ..Frontier::default()
+        };
+        assert!(
+            f.reconciles(),
+            "2 + 3 + 1 + 4 + 0 frequent is 10 generated, which balances"
+        );
+
+        // Move exactly one counter. A `reconciles` that cannot return false
+        // survives every assertion above and dies here.
+        f.infrequent = 5;
+        assert!(
+            !f.reconciles(),
+            "11 accounted against 10 generated must NOT reconcile — a summary \
+             that always balances hides the difference it exists to show"
+        );
+
+        f.infrequent = 3;
+        assert!(!f.reconciles(), "9 accounted against 10 generated is a gap");
+    }
+
+    #[test]
+    fn the_min_hits_getter_reports_the_threshold_actually_applied() {
+        // Deliberately not 1: `with_min_hits` raises zero TO one, so a getter
+        // stuck at 1 is indistinguishable from a correct one on the clamped
+        // path. 600 separates them.
+        assert_eq!(Ladder::with_min_hits(600).min_hits(), 600);
+        assert_eq!(
+            Ladder::with_min_hits(0).min_hits(),
+            1,
+            "zero is raised to one, and the getter reports what was APPLIED \
+             rather than what was asked for"
+        );
+        assert_eq!(Ladder::with_min_hits(2).min_hits(), 2);
+    }
+
+    #[test]
+    fn a_sweep_records_the_bar_count_it_was_walked_over() {
+        // `Sweep::bars` is what every support fraction downstream is taken over,
+        // and `runner::Outcome::trustworthy` compares it against the census. A
+        // sweep that reported 0 bars would make both meaningless, and nothing
+        // here asserted it until this test.
+        for len in [1_usize, 3, 7] {
+            let column = bars(&vec![&[0_u32, 1][..]; len]);
+            let sweep = Ladder::with_min_hits(1).walk(&column, &[0, 1]);
+            assert_eq!(
+                sweep.bars, len as u64,
+                "a {len}-bar column must be recorded as {len} bars"
+            );
+        }
+
+        let empty = Ladder::with_min_hits(1).walk(&[], &[0]);
+        assert_eq!(empty.bars, 0, "an empty column is zero bars, not unset");
+    }
+
     /// THE PROPERTY THE DELETED `popcount != k` FILTER USED TO ENFORCE.
     ///
     /// The prefix join drops the textbook `popcount != k` skip and justifies the

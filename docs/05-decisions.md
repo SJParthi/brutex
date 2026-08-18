@@ -14717,3 +14717,33 @@ no source in the charter to take it from. The operator picks it.
 
 ---
 
+## D-0166 · 2026-08-18 · Three mutants nothing was standing between
+
+`crates/engine/src/lib.rs`.
+
+`cargo-mutants` over this file found three survivors, all of them values the
+suite READ and never ASSERTED:
+
+* `replace Frontier::reconciles -> bool with true` — every test that called it
+  expected `true`, so a version that can never say `false` passed all of them.
+  The method exists to show a counter gap; one that always balances hides the
+  difference it was written to reveal.
+* `replace Ladder::min_hits -> u64 with 1` — only ever set to 1 on the paths that
+  read it back. `with_min_hits` raises zero TO one, so a getter stuck at 1 is
+  indistinguishable from a correct one on the clamped path.
+* `delete field bars from struct Sweep expression in Ladder::walk` — carried
+  through the whole sweep with no assertion that it equals the column walked,
+  though every support fraction is taken over it and `runner::Outcome` compares
+  it against the census.
+
+Three tests now pin them. Re-measured: **64 mutants, 58 caught, 0 missed, 5
+unviable, 1 timed out** — the timeout is the non-terminating loop mutant recorded
+at `docs/06-limits.md` §79, which no assertion can reach.
+
+**Why this was found now.** `CLAUDE.md` §9 has required "no surviving mutant on
+touched modules" throughout, and gate 18 scopes to the DIFF — so a module touched
+by a doc comment and a new test, as this one was, has its pre-existing survivors
+mutated by nothing. Running the file rather than the diff is what surfaced them.
+
+---
+
