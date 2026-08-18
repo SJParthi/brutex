@@ -2539,14 +2539,33 @@
     if (isValidIso(fromDay) && isValidIso(toDay) && dayNum(toDay) < dayNum(fromDay)) {
       out.push({
         field: 'to',
-        why: `To is ${dayLabel(toDay)}, which is ${n(dayNum(fromDay) - dayNum(toDay))} day(s) BEFORE From (${dayLabel(fromDay)}). A window runs forward — the two are the wrong way round.`
+        why: `To is ${dayLabel(toDay)}, which is ${n(dayNum(fromDay) - dayNum(toDay))} day(s) BEFORE From (${dayLabel(fromDay)}). A window runs forward — the two are the wrong way round.`,
+        // THE FIX IS THE ONLY ONE THIS PAGE CAN BE SURE OF. Two valid days in
+        // the wrong order have exactly one reading; every other refusal here
+        // has to guess which end the operator meant, so only the ones with a
+        // single answer carry a button.
+        fix: {
+          label: 'Swap them',
+          run: () => {
+            const [a, b] = [fromDay, toDay];
+            setDay('from', b);
+            setDay('to', a);
+          }
+        }
       });
     }
     for (const [field, value] of [['from', fromDay], ['to', toDay]]) {
       if (!isValidIso(value)) continue;
       const Name = field === 'from' ? 'From' : 'To';
       if (dayNum(value) > dayNum(maxDay)) {
-        out.push({ field, why: `${Name} is ${dayLabel(value)}, after ${dayLabel(maxDay)}. ${ceilReason}` });
+        out.push({
+          field,
+          why: `${Name} is ${dayLabel(value)}, after ${dayLabel(maxDay)}. ${ceilReason}`,
+          fix: {
+            label: `Use ${dayLabel(maxDay)}`,
+            run: () => setDay(/** @type {'from' | 'to'} */ (field), maxDay)
+          }
+        });
       }
       // THE FEED'S FLOOR IS THE ONLY THING THAT MAY REFUSE AN OLD DAY, and the
       // refusal NAMES IT: which feed, at which timeframe, and from when. "Out
@@ -2567,14 +2586,27 @@
       if (dayNum(value) < dayNum(minDay)) {
         out.push({
           field,
-          why: `${Name} is ${dayLabel(value)}, earlier than ${dayLabel(minDay)} — the floor the server's own picker offers (crates/api/src/calendar.rs).`
+          why: `${Name} is ${dayLabel(value)}, earlier than ${dayLabel(minDay)} — the floor the server's own picker offers (crates/api/src/calendar.rs).`,
+          fix: {
+            label: `Use ${dayLabel(minDay)}`,
+            run: () => setDay(/** @type {'from' | 'to'} */ (field), minDay)
+          }
         });
       }
     }
     if (windowDays > MAX_WINDOW_DAYS) {
+      /* THE SENTENCE LEADS WITH THE NUMBER TO MOVE AND ENDS WITH THE SYMBOL.
+         It used to open on `api::ingest::MAX_WINDOW_DAYS`, which is the one
+         clause in it an operator can do nothing with — and by the time he had
+         read past the identifier the line had run off the width of the card.
+         The overshoot, the cap and the day to start on come first because they
+         are what the next click is; the citation stays, last, for the reader
+         who wants to know who refused. */
+      const start = addDays(toDay, -(MAX_WINDOW_DAYS - 1));
       out.push({
         field: 'to',
-        why: `${dayLabel(fromDay)} – ${dayLabel(toDay)} is ${n(windowDays)} days. api::ingest::MAX_WINDOW_DAYS caps one request at ${n(MAX_WINDOW_DAYS)} days, so the parser refuses it before any vendor is contacted.`
+        why: `${dayLabel(fromDay)} – ${dayLabel(toDay)} is ${n(windowDays)} days, ${n(windowDays - MAX_WINDOW_DAYS)} more than one request may carry. Start on ${dayLabel(start)} instead, or move To earlier. The cap is ${n(MAX_WINDOW_DAYS)} days (api::ingest::MAX_WINDOW_DAYS) and the parser applies it before any vendor is contacted.`,
+        fix: { label: `Start ${dayLabel(start)}`, run: () => setDay('from', start) }
       });
     }
     if (isFolderFeed && !folder.trim()) {
@@ -4699,6 +4731,29 @@
     }
     return null;
   });
+  /**
+   * THE SAME REFUSAL, SHORT ENOUGH TO PUT ON THE PAGE.
+   *
+   * `rerunBlock` is a whole sentence and it was rendered THREE TIMES on one
+   * screen — in the refusal list, beside this button, and again on the button's
+   * own `title` — for a single mistyped date. Two of those copies were the same
+   * words the reader had just read six inches higher, and the visible one ran
+   * off the right edge of the card because the row it sits in does not wrap.
+   *
+   * So the sentence is kept where it is READ ONCE — the list above, and the
+   * tooltip for the reader who is on the button rather than the list — and what
+   * is drawn beside the control is the COUNT and the field, which is the part
+   * that says whether this button is the thing to fix. Nothing is lost and
+   * nothing is repeated: `rerunBlock` still carries every word.
+   */
+  const rerunShort = $derived.by(() => {
+    if (phase === 'running') return 'a pull is already on the wire';
+    if (problems.length > 0) {
+      const fields = [...new Set(problems.map((p) => p.field))].join(', ');
+      return `${n(problems.length)} thing(s) to fix above — ${fields}`;
+    }
+    return null;
+  });
 
   let q = $state('');
   /** @type {string | null} */
@@ -4805,8 +4860,31 @@
   // upward when there is no room below, retracting with its rung, and the whole
   // keyboard.
 
-  /** @type {{ field: 'from' | 'to' | null, cursor: string, view: string, up: boolean }} */
-  let cal = $state({ field: null, cursor: '', view: '', up: false });
+  /**
+   * WHICH FACE THE PANEL IS SHOWING, AND WHY IT IS A FACE RATHER THAN A MENU.
+   *
+   * The month and the year used to be two `Picker`s in the header. `Picker` is
+   * the STRIP's control -- 42px rows, an 18px radio, a 380px scroll box, a
+   * panel that hangs `position: absolute` off the button it belongs to. Inside
+   * a 272px calendar header that panel has nowhere to hang but OVER THE GRID:
+   * opening the year drew a twelve-row scrolling list of radio buttons across
+   * the forty-two days it was supposed to be steering, so the reader lost sight
+   * of the thing he was navigating at the exact moment he navigated it.
+   *
+   * A calendar does not need a menu for this. It needs the same box to show a
+   * different face: days, then the twelve months, then the years, each one
+   * REPLACING the grid in place and drilling back down to it. Nothing overlaps
+   * anything, nothing scrolls, and the panel never changes size -- `.calbody`
+   * carries the day grid's own height so the footer does not move under the
+   * pointer when the face changes.
+   *
+   * `Picker` itself is untouched. It is still the right control for a rung in
+   * the strip and it is shared with three other pages; what was wrong was
+   * putting a rung control inside a popover.
+   *
+   * @type {{ field: 'from' | 'to' | null, cursor: string, view: string, up: boolean, pad: 'day' | 'month' | 'year' }}
+   */
+  let cal = $state({ field: null, cursor: '', view: '', up: false, pad: 'day' });
   /** @type {HTMLDivElement | null} */
   let calEl = $state(null);
 
@@ -4850,6 +4928,62 @@
     calDays.every((d) => d.slice(0, 7) !== calView || dayBlock(d) !== null)
   );
 
+  /* ---- the three faces -------------------------------------------------
+     One caption, one pair of arrows, three bodies. Each face states its own
+     step so the header is never a control whose meaning the reader has to
+     infer from what is underneath it. */
+
+  /** The twelve months of the year on screen, each carrying its own refusal. */
+  const calMonths = $derived(
+    MON.map((label, i) => {
+      const ym = `${pad(calYear, 4)}-${pad(i + 1)}`;
+      return { ym, label, off: ym < minMonth || ym > maxMonth };
+    })
+  );
+
+  /** What the caption says, which is always the unit the arrows move. */
+  const calCaption = $derived(
+    cal.pad === 'day'
+      ? `${MON[calMonthNo - 1]} ${calYear}`
+      : cal.pad === 'month'
+        ? String(calYear)
+        : `${calYears[0]} – ${calYears[calYears.length - 1]}`
+  );
+  /** What the caption OPENS, named on its own tooltip rather than guessed at. */
+  const calCaptionTitle = $derived(
+    cal.pad === 'day'
+      ? 'Pick a month instead of paging one at a time.'
+      : cal.pad === 'month'
+        ? 'Pick a year.'
+        : 'Back to the days.'
+  );
+  const calBack = $derived(
+    cal.pad === 'day'
+      ? { on: calView > minMonth, why: 'Previous month' }
+      : cal.pad === 'month'
+        ? { on: calYear > calYears[0], why: 'Previous year' }
+        : { on: false, why: 'Every year this field may take is on screen' }
+  );
+  const calFwd = $derived(
+    cal.pad === 'day'
+      ? { on: calView < maxMonth, why: 'Next month' }
+      : cal.pad === 'month'
+        ? { on: calYear < calYears[calYears.length - 1], why: 'Next year' }
+        : { on: false, why: 'Every year this field may take is on screen' }
+  );
+  /** The arrows move the unit the caption names, whichever face is up.
+   * @param {number} by */
+  function calStep(by) {
+    if (cal.pad === 'day') pickView(addMonths(calView, by));
+    else if (cal.pad === 'month') pickView(clampView(`${pad(calYear + by, 4)}-${pad(calMonthNo)}`));
+  }
+  /* THE CAPTION DRILLS UP AND A CHOICE DRILLS BACK DOWN -- days to months to
+     years, and a picked year lands on the months of that year rather than
+     jumping straight back to a grid the reader has not chosen a month for. */
+  function calZoom() {
+    cal = { ...cal, pad: cal.pad === 'day' ? 'month' : cal.pad === 'month' ? 'year' : 'day' };
+  }
+
   /** @param {'from' | 'to'} field */
   function openCal(field) {
     if (cal.field === field) {
@@ -4869,7 +5003,10 @@
     // the feed changed is exactly the day the reader is looking for, and
     // jumping him to the floor's month would hide the struck-through cell that
     // explains what happened.
-    cal = { field, cursor: clampDay(seed), view: clampView(seed.slice(0, 7)), up };
+    // ALWAYS ON THE DAYS. A panel that reopened on the month pad because that
+    // is where it was left would answer a question the reader did not ask
+    // twice in a row.
+    cal = { field, cursor: clampDay(seed), view: clampView(seed.slice(0, 7)), up, pad: 'day' };
     // FOCUS HAS TO ENTER THE PANEL, ONCE. The keydown handler is on the panel,
     // so with focus left on the trigger every arrow key went to the page
     // instead: the picker opened and then ignored the keyboard entirely.
@@ -5037,12 +5174,17 @@
       shutCal();
       return;
     }
-    // THE HEADER SELECTS KEEP THEIR OWN ARROW KEYS. This handler sits on the
-    // panel, so every keydown inside it arrives here — including the ones aimed
-    // at the month and year <select>, where the block below would
-    // preventDefault them and leave a select that cannot be walked.
-    if (e.target !== e.currentTarget && /** @type {Element | null} */ (e.target)?.tagName === 'SELECT')
-      return;
+    // THE MONTH AND YEAR PADS ARE NOT A GRID OF DAYS, so nothing below this
+    // line applies to them. Every chip on those two faces is a real button in
+    // the tab order — Tab walks them, Enter and Space press them — and the day
+    // cursor must not move under a face that is not showing it.
+    //
+    // THIS GUARD USED TO NAME `<select>`, and it had been dead since the two
+    // header selects became `Picker`s: `tagName === 'SELECT'` matched nothing,
+    // so every arrow key aimed at the open month menu was preventDefault-ed
+    // here and the menu could not be walked at all. A guard that names a
+    // control the page no longer has is not a guard.
+    if (cal.pad !== 'day') return;
     // KEYED BY THE KEY NAME, WHICH IS A STRING. The four names are the whole
     // table and `e.key in map` is the membership test right below it; declaring
     // the record is what lets the lookup on the next line be the same lookup
@@ -6146,7 +6288,11 @@
                          acted on. Same defect the `.wrap` modifier exists for
                          one comment above. -->
                     {#if folderReach.body?.path}
-                      <span class="note quiet wrap">
+                      <!-- `full`: a PATH is the one caption on this strip that
+                           may not be clipped to the uniform block, for the
+                           reason the comment above already gives — an ellipsed
+                           path looks like an answer and cannot be acted on. -->
+                      <span class="note quiet wrap full">
                         resolved: <button
                           class="pathbtn mono"
                           type="button"
@@ -6306,7 +6452,21 @@
             {#if (showProblems || gate || staleWindow) && problems.length > 0}
               <ul class="probs panel-in" aria-live="polite">
                 {#each problems as p (p.field + p.why)}
-                  <li><span class="tag down">{p.field}</span><span class="msg">{p.why}</span></li>
+                  <li>
+                    <span class="tag down">{p.field}</span>
+                    <span class="msg">{p.why}</span>
+                    <!-- A REFUSAL THAT KNOWS THE ANSWER SHOULD OFFER IT. Every
+                         sentence here already names the day to move to; making
+                         the reader retype it into the field above is the whole
+                         of what stood between him and a legal window. Only the
+                         refusals with ONE reading carry a button — see `fix` in
+                         `problems`. -->
+                    {#if p.fix}
+                      <button type="button" class="btn sm pfix" onclick={p.fix.run}>
+                        {p.fix.label}
+                      </button>
+                    {/if}
+                  </li>
                 {/each}
               </ul>
             {/if}
@@ -6513,8 +6673,8 @@
                 >
                   Pull the window again — {n(shortCount)} short
                 </button>
-                {#if rerunBlock}
-                  <span class="hint warn">Cannot be pressed: {rerunBlock}</span>
+                {#if rerunShort}
+                  <span class="hint warn" title={rerunBlock}>Cannot be pressed: {rerunShort}</span>
                 {/if}
               </div>
             {/if}
@@ -6697,8 +6857,8 @@
                 >
                   Pull the {n(censusShort)} month file(s) this window is short
                 </button>
-                {#if rerunBlock}
-                  <span class="hint warn">Cannot be pressed: {rerunBlock}</span>
+                {#if rerunShort}
+                  <span class="hint warn" title={rerunBlock}>Cannot be pressed: {rerunShort}</span>
                 {/if}
               </div>
             {/if}
@@ -7296,105 +7456,112 @@
     onkeydown={onCalKey}
     tabindex="-1"
   >
+    <!-- THE HEADER IS A CAPTION BETWEEN TWO ARROWS, and the caption is the
+         control. It was two `Picker`s; see `cal.pad` for why a strip control
+         inside a 272px popover could only ever draw over the grid it steers.
+         The arrows always move the unit the caption names, so the pair reads
+         as one instrument on all three faces. -->
     <div class="cal-h">
       <button
         type="button"
         class="nav"
-        aria-label="Previous month"
-        disabled={calView <= minMonth}
-        onclick={() => pickView(addMonths(calView, -1))}>‹</button
+        aria-label={calBack.why}
+        title={calBack.why}
+        disabled={!calBack.on}
+        onclick={() => calStep(-1)}>&lsaquo;</button
       >
-      <!-- TWO SELECTS, NOT A SECOND PANE AND NOT ARROWS ALONE. Paging a month
-           at a time is how a reader ends up thirty clicks from where they meant
-           to be; these two reach any day in the span in two picks, and they
-           carry the same bounds the grid does. -->
-      <!-- `Picker`, NOT `<select>`, AND THE REASON IS A BROWSER LIMIT.
-           `.calsel` carried `appearance: none`, so the CLOSED control looked
-           right; a `<select>`'s OPEN list is drawn by the operating system and
-           no CSS reaches it, so on macOS it rendered the OS blue highlight and
-           its own tick -- a control from a different product in the middle of
-           this one. $lib/DayField.svelte's header was changed for the same
-           reason, and these two are the other half of it: until now /db's
-           calendar drew its own menus and /ingest's borrowed the OS's.
-           A month outside the span stays DRAWN AND DISABLED, exactly as the
-           `disabled` attribute on the old `<option>` did. -->
-      <div class="cpick">
-        <Picker
-          single
-          label="months"
-          summary={MON[calMonthNo - 1] ?? 'Month'}
-          title="The month this grid is showing."
-          rows={MON.map((label, i) => ({
-            key: String(i + 1),
-            name: label,
-            disabled:
-              `${pad(calYear, 4)}-${pad(i + 1)}` < minMonth ||
-              `${pad(calYear, 4)}-${pad(i + 1)}` > maxMonth,
-            why:
-              `${pad(calYear, 4)}-${pad(i + 1)}` < minMonth ||
-              `${pad(calYear, 4)}-${pad(i + 1)}` > maxMonth
-                ? 'outside the span this field may take'
-                : undefined
-          }))}
-          selected={new Set([String(calMonthNo)])}
-          onchange={(/** @type {Set<string>} */ sel) => {
-            const m = [...sel][0];
-            if (m) pickView(`${pad(calYear, 4)}-${pad(Number(m))}`);
-          }}
-        />
-      </div>
-      <div class="cpick">
-        <Picker
-          single
-          label="years"
-          summary={String(calYear)}
-          title="The year this grid is showing."
-          rows={calYears.map((y) => ({ key: String(y), name: String(y) }))}
-          selected={new Set([String(calYear)])}
-          onchange={(/** @type {Set<string>} */ sel) => {
-            const y = [...sel][0];
-            if (y) pickView(`${pad(Number(y), 4)}-${pad(calMonthNo)}`);
-          }}
-        />
-      </div>
+      <button
+        type="button"
+        class="calcap"
+        aria-label={`${calCaption}. ${calCaptionTitle}`}
+        title={calCaptionTitle}
+        aria-expanded={cal.pad !== 'day'}
+        onclick={calZoom}
+      >
+        <span class="capt">{calCaption}</span>
+        <span class="capc" class:on={cal.pad !== 'day'} aria-hidden="true">&#9662;</span>
+      </button>
       <button
         type="button"
         class="nav"
-        aria-label="Next month"
-        disabled={calView >= maxMonth}
-        onclick={() => pickView(addMonths(calView, 1))}>›</button
+        aria-label={calFwd.why}
+        title={calFwd.why}
+        disabled={!calFwd.on}
+        onclick={() => calStep(1)}>&rsaquo;</button
       >
     </div>
 
-    <div class="calwk" aria-hidden="true">
-      {#each WEEK as w (w)}<span>{w}</span>{/each}
-    </div>
+    <!-- ONE BOX, THREE FACES, ONE HEIGHT. The days, the twelve months and the
+         years each fill the same block, so the note and the footer under it do
+         not move when the reader changes face. -->
+    <div class="calbody">
+      {#if cal.pad === 'month'}
+        <div class="calpad" role="group" aria-label="Months of {calYear}">
+          {#each calMonths as m (m.ym)}
+            <button
+              type="button"
+              class="padc"
+              disabled={m.off}
+              class:on={m.ym === calView}
+              title={m.off ? `${m.label} ${calYear} is outside ${dayLabel(minDay)} – ${dayLabel(maxDay)}.` : `Show ${m.label} ${calYear}.`}
+              onclick={() => {
+                pickView(m.ym);
+                cal = { ...cal, pad: 'day' };
+              }}
+            >
+              {m.label}
+            </button>
+          {/each}
+        </div>
+      {:else if cal.pad === 'year'}
+        <div class="calpad years" role="group" aria-label="Years this field may take">
+          {#each calYears as y (y)}
+            <button
+              type="button"
+              class="padc"
+              class:on={y === calYear}
+              title={`Show the months of ${y}.`}
+              onclick={() => {
+                pickView(clampView(`${pad(y, 4)}-${pad(calMonthNo)}`));
+                cal = { ...cal, pad: 'month' };
+              }}
+            >
+              {y}
+            </button>
+          {/each}
+        </div>
+      {:else}
+        <div class="calwk" aria-hidden="true">
+          {#each WEEK as w (w)}<span>{w}</span>{/each}
+        </div>
 
-    <div class="dgrid" role="group" aria-label="Days of {monthLabel(calView)}">
+        <div class="dgrid" role="group" aria-label="Days of {monthLabel(calView)}">
       {#each calDays as d (d)}
         {@const why = dayBlock(d)}
         <!-- A REFUSED DAY CARRIES ITS OWN REASON, and a takeable one carries
              what it is. `title` is never empty: Svelte drops the attribute when
              the expression is null, and a tooltip that says nothing is worse
              than none. -->
-        <button
-          type="button"
-          class="cday"
-          data-day={d}
-          disabled={why !== null}
-          title={why ?? dayNote(d)}
-          tabindex={d === cal.cursor ? 0 : -1}
-          aria-pressed={d === (cal.field === 'from' ? fromDay : toDay)}
-          class:picked={d === (cal.field === 'from' ? fromDay : toDay)}
-          class:cursor={d === cal.cursor}
-          class:oth={d.slice(0, 7) !== calView}
-          class:nos={noSessionWhy(d) !== null}
-          class:now={d === maxDay}
-          onclick={() => commit(d)}
-        >
-          {Number(d.slice(8))}
-        </button>
-      {/each}
+          <button
+            type="button"
+            class="cday"
+            data-day={d}
+            disabled={why !== null}
+            title={why ?? dayNote(d)}
+            tabindex={d === cal.cursor ? 0 : -1}
+            aria-pressed={d === (cal.field === 'from' ? fromDay : toDay)}
+            class:picked={d === (cal.field === 'from' ? fromDay : toDay)}
+            class:cursor={d === cal.cursor}
+            class:oth={d.slice(0, 7) !== calView}
+            class:nos={noSessionWhy(d) !== null}
+            class:now={d === maxDay}
+            onclick={() => commit(d)}
+          >
+            {Number(d.slice(8))}
+          </button>
+        {/each}
+        </div>
+      {/if}
     </div>
 
     <!-- THE BOUNDS THE STRUCK-THROUGH DAYS ARE ENFORCING, WRITTEN OUT.
@@ -7406,30 +7573,6 @@
     <p class="calnote">
       {dayLabel(minDay)} – {dayLabel(maxDay)} can be picked. Faint days hold no session;
       struck-through days are outside what this field may take.
-      <!-- THE FLOOR IS STATED, NOT ENFORCED. It used to be both the sentence
-           AND the bound, so this line advertised the feed's floor as the
-           pickable span. The grid now offers the server's whole span and the
-           floor is a property of the ASK, so the sentence has to say what the
-           vendor will actually return rather than what the control will let
-           you choose. Silence here would be the §4 failure; a narrower control
-           was simply the wrong place to put the warning. -->
-      {#if feedFloor.at && feedFloor.at > minDay}
-        <br />Earlier days are pickable and this feed will not answer for all of them:
-        {floorSentence} A day before that returns nothing from this feed — pick a feed or a
-        timeframe that reaches further back to fill it.
-      {/if}
-      <!-- A FOLDER FEED HAS NO FLOOR TO PRINT, AND THIS IS WHAT IT HAS INSTEAD.
-           Not a rule about how far back a vendor will answer — there is no
-           vendor in this sentence — but the span of the files actually in the
-           folder, read from it, with the path beside it. The grid does NOT
-           strike days outside it: those days are askable and will simply come
-           back with nothing, and striking them would claim a refusal nobody
-           made. -->
-      {#if folderReachSentence}
-        <br />No floor applies — {active?.display} is a folder of bought files, so its range is
-        whatever is in it: {folderReachSentence}. Days outside it can still be picked; they hold no file,
-        so they come back empty rather than refused.
-      {/if}
       {#if nothingInView}
         <span class="far">
           No day in {monthLabel(calView)} can be picked here.
@@ -7441,6 +7584,64 @@
         </span>
       {/if}
     </p>
+
+    <!-- THE REACH CAVEAT, HEADLINE OUT AND REASONING FOLDED — AND THAT IS NOT
+         THE §4 FALLBACK.
+         What stood here was eight lines of grey prose inside a 272px popover:
+         the bounds, then the feed's floor with its rolling clause and its
+         citation, then the folder's span, then the month warning. Four separate
+         facts of four different kinds set as one paragraph, so the two that
+         matter — a date, and a warning — read as the same weight as the two
+         that explain them. A reader who meets that wall reads none of it, which
+         is the same outcome as saying nothing and is why it had to change.
+
+         WHAT IS FOLDED IS THE ARGUMENT, NEVER THE FACT. The summary carries the
+         DATE and the feed's name, on screen, unfolded; only the sentence
+         explaining what to do about it is one click away. §4 bans a fallback
+         that HIDES a failure, and nothing here is hidden: the same idiom, with
+         the same reasoning, is what `$lib/Picker.svelte` already uses for the
+         rows a feed cannot serve. The month warning above is NOT in here — a
+         refusal that applies to what is on screen right now stays on screen. -->
+    {#if (feedFloor.at && feedFloor.at > minDay) || folderReachSentence}
+      <details class="calwhy">
+        <summary>
+          {#if feedFloor.at && feedFloor.at > minDay}
+            {feedName(feeds.active)} answers from {dayLabel(feedFloor.at)}{feedFloor.rolling
+              ? ' (rolling)'
+              : ''}
+          {:else}
+            {active?.display} holds files, not a floor
+          {/if}
+        </summary>
+        {#if feedFloor.at && feedFloor.at > minDay}
+          <!-- THE FLOOR IS STATED, NOT ENFORCED. It used to be both the sentence
+               AND the bound, so this line advertised the feed's floor as the
+               pickable span. The grid now offers the server's whole span and the
+               floor is a property of the ASK, so the sentence has to say what the
+               vendor will actually return rather than what the control will let
+               you choose. -->
+          <p>
+            Earlier days are pickable and this feed will not answer for all of them:
+            {floorSentence} A day before that returns nothing from this feed — pick a feed or a
+            timeframe that reaches further back to fill it.
+          </p>
+        {/if}
+        <!-- A FOLDER FEED HAS NO FLOOR TO PRINT, AND THIS IS WHAT IT HAS INSTEAD.
+             Not a rule about how far back a vendor will answer — there is no
+             vendor in this sentence — but the span of the files actually in the
+             folder, read from it, with the path beside it. The grid does NOT
+             strike days outside it: those days are askable and will simply come
+             back with nothing, and striking them would claim a refusal nobody
+             made. -->
+        {#if folderReachSentence}
+          <p>
+            No floor applies — {active?.display} is a folder of bought files, so its range is
+            whatever is in it: {folderReachSentence}. Days outside it can still be picked; they hold
+            no file, so they come back empty rather than refused.
+          </p>
+        {/if}
+      </details>
+    {/if}
     <div class="cal-f">
       <button type="button" class="btn ghost sm" onclick={() => commit(maxDay)}>
         {dayLabel(maxDay)}
@@ -7771,6 +7972,39 @@
     content: '▲ ';
     font-size: 8px;
     color: var(--warn);
+  }
+  /* ══ THE STRIP IS A ROW, AND ITS CAPTIONS ARE WHAT STOPPED IT BEING ONE ══
+
+     `.pickers` is a grid of five controls with `align-items: start`, so each
+     cell is exactly as tall as what is in it. The captions underneath were not
+     the same height as each other and could not be: a `.note` is one clipped
+     line and a `.note.wrap` is however many lines its sentence needs, and the
+     timeframe's — "Dhan — REST API. It serves one minute and coarser. One
+     record at one minute is a bar — open, high, low, close." — ran to five
+     against neighbours that ran to one. Five controls laid out on one baseline,
+     and under them a row four lines taller at one end than the other.
+
+     A FIXED TWO-LINE BLOCK, RESERVED WHETHER IT IS FILLED OR NOT. Two lines
+     rather than one because one was already cutting "everything below is this
+     feed's answer" mid-word; reserved rather than fitted because a caption that
+     grows when a feed answers slowly reflows the whole strip under the reader's
+     hands, which is the hazard the one-line rule was protecting against and it
+     is protected against here too. The box does not change size, so nothing
+     below it can move.
+
+     QUIET CAPTIONS ONLY, AND THAT DISTINCTION IS §4's. A `.note.quiet` is a
+     remark — it carries `·` and it says what a control IS. A `.note.warn`
+     carries `▲` and is a refusal, and an ellipsed refusal is the failure this
+     repository keeps writing comments about, so warnings are not clamped and a
+     cell that grows because something is wrong is a cell that should. */
+  .pickers .field > .note.quiet:not(.full) {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    white-space: normal;
+    overflow: hidden;
+    min-height: calc(2 * 1.35 * var(--fs-micro));
   }
   /* A `pknote` is a one-line tail by default — nowrap, clipped, ellipsed. A
      SENTENCE put in one is a sentence with its end cut off, which is the same
@@ -8183,43 +8417,126 @@
     opacity: 0.3;
     cursor: not-allowed;
   }
-  /* THE HEADER MENUS, SIZED AS `$lib/DayField.svelte` sizes its own so the two
-     calendars in this product are one design rather than two. */
-  .cpick {
+  /* THE CAPTION IS THE CONTROL, and it takes the width the two menus took.
+     One target between the arrows, so the header reads as a single instrument
+     rather than as four things that happen to sit on a line. */
+  .calcap {
     flex: 1 1 auto;
     min-width: 0;
-  }
-  .cpick :global(.pbtn) {
-    padding: 5px 22px 5px 8px;
-    font-size: var(--fs-xs);
-    border-radius: var(--r1);
-    text-align: center;
-    background-position:
-      calc(100% - 11px) 55%,
-      calc(100% - 7px) 55%;
-  }
-  .calsel {
-    flex: 1 1 auto;
-    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s3);
+    height: 26px;
+    padding: 0 var(--s4);
     appearance: none;
-    background: var(--panel);
-    border: 1px solid var(--line);
+    background: none;
+    border: 1px solid transparent;
     border-radius: var(--r2);
     color: var(--ink);
     font: inherit;
     font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
     font-size: var(--fs-sm);
     font-weight: var(--w-semi);
-    text-align: center;
-    height: 26px;
-    padding: 0 var(--s4);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--track-caps);
     cursor: pointer;
-    outline: none;
   }
-  .calsel:focus {
+  .calcap:hover {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--acc);
+  }
+  .calcap:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 1px;
+  }
+  .capt {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* THE CARET SAYS WHICH WAY THE PANEL IS ABOUT TO GO. Down while the days are
+     showing — press and a face opens; up while a pad is showing — press and it
+     closes back to the days. */
+  .capc {
+    flex: 0 0 auto;
+    /* 11px, not 9. At 9 the triangle rendered as a speck beside the caption and
+       read as a stray dot — the one mark saying this text is pressable. */
+    font-size: 11px;
+    line-height: 1;
+    color: var(--dim);
+  }
+  .calcap:hover .capc {
+    color: var(--acc);
+  }
+  .capc.on {
+    transform: rotate(180deg);
+    color: var(--acc);
+  }
+
+  /* ONE HEIGHT FOR THREE FACES. 203px is the day face measured, not chosen:
+     the weekday strip is one --fs-mini line at --lh-base over 2px and 4px of
+     padding (~25px), and the grid is six 28px rows with five --s1 gaps (178px).
+     Without this the panel would shrink when the months face opened and the
+     note, the disclosure and the footer would all jump up under the pointer. */
+  .calbody {
+    min-height: 203px;
+    display: flex;
+    flex-direction: column;
+  }
+  /* THE MONTHS AND THE YEARS. Three columns, filling the block the days leave,
+     so twelve chips are one glance rather than a scroll. `auto-fill` on the
+     rows rather than a fixed four: the year span is FLOOR_YEAR to the ceiling's
+     year and grows by one every January, and a hardcoded row count would start
+     clipping the newest year the first time it did. */
+  .calpad {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: minmax(38px, 1fr);
+    gap: var(--s2);
+    align-content: stretch;
+    overflow-y: auto;
+  }
+  .padc {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    appearance: none;
+    font: inherit;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    border: 1px solid transparent;
+    border-radius: var(--r2);
+    background: none;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .padc:hover:not(:disabled) {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--acc);
+  }
+  /* STRUCK, NOT ABSENT — the same rank the day grid gives a refused day, so a
+     month outside the span reads the same way on both faces. */
+  .padc:disabled {
+    color: var(--faint);
+    cursor: not-allowed;
+    text-decoration: line-through;
+    text-decoration-color: var(--down);
+  }
+  .padc.on {
+    background: var(--acc);
     border-color: var(--acc);
-    box-shadow: 0 0 0 3px var(--acc-soft);
+    color: var(--on-acc);
+    font-weight: var(--w-bold);
+  }
+  .padc:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 1px;
   }
   /* SEVEN COLUMNS, MONDAY-FIRST, and the weekday strip shares the grid so the
      two can never fall out of step. */
@@ -8302,6 +8619,49 @@
     line-height: var(--lh-base);
     color: var(--faint);
   }
+  /* THE FOLDED CAVEAT. The summary is a FACT — a feed name and a date — so the
+     line carries its own answer closed, and only the paragraph explaining what
+     to do about it opens. Marker suppressed and redrawn, because the platform
+     triangle is drawn by the OS at the OS's size and is the one mark on this
+     panel no rule here reaches. */
+  .calwhy {
+    margin-top: var(--s3);
+    font-size: var(--fs-micro);
+    line-height: var(--lh-base);
+    color: var(--faint);
+  }
+  .calwhy summary {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    padding: var(--s2) 0;
+    color: var(--dim);
+    font-family: var(--mono);
+    cursor: pointer;
+    list-style: none;
+  }
+  .calwhy summary::-webkit-details-marker {
+    display: none;
+  }
+  .calwhy summary::before {
+    content: '\25B8';
+    flex: 0 0 auto;
+    /* Same reasoning as `.capc`: below about 10px a triangle in a mono face
+       stops reading as a direction and starts reading as punctuation. */
+    font-size: 10px;
+    line-height: 1;
+    color: var(--acc);
+  }
+  .calwhy[open] summary::before {
+    transform: rotate(90deg);
+  }
+  .calwhy summary:hover {
+    color: var(--ink);
+  }
+  .calwhy p {
+    margin: var(--s2) 0 0;
+    padding-left: var(--s5);
+  }
   /* The reader navigated somewhere this field cannot take a day from. That is a
      legitimate place to be and it gets an answer in words, on its own line — not
      forty-two identical tooltips. */
@@ -8323,24 +8683,53 @@
     font-size: var(--fs-xs);
   }
 
-  /* ---- validation and cautions ---- */
+  /* ---- validation and cautions ----
+
+     A REFUSAL IS AN EDGE, NOT A WALL. This was a full crimson border around a
+     crimson fill, at card width, and it drew the same way for one date that is
+     a day out as for a form with nothing in it — so the loudest object on the
+     page was permanently loud and stopped carrying information. The rail on the
+     left is the mark now, at full strength; the ground behind it is six per
+     cent of the same hue over the panel, which reads as "this list is the
+     refusals" without shouting it. The hue has not changed and nothing is
+     quieter to a colour-blind reader: the rail is a position, the chip on every
+     row still says which field, and the sentence still says what happened. */
   .probs {
     list-style: none;
     margin: 0;
-    padding: var(--s4) var(--s5);
+    padding: var(--s5);
     display: flex;
     flex-direction: column;
-    gap: var(--s3);
-    background: var(--down-soft);
-    border: 1px solid var(--down);
+    gap: var(--s4);
+    background: color-mix(in srgb, var(--down) 6%, var(--panel));
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--down);
     border-radius: var(--r3);
     font-size: var(--fs-xs);
     line-height: var(--lh-base);
   }
   .probs li {
     display: flex;
-    gap: var(--s4);
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s4);
     align-items: baseline;
+  }
+  /* THE SENTENCES START ON ONE LINE. `from` and `to` are four letters apart, so
+     a chip sized to its own text left every message at a different x and the
+     list read as ragged rather than as a column of refusals. Wide enough for
+     the longest field name this page can put in one — `folder`. */
+  .probs li > .tag {
+    min-width: 56px;
+    text-align: center;
+  }
+  /* THE FIX SITS AT THE END OF THE SENTENCE THAT EARNED IT. `margin-left: auto`
+     rather than a column, so a row with no fix does not reserve a gutter for
+     one — and `flex-wrap` above puts it on its own line rather than crushing
+     the sentence when the card is narrow. */
+  .probs .pfix {
+    flex: 0 0 auto;
+    margin-left: auto;
+    align-self: center;
   }
   .caution {
     display: flex;
@@ -8577,11 +8966,22 @@
     color: var(--down);
     font-weight: var(--w-bold);
   }
+  /* IT MAY SHRINK AND IT MAY WRAP. `flex: 0 0 auto` on a row holding a button
+     AND a sentence is a row that cannot give any width back, so the sentence
+     pushed the strip wider than the card and ran off the right edge of the
+     window — visible in the refused state, which is the one state where the
+     sentence matters. `min-width: 0` is the half that lets the hint shrink at
+     all; without it the flex item's automatic minimum size is its content. */
   .lstrip .lact {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--s3);
+  }
+  .lstrip .lact .hint {
+    min-width: 0;
   }
 
   /* ---- the outcome list ---- */
@@ -9032,7 +9432,8 @@
     .din,
     .dbtn,
     .cday,
-    .calsel,
+    .padc,
+    .calcap,
     .cal-h .nav,
     .orow {
       transition:
@@ -9040,6 +9441,22 @@
         border-color var(--d-hover) var(--ease-out),
         color var(--d-hover) var(--ease-out),
         box-shadow var(--d-state) var(--ease-out);
+    }
+    /* The caret turns rather than swapping glyph, so the press reads as the
+       same control changing state instead of two controls alternating. The
+       disclosure's marker turns for the same reason and on the same timing. */
+    .capc,
+    .calwhy summary::before {
+      transition:
+        transform var(--d-state) var(--ease-out),
+        color var(--d-hover) var(--ease-out);
+    }
+    /* THE FACE ARRIVES FROM WHERE IT WAS OPENED. Twelve chips that simply
+       exist read as a repaint; twelve that rise the last few pixels read as
+       the grid folding into them. --d-enter is the token the row animations
+       already use, so this is the page's own timing and not a second one. */
+    .calpad {
+      animation: bx-pop-in var(--d-enter) var(--ease-out);
     }
     .meter i {
       transition: width var(--d-panel) var(--ease-out);
