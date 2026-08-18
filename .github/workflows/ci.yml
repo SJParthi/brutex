@@ -802,9 +802,11 @@ jobs:
           #   read
           #   verb
           #
-          # Declared rather than left refusing, and the distinction from gate 11's
-          # `crates/pull/src/totp.rs` entry is the point: THAT one is a real §4 violation left
-          # visible for its owner, because blessing it would hide a defect. These are not
+          # Declared rather than left refusing. The distinction this used to draw against
+          # gate 11's `crates/pull/src/totp.rs` entry no longer has a second half: that one
+          # WAS a real §4 violation left visible for its owner, and it has since been fixed
+          # and its allowance deleted. The principle it illustrated stands -- blessing a
+          # defect hides it, so an allowlist entry must be a report with an owner. These are not
           # defects -- a scratch directory called `sealed` is not a credential path, and saying
           # so is what this gate asks for. Their owner should still confirm the list.
           folder_scaffold='vendor-data bent bought-nothing wrong-kind never-created sealed earliest latest files pulled read verb'
@@ -851,7 +853,7 @@ jobs:
           field file kept loaded max rotated vendors
           asked blank byte_len chars duplicate fault
           about census rows_read slices
-          not-base32 too-long
+          not-base32 too-long hmac-refused
           at
           unreadable_volume unreadable_oi
           timeframe
@@ -868,8 +870,12 @@ jobs:
           #     bytes the credential is and never the credential; `totp.rs`
           #     logs how many characters were offered against `MAX_SECRET_LEN`.
           #   fault not-base32 too-long   — `totp.rs` outcome words: a
-          #     `TotpError` rendered to a stable token so a page can group by
-          #     it. They name a FAILURE, not a location.
+          #   hmac-refused                  `TotpError` rendered to a stable
+          #     token so a page can group by it. They name a FAILURE, not a
+          #     location. `hmac-refused` joined them when the `unreachable!`
+          #     that gate 11 names in this file became a refusal: it says the
+          #     BUILD is wrong, not the operator's secret, which is why it is a
+          #     separate word rather than folded into one of the other three.
           #   file loaded vendors         — `config.rs`, reporting that the
           #     untracked local configuration was read and how many vendors it
           #     named. The count, never the contents.
@@ -4393,21 +4399,19 @@ jobs:
           # asserts nothing — or to substitute a key, which is a fallback that
           # hides a failure. The `expect` message names the reason and rule 5c
           # below now sees the local allow that goes with it.
-          # crates/pull/src/totp.rs carries a real `unreachable!()`:
+          # crates/pull/src/totp.rs USED TO CARRY a real `unreachable!()`:
           #
           #     .unwrap_or_else(|_| unreachable!("HMAC accepts every key length"))
           #
-          # Rule 5 was blind to `unreachable!` until this commit widened it, so this is
-          # a violation the gate has been unable to see rather than a new one. It is a
-          # §4 breach -- degrade loudly or refuse, never die -- and a coverage region
-          # no input can close, which this workspace has removed four times elsewhere.
-          #
-          # It is allowlisted at ONE rather than left refusing, and the reasoning is
-          # worth stating: `crates/pull` belongs to another line of work, editing it
-          # would clobber in-flight changes, and blocking that PR on a defect its owner
-          # has not seen yet is not this gate's job. The count is pinned, so a second
-          # `unreachable!` anywhere in that file fails. This entry is the report, and it
-          # is meant to be removed rather than kept.
+          # It was allowlisted at ONE, with the note that the entry "is the report, and
+          # it is meant to be removed rather than kept" -- allowlisted only because the
+          # file belonged to another line of work at the time, not because the defect
+          # was acceptable. It has now been fixed at the source: `TotpError` gained an
+          # `HmacRefusedTheKey` variant and the call is a `?`, so the function refuses
+          # instead of dying and no coverage region is left that no input can close.
+          # The entry is gone rather than reworded, which is what "removed rather than
+          # kept" asked for. A NEW `unreachable!` in that file now fails this gate with
+          # no allowance at all, which is the stronger state.
           # `crates/api/src/server.rs` 2, and ONE OF THE TWO IS PROSE. `note_header` carries
           # a real `.expect("a sanitised note is visible ASCII")`, sound because
           # `note_alphabet` emits only 0x20..=0x7E, exactly the alphabet a header value
@@ -4422,7 +4426,6 @@ jobs:
           # justification is the useful artefact and the miscount is the gate's.
           allow_panic='
           crates/api/src/server.rs 2
-          crates/pull/src/totp.rs 1
           crates/pull/src/ssm.rs 1
           crates/telemetry/src/json.rs 5
           crates/telemetry/src/record.rs 4
@@ -4956,7 +4959,8 @@ jobs:
           # THE THREE BELOW ARE WHAT TIGHTENING RULE 1 FOUND, and each is one of
           # the two weaknesses this gate documents about itself above rather than
           # a new kind of defect. They are DECLARED and not fixed for the reason
-          # gate 11 gives about `crates/pull/src/totp.rs` and gate 23 gives about
+          # gate 11 gave about `crates/pull/src/totp.rs` (now fixed and its allowance
+          # deleted, which is what those entries are for) and gate 23 gives about
           # `crates/api/src/logs.rs`: the files belong to other lines of work, a
           # tree two sessions share cannot have one of them editing the other's
           # crates, and blocking a build on a finding its owner has not seen yet

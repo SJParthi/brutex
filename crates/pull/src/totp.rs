@@ -90,6 +90,26 @@ pub enum TotpError {
         /// The offending byte, as it was written.
         byte: u8,
     },
+    /// The HMAC construction refused the decoded key.
+    ///
+    /// # Why this exists when no input can produce it
+    ///
+    /// HMAC is defined for every key length — RFC 2104 hashes a key longer than
+    /// the block and zero-pads a shorter one — so `new_from_slice` cannot
+    /// actually refuse, and an empty key is already refused above as
+    /// [`Self::Empty`].
+    ///
+    /// It existed here as `unreachable!("HMAC accepts every key length")`, and
+    /// the reasoning was sound but the shape was not: `CLAUDE.md` §4 says
+    /// degrade loudly and name the reason, or refuse — it has no clause
+    /// exempting a case the author is confident cannot arise. CI's gate 11 kept
+    /// this file named rather than allowlisted for exactly that reason, calling
+    /// it "a real §4 violation left visible for its owner".
+    ///
+    /// A refusal costs one variant and cannot kill the process that reads a
+    /// broker token. If the dependency's contract ever changes underneath this,
+    /// the caller sees a sentence instead of a stack trace.
+    HmacRefusedTheKey,
 }
 
 impl core::fmt::Display for TotpError {
@@ -103,6 +123,11 @@ impl core::fmt::Display for TotpError {
             Self::NotBase32 { byte } => write!(
                 f,
                 "the shared secret holds byte {byte:#04x}, outside RFC 4648 base32 (A-Z, 2-7)"
+            ),
+            Self::HmacRefusedTheKey => f.write_str(
+                "the HMAC construction refused the decoded secret, which RFC 2104 \
+                 says it cannot do for any key length — treat this as a broken \
+                 build rather than a bad secret",
             ),
         }
     }
@@ -168,6 +193,11 @@ fn note_refusal(why: &TotpError, len: usize) {
         TotpError::Empty => "empty",
         TotpError::TooLong { .. } => "too-long",
         TotpError::NotBase32 { .. } => "not-base32",
+        // NOT A SECRET FAULT AT ALL, and the word says so. The other three name
+        // something the operator can fix in their own configuration; this one
+        // says the build is wrong, and sending an operator to re-read their
+        // secret over it would be the wrong instruction.
+        TotpError::HmacRefusedTheKey => "hmac-refused",
     };
     let _dropped_when_filtered = telemetry::emit(
         &telemetry::Event::error("pull.totp", "the shared secret will not decode")
@@ -230,15 +260,22 @@ fn decode_alphabet(secret: &str) -> Result<Vec<u8>, TotpError> {
 ///
 /// # Errors
 ///
-/// Whatever [`base32_decode`] refuses.
+/// Whatever [`base32_decode`] refuses, and [`TotpError::HmacRefusedTheKey`] if
+/// the HMAC construction ever declines a key RFC 2104 says it must accept.
 pub fn code_at_counter(secret: &str, counter: u64) -> Result<String, TotpError> {
     let key = base32_decode(secret)?;
 
-    // `new_from_slice` accepts any length for HMAC — the spec defines padding
-    // and truncation for keys shorter and longer than the block — so this
-    // cannot fail for a non-empty key, and an empty one was refused above.
-    let mut mac = <Hmac<Sha1> as Mac>::new_from_slice(&key)
-        .unwrap_or_else(|_| unreachable!("HMAC accepts every key length"));
+    // `new_from_slice` accepts any length for HMAC — RFC 2104 hashes a key
+    // longer than the block and zero-pads a shorter one — so this cannot fail
+    // for a non-empty key, and an empty one was refused above.
+    //
+    // REFUSED RATHER THAN UNREACHABLE. It read
+    // `.unwrap_or_else(|_| unreachable!("HMAC accepts every key length"))`, and
+    // the sentence was true. §4 still does not have an "unless it cannot
+    // happen" clause, and the cost of honouring it here is one variant and one
+    // `?`. See `TotpError::HmacRefusedTheKey`.
+    let mut mac =
+        <Hmac<Sha1> as Mac>::new_from_slice(&key).map_err(|_| TotpError::HmacRefusedTheKey)?;
     mac.update(&counter.to_be_bytes());
     let tag = mac.finalize().into_bytes();
 
@@ -302,6 +339,44 @@ pub fn code_at(secret: &str, unix_seconds: u64) -> Result<String, TotpError> {
 )]
 mod tests {
     use super::*;
+
+    /// The refusal that replaced an `unreachable!` still says something useful.
+    ///
+    /// # Why a variant no input can produce is still worth a test
+    ///
+    /// It cannot be reached through `code_at_counter` — RFC 2104 defines HMAC
+    /// for every key length, which is exactly why the old code wrote
+    /// `unreachable!("HMAC accepts every key length")` and was right about the
+    /// fact while wrong about the shape. What a test CAN pin is that the two
+    /// things a reader would meet — the sentence and the telemetry word — exist
+    /// and point at the build rather than at the operator's secret. Sending
+    /// somebody to re-read a correct secret is the wrong instruction, and it is
+    /// the one a copied-from-a-neighbour message would have given.
+    #[test]
+    fn the_hmac_refusal_blames_the_build_and_not_the_secret() {
+        let said = TotpError::HmacRefusedTheKey.to_string();
+        assert!(
+            said.contains("RFC 2104"),
+            "it cites the rule that makes this impossible: {said}"
+        );
+        assert!(
+            said.contains("broken build"),
+            "and it tells the reader where to look, which is NOT at their \
+             secret: {said}"
+        );
+        for other in [
+            TotpError::Empty,
+            TotpError::TooLong { len: 999 },
+            TotpError::NotBase32 { byte: b'0' },
+        ] {
+            assert_ne!(
+                other.to_string(),
+                said,
+                "each refusal is its own sentence; a shared one would make the \
+                 four indistinguishable in a log"
+            );
+        }
+    }
 
     /// RFC 6238 Appendix B, the SHA-1 rows.
     ///
