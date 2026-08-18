@@ -65,10 +65,18 @@ use crate::vendor::{Feed, Granularity, HttpSpec, Listing, Transport};
 pub trait Discovery {
     /// Fetches one discovery URL and returns its body.
     ///
+    /// # Async, natively
+    ///
+    /// The real adapter is `reqwest`, which is async, and the caller is an axum
+    /// handler, which is async. A blocking bridge between them would park a
+    /// runtime thread for the length of a vendor round trip — and with feeds
+    /// now running concurrently, several at once. Rust 1.97 takes `async fn` in
+    /// a trait directly, so there is no bridge and no `async-trait` dependency.
+    ///
     /// # Errors
     ///
     /// Whatever the transport refuses, in the host's own words.
-    fn get(&self, url: &str) -> Result<String, String>;
+    fn get(&self, url: &str) -> impl core::future::Future<Output = Result<String, String>>;
 }
 
 /// Why a chain could not be walked.
@@ -173,7 +181,7 @@ fn lookup_of(feed: Feed) -> Result<HttpSpec, ChainError> {
 /// # Cost
 ///
 /// One request for the expiries, then one per expiry. Nothing scans the store.
-pub fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chain, ChainError> {
+pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chain, ChainError> {
     let spec = lookup_of(feed)?;
     let field = spec.fno.by_name().map_or("expiries", |d| d.expiries_field);
     let contracts_field = spec
@@ -182,7 +190,7 @@ pub fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chain, Cha
         .map_or("contracts", |d| d.contracts_field);
 
     let url = fno::expiries_url(&spec, ask).map_err(ChainError::Lookup)?;
-    let body = from.get(&url).map_err(|why| ChainError::Transport {
+    let body = from.get(&url).await.map_err(|why| ChainError::Transport {
         url: url.clone(),
         why,
     })?;
@@ -204,7 +212,7 @@ pub fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chain, Cha
             expiry,
         };
         let url = fno::contracts_url(&spec, &keyed).map_err(ChainError::Lookup)?;
-        let body = from.get(&url).map_err(|why| ChainError::Transport {
+        let body = from.get(&url).await.map_err(|why| ChainError::Transport {
             url: url.clone(),
             why,
         })?;
@@ -260,7 +268,7 @@ mod tests {
     }
 
     impl Discovery for Canned {
-        fn get(&self, _url: &str) -> Result<String, String> {
+        async fn get(&self, _url: &str) -> Result<String, String> {
             let mut left = self.answers.borrow_mut();
             if left.is_empty() {
                 return Err("no answer left".to_owned());
@@ -283,15 +291,17 @@ mod tests {
     /// The sentence matters as much as the refusal: D-0193 exists because "no
     /// name lookup" was read as "no expired data" for months, so this refusal
     /// has to say the difference out loud.
-    #[test]
-    fn a_feed_without_a_name_lookup_refuses_and_does_not_claim_it_serves_nothing() {
+    #[tokio::test]
+    async fn a_feed_without_a_name_lookup_refuses_and_does_not_claim_it_serves_nothing() {
         let Err(why) = month(
             Feed::Dhan,
             &ask(),
             &Canned {
                 answers: std::cell::RefCell::new(vec![]),
             },
-        ) else {
+        )
+        .await
+        else {
             panic!("Dhan publishes no contract name to discover");
         };
         assert!(matches!(why, ChainError::NoNameLookup { .. }));
@@ -304,15 +314,17 @@ mod tests {
     }
 
     /// An archive feed is refused as what it is: a folder, not a vendor.
-    #[test]
-    fn an_archive_feed_has_no_vendor_to_ask() {
+    #[tokio::test]
+    async fn an_archive_feed_has_no_vendor_to_ask() {
         let Err(why) = month(
             Feed::TrueData,
             &ask(),
             &Canned {
                 answers: std::cell::RefCell::new(vec![]),
             },
-        ) else {
+        )
+        .await
+        else {
             panic!("an archive has no vendor to publish a lookup");
         };
         assert!(matches!(why, ChainError::NotAnHttpFeed { .. }));
@@ -320,15 +332,17 @@ mod tests {
     }
 
     /// The two calls chain, and every readable contract comes back.
-    #[test]
-    fn expiries_feed_contracts_and_every_readable_name_is_kept() {
+    #[tokio::test]
+    async fn expiries_feed_contracts_and_every_readable_name_is_kept() {
         let canned = Canned {
             answers: std::cell::RefCell::new(vec![
                 r#"{"expiries":["2024-01-25"]}"#.to_owned(),
                 r#"{"contracts":["NSE-NIFTY-25Jan24-21000-CE","NSE-NIFTY-25Jan24-21000-PE","NSE-NIFTY-25Jan24-FUT"]}"#.to_owned(),
             ]),
         };
-        let chain = month(Feed::Groww, &ask(), &canned).expect("Groww is asked by name");
+        let chain = month(Feed::Groww, &ask(), &canned)
+            .await
+            .expect("Groww is asked by name");
         assert_eq!(chain.expiries, vec!["2024-01-25".to_owned()]);
         assert_eq!(chain.contracts.len(), 3, "two options and one future");
         assert!(chain.whole(), "every name was readable");
@@ -342,15 +356,17 @@ mod tests {
     ///
     /// The whole point of the module. A contract dropped in silence is a month
     /// that looks complete and is not.
-    #[test]
-    fn an_unreadable_name_is_reported_and_the_readable_ones_still_land() {
+    #[tokio::test]
+    async fn an_unreadable_name_is_reported_and_the_readable_ones_still_land() {
         let canned = Canned {
             answers: std::cell::RefCell::new(vec![
                 r#"{"expiries":["2024-01-25"]}"#.to_owned(),
                 r#"{"contracts":["NSE-NIFTY-25Jan24-21000-CE","!! not a contract !!"]}"#.to_owned(),
             ]),
         };
-        let chain = month(Feed::Groww, &ask(), &canned).expect("the call itself succeeded");
+        let chain = month(Feed::Groww, &ask(), &canned)
+            .await
+            .expect("the call itself succeeded");
         assert_eq!(chain.contracts.len(), 1, "the readable one landed");
         assert_eq!(
             chain.unreadable,
@@ -364,15 +380,17 @@ mod tests {
     }
 
     /// A transport refusal stops the walk and carries the host's own words.
-    #[test]
-    fn a_transport_refusal_names_the_url_and_the_reason() {
+    #[tokio::test]
+    async fn a_transport_refusal_names_the_url_and_the_reason() {
         let Err(why) = month(
             Feed::Groww,
             &ask(),
             &Canned {
                 answers: std::cell::RefCell::new(vec![]),
             },
-        ) else {
+        )
+        .await
+        else {
             panic!("nothing answered, so the walk cannot have succeeded");
         };
         match why {

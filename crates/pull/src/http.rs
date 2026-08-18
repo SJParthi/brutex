@@ -1266,6 +1266,58 @@ fn array_at<'a>(
     Ok(array)
 }
 
+/// THE LIVE DISCOVERY ADAPTER — the one `impl` `crate::chain` was written to
+/// stay independent of.
+///
+/// # Why it belongs here and not in `chain`
+///
+/// This is the only type in the crate that owns a `reqwest::Client` and an
+/// assembled credential. `chain` names a port and opens no socket, so every arm
+/// of it is drivable from a test; the socket is here, in the module that
+/// already had one, and adding it cost no new field and no second client.
+///
+/// # It is governed like every other request
+///
+/// A discovery GET spends the vendor's budget exactly as a bars POST does —
+/// same account, same per-second ceiling — so it takes a permit first and
+/// reports the outcome after. Skipping that would let a contract sweep, which
+/// issues one request per expiry, outrun the ceiling the bars path respects.
+impl crate::chain::Discovery for HttpSource {
+    async fn get(&self, url: &str) -> Result<String, String> {
+        self.wait_for_permit().await;
+        let (name, value) = self.header();
+        let mut builder = self.client.get(url);
+        for (header, word) in self.spec.extra_headers {
+            builder = builder.header(*header, *word);
+        }
+        let answer = builder
+            .header(name, value)
+            .send()
+            .await
+            .map_err(|why| format!("{why}"))?;
+
+        let status = answer.status();
+        if let Some(lock) = self.governor.as_ref() {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status.as_u16() == 429 {
+                g.record_throttled();
+            } else if status.is_success() {
+                g.record_success();
+            }
+        }
+        if !status.is_success() {
+            // THE VENDOR'S OWN STATUS, NOT A PARAPHRASE. A 401 here and a 429
+            // here mean different things to an operator -- one is a credential
+            // and one is a pace -- and collapsing them is how a throttled sweep
+            // gets read as an expired token.
+            return Err(format!("the vendor answered {status}"));
+        }
+        answer.text().await.map_err(|why| format!("{why}"))
+    }
+}
+
 impl BarSource for HttpSource {
     fn window(&self, _request: &BarRequest) -> Result<RawWindow, FetchError> {
         // A blocking `window` over an async client needs a runtime, and this
