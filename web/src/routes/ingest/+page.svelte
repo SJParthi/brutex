@@ -5440,141 +5440,53 @@
                        label it was a second line in one cell and no line in the
                        next, which is half of why this row had no baseline. -->
                   <span class="lab">Universe</span>
-                  <div class="dd">
-                    <button
-                      class="ddb"
-                      type="button"
-                      aria-expanded={drop === 'uni'}
-                      title={universeTitle}
-                      onclick={(e) => {
-                        e.stopPropagation();
-                        drop = drop === 'uni' ? null : 'uni';
-                      }}>{universeSpec.label}</button
-                    >
-                    {#if drop === 'uni'}
-                      <div class="ddm" role="group" aria-label="Universe — the set to pull">
-                        <!-- SAME RULE AS THE PICKERS: a set no request can
-                             name is folded behind one line rather than listed
-                             dead.
-                             This comment used to name `F&O underlyings` and
-                             `Everything` as the two rows that could never be
-                             clicked, "because api::ingest::SpotTarget spells
-                             swept, indices and equities only". Both are
-                             requestable as of D-0136, and the enum has nine
-                             variants rather than three. The rule stays because
-                             a future row may still arrive without a target;
-                             the two examples are gone, and no count of the
-                             enum is stated here — this page cannot see it, so
-                             any number it gives goes stale in silence. -->
-                        {#each UNIVERSES.filter((u) => universeRefusal(u) === null) as u (u.id)}
-                          {@const why = null}
-                          <button
-                            class="ddr"
-                            type="button"
-                            class:off={why !== null}
-                            disabled={why !== null}
-                            aria-pressed={universe === u.id}
-                            title={why ??
-                              `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.${u.note ? ` ${u.note}.` : ''}`}
-                            onclick={() => {
-                              universe = u.id;
-                              drop = null;
-                            }}
-                          >
-                            <span class="tk">{universe === u.id ? '✓' : ''}</span>
-                            <span class="nm">{u.label}</span>
-                            <!-- THE WIRE SLUG IS NOT DRAWN BESIDE THE NAME.
-                                 It read `target=n50` in a second column on
-                                 every row — the value the form POSTs, which is
-                                 an implementation detail of the request and
-                                 not a property of the SET the reader is
-                                 choosing between. Removed at the operator's
-                                 instruction, 14 Aug 2026. It is still on the
-                                 wire, still in the request body the "What goes
-                                 on the wire" fold prints, and still the row's
-                                 `u.target`; what is gone is restating it in
-                                 the picker, where the only question is which
-                                 set. A row that CANNOT be requested keeps its
-                                 word, because there the absence is the fact. -->
-                            {#if why !== null}
-                              <span class="ct warn">no target</span>
-                            {/if}
-                          </button>
-                        {/each}
+                  <!-- THE MENU ONLY. Everything below this control -- the reach
+                       clause and the whole archive-census branch a folder feed
+                       draws -- is untouched. This rung renders two different
+                       things depending on whether the feed is HTTP or a folder
+                       of files, and only the HTTP half was ever a menu; a
+                       previous attempt replaced the WHOLE rung and took the
+                       census with it.
 
-                        <!-- THE DRAWER. It holds the SWEEP PAIR and the
-                             refusals, in that order, and it deletes neither.
-                             The operator asked for the NSE families to lead the
-                             menu; §1 still names NSE-NIFTY and NSE-BANKNIFTY as
-                             the whole engine surface, and it is still the only
-                             set a broker path can serve, so it moves DOWN
-                             rather than out. Removing it would leave this form
-                             unable to build a legal request at all.
-                             The refusals keep their reasons; each names whether
-                             the gap is membership or the wire. -->
-                        <!-- THE SWEEP PAIR IS NO LONGER OFFERED. The operator
-                             asked for it gone three times; §1 still names it as
-                             the engine surface and `api::ingest::SpotTarget`
-                             still spells only swept, indices and equities, so
-                             this menu can now name NO set a broker pull can
-                             serve until that enum grows. Recorded in the commit
-                             rather than argued here. -->
-                        {#if false}
-                          <button
-                            class="ddr"
-                            type="button"
-                            aria-pressed={true}
-                            title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface. It is the only set a broker path can serve: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                            onclick={() => (drop = null)}
-                          >
-                            <span class="tk">✓</span>
-                            <span class="nm">{SWEPT.label}</span>
-                            <span class="ct">the pair this engine sweeps</span>
-                          </button>
-                        {/if}
-                        {#if uniTucked.length > 0}
-                          <button
-                            class="ddr tuck"
-                            type="button"
-                            aria-expanded={uniOpen}
-                            onclick={() => (uniTuck = !uniOpen)}
-                          >
-                            <span class="tk">{uniOpen ? '▾' : '▸'}</span>
-                            <span class="nm">{uniTuckLabel}</span>
-                            <span class="ct">{uniOpen ? 'hide' : 'show'}</span>
-                          </button>
-                          {#if uniOpen}
-                            {#if false}
-                              <!-- LIVE, and only here while it is NOT the
-                                   selection. When it IS, it is promoted above
-                                   the drawer instead — see `uniTucked`. -->
-                              <button
-                                class="ddr"
-                                type="button"
-                                aria-pressed={false}
-                                title="CLAUDE.md §1 names NSE-NIFTY and NSE-BANKNIFTY as the whole engine surface — this repository's own sweep set, not an NSE index family. It pulls with target=swept, and it is the only set a broker path serves: pull::vendor::HttpSpec carries no request-parameter map, so a wider target is refused rather than fetching one series under a name nobody asked for."
-                                onclick={() => {
-                                  universe = SWEPT.id;
-                                  drop = null;
-                                }}
-                              >
-                                <span class="tk"></span>
-                                <span class="nm">{SWEPT.label}</span>
-                                <span class="ct">the pair this engine sweeps</span>
-                              </button>
-                            {/if}
-                            {#each refusedUniverses as x (x.u.id)}
-                              <button class="ddr off" type="button" disabled title={x.why}>
-                                <span class="tk"></span>
-                                <span class="nm">{x.u.label}</span>
-                                <span class="ct warn">no target</span>
-                              </button>
-                            {/each}
-                          {/if}
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
+                       `tuck` REPLACES uniTuck/uniOpen/uniTucked/uniTuckLabel,
+                       which existed to fold the sets no request can name behind
+                       one counted line -- exactly what `tuck` does, and what the
+                       Segments rung already uses it for. A refused set stays
+                       DRAWN, DISABLED and carrying `universeRefusal`'s own
+                       sentence: CLAUDE.md section 4, since a deleted row reads
+                       as "this set does not exist".
+
+                       THE SWEPT PAIR IS NOT ADDED. Its row sat behind a
+                       permanently-false guard, so it was already unrendered; an
+                       earlier attempt at this conversion put it back into the
+                       live list, which handed the operator NSE-NIFTY +
+                       NSE-BANKNIFTY as a selectable set again. Dead code stays
+                       dead. -->
+                  <Picker
+                    single
+                    filter
+                    tuck
+                    label="universes"
+                    summary={universeSpec.label}
+                    title={universeTitle}
+                    rows={UNIVERSES.map((u) => {
+                      const why = universeRefusal(u);
+                      return {
+                        key: u.id,
+                        name: u.label,
+                        disabled: why !== null,
+                        why: why ?? undefined,
+                        title:
+                          why ??
+                          `Pulls with target=${u.target}. ${feedName(feeds.active)} reaches ${reachKnown ? n(reach) : 'an uncounted number of'} name(s) in it, counted from /instruments.json?feed=${feeds.active ?? ''}.${u.note ? ` ${u.note}.` : ''}`
+                      };
+                    })}
+                    selected={new Set([universe])}
+                    onchange={(/** @type {Set<string>} */ sel) => {
+                      const next = [...sel][0];
+                      if (next) universe = next;
+                    }}
+                  />
                   <!-- NARRATION CUT, REFUSAL KEPT. This drew
                        "N reachable · target=n50" on every load — a count the
                        control's own face already carries and a wire slug the
