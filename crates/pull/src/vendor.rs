@@ -2509,12 +2509,22 @@ pub struct RollingSpec {
     pub index_word: &'static str,
     /// The instrument word for a STOCK option — Dhan `OPTSTK`.
     pub stock_word: &'static str,
-    /// Every strike offset this feed serves, ATM outward.
+    /// Strike offsets served for an INDEX option — ATM and ten either side.
     ///
-    /// Written down rather than generated because it is a VENDOR FACT: the
-    /// documented set is ATM and up to ten either side, and a range this build
-    /// invented would be an ask the vendor answers with nothing.
-    pub offsets: &'static [&'static str],
+    /// Written down rather than generated because it is a VENDOR FACT, and kept
+    /// SEPARATE from the stock width because the vendor serves two different
+    /// widths and one list would silently offer the wider one to both. Dhan's
+    /// `strike` row reads "up to ATM+10 / ATM-10 for Index Options, up to
+    /// ATM+3 / ATM-3 for other contracts", and an ask outside a type's own
+    /// width is a request the vendor answers with nothing.
+    pub index_offsets: &'static [&'static str],
+    /// Strike offsets served for a STOCK option — ATM and THREE either side.
+    ///
+    /// Seven, not twenty-one. A driver that walked the index width over stock
+    /// options would send fourteen requests per expiry per side that can only
+    /// come back empty — spending a per-second budget on nothing and leaving a
+    /// chain that looks swept.
+    pub stock_offsets: &'static [&'static str],
     /// The two sides, in the vendor's own spelling.
     pub sides: &'static [&'static str],
     /// The most days one call may span. Dhan documents 45.
@@ -2543,6 +2553,30 @@ pub enum FnoAccess {
     ByName(FnoDiscovery),
     /// Ask by distance from the money; the answer carries the realised strike.
     ByStrikeOffset(RollingSpec),
+}
+
+impl RollingSpec {
+    /// The offsets this vendor serves for one instrument word.
+    ///
+    /// # Why this is a method and not two public fields a caller chooses between
+    ///
+    /// The two widths are the easiest thing in this descriptor to get wrong:
+    /// they differ by fourteen offsets, both are valid-looking string lists,
+    /// and picking the index width for a stock option produces requests that
+    /// return nothing rather than an error. Reading the word decides it once,
+    /// here, instead of at every call site.
+    ///
+    /// An unrecognised word yields the NARROWER list, which is the safe
+    /// direction: too few asks leaves a gap a census can see, too many spends
+    /// budget on answers that cannot exist.
+    #[must_use]
+    pub fn offsets_for(&self, instrument_word: &str) -> &'static [&'static str] {
+        if instrument_word == self.index_word {
+            self.index_offsets
+        } else {
+            self.stock_offsets
+        }
+    }
 }
 
 impl FnoAccess {
@@ -4035,17 +4069,29 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     segment_word: "NSE_FNO",
     index_word: "OPTIDX",
     stock_word: "OPTSTK",
-    offsets: &[
+    // INDEX OPTIONS: ATM and ten either side.
+    index_offsets: &[
         "ATM-10", "ATM-9", "ATM-8", "ATM-7", "ATM-6", "ATM-5", "ATM-4", "ATM-3", "ATM-2", "ATM-1",
         "ATM", "ATM+1", "ATM+2", "ATM+3", "ATM+4", "ATM+5", "ATM+6", "ATM+7", "ATM+8", "ATM+9",
         "ATM+10",
     ],
+    // STOCK OPTIONS: ATM and THREE either side. The vendor's own sentence
+    // distinguishes the two and an earlier version of this row did not, which
+    // would have sent fourteen empty asks per expiry per side on every stock.
+    stock_offsets: &["ATM-3", "ATM-2", "ATM-1", "ATM", "ATM+1", "ATM+2", "ATM+3"],
     sides: &["CALL", "PUT"],
     max_days_per_call: 45,
     years_back: 5,
 };
 
-const _: () = assert!(DHAN_ROLLING.offsets.len() == 21, "ATM and ten either side");
+const _: () = assert!(
+    DHAN_ROLLING.index_offsets.len() == 21,
+    "ATM and ten either side"
+);
+const _: () = assert!(
+    DHAN_ROLLING.stock_offsets.len() == 7,
+    "ATM and three either side"
+);
 const _: () = assert!(DHAN_ROLLING.sides.len() == 2);
 
 const DHAN: Descriptor = Descriptor {
@@ -6171,19 +6217,49 @@ mod tests {
         assert_eq!(spec.years_back, 5, "the vendor documents five years");
         assert_eq!(spec.sides, &["CALL", "PUT"], "the annexure's two sides");
 
-        assert_eq!(spec.offsets.len(), 21, "ATM and up to ten either side");
-        assert_eq!(spec.offsets.first().copied(), Some("ATM-10"));
-        assert_eq!(spec.offsets.last().copied(), Some("ATM+10"));
-        assert!(
-            spec.offsets.contains(&"ATM"),
-            "the money itself is one of the offsets"
+        // TWO WIDTHS, NOT ONE, AND THE DIFFERENCE IS THE VENDOR'S OWN.
+        //
+        // The `strike` row reads "up to ATM+10 / ATM-10 for Index Options, up
+        // to ATM+3 / ATM-3 for other contracts". An earlier version of this
+        // descriptor carried ONE list of twenty-one and applied it to both,
+        // which would have sent fourteen empty asks per expiry per side on
+        // every stock option — spending a per-second budget on answers that
+        // cannot exist, and leaving a chain that looks swept.
+        assert_eq!(
+            spec.index_offsets.len(),
+            21,
+            "index: ATM and ten either side"
         );
-        // NO DUPLICATES AND NO GAPS. A repeated offset would ask twice and
-        // count once; a missing one is a strike silently never pulled, which is
-        // the shape of failure that leaves a chain looking complete.
-        for (i, one) in spec.offsets.iter().enumerate() {
-            for (j, other) in spec.offsets.iter().enumerate() {
-                assert!(i == j || one != other, "offset {one} appears twice");
+        assert_eq!(spec.index_offsets.first().copied(), Some("ATM-10"));
+        assert_eq!(spec.index_offsets.last().copied(), Some("ATM+10"));
+
+        assert_eq!(
+            spec.stock_offsets.len(),
+            7,
+            "stock: ATM and THREE either side"
+        );
+        assert_eq!(spec.stock_offsets.first().copied(), Some("ATM-3"));
+        assert_eq!(spec.stock_offsets.last().copied(), Some("ATM+3"));
+
+        // AND THE WORD PICKS THE WIDTH, so no caller chooses by hand.
+        assert_eq!(spec.offsets_for(spec.index_word).len(), 21);
+        assert_eq!(spec.offsets_for(spec.stock_word).len(), 7);
+        assert_eq!(
+            spec.offsets_for("something else").len(),
+            7,
+            "an unrecognised word takes the NARROWER width — too few asks leaves \
+             a gap a census can see, too many spends budget on nothing"
+        );
+
+        for list in [spec.index_offsets, spec.stock_offsets] {
+            assert!(list.contains(&"ATM"), "the money itself is always offered");
+            // NO DUPLICATES. A repeated offset asks twice and counts once; a
+            // missing one is a strike silently never pulled, which is the shape
+            // of failure that leaves a chain looking complete.
+            for (i, one) in list.iter().enumerate() {
+                for (j, other) in list.iter().enumerate() {
+                    assert!(i == j || one != other, "offset {one} appears twice");
+                }
             }
         }
     }
