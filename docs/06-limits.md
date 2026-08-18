@@ -4608,7 +4608,8 @@ tree that produced the bundle. The digest covers `web/src`, `package-lock.json`,
 rather than an `npm ci` — could change the output without changing the
 fingerprint. The gate itself uses `npm ci`; a developer's machine may not.
 
-**Gate W3 is a RATCHET pinned at 64, not a floor at zero, and this is the
+**Gate W3 is a RATCHET, pinned at 61 today and lowered whenever the count
+falls; not a floor at zero, and this is the
 honest part.** `svelte-check` reported **122** errors on the tree before this
 work and had never run in CI. Adding `@types/node` cleared 68 of them; the
 remaining **64** are real and unfixed. Demanding zero would mean either fixing
@@ -4684,6 +4685,33 @@ another hypothesis, and the answer was immediate.*
 protection's existing requirement covers all five browser gates. It was briefly
 a separate workflow, which could never have been made blocking by any file in
 this tree: `needs:` cannot name a job in another workflow.
+
+**THERE ARE TWO FRONT ENDS, and only one is inside these gates.**
+`web/typeahead.js` is 172 lines of classic-script JavaScript served raw by
+`crates/api/src/assets.rs` and injected into every Rust-rendered page by
+`render.rs:1130`. It is not bundled by Vite, not checked by `svelte-check`, and
+has no test of its own. It also carries **its own copy of the prefix index**
+extracted as `$lib/prefix.js` — same bound, same Map, same build loop — so one
+O(1) claim has two implementations and only one of them is driven.
+
+*Its `fetch` had no ceiling until `6076efd`, because the gate that converted the
+other fourteen call sites walked `web/src` and this file is not under it. Fifteen
+call sites, not fourteen.*
+
+**They cannot share code as things stand, and the obstacle is a design statement
+rather than an oversight.** A classic script has no module scope to import into;
+making it a module means changing the tag `render.rs` emits. And `assets.rs`
+serves exactly one file out of `web/` while its own doc says of `web/src`:
+*"Nothing under it is ever served."* Serving the shared module would contradict
+that rather than extend it. Closing the duplication is a decision about how the
+Rust side serves the front end, not a fix.
+
+**What is enforced meanwhile:** `web/tests/twofrontends.test.js` refuses a drift
+in the prefix bound, which is the number that must agree — raise it in one copy
+and the type-ahead on the Rust-rendered pages answers a different question from
+the SPA's, with neither page saying so. It also fails, deliberately, if
+`typeahead.js` ever stops building its own index, so a guard that has outlived
+its subject is deleted rather than left reading as coverage.
 
 ---
 
