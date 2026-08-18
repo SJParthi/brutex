@@ -5777,6 +5777,45 @@
            and "2,206 refused" is the fact an operator wants explained the moment
            they see a column of dashes. -->
       <span class="actions">
+        <!-- ==============================================================
+             THE SECOND VIEW WAS UNREACHABLE, AND THE COMMENT ABOVE `view`
+             SAID IT WAS "ONE CLICK AWAY".
+
+             `view` was declared `$state('bars')` and never assigned again --
+             the only writes to it were gone, so `VIEWS` carried two entries,
+             every `view === 'census'` branch was dead markup, and the coverage
+             survey was reachable by editing the source. Its own title says
+             what that cost: it "is the only view that can survey the whole
+             store for a hole", and the page holding a hole survey nobody can
+             open is worse than not having one, because the code reads as
+             though the capability is there.
+
+             THE CONTROL IS NOT INVENTED HERE. `.segs`, `.seg`,
+             `.seg[aria-selected='true']` and `.seg .c` were all still in the
+             stylesheet below, orphaned -- the compiler flagged three of them as
+             unused selectors, which is how the original shape was recovered
+             rather than guessed. It is a TABLIST with a count on each tab, and
+             that CSS's own comment says why: the clause that used to sit under
+             the control said how many segments were held, and the tabs are that
+             enumeration. Restoring the markup the styles were written for also
+             clears the three warnings.
+             ============================================================== -->
+        <span class="segs" role="tablist" aria-label="View">
+          {#each VIEWS as v (v.key)}
+            <button
+              class="seg"
+              type="button"
+              role="tab"
+              aria-selected={view === v.key}
+              tabindex={view === v.key ? 0 : -1}
+              title={v.title}
+              onclick={() => (view = v.key)}
+              >{v.label}<span class="c"
+                >{fmt(v.key === 'bars' ? barSorted.length : sorted.length)}</span
+              ></button
+            >
+          {/each}
+        </span>
         {#if filtered}
           <button class="btn ghost sm" type="button" onclick={reset}>Reset all filters</button>
         {/if}
@@ -5845,6 +5884,39 @@
           pageTo
         )} on page {fmt(pageNow)} of {fmt(pageCount)}.</span
       >
+
+      <!-- ================================================================
+           THE READ BUDGET SAYS SO, AND CAN BE LIFTED.
+
+           `barPlan` has always computed `held` -- how many matched
+           instrument-months the budget did NOT open -- and nothing rendered
+           it. `readBudget` is 6 and had no control, so a query matching sixty
+           files drew rows from six and the grid looked like the whole answer.
+           Rows from the other fifty-four were not empty, they were ABSENT,
+           and absence with no notice is the failure CLAUDE.md §4 forbids: it
+           neither degrades loudly nor refuses.
+
+           The button sets the budget to 0, which `barPlan` already reads as
+           "no ceiling" -- the escape existed in the arithmetic and had no way
+           in. It is a press rather than the default because opening sixty
+           files is a real cost the operator should choose, not one a page
+           takes on their behalf.
+           ================================================================ -->
+      {#if view === 'bars' && barPlan.held > 0}
+        <p class="budget" role="status">
+          Read <b>{fmt(barPlan.read.length)}</b> of {fmt(barPlan.all.length)} matched
+          instrument-month(s). Rows from the other <b>{fmt(barPlan.held)}</b> are absent rather than
+          empty, so this grid is a sample of the match and not the whole of it.
+          <button
+            class="btn ghost sm"
+            type="button"
+            title="Open every matched instrument-month. One request per file, so {fmt(
+              barPlan.held
+            )} more file(s) are read."
+            onclick={() => (readBudget = 0)}>Read all {fmt(barPlan.all.length)}</button
+          >
+        </p>
+      {/if}
     </div>
 
     {#if noteOpen}
@@ -7631,6 +7703,18 @@
     align-items: center;
     gap: var(--s4);
     flex-wrap: wrap;
+  }
+  /* Not an error and not a success: a statement about what the grid above IS.
+     `--warn` would overstate it, since nothing has gone wrong -- so it takes
+     the muted voice and earns its attention from the bold figures in it. */
+  .budget {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    flex-wrap: wrap;
+    margin: var(--s3) 0 0;
+    color: var(--dim);
+    font-size: var(--fs-mini);
   }
 
   /* ---- THE COUNTED LINE, AND IT IS WHAT THE SIX TILES WERE ------------
