@@ -15202,3 +15202,52 @@ work-in-progress is how two changes become one conflict. **OPEN.**
 
 ---
 
+## D-0177 · 2026-08-18 · Bar lookup is measured, and it was the first thing rule 4 names
+
+`crates/store/benches/ratio.rs`.
+
+`CLAUDE.md` §3 rule 4 names five operations that must be constant, and **bar
+lookup is the first of them**. `BarFile::read_record` is documented "Reads one
+record by index, in O(1)". **Nothing in this workspace measured it.**
+
+This crate's bench covered header reads (C-01), block sealing (C-07) and the
+checksum (C-08) — and never the read the whole store exists to serve. An
+independent O(1) audit of all thirteen crates found the gap, along with 36 other
+hot paths carrying a cost claim and no bench.
+
+**The claim is easy to believe, and that is the danger.** `offset_of` is a
+multiply and an add; the read is a fixed 56 bytes. But "obviously constant" is
+what `docs/06-limits.md` §7b records four separate defects hiding behind, each
+found only when somebody measured.
+
+### Both ends, at every size
+
+Index 0 **and the last committed index**, at 1,000 / 10,000 / 100,000 records. A
+scan that walked to the record would be flat in the first and linear in the
+second, so measuring only index 0 would prove nothing.
+
+| row | measured |
+|---|---|
+| `read_record[0]`, 10x / 100x file | 0.573x / 0.567x |
+| `read_record[last]`, 10x / 100x file | 0.992x / 0.989x |
+| **first against last, same 100,000-record file** | **0.915x** |
+
+The last row is the one that matters: reading the final record of a
+100,000-record file costs what reading the first does. A scan would be 100,000x.
+
+The rows below 1.0 are cache behaviour, not a defect — the larger files were
+written more recently and are warmer. The ceiling is two-sided at 3.0x, so a
+cheaper result is reported and passes rather than being hidden.
+
+### The setup refuses rather than measuring nothing
+
+`refuse` exits non-zero if the bench file will not open or fill. A bench that
+silently measured a file it failed to write would report a beautiful ratio over
+nothing, which is the fallback §4 bans.
+
+**Documented as C-16**, verified against gate 10's own resolver before this entry
+was written — a bench row no invariant names is invisible to gate 14, which is
+how five of `engine`'s nine rows went undocumented until D-0162.
+
+---
+

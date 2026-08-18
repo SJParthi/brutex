@@ -36,11 +36,15 @@
 use std::hint::black_box;
 use std::time::Instant;
 
+use brutex_core::vendor::Vendor;
 use store::block;
 use store::crc::crc32c;
+use store::file::BarFile;
+use store::format::Bar;
 use store::format::{BLOCK_LEN, FLAG_CHECKSUMS, HEADER_LEN, SLOT_LEN};
 use store::header::Header;
 use store::layout::Layout;
+use store::path::{FileKind, PathParts, StorePath, Timeframe, YearMonth};
 
 /// A ratio above this is a failure. Thousandths, so the comparison is integer.
 ///
@@ -111,6 +115,126 @@ fn region(slots: usize) -> Vec<u8> {
         *dst = src;
     }
     bytes
+}
+
+/// A setup failure this bench cannot measure past, said in the host's words.
+///
+/// A bench that silently measured a file it failed to fill would report a
+/// beautiful ratio over nothing, which is the fallback `CLAUDE.md` §4 bans.
+fn refuse(why: &str) -> ! {
+    println!("BENCH SETUP FAILED — {why}");
+    std::process::exit(1)
+}
+
+/// A bars file holding `n` committed records, and the directory that owns it.
+///
+/// The directory is returned so it outlives the file; dropping it first would
+/// unlink the bytes the measurement is about.
+fn loaded(name: &str, n: u64) -> (BarFile, std::path::PathBuf) {
+    let root = std::env::temp_dir().join(format!("brutex-bench-{name}-{}", std::process::id()));
+    let _ignored = std::fs::remove_dir_all(&root);
+    let mut file = match BarFile::open_or_create(&root, bench_path(), 7) {
+        Ok(f) => f,
+        Err(e) => refuse(&format!("the bench file would not open: {e}")),
+    };
+    // Appended in one batch: `append` requires strictly increasing timestamps,
+    // and one call keeps the setup out of the measurement entirely.
+    let batch: Vec<Bar> = (0..n)
+        .map(|i| {
+            let raw = i64::try_from(i).unwrap_or(0);
+            Bar {
+                ts_micros: raw.saturating_mul(60_000_000),
+                open: 2_000_000 + raw,
+                high: 2_000_100 + raw,
+                low: 1_999_900 + raw,
+                close: 2_000_050 + raw,
+                volume: 1_000,
+                open_interest: 0,
+            }
+        })
+        .collect();
+    if let Err(e) = file.append(&batch) {
+        refuse(&format!("the bench file would not fill: {e}"));
+    }
+    (file, root)
+}
+
+/// The path every bench file uses. One month, one symbol, one timeframe.
+fn bench_path() -> StorePath<'static> {
+    match StorePath::new(PathParts {
+        vendor: Vendor::Groww,
+        exchange: "NSE",
+        segment: "INDEX",
+        symbol: "NIFTY",
+        contract: None,
+        timeframe: Timeframe::MINUTE_1,
+        month: match YearMonth::new(2024, 6) {
+            Ok(m) => m,
+            Err(_) => refuse("June 2024 is a real month"),
+        },
+        file: FileKind::Bars,
+    }) {
+        Ok(p) => p,
+        Err(_) => refuse("the bench path is a legal one"),
+    }
+}
+
+/// C-16 — reading one record costs the same whatever the file holds.
+///
+/// # Why this row did not exist until now
+///
+/// `CLAUDE.md` §3 rule 4 names FIVE operations that must be constant, and **bar
+/// lookup is the first of them**. `BarFile::read_record` is documented "Reads
+/// one record by index, in O(1)" and, until this row, **nothing in the workspace
+/// measured it**. An independent O(1) audit of all thirteen crates found that
+/// gap: this crate's bench measured header reads, block sealing and the
+/// checksum, and never the read the whole store exists to serve.
+///
+/// The claim is easy to believe and that is precisely the danger — `offset_of`
+/// is multiply-and-add, and the read is a fixed 56 bytes. But "obviously
+/// constant" is what `docs/06-limits.md` §7b records four separate defects
+/// hiding behind.
+///
+/// Both ends are read at every size: index 0, and the LAST committed index. A
+/// scan that walked to the record would be flat in the first and linear in the
+/// second.
+fn record_read_is_flat_in_the_file() -> bool {
+    let (small, _d1) = loaded("read-small", 1_000);
+    let (medium, _d2) = loaded("read-medium", 10_000);
+    let (large, _d3) = loaded("read-large", 100_000);
+
+    let first = |f: &BarFile| cost_ps(200, || black_box(f).read_record(black_box(0)));
+    let last = |f: &BarFile, n: u64| {
+        cost_ps(200, || {
+            black_box(f).read_record(black_box(n.saturating_sub(1)))
+        })
+    };
+
+    let base = first(&small);
+    let mut ok = true;
+    ok &= ratio("C-16 read_record[0], 10x file", base, first(&medium));
+    ok &= ratio("C-16 read_record[0], 100x file", base, first(&large));
+
+    let base_last = last(&small, 1_000);
+    ok &= ratio(
+        "C-16 read_record[last], 10x file",
+        base_last,
+        last(&medium, 10_000),
+    );
+    ok &= ratio(
+        "C-16 read_record[last], 100x file",
+        base_last,
+        last(&large, 100_000),
+    );
+
+    // And the two ends of the SAME file cost the same, which is the shape a
+    // scan would break first.
+    ok &= ratio(
+        "C-16 read_record: first against last, same file",
+        first(&large),
+        last(&large, 100_000),
+    );
+    ok
 }
 
 /// C-01 — reading the header costs the same whatever region it is handed.
@@ -219,6 +343,7 @@ fn main() {
     ok &= header_read_is_flat();
     ok &= block_seal_is_flat();
     ok &= checksum_beats_the_bit_loop();
+    ok &= record_read_is_flat_in_the_file();
     if ok {
         println!("all ratios within the ceiling");
     } else {
