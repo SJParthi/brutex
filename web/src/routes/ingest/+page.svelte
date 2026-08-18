@@ -7189,7 +7189,7 @@
       }}
     />
     <span
-      class="pknote"
+      class="note quiet"
       class:warn={!reachKnown}
       title={`everything below is this feed's answer · ${scopeNote}`}
     >
