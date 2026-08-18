@@ -29,6 +29,15 @@
   import { page } from '$app/state';
   import { feeds, loadFeeds } from '$lib/feeds.svelte.js';
   import { loadCatalogue } from '$lib/index.svelte.js';
+  // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
+  //
+  // A bare `toLocaleTimeString()` printed `15:29:04` in whatever zone the host
+  // happens to sit in, and named neither the zone nor the day -- so a stamp
+  // from yesterday's session was indistinguishable from one taken a minute
+  // ago, which is the single fact this line exists to report. `/db` diagnosed
+  // this and fixed itself; `stampLabel` is what it fixed itself with, and this
+  // is the third and last spelling of the rule joining the other two.
+  import { stampLabel } from '$lib/dates.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
    *
@@ -632,7 +641,7 @@
       onclick={probe}
       title={api.state === 'down'
         ? `Probing /feeds.json failed: ${api.why}`
-        : `Round trip to /feeds.json. Checked ${new Date(api.at).toLocaleTimeString()}. Click to re-check.`}
+        : `Round trip to /feeds.json. Checked ${stampLabel(api.at)}. Click to re-check.`}
     >
       <span
         class="dot"

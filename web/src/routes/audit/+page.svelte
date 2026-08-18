@@ -75,6 +75,15 @@
    */
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
+  // THE ZONE IS NAMED, BECAUSE THE MACHINE'S ZONE IS NOT THE PRODUCT'S.
+  //
+  // A bare `toLocaleTimeString()` printed `15:29:04` in whatever zone the host
+  // happens to sit in, and named neither the zone nor the day -- so a stamp
+  // from yesterday's session was indistinguishable from one taken a minute
+  // ago, which is the single fact these lines exist to report. `/db` diagnosed
+  // this and fixed itself; `stampLabel` is what it fixed itself with, and this
+  // is the third and last spelling of the rule joining the other two.
+  import { stampLabel } from '$lib/dates.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -893,7 +902,7 @@
         <span class="dot down"></span><span class="txt">/audit.json failed</span>
       </span>
     {:else if payload}
-      <span class="status" title="Round trip to /audit.json, measured. Last answer {new Date(load.at).toLocaleTimeString()}.">
+      <span class="status" title="Round trip to /audit.json, measured. Last answer {stampLabel(load.at)}.">
         <span class="dot up" class:live={load.state === 'refreshing'}></span>
         <span class="txt">{n0(payload.journal.records)} runs</span>
         <span class="ms">{load.ms} ms</span>
@@ -1064,7 +1073,7 @@
 
         {#if stale}
           <p class="why" role="alert">
-            The figures above are the last good answer, from {new Date(load.at).toLocaleTimeString()}.
+            The figures above are the last good answer, from {stampLabel(load.at)}.
             The poll since then failed: {load.error}
           </p>
         {/if}
