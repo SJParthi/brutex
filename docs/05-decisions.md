@@ -15719,3 +15719,59 @@ chased.
 
 ---
 
+
+## D-0193 · 2026-08-18 · Dhan serves expired options — D-0170 concluded otherwise and was wrong
+
+D-0170 recorded, and `crates/pull/src/vendor.rs` restated in a comment and in a
+test's own name, that **Dhan publishes no expired-contract lookup** and that a
+derivative segment word for it "would be an invention with nothing to spend it
+on". The reasoning ran: `/v2/charts/rollingoption` answers an ATM-relative
+series whose underlying contract changes weekly, therefore there is no contract
+name in it to discover, therefore the vendor serves nothing.
+
+**The first two steps are true and the conclusion does not follow.** Dhan's own
+documentation — `14-expired-options-data.md`, read 2026-08-18 — states that
+`POST /v2/charts/rollingoption` returns **five years of expired options data at
+minute level**, for index *and* stock options, carrying open, high, low, close,
+implied volatility, open interest, spot and the **realised `strike`**. The
+contract's identity is recoverable from the ANSWER even though it cannot be
+spelled in the ASK.
+
+This entry corrects the record. The ledger is append-only, so D-0170 stands as
+written and this supersedes its capability claim; its `Listing::Derivative`
+arm, its venue mapping and its Groww `FNO` row are unaffected and remain
+correct.
+
+## Two acquisition models, not one
+
+The mistake was treating "expired F&O" as one capability with one shape. It is
+two, and a vendor has one or the other:
+
+| | **By name** | **By strike offset** |
+|---|---|---|
+| Vendor | Groww | Dhan |
+| Address | `NSE-NIFTY-30Sep25-24650-CE` | `securityId` + `expiryFlag` + `expiryCode` + `strike` + side |
+| Flow | expiries -> contracts -> bars by name | one POST per (offset, side, window) |
+| Covers | futures **and** options | options only |
+| History | from 2020 | last 5 years |
+| Per call | one contract | up to 45 days, one offset, one side |
+| Carries | OHLCV | OHLCV + IV + OI + spot + strike |
+
+`HttpSpec::fno` is the field for the FIRST model only. Dhan's `None` there was
+always the right value for that field; what was wrong was reading the field's
+absence as the vendor's. The descriptor grows a second field rather than
+overloading the first, which is `vendor.rs`'s own stated law: everything that
+differs between one feed and another is a FIELD, not a branch.
+
+## What this costs, measured
+
+Dhan's data APIs are limited to **5 requests per second and 7,000 per day**
+(`22-rate-limits.md`). The strike-offset model multiplies: offsets x sides x
+underlyings x 45-day windows. A naive sweep of 213 underlyings at 21 offsets and
+2 sides is 8,946 requests for ONE window — past the daily ceiling before a
+second window is asked for. The ladder must therefore carry a request budget per
+vendor, and that budget is a property of the descriptor rather than of the
+caller. Recorded here so the driver is written against it rather than against an
+assumption.
+
+---

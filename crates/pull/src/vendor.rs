@@ -3924,10 +3924,27 @@ const DHAN: Descriptor = Descriptor {
         // "POST /charts/historical — Get OHLC for daily timeframe" and
         // "POST /charts/intraday — Get OHLC for minute timeframe", and
         // `interval` appears in the intraday parameter table and in no other.
-        // NO CONTRACT LOOKUP, and it is the vendor's shape rather than a gap.
-        // `/v2/charts/rollingoption` answers an ATM-RELATIVE series —
-        // `strike: "ATM+10"`, `expiryFlag: WEEK` — whose underlying contract
-        // changes every week. There is no contract name in it to discover.
+        // NO CONTRACT *NAME* LOOKUP, AND THAT IS NOT THE SAME AS NO EXPIRED
+        // DATA. This comment used to stop at "there is no contract name in it
+        // to discover" and let the reader conclude the vendor serves none. It
+        // does: `POST /v2/charts/rollingoption` returns FIVE YEARS of expired
+        // options at minute level, index and stock, with open/high/low/close,
+        // implied volatility, open interest, spot AND the realised `strike`
+        // array — so the contract's identity is recoverable from the answer
+        // even though it cannot be named in the ask.
+        //
+        // What is true is that it is addressed differently: by `securityId`
+        // plus `expiryFlag` (WEEK|MONTH), `expiryCode` (1 near, 2 next, 3 far)
+        // and a strike OFFSET from the money (`ATM`, `ATM+10`, `ATM-10`), one
+        // side at a time, up to 45 days per call. Groww is addressed by NAME —
+        // `NSE-NIFTY-30Sep25-24650-CE`. Two acquisition models, both real.
+        //
+        // `fno` below is the NAME-discovery field, so Dhan correctly carries
+        // `None` for it. That field is not the question "does this vendor have
+        // expired data"; see docs/05-decisions.md D-0171, which records the
+        // wrong conclusion this comment previously invited and the two-model
+        // shape that replaces it. Source: Dhan Docs 14-expired-options-data.md
+        // and 20-annexure.md, read 2026-08-18.
         fno: None,
         rung_routes: &[RungRoute {
             rung: Granularity::Minute1,
@@ -5988,7 +6005,7 @@ mod tests {
     /// `CLAUDE.md` §3 rule 1 — and asserting the ABSENCE is what stops a later
     /// edit from "helpfully" filling it in.
     #[test]
-    fn groww_names_the_fno_segment_and_dhan_names_no_derivative_at_all() {
+    fn groww_names_the_fno_segment_and_dhan_names_no_name_lookup() {
         let Transport::Http(groww) = Feed::Groww.descriptor().transport else {
             panic!("Groww is an HTTP feed");
         };
@@ -6012,8 +6029,9 @@ mod tests {
         };
         assert!(
             dhan.listing_words(Listing::Derivative).is_none(),
-            "Dhan publishes no expired-contract lookup, so a derivative word \
-             here would be an invention with nothing to spend it on"
+            "Dhan publishes no NAME-based contract lookup. It does serve expired \
+             options, by strike offset rather than by name — so this asserts the \
+             absence of the `fno` FIELD, never the absence of the capability"
         );
         assert!(
             dhan.fno.is_none(),
