@@ -5492,9 +5492,8 @@
       else byFeed.set(k, [b]);
     }
 
-    // ONE CHAIN PER FEED. Each awaits its own requests in turn, and the chains
-    // themselves run in turn as well -- see the note at the loop below for why
-    // they cannot usefully overlap.
+    // ONE CHAIN PER FEED. Each awaits its own requests in turn; the chains
+    // themselves are awaited together.
     //
     // A FAILING FEED STOPS ITS OWN CHAIN AND NOT THE OTHERS, which is a change
     // the fan-out forces and an improvement on its own terms: under the old
@@ -5547,33 +5546,29 @@
       }
     };
 
-    // THE CHAINS RUN IN TURN, NOT TOGETHER, AND THE SERVER IS WHY.
+    // THE CHAINS RUN TOGETHER AGAIN, BECAUSE THE SERVER NOW LETS THEM.
     //
-    // `Promise.all` here fired one request per feed at the same instant. The
-    // rate-budget reasoning above is sound and is not what decides this:
-    // `server.rs` takes ONE SEAT PER PROCESS, not one per vendor --
-    // `site.autopilot.take_seat()` -- and answers 409 to every request that
-    // does not get it. So the fan-out could never have produced parallel
-    // WORK. It produced one run and N-1 refusals.
+    // This was serialised in e902e65 for a real reason: `server.rs` held ONE
+    // seat for the whole process, so a fan-out produced one run and N-1 × 409.
+    // Measured from `logs/events.ndjson`, 18 Aug 22:16:54 — four POSTs inside
+    // seven milliseconds, three refused, one storing 11 bars.
     //
-    // MEASURED, from `logs/events.ndjson` on 18 Aug at 22:16:54: four
-    // POST /pull/spot inside seven milliseconds, three answered 409, one took
-    // the seat and stored 11 bars with nothing failed. The operator read that
-    // as a failed pull. It was a race this page started against a lock it
-    // cannot win.
+    // THE SEAT IS PER FEED NOW. `autopilot.rs` carries `seats: AtomicU8` with
+    // one bit per feed and `take_seat(feed)` claiming only that feed's bit, and
+    // its own doc names the same incident and the same 299µs. The thing the
+    // seat guards is the census lock, and the census is per vendor —
+    // `dhan.man.lock` and `groww.man.lock` are different files — so two feeds
+    // writing their own manifests never could race. Serialising here now costs
+    // exactly what the fan-out was written to buy.
     //
-    // Running them in turn costs nothing: the server serialises regardless, so
-    // throughput is identical and the spurious refusals are gone. The seat is
-    // global by design -- its own comment explains that the census lock refuses
-    // rather than queues, so a second pull would see all 773 instruments fail
-    // individually and call that a run. A per-vendor seat would bring that
-    // back.
+    // PARALLEL ACROSS FEEDS, SEQUENTIAL WITHIN ONE, which is the rule the rate
+    // budget dictates: a budget is per VENDOR, so two rungs at one broker
+    // double the rate against a single ceiling while two brokers share nothing.
     //
-    // A FAILING FEED STILL STOPS ONLY ITS OWN CHAIN. `chain` catches per
-    // request, so awaiting them in sequence keeps that property.
-    for (const group of byFeed.values()) {
-      await chain(group);
-    }
+    // A FAILING FEED STILL STOPS ONLY ITS OWN CHAIN — `chain` catches per
+    // request, so one vendor's dead socket cannot throw away answers another
+    // has already paid for.
+    await Promise.all([...byFeed.values()].map(chain));
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
