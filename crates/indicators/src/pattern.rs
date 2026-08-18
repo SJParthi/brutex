@@ -917,6 +917,70 @@ mod tests {
         );
     }
 
+    /// THE PARTIAL-RECOVERY PATTERN: THREE PRICE CLAUSES, EACH AT ITS EDGE.
+    ///
+    /// Bit 212 needs a bar that gapped below the prior low, closed back above
+    /// the prior close, and yet failed to reach the prior body's midpoint. Those
+    /// three prices bracket a narrow window, and each edge of it is a separate
+    /// clause — an `&&` turned into `||` makes any one of them sufficient, which
+    /// would fire this bit on bars that never recovered at all.
+    ///
+    /// Every clause gets two cases: one past its threshold, which kills the
+    /// `&&`, and one exactly at it, which kills the comparison. They are not
+    /// interchangeable — `>` and `<` both refuse a value on the wrong side, so
+    /// only the threshold itself separates a strict comparison from a loose one.
+    #[test]
+    fn every_edge_of_the_partial_recovery_window_is_required() {
+        // bar1 bearish: open 200, close 100, low 90, mid 150.
+        let prior = at(10, 200, 210, 90, 100);
+        let fires = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &prior);
+            ok(&mut p, bar0).get(212)
+        };
+
+        assert!(
+            fires(&at(11, 80, 125, 75, 120)),
+            "opening at 80 below the 90 low and closing at 120 -- above the 100 \
+             close, below the 150 midpoint -- satisfies all five clauses"
+        );
+
+        // `bar0.open < bar1.low`
+        assert!(
+            !fires(&at(11, 95, 125, 90, 120)),
+            "an open ABOVE the prior low never gapped down, so there is nothing \
+             to recover from"
+        );
+        assert!(
+            !fires(&at(11, 90, 125, 85, 120)),
+            "and an open EXACTLY at the prior low has not gapped below it; `<=` \
+             would accept this and `<` must not"
+        );
+
+        // `bar0.close > bar1.close`
+        assert!(
+            !fires(&at(11, 80, 125, 75, 95)),
+            "a close BELOW the prior close recovered nothing"
+        );
+        assert!(
+            !fires(&at(11, 80, 125, 75, 100)),
+            "and a close EXACTLY at the prior close recovered nothing either -- \
+             `>=` would call this a recovery and `>` must not"
+        );
+
+        // `bar0.close < bar1.mid()`
+        assert!(
+            !fires(&at(11, 80, 165, 75, 160)),
+            "a close ABOVE the midpoint is a full piercing, which is bit 161 -- \
+             this clause is what keeps the two apart"
+        );
+        assert!(
+            !fires(&at(11, 80, 155, 75, 150)),
+            "and a close EXACTLY at the midpoint has reached it, so the recovery \
+             is not partial; `<=` would accept this and `<` must not"
+        );
+    }
+
     /// THE HARAMI PAIR: CONTAINMENT IS TWO CLAUSES, NOT ONE.
     ///
     /// Bits 159 and 160 fire when the current body sits wholly inside the prior
