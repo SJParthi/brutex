@@ -6736,91 +6736,84 @@
   <div class="field">
     <!-- THE CAPTION IS THE CAPTION. What the italic sub-clause used to say —
          that this is the page's whole scope, and where it is chosen — is on
-         the button's `title` now, one hover from the control it is about, and
-         the clause below states the same in the document. -->
+         the control's `title`, one hover from the thing it is about, and the
+         clause below states the same in the document. -->
     <span class="lab">Broker feed</span>
-    <div class="picker" data-drop="feed">
-      <button
-        class="mnyb"
-        type="button"
-        aria-haspopup="true"
-        aria-expanded={drop === 'feed'}
-        title={`${feedName}. THE PAGE'S WHOLE SCOPE: every count on this page is this feed's store — every row read from /store.json?feed=${feeds.active ?? ''} and every membership count from /instruments.json?feed=${feeds.active ?? ''} — and no page in this product puts one feed's numbers beside another's, because the two are not the same instrument universe, the same session handling or the same price scale. A bar belongs to the vendor that supplied it, so changing this changes the store, not the view of one.${feeds.error ? ` The feed list itself could not be read: ${feeds.error}. Nothing below this line has been scoped to anything.` : ''}`}
-        onclick={(e) => {
-          e.stopPropagation();
-          drop = drop === 'feed' ? null : 'feed';
-        }}
-        >{feeds.error
-          ? 'Feed list unread'
-          : feeds.all.length === 0
-            ? 'No feeds'
-            : feeds.active
-              ? feedName
-              : 'Select a feed'}</button
-      >
-      {#if drop === 'feed'}
-        <div class="menu" role="group" aria-label="Broker feed — the page's whole scope">
-          {#each feeds.all as f (f.wire)}
-            {@const ready = f.ready === true}
-            {@const held = survey.byFeed.get(f.wire)}
-            <button
-              class="opt"
-              type="button"
-              class:off={!ready}
-              disabled={!ready}
-              aria-pressed={feeds.active === f.wire}
-              title={ready
-                ? `Selects ${f.display}. Every count and every row below becomes this feed's, read again from /store.json?feed=${f.wire} and /instruments.json?feed=${f.wire} — nothing is deleted, nothing is merged with the feed you are leaving, and no figure on this page ever puts the two side by side.${
-                    held
-                      ? held.error
-                        ? ` Its store could not be read on the last survey: ${held.error}.`
-                        : ` The last survey read ${fmt(held.cells)} instrument-month(s) and ${fmt(held.bars)} bar(s) under it.`
-                      : ' Its store has not been surveyed in this session, so the count beside it is a dash rather than a zero.'
-                  }`
-                : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'}`}
-              onclick={() => {
-                feeds.active = f.wire;
-                drop = null;
-              }}
-            >
-              <span class="tk">{feeds.active === f.wire ? '✓' : ''}</span>
-              <span class="nm">{f.display}</span>
-              <span class="ct" class:warn={!ready || Boolean(held?.error)}
-                >{#if !ready}unavailable{:else if held?.error}not read{:else if held}{fmt(
-                    held.cells
-                  )} held{:else}not surveyed{/if}</span
-              >
-            </button>
-          {/each}
-          <!-- THE CONTROL IS NEVER DISABLED, WHICH IS WHAT KEEPS THIS ROW
-               REACHABLE. Greying the button on an empty list would put the two
-               reasons the list can be empty — the server has no descriptor
-               row, or the list could not be read at all — behind a press that
-               no longer works, and a dead control with the reason inside it is
-               the shape `CLAUDE.md` §4 bans. `feeds.error` is quoted as the
-               server's own string rather than paraphrased. -->
-          {#if feeds.all.length === 0}
-            <p class="none">
-              {#if feeds.error}
-                <code>/feeds.json</code> could not be read, so this page is scoped to nothing and
-                every count below it is absent rather than zero: {feeds.error}
-              {:else}
-                <code>/feeds.json</code> answered with an empty list, so there is no vendor to
-                select and no store to read. A feed appears here the day its descriptor row exists
-                on the Rust side — nothing in this file names one.
-              {/if}
-            </p>
-          {/if}
-        </div>
-      {/if}
-    </div>
-    <!-- THE SCOPE SENTENCE, KEPT. It was the `.scopeline`'s own counted line;
-         it is this control's clause now, which is where every other fact in
-         this strip lives. It CLIPS, so the whole of it is on the control's
-         `title` as well — the page's standing rule. The states before a store
-         answers are NAMED rather than counted: a "0 held" under a feed nobody
-         chose, or under a read that failed, is a claim about a disk nobody
-         reached. -->
+    <!-- THE SAME `Picker` /ingest'S FEED RUNG NOW USES, AND THAT SYMMETRY IS
+         THE WHOLE POINT OF THIS CHANGE.
+
+         BOTH pages hand-rolled this one control and no other. Every other rung
+         here was already `Picker`; /ingest's were `.dd`/`.ddm`. So the feed
+         menu was the last place the two pages drew one question two ways — a
+         plain ✓ list with no filter here, a different plain ✓ list with no
+         filter there — and it is the menu, not the label, that a reader
+         actually looks at. Unifying the class names in 673e7da made the labels
+         match and left this untouched, which is exactly why the pages still
+         did not look alike afterwards.
+
+         EVERY BEHAVIOUR IS KEPT AND NONE RE-IMPLEMENTED:
+
+         * A refused feed is DRAWN AND DISABLED with `/feeds.json`'s own reason,
+           never omitted — `CLAUDE.md` §4, and `Picker`'s `disabled` + `why` is
+           the shape every other rung on this page already uses.
+         * The per-feed survey count keeps its four states — unavailable, not
+           read, N held, not surveyed — as the row's `detail`, so a dash is
+           still a dash and never a zero.
+         * The control is NEVER disabled, which is what keeps it reachable when
+           the list is empty; the empty case is stated below rather than behind
+           a dead press.
+
+         SINGLE, because this page shows one store at a time and the operator
+         asked for exactly that: every rung on /db is `single`. -->
+    <Picker
+      single
+      filter
+      label="feeds"
+      summary={feeds.error
+        ? 'Feed list unread'
+        : feeds.all.length === 0
+          ? 'No feeds'
+          : feeds.active
+            ? feedName
+            : 'Select a feed'}
+      rows={feeds.all.map((f) => {
+        const ready = f.ready === true;
+        const held = survey.byFeed.get(f.wire);
+        return {
+          key: f.wire,
+          name: f.display,
+          detail: !ready
+            ? 'unavailable'
+            : held?.error
+              ? 'not read'
+              : held
+                ? `${fmt(held.cells)} held`
+                : 'not surveyed',
+          disabled: !ready,
+          why: ready
+            ? undefined
+            : (f.why ??
+              'the server marked this feed not ready and stated no reason, which is itself the thing to fix.'),
+          title: ready
+            ? `Selects ${f.display}. Every count and every row below becomes this feed's, read again from /store.json?feed=${f.wire} and /instruments.json?feed=${f.wire} — nothing is deleted, nothing is merged with the feed you are leaving, and no figure on this page ever puts the two side by side.${
+                held
+                  ? held.error
+                    ? ` Its store could not be read on the last survey: ${held.error}.`
+                    : ` The last survey read ${fmt(held.cells)} instrument-month(s) and ${fmt(held.bars)} bar(s) under it.`
+                  : ' Its store has not been surveyed in this session, so the count beside it is a dash rather than a zero.'
+              }`
+            : `${f.display} is refused by the server, and this is /feeds.json's own reason rather than a paraphrase of it: ${f.why ?? 'no reason stated.'}`
+        };
+      })}
+      selected={new Set([feeds.active])}
+      onchange={(/** @type {Set<string>} */ sel) => {
+        const next = [...sel][0];
+        if (next) feeds.active = next;
+      }}
+    />
+    <!-- THE STATES BEFORE A STORE ANSWERS ARE NAMED RATHER THAN COUNTED: a
+         "0 held" under a feed nobody chose, or under a read that failed, is a
+         claim about a disk nobody reached. -->
     <span class="note" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
       {#if feeds.error}
         the feed list could not be read, so nothing below is scoped to anything
@@ -6832,10 +6825,6 @@
       {:else if loading && rows.length === 0}
         reading this feed's store — every count below is this feed's store
       {:else}
-        <!-- THE COUNT AND THE CLOCK. "every count below is this feed's
-             store" is a standing fact about the page, identical on every load,
-             and it was taking the width the two live numbers needed. It is on
-             this cell's own title. -->
         {fmt(deco.length)} held · read {clock(fetchedAt)}
       {/if}
     </span>
@@ -6857,6 +6846,15 @@
      ====================================================================== -->
 
 <style>
+  /* THE HAND-ROLLED FEED MENU IS GONE, and with it the last place this page
+     drew a control of its own. `.mnyb`, `.menu`, `.opt` and their tick/name/
+     count children styled ONE dropdown — the broker feed — while every other
+     rung here was already `$lib/Picker.svelte`. /ingest had a second, different
+     hand-rolled copy of the same question. That divergence, not the class
+     names, is why the two pages still looked unalike after their labels were
+     unified: a reader looks at the menu. Both feed rungs are `Picker` now, so
+     these rules have nothing left to match. */
+
   /* Everything here is expressed through `theme.css` tokens. No literal colour,
      no literal font, no second theme system — and every `transition` and
      `animation` sits inside the reduced-motion guard, the same discipline the
@@ -7373,43 +7371,6 @@
    * What this replaced was the bar-era face: borderless, `padding: 0 20px 0
    * 0`, a 19px line box, the caret pulled in to 6px. Beside eight bordered
    * Pickers it read as a link someone had left in the strip. */
-  .mnyb {
-    appearance: none;
-    width: 100%;
-    margin: 0;
-    background-color: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-base);
-    font-weight: var(--w-semi);
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    padding: 11px 36px 11px 14px;
-    text-align: left;
-    cursor: pointer;
-    max-width: 100%;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    background-image: linear-gradient(45deg, transparent 50%, var(--acc) 50%),
-      linear-gradient(135deg, var(--acc) 50%, transparent 50%);
-    background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%;
-    background-size: 5px 5px, 5px 5px;
-    background-repeat: no-repeat;
-  }
-  .mnyb:hover:not(:disabled) {
-    border-color: var(--dim);
-  }
-  .mnyb:focus-visible {
-    outline: 2px solid var(--acc);
-    outline-offset: 2px;
-  }
-  .mnyb:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
   /* THE TOGGLE WEARS THE SAME FACE AND OPENS NOTHING, so it drops the caret
      rather than drawing one that points at a menu that does not exist. Pressed
      is a STATE and is drawn as one — the holes filter being on is the single
@@ -7454,85 +7415,9 @@
   /* ---- THE MENU -------------------------------------------------------
      Drawn to `Picker`'s own popup metrics, so a menu opened from a `.mnyb` and
      a menu opened from a `.pbtn` are the same object two cells apart. */
-  .picker {
-    position: relative;
-    min-width: 0;
-  }
-  .menu {
-    position: absolute;
-    left: 0;
-    top: calc(100% + var(--s3));
-    z-index: 40;
-    width: max-content;
-    min-width: 100%;
-    max-width: min(92vw, 560px);
-    max-height: 380px;
-    overflow-y: auto;
-    background: var(--raise);
-    border: 1px solid var(--line);
-    border-radius: var(--r3);
-    padding: var(--s2);
-    box-shadow: var(--e3);
-  }
-  .opt {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    width: 100%;
-    appearance: none;
-    border: 0;
-    background: none;
-    text-align: left;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-sm);
-    padding: var(--s3) var(--s5);
-    min-height: 34px;
-    border-radius: var(--r2);
-    cursor: pointer;
-  }
-  .opt:hover:not(:disabled) {
-    background: var(--panel-2);
-  }
-  .opt:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: -2px;
-  }
   /* Drawn and refused, never absent: a row missing from the list reads as a set
      that does not exist rather than one this page cannot count. The whole reason
      is on the row's own `title`. */
-  .opt.off {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .opt .tk {
-    flex: 0 0 12px;
-    color: var(--acc);
-    font-weight: var(--w-bold);
-  }
-  .opt .nm {
-    flex: 1;
-    min-width: 0;
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .opt .ct {
-    flex: 0 0 auto;
-    max-width: 220px;
-    text-align: right;
-    color: var(--dim);
-    font-size: var(--fs-xs);
-    font-family: var(--mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .opt .ct.warn {
-    color: var(--warn);
-  }
   /* THE MONTH'S STATE SPINE, on the row where the card's used to be. The pip is
      the only colour a month row carries, and it carries the same three states
      the card band did — the rules for it are further down and are shared with
@@ -7574,13 +7459,6 @@
   }
   /* SHOWN AND REFUSED, NEVER SILENT. A menu that collapses to one row when a
      filter empties it is a menu that looks broken; this says which it is. */
-  .none {
-    margin: 0;
-    padding: var(--s5) var(--s4);
-    text-align: center;
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
 
   /* ---- THE TEXT FIELD AND THE TWO MONTH FIELDS ------------------------
      `.din` is the strip's own text face. `theme.css`'s `.search` gives it a
