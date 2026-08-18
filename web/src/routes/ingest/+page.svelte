@@ -5873,7 +5873,7 @@
                       class="ddb"
                       type="button"
                       aria-expanded={drop === 'ins'}
-                      title={`Ticked — this is what is counted. ${insSummary}. A tick decides what this page counts — the ask line, the census below and the outcome list after a run. It cannot narrow the REQUEST: api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so target=${target} asks for all ${reachKnown ? n(reach) : '—'} either way.`}
+                      title={`Ticked — this is what is counted. ${insSummary}. ${reachKnown ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.` : reachWhy} A tick decides what this page counts — the ask line, the census below and the outcome list after a run. It cannot narrow the REQUEST: api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so target=${target} asks for all ${reachKnown ? n(reach) : '—'} either way.`}
                       onclick={(e) => {
                         e.stopPropagation();
                         drop = drop === 'ins' ? null : 'ins';
@@ -5966,21 +5966,19 @@
                       </div>
                     {/if}
                   </div>
-                  <span
-                    class="note quiet"
-                    class:warn={!reachKnown}
-                    title={reachKnown
-                      ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.`
-                      : reachWhy}
-                  >
-                    <!-- "IN <FEED>'S MASTER" WAS WRONG, AND WRONG BY A FACTOR OF THREE.
-                         `catalogue.rows` is /instruments.json, which is the merged
-                         TRACKED catalogue. Measured against the running server: it
-                         returns 869 rows for Dhan while /health reports 2,878 kept
-                         from Dhan's master. The label named the larger thing and
-                         printed the smaller number. -->
-                    {reachKnown ? `of ${n(catalogue.rows.length)} tracked` : reachWhy}
-                  </span>
+                  <!-- "of 869 tracked" IS A DENOMINATOR, AND IT HAD NO
+                       NUMERATOR BESIDE IT. The control's face reads
+                       `All 50 ticked`; a second line under it naming the size of
+                       the catalogue those 50 came out of is a fact about the
+                       SERVER printed under a control about the SELECTION, on
+                       every load. It is on the button's `title` with the whole
+                       measurement around it.
+                       `reachWhy` STAYS. That branch is the §4 case — the reach
+                       could not be read at all — and it is drawn only when it
+                       is true. -->
+                  {#if !reachKnown}
+                    <span class="note warn" title={reachWhy}>{reachWhy}</span>
+                  {/if}
                 </div>
               {/if}
 
@@ -6019,6 +6017,9 @@
                   >
                   <Picker
                     label="bar lengths"
+                    title={feedFinest
+                      ? `${feedFinest.short} One record at ${feedFinest.rungPhrase} is a ${feedFinest.label}. ${feedFinest.because} — ${feedFinest.source}`
+                      : 'Bar lengths — the granularity field on the wire. This server stated no granularity floor for the active feed, so nothing here refuses any rung for it.'}
                     summary={rungsChosen.length === 0
                       ? 'No timeframe ticked'
                       : rungsChosen.length === rungTally.live
@@ -6066,12 +6067,20 @@
                        this says what the FEED is, which is the fact that
                        decides whether the second rung is one of the rows
                        above. -->
-                  {#if feedFinest}
-                    <span class="note quiet wrap" title={`${feedFinest.because} — ${feedFinest.source}`}>
-                      {feedFinest.short} One record at {feedFinest.rungPhrase} is a
-                      {feedFinest.label}.
-                    </span>
-                  {:else if feeds.active}
+                  <!-- THE FEED'S FLOOR IS A FACT, AND IT WAS THE LONGEST
+                       NARRATION ON THE STRIP.
+                       "Dhan — REST API. It serves one minute and coarser. One
+                       record at one minute is a bar — open, high, low, close."
+                       ran to five lines under a control whose face reads
+                       `1 minute`, on every load, and it is what made the row
+                       four lines taller at one end than the other. It is on the
+                       menu's `title` now, with its provenance, which is where
+                       the same fact already lived in its long form.
+                       WHAT IT PROTECTS IS UNCHANGED. The floor still decides
+                       which rows `rungRows` draws, and a rung this feed refuses
+                       is still a row in that menu carrying its own why. Nothing
+                       is enforced here and nothing was. -->
+                  {#if !feedFinest && feeds.active}
                     <!-- A MISSING FIELD, NAMED AS ONE. This used to read "no
                          granularity floor stated", which was true of a browser
                          holding a transcription that did not cover the feed.
@@ -6244,22 +6253,26 @@
                       {#if cal.field === 'to'}{@render dayGrid()}{/if}
                     </div>
                   </div>
-                  <span
-                    class="note quiet"
-                    class:warn={Boolean(fromDay) && Boolean(toDay) && !windowOk}
-                  >
-                    {#if windowOk}
-                      {dayLabel(from)} – {dayLabel(to)} · {n(windowDays)} day(s) · {n(
-                        windowMonths.length
-                      )} month file(s) {monthLabel(windowMonths[0])}{windowMonths.length > 1
-                        ? ` – ${monthLabel(windowMonths[windowMonths.length - 1])}`
-                        : ''}
-                    {:else if fromDay && toDay}
-                      the two dates are the wrong way round
-                    {:else}
-                      no window picked
-                    {/if}
-                  </span>
+                  <!-- THE WINDOW LINE SAID WHAT THE TWO FIELDS ABOVE IT AND
+                       THE TILE BELOW IT WERE ALREADY SAYING.
+                       "06 Jan 2015 – 05 Feb 2016 · 396 day(s) · 14 month
+                       file(s) Jan 2015 – Feb 2016" sat between two boxes
+                       reading `06 Jan 2015` and `05 Feb 2016`, and the WINDOW
+                       tile four inches down reads `396` over `day(s) · 14 month
+                       file(s)`. Every clause of it was on screen twice, in the
+                       reader's own words, at a larger size.
+                       THE TWO REFUSALS STAY. Neither is a restatement: one says
+                       the pair cannot make a window, the other that there is no
+                       pair yet, and neither is drawn unless it is true. -->
+                  {#if !windowOk}
+                    <span class="note warn">
+                      {#if fromDay && toDay}
+                        the two dates are the wrong way round
+                      {:else}
+                        no window picked
+                      {/if}
+                    </span>
+                  {/if}
                 </div>
 
                 {#if isFolderFeed}
@@ -6324,63 +6337,19 @@
                 {/if}
               {/if}
 
-              <!-- THE SIZE OF THE ASK, IN ONE LINE, AT THE FOOT OF THE STRIP.
-                   This is the whole of what the four tiles carried that is not
-                   already on a control: the product and its factors, which is
-                   `productLine` unchanged, and the measured store reading
-                   beside it. An estimate is labelled an estimate — the server
-                   states no total. -->
-              <!-- ══ THE ASK, AS TILES RATHER THAN AS A SENTENCE ══
-
-                   This was one line reading
-                   "Asked 50 instrument(s) × 1 segment(s) × 1 rung(s) × 0 month
-                   file(s) = 0 instrument-month(s), estimated Held 0 · 0 bar(s),
-                   measured from /store.json" — two numbers that decide whether
-                   to press the button, wearing eleven words and a multiplication
-                   in between. The reference draws exactly this as a row of
-                   tiles, and it is right: a figure somebody looks AT belongs in
-                   the data scale, and the arithmetic that produced it belongs
-                   under it in small type.
-
-                   `.metric` is theme.css section 8 — the reference's own class,
-                   so this row is the same rule the mockup draws with rather than
-                   a second one that resembles it. `.v` inside it is the data
-                   scale with tabular figures.
-
-                   ESTIMATED AND MEASURED KEEP THEIR WORDS. The left tile is
-                   arithmetic on what was ticked; the right is a reading of
-                   /store.json. §3 rule 6 makes that distinction load-bearing,
-                   and it survives the move: it is each tile's footer. -->
-              <div class="tiles">
-                <div class="metric">
-                  <span class="k">Asked</span>
-                  <span class="v">{reachKnown ? n(expectedUnits) : '—'}</span>
-                  <span class="foot">instrument-month(s) · estimated</span>
-                </div>
-                <div class="metric">
-                  <span class="k">Held</span>
-                  <span class="v"
-                    >{live ? n(live.units) : storeRead.at ? n(heldInWindow) : '—'}</span
-                  >
-                  <span class="foot">
-                    {live || storeRead.at
-                      ? `${n(live ? live.rows : heldBarsInWindow)} bar(s) · measured`
-                      : 'measured when the store answers'}
-                  </span>
-                </div>
-                <div class="metric">
-                  <span class="k">Instruments</span>
-                  <span class="v">{reachKnown ? n(insCount) : '—'}</span>
-                  <span class="foot">
-                    {n(segmentsReached.length)} segment(s) · {n(rungCount)} rung(s)
-                  </span>
-                </div>
-                <div class="metric">
-                  <span class="k">Window</span>
-                  <span class="v">{windowOk ? n(windowDays) : '—'}</span>
-                  <span class="foot">day(s) · {n(windowMonths.length)} month file(s)</span>
-                </div>
-              </div>
+              <!-- THE ASK TILES ARE GONE, AT THE OPERATOR'S INSTRUCTION.
+                   Asked / Held / Instruments / Window stood here as a four-tile
+                   row. Two of the four restated controls that are three inches
+                   above them — Instruments is the tick count the menu's own face
+                   carries, and Window is the two date fields subtracted — and
+                   the row was the last thing between the form and the button.
+                   WHAT LEAVES WITH THEM, STATED RATHER THAN LOST: `Asked` was
+                   the only rendering of the estimated instrument-month product,
+                   and `Held` the only AGGREGATE of the store reading. The
+                   per-series census below still measures both per instrument —
+                   `BARS STORED / EXPECTED` and `MONTHS UNPROVED` — and its
+                   header still names the window, the sessions and the series
+                   count, so nothing here is the only place a number exists. -->
 
               <!-- ================================ THE TWO BULK ACTIONS =====
                    One clears the selection; the other would clear the store,
@@ -7315,7 +7284,7 @@
         : feedsChosen.length === 1
           ? feedName(feedsChosen[0])
           : `${n(feedsChosen.length)} feeds · ${n(wireBodies.length)} request(s)`}
-      title={`Which vendors this run asks. ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) = ${n(wireBodies.length)} request(s), each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
+      title={`Everything below is this feed's answer — ${scopeNote}. Which vendors this run asks: ${n(feedsChosen.length)} feed(s) x ${n(rungsChosen.length)} timeframe(s) = ${n(wireBodies.length)} request(s), each with its own receipt. The page's COUNTS stay scoped to ${feedName(feeds.active)} — a count is measured against one master and one store, and no page in this product puts two feeds' numbers side by side.`}
       rows={feeds.all.map((f) => ({
         key: f.wire,
         name: f.display,
@@ -7342,19 +7311,23 @@
           sel.size === 1 && [...sel][0] === feeds.active ? new Set() : new Set(sel);
       }}
     />
-    <span
-      class="note quiet"
-      class:warn={!reachKnown}
-      title={`everything below is this feed's answer · ${scopeNote}`}
-    >
-      {#if feedsChosen.length > 1}
+    <!-- ONE FEED SAYS NOTHING HERE; MORE THAN ONE HAS SOMETHING ONLY THIS
+         LINE CAN SAY.
+         "everything below is this feed's answer · <scope>" drew under a control
+         whose face already reads `Dhan`, on every load, forever — the running
+         commentary the cut two hundred lines down already named and removed one
+         instance of. It is on the control's own `title` now, which is where §4
+         sends a fact that does not fit.
+         The multi-feed branch is NOT narration and stays: with two feeds ticked
+         the counts below belong to ONE of them, and nothing else on this page
+         says which. It appears only when it is true. -->
+    {#if feedsChosen.length > 1}
+      <span class="note quiet">
         {n(feedsChosen.length)} feed(s) · {n(wireBodies.length)} request(s) · counts below are {feedName(
           feeds.active
         )}'s
-      {:else}
-        everything below is this feed's answer · {scopeNote}
-      {/if}
-    </span>
+      </span>
+    {/if}
   </div>
 {/snippet}
 
@@ -7385,6 +7358,9 @@
     <Picker
       tuck
       label="segments"
+      title={`The store keys on three segments and all three are drawn. ${segmentsUnserved
+        .map((s) => `${s.label} — ${s.why}`)
+        .join('\n\n')}`}
       summary={segmentsReached.length > 0
         ? segmentsReached.map((s) => s.label).join(', ')
         : 'No segment selected'}
@@ -7420,16 +7396,13 @@
       selected={segSet}
       onchange={(/** @type {Set<string>} */ sel) => (segSet = sel)}
     />
-    <span
-      class="note quiet"
-      title={`The store keys on three segments and all three are drawn. ${segmentsUnserved
-        .map((s) => `${s.label} — ${s.why}`)
-        .join('\n\n')}`}
-    >
-      {n(segmentsReached.length)} of {n(SEGMENTS.length)} active{segmentsUnserved.length > 0
-        ? ` · ${n(segmentsUnserved.length)} refused, drawn with the reason`
-        : ''}
-    </span>
+    <!-- "1 of 3 active · 2 refused, drawn with the reason" IS GONE, AND THE
+         TWO FACTS IN IT ARE BOTH STILL ON SCREEN.
+         The control's face names the ticked segments. The refused two are rows
+         inside it — drawn, dead, each carrying its own why — behind Picker's
+         own drawer line, which states its count and says "show why". This line
+         was a third rendering of a thing the reader can see twice, under a
+         control it made taller. The long form is the menu's `title`. -->
   </div>
 {/snippet}
 
@@ -8059,6 +8032,32 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* ══ A RUNG'S MENU IS THE WIDTH OF ITS RUNG ══
+
+     `Picker` sizes its panel `width: max-content` and that is right for the
+     control it was written for — a 750-name instrument search needs whatever
+     width the longest name wants. In the STRIP it is wrong, and visibly: a
+     Segments menu whose widest row is "Expired futures / contracts that have
+     already se…" opened to roughly twice its own button and hung across the
+     two controls beside it, so the panel no longer looked attached to the
+     thing it belonged to. Timeframe did the same over the right edge.
+
+     Pinned to the button here, and only here. `Picker` is shared with three
+     other pages and is not edited from this file — the same rule the `.pbtn`
+     clip above already follows. `max-content` stays the floor via `min-width`
+     on the component, so a menu never gets NARROWER than its button either. */
+  .field :global(.pmenu) {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+  /* THE DETAIL COLUMN GIVES WAY FIRST. At the button's width the name and its
+     detail no longer both fit on their own terms, and the NAME is the thing
+     being chosen — so the detail takes what is left and ellipses, rather than
+     forcing the row wider than the panel. */
+  .field :global(.pmenu) :global(.pct) {
+    max-width: 45%;
   }
   .ddb {
     appearance: none;
@@ -8782,21 +8781,11 @@
     border: 0;
     padding: 0;
   }
-  /* THE TILE ROW. `auto-fit` rather than a fixed four, so the row reflows
-     instead of overflowing on a narrow window — and `minmax` keeps a tile from
-     collapsing to the width of its own label. The reference draws four; this
-     draws whatever fits, which is the same design at every width. */
-  .tiles {
-    grid-column: 1 / -1;
-    margin-top: var(--s5);
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-    gap: 1px;
-    background: var(--line-soft);
-    border: 1px solid var(--line-soft);
-    border-radius: var(--r3);
-    overflow: hidden;
-  }
+  /* `.tiles` IS GONE WITH THE ROW IT DREW. Leaving the rule behind is the
+     exact pattern Gate W4 exists to catch — styling whose markup was deleted,
+     with the comment beside it still asserting a layout the page no longer
+     has. `.metric` is NOT removed: it is theme.css section 8 and other pages
+     draw with it. */
   .wire {
     border: 1px solid var(--line);
     border-radius: var(--r3);
