@@ -2260,7 +2260,7 @@ fn store_filter_bar(filter: &crate::census::StoreFilter, held_only: bool) -> Str
 }
 
 /// The per-vendor counter cards. One field read each, never a walk.
-fn census_cards(censuses: &[VendorCensus]) -> String {
+fn census_cards(censuses: &[&VendorCensus]) -> String {
     let mut out = String::with_capacity(1024);
     out.push_str("<section class=\"cards\">");
     for (i, census) in censuses.iter().enumerate() {
@@ -2459,11 +2459,28 @@ pub fn store_page(view: &StoreView<'_>) -> String {
     // numbers next to each other are read as a difference whether or not one
     // is meant, and between feeds that are not the same universe there is no
     // difference to read.
-    let mine: Vec<VendorCensus> = view
+    // BORROWED, NOT CLONED, AND THE DIFFERENCE IS THE WHOLE COST OF THIS PAGE.
+    //
+    // This was `.cloned()`. `VendorCensus` holds a `Census`, whose `Held` variant
+    // boxes a whole `Manifest` -- a `Vec<Held>` plus a `HashMap<EntryKey, Held>`,
+    // both of which `Clone` deep-copies. So rendering this page copied every
+    // entry the manifest holds, per request, in order to read the four header
+    // scalars `census_cards` actually touches: `counters`, `generation`,
+    // `is_loud` and `vendor`.
+    //
+    // `/store.json` and `/bars` already pay an O(entries) cost through
+    // `census_now`, recorded at `docs/06-limits.md` §41. `store_html` does NOT --
+    // D-0039 moved it to the startup-resident `site.censuses` for exactly that
+    // reason -- so this clone was the SOLE O(entries) term on the HTML path, and
+    // it put back the cost D-0039 had removed.
+    //
+    // References rather than `find`: the filter's semantics are preserved
+    // exactly, including the order and the (currently impossible) case of two
+    // censuses sharing a vendor. D-0170.
+    let mine: Vec<&VendorCensus> = view
         .censuses
         .iter()
         .filter(|c| c.vendor == view.feed)
-        .cloned()
         .collect();
     body.push_str(&census_cards(&mine));
     if let Some(filter) = view.filter {

@@ -4514,3 +4514,63 @@ That is the work this section exists to name, and it is **OPEN**.
 
 ---
 
+## 81. What an independent O(1) audit of all thirteen crates found
+
+Measured 2026-08-18 by thirteen auditors reading the code rather than trusting
+the gates, each claimed violation then put to a reviewer instructed to refute by
+default.
+
+| | |
+|---|---|
+| Hot paths audited | **152** |
+| Agree with their stated cost | **129** |
+| Disagree | **23** |
+| Proven by a bench row | 115 |
+| **No bench at all** | **37** |
+| Violations claimed | 47 |
+| Verified | 28 |
+| **Confirmed** | **1** |
+| Refuted | 27 |
+
+**The headline is the refutation rate.** Of 47 constructs that looked like O(1)
+violations, exactly one survived scrutiny. The per-operation discipline is real.
+
+### The one confirmed violation — fixed, D-0170
+
+`crates/api/src/render.rs`. The `/store` HTML page ran `.cloned()` over the
+censuses, and `VendorCensus` boxes a whole `Manifest` — a `Vec<Held>` plus a
+`HashMap<EntryKey, Held>`, both deep-copied by `Clone`. So the page copied every
+entry the manifest holds, per request, to read the four header scalars
+`census_cards` touches.
+
+`/store.json` and `/bars` already pay O(entries) through `census_now` (§41), but
+`store_html` does not — D-0039 moved it to the startup-resident censuses for
+exactly that reason. This clone was the **sole** O(entries) term on the HTML path
+and put back the cost D-0039 removed. Now borrowed.
+
+### The 23 disagreements are documentation drift, not slow code
+
+Every one is a case where the cost is genuinely constant and the number written
+beside it is wrong. Two examples, both re-derived by rebuilding the tables from
+the source arrays with the crate's own hash:
+
+* **`MemberIndex::position`** documents "the worst probe is `<= 8` for all five
+  tiers". True for a HIT. For a MISS the loop runs to the first empty slot:
+  **NTM 11, FNO 10, NIFTY_200 9, NIFTY_50 9, NIFTY_500 8, NIFTY_100 7.** Three
+  tables exceed the stated bound. Still a bounded constant — the tables are fixed
+  size — but not the bound written down. Both tests that cover it iterate
+  `members` only, so neither measures a miss.
+* **`universe::of_equity`** documents "at most 32 probe steps". 32 is the sum of
+  the six HIT worsts; the worst possible total is **54**, and a synthetic
+  non-member already reaches 41 in one call. Measured mean over the 750 real
+  Total Market names is 7.6 steps, and 8.4 over 5,000 non-members — nothing is
+  measurably slow, the constant is real, the number is wrong.
+
+### 37 hot paths have no bench at all
+
+Including `Paisa::from_rupees_half_up`, the one float boundary, called per bar.
+Gate 14 only checks the ids a row LISTS, so a path that claims a cost in a doc
+comment and names no row is invisible to it. **OPEN.**
+
+---
+

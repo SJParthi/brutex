@@ -14926,3 +14926,33 @@ red.
 sat under that work; the driver and the route are the next units.
 
 ---
+
+## D-0171 · 2026-08-18 · The `/store` page copied every manifest entry to print four numbers
+
+`crates/api/src/render.rs`.
+
+`store_html` collected its censuses with `.cloned()`. `VendorCensus` holds a
+`Census`, whose `Held` variant boxes a whole `Manifest` — a `Vec<Held>` plus a
+`HashMap<EntryKey, Held>`, both of which `Clone` deep-copies. `census_cards`
+touches `counters()`, `generation()`, `is_loud()` and `vendor`: four header
+scalars. So the page copied every entry the manifest holds, per request, and used
+none of it.
+
+**Why this one mattered more than it looks.** `/store.json` and `/bars` already
+pay an O(entries) cost through `census_now`, recorded at `docs/06-limits.md` §41.
+`store_html` does NOT — D-0039 moved it to the startup-resident `site.censuses`
+for exactly that reason. This clone was therefore the **sole** O(entries) term on
+the HTML path, reintroducing the cost D-0039 had removed.
+
+Now `Vec<&VendorCensus>` and `census_cards(&[&VendorCensus])`. References rather
+than `find`: the filter's semantics are preserved exactly, including order and
+the currently-impossible case of two censuses sharing a vendor.
+
+**Found by an independent O(1) audit of all thirteen crates** — 152 hot paths,
+47 claimed violations, and this the only one of 28 verified that survived a
+reviewer instructed to refute by default. `docs/06-limits.md` §81 records the
+whole sweep, including 23 documented bounds that are wrong about a cost that is
+nonetheless constant, and 37 hot paths with no bench at all.
+
+---
+
