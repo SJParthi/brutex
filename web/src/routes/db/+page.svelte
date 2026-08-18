@@ -6714,23 +6714,35 @@
         {/if}
       </span>
 
-      <label class="pgsize">
+      <!-- THE LAST OS-DRAWN MENU IN THIS PRODUCT. `<select>` styles its closed
+           face and NOT its open list -- that popup belongs to the operating
+           system -- so this one control kept rendering the OS blue highlight
+           under a page that draws everything else itself. Same fix as both
+           calendars: `Picker`, single, with each row's own sentence carried
+           across as its `why` rather than an `<option title>` no reader hovers. -->
+      <div class="pgsize">
         <span>Rows per page</span>
-        <select
-          value={pageSize}
-          onchange={(e) => setPageSize(Number(e.currentTarget.value))}
+        <Picker
+          single
+          label="page sizes"
+          summary={fmt(pageSize)}
           title="How many rows this page holds. The reader's place is kept across a change: the row you were standing on stays on screen."
-        >
-          {#each PAGE_SIZES as n (n)}
-            <option
-              value={n}
-              title={n >= 1000
+          rows={PAGE_SIZES.map((n) => ({
+            key: String(n),
+            name: fmt(n),
+            detail: n >= 1000 ? `${fmt(n * BAR_COLS.length)} cells` : undefined,
+            why:
+              n >= 1000
                 ? `${fmt(n)} rows in one document. On the bar grid that is ${fmt(n * BAR_COLS.length)} cells — legible, and slow to lay out.`
-                : `${fmt(n)} rows per page`}>{fmt(n)}</option
-            >
-          {/each}
-        </select>
-      </label>
+                : undefined
+          }))}
+          selected={new Set([String(pageSize)])}
+          onchange={(/** @type {Set<string>} */ sel) => {
+            const n = Number([...sel][0]);
+            if (Number.isFinite(n) && n > 0) setPageSize(n);
+          }}
+        />
+      </div>
 
       <label class="pgjump">
         <span>Go to page</span>
