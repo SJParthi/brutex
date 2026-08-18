@@ -345,6 +345,15 @@ fn seen_of(n: usize) -> std::collections::HashSet<ConditionMask> {
 /// So this varies the SEEN SET and nothing else: 1,000 / 10,000 / 100,000
 /// masks, one `contains` against each, hit and miss.
 fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
+    // `once_ps` times ONE call and a hash probe is nanoseconds, so the repeats
+    // go INSIDE and the total is divided by them. Same shape as C-E-11 below.
+    //
+    // DECLARED FIRST, not beside the closure that reads it: an item exists from
+    // the start of its scope whatever line it is written on, so `const` after a
+    // `let` reads as sequential when it is not. `clippy::items_after_statements`
+    // refuses the spelling for that reason, and it is denied workspace-wide.
+    const REPS: usize = 20_000;
+
     let small = seen_of(1_000);
     let medium = seen_of(10_000);
     let large = seen_of(100_000);
@@ -352,10 +361,6 @@ fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
     // A mask that IS in every set, and one that is in none.
     let present = candidate(1);
     let absent = ConditionMask::ZERO.with_bit(380);
-
-    // `once_ps` times ONE call and a hash probe is nanoseconds, so the repeats
-    // go INSIDE and the total is divided by them. Same shape as C-E-11 below.
-    const REPS: usize = 20_000;
     let probe = |set: &std::collections::HashSet<ConditionMask>, m: &ConditionMask| -> u128 {
         let total = once_ps(|| {
             let mut found = 0_usize;
