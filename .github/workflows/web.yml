@@ -142,20 +142,20 @@ jobs:
       # CSS is what let the removed view toggle be RESTORED to its original
       # shape rather than guessed at.
       #
-      # A RATCHET AT 86, for the same reason W3 is a ratchet: a floor of zero
-      # would mean deleting 86 rules inside the commit that adds the gate. That
-      # cleanup is also not mechanisable — an attempt to remove them by line
-      # number cut a selector out of a comma-separated list and left a dangling
-      # `.sortbtn,`, failing the build. It has to be done by hand, a rule at a
-      # time, and this gate is what makes that work measurable and keeps the
-      # number from climbing while it waits.
+      # A RATCHET, for the same reason W3 is a ratchet: a floor of zero
+      # would mean clearing every one inside the commit that adds the gate.
+      # The ceiling has come down from 86 to 35 as the provably-dead rules were
+      # removed; what remains needs a judgement per selector, because each has
+      # a class token that DOES appear in the markup and only the combination
+      # is unmatchable. This gate keeps the number from climbing while that
+      # waits, and prints the new ceiling whenever it falls.
       #
       # Counted DISTINCT, because the client and server passes each report the
       # same selector once.
       # ----------------------------------------------------------------------
       - name: Gate W4 — unused CSS does not grow
         run: |
-          CEILING=86
+          CEILING=35
           npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
           FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
                   | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')

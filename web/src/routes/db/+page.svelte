@@ -7287,7 +7287,6 @@
      under a group of controls sharing a hairline box — and under a grid cell
      it draws across the gap below, pointing at whatever rung wrapped onto the
      next row. Every control in here already states its own focus: `.pbtn`,
-     `.din` and `.dbtn` each carry `:focus-visible { outline: 2px solid }`,
      which is the signal /ingest shows and is the one a keyboard reader
      actually needs — per control, not per group. */
   /* A RUNG THAT CANNOT BE USED SAYS SO ON ITS CAPTION AND ITS CONTROL, NEVER ON
@@ -7392,9 +7391,7 @@
      inert the moment `.strip` stopped being a flex container. They asked for a
      larger share of ONE line, and the grid's answer to "this rung needs more
      room" is a whole track — `span 2` where two tracks exist, and nothing
-     where they do not, which is what `auto-fit` already handles by wrapping.
-     Left as a no-op they would read as live sizing to the next reader. */
-  .strip .field.combo,
+     where they do not,
   .strip .field.mcell {
     min-width: 0;
   }
@@ -7436,11 +7433,7 @@
      popup covers is a message that was not delivered. */
   /* NO `.derr.on` PAIR HERE. The approved design toggles this node with a
      class because it is always in its DOM; this one is gated by an `{#if}` on
-     `rangeInverted`, so a hidden state it can never be in would be a
-     declaration for a node nothing builds — and the class beside it would be an
-     attribute that says nothing. It exists exactly when it has something to
-     say. */
-  .derr {
+     `rangeInverted`{
     position: absolute;
     left: var(--s5);
     bottom: calc(100% - var(--s2));
@@ -7457,8 +7450,7 @@
     border-radius: var(--r2);
     padding: var(--s3) var(--s4);
     box-shadow: var(--e2);
-  }
-  /* THERE IS NO `.dright .derr` RULE, AND THAT IS NOT AN OMISSION. Only the FROM
+  } AND THAT IS NOT AN OMISSION. Only the FROM
      end ever draws this complaint — it is the bound that is too late — so a rule
      anchoring it to the To cell's right edge would be a rule for a node nothing
      builds, which is how a control comes back without anyone deciding to bring
@@ -7588,47 +7580,24 @@
     background: var(--panel-2);
     box-shadow: inset 2px 0 0 var(--acc);
   }
-  /* SHOWN AND REFUSED, NEVER SILENT. A menu that collapses to one row when a
-     filter empties it is a menu that looks broken; this says which it is. */
-
-  /* ---- THE TEXT FIELD AND THE TWO MONTH FIELDS ------------------------
-     `.din` is the strip's own text face. `theme.css`'s `.search` gives it a
-     bordered box, which is right on a page that has one search and wrong in a
+  /* SHOWN AND REFUSED, which is right on a page that has one search and wrong in a
      row of borderless faces, so the box is taken off HERE — three class names
      deep, which is what beats a single-class theme rule without touching it. */
   /* THE DAY AND MONTH FIELDS TAKE /INGEST'S BOX, for the same reason the
-     Picker face does: this de-styled them to the bar's borderless 19px line,
-     and the bar is gone. /ingest sets `font-size: var(--fs-base); padding:
-     11px 13px; border-radius: 9px` on `.dates .din` — the field then agrees
-     with `.pbtn` on height, radius and face, which is what makes a row of
+     Picker face does: this de-styled them to the bar's borderless 19px line, radius and face, which is what makes a row of
      dropdowns and a pair of dates read as one strip. The focus outline is
      restored with them: suppressing it was only defensible while the CELL drew
-     a focus underline for the whole group, and that rule is deleted above. */
-  .strip .field .din {
+     a focus underline for the whole group{
     width: 100%;
     max-width: none;
     font-size: var(--fs-base);
     padding: 11px 13px;
     border-radius: 9px;
   }
-  .strip .field .dbtn {
-    font-size: var(--fs-base);
-    padding: 11px 10px;
-    border-radius: 9px;
-  }
   /* The month field is the same face at the same height — it is a button rather
      than a text box, for the reason stated at the snippet, but nothing about
      that should be visible in the row. */
-  /* NO `min-width` ON THE MONTH FIELD INSIDE THE STRIP, and that is the one
-     change the unbroken row demanded of it. `.dval` sets `min-width: 5.4rem`
-     so the two ends of the window stay the same width and the ▦ beside them
-     stays put; inside a cell that may be narrowed to an equal share of one
-     row, a floor of 5.4rem plus the button is a cell that cannot shrink, and
-     a flex item that will not shrink overflows its own border rather than
-     wrapping. The floor is dropped here and the month ellipses like every
-     other face in the strip — `Sep 2024` is eight characters and reaches that
-     point long after the captions do. */
-  .strip .field .dval {
+  /* NO `min-width` ON THE MONTH FIELD INSIDE THE STRIP, a floor of 5.4rem plus the button is a cell that cannot shrink{
     font-size: var(--fs-base);
     min-width: 0;
     overflow: hidden;
@@ -7755,10 +7724,7 @@
     flex: none;
   }
 
-  /* The hint sits INSIDE the input's right padding, and the pull has to absorb
-     the gap of the row it is in to land there. `.dwrap` is that row now, and
-     its gap is `--s3`. */
-  .slash {
+  /* The hint sits INSIDE the input's right padding{
     margin-left: calc(-1 * var(--s6));
     opacity: 0.55;
     pointer-events: none;
@@ -7907,13 +7873,7 @@
      correctly sized, fully clickable checkbox made of transparent pixels with
      no border and no tick. Present, placed, unpainted.
 
-     Three facts make that impossible on this page, and all three were checked
-     rather than assumed:
-
-       1. NO RULE IN THIS FILE MATCHES A FORM CONTROL BY ELEMENT. Every
-          `appearance: none` here is on a class — `.dval`, `.dbtn`, `.calnav`,
-          `.calsel`, `.cmon` — and none of them is ever put on an input.
-       2. `.cell` HERE IS A TABLE CELL, not a control cell. The controls live in
+     Three facts make that impossible on this page, not a control cell. The controls live in
           `.qcell`, and neither selector has an `input` or `select` descendant
           rule at all.
        3. THE CHECKBOX IS NOT IN THIS FILE'S SCOPE. It is drawn by
@@ -7935,70 +7895,19 @@
      page is: `Sep 2024` and `Mar 2020` are the same width, so the two ends of
      the window line up and the arrow between them stays centred. */
   /* `.dcell` WENT WITH THE MARKUP IT POSITIONED. It was the last rule in this
-     block still matching anything, and only because /db's own day inputs
-     borrowed the class; `$lib/DayField.svelte` owns that element now and
-     carries its own `position: relative`. Its siblings below have been dead
-     since the month calendar was removed. */
-  .dwrap {
+     block still matching anything{
     display: flex;
     align-items: center;
     gap: var(--s3);
   }
-  .dval {
-    appearance: none;
-    border: 0;
-    background: transparent;
-    padding: 0;
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-sm);
-    font-weight: 650;
-    letter-spacing: -0.015em;
-    color: var(--ink);
-    cursor: pointer;
-    white-space: nowrap;
-    text-align: left;
-    min-width: 5.4rem;
-  }
   /* AN UNSET BOUND LOOKS UNSET. `Any earlier` at the ink weight reads as a
      month called "Any earlier"; at the faint weight it reads as the absence it
-     is, which is the whole distinction `''` carries in the state. */
-  .dval.unset {
+     is{
     color: var(--faint);
     font-weight: var(--w-mid);
   }
-  .dval:hover {
-    color: var(--acc);
-  }
-  .dval:focus-visible,
-  .dbtn:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-    border-radius: var(--r1);
-  }
-  .dbtn {
-    appearance: none;
-    border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--faint);
-    font: inherit;
-    font-size: var(--fs-xs);
-    line-height: 1;
-    cursor: pointer;
-    padding: 3px 5px;
-    border-radius: var(--r2);
-    flex: none;
-  }
-  .dbtn:hover {
-    color: var(--acc);
-    border-color: var(--acc);
-  }
 
-  /* THE CALENDAR. Anchored to the CELL rather than to the field, so nothing
-     between them can push it out of line; the To end drops to the LEFT because
-     it is the last cell before the tail and a panel hanging off its right edge
-     would leave the pane at the widths this strip wraps at. */
-  .cal {
+  /* THE CALENDAR. Anchored to the CELL rather than to the field{
     position: absolute;
     left: var(--s4);
     top: calc(100% + var(--s3));
@@ -8010,90 +7919,10 @@
     padding: var(--s4);
     box-shadow: var(--e3);
   }
-  .dright .cal {
-    left: auto;
-    right: var(--s4);
-  }
-  .calhd {
-    display: flex;
-    align-items: center;
-    gap: var(--s2);
-    margin-bottom: var(--s4);
-  }
-  .calnav {
-    appearance: none;
-    border: 1px solid var(--line);
-    background: var(--bg-2);
-    color: var(--faint);
-    font: inherit;
-    font-size: var(--fs-sm);
-    line-height: 1;
-    width: 24px;
-    height: 24px;
-    flex: none;
-    border-radius: var(--r2);
-    cursor: pointer;
-  }
-  .calnav:hover:not(:disabled) {
-    color: var(--acc);
-    border-color: var(--acc);
-  }
-  .calnav:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-  .calsel {
-    appearance: none;
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: var(--r2);
-    color: var(--ink);
-    font: inherit;
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    padding: 0 var(--s3);
-    height: 24px;
-    cursor: pointer;
-    flex: 1;
-    min-width: 0;
-    text-align: center;
-  }
-  .calnav:focus-visible,
-  .calsel:focus-visible,
-  .cmon:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: -1px;
-  }
-  .calgrid {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: var(--s2);
-  }
-  .cmon {
-    appearance: none;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--ink);
-    font: inherit;
-    font-family: var(--mono);
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    height: 26px;
-    border-radius: var(--r2);
-    cursor: pointer;
-  }
-  .cmon:hover:not(:disabled) {
-    background: var(--panel-2);
-    color: var(--acc);
-  }
   /* A MONTH THE STORE HOLDS NOTHING FOR IS STRUCK THROUGH AND REFUSES THE
      CLICK. It keeps its slot: the shape of a backfill's hole is the most
      useful thing this panel can show while a bound is being chosen, and it is
-     invisible the moment the empty months are simply left out. Amber, not red
-     — a month nobody pulled is a severity and not a direction. */
-  .cmon:disabled {
+     invisible the moment the empty months are simply left out. Amber{
     color: var(--faint);
     opacity: 0.5;
     cursor: not-allowed;
@@ -8101,20 +7930,12 @@
     text-decoration-thickness: 1px;
     text-decoration-color: color-mix(in srgb, var(--warn) 70%, transparent);
   }
-  .cmon[aria-pressed='true']:not(:disabled) {
-    background: var(--acc);
-    border-color: var(--acc);
-    color: var(--on-acc);
-    font-weight: var(--w-bold);
-  }
   /* THE BOUND IS ON SCREEN — as the month, in this product's own form. It used
      to be the RAW key here, on the argument that the panel writing the string
      is the right place to read it back; the string it printed was `2024-09`,
      which is the store's spelling standing in for a date on a page where every
      other month reads `Sep 2024`. The key did not go anywhere: the field above
-     and each of the twelve month buttons name it in their own `title`, so it is
-     still readable from the control that owns it. */
-  .calft {
+     and each of the twelve month buttons name it in their own `title`{
     display: flex;
     align-items: baseline;
     flex-wrap: wrap;
@@ -8125,12 +7946,6 @@
     font-size: var(--fs-mini);
     color: var(--faint);
     line-height: 1.5;
-  }
-  .calft b {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    color: var(--ink-2);
-    font-weight: var(--w-semi);
   }
 
   /* ---- the refusal notice --------------------------------------------- */
@@ -8853,9 +8668,7 @@
      ==================================================================== */
 
   /* WHICH GRID IS SHOWING, AND THE SENTENCE THAT SAYS SO, ON ONE ROW. The
-     tab and the sentence are one derived value read twice, so a pressed tab
-     with a contradicting caption is not a state this page can reach. */
-  .viewbar {
+     tab and the sentence are one derived value read twice{
     flex: none;
     display: flex;
     align-items: center;
@@ -8870,62 +8683,6 @@
     border-radius: var(--r4);
     background: var(--panel-2);
   }
-  .vtab {
-    appearance: none;
-    display: inline-flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-    border: 0;
-    border-radius: var(--r2);
-    background: none;
-    color: var(--dim);
-    font: inherit;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    padding: var(--s3) var(--s5);
-    cursor: pointer;
-    text-align: left;
-  }
-  .vtab i {
-    font-style: normal;
-    font-size: var(--fs-micro);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-  }
-  .vtab:hover {
-    color: var(--ink);
-  }
-  .vtab[aria-selected='true'] {
-    background: var(--acc);
-    color: var(--on-acc);
-  }
-  .vtab[aria-selected='true'] i {
-    color: var(--on-acc);
-    opacity: 0.72;
-  }
-  .vtab:focus-visible {
-    outline: 2px solid var(--focus);
-    outline-offset: 2px;
-  }
-  .vsay {
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  .vsay b {
-    color: var(--ink-2);
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-  }
-  .vbudget {
-    display: inline-flex;
-    align-items: center;
-    gap: var(--s3);
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  .vbudget select,
   .pgsize select {
     appearance: none;
     background: var(--panel);
@@ -8945,22 +8702,15 @@
     background-size: 5px 5px, 5px 5px;
     background-repeat: no-repeat;
   }
-  .vbudget select:focus-visible,
   .pgsize select:focus-visible,
   .pgjump input:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: 2px;
   }
-  /* THE PARTITION THAT SUMS. read + over budget = matched, on screen. */
-  .vsum {
+  /* THE PARTITION THAT SUMS. read + over budget = matched{
     font-size: var(--fs-xs);
     color: var(--faint);
     font-variant-numeric: tabular-nums;
-  }
-  .vsum b {
-    color: var(--ink-2);
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
   }
 
   /* ---- THE BAR GRID. A real table: paged, not windowed, so the browser's
