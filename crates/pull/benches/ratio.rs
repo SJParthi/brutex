@@ -329,12 +329,12 @@ fn census_beats_the_scan_it_replaces() -> bool {
 /// because both legs moved together.
 ///
 /// The denominator has to be something that cannot move when `entry` does. This
-/// reads the manifest's own held count and folds it — same struct, same pointer
+/// reads the manifest's own entry count and folds it — same struct, same pointer
 /// chased, no hash and no probe. The quotient is "how many of the cheapest
 /// manifest touches does one entry lookup cost".
 fn floor_ps(m: &Manifest) -> u128 {
     cost_ps(20_000, || {
-        let n = black_box(m).len();
+        let n = black_box(m).entries();
         black_box(n.wrapping_add(1))
     })
 }
@@ -358,12 +358,28 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
 
 /// C-14 — one entry lookup costs a bounded multiple of the per-lookup floor.
 fn entry_lookup_stays_within_its_budget() -> bool {
-    /// Floors allowed per lookup. Measured below, then pinned.
-    const ALLOWED: u128 = 0;
+    /// Floors allowed per lookup.
+    ///
+    /// Measured, arm64 laptop, release, three consecutive runs: **57.167,
+    /// 57.161, 58.440** floors, at a floor of 502–514 ps. A **1.02x spread** —
+    /// the tightest in the workspace, because both legs read the same resident
+    /// struct and neither allocates.
+    ///
+    /// **240**, sized on the worst observed with roughly 4x left over, the same
+    /// rule the other nine budgets apply. It still refuses the 174x uniform
+    /// regression this file's ratios would report as ok: such a lookup would
+    /// read about 10,100 floors and be refused by a factor of 42.
+    ///
+    /// A breach is NOT a census-size dependence; C-12 is that row, and it is
+    /// measured at 1x, 10x and 100x. This one means every lookup got dearer at
+    /// once — a rehash at an exact load factor, say, which is the defect
+    /// `docs/06-limits.md` records as a 2.4 ms stall at 50,000 entries and which
+    /// no quotient can see.
+    const ALLOWED: u128 = 240;
 
     let (m, _keep) = census(100_000);
     let floor = floor_ps(&m);
-    println!("  the per-lookup floor is {floor} ps — one held-count read and an add");
+    println!("  the per-lookup floor is {floor} ps — one entry-count read and an add");
     let present = key(7);
     let at = cost_ps(20_000, || black_box(&m).entry(black_box(&present)));
     budget("C-14 entry lookup against the floor", floor, at, ALLOWED)

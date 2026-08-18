@@ -16199,3 +16199,29 @@ refusing the 174x regression by a factor of 44.
 
 ---
 
+## D-0204 · 2026-08-18 · `crates/pull` gains a floor-relative budget — eleven of thirteen
+
+The eighth of the nine ratio-only crates. C-12 divides one entry lookup by
+another, and a uniform slowdown cancels in a quotient — the failure that let a
+mask operation run 174x slower while passing its crate's ratio rows at 0.98x.
+
+**The floor** is one entry-count read and an add on the same manifest: same
+struct, same pointer, no hash and no probe.
+
+**Measured**, three consecutive runs: **57.167, 57.161, 58.440** floors at a
+floor of 502–514 ps. The **1.02x spread is the tightest in the workspace** —
+both legs read the same resident struct and neither allocates.
+
+**Budget 240**, sized on the worst observed with about 4x left over, refusing the
+174x regression by a factor of 42.
+
+**What this row is FOR, specifically.** C-12 already proves the lookup does not
+grow with the census, measured at 1x, 10x and 100x. This one catches the other
+shape: every lookup getting dearer at once. A `HashMap` rehash at an exact load
+factor is exactly that, and `docs/06-limits.md` records it as a **2.4 ms stall at
+50,000 entries** — a defect that passed every ratio because both legs paid it.
+
+**One crate remains ratio-only**: `api`.
+
+---
+
