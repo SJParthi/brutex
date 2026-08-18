@@ -5343,10 +5343,170 @@ jobs:
   # ==========================================================================
   # The job NAME is what a branch-protection rule and the auto-merge workflow
   # match on, so it is spelled exactly as the required check: `ci-ok`.
+  # ==========================================================================
+  # GATE W — THE BROWSER TREE.
+  #
+  # This job was `.github/workflows/web.yml`, on the reasoning that the engine's
+  # gates and the browser's gates should not be confused for one another. True,
+  # and beside the point: `needs:` CANNOT NAME A JOB IN ANOTHER WORKFLOW FILE.
+  # A separate workflow could only have been made blocking by adding a second
+  # required check in branch protection, which is a repository setting and not a
+  # file in this tree. `ci-ok` already lists its needs and branch protection
+  # already requires `ci-ok`, so moving the job here makes Gate W binding with
+  # no setting to change. The distinction survives in the job's name.
+  #
+  # IT INSTALLS NODE, AND THAT DOES NOT WEAKEN GATE 1E. Jobs do not share a
+  # machine. Gate 1e shadows twelve JS binaries with failing stubs on its own
+  # runner and proves cargo builds and tests without them there; a different job
+  # installing Node on a different runner cannot reach it. CLAUDE.md §2 forbids
+  # a CRATE depending on the front-end toolchain, not a CI file knowing it
+  # exists.
+  # ==========================================================================
+  web:
+    name: Gate W — the browser tree
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # `ci` and NOT `install`. `npm install` may rewrite the lockfile, which
+      # would make the rebuild below a comparison against a dependency set the
+      # repository never agreed to.
+      - name: Install exactly the lockfile
+        run: npm ci --prefix web
+
+      # ----------------------------------------------------------------------
+      # GATE W1 — THE COMMITTED BUNDLE IS THE ONE THIS SOURCE PRODUCES.
+      #
+      # This check is only possible because `svelte.config.js` sets
+      # `version.name` to a digest of the source rather than `Date.now()`.
+      # With the default clock version, rebuilding IDENTICAL source rewrote 18
+      # of 39 tracked files -- the timestamp enters the client manifest, which
+      # changes that chunk's content hash, which changes every filename that
+      # references it. A gate that failed on every run for a reason that was
+      # never the source would train a reader to ignore it.
+      #
+      # Source maps are gitignored, so they cannot enter this diff.
+      # ----------------------------------------------------------------------
+      - name: Gate W1 — web/build matches web/src
+        run: |
+          npm --prefix web run build
+          if ! git diff --exit-code --stat -- web/build; then
+            echo
+            echo "The committed bundle is not what this source builds."
+            echo
+            echo "web/build is served from disk by the Rust binary, so the"
+            echo "artifact in this repository is what an operator actually"
+            echo "runs. A source change committed without a rebuild ships a"
+            echo "page that does not match its own source, and nothing else"
+            echo "in CI would notice."
+            echo
+            echo "Fix: npm --prefix web run build, then commit web/build."
+            exit 1
+          fi
+          echo "The bundle corresponds to the source. Fingerprint:"
+          cat web/build/_app/version.json
+
+      # ----------------------------------------------------------------------
+      # GATE W2 — THE TESTS THAT EXIST ACTUALLY RUN.
+      #
+      # node's own runner, so this needs no dependency beyond the toolchain
+      # already installed above.
+      # ----------------------------------------------------------------------
+      - name: Gate W2 — the front-end tests
+        run: node --test web/tests/*.test.js
+
+      # ----------------------------------------------------------------------
+      # GATE W3 — TYPES DO NOT GET WORSE.
+      #
+      # A RATCHET, NOT A FLOOR, and the distinction is the honest part. The
+      # tree carries 64 errors today. Demanding zero would mean either fixing
+      # 64 errors in the commit that adds this gate -- unrelated work, badly
+      # scoped -- or shipping a gate that is red from birth, which is a gate
+      # nobody reads. Demanding "no worse than today" is enforceable now and
+      # gets stricter every time somebody lowers the number.
+      #
+      # `docs/06-limits.md` is where the fact that this is not zero belongs.
+      # ----------------------------------------------------------------------
+      - name: Gate W3 — svelte-check does not regress
+        run: |
+          CEILING=64
+          npm --prefix web run check 2>&1 | tee /tmp/check.log || true
+          FOUND=$(grep -oE '[0-9]+ ERRORS' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
+          if [ "$FOUND" = missing ]; then
+            echo "svelte-check produced no ERRORS line — it did not run, and a"
+            echo "gate that cannot run must fail rather than pass."
+            exit 1
+          fi
+          echo "svelte-check errors: $FOUND (ceiling $CEILING)"
+          if [ "$FOUND" -gt "$CEILING" ]; then
+            echo "That is more than the tree carried when this gate was written."
+            exit 1
+          fi
+          if [ "$FOUND" -lt "$CEILING" ]; then
+            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
+            echo "the ratchet keeps its meaning."
+          fi
+
+      # ----------------------------------------------------------------------
+      # GATE W4 — ORPHANED CSS DOES NOT GROW.
+      #
+      # The Svelte compiler already finds this and already prints it; nothing
+      # read it. 86 distinct selectors are styled in `db` and `ingest` for
+      # markup that no longer exists — a whole inline calendar superseded by
+      # `DayField`, an entire earlier generation of the view bar (`.viewbar`,
+      # `.vtab`, `.vbudget`, `.vsum`) superseded by `.segs`/`.seg`, and a month
+      # toggle. Each is a rule whose markup was deleted while the styling, and
+      # usually the reasoning in the comment beside it, stayed behind.
+      #
+      # That is not cosmetic. It is the measurable signature of the pattern
+      # that produced the worst findings on this page: safeguards that were
+      # written, argued for in a comment, and then orphaned by a later markup
+      # deletion, leaving the comment still asserting a guarantee the code no
+      # longer delivers. `.seg` is the proof it cuts both ways — the orphaned
+      # CSS is what let the removed view toggle be RESTORED to its original
+      # shape rather than guessed at.
+      #
+      # A RATCHET, for the same reason W3 is a ratchet: a floor of zero
+      # would mean clearing every one inside the commit that adds the gate.
+      # The ceiling has come down from 86 to 35 as the provably-dead rules were
+      # removed; what remains needs a judgement per selector, because each has
+      # a class token that DOES appear in the markup and only the combination
+      # is unmatchable. This gate keeps the number from climbing while that
+      # waits, and prints the new ceiling whenever it falls.
+      #
+      # Counted DISTINCT, because the client and server passes each report the
+      # same selector once.
+      # ----------------------------------------------------------------------
+      - name: Gate W4 — unused CSS does not grow
+        run: |
+          CEILING=35
+          npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
+          FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
+                  | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')
+          echo "distinct unused CSS selectors: $FOUND (ceiling $CEILING)"
+          if [ "$FOUND" -gt "$CEILING" ]; then
+            echo
+            echo "A rule was added for markup that does not exist, or markup was"
+            echo "deleted and its styling left behind. The second is how this"
+            echo "repository loses safeguards: the comment beside the rule keeps"
+            echo "asserting a guarantee the page no longer delivers."
+            exit 1
+          fi
+          if [ "$FOUND" -lt "$CEILING" ]; then
+            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
+            echo "the ratchet keeps its meaning."
+          fi
+
   ci-ok:
     name: ci-ok
     runs-on: ubuntu-24.04
-    needs: [language-purity, build, coverage, complexity, mutants]
+    needs: [language-purity, build, coverage, complexity, mutants, web]
     if: always()
     steps:
       - name: Verify every gate went green
