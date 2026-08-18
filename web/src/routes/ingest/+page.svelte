@@ -5492,8 +5492,9 @@
       else byFeed.set(k, [b]);
     }
 
-    // ONE CHAIN PER FEED. Each awaits its own requests in turn; the chains
-    // themselves are awaited together.
+    // ONE CHAIN PER FEED. Each awaits its own requests in turn, and the chains
+    // themselves run in turn as well -- see the note at the loop below for why
+    // they cannot usefully overlap.
     //
     // A FAILING FEED STOPS ITS OWN CHAIN AND NOT THE OTHERS, which is a change
     // the fan-out forces and an improvement on its own terms: under the old
@@ -5546,7 +5547,33 @@
       }
     };
 
-    await Promise.all([...byFeed.values()].map(chain));
+    // THE CHAINS RUN IN TURN, NOT TOGETHER, AND THE SERVER IS WHY.
+    //
+    // `Promise.all` here fired one request per feed at the same instant. The
+    // rate-budget reasoning above is sound and is not what decides this:
+    // `server.rs` takes ONE SEAT PER PROCESS, not one per vendor --
+    // `site.autopilot.take_seat()` -- and answers 409 to every request that
+    // does not get it. So the fan-out could never have produced parallel
+    // WORK. It produced one run and N-1 refusals.
+    //
+    // MEASURED, from `logs/events.ndjson` on 18 Aug at 22:16:54: four
+    // POST /pull/spot inside seven milliseconds, three answered 409, one took
+    // the seat and stored 11 bars with nothing failed. The operator read that
+    // as a failed pull. It was a race this page started against a lock it
+    // cannot win.
+    //
+    // Running them in turn costs nothing: the server serialises regardless, so
+    // throughput is identical and the spurious refusals are gone. The seat is
+    // global by design -- its own comment explains that the census lock refuses
+    // rather than queues, so a second pull would see all 773 instruments fail
+    // individually and call that a run. A per-vendor seat would bring that
+    // back.
+    //
+    // A FAILING FEED STILL STOPS ONLY ITS OWN CHAIN. `chain` catches per
+    // request, so awaiting them in sequence keeps that property.
+    for (const group of byFeed.values()) {
+      await chain(group);
+    }
     controller = null;
     finishedAt = Date.now();
     phase = 'done';
