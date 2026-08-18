@@ -917,6 +917,68 @@ mod tests {
         );
     }
 
+    /// THE DARK-CLOUD MIRROR: EVERY CLAUSE AND EVERY THRESHOLD.
+    ///
+    /// Bit 162 is bit 161 reflected — prior bar up, current bar down, gapping
+    /// ABOVE the prior high instead of below the prior low. Seven mutants live
+    /// on it: four `&&` turned into `||` and three comparisons flipped one step.
+    ///
+    /// Both techniques are applied to each price clause, because they are not
+    /// interchangeable and a earlier version of the 161 test proved it. A clause
+    /// negated well past its threshold kills the `&&` and leaves the comparison
+    /// alive — `>` and `>=` both refuse an open of 205 against a high of 210.
+    /// Only the threshold value itself separates them.
+    #[test]
+    fn every_clause_and_threshold_of_the_dark_cloud_pattern_is_required() {
+        // bar1: bullish, open 100 close 200, high 210, mid 150.
+        let prior = at(10, 100, 210, 90, 200);
+        // bar0: bearish, open 220 (> high), close 130 (< mid, > prior open).
+        let fires = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &prior);
+            ok(&mut p, bar0).get(162)
+        };
+
+        assert!(
+            fires(&at(11, 220, 225, 125, 130)),
+            "the fixture must satisfy all five clauses first -- negating one \
+             clause of a pattern that never fired proves nothing about it"
+        );
+
+        // `bar0.open > bar1.high`: below it, then exactly at it.
+        assert!(
+            !fires(&at(11, 205, 210, 125, 130)),
+            "an open BELOW the prior high has not gapped above it"
+        );
+        assert!(
+            !fires(&at(11, 210, 215, 125, 130)),
+            "and an open EXACTLY at the prior high has not gapped either -- the \
+             comparison is strict, and `>=` would accept this"
+        );
+
+        // `bar0.close < bar1.mid()`: above it, then exactly at it.
+        assert!(
+            !fires(&at(11, 220, 225, 125, 160)),
+            "a close ABOVE the prior body's midpoint has not clouded it"
+        );
+        assert!(
+            !fires(&at(11, 220, 225, 125, 150)),
+            "and a close EXACTLY at the midpoint has not passed it; `<=` would \
+             accept this and `<` must not"
+        );
+
+        // `bar0.close > bar1.open`: below it, then exactly at it.
+        assert!(
+            !fires(&at(11, 220, 225, 85, 90)),
+            "a close BELOW the prior open is a full engulfing, not a dark cloud"
+        );
+        assert!(
+            !fires(&at(11, 220, 225, 95, 100)),
+            "and a close EXACTLY at the prior open is a full retracement; `>=` \
+             would accept this and `>` must not"
+        );
+    }
+
     /// THE GAP PATTERNS: EVERY CLAUSE ISOLABLE, INCLUDING THE COMPARISON.
     ///
     /// Bits 202 and 203 are three clauses each, and unlike the piercing pattern
