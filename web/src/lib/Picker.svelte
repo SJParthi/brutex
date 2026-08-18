@@ -220,7 +220,16 @@
     // The refusal is here and not only on the input, because this is the door
     // every other path goes through as well.
     if (blocked.has(key)) return;
-    if (single) return emit(new Set([key]));
+    /* A SINGLE-CHOICE MENU CLOSES ON THE CHOICE. It emitted and stayed open,
+       so the list sat over the thing it had just changed and the reader had to
+       dismiss it themselves -- worst inside a calendar, where the month list
+       covers the grid it just repainted. Multi-select deliberately stays open:
+       there, the next click is usually another tick. */
+    if (single) {
+      emit(new Set([key]));
+      openId = 0;
+      return;
+    }
     const next = new Set(selected);
     next.has(key) ? next.delete(key) : next.add(key);
     emit(next);
