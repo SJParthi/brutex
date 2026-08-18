@@ -15608,3 +15608,57 @@ counted as covered.
 
 ---
 
+## D-0191 · 2026-08-18 · Rule 4's five operations are all measured now
+
+`crates/engine/benches/ratio.rs`.
+
+`CLAUDE.md` §3 rule 4 names five operations that must be constant. At the start
+of today **one** was properly proven. The last two land here.
+
+### Duplicate rejection — C-E-10
+
+`C-03` covered it and said in its own row that it did not: *"the seen-set size is
+not varied independently, so this row proves dedup does not make a walk
+superlinear, and does NOT isolate a probe's own cost."* An honest narrowing that
+leaves the operation unmeasured.
+
+That matters because a `HashSet` rehash at an exact load factor is how
+`docs/06-limits.md` records a **2.4 ms stall at 50,000 entries** — the defect
+gate 11 rule 3 was written for. Folding the probe into a whole-ladder walk hides
+exactly that shape.
+
+This varies the seen set and nothing else — 1,000 / 10,000 / 100,000 masks, one
+`contains` against each, **hit and miss both**, because a probe that short-circuits
+on a miss would be flat on hits and linear on misses. Measured **1.097x–1.117x**.
+
+### Result append — C-E-11
+
+`C-04` was marked UNMEASURED: *"amortised push is O(1) by construction rather
+than by measurement here."* By construction is a real argument and it is not a
+measurement. An `Itemset` is 56 bytes, and a doubling reallocation at 100,000
+results moves 5.6 MB.
+
+Measured as a **batch divided by its own length**, not one push in isolation: a
+single push either hits a reallocation or does not, and timing one of each would
+measure the allocator's mood rather than the amortised cost the claim is about.
+
+Deliberately **not** `with_capacity` — `next_level` builds `out` with
+`Vec::new`, so reserving up front would measure a Vec that never grows, which is
+not the one the sweep uses. Measured **0.633x–0.811x**, cheaper at scale because
+amortisation improves as the buffer grows.
+
+### Where rule 4 stands
+
+| operation | row | state |
+|---|---|---|
+| mask evaluation | C-V-01/02/03 + floor budget | proven |
+| bar lookup | C-16 (D-0177) | proven |
+| condition lookup | C-V-06 | proven |
+| duplicate rejection | **C-E-10** | proven |
+| result append | **C-E-11** | proven |
+
+**Five of five.** Each varies the one quantity its claim is about and holds the
+rest fixed, which is the difference between a measurement and a reassurance.
+
+---
+

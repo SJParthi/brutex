@@ -306,6 +306,145 @@ fn support_costs_the_same_per_bar_at_every_depth() -> bool {
     ok
 }
 
+/// A set of `n` distinct masks, filled the way a level's `seen` set is.
+///
+/// Distinct by construction — the low bits of `i` are spread across the six
+/// words, so no two entries collide and the set really holds `n`.
+fn seen_of(n: usize) -> std::collections::HashSet<ConditionMask> {
+    let mut set = std::collections::HashSet::with_capacity(n);
+    for i in 0..n {
+        let mut m = ConditionMask::ZERO;
+        let raw = u32::try_from(i).unwrap_or(0);
+        for w in 0..6_u32 {
+            if (raw >> w) & 1 == 1 {
+                m = m.with_bit(w * 64 + (raw % 61));
+            }
+        }
+        m = m.with_bit(raw % 383);
+        set.insert(m);
+    }
+    set
+}
+
+/// C-E-10 — duplicate rejection costs the same however much has been seen.
+///
+/// # Why this row exists beside C-E-04
+///
+/// `CLAUDE.md` §3 rule 4 names duplicate rejection among the five operations
+/// that must be constant. `C-03` in `docs/04-invariants.md` covers it today and
+/// **says in its own row that it does not**: "the seen-set size is not varied
+/// independently, so this row proves dedup does not make a walk superlinear, and
+/// does NOT isolate a probe's own cost."
+///
+/// That is an honest narrowing and it leaves the operation unmeasured. A
+/// `HashSet` probe is O(1) amortised, but a rehash at an exact load factor is
+/// how `docs/06-limits.md` records a 2.4 ms stall at 50,000 entries — the defect
+/// gate 11 rule 3 was written for. Folding the probe into a whole-ladder walk
+/// hides exactly that.
+///
+/// So this varies the SEEN SET and nothing else: 1,000 / 10,000 / 100,000
+/// masks, one `contains` against each, hit and miss.
+fn duplicate_rejection_costs_the_same_however_much_is_seen() -> bool {
+    let small = seen_of(1_000);
+    let medium = seen_of(10_000);
+    let large = seen_of(100_000);
+
+    // A mask that IS in every set, and one that is in none.
+    let present = candidate(1);
+    let absent = ConditionMask::ZERO.with_bit(380);
+
+    // `once_ps` times ONE call and a hash probe is nanoseconds, so the repeats
+    // go INSIDE and the total is divided by them. Same shape as C-E-11 below.
+    const REPS: usize = 20_000;
+    let probe = |set: &std::collections::HashSet<ConditionMask>, m: &ConditionMask| -> u128 {
+        let total = once_ps(|| {
+            let mut found = 0_usize;
+            for _ in 0..REPS {
+                if black_box(set).contains(black_box(m)) {
+                    found = found.saturating_add(1);
+                }
+            }
+            black_box(found)
+        });
+        total / u128::try_from(REPS).unwrap_or(1).max(1)
+    };
+
+    let mut ok = true;
+    let hit = probe(&small, &present);
+    ok &= ratio(
+        "C-E-10 dedup HIT: 1,000 -> 10,000 seen",
+        hit,
+        probe(&medium, &present),
+    );
+    ok &= ratio(
+        "C-E-10 dedup HIT: 1,000 -> 100,000 seen",
+        hit,
+        probe(&large, &present),
+    );
+
+    let miss = probe(&small, &absent);
+    ok &= ratio(
+        "C-E-10 dedup MISS: 1,000 -> 10,000 seen",
+        miss,
+        probe(&medium, &absent),
+    );
+    ok &= ratio(
+        "C-E-10 dedup MISS: 1,000 -> 100,000 seen",
+        miss,
+        probe(&large, &absent),
+    );
+    ok
+}
+
+/// C-E-11 — appending one result costs the same however many are held.
+///
+/// # Why this row exists
+///
+/// The fifth operation rule 4 names. `C-04` is marked **UNMEASURED** in
+/// `docs/04-invariants.md` — "the engine appends to a `Vec`, whose amortised
+/// push is O(1) by construction rather than by measurement here, and no bench
+/// varies the results-held count independently".
+///
+/// By construction is a real argument and it is not a measurement. `Vec::push`
+/// is amortised O(1) only if the growth is geometric and the element is `Copy`
+/// or cheap to move; an `Itemset` is 56 bytes, and a doubling reallocation at
+/// 100,000 results moves 5.6 MB. That is the cost this row bounds.
+///
+/// Measured as a BATCH divided by its own length rather than one push in
+/// isolation: a single push either hits a reallocation or does not, and timing
+/// one of each would measure the allocator's mood. Pushing `n` and dividing by
+/// `n` is the amortised figure the claim is actually about.
+fn result_append_costs_the_same_however_many_are_held() -> bool {
+    let one = candidate(3);
+    let per_push = |n: usize| -> u128 {
+        let total = once_ps(|| {
+            // Deliberately NOT `with_capacity`: reserving up front would measure
+            // a Vec that never grows, which is not what the sweep does --
+            // `next_level` builds `out` with `Vec::new`.
+            let mut out: Vec<ConditionMask> = Vec::new();
+            for _ in 0..n {
+                out.push(black_box(one));
+            }
+            black_box(out.len())
+        });
+        total / u128::try_from(n).unwrap_or(1).max(1)
+    };
+
+    let base = per_push(1_000);
+    let mut ok = true;
+    ok &= ratio(
+        "C-E-11 append: 1,000 -> 10,000 held",
+        base,
+        per_push(10_000),
+    );
+    ok &= ratio(
+        "C-E-11 append: 1,000 -> 100,000 held",
+        base,
+        per_push(100_000),
+    );
+    ok
+}
+
 /// C-E-08 — one pair of the join costs the same whatever the frontier holds.
 ///
 /// # The row `DEFAULT_PAIR_BUDGET` cited before it existed
@@ -607,6 +746,8 @@ fn main() {
     ok &= support_costs_the_same_whether_bars_match_or_not();
     ok &= transposed_support_costs_the_same_whether_bars_match_or_not();
     ok &= one_join_pair_costs_the_same_at_every_frontier_width();
+    ok &= duplicate_rejection_costs_the_same_however_much_is_seen();
+    ok &= result_append_costs_the_same_however_many_are_held();
     ok &= transposed_support_costs_a_constant_per_bitmap_read();
     ok &= a_ladder_walk_costs_the_same_per_bar_at_every_column_length();
     if ok {
