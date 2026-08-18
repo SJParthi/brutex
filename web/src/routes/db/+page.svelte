@@ -7351,6 +7351,85 @@
   .cfold > summary:hover .lead {
     color: var(--ink);
   }
+  /* ══ THE SAME SELECTION /ingest DRAWS, PORTED VERBATIM ══
+
+     `Picker` is shared, so both pages already had the same MARKUP. What they
+     did not share is the page-scoped treatment: /ingest carries nine
+     `.field :global(.pmenu …)` rules and this file carried none, so the two
+     strips rendered the same component two different ways — /ingest with the
+     row carrying its own state, /db still with a gutter of hollow radio rings
+     down the left edge of every menu.
+
+     THE ROW IS THE CONTROL. Every rung on this page is `single`, so every menu
+     was a column of rings with exactly one filled — a second mark saying what
+     the tinted, railed row already says, and the thing that read as dated. The
+     input is moved OUT OF THE FLOW, not removed: same type, same :checked, same
+     change event, same tab order, so the keyboard and the reader are untouched.
+
+     THE CHECKBOX RULES COME TOO, even though nothing here is multi-select
+     today. They cost nothing while unused and they mean the two pages cannot
+     drift the next time a menu on either one gains a second tick.
+
+     Kept as page rules rather than pushed into `Picker`: the component is
+     shared with /markets and /autopilot, and this is the boundary /ingest
+     already established. */
+  .field :global(.pmenu .plist input[type='radio']) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  /* `order: 1` KEEPS THE CHECK ON THE FIRST LINE. `.pwhy` is `flex: 0 0 100%`
+     so it claims a row of its own, and the check is an `::after` — last in
+     source order, which lands it on a THIRD line under the sentence, alone at
+     the left. Ordering the sentence after it puts the mark back beside the name
+     with no pixel offset to go stale. */
+  .field :global(.pmenu .plist label:has(input[type='radio']) .pwhy) {
+    padding-left: 0;
+    order: 1;
+  }
+  /* THE CHECK, DRAWN RATHER THAN TYPED — two borders on a rotated box, the
+     technique `Picker` already uses for its own tick, so it cannot come out as
+     a missing glyph. */
+  .field :global(.pmenu .plist label:has(input[type='radio']:checked))::after {
+    content: '';
+    flex: 0 0 auto;
+    align-self: center;
+    width: 5px;
+    height: 10px;
+    margin: 0 2px 3px 0;
+    border: solid var(--acc);
+    border-width: 0 2px 2px 0;
+    transform: rotate(43deg);
+  }
+  /* The input carried the focus ring and the input is out of the flow, so the
+     row takes it — inset, so it reads as the row being focused. */
+  .field :global(.pmenu .plist label:has(input[type='radio']:focus-visible)) {
+    outline: 2px solid var(--acc);
+    outline-offset: -2px;
+  }
+  /* A row that cannot be chosen shows no check: it is struck through and
+     dimmed, which `Picker` already does. */
+  .field :global(.pmenu .plist label.pdis)::after {
+    content: none;
+  }
+  .field :global(.pmenu .plist input[type='checkbox']) {
+    width: 14px;
+    height: 14px;
+    /* 4px, not Picker's 6. On a 14px square a 6px radius is nearly half the
+       side and the box renders as a ROUNDEL — the one shape a checkbox may not
+       have, because round reads as radio and radio means the others untick. */
+    border-radius: 4px;
+  }
+  .field :global(.pmenu .plist input[type='checkbox']:checked)::after {
+    width: 3.5px;
+    height: 7px;
+    margin-top: -1px;
+  }
+
   .strip.sub {
     background: var(--panel);
   }
