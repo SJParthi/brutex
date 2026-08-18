@@ -5553,6 +5553,45 @@
          REFUSALS with it") — a comment that had been true of the CSS and false
          of the markup ever since the gate went in. It is true of both again.
          ================================================================== -->
+    <!-- ══ THE WHOLE STRIP FOLDS WHEN THERE IS NO CONTRACT TO NARROW ══
+
+         The comment above argues this strip must be DRAWN because "/ingest
+         draws its two contract segments unconditionally, both refusing, both
+         with the reason on their face; the two pages are meant to read as one
+         product." That reasoning is right and its premise is out of date:
+         /ingest passes `tuck` to both its universe and its segments menus, so
+         the rows it cannot serve sit behind ONE counted line reading "2 rows
+         this feed cannot serve — show why". Folding here is what restores the
+         consistency that comment was reaching for, not what breaks it.
+
+         AND NOTHING IS HIDDEN, which is the distinction §4 turns on. The
+         section is not gated away: it is drawn, its count is on the line, its
+         reason is on the line, and one click opens all four cells with every
+         refusal intact. That is `Picker`'s own `tuck` argument applied to a
+         strip — "a list whose first screenful is entirely unusable teaches the
+         operator no more than a hidden row does. It teaches less: it reads as a
+         broken build."
+
+         WHY IT IS EMPTY IS A FACT ABOUT THE BUILD, NOT ABOUT THE STORE, and
+         `expiryRefusal` already says so in full: POST /pull/fno answers 503,
+         "expired F&O has no local-archive path and no HTTP transport in this
+         build", and every FUT/CE/PE master row is declined as
+         `Skip::LiveContract`. No pull an operator can start will populate these
+         four controls, which is exactly why four of them standing open with
+         eight lines of amber text was reading as a broken page.
+
+         OPEN WHENEVER THERE IS SOMETHING TO CHOOSE. `open={!expiryRefusal}` —
+         the fold is the exception, not the default, so a store that does hold
+         contracts is unchanged from before this commit. -->
+    <details class="cfold" open={!expiryRefusal}>
+      <summary>
+        <span class="lead">Contract</span>
+        {#if expiryRefusal}
+          <span class="note warn">nothing stored to narrow — no expiry, strike, ladder or side</span>
+        {:else}
+          <span class="note quiet">{fmt(expiriesAll.length)} expiry(ies) held</span>
+        {/if}
+      </summary>
     <section class="strip sub" aria-label="Contract">
       <span class="lead">Contract</span>
 
@@ -5760,6 +5799,7 @@
         </span>
       </div>
     </section>
+    </details>
 
 
     <!-- ==================================================================
@@ -7279,6 +7319,38 @@
      take the two REFUSALS with it. "Why is there no strike control" is exactly
      the question `CLAUDE.md` §4 says must be answered out loud rather than by
      an absence, so the strip stays and its cells go `.off`. */
+  /* THE CONTRACT FOLD. Marker suppressed and redrawn for the reason the
+     calendar's disclosure gives on /ingest: the platform triangle is drawn by
+     the OS at the OS's size and is the one mark on the page no rule here
+     reaches. The summary is a flex row so the lead and its count sit on one
+     line at the same baseline the open strip's `.lead` uses. */
+  .cfold {
+    min-width: 0;
+  }
+  .cfold > summary {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    padding: var(--s3) 0;
+    cursor: pointer;
+    list-style: none;
+  }
+  .cfold > summary::-webkit-details-marker {
+    display: none;
+  }
+  .cfold > summary::before {
+    content: '\25B8';
+    flex: 0 0 auto;
+    font-size: 10px;
+    line-height: 1;
+    color: var(--acc);
+  }
+  .cfold[open] > summary::before {
+    transform: rotate(90deg);
+  }
+  .cfold > summary:hover .lead {
+    color: var(--ink);
+  }
   .strip.sub {
     background: var(--panel);
   }
