@@ -2323,54 +2323,47 @@
   });
 
   /**
-   * THE WINDOW IS THE FEED'S OWN, AND IT FOLLOWS THE FEED.
+   * THE VISIBLE WINDOW IS FEED-INDEPENDENT. THE WIRE IS NOT.
    *
-   * # Why a fixed 01 Jan 2015 was the wrong answer
+   * # Why the field must not show one feed's floor
    *
-   * That is `minDay` — the floor the SERVER'S picker offers, and it is the same
-   * date for every feed in the list. It says nothing about the feed actually
-   * selected. Opening Dhan on 2015 asks for six years the vendor will not
-   * answer for, and it makes the default window about 4,250 days against a
-   * `MAX_WINDOW_DAYS` of 3,653 — so the form opened in a state the parser
-   * refuses, for a reason the page invented rather than one the operator caused.
+   * It briefly did — `feedFloor.at`, so Dhan opened on its rolling five years.
+   * That is only correct while exactly ONE feed is ticked. Tick two and there is
+   * no single honest date to put in one box: Dhan answers from five years back
+   * and Groww from 01 Jan 2020, and a field showing either is wrong about the
+   * other. Measured on the running page — the strip read `2 feeds · 2 request(s)`
+   * over a From of 18 Aug 2021, which is Dhan's floor presented as the window
+   * for both.
    *
-   * # What it is instead
+   * So the two fields state the OPERATOR'S INTENT and nothing else: the whole
+   * span the server's picker offers, 01 Jan 2015 to the newest askable day.
+   * `minDay` and `maxDay`, neither of which knows or cares which feeds are
+   * ticked.
    *
-   * `feedFloor.at` — the day THIS feed, at THIS timeframe, actually answers
-   * from, read off `/feeds.json` and recomputed on every change because a
-   * rolling floor is a moving one. Dhan rolls about five years back, so its
-   * window opens near 1,800 days and is inside the cap by construction rather
-   * than by a number typed here. A feed that states no floor falls back to
-   * `minDay`, which is the honest bound when nothing narrower is known.
+   * # Where the per-feed dates belong
    *
-   * To is `maxDay`: the newest day that can be asked for, which moves with the
-   * clock and with the 15:30 close.
+   * On the wire, per body, and only there — see `floorFor` and `wireBodies`.
+   * Each request already goes out as its own POST, so each one can carry the
+   * date ITS vendor can answer for. The floors are declared, not invented:
+   * `pull::vendor` holds `Rolling { years: 5 }` for Dhan,
+   * `Fixed { 2020, 1, 1 }` for Groww and `Rolling { years: 10 }` for Zerodha,
+   * each with the operator's own observation recorded as its source.
    *
-   * # It stops following the moment it is his
+   * # Seeded once, not pinned
    *
-   * `windowTouched` is `rungTouched`'s argument applied to this control, and
-   * that comment is worth reading beside this one: *"A default is not a
-   * decision he made. Moving it costs him nothing and tells him nothing false.
-   * Moving HIS tick would do both."* So the window tracks the feed, the rung
-   * and the clock until the operator types a day or picks one — and from then
-   * on it is his and nothing here writes it again.
-   *
-   * `setDay` is the one writer, so the ISO value and the text can never drift.
+   * `maxDay` moves at midnight and at the 15:30 close; re-running this would
+   * overwrite a window the operator had chosen. `windowTouched` is
+   * `rungTouched`'s argument applied here — "A default is not a decision he
+   * made. Moving it costs him nothing and tells him nothing false. Moving HIS
+   * tick would do both."
    */
   let windowTouched = $state(false);
 
-  /** The span this feed implies — its own floor, to the newest askable day. */
-  const feedWindow = $derived({
-    from: feedFloor.at && feedFloor.at > minDay ? feedFloor.at : minDay,
-    to: maxDay
-  });
-
   $effect(() => {
-    if (windowTouched) return;
-    const { from: f, to: t } = feedWindow;
-    if (!isValidIso(f) || !isValidIso(t)) return;
-    if (fromDay !== f) setDay('from', f);
-    if (toDay !== t) setDay('to', t);
+    if (windowTouched || !isValidIso(maxDay) || !isValidIso(minDay)) return;
+    windowTouched = true;
+    setDay('from', minDay);
+    setDay('to', maxDay);
   });
   /**
    * The refusal, naming the FEED, the TIMEFRAME and the day it starts at.
@@ -2532,6 +2525,41 @@
      array was one entry per ticked timeframe. Adding the feed to the product
      is the whole of the fan-out -- nothing about the loop, the receipts or the
      abort changes, because they were already written for N. */
+  /**
+   * THE DAY THIS ONE REQUEST MAY START AT, for this feed at this rung.
+   *
+   * Three bounds, and the latest of them wins:
+   *
+   *   1. the window the operator asked for — never widened, only narrowed;
+   *   2. the feed's own declared floor, `pairFloor`, which for Dhan is a
+   *      rolling five years, for Groww the fixed 01 Jan 2020 and for Zerodha a
+   *      rolling ten — each traceable to the operator's own observation in
+   *      `pull::vendor`, not invented here;
+   *   3. `MAX_WINDOW_DAYS` behind the To date, because a feed with no declared
+   *      floor at all (both archives are `Unbounded`) would otherwise inherit
+   *      the full 01 Jan 2015 span, which is about 4,250 days and the parser
+   *      refuses at 3,653 before any vendor is contacted.
+   *
+   * A FEED THAT STATES NO FLOOR IS NOT A FEED WITH NO LIMIT. Bound 3 is what
+   * keeps the honest answer "as much as one request may carry" from becoming
+   * the dishonest one "refused, and the page let you press it".
+   *
+   * THIS NARROWS THE ASK AND IT IS NOT SILENT. Every body it produces is
+   * printed verbatim in the wire fold below the form, so the dates that
+   * actually go out are on screen beside the dates that were asked for — which
+   * is the whole reason the fold exists.
+   *
+   * @param {string} wire @param {string} rungDir
+   */
+  function floorFor(wire, rungDir) {
+    const declared = pairFloor(wire, rungDir).at;
+    const cap = isValidIso(to) ? addDays(to, -(MAX_WINDOW_DAYS - 1)) : from;
+    let start = from;
+    if (declared && declared > start) start = declared;
+    if (cap > start) start = cap;
+    return start;
+  }
+
   const wireBodies = $derived(
     feedsChosen.flatMap((v) =>
       rungsChosen.map((r) => ({
@@ -2542,9 +2570,36 @@
            learn something the caller knew. */
         vendor: v,
         label: feedsChosen.length > 1 ? `${feedName(v)} · ${r.label}` : r.label,
-        body: wireBodyFor(r.dir, from, to, v)
+        /* THE FROM IS THIS FEED'S, NOT THE FORM'S. See `floorFor`: the two
+           date boxes carry the operator's intent, and each body carries the day
+           the vendor it names can actually answer from. */
+        from: floorFor(v, r.dir),
+        body: wireBodyFor(r.dir, floorFor(v, r.dir), to, v)
       }))
     )
+  );
+
+  /**
+   * EVERY FEED WHOSE ASK WAS MOVED, AND THE DAY IT MOVED TO.
+   *
+   * `floorFor` narrows and never widens — it is a `max` of three bounds — so a
+   * window the operator picks INSIDE every ticked feed's reach goes out exactly
+   * as typed. One week, one day, one month: nothing here fires and nothing is
+   * changed. This list is empty in that case, and the note it feeds does not
+   * draw at all.
+   *
+   * It fills only when the From asked for is EARLIER than what a feed can
+   * answer, which is the one case where the request that goes out is not the
+   * request on screen. §4 does not allow that to be silent.
+   */
+  const narrowings = $derived(
+    wireBodies
+      .filter((b) => b.from !== from)
+      .map((b) => ({
+        feed: feedName(b.vendor),
+        rung: RUNGS.find((r) => r.dir === b.dir)?.label ?? b.dir,
+        at: b.from
+      }))
   );
 
   // -------------------------------------------------------------- validation
@@ -2655,21 +2710,19 @@
         });
       }
     }
-    if (windowDays > MAX_WINDOW_DAYS) {
-      /* THE SENTENCE LEADS WITH THE NUMBER TO MOVE AND ENDS WITH THE SYMBOL.
-         It used to open on `api::ingest::MAX_WINDOW_DAYS`, which is the one
-         clause in it an operator can do nothing with — and by the time he had
-         read past the identifier the line had run off the width of the card.
-         The overshoot, the cap and the day to start on come first because they
-         are what the next click is; the citation stays, last, for the reader
-         who wants to know who refused. */
-      const start = addDays(toDay, -(MAX_WINDOW_DAYS - 1));
-      out.push({
-        field: 'to',
-        why: `${dayLabel(fromDay)} – ${dayLabel(toDay)} is ${n(windowDays)} days, ${n(windowDays - MAX_WINDOW_DAYS)} more than one request may carry. Start on ${dayLabel(start)} instead, or move To earlier. The cap is ${n(MAX_WINDOW_DAYS)} days (api::ingest::MAX_WINDOW_DAYS) and the parser applies it before any vendor is contacted.`,
-        fix: { label: `Start ${dayLabel(start)}`, run: () => setDay('from', start) }
-      });
-    }
+    /* THE CAP IS NO LONGER A REFUSAL, BECAUSE IT IS NO LONGER REACHABLE.
+       This used to refuse the WINDOW when it exceeded `MAX_WINDOW_DAYS`, and
+       that was right while the two date boxes were the thing that went on the
+       wire. They are not: `floorFor` clamps every body to the latest of the
+       operator's From, the feed's declared floor, and the cap itself — so
+       `to - from` on any body sent is at most the cap BY CONSTRUCTION, and a
+       refusal here would refuse a request this page will never send.
+       Measured: with the fields on 01 Jan 2015 – 18 Aug 2026 the page blocked
+       every Pull button over a 4,248-day window, while the body it would have
+       posted for Dhan was 1,827 days and perfectly legal.
+       The narrowing is NOT silent — see `narrowings` and the note under the day
+       window, which names every feed whose ask was moved and the day it moved
+       to. §4 wants the change stated, not the request refused. */
     if (isFolderFeed && !folder.trim()) {
       out.push({ field: 'folder', why: 'Folder is empty. An archive run reads CSV files from a directory you name.' });
     }
@@ -6340,6 +6393,27 @@
                       {:else}
                         no window picked
                       {/if}
+                    </span>
+                  {/if}
+                  <!-- WHAT ACTUALLY GOES OUT, WHEN IT IS NOT WHAT IS ABOVE.
+                       The two boxes are the operator's intent and are the same
+                       for every ticked feed. A feed cannot always answer for
+                       all of it — Dhan rolls five years back, Groww starts at a
+                       fixed 01 Jan 2020, Zerodha rolls ten — so each request is
+                       clamped to its own vendor's floor before it is sent.
+                       IT ONLY EVER NARROWS. A window inside every ticked feed's
+                       reach — a week, a day, a month — goes out exactly as
+                       typed, `narrowings` is empty, and this line does not draw.
+                       When it does draw it is because the request differs from
+                       the form, which §4 does not allow to be silent. -->
+                  {#if narrowings.length > 0}
+                    <span
+                      class="note warn wrap"
+                      title="Each floor is declared in pull::vendor with the operator's own observation as its source, and the server clamps to the same floors again on arrival — this states the narrowing, it does not perform it alone."
+                    >
+                      asked from {dayLabel(from)}; {n(narrowings.length)} request(s) start later
+                      because their feed answers no earlier —
+                      {narrowings.map((w) => `${w.feed} · ${w.rung} from ${dayLabel(w.at)}`).join(', ')}
                     </span>
                   {/if}
                 </div>
