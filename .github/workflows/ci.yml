@@ -6382,7 +6382,12 @@ jobs:
       # CSS is what let the removed view toggle be RESTORED to its original
       # shape rather than guessed at.
       #
-      # A RATCHET, for the same reason W3 is a ratchet: a floor of zero
+      # IT IS NOW A FLOOR AT ZERO, and it arrived there the way a ratchet is
+      # supposed to: 86 -> 35 -> 33 -> 10 -> 0, each step a set of rules the
+      # compiler had already proved could not match. From here the gate refuses
+      # the FIRST orphaned selector rather than the eighty-seventh.
+      #
+      # It began as a ratchet, for the same reason W3 is one: a floor of zero
       # would mean clearing every one inside the commit that adds the gate.
       # The ceiling has come down from 86 to 35 as the provably-dead rules were
       # removed; what remains needs a judgement per selector, because each has
@@ -6466,7 +6471,7 @@ jobs:
 
       - name: Gate W4 — unused CSS does not grow
         run: |
-          CEILING=10
+          CEILING=0
           npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
           FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
                   | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')

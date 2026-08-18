@@ -61,6 +61,7 @@
   // `web/tests/timeout.test.js` now refuses a bare `fetch` anywhere in
   // `web/src` so the ceiling cannot be reverted silently a second time.
   import { ask as request } from '$lib/ask.js';
+  import { exact } from '$lib/money.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1259,11 +1260,20 @@
    * for 750 instruments today, and a formatter constructed per call would load
    * locale data on every one of them.
    */
-  const IN = new Intl.NumberFormat('en-IN');
-  /** @param {unknown} x */
-  function n(x) {
-    return IN.format(Number(x ?? 0));
-  }
+  // THE FIFTH AND LAST SPELLING OF `en-IN`, AND IT LEAKED "NaN".
+  //
+  // `IN.format(Number(x ?? 0))` renders the literal string "NaN" for anything
+  // that is not a number and not nullish -- a string, an object, an already-NaN
+  // -- at all 189 call sites on this page. `/db` shipped the same leak and it
+  // was closed in 2ef43bb; this is the third page to carry it.
+  //
+  // `exact` is the shared formatter: one `en-IN`, and an em dash for every
+  // shape of no-number. The `?? 0` is KEPT rather than removed, deliberately --
+  // turning nullish into zero is this page's existing intent at 189 sites and
+  // changing it is a display decision, not a bug fix. It is worth revisiting
+  // separately: CLAUDE.md §7's "zero means zero" argues an absent count should
+  // read as the dash rather than as a counted nothing.
+  const n = (/** @type {unknown} */ x) => exact(Number(x ?? 0));
 
   // ------------------------------------------------------------------- feed
 
@@ -8194,29 +8204,6 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
-  .ddr .nm {
-    flex: 1;
-    min-width: 0;
-    font-family: var(--mono);
-    font-weight: var(--w-semi);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ddr .ct {
-    flex: 0 0 auto;
-    max-width: 220px;
-    text-align: right;
-    color: var(--dim);
-    font-size: var(--fs-base);
-    font-family: var(--mono);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .ddr .ct.warn {
-    color: var(--warn);
-  }
 
   /* ---- the two days ----
      A flex pair rather than a 1fr/1fr grid, so that when the rung loses its
@@ -8822,12 +8809,6 @@
     padding: var(--s4) var(--s5);
     background: var(--warn-soft);
   }
-  .cautions .caution {
-    margin: var(--s4) 0 0;
-    background: none;
-    border: 0;
-    padding: 0;
-  }
   /* `.tiles` IS GONE WITH THE ROW IT DREW. Leaving the rule behind is the
      exact pattern Gate W4 exists to catch — styling whose markup was deleted,
      with the comment beside it still asserting a layout the page no longer
@@ -8908,40 +8889,6 @@
   .verdict.bad {
     background: var(--down-soft);
     border-left-color: var(--down);
-  }
-  .verdict b {
-    display: block;
-    font-size: var(--fs-sm);
-    letter-spacing: var(--track-caps);
-    margin-bottom: var(--s2);
-  }
-  table.kv {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: var(--fs-xs);
-  }
-  table.kv th {
-    text-align: left;
-    vertical-align: top;
-    white-space: nowrap;
-    padding: var(--s3) var(--s5) var(--s3) 0;
-    color: var(--faint);
-    font-weight: var(--w-semi);
-    border-bottom: 1px solid var(--line-soft);
-    width: 1%;
-  }
-  /* `white-space: normal` UNDOES A GLOBAL. theme.css sets
-     `tbody td { white-space: nowrap }` for the market tables, which is right
-     there and wrong here: a receipt's `Balances` line is a sentence, and
-     nowrap turned it into one 900-pixel row that pushed the card's own width
-     past the panel edge. */
-  table.kv td {
-    padding: var(--s3) 0;
-    border-bottom: 1px solid var(--line-soft);
-    color: var(--ink);
-    line-height: var(--lh-base);
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
 
   /* ---- the verdict strip ----
@@ -9476,13 +9423,6 @@
        already use, so this is the page's own timing and not a second one. */
     .calpad {
       animation: bx-pop-in var(--d-enter) var(--ease-out);
-    }
-    .meter i {
-      transition: width var(--d-panel) var(--ease-out);
-    }
-    .meter.indet i {
-      animation: bx-indeterminate var(--d-sweep) var(--ease-in-out) infinite;
-      transition: none;
     }
   }
 </style>
