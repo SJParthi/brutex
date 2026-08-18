@@ -1184,6 +1184,140 @@ mod tests {
         );
     }
 
+    /// CONTAINMENT OUTRANKS ORDERING, WHICH IS THE ONLY THING THAT GUARD BUYS.
+    ///
+    /// `each_of_the_four_containment_failures_is_refused` moves one field per case and
+    /// is exactly the right shape — and it cannot see this guard at all. [`Self::stepped`]
+    /// takes `self` by value and the value is thrown away on a refusal, and
+    /// `Candle::check` downstream carries the SAME four clauses. Bypass the guard here
+    /// and a module refuses the identical bar with the identical `PriceOutsideRange`,
+    /// leaving no torn state behind either. Nothing about the returned error or the
+    /// evaluator's state moves, so all three `||` in that chain could become `&&` with
+    /// the suite green.
+    ///
+    /// What the guard buys is **precedence**. Between it and the first module sits the
+    /// ordering check, and a bar that is mis-assembled AND out of order is refused for
+    /// its ORDER once containment is bypassed. A caller then goes and looks at the feed
+    /// when the record is what is broken — the fallback that names the wrong reason
+    /// that §4 bans, and the reason the containment check was put ahead of everything
+    /// rather than left to the module that would have caught it anyway.
+    ///
+    /// The control case is what makes this a claim about precedence and not about the
+    /// containment check alone: the same timestamp on a WELL-FORMED bar is refused for
+    /// its order, so both guards are armed on this input and containment wins.
+    #[test]
+    fn a_mis_assembled_bar_is_refused_for_its_prices_and_not_for_its_order() {
+        let base = session(21_100, 1).first().copied().expect("one bar");
+        let mut seeded = fresh();
+        assert!(
+            seeded.step(&base).is_ok(),
+            "the base fixture must itself be legal, or the cases below prove nothing"
+        );
+        assert_eq!(
+            seeded.step(&base),
+            Err(Corrupt::TimestampNotIncreasing),
+            "a repeated timestamp on a WELL-FORMED bar must be refused for its order, \
+             or the cases below are not about precedence at all"
+        );
+
+        // Each bar repeats the timestamp AND breaks exactly one containment clause.
+        // Both guards would fire; containment is the one that must answer.
+        for (name, bar) in [
+            (
+                "an open above the high",
+                Candle {
+                    open: base.high + 1,
+                    ..base
+                },
+            ),
+            (
+                "a close above the high",
+                Candle {
+                    close: base.high + 1,
+                    ..base
+                },
+            ),
+            (
+                "an open below the low",
+                Candle {
+                    open: base.low - 1,
+                    ..base
+                },
+            ),
+            (
+                "a close below the low",
+                Candle {
+                    close: base.low - 1,
+                    ..base
+                },
+            ),
+        ] {
+            let mut e = seeded;
+            assert_eq!(
+                e.step(&bar),
+                Err(Corrupt::PriceOutsideRange),
+                "{name}: the bar was refused for its ORDER, so a caller is sent to \
+                 the feed when the record is what is broken"
+            );
+        }
+    }
+
+    /// THE RUNNING LOW MUST DESCEND, AND ONLY A LATER BAR THAT MAKES ONE CAN SAY SO.
+    ///
+    /// The fold is two bare `if`s, and `<` turned into `==` keeps the assignment only
+    /// where it is a no-op — the running low then never descends after the seeding bar,
+    /// and every session hands its successor a `pdl` that is the FIRST bar's low rather
+    /// than the day's. Positions 13–18 and the whole pivot ladder are computed from it.
+    ///
+    /// A session whose low arrives on the first bar cannot show this, which is why the
+    /// low here arrives on the second and the high on the third: each extreme moves on
+    /// a bar of its own, so neither assignment can be carried by the other.
+    ///
+    /// `>` to `>=` and `<` to `<=` are NOT chased and are recorded in
+    /// `docs/06-limits.md`: at equality both write the value already held, so no
+    /// assertion can separate them.
+    #[test]
+    fn the_running_extremes_descend_and_rise_on_the_bar_that_moves_them() {
+        let day = 21_100;
+        let mk = |minute: i64, high: i64, low: i64| Candle {
+            ts_micros: day * DAY_MICROS + IST_OPEN_UTC_MICROS + minute * MINUTE_MICROS,
+            open: 2_500_000,
+            high,
+            low,
+            close: 2_500_000,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+        let mut e = fresh();
+        // Bar 0 seeds both extremes. Bar 1 makes a new LOW only, bar 2 a new HIGH only.
+        for bar in [
+            mk(0, 2_510_000, 2_490_000),
+            mk(1, 2_505_000, 2_480_000),
+            mk(2, 2_520_000, 2_495_000),
+        ] {
+            assert!(e.step(&bar).is_ok(), "a fixture bar was refused");
+        }
+        // The books close on the next session, which is where the extremes become
+        // observable: they are what the previous session hands the ladder.
+        let next = Candle {
+            ts_micros: (day + 1) * DAY_MICROS + IST_OPEN_UTC_MICROS,
+            ..mk(0, 2_510_000, 2_490_000)
+        };
+        assert!(
+            e.step(&next).is_ok(),
+            "the first bar of day two was refused"
+        );
+        let previous = e.previous.expect("day one closed its books");
+        assert_eq!(
+            previous.low, 2_480_000,
+            "the running low did not descend to the low of bar 1"
+        );
+        assert_eq!(
+            previous.high, 2_520_000,
+            "the running high did not rise to the high of bar 2"
+        );
+    }
+
     /// A repeated or receding timestamp is refused, and refused **before** the
     /// rollover.
     ///
