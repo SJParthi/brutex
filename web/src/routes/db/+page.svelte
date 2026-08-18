@@ -1705,13 +1705,33 @@
    */
   const instrumentOffered = $derived.by(() => {
     const held = new Map(instrumentRows.map((r) => [r.key, r]));
-    if (universeKeys === null) return instrumentRows;
-    const out = [];
-    for (const k of universeKeys) {
-      const h = held.get(k);
-      out.push({ key: k, months: h?.months ?? 0, bars: h?.bars ?? 0, short: h?.short ?? 0 });
+    /* THE ROW SHOWS WHAT /ingest's SHOWS — the trading SYMBOL and the kind.
+       `insRows` there is `{ sym: m.symbol, detail: m.kind.toLowerCase() }`, so
+       its menu reads `3600NE  equity`. This rung read the STORE KEY off the same
+       instrument — `NSE-CASH-360ONE` — and printed a held count where the kind
+       goes, so the two pages named the same thing two different ways and only
+       one of them was the name a human uses.
+
+       The KEY stays the store key, because that is what the table filters on.
+       Only what is DISPLAYED changes. */
+    const meta = new Map();
+    for (const r of masterRows()) {
+      const k = censusKeyOf(r);
+      if (k) meta.set(k, { sym: r?.symbol ?? k, kind: r?.kind ? String(r.kind).toLowerCase() : '' });
     }
-    return out.sort((a, b) => txt(a.key, b.key));
+    /** @param {string} k @param {{months:number,bars:number,short:number}=} h */
+    const decorate = (k, h) => ({
+      key: k,
+      sym: meta.get(k)?.sym ?? k,
+      kind: meta.get(k)?.kind ?? '',
+      months: h?.months ?? 0,
+      bars: h?.bars ?? 0,
+      short: h?.short ?? 0
+    });
+    if (universeKeys === null) return instrumentRows.map((r) => decorate(r.key, r));
+    const out = [];
+    for (const k of universeKeys) out.push(decorate(k, held.get(k)));
+    return out.sort((a, b) => txt(a.sym, b.sym) || txt(a.key, b.key));
   });
 
   /**
@@ -1731,26 +1751,81 @@
    */
   const SEGMENT_KEYS = ['INDEX', 'CASH', 'FNO'];
 
-  /** Every segment the store keys on, with what this selection holds of it. */
+  /**
+   * /ingest's THREE SEGMENTS, ON THIS PAGE'S OWN ROWS.
+   *
+   * The rung offered INDEX / CASH / FNO — the store's own second field — and
+   * /ingest offers Spot / Expired futures / Expired options. Same question, two
+   * vocabularies, so a reader moving between the pages had to translate.
+   *
+   * THE FILE ARGUED AGAINST THIS and the objection was real: "relabelling would
+   * rename three sets into three other sets that do not have the same members".
+   * It is answered rather than ignored — the sets are not relabelled, they are
+   * RE-DERIVED from a field every row already carries. `expiry` is what splits
+   * them:
+   *
+   *   Spot            a continuous series — `expiry === null`. INDEX and CASH
+   *                   both land here, which is correct: neither settles.
+   *   Expired futures a settled contract, `-FUT`.
+   *   Expired options a settled contract, `-CE` or `-PE`.
+   *
+   * So Spot is not "INDEX renamed" — it is every row with no expiry, whatever
+   * the store keyed it under, and the membership is computed rather than
+   * asserted. The operator's instruction, and the objection's terms are met.
+   *
+   * The notes are /ingest's own words, including the 503, because the reason an
+   * expired contract is absent is the same reason on both pages.
+   */
+  const SEG_VIEW = [
+    { key: 'spot', name: 'Spot', note: 'continuous series — no expiry' },
+    {
+      key: 'futures',
+      name: 'Expired futures',
+      note: 'contracts that have already settled · 503 — no transport in this build'
+    },
+    {
+      key: 'options',
+      name: 'Expired options',
+      note: 'contracts that have already settled · 503 — no transport in this build'
+    }
+  ];
+
+  /** Which of the three a stored row belongs to, off its own name. */
+  /** @param {{expiry: string | null, instrument: string}} r */
+  function segOf(r) {
+    if (r.expiry === null) return 'spot';
+    return /-(CE|PE)$/.test(r.instrument) ? 'options' : 'futures';
+  }
+
+  /** /ingest's three, each with what this selection holds of it. */
   const segmentRows = $derived.by(() => {
-    const held = new Map(kinds);
-    return SEGMENT_KEYS.map((k) => {
-      const n = held.get(k) ?? 0;
+    const n = new Map();
+    for (const r of textMatched) {
+      const s = segOf(r);
+      n.set(s, (n.get(s) ?? 0) + 1);
+    }
+    return SEG_VIEW.map((s) => {
+      const c = n.get(s.key) ?? 0;
       return {
-        key: k,
-        name: k,
-        detail: n > 0 ? `${fmt(n)} held` : 'none held',
+        key: s.key,
+        name: s.name,
+        /* THE DETAIL IS /ingest's NOTE, which is what that page puts here. The
+           held count is this page's own fact and rides the title beside it. */
+        detail: s.note,
+        title: c > 0 ? `${fmt(c)} instrument-month(s) held. ${s.note}` : `Nothing stored. ${s.note}`,
         /* NOT `disabled`. A segment with nothing stored is a legitimate thing to
-           select — the answer is an empty table, which is the answer to "do I
-           hold any of these". Disabling it would refuse the question. `why` is
-           what says the table will be empty before the click. */
-        why: n === 0 ? 'nothing stored under this segment for the current selection' : undefined
+           select — the answer is an empty table, which IS the answer to "do I
+           hold any of these". Disabling it would refuse the question. */
+        why: c === 0 ? 'nothing stored under this segment for the current selection' : undefined
       };
     });
   });
 
   /** Text and kind: the base the month cards roll up. */
-  const segmented = $derived(kind ? textMatched.filter((r) => r.kind === kind) : textMatched);
+  /* `segOf`, NOT `r.kind`. `kind` now holds one of /ingest's three — spot,
+     futures, options — and those are derived from a row's expiry rather than
+     read off the store's second field. See `SEG_VIEW`. */
+  const segmented = $derived(kind ? textMatched.filter((r) => segOf(r) === kind) : textMatched);
 
   /* ======================================================================
      THE BAR-LENGTH RUNG — feed → universe → TIMEFRAME → months
@@ -4331,8 +4406,8 @@
    */
   $effect(() => {
     if (kind === '' && segmentRows.length > 0) {
-      const held = kinds[0]?.[0];
-      kind = held ?? segmentRows[0].key;
+      const held = segmentRows.find((s) => s.why === undefined);
+      kind = (held ?? segmentRows[0]).key;
     }
   });
 
@@ -4371,8 +4446,19 @@
     if (picked && !instrumentKeys.has(picked)) {
       out.push({ rung: 'Instrument', value: picked, clear: () => (filter = '') });
     }
-    if (kind && !kinds.some(([k]) => k === kind)) {
-      out.push({ rung: 'Segment', value: kind, clear: () => (kind = '') });
+    /* `SEG_VIEW`, NOT `kinds`. `kind` holds one of /ingest's three now — spot,
+       futures, options — and `kinds` holds the store's own second field, INDEX /
+       CASH / FNO. Comparing across the two vocabularies made this fire on every
+       load: "Segment is set to spot, which the rungs above it no longer offer",
+       over a rung that was offering exactly that. All three are always offered,
+       so the only way to strand this rung now is a value from neither
+       vocabulary. */
+    if (kind && !SEG_VIEW.some((s) => s.key === kind)) {
+      out.push({
+        rung: 'Segment',
+        value: kind,
+        clear: () => (kind = SEG_VIEW[0].key)
+      });
     }
     if (timeframe && !tfAll.some(([t]) => t === timeframe)) {
       /* RE-SEEDS RATHER THAN CLEARING TO NOTHING. `''` used to mean "all rungs"
@@ -5394,12 +5480,10 @@
             filter
             label="instruments"
             summary={picked
-              ? picked
+              ? (instrumentOffered.find((r) => r.key === picked)?.sym ?? picked)
               : typed
                 ? `Typed · ${fmt(instrumentRows.length)} held`
-                : instrumentRows.length === 1
-                  ? instrumentRows[0].key
-                  : `All · ${fmt(instrumentRows.length)} held`}
+                : `${fmt(instrumentOffered.length)} offered`}
             rows={[
               /* NO "ALL INSTRUMENTS" ROW, for the reason `All rungs` went from
                  Timeframe: this rung is `single`, so "all of them" is not a
@@ -5407,21 +5491,19 @@
                  the head row was the only way to leave it unchosen. */
               ...instrumentOffered.map((r) => ({
                 key: r.key,
-                name: r.key,
+                name: r.sym,
                 /* BACKWARD-LOOKING, ALWAYS. "held" is what /store.json can
                    prove; what the vendor could serve is /ingest's question and
                    no endpoint this page calls can answer it. */
-                detail:
+                /* THE KIND, WHICH IS WHAT /ingest PUTS HERE — `equity`, `index`.
+                   The held count is a fact about THIS page and belongs on the
+                   row's title beside it, not in the column /ingest fills with
+                   the instrument's type. */
+                detail: r.kind || (r.months === 0 ? 'nothing stored' : 'in this master'),
+                title:
                   r.months === 0
-                    ? /* NOTHING STORED IS ITS OWN ANSWER, not `0 month(s) held`.
-                         The rung offers the whole universe now, so most rows on
-                         a fresh store are zero — and "0 month(s) held" reads as
-                         a measurement that came back zero, where "nothing
-                         stored" reads as the absence it is. */
-                      'nothing stored'
-                    : r.short > 0
-                      ? `${fmt(r.months)} month(s) held · −${fmt(r.short)}`
-                      : `${fmt(r.months)} month(s) held`
+                    ? `${r.sym} — ${r.key}. Nothing stored for it at this selection.`
+                    : `${r.sym} — ${r.key}. ${fmt(r.months)} month(s) held${r.short > 0 ? `, ${fmt(r.short)} short` : ''}.`
               }))
             ]}
             selected={new Set([picked])}
@@ -5498,10 +5580,8 @@
             ? `${kinds.length === 1 ? kinds[0][0] : 'Nothing'} is the only segment this store holds, so there is nothing to narrow. The store's own second field — INDEX, CASH, FNO.`
             : `${fmt(segmented.length)} instrument-month(s) across ${fmt(kinds.length)} segment(s). The store's own second field — INDEX, CASH, FNO.`}
           summary={kind
-            ? kind
-            : kinds.length === 1
-              ? kinds[0][0]
-              : `All \u00b7 ${fmt(kinds.length)}`}
+            ? (SEG_VIEW.find((s) => s.key === kind)?.name ?? kind)
+            : `${fmt(SEG_VIEW.length)} offered`}
           rows={segmentRows}
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
