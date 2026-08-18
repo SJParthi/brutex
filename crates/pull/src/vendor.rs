@@ -2469,6 +2469,108 @@ pub enum Pooling {
     PerRequestKind,
 }
 
+/// ADDRESSING AN EXPIRED CONTRACT BY ITS DISTANCE FROM THE MONEY.
+///
+/// # Why this exists beside [`FnoDiscovery`] rather than instead of it
+///
+/// There are two ways a vendor sells expired option data and this build needs
+/// both, because its two REST feeds chose differently.
+///
+/// Groww sells it **by name**: `NSE-NIFTY-30Sep25-24650-CE` is discovered
+/// through [`FnoDiscovery`] and then asked for down the ordinary bars path,
+/// exactly like a spot series. Dhan sells it **by offset**: there is no
+/// contract name in the ask at all. You name the underlying's `securityId`,
+/// whether the expiry is weekly or monthly, whether it is the near, next or far
+/// one, how many strikes from the money, and which side — and the answer
+/// carries the realised `strike` so the contract's identity is recovered from
+/// the response rather than stated in the request.
+///
+/// D-0193 records the mistake this shape corrects: `fno: None` on Dhan was read
+/// as "this vendor serves no expired data", when it only ever meant "this
+/// vendor has no NAME lookup". Dhan serves five years of expired options at
+/// minute level, index and stock, with implied volatility, open interest and
+/// spot alongside the bar.
+///
+/// # Why a field and not a branch
+///
+/// `CLAUDE.md` §5 and this module's own header: everything that differs between
+/// one feed and another is a ROW IN A TABLE, never an `if vendor ==`. A third
+/// vendor arriving with a third shape adds a variant here and a row there, and
+/// edits no driver.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollingSpec {
+    /// The path this vendor answers rolling-option requests on.
+    pub path: &'static [PathSegment],
+    /// The parameters that do not vary per contract, in the vendor's spelling.
+    pub fixed: &'static [Param],
+    /// The exchange-and-segment word for expired derivatives — Dhan `NSE_FNO`.
+    pub segment_word: &'static str,
+    /// The instrument word for an INDEX option — Dhan `OPTIDX`.
+    pub index_word: &'static str,
+    /// The instrument word for a STOCK option — Dhan `OPTSTK`.
+    pub stock_word: &'static str,
+    /// Every strike offset this feed serves, ATM outward.
+    ///
+    /// Written down rather than generated because it is a VENDOR FACT: the
+    /// documented set is ATM and up to ten either side, and a range this build
+    /// invented would be an ask the vendor answers with nothing.
+    pub offsets: &'static [&'static str],
+    /// The two sides, in the vendor's own spelling.
+    pub sides: &'static [&'static str],
+    /// The most days one call may span. Dhan documents 45.
+    ///
+    /// A window wider than this is SPLIT by the driver, never sent and hoped
+    /// for: a vendor silently clamping a range returns a short answer that
+    /// decodes cleanly, which is the failure mode a census over this tree
+    /// ranked as the most dangerous class there is.
+    pub max_days_per_call: u16,
+    /// How many whole years back the vendor answers for.
+    pub years_back: u16,
+}
+
+/// How a feed is asked for expired contracts — by NAME, by OFFSET, or not at all.
+///
+/// # The `None` arm is a vendor fact, not a gap
+///
+/// A feed carrying it publishes no expired-contract route this build can use,
+/// and the refusal that follows names the vendor rather than apologising for
+/// the code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FnoAccess {
+    /// This vendor serves no expired contract by any route.
+    None,
+    /// Discover the contract's NAME, then ask the ordinary bars path for it.
+    ByName(FnoDiscovery),
+    /// Ask by distance from the money; the answer carries the realised strike.
+    ByStrikeOffset(RollingSpec),
+}
+
+impl FnoAccess {
+    /// Whether this feed can be asked for an expired contract at all.
+    #[must_use]
+    pub const fn serves(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    /// The name discovery, when this feed is addressed that way.
+    #[must_use]
+    pub const fn by_name(self) -> Option<FnoDiscovery> {
+        match self {
+            Self::ByName(d) => Some(d),
+            Self::None | Self::ByStrikeOffset(_) => None,
+        }
+    }
+
+    /// The rolling spec, when this feed is addressed that way.
+    #[must_use]
+    pub const fn by_offset(self) -> Option<RollingSpec> {
+        match self {
+            Self::ByStrikeOffset(r) => Some(r),
+            Self::None | Self::ByName(_) => None,
+        }
+    }
+}
+
 /// How a feed is asked WHICH expired contracts exist.
 ///
 /// # Why discovery is its own shape and not another `bars_path`
@@ -3898,6 +4000,46 @@ const GDFL_FLOOR: GranularityFloor = GranularityFloor {
              stating that this vendor's floor is a one-second conflated \
              snapshot and not a print stream. See D-0118.",
 };
+
+/// DHAN'S EXPIRED-OPTIONS ROUTE, read first-hand from the vendor's own
+/// `14-expired-options-data.md` and `20-annexure.md` on 2026-08-18.
+///
+/// Every value here is quoted, never inferred. `POST /v2/charts/rollingoption`
+/// returns five years of expired options at minute level, index AND stock,
+/// carrying open, high, low, close, volume, implied volatility, open interest,
+/// spot and the realised strike. Up to 45 days per call.
+///
+/// The offsets are the documented set — ATM and up to ten either side — written
+/// out rather than generated, because the width is the VENDOR'S and a range
+/// this build invented would be an ask answered with nothing.
+const DHAN_ROLLING: RollingSpec = RollingSpec {
+    path: &[
+        PathSegment::Literal("v2"),
+        PathSegment::Literal("charts"),
+        PathSegment::Literal("rollingoption"),
+    ],
+    // `interval` is the rung and `expiryCode`/`expiryFlag`/`strike`/
+    // `drvOptionType` vary per ask, so they are the driver's to fill; these are
+    // the ones that do not move.
+    fixed: &[Param {
+        name: "exchangeSegment",
+        value: ParamValue::Fixed("NSE_FNO"),
+    }],
+    segment_word: "NSE_FNO",
+    index_word: "OPTIDX",
+    stock_word: "OPTSTK",
+    offsets: &[
+        "ATM-10", "ATM-9", "ATM-8", "ATM-7", "ATM-6", "ATM-5", "ATM-4", "ATM-3", "ATM-2", "ATM-1",
+        "ATM", "ATM+1", "ATM+2", "ATM+3", "ATM+4", "ATM+5", "ATM+6", "ATM+7", "ATM+8", "ATM+9",
+        "ATM+10",
+    ],
+    sides: &["CALL", "PUT"],
+    max_days_per_call: 45,
+    years_back: 5,
+};
+
+const _: () = assert!(DHAN_ROLLING.offsets.len() == 21, "ATM and ten either side");
+const _: () = assert!(DHAN_ROLLING.sides.len() == 2);
 
 const DHAN: Descriptor = Descriptor {
     // MEASURED against Groww on the same instrument and the same five sessions:
@@ -5974,6 +6116,93 @@ mod tests {
         assert_eq!(named[0].venue(), Venue::NseCash);
         assert_eq!(named[0].start(), start);
         assert_eq!(named[0].verified_from(), Some(resumes));
+    }
+
+    /// Dhan's rolling-option route is the vendor's own figures, not this
+    /// build's guesses.
+    ///
+    /// # Why every value is asserted rather than trusted
+    ///
+    /// D-0193 exists because a capability claim about this exact endpoint was
+    /// recorded backwards for months: `fno: None` meant "no NAME lookup" and
+    /// was read as "serves nothing". The correction is only worth as much as
+    /// the figures that replace it, and those figures come from
+    /// `Dhan Docs/14-expired-options-data.md` and `20-annexure.md`. A test that
+    /// pins them turns a later silent edit into a red build.
+    ///
+    /// The offsets in particular: the documented width is ATM and up to ten
+    /// either side. Twenty-one is not a round number somebody liked, it is
+    /// 10 + 1 + 10, and a build that widened it would be asking for strikes the
+    /// vendor answers with nothing.
+    #[test]
+    fn dhans_rolling_option_route_carries_the_vendors_own_documented_figures() {
+        let spec = DHAN_ROLLING;
+        assert_eq!(
+            spec.segment_word, "NSE_FNO",
+            "the annexure's exchange segment"
+        );
+        assert_eq!(
+            spec.index_word, "OPTIDX",
+            "the annexure's index-option word"
+        );
+        assert_eq!(
+            spec.stock_word, "OPTSTK",
+            "the annexure's stock-option word"
+        );
+        assert_eq!(
+            spec.max_days_per_call, 45,
+            "the vendor documents 45 days per call"
+        );
+        assert_eq!(spec.years_back, 5, "the vendor documents five years");
+        assert_eq!(spec.sides, &["CALL", "PUT"], "the annexure's two sides");
+
+        assert_eq!(spec.offsets.len(), 21, "ATM and up to ten either side");
+        assert_eq!(spec.offsets.first().copied(), Some("ATM-10"));
+        assert_eq!(spec.offsets.last().copied(), Some("ATM+10"));
+        assert!(
+            spec.offsets.contains(&"ATM"),
+            "the money itself is one of the offsets"
+        );
+        // NO DUPLICATES AND NO GAPS. A repeated offset would ask twice and
+        // count once; a missing one is a strike silently never pulled, which is
+        // the shape of failure that leaves a chain looking complete.
+        for (i, one) in spec.offsets.iter().enumerate() {
+            for (j, other) in spec.offsets.iter().enumerate() {
+                assert!(i == j || one != other, "offset {one} appears twice");
+            }
+        }
+    }
+
+    /// The two feeds are addressed in the two different ways, and the enum says
+    /// which without anyone branching on the vendor's name.
+    #[test]
+    fn groww_is_addressed_by_name_and_dhan_by_offset() {
+        let by_name = FnoAccess::ByName(FnoDiscovery {
+            expiries_path: &[],
+            expiries_params: &[],
+            expiries_field: "expiries",
+            contracts_path: &[],
+            contracts_params: &[],
+            contracts_field: "contracts",
+            from_year: 2020,
+        });
+        assert!(by_name.serves());
+        assert!(by_name.by_name().is_some(), "a name feed answers by name");
+        assert!(
+            by_name.by_offset().is_none(),
+            "and never by offset — asking it that way must return nothing \
+             rather than something plausible"
+        );
+
+        let by_offset = FnoAccess::ByStrikeOffset(DHAN_ROLLING);
+        assert!(by_offset.serves());
+        assert!(by_offset.by_offset().is_some());
+        assert!(by_offset.by_name().is_none());
+
+        // AND `None` SERVES NOTHING, which is a vendor fact rather than a gap.
+        assert!(!FnoAccess::None.serves());
+        assert!(FnoAccess::None.by_name().is_none());
+        assert!(FnoAccess::None.by_offset().is_none());
     }
 
     /// A contract keeps the DERIVATIVES clock, not the cash one.
