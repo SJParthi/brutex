@@ -6009,7 +6009,9 @@
                      is `/feeds.json`'s granularity floor: a feed that bottoms
                      out at a minute has the second rung permanently refused and
                      `rungRows` drops it. No vendor is named in this file. -->
-                <div class="field">
+                <!-- `rung`: the ONE control on this strip whose menu needs a
+                     ceiling. See `.field.rung` in the stylesheet. -->
+                <div class="field rung">
                   <span
                     class="lab"
                     title="Bar lengths — the granularity field on the wire. Timeframe is the cascade's word for this rung and the word /db and /markets use for the same axis; bar length is what it means; granularity is what it is called on the wire. All three name one thing."
@@ -7632,90 +7634,101 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  /* ══ A RUNG'S MENU IS THE WIDTH OF ITS RUNG ══
 
-     `Picker` sizes its panel `width: max-content` and that is right for the
-     control it was written for — a 750-name instrument search needs whatever
-     width the longest name wants. In the STRIP it is wrong, and visibly: a
-     Segments menu whose widest row is "Expired futures / contracts that have
-     already se…" opened to roughly twice its own button and hung across the
-     two controls beside it, so the panel no longer looked attached to the
-     thing it belonged to. Timeframe did the same over the right edge.
+  /* ══ ONE CONTROL NEEDED A CEILING, AND IT IS NOT ALL FIVE ══
 
-     Pinned to the button here, and only here. `Picker` is shared with three
-     other pages and is not edited from this file — the same rule the `.pbtn`
-     clip above already follows. `max-content` stays the floor via `min-width`
-     on the component, so a menu never gets NARROWER than its button either. */
-  .field :global(.pmenu) {
-    width: 100%;
-    min-width: 0;
-    max-width: none;
-  }
-  /* THE DETAIL COLUMN GIVES WAY FIRST. At the button's width the name and its
-     detail no longer both fit on their own terms, and the NAME is the thing
-     being chosen — so the detail takes what is left and ellipses, rather than
-     forcing the row wider than the panel. */
-  .field :global(.pmenu) :global(.pct) {
-    max-width: 45%;
+     `Picker` sizes its panel `width: max-content` up to `min(92vw, 560px)`,
+     and for four of the five rungs that is right — the feed names, the universe
+     names and the segment sentences all want the room and truncate visibly
+     without it. A first attempt pinned every menu in the strip to its button's
+     width and it was wrong in the obvious way: "Global Datafeeds" became
+     "Global D…" and "contracts that have already settled" became "contracts
+     t…", which is an ellipsed refusal — the thing this page keeps removing.
+
+     TIMEFRAME IS THE EXCEPTION because its rows carry the longest detail on the
+     strip ("1min · 375 bar(s) per session") on the RIGHTMOST control, so
+     `max-content` opened it from its own left edge to the window's right and it
+     hung across Segments. A ceiling, not a pin: it still sizes to its content,
+     it just stops before it becomes a banner. */
+  .field.rung :global(.pmenu) {
+    max-width: 420px;
   }
 
-  /* ══ THE STRIP'S MENUS ARE DENSE. THE COMPONENT'S DEFAULTS ARE NOT ══
+  /* ══ THE ROW IS THE CONTROL. A COLUMN OF EMPTY CIRCLES IS NOT ══
 
-     `$lib/Picker.svelte` is sized for a 750-name instrument search, where an
-     `--fs-lg` box with 18px of padding is the control you are actually there
-     to use and a 42px row is a comfortable target in a list you will scroll
-     for a while. In the STRIP the same metrics open a panel where the search
-     box is taller than three of the six rows under it — a six-item universe
-     list where the biggest object on screen is a box for narrowing six items.
+     What read as dated here was never the panel or the type — it was the
+     gutter. Six universes drawn as six hollow rings down the left edge, five
+     of them empty, is a 1998 form control, and it is dated for a reason that
+     is not fashion: the ring is a SECOND thing to look at that says what the
+     row already says. The eye has to find a 15px circle to answer "which one
+     is picked" on a list where the picked row is already tinted and already
+     railed.
 
-     Scoped here, on the operator's instruction, rather than changed in the
-     component: `Picker` is shared with /db, /markets and /autopilot, and this
-     is the same rule the `.pbtn` clip and the `.pmenu` width above already
-     follow — the page adjusts the shared control for its own strip and does
-     not edit it for everyone.
+     So the box goes and the ROW carries the state — the accent ground and the
+     rail `Picker` already draws, plus a check at the end of the line the way a
+     macOS menu, a command palette and every current picker mark a choice.
 
-     NOTHING SEMANTIC MOVES. A radio is still a circle and a checkbox still a
-     square — that distinction is the only thing on screen saying whether
-     ticking one unticks the rest, and the component's own comment is right
-     that it is load-bearing. They are 15px instead of 18px. */
-  .field :global(.pmenu .phead) {
-    padding: var(--s3) var(--s2) var(--s4);
-  }
-  .field :global(.pmenu .pq) {
-    font-size: var(--fs-base);
-    padding: var(--s4) var(--s5);
-    border-radius: var(--r3);
-  }
-  /* "Matches name or detail" IS THE NARRATION THIS PAGE HAS BEEN CUTTING. A
-     search box that searches what is in it needs no caption under it. */
-  .field :global(.pmenu .phint) {
-    display: none;
-  }
-  .field :global(.pmenu .pact button) {
-    padding: var(--s3);
-  }
-  .field :global(.pmenu .plist label) {
-    min-height: 0;
-    padding: var(--s3) var(--s5);
-    gap: 2px var(--s5);
-    border-radius: var(--r2);
-  }
+     THE INPUT IS STILL THERE AND STILL REAL. It is moved out of the flow, not
+     removed: it keeps its `type`, its `name`, its `:checked`, its change event
+     and its place in the tab order, so the keyboard, the screen reader and
+     `toggle()` all behave exactly as before. This is a rendering change and
+     nothing else.
+
+     WHAT IS LOST, HONESTLY: `Picker`'s own comment argues the circle-vs-square
+     is load-bearing — it is "the only thing on screen saying whether ticking
+     this one unticks the rest". That was true when the glyph was the only mark.
+     It is not the only mark now: a single-choice menu has exactly one tinted
+     row and no bulk header, and a multi-choice one has "Select all N / Clear
+     all" across its top and tints every row you tick. Scoped to this page, so
+     the component's own reasoning still governs /db, /markets and /autopilot. */
   .field :global(.pmenu .plist input) {
-    width: 15px;
-    height: 15px;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    opacity: 0;
+    pointer-events: none;
   }
-  /* The reason under a row is indented past the control it belongs to, and
-     that indent is measured from the control — a 45px gutter beside a 15px
-     box is a sentence floating in the middle of the row. */
+  /* The reason under a row was indented past a box that is no longer in the
+     flow, which left it floating in the middle of the row.
+
+     `order: 1` IS WHAT KEEPS THE CHECK ON THE FIRST LINE. `.pwhy` is
+     `flex: 0 0 100%`, so it takes a row of its own, and the check below is an
+     `::after` — last in source order, which put it on a THIRD line under the
+     sentence, floating alone at the left. Ordering the sentence after it puts
+     the check back beside the name where it belongs, with no pixel offset to
+     go stale: the wrap is still the flex container's to decide. */
   .field :global(.pmenu .pwhy) {
-    padding-left: calc(15px + var(--s5));
-    font-size: var(--fs-micro);
+    padding-left: 0;
+    order: 1;
   }
-  /* A menu that can be half the window tall is a menu that covers the form it
-     belongs to. Six universes, three segments and two rungs all fit well
-     inside this; the instrument search is not one of these — it is `.ddm`. */
-  .field :global(.pmenu) {
-    max-height: 320px;
+  /* THE CHECK, DRAWN RATHER THAN TYPED — two borders on a rotated box, the
+     same technique `Picker` uses for its own tick, so it cannot come out as a
+     missing glyph on a machine without the font. */
+  .field :global(.pmenu .plist label:has(input:checked))::after {
+    content: '';
+    flex: 0 0 auto;
+    align-self: center;
+    width: 5px;
+    height: 10px;
+    margin: 0 2px 3px 0;
+    border: solid var(--acc);
+    border-width: 0 2px 2px 0;
+    transform: rotate(43deg);
+  }
+  /* FOCUS HAS TO LAND SOMEWHERE VISIBLE. The input carried the ring and the
+     input is out of the flow, so the row takes it — inset, so it reads as the
+     row being focused rather than as a second border around it. */
+  .field :global(.pmenu .plist label:has(input:focus-visible)) {
+    outline: 2px solid var(--acc);
+    outline-offset: -2px;
+  }
+  /* A row that cannot be chosen shows no check and no ground — it is struck
+     through and dimmed, which `Picker` already does, and the gutter it used to
+     need for a disabled box is gone with every other row's. */
+  .field :global(.pmenu .plist label.pdis)::after {
+    content: none;
   }
   .ddb {
     appearance: none;
