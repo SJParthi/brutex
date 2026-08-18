@@ -1735,9 +1735,11 @@ fn blocked_by(status: &crate::autopilot::Status, paused: bool) -> String {
 ///
 /// # Why there is no queue, stated in terms a caller can check
 ///
-/// There is exactly one pull seat — [`crate::autopilot::Control::take_seat`], a
-/// compare-exchange — and `pull::ingest`'s census lock refuses rather than
-/// queues. Nothing in this process drains a pending list, because no pending
+/// There is one pull seat PER FEED — [`crate::autopilot::Control::take_seat`],
+/// a compare-exchange against that feed's slot — and `pull::ingest`'s census
+/// lock refuses rather than queues. Per feed rather than per process because
+/// the census the seat stands for is per vendor; what does not change is that
+/// a refused seat is refused, never parked. Nothing in this process drains a pending list, because no pending
 /// list exists. A route that answered `202 Accepted` would therefore be
 /// answering for work that no code will ever pick up.
 ///
@@ -1833,7 +1835,8 @@ fn queue_answer(
 pub const NO_QUEUE: &str = "REFUSED · the selection is legal and was understood in \
      full, and nothing was queued, because this build has no queue to put it in. It \
      is not being held anywhere and no task will pick it up later: there is one pull \
-     seat (api::autopilot::Control::take_seat, a compare-exchange), pull::ingest's \
+     seat per feed (api::autopilot::Control::take_seat, a compare-exchange against \
+     that feed's slot), pull::ingest's \
      census lock refuses rather than queues, and nothing in this process drains a \
      pending list. Answering 202 here would be accepting and dropping it, which \
      CLAUDE.md §4 bans. What exists instead: POST /pull/spot runs exactly this \

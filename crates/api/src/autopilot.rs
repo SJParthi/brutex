@@ -67,7 +67,7 @@
 //! "click Run" not mean run. A restart re-derives everything from the store,
 //! which is what makes killing the process safe.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use pull::manifest::EntryKey;
 use pull::session::{Day, IstMoment, Window};
@@ -1559,14 +1559,41 @@ pub struct Control {
     /// moved since — a run that began after the pause captures the new value
     /// and is unaffected.
     epoch: AtomicU64,
-    /// The one in-process pull seat.
+    /// The in-process pull seats — **one per feed**, not one per process.
     ///
     /// `pull::ingest`'s census lock **refuses rather than queues**, and it is
     /// taken and released once per chunk — so a manual pull landing inside an
-    /// autopilot tick would see every instrument fail with a lock message.
-    /// One seat, taken for the whole tick, turns that into one honest 409 that
+    /// autopilot tick would see every instrument fail with a lock message. A
+    /// seat, taken for the whole tick, turns that into one honest 409 that
     /// names the resolution.
-    seat: AtomicBool,
+    ///
+    /// # Why one per feed and not one for everything
+    ///
+    /// It WAS a single `AtomicBool`, and that made the two requirements
+    /// contradict each other: feeds are supposed to run in parallel while a
+    /// feed's own rungs run in order. With one seat the second feed to arrive
+    /// was refused at the door — measured, three POSTs landing together and the
+    /// loser turned away in 299µs, having read no credential and opened no
+    /// socket. The store then held Dhan's month and nothing of Groww's, and the
+    /// journal recorded no Groww run at all, because there had not been one.
+    ///
+    /// The seat was always coarser than the thing it guards. That thing is the
+    /// census lock, and the census is **per vendor** — `dhan.man.lock` and
+    /// `groww.man.lock` are different files. Two feeds writing their own
+    /// manifests cannot race; one seat asserted they could.
+    ///
+    /// Indexed by `feed as usize`, which `#[repr(u8)]` and the explicit
+    /// discriminants on [`pull::vendor::Feed`] make an O(1) subscript rather
+    /// than a search.
+    /// One BIT per feed, in `Feed` discriminant order.
+    ///
+    /// A bitmask rather than an array of flags because the two operations this
+    /// needs are then single atomics with no subscript: claiming one feed is a
+    /// `fetch_or` of its bit, and claiming every feed is one `compare_exchange`
+    /// from zero. The second is what makes a round's all-or-nothing take atomic
+    /// by construction rather than a loop that has to remember to give back
+    /// what it already took.
+    seats: AtomicU8,
     /// What to report. A lock, because it is a paragraph rather than a word,
     /// and it is written once per tick and read once per page.
     status: std::sync::Mutex<Status>,
@@ -1696,7 +1723,7 @@ impl Control {
         Self {
             paused: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
-            seat: AtomicBool::new(false),
+            seats: AtomicU8::new(0),
             status: std::sync::Mutex::new(Status::default()),
         }
     }
@@ -1772,11 +1799,43 @@ impl Control {
     /// across `await` points and a `std::sync::MutexGuard` is not `Send` —
     /// which would make the whole background task unspawnable.
     #[must_use]
-    pub fn take_seat(&self) -> Option<Seat<'_>> {
-        self.seat
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+    pub fn take_seat(&self, feed: pull::vendor::Feed) -> Option<Seat<'_>> {
+        let bit = seat_bit(feed);
+        // `fetch_or` IS THE WHOLE CLAIM. If the bit was already set this call
+        // changed nothing, so a loser has nothing to undo — which is why there
+        // is no compare-exchange loop and no window where a refused caller is
+        // still holding something.
+        let was = self.seats.fetch_or(bit, Ordering::AcqRel);
+        (was & bit == 0).then(|| Seat {
+            held: &self.seats,
+            bit,
+        })
+    }
+
+    /// Every feed's seat at once, or none of them.
+    ///
+    /// # Why the autopilot takes all of them
+    ///
+    /// A round surveys every feed, so it cannot hold one feed's seat and touch
+    /// another's census. All-or-nothing is what keeps that honest: a round that
+    /// took the seats it could get would work on some feeds and skip others
+    /// while reporting one verdict for the pass.
+    ///
+    /// **A partial hold is impossible here rather than merely avoided.** The
+    /// take is one `compare_exchange` from zero, so a refusal leaves the mask
+    /// exactly as it found it. The shape this replaced — claim them one at a
+    /// time, unwind on the first failure — could deadlock every pull of an
+    /// earlier feed against a round that is not running if the unwind were ever
+    /// wrong, and nothing on any page could have reported it.
+    ///
+    /// # Cost
+    ///
+    /// One atomic. No allocation and no loop.
+    pub fn take_every_seat(&self) -> Option<AllSeats<'_>> {
+        self.seats
+            .compare_exchange(0, ALL_SEATS, Ordering::AcqRel, Ordering::Acquire)
             .ok()
-            .map(|_| Seat { held: &self.seat })
+            .map(|_| AllSeats { held: &self.seats })
     }
 
     /// Publish a new status. Never blocks a fetch: on a poisoned lock the
@@ -1806,16 +1865,32 @@ impl Control {
         self.status.lock().ok().map(|held| read(&held))
     }
 
-    /// Whether the one pull seat is taken, right now. One acquire load.
+    /// Whether ANY feed's pull seat is taken, right now.
     ///
     /// **A held seat does not mean a hand-made pull is running.** [`round`]
-    /// takes it for the whole of every pass, so the backfill's own tick holds it
-    /// too. It is reported as the fact it is — held or free — and nothing infers
-    /// a blocker from it alone; what is standing off, and why, is
-    /// [`Status::detail`]'s job.
+    /// takes every seat for the whole of every pass, so the backfill's own tick
+    /// holds them too. It is reported as the fact it is — held or free — and
+    /// nothing infers a blocker from it alone; what is standing off, and why,
+    /// is [`Status::detail`]'s job.
+    ///
+    /// # Why "any" and not "all"
+    ///
+    /// This answers a page's "is something writing to the store". One feed
+    /// pulling is something, so `any` is the honest reduction — `all` would
+    /// report a free store while Groww was mid-month.
+    ///
+    /// # Cost
+    ///
+    /// One atomic load.
     #[must_use]
     pub fn seat_held(&self) -> bool {
-        self.seat.load(Ordering::Acquire)
+        self.seats.load(Ordering::Acquire) != 0
+    }
+
+    /// Whether one feed's seat is taken, right now. One acquire load.
+    #[must_use]
+    pub fn feed_seat_held(&self, feed: pull::vendor::Feed) -> bool {
+        self.seats.load(Ordering::Acquire) & seat_bit(feed) != 0
     }
 
     /// Record one instrument that did not answer, newest first.
@@ -1867,14 +1942,51 @@ impl Control {
 /// The one pull seat, released when this is dropped.
 #[derive(Debug)]
 pub struct Seat<'a> {
-    held: &'a AtomicBool,
+    held: &'a AtomicU8,
+    bit: u8,
 }
 
 impl Drop for Seat<'_> {
     fn drop(&mut self) {
-        self.held.store(false, Ordering::Release);
+        self.held.fetch_and(!self.bit, Ordering::Release);
     }
 }
+
+/// Every feed's seat, held together and released together.
+///
+/// See [`Control::take_every_seat`] for why the autopilot needs all of them.
+#[derive(Debug)]
+pub struct AllSeats<'a> {
+    held: &'a AtomicU8,
+}
+
+impl Drop for AllSeats<'_> {
+    fn drop(&mut self) {
+        self.held.store(0, Ordering::Release);
+    }
+}
+
+/// Which bit in the seat mask belongs to one feed.
+///
+/// # Why a shift and not a subscript
+///
+/// A subscript is a panicking operation that a reader has to prove safe from
+/// two facts held apart — the enum's discriminants and the array's length —
+/// and clippy is right to refuse it. The shift is total: every `u8` shifted by
+/// a value the const assertion below bounds is a `u8`.
+const fn seat_bit(feed: pull::vendor::Feed) -> u8 {
+    1u8 << (feed as u8)
+}
+
+/// Every seat, held at once. `FEED_COUNT` ones.
+const ALL_SEATS: u8 = (1u8 << pull::vendor::FEED_COUNT) - 1;
+
+/// THE MASK MUST HOLD EVERY FEED, checked when the table grows rather than when
+/// a sixth feed's pull mysteriously shares a seat with the first.
+const _: () = assert!(
+    pull::vendor::FEED_COUNT < 8,
+    "the pull seats are a u8 bitmask; a sixth-and-beyond feed needs a wider one"
+);
 
 /// Every series the sweep will actually fetch, as the store keys them.
 ///
@@ -2577,7 +2689,7 @@ async fn round(
     // would spin that at the speed of the loop — which is the one way this task
     // could starve the requests it is supposed to stay out of the way of. So it
     // is checked before any work, and it waits rather than spinning.
-    let Some(_seat) = site.autopilot.take_seat() else {
+    let Some(_seats) = site.autopilot.take_every_seat() else {
         site.autopilot.publish(|status| {
             status.phase = Phase::Paused;
             status.detail = String::from(
@@ -4133,7 +4245,9 @@ mod tests {
         let control = Control::new();
         assert!(!control.seat_held());
         {
-            let _seat = control.take_seat().expect("a free seat");
+            let _seat = control
+                .take_seat(pull::vendor::Feed::Dhan)
+                .expect("a free seat");
             assert!(control.seat_held());
         }
         assert!(!control.seat_held(), "the seat is released on drop");
@@ -4345,7 +4459,10 @@ mod tests {
     #[tokio::test]
     async fn a_manual_pull_holding_the_seat_makes_the_backfill_stand_off() {
         let site = empty_site("seat");
-        let held = site.autopilot.take_seat().expect("the seat starts free");
+        let held = site
+            .autopilot
+            .take_seat(pull::vendor::Feed::Dhan)
+            .expect("the seat starts free");
         let yesterday = yesterday_ist(std::time::SystemTime::now()).expect("a usable clock");
         let axis = [series("NIFTY")];
         let mut feeds = drivable(yesterday);
@@ -4699,22 +4816,94 @@ mod tests {
         );
     }
 
-    /// One seat, and it comes back when it is dropped.
+    /// One seat PER FEED, and it comes back when it is dropped.
     #[test]
     fn the_pull_seat_admits_one_holder_at_a_time() {
         let control = Control::new();
         {
-            let held = control.take_seat().expect("the seat is free");
+            let held = control
+                .take_seat(pull::vendor::Feed::Dhan)
+                .expect("the seat is free");
             assert!(
-                control.take_seat().is_none(),
-                "a second holder is refused rather than queued"
+                control.take_seat(pull::vendor::Feed::Dhan).is_none(),
+                "a second holder of the SAME feed is refused rather than queued"
             );
             drop(held);
         }
         assert!(
-            control.take_seat().is_some(),
+            control.take_seat(pull::vendor::Feed::Dhan).is_some(),
             "the seat is released on drop, including on an early return"
         );
+    }
+
+    /// Two feeds pull at once. This is the requirement the single seat broke.
+    ///
+    /// Feeds run in parallel while one feed's own rungs run in order, and with
+    /// one process-wide seat those two sentences contradicted each other: the
+    /// second feed to arrive was refused at the door, before a credential was
+    /// read or a socket opened. What the seat stands for is the census lock,
+    /// and the census is per vendor — `dhan.man.lock` and `groww.man.lock` are
+    /// different files, so the parallel case it refused was never a race.
+    #[test]
+    fn two_feeds_hold_their_seats_at_the_same_time() {
+        let control = Control::new();
+        let dhan = control
+            .take_seat(pull::vendor::Feed::Dhan)
+            .expect("Dhan's seat is free");
+        let groww = control
+            .take_seat(pull::vendor::Feed::Groww)
+            .expect("Groww's seat is a DIFFERENT seat and must also be free");
+
+        assert!(control.feed_seat_held(pull::vendor::Feed::Dhan));
+        assert!(control.feed_seat_held(pull::vendor::Feed::Groww));
+        assert!(
+            !control.feed_seat_held(pull::vendor::Feed::Zerodha),
+            "a feed nobody asked for is untouched"
+        );
+        assert!(control.seat_held(), "`any` is the honest reduction here");
+
+        // AND THE AUTOPILOT STANDS OFF WHILE EITHER IS HELD. A round surveys
+        // every feed, so partial admission would work on some and skip others
+        // under one verdict.
+        assert!(
+            control.take_every_seat().is_none(),
+            "a round cannot start while one feed is being pulled by hand"
+        );
+
+        drop(dhan);
+        assert!(
+            control.take_every_seat().is_none(),
+            "one seat still held is still a refusal"
+        );
+        drop(groww);
+        assert!(
+            control.take_every_seat().is_some(),
+            "with every seat free the round may run"
+        );
+    }
+
+    /// A refused all-seats take leaves nothing held.
+    ///
+    /// The bug this pins is a partial acquisition: taking Dhan's seat, failing
+    /// on Groww's, and returning `None` while still holding Dhan's would
+    /// deadlock every Dhan pull against a round that is not running, with
+    /// nothing on any page able to say why.
+    #[test]
+    fn a_refused_round_releases_every_seat_it_had_taken() {
+        let control = Control::new();
+        // Groww is index 1, so the sweep takes Dhan's seat first and then fails.
+        let groww = control.take_seat(pull::vendor::Feed::Groww).expect("free");
+        assert!(
+            control.take_every_seat().is_none(),
+            "refused, as it must be"
+        );
+        assert!(
+            !control.feed_seat_held(pull::vendor::Feed::Dhan),
+            "Dhan's seat was taken on the way to the failure and MUST have been \
+             given back — a partial hold is a deadlock nothing can report"
+        );
+        drop(groww);
+        assert!(control.take_every_seat().is_some());
     }
 
     /// **A paused autopilot sleeps. It does not spin.**

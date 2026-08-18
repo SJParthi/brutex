@@ -6217,15 +6217,27 @@ async fn pull_spot(
     // request that straddles midnight cannot be gated against one day and
     // recorded on another.
     let now = std::time::SystemTime::now();
-    // ONE PULL AT A TIME, AND THE REFUSAL SAYS WHAT TO DO ABOUT IT.
+    // ONE PULL AT A TIME PER FEED, AND THE REFUSAL SAYS WHAT TO DO ABOUT IT.
     //
     // `pull::ingest`'s census lock REFUSES rather than queues, and it is taken
     // and released once per chunk — so a hand-made pull landing inside an
     // autopilot tick would not wait its turn, it would see every one of the 773
-    // instruments fail with a lock message and call that a run. One seat turns
+    // instruments fail with a lock message and call that a run. A seat turns
     // that into a single honest refusal that names the control which resolves
     // it. `CLAUDE.md` §4: degrade loudly and name the reason.
-    let Some(_seat) = site.autopilot.take_seat() else {
+    //
+    // PER FEED, because the census it stands for is per vendor. One seat for
+    // the process refused the second feed of a parallel pull at the door — it
+    // read no credential and opened no socket, and the store ended the evening
+    // holding one broker's month and none of the other's.
+    //
+    // THE FEED IS PARSED BEFORE THE SEAT IS TAKEN, and it has to be: a seat
+    // cannot be per-feed if it is claimed before anyone knows which feed. This
+    // is the same O(1) form lookup `parse_spot` does later, and an unreadable
+    // one falls to the descriptor's default exactly as it does there, so the
+    // seat and the run can never disagree about which feed this is.
+    let wants = ingest::parse_feed(&param(&body, "vendor")).unwrap_or(pull::vendor::Feed::Dhan);
+    let Some(_seat) = site.autopilot.take_seat(wants) else {
         return (
             axum::http::StatusCode::CONFLICT,
             receipt(),
@@ -6233,11 +6245,17 @@ async fn pull_spot(
                 "Spot pull",
                 vec![(
                     "Refused because",
-                    "the autopilot holds the pull seat, so this request was refused \
-                     rather than run against a store another pull is already writing \
-                     to. Pause it at /autopilot and try again — it resumes from \
-                     wherever the store reaches, so nothing is lost by pausing."
-                        .to_owned(),
+                    format!(
+                        "another pull already holds {}'s seat, so this request was \
+                         refused rather than run against a manifest that pull is \
+                         already writing to. Other feeds are unaffected — the seats \
+                         are per feed, because the census they stand for is. If it \
+                         is the autopilot, pause it at /autopilot and try again; it \
+                         resumes from wherever the store reaches, so nothing is lost \
+                         by pausing.",
+                        wants.display()
+                    )
+                    .to_owned(),
                 )],
                 site.broker,
             )),
@@ -12062,7 +12080,10 @@ mod tests {
             // page would ever draw a verdict from, and it carries the marker
             // for the same reason the other two do — the reader tests one
             // thing, unconditionally.
-            let seat = holder.autopilot.take_seat().expect("the seat is free");
+            let seat = holder
+                .autopilot
+                .take_seat(pull::vendor::Feed::Dhan)
+                .expect("the seat is free");
             let conflict = post(
                 addr,
                 "/pull/spot",
