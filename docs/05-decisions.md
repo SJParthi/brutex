@@ -15930,3 +15930,56 @@ rest.
 
 ---
 
+## D-0197 · 2026-08-18 · The front end's LANGUAGE is JavaScript with JSDoc, checked strictly by TypeScript, and there is no TypeScript source
+
+`web/tsconfig.json`, `web/package.json`, `.github/workflows/ci.yml` Gate W3.
+
+D-0174 recorded the framework and left the language unstated. The operator asked
+what the front end is written in, and the honest answer was in no document.
+
+**What it actually is, counted rather than described.** Under `web/`, excluding
+the committed build: **29 `.js`, 8 `.svelte`, 6 `.html`, 3 `.json`, 1 `.css`.**
+**Zero `.ts` and zero `.tsx`.** Yet `typescript` is a devDependency and
+`tsconfig.json` sets `checkJs: true` with `strict: true` — so TypeScript's
+checker runs over JavaScript in strict mode and TypeScript's *syntax* appears
+nowhere. Types are carried in JSDoc: **626 annotations across 17 of the 24
+source files.**
+
+That is a deliberate and unusual combination, and nothing said so.
+
+**Why JSDoc rather than `.ts`, and the reason is this repository's own §2.** A
+`.ts` file cannot be executed. Every test would need a transpiler, and a
+transpiler is a build step between the source and the thing under test. The
+front-end tests are `node --test web/tests/*.test.js`, and they `import
+'../src/lib/bps.js'` — **the shipped module, directly, with nothing in
+between**. 92 tests run that way today. The moment the source is TypeScript that
+property is gone and the browser tree needs a second toolchain to be *tested*,
+not merely built.
+
+§2's rule for `crates/**` is that no crate may depend on the front end's
+toolchain. This is the same instinct applied one level in: **the tests do not
+depend on the build.** It is why every extraction this session — `bps.js`,
+`ask.js`, `dates.js`, `prefix.js`, `rows.js`, `pick.js`, `money.js` — became
+testable by *moving* a function rather than by configuring anything.
+
+**What it costs, stated rather than omitted.** JSDoc is more verbose than
+annotations for the same types, and awkward for generics — `store.svelte.js`
+needs an explicit `@template` where TypeScript would infer. Some expressions
+have no comfortable JSDoc form and are written as a cast. And the checking is
+**not clean**: 61 errors stand today, pinned by Gate W3 as a ratchet rather than
+a floor, for the reason recorded in `docs/06-limits.md` §82.
+
+**Styling is plain CSS with custom properties.** No preprocessor, no Tailwind,
+no CSS-in-JS: one `theme.css` of 189 tokens plus per-component `<style>` blocks
+that Svelte scopes. The compiler's `css_unused_selector` is what makes that
+safe, and Gate W4 is what makes it enforced.
+
+**What would change this.** If a type expression becomes unwriteable in JSDoc,
+the question reopens — but the answer is not "switch to `.ts`", it is "extract
+the logic so the type is simpler", which is what happened seven times this
+session. Introducing `.ts` means introducing a transpiler into the test path and
+is a new entry, not a silent one.
+
+`docs/06-limits.md` gains nothing here beyond §82, which already records the 61.
+
+---
