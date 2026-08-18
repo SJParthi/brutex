@@ -15251,3 +15251,311 @@ how five of `engine`'s nine rows went undocumented until D-0162.
 
 ---
 
+
+## D-0178 · 2026-08-18 · The archive walk orders its members once, in `walk`, not once per directory
+
+**Status: locked.** `archive::descend` sorted the accumulator at the foot of every
+directory it entered. It now sorts nowhere, and `archive::walk` orders once after the
+recursion has fully unwound, through a named `sort_members`.
+
+### The order that comes out is identical, and that is the first thing to settle
+
+A reader's first worry is reproducibility, so it is answered before the cost is. The
+old outermost `descend` call sorted the whole shared accumulator *after* every nested
+call had already returned — its result was, by construction, "every member, by path".
+Each inner sort only re-ordered a prefix the outer one was about to re-order. Nothing
+between the sorts reads a position: the loop only pushes, and the `MAX_MEMBERS` guard
+reads `out.len()`, which no reordering changes. `sort_by` is stable, and a stable sort
+never changes the relative order of equal elements, so even the duplicate-path case a
+filesystem cannot produce but the type permits comes out the same either way.
+`CLAUDE.md` §3 rule 5 — same inputs, same outputs, byte for byte — is untouched. The
+whole vector is pinned by
+`pull::archive::tests::the_walk_orders_members_by_path_across_every_level` rather than
+argued for here.
+
+### What it cost, and the number that is actually certain
+
+`descend` is entered once per directory, so a walk over `d` directories performed `d`
+orderings of the accumulator the *whole walk* shares — not of the directory's own
+members. O(d · n log n) where O(n log n) was wanted, on a path this repository claims
+is bounded.
+
+For GDFL the layout is recorded on `descend` and measured on the operator's disk: the
+feed folder, `GFDLNFO_TICK_01072025`, `Options`, `Futures` and its `-I`/`-II`/`-III`
+month folders — **seven directories** over one day's 12,132 contracts. Seven orderings
+where one was needed.
+
+**Seven is the number that is certain; the sizes are a range and are not claimed.**
+Each old sort saw the accumulator as it stood when that directory finished, so the
+sizes turn on the order `fs::read_dir` happens to yield `Options` and `Futures` — the
+very order the sort exists because nobody can predict. At least three of the seven are
+over the full 12,132 whichever way it falls, because the last group folder, the stem
+above it and the feed folder all finish after the final push; the rest are smaller by
+an amount nobody has instrumented. An earlier draft of the comment said all seven were
+twelve-thousand-element sorts, which was one measurement more than anybody took.
+
+### `d` differs by vendor, and only one vendor is measured
+
+GDFL is `Nesting::ZipOfSegmentFolders` and puts members two and three levels below the
+feed folder. `TrueData` is `Nesting::ZipOfDailyZips` with `MemberPattern::SymbolAtRoot`
+— one member per instrument at the archive's own root — so its `d` is smaller and
+nobody has counted it. An earlier draft of the module doc said the members of *both*
+vendors sat two and three levels down; `crate::vendor` says otherwise and is the
+record. The factor is superlinear either way and measured on one of them, which is the
+most that can be claimed under §3 rule 1. The unmeasured half is registered in
+`docs/06-limits.md`.
+
+### Why the test is a call count and not a shape
+
+This is the part worth remembering, because it is why the defect survived. An ordering
+performed once and an ordering performed seven times return the *identical vector*.
+Every ordering test this crate already had passed throughout, including the two-level
+census test in `crates/pull/tests/folder.rs`. No assertion about the output can see
+this. So `sort_members` increments a `#[cfg(test)]` thread-local counter and
+`pull::archive::tests::the_members_are_sorted_once_per_walk_not_once_per_directory`
+asserts it is exactly 1 — the same device `crates/greeks/src/bsm.rs::MODEL_EVALUATIONS`
+uses, for the same reason. `#[cfg(test)]` on the statement removes it entirely, so a
+release walk pays nothing.
+
+### What this does not fix
+
+The walk is still O(members). It opens every file and that is inherent; the module doc
+says so plainly. This removes a superlinear factor from the **ordering** alone, and no
+throughput number was measured before or after.
+
+---
+
+## D-0179 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/pull/src/csv.rs (the only file touched)
+
+A vendor open interest of exactly `i64::MIN` is refused at the CSV boundary, not stored as the null.
+
+§7 spends `i64::MIN` on "there is no open interest", and `pull::fetch::land` performs that substitution one layer down as `row.open_interest.unwrap_or(i64::MIN)`. A vendor that literally sends -9223372036854775808 therefore reached the bar as the null, and from the bar onward the measurement and the omission were the same eight bytes — `store::format::Bar` holds an `i64` and has no third state to read them back into. That is the silent substitution §4 bans, and it is invisible afterwards: the bar has a valid checksum and asserts an omission that did not occur.
+
+The CSV decoder is the last place the two facts are still two different values, so that is where they are told apart. `csv::decode_rows` now returns `CsvError::OpenInterestSentinel` when the open-interest field parses to exactly `i64::MIN`.
+
+REFUSED RATHER THAN COUNTED, which is the choice worth writing down, because the field beside it does the opposite. An unreadable volume degrades to `0` and increments `Tally::unreadable_volume`, and an unreadable open interest degrades to `None` and increments `Tally::unreadable_open_interest`. Both of those degrades record something TRUE — the value is not known — and the counter says how often it happened. Storing a value the vendor DID send as absent records something FALSE, and a counter beside it does not unrecord it. The bar on disk still lies. §4 permits a loud degrade or a refusal; this case has no honest degrade available, so it is the refusal. It also matches what this module already does with every other malformed field: a bad line refuses the whole file, because a file missing an arbitrary subset of its rows is not a shorter file, it is a wrong one, and the manifest would record it as complete.
+
+The guard closes the single hole in a rule that was already written down. `store::format::Bar::counts_are_sane` refuses every negative open interest EXCEPT `OI_NULL`, so a vendor sending -5 is caught at the store's survey. `i64::MIN` is the one negative value that walks past that check, precisely because it is spelled exactly like the null.
+
+WHAT IT DOES NOT COVER, stated here so the ledger does not overclaim. Rows that reach `fetch::land` by the HTTP path build their open interest from a `Vec<i64>` in `RawWindow::decode` rather than from this decoder, and can still carry `i64::MIN` in. That guard belongs beside that decode and is not yet written. Nor does this make an open interest OF `i64::MIN` storable — §7 has spent that value, and an open interest is a contract count, which is never negative at all.
+
+---
+
+## D-0180 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/costs/src/expiry.rs (the only file touched)
+
+One reference day for a monthly expiry, on both arms, so a contract month cannot have two dates
+
+`expiry::next_monthly_on` resolved a monthly expiry with two different rules depending on which arm
+it took. For the caller's own month it read the weekday regime at the day the caller asked on; only
+after rolling into the next month did it read the regime at `MONTHLY_REGIME_REFERENCE_DAY`, the 15th.
+Two rules, and they were only ever going to agree while every regime boundary fell on the 1st of a
+month.
+
+The SEBI expiry standardisation did not. NSE moved both swept indices to the last Tuesday effective
+2025-09-02 — the second day of a month — and September 2025 promptly resolved two ways. Asked on
+2025-08-29, August's last Thursday had passed, the month rolled, September was read at its 15th
+(Tuesday) and the answer was 2025-09-30. Asked on 2025-09-02 the day itself was already Tuesday and
+the answer was again 2025-09-30. Asked on 2025-09-01 the day itself was still Thursday and the
+answer was 2025-09-25. One contract month, two settlement dates, chosen by nothing more principled
+than which day somebody put the question. That is not a rounding difference — it is two different
+contracts, and a cost or a moneyness computed against the wrong one is wrong by a whole expiry.
+
+The fix is to delete the second rule rather than to reconcile the two. Whichever month is being
+resolved, its weekday is read at the 15th of *that* month and never at `on`. Across the whole
+1990-2100 window this changes exactly one day's answer on each underlying — 2025-09-01, from
+2025-09-25 to 2025-09-30 — because the other five monthly row starts are all on the 1st, where the
+day asked and the 15th are necessarily in the same regime. Every previously pinned case was
+re-derived by hand against the rows and none moved.
+
+The lookup at the day the caller named is KEPT, and it is not redundant with the regime read. It
+answers a different question — is this day inside a verified window at all? — and the reference day
+cannot answer it, because a table whose refusal window opens after the 15th leaves the reference
+verified while the day asked is not. Answering such a day from the reference would be the silent
+extrapolation `docs/00-charter.md` prohibition 6 forbids. It is also what keeps `next_monthly_expiry`
+and `monthly_regime` refusing with the same refusal, word for word, on the same day. The monthly path
+therefore costs three table lookups rather than two; each is still the same fixed
+`dated::MAX_LATER_ROWS` trip count, so the per-operation bound in CLAUDE.md §3 rule 4 is unchanged
+and the bench's in-month-to-rollover ratio improves from 2:1 to 3:2.
+
+What this does not fix, stated so it is not discovered later: the 15th remains a choice, ported from
+the source's `expiry_calendar.py` rather than second-guessed. A boundary landing after the 15th of a
+month would hand that whole month to the superseded regime. None does — the four transitions are on
+the 1st (BANKNIFTY 2024-03-01), the 1st (BANKNIFTY 2025-01-01), the 2nd (NIFTY 2025-09-02) and the
+2nd (BANKNIFTY 2025-09-02) — and the day the rule would need to change is the day a circular puts one
+later in a month. Nor does any of this know about trading holidays: the answer is still the calendar
+expiry.
+
+No dated row was added, removed or edited. The evidence is untouched; only the rule for reading it
+changed, and a test asserts precisely that — 2025-09-01 is still inside the Thursday regime and
+2025-09-15 is still Tuesday — so the fix cannot be mistaken for, or quietly become, an edit to
+exchange data.
+
+---
+
+## D-0181 · 2026-08-18 · crates/runner/src/trade.rs
+
+**The end of the slice is not a square-off — in `trade` as well as in `outcome`**
+
+`runner::trade::walk` ended a hold at `wanted.min(forced)`, where `forced` is the last bar of the entry's own session that a fill can land in. On a slice cut mid-session that bar is THE CUT. A hold that overran its horizon therefore exited there and was stamped `forced: true` — a 15:10 square-off reported on a bar where no square-off happened, arriving in the results table with a best/worst pair, a return and a flag, indistinguishable from a real round trip. That is worse than a missing trade: a missing trade is a smaller `n`, this is a manufactured fill, and it is the fallback that hides a failure §4 bans.
+
+`runner::outcome::forward` already had the answer and had had it since the forward-return tail was corrected. There are three cases, not two: the horizon fits inside the tradeable window and the exit is ordinary; it does not and the window genuinely ENDED, which is a real measured square-off; it does not and the window merely ran out of file, which is no observation at all. The two modules were disagreeing about the same slice — `edge` reported nothing where `walk` reported a trade.
+
+`trade` now takes the same branch and refuses the third case. The refused signal is counted in `Trades::too_late` rather than in a bucket of its own, because `Trades::reconciles` admits exactly three outcomes and a fourth is a format change to every caller of the struct. The cost is stated rather than hidden: a slice cut mid-day inflates `too_late` by however many signals its tail carried, and nothing distinguishes those from the genuine 15:10 refusals.
+
+Two limits are accepted rather than solved. A slice cut at 15:05 still loses the five minutes to the square-off, and every signal in them becomes `too_late`. And a session truncated with further days after it cannot be told from a session that really closed early — the 2025 Muhurat session was sixty bars, and this repository has no exchange calendar that would separate the two. Only the LAST session of a slice is detectable, because only its final bar has no successor. `outcome` makes the same call for the same reason, and consistency between the two is worth more here than a guess in either.
+
+`is_window_end` is duplicated into `trade` rather than shared: `outcome`'s copy is private, and a shared home is a module neither of them owns. The duplication is recorded in both places and pinned by a test in each, so a drift fails a build instead of producing two answers about one slice.
+
+Incidentally: `SquareOff`, the type the table now carries, derives only `Clone` and `Copy`. The `Debug`, `PartialEq` and `Eq` it was born with reach no call site, and a derived impl nothing calls is an instrumented region no test can cover against §9's 100% floor.
+
+---
+
+## D-0182 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/api/src/server.rs
+
+A state-changing request is answered only when it came from this server's own page.
+
+`crates/api/src/server.rs` documented its guard on `/universe/resolve`, `/pull/spot`, `/pull/fno` and the three autopilot routes as "POST, AND THERE IS NO GET … D-0128". That reasoning is sound and it is about crawlers: a link preview, a health check and a back button all issue GET, and a GET on those paths reaches no handler that spends anything.
+
+It is not a guard against another page. An HTML form posting `application/x-www-form-urlencoded` is a CORS simple request — no preflight, no opt-in required from this server — so any site the operator has open can auto-submit one. Every handler behind these routes takes a bare `body: String`, so not even the content type narrows what is accepted, and the default listen address being loopback decides nothing: the browser running the hostile page is on the loopback interface too. What that reaches is not a read, because a cross-origin caller cannot see the response. It is the write — roughly 300 sockets opened to a third party against the shared token D-0128 exists to protect, a twelve-hour run resumed, an ingest begun.
+
+So: GET and HEAD pass untouched, because they change nothing and gating them would take down every page and every JSON route. Anything else is decided by `Sec-Fetch-Site`, which the user agent sets and page script cannot write — which is the only reason it is worth reading. `same-origin` passes. `cross-site`, `same-site`, `none` and any token this build has never heard of are refused, because a value nobody here recognises is not evidence of anything and defaulting it open is the fallback §4 bans. An absent header falls back to comparing the `Origin` authority against `Host`.
+
+A request carrying neither header is admitted, and that is the deliberate hole. curl sends neither; every socket test in this crate sends neither; a client that is not a browser has no origin to compare in the first place. The cost is stated rather than hidden: a browser that sends neither on a cross-origin form POST is not stopped by this. That every shipping engine sends both is read from the specifications and is not measured here, so it is a claim about the world and not about this code. The fallback also compares authorities and not schemes, because `Host` carries none — the blind spot a plain-HTTP loopback deployment already has, not a new one.
+
+The layer sits inside the request log and inside the body limit: an oversized body is still refused by length first, and the 403 is written down like every other answer, because an attempted cross-origin write that nobody records is one nobody finds. This is not authentication. There is still none on this port, and this decision does not pretend otherwise.
+
+---
+
+## D-0183 · 2026-08-18 · Nine gates that reported success over code they could not see
+
+Every defect below has the same shape: a gate whose SCAN was narrower than its MESSAGE, printing a verdict about a region it never read. None of them was wrong about what it examined. All of them were wrong about what they claimed to have examined, and that is the more dangerous error, because a green tick is indistinguishable from a real one.
+
+**The parser that read one spelling of four.** Gates 9 and 9b extracted dependencies with `awk '/^\[dependencies\]/{f=1;next} /^\[/{f=0} f && /=/ {print $1}'`. Cargo accepts four spellings of one dependency and that awk sees exactly one. `crates/core/tests/graph.rs` had already measured the consequence and written it down: a single `[dependencies.store]` stanza "defeated NINE guarantees at once", naming gates 9, 9b, 21 clause A and 22 clause A among them. For those stanzas the awk printed nothing — and printing nothing is precisely how those steps said "core depends on nothing". A pass and a bypass spelled identically.
+
+Gate 22 clause A had already been repaired, and the repair is the right one: a shell cannot parse TOML, so REFUSE every spelling the extractor cannot read and let the extractor then be a complete parse rather than a hopeful one. That approach is now carried to gates 9 and 9b, where it is doubly correct — three of the four spellings declare a dependency, and these two crates may declare none of any kind. Gate 9 additionally had no dev-dependency clause at all, so a flat `[dev-dependencies]` in `crates/core` passed in silence; it is now one line in the refusal list, and `[build-dependencies]` and `[target.*]` came free with it. Gate 21 clause A still carries the original parser and is recorded as a known gap rather than fixed here.
+
+**The cut that hid 8,734 lines.** Gate 19 skipped from the first `#[cfg(test)]` onward, on a stated assumption — "Every file in this workspace puts its test module last" — that was false. `crates/api/src/server.rs` is 15,654 lines and its first `#[cfg(test)]` is at 7,717; `audit.rs` hid 797 more. Gate 11 had already met this exact bug class and answered it (D-0065): the boundary is a SUBTRACTION, not a cut, because an attribute is not only ever a test module. That stripper is now gate 19's, character for character, duplicated rather than shared because a `run:` step cannot import from another and a tracked shell script is an extension gate 1 refuses. The verdict did not change — both hidden sites turn out to be inside test modules, 11 before and 11 after — and that is the point worth recording: the gate was right by luck over 8,734 lines it could not see, and luck is not a boundary.
+
+**Two checks that keyed on a default filename.** Gate 2 globbed `*build.rs` and gate 13 layer 3 tested `$NF == "build.rs"`. `build.rs` is only what cargo looks for when a manifest says nothing; `build = "gen.rs"` renames the script out of both at once, and the file it names is a `.rs` that gate 1's allowlist welcomes. Both now refuse the manifest KEY. `links =` is refused with it, because a package declaring one is a package cargo requires a build script for — this layer's subject announced in a different word.
+
+**A quote that named three commands where the gate tested one.** Gate 1e quotes §2 — "`cargo build`, `cargo test` and `cargo clippy` must pass on a machine with no Node" — and shadowed the toolchain for the build alone. `cargo build --all-targets` compiles test binaries and never runs them, so a `#[test]` reaching for a bundler at runtime was invisible: the stub was on PATH and nothing ever reached the line that would have invoked it. The test run is now shadowed too. It needed `fetch-depth: 0` on that job, because `findings.rs` refuses a shallow clone by design; without it the gate would have gone red for a reason having nothing to do with §2, which is the worst shape of failure — red for the wrong reason trains a reader to ignore the gate. `cargo clippy` stays unshadowed and the gate says why: it compiles and does not execute, so the build clause already walks every point at which it could reach a toolchain.
+
+**A declared surface that omitted two of its own members.** Gate 21 clause B printed "the logger's file-opening surface is the declared one" while probing for six constructs, and `create_dir_all` and `fs::metadata` were live production code in `sink.rs` that were not among them. A declaration that omits its own members reads as a stronger statement than it is — the failure gate 1d exists to refuse. `fs::read` is added with them and finds nothing today; it is there because it is the plainest way to read a bar file and its absence from the list was the only reason it would not have been seen. Its probe carries an opening paren, and that is load-bearing: probes are matched as substrings, so bare `fs::read` also counts `fs::read_dir` and `fs::read_to_string`.
+
+**A lint denied at the root and guarded by nothing.** `clippy::indexing_slicing` is denied in the workspace lint table beside `unwrap_used` and `panic`, is panic-capable in exactly the same way, and the string appeared NOWHERE in the CI file. Deleting its one line from `Cargo.toml` disarmed it across twelve crates with every gate still green. It joins gate 11 rule 5b. It is deliberately NOT in rule 5c, and the number is the reason rather than the taste: adding it there was measured at 16 hits across 10 files against an allowlist of 2, several in a crate another line of work is editing. The honest statement is that the TABLE is guarded and the local allows are not, and it is written into the gate rather than left to be discovered.
+
+**A fixture two processes could both claim.** D-0042 recorded a test failing one run in three because its fixture was `temp_dir().join("brutex-master-toobig.csv")` — one fixed name in a directory shared by every process on the machine — and answered it with `api::scratch`, which stamps the process id into every temporary path. Nothing made the rest of the workspace use it, and nine sites still name a fixed path. Gate 23 gained a clause, because it is the only step here that walks test sources at all. Each of the nine is declared with its reason; several are paths asserted ABSENT and cannot collide, and one — `api/src/logs.rs`, which builds a fixed directory and then removes and recreates it — is the same live hazard D-0042 described. That entry is the report, and it is meant to be removed rather than kept.
+
+The declaration is a CEILING with a loose-entry warning rather than an exact match, and that is a deliberate departure from the clause above it. An exact match fails when a count DROPS, on the ground that a stale declaration is a lie. Here a count drops precisely when somebody fixes a fixture, and turning that into a red build for a second contributor on a tree two sessions share would teach people to leave the fixtures alone.
+
+---
+
+## D-0184 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/api/src/logs.rs (the only file touched)
+
+No new decision entry is warranted, and I would rather say that than manufacture one.
+
+The rule this change applies was already decided — `crates/api/src/scratch.rs` carries the full reasoning in its module note (the intermittent `master::tests::a_master_larger_than_this_reader_holds_is_refused_before_it_is_read` failure, `cleanup: Os { code: 2, kind: NotFound }`, reproduced deliberately by starting two copies of the test binary together), and CI gate 23 clause C names the governing decision as D-0042 when it describes this exact call site as "identical in shape to D-0042's". Nothing was locked here that was not locked then; one call site that predates the rule was moved under it.
+
+The only ledger-worthy remainder is retiring the gate 23 clause C allowlist entry for `api/src/logs.rs`, and that is a change to a file I may not touch — it is written up under `deferred` instead.
+
+---
+
+## D-0185 · 2026-08-18 · crates/lake/src/reader.rs (the only file edited)
+
+**A row group's declared row count is bounded by the file's own byte length before it is spent as a capacity.**
+
+`LakeFile::read_row_group` took `RowGroup.num_rows` out of a thrift footer, checked its sign, and handed it to seven `Vec::with_capacity` sites. A footer is bytes on disk; a corrupt or hostile one can say `1 << 40`, which is positive, fits a `usize`, and asks for an 8 TiB `Vec<i64>`. `Vec::with_capacity` has no way to say no — the allocator's refusal becomes `std::alloc::handle_alloc_error`, which aborts rather than panics, so nothing catches it, and `panic = "abort"` in `[profile.release]` removes even the theoretical unwind. The operator got a stopped process and no file name. That is precisely the failure the comment in `Columns::pages` already names for parquet's own `ColumnChunkMetaData::byte_range` assert; this was the second door into the same room, and §4 does not care which door.
+
+The ceiling chosen is `self.bytes.len()` — the file's own length, which this reader already holds in memory in full, so reading it is exact and free. It is crude on purpose. It is not a proof of Parquet legality: a column of pure nulls RLE-encodes an arbitrarily long run of definition levels in a handful of bytes, so a legal file can declare more rows than it has bytes, and this refuses one. It is justified by measurement instead. Every lake leaf is an unnested OPTIONAL primitive; timestamp, open, high, low, close and volume are null in none of the 170,547 F&O rows and 78,448 cash/index rows already measured for `LakeError::UnexpectedNull`; the largest lake file measured is a few megabytes against row counts in the thousands. The margin on real data is orders of magnitude.
+
+Two alternatives were considered and rejected. A tight per-row byte estimate would have to model RLE, dictionary and ZSTD to be sound, and would be a model of the writer rather than a fact about the file — the kind of guess §3 rule 1 forbids. `Vec::try_reserve` would return an error instead of aborting, but it would return it at the reservation, several frames away from the footer field that lied, carrying only a byte count; the refusal belongs where the impossible number can still be named against the file it came from, and `LakeError::ImpossibleLength` already existed to name it.
+
+What this buys is stated narrowly: peak memory in `read_row_group` is now proportional to bytes already resident rather than to a number the file chose. It does not make allocation failure impossible — a multi-megabyte group still reserves tens of megabytes, and a `Vec<Option<Greeks>>` is about 72 bytes a row. It removes the case where one corrupt footer field demands terabytes. The identical defect one layer down, at `page.rs`'s `Vec::with_capacity(uncompressed_page_size)`, is untouched here and is recorded as open.
+
+---
+
+## D-0186 · 2026-08-18 · crates/vocab/src/table.rs, crates/vocab/src/tolerance.rs, crates/vocab/src/error.rs (no other file touched
+
+**A `near_*` position declares which quantity its band is a fraction of, and `set_near` refuses the other one.**
+
+D-0079 established that there are two band widths, not one, because they are fractions of different quantities: `TOL_FIB_MILLI` = 10 thousandths of the session range and `TOL_PIVOT_MILLI` = 500 thousandths of the CPR width. It recorded the distinction in prose and in two constants. It did not make the distinction checkable, and prose is not a gate.
+
+The consequence was that `table::set_near` asked only whether a position was a `near_*` row. Both widths reached it as a bare `Tolerance` — one `i64`, indistinguishable once constructed — so handing the pivot band to a Fibonacci rung returned `Ok` and set the bit, as did handing the Fibonacci band to a pivot level. At today's pins that is a band fifty times too wide or fifty times too narrow, and the bit it sets means something other than what its name says.
+
+What makes this worth a type rather than a review note is that it is undetectable afterwards. A `ConditionMask` is a set of positions and carries no record of the band that decided them, so a stored result set built on the wrong width is byte for byte a correct one. There is no later check that could find it, no test on the mask that could fail, and no way to tell a rerun apart from the original. `CLAUDE.md` §4 bans a fallback that hides a failure; this was one, and it hid the failure permanently.
+
+So the base is now a value. `tolerance::Base` has two variants; `Tolerance` carries which one it was measured on; `pinned_fib()` and `pinned_pivot()` produce values that differ in more than a number. Every one of the 97 `near_*` rows declares its base in `BitDef.band`, and `set_near` compares the two before it applies the band, returning `VocabError::WrongBand` naming both sides. The fourteen live positions on the CPR width are exactly the plan `crates/indicators/src/daily.rs` hands one width — 7–12, 17, 18, 54, 55, 178, 179, 188, 189 — which is a fact about that module read off it, not a classification invented here.
+
+`Kind` is now derived from `band` by a `const fn` inside the four row constructors rather than passed in beside it, so a row cannot claim to need a tolerance while naming no family. `near` takes a bare `Base` and not an `Option`, so appending a `near_*` row without deciding its family is a compile error rather than a row that silently joins whichever family the first caller passes a width from.
+
+No bit was renumbered, retired, voided or reordered. `band` is a property of a row and not of the encoding: `COUNT`, `NEXT_FREE`, `LIVE` and `VOCAB_VERSION` are unchanged, and every stored mask means exactly what it meant. §3.8 is untouched.
+
+**The base belongs on `Kind::Near` as a payload and is not there yet.** `Near { base }` would make an unclassified row impossible to write rather than merely checked. `Kind::Near` is compared as a bare unit value in eleven places across seven `crates/indicators` modules and this crate's own integration test, and a struct variant is a compile error at every one, so that move has to be a single commit spanning both crates. Recorded as the next step rather than done badly here.
+
+**What this does not fix.** `range_paisa` is still unchecked. A caller can pass the correct tolerance and the wrong span — the session range where the CPR width belongs — and every type is satisfied, because `Tolerance::covers` sees two `i64` and no arithmetic can tell a session range from a CPR width. That failure now sits entirely with the seven `crates/indicators` modules that derive the span. It is the same class of silent wrongness and it has been moved, not removed.
+
+---
+
+## D-0187 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/runner/src/excursion.rs and /Users/parthi/IdeaProjects/brutex/crates/runner/src/grid.rs
+
+**A trailing stop may not take its peak and its give-back from the same bar.**
+
+`crates/runner/src/excursion.rs` raised the running peak with the current bar's favourable extreme and then measured that same bar's retreat from the raised peak. That is the favourable-first intra-bar ordering, assumed silently on every bar of every trade. It is the look-ahead class of error and it flatters the result twice over: it fires trailing exits on bars where the retreat-first ordering would not have fired one at all, and it prices the fill against a high the resting order had not yet seen.
+
+The engine already treats the sibling case honestly. When one bar reaches both a stop and a target, `Crossings::ambiguous` records the offset and `grid::ended_by` resolves it as the stop in the pessimistic reading and as the target in the optimistic one; the spread is `Cell::uncertainty` and nothing selects on the optimistic figure. The trail was the one exit that did not go through that machinery, and its uncertainty read zero for a reason that had nothing to do with the data.
+
+The fix splits the question in two, because the two halves have different answers.
+
+*Whether the rung fired* is now settled against the peak as it stood BEFORE the bar. That test is order-independent: if the pre-bar peak `P` satisfies `P - low >= d`, the level `P - d` sits at or above the bar's low and the low reaches it whichever extreme came first, since the favourable-first ordering only raises the level further above the low. A crossing recorded under this rule therefore happened under both readings. The crossings the old rule produced out of the assumption alone are not recorded, and they are not lost either — the give-back is a running maximum, so the rung is picked up by whatever later bar genuinely retreats that far, or by none.
+
+*What the fill was priced against* remains unknown, and only on a bar that raised the peak. There the order hung from the pre-bar peak under retreat-first and from the raised peak under favourable-first, and both prices lie inside the bar's own range. Both anchors are recorded, `Crossings::trail_ambiguous` names the offsets where they differ, and `grid::ended_by` picks between them on the same pessimism flag that already picks between the stop and the target — which is why that parameter is now called `pessimistic` rather than `stop_wins`. `Cell::ambiguous_bars` counts the trail's set only for variants that carry a trailing rung, because nothing in it can reach a variant whose `trail_at` is `NEVER`.
+
+Two things this deliberately does not do. It does not let the two readings disagree about the exit BAR: pricing the retreat-first ordering as a fill at `pre_peak - d` in the case where that level is below the bar's low would invent a price the bar never printed, and letting the pessimistic reading hold the position past an exit the optimistic one took is the error that once produced a pessimistic total beating the optimistic one. And it therefore does not size, in `uncertainty()`, how much a refused crossing would have been worth. That gap is named in `docs/06-limits.md` rather than papered over.
+
+This changes backtest results for every variant with a trailing rung, and it changes them in both directions — a trail that used to fire on the bar that made the peak now fires later or not at all, which is sometimes worse for the position and sometimes better. It is not a conservative haircut and is not offered as one. It is the reading the data supports.
+
+---
+
+## D-0188 · 2026-08-18 · /Users/parthi/IdeaProjects/brutex/crates/pull/src/http.rs
+
+A vendor answer is bounded before it is held, and the null sentinel is refused where the vendor still owns it
+
+Two boundary faults in `pull::http`, closed together because they are the same mistake at different scales: a check written where the value is convenient rather than where it is still true.
+
+The size cap ran on `text.len()` — that is, on a String the whole answer had already been decoded into. It named the right number and it named it having already paid for it, which is not a bound at all. The refusal path had no size check whatever: `trim` cut the error to 500 characters, but only after `text()` had built the entire body, so a 500 carrying a gigabyte cost a gigabyte to print half a kilobyte of it. Reading is now framed. `Content-Length` is refused before the read when it is offered — the same three lines `resolve::HttpDocuments::get_async` already carries, because a claim past the cap needs no body to disprove it — and the read itself stops at the cap, which is the only check that binds on a chunked or close-delimited answer where no length is declared. What this buys is the removal of the unbounded case, not a byte-exact ceiling: the peak is the cap plus one hyper frame, and it does not bound time at all — an endless stream of empty frames is ended by REQUEST_TIMEOUT_SECS and by nothing written here.
+
+`CLAUDE.md` §7 spends `i64::MIN` on ABSENCE: it is the open-interest null, and zero means zero. `fetch::land` performs that substitution one layer down. So a vendor sending the literal -9223372036854775808 decoded as an ordinary number, satisfied every check below it, landed, and read back off disk as no open interest at all — silent in both directions, since nothing said the number had been swallowed and nothing said the null had been invented. The decoder is the last place the two are still different values, so it is where they are told apart. Refused for every field `one_number` reads, not only open interest: a volume of `i64::MIN` is not a volume and a timestamp of `i64::MIN` is not a time, and one rule is cheaper to keep true than three. The cost is stated rather than hidden — no field read through that function can ever carry that one value, which is what the sentinel already spent.
+
+This is the vendor half of a rule the local-archive half now also enforces: `csv::CsvError::OpenInterestSentinel` reaches the same conclusion from the same paragraph of §7. Neither path was written knowing about the other, and they agree.
+
+---
+
+## D-0189 · 2026-08-18 · crates/store/src/file.rs (the only file touched
+
+A torn tail past the commit counter opens the month; only a file short of it refuses.
+
+`BarFile::validated` measured `Layout::ragged_tail_bytes(len)` — the raggedness of the whole file — and refused any non-zero remainder with `StoreError::RaggedTail`. The remainder it was measuring is not one thing but two, and only one of them is a fault.
+
+A file SHORT of what its counter claims is a real disagreement, and it was already refused one layer up: `Header::validate` rejects `n_valid > capacity_for(file_len)` as `CounterExceedsFile`, and `Header::read_region` walks back to an older generation rather than condemning the file. Nothing reaches `validated` with bytes missing from the committed extent.
+
+A file LONGER than its counter claims is an interrupted append. The records were written and the header slot that publishes them was not, which is the ordinary crash the two-phase commit in §5 is designed around — the tail is supposed to be lost, and the next append overwrites it at exactly `offset_of(n_valid)`. Refusing there cost the operator every committed bar in the month to protect bytes no reader can address, and `CLAUDE.md` §3 rule 8 means nothing in this repository may rewrite the file to clear them. One interrupted pull and the month was unopenable by every process, permanently. `docs/04-invariants.md` S-07 and `docs/02-store-format.md` §7 both promised the opposite behaviour for the whole time the refusal was there.
+
+So the measurement is now of the committed extent — `len - offset_of(n_valid)`, computed through `capacity_for` and `ragged_tail_bytes` so that no unreachable overflow arm is introduced — and a non-zero result is reported through the sink at `Warn` with the path, the length, the counter and the discarded byte count, rather than refused. Warn and not Error for the reason `note_header_fell_back` gives: nothing failed. Every bar the file returns is real and was committed; the bytes being ignored were never published to anyone.
+
+What was not taken: the physical truncation §7's pseudocode shows. That is a destructive write performed on an operator's file at open time, and `crates/store/src/file.rs` already argues against it in its module documentation. Ignoring the bytes and naming them is the same outcome for every reader — nothing at or past `n_valid` is readable, which is S-03 — without the write. The cost is that the remainder survives reopens and the line repeats until an append covers it, which is stated in the code.
+
+`StoreError::RaggedTail` therefore has no producer in this crate. The variant is kept rather than deleted, because deleting a public variant is an API change that wants its own entry and its own test edits.
+
+---
+
+A re-pull is located by timestamp, not assumed to be the file's tail.
+
+`BarFile::append`'s duplicate check compared an overlapping batch against the LAST `count` committed records and nothing else. That answers correctly for exactly one shape — a re-pull that happens to end at the file's final bar — and refuses every other one. Re-offering a day from the middle of an already-backfilled month compared that day's bars against the month's last day, found them different, and reported `TimestampsOutOfOrder`: a vendor restating history, for bars the file already held byte for byte. `CLAUDE.md` §3 rule 5 promises reruns are safe, and for a month with anything after the re-pulled window they were not.
+
+The batch is now located by its first timestamp — a bisection over the committed records, which are strictly increasing because `survey` and `Header::advance` enforce it at the write boundary — and compared record by record from there. Every offered bar must equal the record at its own index or the answer is not "already present"; the existing refusal is untouched for a bar the file does not hold or holds differently, and a batch that runs past the counter is declined here so the partial-overlap resume path can take it.
+
+The cost is `O(log n_valid)` reads to locate plus one per offered bar. This is not an O(1) path and is not claimed to be. `docs/07-o1-architecture.md` layer 4's ban on a search is about the per-bar sweep path that `CLAUDE.md` §3 rule 4 enumerates; this is the ingest boundary, it runs once per offered batch, and the code it replaced was not O(1) either — it read `count` records unconditionally and answered the wrong question. Gate 11 rule 1 refuses the spellings `.binary_search` and `.partition_point`; neither appears, because there is no slice to call them on — the records are on disk and the bisection is a loop over `read_record`. The file's one allowlisted occurrence, the `partition_point` over the incoming batch in `suffix_that_follows`, is unchanged.
+
+`suffix_that_follows` still anchors its overlap at the tail, and that is deliberate rather than overlooked. A bar carries its own timestamp, so a comparison that matches proves the anchor was right; a wrong anchor can only make the comparison fail, and a failure there is a refusal and never a silent drop.
+
+---
