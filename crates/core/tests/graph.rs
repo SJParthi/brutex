@@ -55,8 +55,11 @@ const WORKSPACE: &str = include_str!("../../../Cargo.toml");
 /// Closed against `WORKSPACE` by [`the_manifest_list_is_the_whole_workspace`], so a
 /// crate added to the workspace and not to this list is a failing test rather than a
 /// silently unchecked row.
-const MANIFESTS: [(&str, &str); 12] = [
+const MANIFESTS: [(&str, &str); 13] = [
     ("api", include_str!("../../api/Cargo.toml")),
+    // The operator entry point for the sweep. D-0169; before it, nothing that
+    // could be RUN reached `runner`, `engine`, `indicators`, `vocab` or `costs`.
+    ("cli", include_str!("../../cli/Cargo.toml")),
     ("core", include_str!("../Cargo.toml")),
     ("costs", include_str!("../../costs/Cargo.toml")),
     ("engine", include_str!("../../engine/Cargo.toml")),
