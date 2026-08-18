@@ -236,7 +236,21 @@ pub fn grid(out: &mut String, g: &Grid, keep: usize) {
     let mut ordered: Vec<&Cell> = g.cells.iter().collect();
     ordered.sort_by_key(|c| {
         let base = c.stop.is_none() && c.target.is_none() && c.trail.is_none();
-        (!base, -c.pessimistic)
+        // `Reverse`, NOT `-c.pessimistic`, AND THE DIFFERENCE IS AN ABORT.
+        //
+        // `crate::grid` accumulates this field with `saturating_add`, whose floor
+        // is exactly `i64::MIN` -- so the one value the accumulator is DESIGNED to
+        // produce when a variant loses without bound is the one value that has no
+        // positive counterpart. Under `overflow-checks = true` the negation panics,
+        // and the release profile sets `panic = "abort"`, so the process dies with
+        // no message, no partial report and no name for what happened. Sorting a
+        // results table is not a thing that should be able to kill the process.
+        //
+        // `Reverse` orders descending with no arithmetic at all, so there is
+        // nothing left to overflow. `costs::moneyness` reaches for `checked_neg`
+        // at the same hazard; here the negation can be deleted outright rather
+        // than guarded, which is the better of the two.
+        (!base, core::cmp::Reverse(c.pessimistic))
     });
 
     let shown = ordered.len().min(keep);
@@ -486,6 +500,49 @@ pub fn bootstrap(out: &mut String, rc: Option<&Verdict>, spa: Option<&Verdict>, 
     reason = "the exception every test module in this workspace takes."
 )]
 mod tests {
+
+    /// A LOSING VARIANT MUST NOT BE ABLE TO KILL THE PROCESS.
+    ///
+    /// `crate::grid` accumulates `Cell::pessimistic` with `saturating_add`, whose
+    /// floor is exactly `i64::MIN`. This function used to sort on
+    /// `-c.pessimistic`, and `i64::MIN` has no positive counterpart: under
+    /// `overflow-checks = true` that negation panics, and the release profile sets
+    /// `panic = "abort"`, so the process would die with no message and no partial
+    /// report. The one value the accumulator is DESIGNED to produce on unbounded
+    /// loss was the one value the sort key could not take.
+    ///
+    /// Sorting a results table is not a thing that should be able to abort a
+    /// process, so the negation is gone rather than guarded.
+    #[test]
+    fn the_grid_table_orders_a_saturated_loss_without_negating_it() {
+        let cell = |stop: Option<usize>, pess: i64| crate::grid::Cell {
+            stop,
+            trades: 1,
+            pessimistic: pess,
+            optimistic: pess,
+            ..crate::grid::Cell::default()
+        };
+        let g = crate::grid::Grid {
+            // The base row (no stop, no target, no trail) must still lead, and the
+            // two rungs must still order best-first beneath it.
+            cells: vec![cell(None, -5), cell(Some(0), i64::MIN), cell(Some(1), 100)],
+            signals: 3,
+            ..crate::grid::Grid::default()
+        };
+
+        let mut out = String::new();
+        grid(&mut out, &g, 10);
+
+        assert!(!out.is_empty(), "the table rendered rather than aborting");
+        let best = out.find("100").expect("the profitable rung is shown");
+        let worst = out
+            .find(&i64::MIN.to_string())
+            .expect("the saturated rung is shown rather than dropped");
+        assert!(
+            best < worst,
+            "the better rung must sort above the saturated one:\n{out}"
+        );
+    }
     use super::{bootstrap, grid, overfitting, trades, walk_forward};
     use crate::pbo::{Placement, probability_of_overfitting};
     use crate::trade::{Trade, Trades};

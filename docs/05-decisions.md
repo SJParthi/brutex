@@ -14782,3 +14782,33 @@ control into a rubber stamp. Recorded OPEN at `docs/06-limits.md` §80.
 
 ---
 
+## D-0168 · 2026-08-18 · Sorting the exit grid could abort the process
+
+`crates/runner/src/audit.rs`.
+
+`audit::grid` ordered its rows on `-c.pessimistic`. `crate::grid` accumulates
+that field with `saturating_add`, whose floor is exactly `i64::MIN` — so the one
+value the accumulator is DESIGNED to produce when a variant loses without bound
+is the one value that has no positive counterpart.
+
+`overflow-checks = true` makes the negation panic, and the release profile sets
+`panic = "abort"`. A grid holding a fully-saturated losing variant would have
+killed the process with no message, no partial report and no name for what
+happened — while rendering a results table.
+
+Now `core::cmp::Reverse`, which orders descending with no arithmetic at all.
+`costs::moneyness` reaches for `checked_neg` at the same hazard; here the negation
+could be deleted outright rather than guarded, which is the better of the two.
+
+**Two ways in were identified**, and neither is ruled out by the store: a variant
+accumulating two losses near `-4.6e18` paisa, which `Bar::ohlc_is_sane` permits
+because it bounds sign and ORDER but never MAGNITUDE; or one trade whose exit bar
+carries a `close` near `i64::MIN`, since `trade::round_trip` validates `open`,
+`high` and `low` through `FillBar` and never `close`.
+
+**Found by an extreme-permutation fleet**, not by a test — 112 scenarios across
+eight failure classes, of which this was one of four that survived an adversarial
+reviewer instructed to refute by default.
+
+---
+
