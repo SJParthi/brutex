@@ -102,6 +102,74 @@ fn batch(n: usize) -> Batch {
 }
 
 /// The claim: a row lookup does not get more expensive as the batch grows.
+/// The per-row floor: the cheapest possible touch of the same batch.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row here divides one lookup cost by another, and a UNIFORM slowdown
+/// cancels in a quotient. An audit measured exactly that elsewhere in this
+/// workspace: a mask operation **174x slower passed its crate's ratio rows at
+/// 0.98x-1.00x**, because both legs moved together.
+///
+/// The denominator has to be something that cannot move when `row` does. This
+/// reads the batch's own length and folds it — same struct, same pointer, no row
+/// decode — so the quotient is "how many of the cheapest batch touches does one
+/// row lookup cost".
+fn floor_ps(b: &Batch) -> u128 {
+    cost_ps(2_000, || {
+        let n = black_box(b).len();
+        black_box(n.wrapping_add(1))
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<52} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<52} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-L-04 — one row lookup costs a bounded multiple of the per-row floor.
+fn row_lookup_stays_within_its_budget() -> bool {
+    /// Floors allowed per lookup.
+    ///
+    /// Measured, arm64 laptop, release, three consecutive runs: **10.071,
+    /// 10.011, 10.011** floors, at a floor of 437–937 ps.
+    ///
+    /// The RATIO held at ten even though the floor itself moved **2.1x** between
+    /// runs — which is the whole argument for measuring against a floor rather
+    /// than a wall-clock number. Both legs move with the machine; what stays
+    /// fixed is how many of one the other costs.
+    ///
+    /// **40**, sized on the worst observed with roughly 4x left over, and still
+    /// refusing the 174x uniform regression by a factor of 43.
+    ///
+    /// A breach is NOT a batch-size dependence — C-L-01 is that row. It means
+    /// every lookup got dearer at once, which a quotient cannot see.
+    const ALLOWED: u128 = 40;
+
+    let b = batch(LARGE);
+    let floor = floor_ps(&b);
+    println!("  the per-row floor is {floor} ps — one length read and an add");
+    let at = cost_ps(2_000, || b.row(black_box(LARGE - 1)));
+    budget(
+        "C-L-04 row(last) against the per-row floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 fn row_lookup_is_constant_in_batch_size() -> bool {
     let small = batch(SMALL);
     let medium = batch(MEDIUM);
@@ -179,6 +247,7 @@ fn main() {
     println!("gate 8 — crates/lake, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
     ok &= row_lookup_is_constant_in_batch_size();
+    ok &= row_lookup_stays_within_its_budget();
     ok &= iteration_is_linear_per_row();
     ok &= contract_parse_does_not_scan_the_name();
     if ok {

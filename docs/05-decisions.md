@@ -16109,3 +16109,37 @@ entry was written.
 
 ---
 
+## D-0201 · 2026-08-18 · `crates/lake` gains a floor-relative budget — five of thirteen
+
+The fifth of the nine ratio-only crates. Same reason as the four before it: every
+row divided one lookup cost by another, and a uniform slowdown cancels in a
+quotient — the failure that let a mask operation run 174x slower while passing
+its crate's ratio rows at 0.98x.
+
+**The floor** is one length read and an add on the same batch. Same struct, same
+pointer, no row decode.
+
+**Measured**, three consecutive runs: **10.071, 10.011, 10.011** floors at a
+floor of 437–937 ps.
+
+**The finding worth keeping:** the ratio held at ten while **the floor itself
+moved 2.1x between runs**. That is the whole argument for measuring against a
+floor rather than a wall-clock number — both legs move with the machine, and what
+stays fixed is how many of one the other costs. A budget in nanoseconds would
+have looked like a 2x regression here; in floors it did not move.
+
+**Budget 40**, sized on the worst observed with about 4x left over, still
+refusing the 174x regression by a factor of 43.
+
+### This work was written twice
+
+The first version was lost: it sat uncommitted on a tree two sessions share while
+three measurement runs completed, and a checkout elsewhere wiped it. Nothing was
+at fault but the sequencing — on a shared checkout, work is safe when it is
+committed and not before. It is staged the moment it builds now, and measured
+after.
+
+**Four crates remain ratio-only**: `api`, `pull`, `runner`, `store`.
+
+---
+

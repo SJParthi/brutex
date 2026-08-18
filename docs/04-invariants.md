@@ -1374,6 +1374,7 @@ here, and `docs/06-limits.md` is where that gap is recorded.
 | C-L-01 | `Batch::row` costs the same at 2,480, 24,800 and 248,000 rows, and the **last** row of a 248,000-row batch costs what its **first** row costs — the form a scan would fail by 248,000× | `lake::bench::row_lookup_is_constant_in_batch_size` | ✓ |
 | C-L-02 | A full walk stays linear: cost **per row** does not grow from 2,480 rows to 248,000, so iteration is not quadratic in the batch | `lake::bench::iteration_is_linear_per_row` | ✓ |
 | C-L-03 | Parsing a contract name does not scan it — a 4 KiB name that is **refused** never costs more than a 26-byte name that is accepted | `lake::bench::contract_parse_does_not_scan_the_name` | ✓ |
+| C-L-04 | One row lookup costs a bounded multiple of the per-row **floor** — one length read and an add on the same batch, no row decode. **This is the row a ratio cannot replace**: C-L-01 divides one lookup by another, so a UNIFORM slowdown cancels, and an audit measured a mask operation 174× slower passing its crate's ratio rows at 0.98×–1.00×. Measured 10.071 / 10.011 / 10.011 floors — **the ratio held at ten while the floor itself moved 2.1× between runs**, which is the whole argument for measuring against a floor rather than a wall-clock number. Budget **40** | `lake::bench::row_lookup_stays_within_its_budget` | ✓ |
 
 Measured on the operator's machine, 2026-08-09, `cargo bench -p lake`, exit 0.
 C-L-01 spanned **0.986× – 1.073×** across its four comparisons, at 4.5–4.9 ns
