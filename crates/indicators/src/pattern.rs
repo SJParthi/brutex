@@ -841,6 +841,69 @@ mod tests {
         p.step(bar).expect("this fixture bar is sane")
     }
 
+    /// EACH CLAUSE OF A TWO-BAR PATTERN IS LOAD-BEARING ON ITS OWN.
+    ///
+    /// Bit 161 fires on five conditions joined by `&&`. `cargo-mutants` turns
+    /// each `&&` into `||`, and **the only input that separates them is one
+    /// where exactly ONE clause is false and every other holds** — with `||`
+    /// that bar still fires the bit, with `&&` it must not. A test that simply
+    /// fails every clause at once proves nothing: both versions refuse it.
+    ///
+    /// Forty-six of this file's survivors are `&&` in `Patterns::bits`, and this
+    /// is the shape that kills them.
+    ///
+    /// # Two of the five clauses cannot be isolated, and that is arithmetic
+    ///
+    /// `bar1.bearish()` and `bar0.bullish()` are entangled with the price
+    /// clauses beneath them. The pattern needs `bar0.close` above `bar1.mid()`
+    /// and below `bar1.open`, and `bar0.open` below `bar1.low` — so making
+    /// `bar1` bullish moves `bar1.open` below `bar0.close` and breaks a second
+    /// clause at the same time, and making `bar0` bearish needs its close below
+    /// an open that is already below `bar1.low`, which puts the close under
+    /// `bar1.mid()` too. No single-clause negation exists for either, so they
+    /// are left to the three that do and recorded here rather than faked.
+    #[test]
+    fn every_price_clause_of_the_piercing_pattern_is_required_on_its_own() {
+        // bar1: bearish, open 200 close 100, low 90, mid 150.
+        let prior = at(10, 200, 210, 90, 100);
+        // bar0: bullish, open 80 (< low), close 170 (> mid, < open of bar1).
+        let firing = at(11, 80, 180, 75, 170);
+
+        let fires = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &prior);
+            ok(&mut p, bar0).get(161)
+        };
+
+        assert!(
+            fires(&firing),
+            "the fixture must satisfy all five clauses, or negating one proves \
+             nothing about that clause"
+        );
+
+        // Clause: `bar0.open < bar1.low`. 95 is above bar1's low of 90 and
+        // everything else still holds.
+        assert!(
+            !fires(&at(11, 95, 180, 75, 170)),
+            "an open ABOVE the prior low is not a piercing gap-down; `||` would \
+             still fire this bit"
+        );
+
+        // Clause: `bar0.close > bar1.mid()`. 140 is under the 150 midpoint.
+        assert!(
+            !fires(&at(11, 80, 180, 75, 140)),
+            "a close that failed to reclaim the prior body's midpoint has not \
+             pierced it"
+        );
+
+        // Clause: `bar0.close < bar1.open`. 205 is above bar1's open of 200.
+        assert!(
+            !fires(&at(11, 80, 210, 75, 205)),
+            "a close ABOVE the prior open is an engulfing, not a piercing -- the \
+             two are different bits and this clause is what separates them"
+        );
+    }
+
     /// All 62 positions are live, plain, and named `pat_*`.
     #[test]
     fn every_position_is_a_live_plain_pattern() {
