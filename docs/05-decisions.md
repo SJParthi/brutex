@@ -14812,3 +14812,69 @@ reviewer instructed to refute by default.
 
 ---
 
+## D-0169 · 2026-08-18 · `crates/cli` — the entry point the sweep never had
+
+Until this crate, **nothing that could be RUN reached the sweep.** The only
+binary was `api`, whose dependency set is `core`, `pull`, `store` and
+`telemetry`, naming none of `runner`, `engine`, `indicators`, `vocab` or
+`costs`. The Apriori ladder, the 280-position vocabulary, the exit grid, the
+walk-forward and the significance bar were compiled, tested, benchmarked and
+unreachable; `report::render`, `report::render_auto` and `audit::render` — the
+only surfaces that display any of it — had no caller and no route.
+
+`CLAUDE.md` §5 named the absence and `docs/06-limits.md` §78 recorded it. This
+closes both.
+
+**Measured, first end-to-end run:** `cli sweep 12 300` → 4,500 bars offered,
+2,624 swept, 1,876 warming, 0 refused, every bar accounted for; depth **19**,
+**2,190,304** combinations; k=1 generated 238, excluded 161, 46 frequent.
+
+### Three arrows, and one deliberately absent
+
+`runner`, `engine` and `indicators`. `runner` re-exports nothing, so a caller
+cannot build an `Evaluator` or a `Ladder` without naming those two itself; the
+alternative — adding `pub use` to `runner` — would put a second spelling of two
+public types into the only join crate.
+
+**No arrow to `store`, and that is the whole design.** The operator's standing
+rule is that neither a vendor pull nor the bars already on disk may be used at
+all, so the only honest input is `runner::synthetic`. This crate DECLINES the
+capability rather than declining to use it, which is the reasoning gate 22
+applies to the swept crates. It is not on gate 22's list and must never be added
+to one: clause A pins `vocab`, `indicators` and `engine` to `vocab` alone, and
+`cli` is a caller exactly as `runner` is.
+
+### The provenance banner is load-bearing
+
+Every render is led by `PROVENANCE`, which says the bars were generated. A report
+over synthetic data is **byte-identical in shape** to one over real data, and the
+difference is the only thing deciding whether a number in it means anything.
+Rendering a complete, confident-looking sweep over invented bars without saying
+so is §4's failure-wearing-a-success's-clothes with better typography.
+`the_report_always_declares_its_bars_are_generated` asserts it, so a change that
+only touches rendering cannot drop it.
+
+### Shape borrowed from `api`, on purpose
+
+`main.rs` holds one call; all logic is in `lib.rs`, which is ordinary library
+code; `tests/binary.rs` runs the binary so even that call is measured. Two
+binaries that end differently are two things an operator has to learn.
+
+`evaluator`, `sweep` and `auto` each take their fallible input as a PARAMETER
+with a thin public wrapper that fetches it — the `stays_paused_from` idiom. Their
+refusal arms cannot be reached through the public entry points, because
+`Widths::pinned()` cannot fail in this build, and an unreachable arm does not
+merely miss §9's coverage floor, it makes the floor unattainable.
+
+**Verified to §9:** `cargo llvm-cov -p cli` → **100.00% regions, 100.00% lines,
+100.00% functions**, no omit list. `cargo mutants` over both files → **25
+mutants, 23 caught, 2 unviable, 0 survived.** 13 tests.
+
+### What this does NOT close
+
+`audit::render` still has no caller — this renders the sweep report, not the
+trade audit. And a pipeline that runs is not a backtest: every figure it produces
+describes the generator. Recorded at `docs/06-limits.md` §78.
+
+---
+

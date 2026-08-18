@@ -140,11 +140,27 @@ moved the front end to `web/` as an unrestricted directory. There is no
 gate 7 skips permanently**. §2's boundary is what governs the front end now: no
 crate may depend on its toolchain to build, test or run.
 
-**There is no `cli` either, and its absence is the live gap.** The only binary in
-the workspace is `api`, whose dependency set is `core`, `pull`, `store` and
-`telemetry` — so nothing that can be run reaches `runner`, `engine`,
-`indicators`, `vocab` or `costs`. The sweep compiles and is tested; it is not
-reachable from an entry point.
+**`cli` now exists, and closing that gap is what it is for.** Until D-0169 the
+only binary was `api`, whose dependency set is `core`, `pull`, `store` and
+`telemetry` — so nothing that could be RUN reached `runner`, `engine`,
+`indicators`, `vocab` or `costs`. The sweep compiled and was tested and was
+unreachable from any entry point, and the three render surfaces that display it
+had no caller at all.
+
+`cli` depends on `runner`, `engine` and `indicators`, and **deliberately not on
+`store`**. The operator's standing rule is that neither a vendor pull nor the
+bars already on disk may be used, so its only input is `runner::synthetic`,
+generated in-process. It declines the capability rather than declining to use
+it — the same reasoning gate 22 applies to the swept crates.
+
+It is **not** on gate 22's list and must never be added to one: clause A pins
+`vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
+as `runner` is.
+
+Every report it renders is led by a banner saying the bars were generated. A
+sweep over invented data is byte-identical in shape to one over real data, and
+without that line it would be the failure wearing a success's clothes that §4
+bans.
 
 ---
 

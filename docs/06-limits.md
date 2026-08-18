@@ -4398,7 +4398,23 @@ caller, not one producing wrong numbers now.
 
 ---
 
-## 78. Nothing that can be RUN reaches the sweep
+## 78. ~~Nothing that can be RUN reaches the sweep~~ — CLOSED by D-0169
+
+**`crates/cli` closes this.** `cargo run -p cli -- sweep 12 300` walks the ladder
+end to end: measured on this tree, 4,500 bars offered, 2,624 swept, 1,876 still
+warming, depth **19**, **2,190,304** combinations found, ladder walked to
+extinction. `report::render` and `report::render_auto` now have a caller.
+
+What remains true, and is the reason this section is superseded rather than
+deleted: **the input is generated, not market data.** The operator's standing
+rule forbids both a vendor pull and the bars already on disk, so `cli` takes
+`runner::synthetic` and nothing else, and says so in a banner above every report.
+A pipeline that runs is not a backtest. `audit::render` also still has no caller —
+`cli` renders the sweep report, not the trade audit.
+
+The original text follows.
+
+### The reading before D-0169
 
 The workspace has one binary, `api`, and its dependency set is `core`, `pull`,
 `store` and `telemetry`. It names none of `runner`, `engine`, `indicators`,

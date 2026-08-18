@@ -1,0 +1,49 @@
+[package]
+name         = "cli"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+publish      = { workspace = true }
+description  = "The operator entry point for the sweep: bars in, ladder walked, report out."
+
+# WHY THIS CRATE EXISTS.
+#
+# Until it did, NOTHING THAT COULD BE RUN REACHED THE SWEEP. The only binary in
+# the workspace was `api`, whose dependency set is `core`, `pull`, `store` and
+# `telemetry` -- so `runner`, `engine`, `indicators`, `vocab` and `costs` were
+# compiled, tested, benchmarked and unreachable. `report::render`,
+# `report::render_auto` and `audit::render` -- the only surfaces that show the
+# census, the ladder, the significance bar, the trades and the walk-forward --
+# had no caller and no route. `CLAUDE.md` §5 named that absence as the live gap
+# and `docs/06-limits.md` §78 recorded it. This closes it.
+#
+# ONE DEPENDENCY, AND IT IS THE JOIN CRATE. `runner` already carries `core`,
+# `costs`, `engine`, `indicators` and `vocab`, so naming it once is the whole
+# graph. Adding any of the five directly would be a second spelling of an arrow
+# that already exists.
+#
+# NO ARROW TO `store`, AND THAT IS THE POINT. The operator's standing rule is
+# that neither a vendor pull nor the bars already on disk may be used at all, so
+# the only honest input is `runner::synthetic`, generated in-process. A binary
+# that could open the store would make the rule a matter of discipline again,
+# which is what gate 22 exists to prevent for the swept crates. This crate
+# declines the capability rather than declining to use it.
+#
+# NOT ON GATE 22'S LIST, and it must not be added to one: clause A pins
+# `vocab`, `indicators` and `engine` to `vocab` alone. This crate is the caller,
+# not a swept crate, exactly as `runner` is.
+#
+# THREE ARROWS, NOT ONE, BECAUSE `runner` RE-EXPORTS NOTHING. `Sweeper::run`
+# takes an `indicators::Evaluator` and `Sweeper::new` takes an `engine::Ladder`,
+# so a caller cannot construct either without naming those crates itself. The
+# alternative -- adding `pub use` re-exports to `runner` -- would put a second
+# spelling of two public types into the crate that is currently the only join,
+# and a second spelling is a second thing to keep in agreement.
+[dependencies]
+runner     = { path = "../runner", version = "0.1.0" }
+engine     = { path = "../engine", version = "0.1.0" }
+indicators = { path = "../indicators", version = "0.1.0" }
+
+[lints]
+workspace = true
