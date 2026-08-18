@@ -6765,135 +6765,21 @@
            to report until it does. -->
       {#if windowOk}
       <section class="census">
-        <h2 class="sec">
-          Every series in that window
-          <span class="cnt mono">{n(censusRows.length)}</span>
-          <em>{censusSub}</em>
-        </h2>
+        <!-- ══ THE HEADING AND THE TWO STRIPS ARE GONE, AT THE OPERATOR'S
+             INSTRUCTION ══
+             What stood between the form and the table: a heading restating the
+             window the two date fields above already hold, a verdict strip of
+             filter pills with a bulk pull button, and a bar naming when the
+             store was read. Three bands of chrome over a table that says all of
+             it per row — INSTRUMENT, BARS STORED / EXPECTED, MONTHS UNPROVED,
+             VERDICT, NEXT STEP.
+             WHAT LEAVES WITH THEM, STATED: the verdict FILTER (clicking a pill
+             narrowed the table to one verdict), the "Pull the N month file(s)"
+             bulk action, and the "Re-read the store" press. The per-row NEXT
+             STEP button still pulls, and the form above still runs the whole
+             window; the reading still refreshes when a run finishes. -->
 
         <div class="cgrid">
-          <!-- THE STRIP: one verdict in a sentence, the retry judgement under
-               it, the non-zero counts as filters, the total they must reach,
-               and the one bulk action. -->
-          <div class="lstrip {censusVerdict.tone}">
-            <!-- REMOVED: the verdict sentence. The Verdict COLUMN in the table
-                 below carries the same classification, per row. -->
-
-            {#if censusPills.length > 0}
-              <div class="lpills">
-                {#each censusPills as p (p.k)}
-                  <button
-                    class="lp"
-                    type="button"
-                    aria-pressed={cBucket === p.k}
-                    class:on={cBucket === p.k}
-                    title={(cBucket === p.k
-                      ? 'Showing only these. Click again to show every series. — '
-                      : `Click to show only these ${n(p.count)} — `) + VERDICT[p.k][2]}
-                    onclick={() => {
-                      cBucket = cBucket === p.k ? null : p.k;
-                      cPage = 1;
-                    }}
-                  >
-                    <span
-                      class="dot"
-                      class:up={VERDICT[p.k][0] === 'up'}
-                      class:down={VERDICT[p.k][0] === 'down'}
-                      class:warn={VERDICT[p.k][0] === 'warn'}
-                      class:acc={VERDICT[p.k][0] === 'info'}
-                    ></span>
-                    <span class="n">{n(p.count)}</span>
-                    {VERDICT[p.k][1]}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-
-            <!-- THE PARTITION HAS TO ADD UP AND THE SUM IS ON SCREEN. A tidy
-                 number that hides a series nobody accounted for is the failure
-                 §4 bans, so the mismatch shouts rather than rounding. -->
-            {#if censusRows.length > 0}
-              {#if censusDrawn === censusRows.length}
-                <span class="ltot">of {n(censusRows.length)} series</span>
-              {:else}
-                <span class="ltot bad">
-                  MISMATCH — {n(censusRows.length)} series, {n(censusDrawn)} accounted for
-                </span>
-              {/if}
-            {/if}
-
-            {#if censusShort > 0}
-              <div class="lact">
-                <button
-                  class="btn primary sm"
-                  type="button"
-                  disabled={rerunBlock !== null}
-                  title={rerunBlock
-                    ? `Cannot be pressed: ${rerunBlock}`
-                    : `Sends the ${n(wireBodies.length)} request(s) the form above describes — ${dayLabel(from)} – ${dayLabel(to)}, one per ticked timeframe — and re-reads the store after. It asks for the whole target: SpotRequest carries no member field, so it cannot be narrowed to the short series. The month files inside the window are what it fills.`}
-                  onclick={() => start()}
-                >
-                  Pull the {n(censusShort)} month file(s) this window is short
-                </button>
-                {#if rerunShort}
-                  <span class="hint warn" title={rerunBlock}>Cannot be pressed: {rerunShort}</span>
-                {/if}
-              </div>
-            {/if}
-          </div>
-
-          <!-- WHEN THE READING WAS TAKEN, AND A PRESS TO TAKE IT AGAIN. A
-               census over a stale store is a census that lies quietly. -->
-          <div class="cbar">
-            <span class="hint" class:warn={storeRead.error !== null}>
-              {#if storeRead.error}
-                The store could not be read, so no row below is drawn rather than every row being
-                drawn as empty: {storeRead.error}
-              {:else if storeRead.busy}
-                Reading <span class="mono">/store.json?feed={feeds.active}</span>…
-              {:else if storeRead.at}
-                {n(storeRead.rows)} instrument-month row(s) read from
-                <span class="mono">/store.json?feed={feeds.active}</span> at {stampLabel(
-                  storeRead.at
-                )}
-                · {n(heldInWindow)} of them are inside this window
-              {:else}
-                The store has not been read yet.
-              {/if}
-            </span>
-            <span class="hint" class:warn={pilot.error !== null}>
-              {#if pilot.error}
-                The sweep ladder could not be read, so no row is marked retrying and none is marked
-                failed — both of those are that route's evidence, not this page's guess:
-                {pilot.error}
-              {:else if feedHalt}
-                The sweep has HALTED for {feedName(feeds.active)}: {feedHalt}
-              {:else if pilot.inFlight}
-                In flight now: <span class="mono">{pilot.inFlight.instrument}</span>
-                {pilot.inFlight.month} ({n(pilot.inFlight.index)} of {n(pilot.inFlight.of)})
-              {:else if pilot.at}
-                The sweep names nothing in flight, so no row is marked retrying.
-              {:else}
-                The sweep ladder has not been read.
-              {/if}
-            </span>
-            <span class="spacer"></span>
-            <button
-              class="btn ghost sm"
-              type="button"
-              disabled={storeRead.busy || pilot.busy}
-              title={storeRead.busy || pilot.busy
-                ? 'A reading is already in flight. A second press would duplicate it, and /store.json rebuilds the census server-side.'
-                : 'Reads /store.json and /ingest/status.json again. Every number below is one of those two answers — nothing here is cached beyond this press.'}
-              onclick={() => {
-                refreshStore();
-                readPilot();
-              }}
-            >
-              {storeRead.busy || pilot.busy ? 'Reading…' : 'Re-read the store'}
-            </button>
-          </div>
-
           <div class="cscroll">
             <table>
               <thead>
@@ -6968,6 +6854,31 @@
                       <span class="hsub">measured, not reported</span>
                     </button>
                   </th>
+                  <!-- ══ ATTEMPTS — AND IT IS HONEST ABOUT HAVING ALMOST
+                       NOTHING TO SAY ══
+                       The column answers "how many times was this asked for",
+                       and the answer for a manual pull is ALWAYS ONE, because
+                       /pull/spot makes one attempt per cell and counts none.
+                       Only the sweep counts attempts, and only for the month it
+                       is on right now — `attempts` / `attempts_max` off
+                       /ingest/status.json, which this page already polls.
+
+                       SO THE EMPTY CELL SAYS THE FINDING RATHER THAN A DASH.
+                       "1 · not counted" is the fact: one ask was made and
+                       nothing is keeping score, so a row that came back empty
+                       cannot be told apart from a row that was never reachable.
+                       A bare `—` would read as "no data available", which is
+                       the §4 silence — this is the same absence, named.
+
+                       NOT SORTABLE, deliberately. Every other header here ranks
+                       a number that differs per row; this one is the same value
+                       on every row but the one the sweep is holding, and a sort
+                       control that cannot reorder anything is a control that
+                       lies about what it does. -->
+                  <th class="num">
+                    <span class="hrow">Attempts</span>
+                    <span class="hsub">asked, and counted</span>
+                  </th>
                   <th>
                     <button
                       class="sort"
@@ -7037,6 +6948,28 @@
                           class:info={VERDICT[r.state][0] === 'info'}
                           title={VERDICT[r.state][2]}>{VERDICT[r.state][1]}</span
                         >
+                      </td>
+                      <!-- THE ONLY ROW WITH A REAL COUNT IS THE ONE THE SWEEP IS
+                           HOLDING. `r.state === 'retry'` is set from
+                           /ingest/status.json naming this instrument in flight,
+                           and the same answer carries `attempts` and
+                           `attempts_max` for the feed it is on — so where the
+                           count exists it is READ, and where it does not the
+                           cell says why instead of drawing a dash. -->
+                      <td class="num mono">
+                        {#if r.state === 'retry' && feedLadder}
+                          <span
+                            class="info"
+                            title={`The sweep is on this instrument now — attempt ${n(feedLadder.attempts)} of ${n(feedLadder.attempts_max)} for ${feedLadder.month}. Read from /ingest/status.json.`}
+                            >{n(feedLadder.attempts)} / {n(feedLadder.attempts_max)}</span
+                          >
+                        {:else}
+                          <span
+                            class="dash"
+                            title="One. A pull from the form above asks for each instrument-month exactly once and keeps no attempt count, so a series that came back empty cannot be told apart here from one that was never reached. Only the sweep counts attempts, and only for the month it is holding."
+                            >1 · not counted</span
+                          >
+                        {/if}
                       </td>
                       <td>
                         {#if r.unproved === 0}
@@ -9350,34 +9283,14 @@
     gap: var(--s4);
     min-width: 0;
   }
-  h2.sec {
-    display: flex;
-    align-items: center;
-    gap: var(--s4);
-    flex-wrap: wrap;
-    margin: var(--s4) 0 0;
-    font-size: var(--fs-mini);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    font-weight: var(--w-bold);
-  }
-  h2.sec .cnt {
-    font-size: var(--fs-mini);
-    color: var(--acc);
-    background: var(--acc-soft);
-    padding: 1px 7px;
-    border-radius: 9px;
-    letter-spacing: 0;
-  }
-  h2.sec em {
-    font-style: normal;
-    font-size: var(--fs-mini);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--dim);
-    font-weight: var(--w-reg);
-  }
+  /* `h2.sec`, its two children and `.cbar` all go with the markup they drew.
+
+     `.cbar` IS REMOVED EVEN THOUGH GATE W4 DID NOT ASK FOR IT. The compiler
+     reported the three `h2.sec` selectors and not this one, so the ratchet was
+     already back at its ceiling with a dead rule still in the file — a reminder
+     that W4 is a floor on carelessness and not a proof of its absence. The rule
+     had no markup left; that is the whole test, and it is the one this
+     repository keeps saying matters. */
   .cgrid {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -9385,14 +9298,6 @@
     box-shadow: var(--e1);
     overflow: hidden;
     min-width: 0;
-  }
-  .cbar {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    flex-wrap: wrap;
-    padding: var(--s3) var(--s5);
-    border-bottom: 1px solid var(--line);
   }
   /* THE TABLE SCROLLS INSIDE ITS OWN BOX. A wide table that widens the page
      puts the form's own controls off screen. */
@@ -9403,6 +9308,17 @@
   }
   .cscroll th {
     vertical-align: bottom;
+  }
+  /* A HEADER THAT IS NOT A BUTTON STILL STACKS ITS UNIT UNDER ITS NAME.
+     `.sort` is the flex column that puts "bars, from the NSE calendar" on its
+     own line under "Bars stored / expected"; the one column with no sort
+     control inherited none of that and ran "Attempts  asked, and counted"
+     along a single line, half a size larger than every header beside it.
+     The direct-child combinator is what keeps this off the sortable headers —
+     theirs are nested inside the button and are already handled. */
+  .cscroll th > .hrow,
+  .cscroll th > .hsub {
+    display: block;
   }
   .cscroll .sort {
     display: flex;
