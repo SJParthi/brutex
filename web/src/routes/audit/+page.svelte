@@ -84,6 +84,10 @@
   // this and fixed itself; `stampLabel` is what it fixed itself with, and this
   // is the third and last spelling of the rule joining the other two.
   import { stampLabel } from '$lib/dates.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
 
   /* ══════════════════════════════════════════════════════════════════════
      CONSTANTS — each one traceable to a file in this repository
@@ -315,7 +319,7 @@
     if (!feed) return null;
     const url = `/audit.json?feed=${encodeURIComponent(feed)}${page ? `&page=${page}` : ''}`;
     const t0 = performance.now();
-    const r = await fetch(url, { cache: 'no-store' });
+    const r = await ask(url, { cache: 'no-store' });
     const ms = Math.round(performance.now() - t0);
     if (!r.ok) {
       // THE REAL ERROR, NAMED. A 404 here means the process serving this port

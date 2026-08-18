@@ -38,6 +38,10 @@
   // this and fixed itself; `stampLabel` is what it fixed itself with, and this
   // is the third and last spelling of the rule joining the other two.
   import { stampLabel } from '$lib/dates.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
 
   /** ONE DEFINITION OF A FEED, AND IT IS NOT THIS FILE'S.
    *
@@ -407,7 +411,7 @@
   async function probe() {
     const t0 = performance.now();
     try {
-      const r = await fetch('/feeds.json', { cache: 'no-store' });
+      const r = await ask('/feeds.json', { cache: 'no-store' });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const ct = r.headers.get('content-type') ?? '';
       if (!ct.includes('json')) {

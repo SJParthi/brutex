@@ -84,6 +84,10 @@
    */
   import { feeds } from '$lib/feeds.svelte.js';
   import { store, syncStore, watchStore } from '$lib/store.svelte.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
   import { untrack } from 'svelte';
 
   /* ======================================================================
@@ -745,7 +749,7 @@
   async function tick() {
     const t0 = performance.now();
     try {
-      const r = await fetch('/autopilot.json', { cache: 'no-store' });
+      const r = await ask('/autopilot.json', { cache: 'no-store' });
       const ms = Math.round(performance.now() - t0);
       if (r.status === 404) {
         setLink({
@@ -1325,7 +1329,7 @@
     control = { busy: true };
     let code = 0;
     try {
-      const r = await fetch(CONTROL, {
+      const r = await ask(CONTROL, {
         method: 'POST',
         headers: { 'content-type': 'application/x-www-form-urlencoded' },
         body: `action=${encodeURIComponent(action)}`

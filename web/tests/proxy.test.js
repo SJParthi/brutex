@@ -46,7 +46,11 @@ function fetched() {
   const out = new Set();
   for (const file of sources(join(web, 'src'))) {
     const text = readFileSync(file, 'utf8');
-    for (const m of text.matchAll(/fetch\(\s*[`'"](\/[^`'"?]*)/g)) {
+    // `ask(` as well as `fetch(`: `$lib/ask.js` wraps every request so it has a
+    // ceiling, so the call sites spell it `ask`. Scanning for only the bare word
+    // would report a clean list while covering nothing — which is precisely how
+    // this list drifted four times.
+    for (const m of text.matchAll(/\b(?:fetch|ask)\(\s*[`'"](\/[^`'"?]*)/g)) {
       out.add({ path: m[1], file: file.slice(web.length + 1) }.path);
     }
   }

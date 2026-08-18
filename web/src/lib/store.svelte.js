@@ -66,6 +66,10 @@
 // THE WINDOW FOLD'S ARITHMETIC, in a module with no runes in it so a test can
 // drive it. See `$lib/fold.js`.
 import { foldWindow, foldKey } from '$lib/fold.js';
+// A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+// ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+// threaded through every call site.
+import { ask } from '$lib/ask.js';
 
 /* ======================================================================
    THE RUNGS ON DISK — the store's own list, not a second copy of it.
@@ -488,7 +492,7 @@ function read(feed, generation) {
   store.state = 'reading';
   store.error = null;
 
-  const mine = fetch(`/store.json?feed=${encodeURIComponent(feed)}`)
+  const mine = ask(`/store.json?feed=${encodeURIComponent(feed)}`)
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status} from /store.json`))))
     .then((body) => {
       if (asked !== key) return; // a newer feed or generation won; this answer is stale

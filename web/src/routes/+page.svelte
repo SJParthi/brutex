@@ -88,6 +88,10 @@
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
   import {
     store,
     syncStore,
@@ -755,7 +759,7 @@
       timeframe: rung,
       month
     });
-    const r = await fetch(`/bars.json?${q}`);
+    const r = await ask(`/bars.json?${q}`);
     let body = null;
     try {
       body = await r.json();

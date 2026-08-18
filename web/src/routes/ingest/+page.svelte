@@ -47,6 +47,10 @@
   import { onMount, untrack } from 'svelte';
   import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
   import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1486,7 +1490,7 @@
     /** @param {string | null} segment */
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
-      const r = await fetch(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
+      const r = await ask(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
       return { ok: r.ok, data: await r.json(), segment };
     };
     const first = await ask(null);
@@ -3630,7 +3634,7 @@
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
-      const r = await fetch('/ingest/status.json');
+      const r = await ask('/ingest/status.json');
       if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
       const j = await r.json();
       pilot = {
@@ -5145,7 +5149,11 @@
     for (const b of bodies) {
       sent = { done: sent.done, of: bodies.length, label: b.label };
       try {
-        const r = await fetch('/pull/spot', {
+        const r = await ask('/pull/spot', {
+        // A PULL IS THE ONE ROUTE WHOSE WORK IS NOT LOCAL, so it carries its own
+        // ceiling rather than the 15 s every other read gets. The operator's own
+        // Cancel signal still applies: `ask` answers to both.
+        ms: 120_000,
           method: 'POST',
           headers: { 'content-type': 'application/x-www-form-urlencoded' },
           body: b.body,

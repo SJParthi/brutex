@@ -84,6 +84,10 @@
   // drives them under `node --test`.
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
   import { basisPoints } from '$lib/bps.js';
+  // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+  // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+  // threaded through every call site.
+  import { ask } from '$lib/ask.js';
 
   /* ======================================================================
      THE SHAPES, NAMED ONCE — imported where they already exist
@@ -3050,7 +3054,7 @@
       month: r.month
     });
     try {
-      const res = await fetch(`/bars.json?${q}`);
+      const res = await ask(`/bars.json?${q}`);
       let body = null;
       try {
         body = await res.json();

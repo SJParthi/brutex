@@ -15,6 +15,11 @@
  * Building the index is O(n) ONCE, at load. That is inherent — every row has to
  * be seen to be indexed — and it is paid a single time for the session.
  */
+
+// A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+// ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+// threaded through every call site.
+import { ask } from '$lib/ask.js';
 const MAX_PREFIX = 4;
 
 // `feed` IS NOT BOOKKEEPING — IT IS THE GATE. /ingest:1449 and /db:1013 both
@@ -38,7 +43,7 @@ export async function loadCatalogue(feed) {
     // THE FEED IS PART OF THE QUESTION. The two brokers do not list the same
     // instruments, so "every instrument" is a different set per feed and the
     // index has to be rebuilt when the selection changes.
-    const r = await fetch(`/instruments.json?feed=${encodeURIComponent(feed ?? '')}`);
+    const r = await ask(`/instruments.json?feed=${encodeURIComponent(feed ?? '')}`);
     if (!r.ok) {
       // THE SERVER ALREADY SAID WHY, AND THIS THREW IT AWAY.
       //

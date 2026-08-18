@@ -11,6 +11,10 @@
  * file names a vendor.
  */
 import { survey, surveyStores } from '$lib/store.svelte.js';
+// A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
+// ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
+// threaded through every call site.
+import { ask } from '$lib/ask.js';
 
 /**
  * ONE FEED, AS `/feeds.json` SENDS IT.
@@ -73,7 +77,7 @@ export async function loadFeeds(force = false) {
 
 async function loadFeedsNow() {
   try {
-    const r = await fetch('/feeds.json');
+    const r = await ask('/feeds.json');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     feeds.all = await r.json();
     // THE FEED THAT ACTUALLY HOLDS DATA, preferred over the one that merely
