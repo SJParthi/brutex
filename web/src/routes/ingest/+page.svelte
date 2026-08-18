@@ -2174,40 +2174,6 @@
   let toDay = $state('');
   let fromText = $state('');
   let toText = $state('');
-
-  /**
-   * THE WINDOW OPENS ON THE WHOLE SPAN, at the operator's instruction.
-   *
-   * From is `minDay` — 01 Jan 2015, the floor the server's own picker offers —
-   * and To is `maxDay`, the newest day that can be asked for, which moves with
-   * the clock and with the 15:30 close rather than being a stored constant.
-   * Both fields used to open empty, which meant the census below could not
-   * draw at all until two dates were typed.
-   *
-   * SEEDED ONCE, NOT PINNED. The guard is what makes this a default rather
-   * than a lock: `maxDay` changes at midnight and when a session closes, and
-   * re-running this would overwrite a window the operator had chosen —
-   * `CLAUDE.md` §4's silent change, and the exact hazard `typing` exists to
-   * prevent one control down.
-   *
-   * IT OPENS OVER THE CAP, AND THAT IS THE INSTRUCTION RATHER THAN A BUG.
-   * 01 Jan 2015 to today is about 4,250 days and `MAX_WINDOW_DAYS` is 3,653,
-   * so the refusal draws on load with the day to start on and a button that
-   * applies it. Stated here because a form that opens invalid is a real
-   * decision and not an accident: the operator asked for the whole span in
-   * front of him, and the page says what one request can carry rather than
-   * quietly narrowing what he asked for.
-   *
-   * `setDay` is the one writer — it moves the ISO value and the text together,
-   * so the label can never be left behind by the value.
-   */
-  let seeded = false;
-  $effect(() => {
-    if (seeded || !isValidIso(maxDay) || !isValidIso(minDay)) return;
-    seeded = true;
-    setDay('from', minDay);
-    setDay('to', maxDay);
-  });
   /** The refusal a typed string earned, per field. Cleared the moment one takes. */
   /** @type {{ from: string | null, to: string | null }} */
   let typedErr = $state({ from: null, to: null });
@@ -2354,6 +2320,57 @@
       if (f.at && (!worst.f.at || f.at > worst.f.at)) worst = { r, f };
     }
     return { ...worst.f, rung: worst.r };
+  });
+
+  /**
+   * THE WINDOW IS THE FEED'S OWN, AND IT FOLLOWS THE FEED.
+   *
+   * # Why a fixed 01 Jan 2015 was the wrong answer
+   *
+   * That is `minDay` — the floor the SERVER'S picker offers, and it is the same
+   * date for every feed in the list. It says nothing about the feed actually
+   * selected. Opening Dhan on 2015 asks for six years the vendor will not
+   * answer for, and it makes the default window about 4,250 days against a
+   * `MAX_WINDOW_DAYS` of 3,653 — so the form opened in a state the parser
+   * refuses, for a reason the page invented rather than one the operator caused.
+   *
+   * # What it is instead
+   *
+   * `feedFloor.at` — the day THIS feed, at THIS timeframe, actually answers
+   * from, read off `/feeds.json` and recomputed on every change because a
+   * rolling floor is a moving one. Dhan rolls about five years back, so its
+   * window opens near 1,800 days and is inside the cap by construction rather
+   * than by a number typed here. A feed that states no floor falls back to
+   * `minDay`, which is the honest bound when nothing narrower is known.
+   *
+   * To is `maxDay`: the newest day that can be asked for, which moves with the
+   * clock and with the 15:30 close.
+   *
+   * # It stops following the moment it is his
+   *
+   * `windowTouched` is `rungTouched`'s argument applied to this control, and
+   * that comment is worth reading beside this one: *"A default is not a
+   * decision he made. Moving it costs him nothing and tells him nothing false.
+   * Moving HIS tick would do both."* So the window tracks the feed, the rung
+   * and the clock until the operator types a day or picks one — and from then
+   * on it is his and nothing here writes it again.
+   *
+   * `setDay` is the one writer, so the ISO value and the text can never drift.
+   */
+  let windowTouched = $state(false);
+
+  /** The span this feed implies — its own floor, to the newest askable day. */
+  const feedWindow = $derived({
+    from: feedFloor.at && feedFloor.at > minDay ? feedFloor.at : minDay,
+    to: maxDay
+  });
+
+  $effect(() => {
+    if (windowTouched) return;
+    const { from: f, to: t } = feedWindow;
+    if (!isValidIso(f) || !isValidIso(t)) return;
+    if (fromDay !== f) setDay('from', f);
+    if (toDay !== t) setDay('to', t);
   });
   /**
    * The refusal, naming the FEED, the TIMEFRAME and the day it starts at.
@@ -5077,6 +5094,8 @@
   /** @param {string} isoDay */
   function commit(isoDay) {
     if (dayBlock(isoDay)) return;
+    // Same as typing one — see `windowTouched`.
+    windowTouched = true;
     // THE LATCH HOLDS A FIELD WHENEVER THIS RUNS. `commit` is reachable from
     // the open panel and from nowhere else — `openCal` sets `cal.field` to one
     // of the two names before the panel mounts, and `shutCal` clears it
@@ -5309,6 +5328,8 @@
    */
   /** @param {'from' | 'to'} field @param {string} text */
   function typeDay(field, text) {
+    // FROM HERE THE WINDOW IS HIS. See `windowTouched`.
+    windowTouched = true;
     const r = parseDay(text);
     if (field === 'from') {
       fromText = text;
