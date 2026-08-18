@@ -170,6 +170,71 @@ fn all_live_bits() -> ConditionMask {
     LIVE
 }
 
+/// C-V-06 — condition lookup costs the same wherever in the table it lands.
+///
+/// # Why this row did not exist until now
+///
+/// `CLAUDE.md` §3 rule 4 names five operations that must be constant, and
+/// **condition lookup is the second of them**. `table::definition` is
+/// `TABLE.get(index)` and `table::is_live` wraps it; `engine::Ladder::walk`
+/// calls `is_live` once per offered position. An independent O(1) audit of all
+/// thirteen crates found that **no bench measured either**.
+///
+/// The rows above measure the MASK. They say nothing about the TABLE, and the
+/// two are different operations on different data — one is six words of
+/// register arithmetic, the other is a bounds-checked index into 280 rows of
+/// static memory.
+///
+/// # Why the index has to vary, and why a miss is included
+///
+/// A direct index costs the same everywhere; **a scan does not**. Looking up
+/// position 0, position 279 and a position past the end is what separates them:
+/// a linear search would be flat at 0 and linear at 279, and would walk the
+/// whole table before answering the miss. That is the only shape this row can
+/// usefully refuse, so it is the shape it measures.
+fn a_condition_lookup_costs_the_same_wherever_it_lands() -> bool {
+    let live = |i: u16| cost_ps(20_000, || black_box(vocab::table::is_live(black_box(i))));
+    let def = |i: u16| cost_ps(20_000, || black_box(vocab::table::definition(black_box(i))));
+
+    // The first row, the last allocated row, and one past the table.
+    let last = NEXT_FREE.saturating_sub(1);
+    let past = NEXT_FREE.saturating_add(64);
+
+    let base = live(0);
+    let mut ok = true;
+    ok &= ratio(
+        &format!("C-V-06 is_live: position 0 -> position {last}"),
+        base,
+        live(last),
+    );
+    ok &= ratio(
+        &format!("C-V-06 is_live: position 0 -> position {past}, past the table"),
+        base,
+        live(past),
+    );
+    ok &= ratio(
+        &format!("C-V-06 is_live: position 0 -> position {}", last / 2),
+        base,
+        live(last / 2),
+    );
+
+    // `definition` is the half `is_live` is built on, measured separately so a
+    // regression in the match arm and one in the index cannot hide behind each
+    // other.
+    let dbase = def(0);
+    ok &= ratio(
+        &format!("C-V-06 definition: position 0 -> position {last}"),
+        dbase,
+        def(last),
+    );
+    ok &= ratio(
+        &format!("C-V-06 definition: position 0 -> position {past}, past the table"),
+        dbase,
+        def(past),
+    );
+    ok
+}
+
 /// C-V-01 — the answer's VALUE does not change the answer's COST.
 ///
 /// A hit and a miss must cost the same. If a miss were cheaper the engine's
@@ -364,6 +429,7 @@ fn main() {
     let mut ok = true;
     ok &= no_operation_costs_more_than_its_budget(floor);
     ok &= a_hit_and_a_miss_cost_the_same();
+    ok &= a_condition_lookup_costs_the_same_wherever_it_lands();
     ok &= a_miss_costs_the_same_in_every_word();
     ok &= the_cost_does_not_grow_with_what_the_candidate_requires();
     ok &= the_set_operations_do_not_grow_with_the_bits_set();

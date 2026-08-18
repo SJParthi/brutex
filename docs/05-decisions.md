@@ -15559,3 +15559,52 @@ The cost is `O(log n_valid)` reads to locate plus one per offered bar. This is n
 `suffix_that_follows` still anchors its overlap at the tail, and that is deliberate rather than overlooked. A bar carries its own timestamp, so a comparison that matches proves the anchor was right; a wrong anchor can only make the comparison fail, and a failure there is a refusal and never a silent drop.
 
 ---
+
+## D-0190 · 2026-08-18 · Condition lookup is measured — three of rule 4's five now are
+
+`crates/vocab/benches/ratio.rs`.
+
+`CLAUDE.md` §3 rule 4 names five operations that must be constant. **Condition
+lookup is the second**, and nothing measured it. `table::definition` is
+`TABLE.get(index)`, `table::is_live` wraps it, and `engine::Ladder::walk` calls
+`is_live` once per offered position.
+
+The rows already here measure the MASK — `hits`, `popcount`, `union`,
+`intersect`. Those are six words of register arithmetic. **The table is a
+different operation on different data**: a bounds-checked index into 280 rows of
+static memory. Proving one says nothing about the other, and this crate had been
+treated as covered because the mask rows are thorough.
+
+### The index has to vary, and a miss has to be included
+
+A direct index costs the same everywhere; **a scan does not**. Position 0,
+position 279, the midpoint, and one past the table — because a linear search
+would be flat at 0, linear at 279, and would walk the whole table before
+answering the miss. That is the only shape this row can usefully refuse.
+
+| row | measured |
+|---|---|
+| `is_live` 0 → 279 | 1.003x |
+| `is_live` 0 → 344 (past the table) | 1.003x |
+| `is_live` 0 → 139 (midpoint) | 1.000x |
+| `definition` 0 → 279 | 1.062x |
+| `definition` 0 → 344 | 1.111x |
+
+`definition` is measured separately from `is_live` so a regression in the match
+arm and one in the index cannot hide behind each other.
+
+### Where rule 4 stands now
+
+| operation | state |
+|---|---|
+| mask evaluation | proven — C-V-01/02/03, plus a floor budget |
+| **bar lookup** | **proven — C-16, D-0177** |
+| **condition lookup** | **proven — C-V-06, this entry** |
+| duplicate rejection | C-03 says in its own words it does not isolate the probe's cost |
+| result append | C-04 is marked UNMEASURED |
+
+**Three of five.** The two remaining are recorded as what they are rather than
+counted as covered.
+
+---
+
