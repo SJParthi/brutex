@@ -15032,3 +15032,94 @@ how five of `engine`'s nine rows went undocumented until D-0162.
 
 ---
 
+
+## D-0174 · 2026-08-18 · Svelte was chosen on 2026-08-08 and never written down; here is the entry, with the alternatives measured
+
+`web/package.json`, `web/svelte.config.js`, `CLAUDE.md` §9.
+
+**This entry is late by ten days and that is the point of it.** The operator
+asked why the front end is Svelte. Nothing in this file could answer, because
+nothing in this file had ever said.
+
+**What the ledger did hold.** D-0052 and D-0053, both 2026-08-08, record the
+operator asking for the language rule to be lifted *for the front end alone* —
+twice in the first, four more times in the second, quoted verbatim in each. Those
+entries decide **whether** `web/` may carry a framework. Neither decides
+**which**, and no later entry does either: every mention of "SvelteKit" in this
+file describes something that already existed.
+
+**What actually happened.** `12f7cb6` added D-0053 at 11:43. `4a5953f` added
+Svelte 5, SvelteKit 2, Vite and `lightweight-charts` at 11:56 — 14 files, 547
+lines, thirteen minutes later, touching no document. The reasoning for the stack
+exists in exactly one place, that commit's message, which is not a tracked file:
+*"Svelte 5 (runes) — no virtual DOM, compiles to direct DOM operations. Smallest
+runtime of the current frameworks and the least boilerplate for a data-dense
+console."* Grepping every tracked `.md`, `.rs`, `.yml` and `.toml` for
+`virtual DOM`, `smallest runtime` or `chose svelte` returns nothing.
+
+§9 requires a decision entry for every locked choice. `svelte ^5.25.0`,
+`@sveltejs/kit ^2.20.0`, `vite ^6.2.0` and `lightweight-charts ^5.0.5` are as
+locked as choices get — six pages and ~31,000 lines depend on them — and the
+*consequences* got entries (D-0064 on serving the build, D-0068 on committing it)
+while the *cause* got none.
+
+**One half of the choice follows from the operator's own words and the other does
+not.** They asked for a console "equal to Dhan and TradingView". The way to equal
+TradingView's charts is to use TradingView's charts, and `lightweight-charts` is
+the library TradingView publishes under MIT. That pick is theirs. Svelte was
+*inferred* from "data-dense console" plus a request for motion, was never tested
+against an alternative, and is the half that needed this entry.
+
+**The alternatives, measured rather than argued.** Identical Vite 8.2.1
+production builds of the same page, same machine, 2026-08-18; wasm figures from
+js-framework-benchmark's transferred-bytes column.
+
+| | gzip | packages | a11y in compiler | motion in core |
+|---|---|---|---|---|
+| vanilla JS | ~1.4 kB | 0 | none | none |
+| **Svelte 5** | **9.13 kB** | 82 | **51 checks** | **spring + tween** |
+| htmx 2 | 16.59 kB | **1** | none | CSS only |
+| Vue 3 | 23.60 kB | 26–664 | plugin, stalled | `<Transition>` only |
+| Leptos (wasm) | 48.8 kB | — | none | crate |
+| React 19 | 59.92 kB | 66 | opt-in plugin | library |
+| Dioxus (wasm) | 114.9 kB | — | none | crate |
+| Next 16 | 172.46 kB | 60–426 | opt-in plugin | library |
+
+**Rust-to-wasm is rejected, and it is the rejection worth recording**, because it
+is the option this repository's instinct points at. Leptos ships 4× Svelte's
+bytes and Dioxus 9.4×, at 3.8× and 8.8× the first paint: wasm must be fetched,
+compiled and instantiated before it paints, and a dashboard's cost is paint, not
+compute. It would not even yield a Rust-only tree — `wasm-opt` is Binaryen, a C++
+binary, and `cargo-leptos` reaches for `sass`, whose usual install path is npm.
+It would also reactivate the rule §5 records as permanently skipped.
+
+React, Next, Vue and Nuxt are rejected on the same table: strictly larger, with
+no compensating property this product needs.
+
+**Svelte stands, and these are the reasons that survive scrutiny.** Not bundle
+size — on loopback the 51 kB gap to React is approximately zero wall-clock, and
+any entry claiming otherwise would be claiming a measurement nobody took. It
+stands on **51 accessibility checks the compiler runs with no plugin and no
+opt-in**, on compiler-native unused-CSS detection, and on being the only option
+with spring and tween in core.
+
+**The costs, named rather than omitted.** Highest dependency count of every
+JavaScript option measured. Official devtools last updated 2024-05-29, with
+Svelte 5 support an open issue. AI assistance measurably weaker than for React,
+because runes shipped 2024-10 against a corpus of Svelte 3 and 4 — a recurring
+tax on a single operator who works this way. Governance now two vendors deep:
+Vercel employs the Svelte core team, and Cloudflare acquired the company behind
+Vite in 2026-06.
+
+**The honest asymmetry.** `+layout.js` sets `ssr = false`, correctly under D-0053,
+so all five prerendered files are empty shells. SvelteKit's largest
+differentiator over a plain SPA is therefore switched off and delivering nothing;
+what is used is routing, reactivity, the a11y pass and the transitions. That does
+not make Svelte wrong, but it does mean **vanilla JavaScript is a more serious
+competitor for this specific setup than the table's ranking suggests** — and it,
+not wasm, is the direction that would delete the toolchain rather than swap it.
+If that trade is ever made, it is a new entry, not a silent one.
+
+`docs/06-limits.md` gains nothing here: no bound is claimed and none is met.
+
+---
