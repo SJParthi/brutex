@@ -174,28 +174,28 @@ const LADDER_GAPS: [i64; 10] = {
     ]
 };
 
-/// The adjacent gaps must sum to the ladder's whole span.
-///
-/// # What this catches that `SMALLEST_LADDER_GAP` cannot
-///
-/// `cargo-mutants` turned each `-` in the gap computation into a `+` — **ten of
-/// them, and every one survived.** The reason is arithmetic rather than
-/// carelessness: the ladder's smallest gap is 118 and it occurs **twice**,
-/// `500 - 382` and `618 - 500`. Mutating either into a sum leaves the other as
-/// the minimum, so the constant is still 118, the `== 118` assertion still
-/// holds, and nothing anywhere observes a difference.
-///
-/// No runtime test can kill an equivalent mutant. Only a stronger invariant can
-/// stop it being equivalent, and this is that invariant: adjacent differences
-/// **telescope**, because every interior rung is added once and subtracted once,
-/// so their sum is exactly `last - first` whatever the rungs are. Turn any
-/// single `-` into a `+` and two terms stop cancelling — the total moves and
-/// this fails to COMPILE.
-///
-/// It is a real property of the ladder rather than a trick played on the
-/// mutation tool: a fold of adjacent gaps that does not telescope is a fold that
-/// is not reading adjacent gaps.
-const LADDER_GAPS_TELESCOPE: () = {
+// The adjacent gaps must sum to the ladder's whole span.
+//
+// # What this catches that `SMALLEST_LADDER_GAP` cannot
+//
+// `cargo-mutants` turned each `-` in the gap computation into a `+` — **ten of
+// them, and every one survived.** The reason is arithmetic rather than
+// carelessness: the ladder's smallest gap is 118 and it occurs **twice**,
+// `500 - 382` and `618 - 500`. Mutating either into a sum leaves the other as
+// the minimum, so the constant is still 118, the `== 118` assertion still
+// holds, and nothing anywhere observes a difference.
+//
+// No runtime test can kill an equivalent mutant. Only a stronger invariant can
+// stop it being equivalent, and this is that invariant: adjacent differences
+// **telescope**, because every interior rung is added once and subtracted once,
+// so their sum is exactly `last - first` whatever the rungs are. Turn any
+// single `-` into a `+` and two terms stop cancelling — the total moves and
+// this fails to COMPILE.
+//
+// It is a real property of the ladder rather than a trick played on the
+// mutation tool: a fold of adjacent gaps that does not telescope is a fold that
+// is not reading adjacent gaps.
+const _: () = {
     let [r0, .., r10] = LADDER_NUMERATORS;
     let [g0, g1, g2, g3, g4, g5, g6, g7, g8, g9] = LADDER_GAPS;
     assert!(
