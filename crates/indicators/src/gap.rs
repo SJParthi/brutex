@@ -564,6 +564,67 @@ mod tests {
         assert_eq!(g.leg(), None, "no leg was established");
     }
 
+    /// TOUCHING YESTERDAY'S EXTREME IS NOT GAPPING PAST IT, IN EITHER DIRECTION.
+    ///
+    /// Both direction tests in [`GapFib::establish`] are strict, and the sheet's own
+    /// requirement is that `X3` be POSITIVE. Relax either to `>=` and an open that
+    /// exactly touches yesterday's edge establishes a leg of length zero — eleven rungs
+    /// all sitting on one price, which is the "eleven bits at one price is not a ladder"
+    /// that `a_session_that_did_not_gap_sets_nothing` refuses one case away from here.
+    ///
+    /// The fixtures above open comfortably clear of the anchor, and `>` and `>=` answer
+    /// a clear open identically. The distinction is at one value per side, and each is
+    /// asserted twice: ON yesterday's extreme, where there is no leg, and one paisa past
+    /// it, where there is.
+    #[test]
+    fn an_open_that_only_touches_yesterdays_edge_has_not_gapped() {
+        // Yesterday's last three bars span 2_499_000..=2_501_000 on both days below.
+        let yesterday = |g: &mut GapFib| {
+            for m in 0..6 {
+                let _ = ok(g, &at(30_000, m, 2_501_000, 2_499_000, 2_500_000));
+            }
+        };
+        // Today's opening candle, three bars of one shape.
+        let opening = |g: &mut GapFib, high: i64, low: i64| {
+            for m in 0..3 {
+                let _ = ok(g, &at(30_001, m, high, low, (high + low) / 2));
+            }
+        };
+
+        // Exactly on both edges: neither test is satisfied by a touch.
+        let mut flat = GapFib::new();
+        yesterday(&mut flat);
+        opening(&mut flat, 2_501_000, 2_499_000);
+        assert_eq!(
+            flat.leg(),
+            None,
+            "an open touching BOTH of yesterday's edges gapped past neither; a leg \
+             here has length zero and puts eleven rungs on one price"
+        );
+
+        // One paisa above the high is an up gap, and it is the shortest one there is.
+        let mut up = GapFib::new();
+        yesterday(&mut up);
+        opening(&mut up, 2_501_001, 2_499_000);
+        assert_eq!(
+            up.leg().map(|l| l.direction),
+            Some(Direction::Up),
+            "one paisa above yesterday's high is an up gap"
+        );
+
+        // One paisa below the low is a down gap. The high stays ON yesterday's high,
+        // so the up test is refused by a touch and the down test decides.
+        let mut down = GapFib::new();
+        yesterday(&mut down);
+        opening(&mut down, 2_501_000, 2_498_999);
+        assert_eq!(
+            down.leg().map(|l| l.direction),
+            Some(Direction::Down),
+            "one paisa below yesterday's low is a down gap, and the touched high \
+             above it must not claim the session first"
+        );
+    }
+
     /// THE OPENING CANDLE'S HIGH IS THE MAX OVER ITS THREE BARS, NOT THE LAST BAR'S.
     ///
     /// `today_bars == 0` picks the branch that SEEDS the extremes; every later bar of the
