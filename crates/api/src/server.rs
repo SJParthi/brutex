@@ -11723,6 +11723,50 @@ mod tests {
         // degraded serve no longer exits 0 — would have made this test's
         // failure look like its own defect. The expectation is computed from
         // the same `report` D-0026 gave the `report` command.
+        //
+        // AND THE STORE HAS A VERDICT TOO, which is the other half of the same
+        // argument. `run` refuses a store another server already holds, and the
+        // developer this suite runs for keeps one serving from an IDE all day —
+        // so the assertion below read `left: 1, right: 3` on his machine for a
+        // reason that was entirely correct behaviour. The store root cannot be
+        // redirected from here: it comes from `BRUTEX_STORE`, `set_var` is
+        // `unsafe` under edition 2024, this crate forbids `unsafe`, and mutating
+        // it would race every other test in this binary. So the expectation
+        // takes the environment as it finds it, exactly as it already does for
+        // the masters, and BOTH branches assert something.
+        let busy = store_dir().is_ok_and(|root| {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(root.join("serve.lock"))
+                .is_ok_and(|file| file.try_lock().is_err())
+        });
+        if busy {
+            // A HELD STORE IS A REFUSAL AND IT NAMES THE HOLDER. This is the
+            // same path `run_refuses_a_store_another_server_holds` pins; what is
+            // asserted here is that the refusal is what a serve DOES when the
+            // store is busy, rather than the universe verdict it would have
+            // reported otherwise.
+            assert_eq!(
+                run(&argv(&["serve", "127.0.0.1:0"]), fired()).await,
+                FAILED,
+                "a store another server is already serving is refused, not shared"
+            );
+            let refused = crate::emitted::landed(
+                from,
+                "api.serve",
+                "refused: another instance is serving this store",
+            );
+            assert!(
+                refused.iter().any(|record| {
+                    record.level == telemetry::Level::Error
+                        && crate::emitted::says(record, "why", "already serving this store")
+                }),
+                "and the refusal is in the file as well as on the terminal: {refused:?}"
+            );
+            return;
+        }
+
         let expected =
             masters_dir().map_or(FAILED, |dir| if report(&dir).1 { OK } else { DEGRADED });
         assert_eq!(
