@@ -512,6 +512,40 @@ mod tests {
         );
     }
 
+    /// A NEGATIVE VALUE KEEPS ITS PAISE ON THE CORRECT SIDE OF ZERO.
+    ///
+    /// This module carried its own copy of the rupee-to-paisa conversion, and
+    /// the copy parsed the sign into the rupee half and then ADDED the unsigned
+    /// fraction — so `-19200.05` came back as `-1_919_995`, which is
+    /// Rs -19,199.95: ten paise closer to zero than the text says, and on the
+    /// wrong side of the tick. `crate::csv::paisa` applies the sign to the
+    /// combined total, and this asserts the two agree.
+    ///
+    /// No vendor publishes a negative STRIKE, which is why nothing here caught
+    /// it for as long as it stood. `CLAUDE.md` §7 fixes one law for this
+    /// conversion regardless of which field happens to exercise it, and a
+    /// second spelling that is wrong is worse than no second spelling.
+    #[test]
+    fn a_negative_value_is_converted_by_the_same_law_as_a_positive_one() {
+        assert_eq!(
+            paisa_of("-19200.05"),
+            Some(-1_920_005),
+            "the paise belong on the same side of zero as the rupees"
+        );
+        assert_eq!(
+            paisa_of("-19200.05"),
+            crate::csv::paisa("-19200.05"),
+            "one law, so the two spellings must agree on every input"
+        );
+        assert_eq!(paisa_of("19200.05"), Some(1_920_005));
+        assert_eq!(paisa_of("-0.05"), Some(-5), "a sign with no whole rupees");
+        assert_eq!(
+            paisa_of("-19200.005"),
+            None,
+            "a third place is refused on the negative side too"
+        );
+    }
+
     /// A NAME THIS BUILD CANNOT READ IS REFUSED, NEVER GUESSED AT.
     ///
     /// A wrong strike or a wrong expiry names a DIFFERENT contract, and filing
@@ -809,16 +843,15 @@ fn parse_expiry(token: &str) -> Option<brutex_core::instrument::Expiry> {
 /// multiply — `19200.05` is not representable in binary floating point, and
 /// §7 is what forbids finding that out at the write boundary.
 fn paisa_of(text: &str) -> Option<i64> {
-    let (whole, frac) = text.split_once('.').unwrap_or((text, ""));
-    if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let rupees: i64 = whole.parse().ok()?;
-    // Two places, padded: "5" is fifty paise and not five.
-    let paise: i64 = match frac.len() {
-        0 => 0,
-        1 => frac.parse::<i64>().ok()?.checked_mul(10)?,
-        _ => frac.parse().ok()?,
-    };
-    rupees.checked_mul(100)?.checked_add(paise)
+    // ONE LAW, NOT TWO. This used to carry its own copy of the conversion, and
+    // the copy was wrong for a negative value: it parsed the sign into the rupee
+    // half and then ADDED the unsigned fractional part, so `"-19200.05"` came
+    // back as -1_919_995 (Rs -19,199.95) instead of -1_920_005. `crate::csv::paisa`
+    // strips the sign, combines the halves, and applies the sign to the total,
+    // which is the same order `Paisa::from_rupees_half_up` uses.
+    //
+    // `CLAUDE.md` s7 fixes ONE law for rupees to paisa. A second spelling of it
+    // is a second thing to get wrong, and this one already had been -- so the
+    // repair is to delete the spelling rather than to correct it in place.
+    crate::csv::paisa(text)
 }
