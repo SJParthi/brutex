@@ -4344,3 +4344,74 @@ evidence. Until that exists the shipped key stays, and it stays labelled a proxy
 real pulled or stored data is used, and it holds here: a key chosen on real
 history would be fitted to that history, which is the overfitting this crate's
 whole second half exists to detect.
+
+## 77. The bootstrap tests are miscalibrated on short samples, and the threshold is not this crate's to pick
+
+`crates/runner/src/bootstrap.rs`. Found by an adversarial audit of 2026-08-18
+that reproduced it by compiling the module verbatim and running it, rather than
+by reading it.
+
+**Measured false-positive rate on pure noise**, two strategies, 200 bootstrap
+draws, 2,000 trials per row, noise uniform on -100..99 so the sample mean is
+slightly NEGATIVE and the test is biased *against* clearing. Nominal size 5%:
+
+| Periods | White's RC | Hansen's SPA |
+|---|---|---|
+| 1 | 73.5% | 73.5% |
+| 2 | 45.9% | 50.5% |
+| 3 | 37.1% | 37.1% |
+| 5 | 26.1% | 29.6% |
+| 10 | 21.2% | 23.3% |
+| 30 | 13.3% | 14.3% |
+| 100 | 7.4% | 7.7% |
+
+**What was fixed.** The row at the top is structural rather than statistical: a
+one-period series cannot be resampled at all — the stationary bootstrap can only
+draw index 0, so every draw reproduces the sample and the null is a point mass.
+Any positive value scored p = 0.0 and cleared, at 1 paisa as readily as at
+1,000,000, which is the tell that the magnitude was not being tested. D-0165
+extends the existing `draws == 0` rule to it: nothing to compare against reads as
+no evidence, not as certainty.
+
+**What is NOT fixed, and why.** Every other row. A bootstrap over 30 periods
+firing falsely 13% of the time against a nominal 5% is a real defect and the
+repair is a minimum-period floor — but *which* floor is a number. 100 periods
+buys 7.4%, 300 gets to nominal, and the cost of each is a shorter usable history
+per fold. `CLAUDE.md` §3 rule 1 forbids this crate inventing it, and there is no
+source in `docs/00-charter.md` to take it from. **The operator picks it, or it
+stays here.**
+
+**What this does not say.** That the rates above hold for the correlated series a
+real sweep produces. They were measured on independent noise. Two combinations
+sharing four of five conditions fire on nearly the same bars, and the stationary
+bootstrap exists to carry that dependence — the direction the rates move under it
+is **unmeasured**.
+
+**How it reaches a result today: it does not.** Nothing calls `spa`,
+`reality_check` or `romano_wolf` outside their own tests, because the sweep is
+not reachable from a binary at all — see §78. This is a defect waiting for a
+caller, not one producing wrong numbers now.
+
+---
+
+## 78. Nothing that can be RUN reaches the sweep
+
+The workspace has one binary, `api`, and its dependency set is `core`, `pull`,
+`store` and `telemetry`. It names none of `runner`, `engine`, `indicators`,
+`vocab` or `costs`. Nothing outside `crates/runner` references `Sweeper`, and no
+HTTP route runs a sweep.
+
+So the Apriori ladder, the 280-position vocabulary, the walk-forward, the exit
+grid, the significance bar and every bootstrap in §77 are exercised **only by
+their own tests and benches**. `report::render`, `report::render_findings`,
+`report::render_auto` and `audit::render` are the only surfaces that display any
+of it, and none of the four has a caller or a route.
+
+This is stated as a limit rather than a defect because closing it is a decision,
+not a repair: a `cli` binary needs somewhere to get bars from, and the operator's
+standing rule forbids both a vendor pull and the bars already on disk. Until that
+is settled the only honest input is `runner::synthetic`, and a binary that can
+only sweep generated bars should be built deliberately rather than by default.
+
+---
+

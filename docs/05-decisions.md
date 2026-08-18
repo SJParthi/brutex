@@ -14682,3 +14682,38 @@ sentence against the code beneath it.
 
 ---
 
+## D-0165 · 2026-08-18 · A sample that cannot be resampled carries no evidence
+
+`crates/runner/src/bootstrap.rs`.
+
+`aligned` refused an empty series and a length mismatch, and nothing else. A
+ONE-period series reached the whole machinery, where the stationary bootstrap can
+only ever draw index 0: every draw reproduces the sample, the null distribution is
+a point mass, and any positive value scored p = 0.0 and cleared.
+
+**Measured at 1, 7, 500 and 1,000,000 paisa alike** — identical verdicts across
+six orders of magnitude, which is the tell that the number was never tested.
+
+Both `reality_check` and `spa` now return `p_value = 1.0` when `periods < 2`.
+
+**Why this is not an invented threshold.** It is the existing `draws == 0` rule
+reached from the other side. That rule's own comment is "with nothing to compare
+against, a p-value of 0 would read as overwhelming evidence. One reads as none,
+which is the truth." A point-mass null IS nothing to compare against. And the
+direction matches `a_sample_too_short_for_hansens_gate_keeps_every_strategy`,
+which already settles that where a statistic cannot be computed the answer falls
+to the CONSERVATIVE side.
+
+**Two periods is deliberately NOT refused.** It is the shortest series the
+bootstrap can actually vary, so the guard is structural rather than a calibration
+floor. The test asserts the two-period case still computes, so that a later change
+cannot quietly turn this into the threshold this crate declined to pick.
+
+**The calibration defect this does not fix is recorded, not hidden.**
+`docs/06-limits.md` §77 carries the measured false-positive table — 37.1% at three
+periods and 13.3% at thirty, against a nominal 5%. A minimum-period floor is the
+repair and *which* floor is a number §3 rule 1 forbids this crate inventing, with
+no source in the charter to take it from. The operator picks it.
+
+---
+

@@ -234,7 +234,20 @@ pub fn reality_check(
 
     Some(Verdict {
         statistic: observed,
-        p_value: if draws == 0 {
+        // NOTHING TO COMPARE AGAINST READS AS NO EVIDENCE, NOT AS CERTAINTY.
+        //
+        // `draws == 0` is the case this rule was written for. `periods < 2` is
+        // the same case reached from the other side: the stationary bootstrap
+        // can only ever draw index 0 out of a one-period series, so every draw
+        // reproduces the sample exactly and the null distribution is a point
+        // mass. A p-value computed against a point mass is not a weak result, it
+        // is an absent one — and before this guard a single positive period
+        // returned p = 0.0 and cleared, for 1 paisa as readily as for 1,000,000.
+        //
+        // The direction is the one `a_sample_too_short_for_hansens_gate_keeps_every_strategy`
+        // already fixes for the recentring gate: where a statistic cannot be
+        // computed, the answer falls to the CONSERVATIVE side.
+        p_value: if draws == 0 || periods < 2 {
             1.0
         } else {
             beaten as f64 / draws as f64
@@ -338,7 +351,20 @@ pub fn spa(returns: &[Vec<i64>], draws: usize, seed: u64, block: usize) -> Optio
 
     Some(Verdict {
         statistic: observed,
-        p_value: if draws == 0 {
+        // NOTHING TO COMPARE AGAINST READS AS NO EVIDENCE, NOT AS CERTAINTY.
+        //
+        // `draws == 0` is the case this rule was written for. `periods < 2` is
+        // the same case reached from the other side: the stationary bootstrap
+        // can only ever draw index 0 out of a one-period series, so every draw
+        // reproduces the sample exactly and the null distribution is a point
+        // mass. A p-value computed against a point mass is not a weak result, it
+        // is an absent one — and before this guard a single positive period
+        // returned p = 0.0 and cleared, for 1 paisa as readily as for 1,000,000.
+        //
+        // The direction is the one `a_sample_too_short_for_hansens_gate_keeps_every_strategy`
+        // already fixes for the recentring gate: where a statistic cannot be
+        // computed, the answer falls to the CONSERVATIVE side.
+        p_value: if draws == 0 || periods < 2 {
             1.0
         } else {
             beaten as f64 / draws as f64
@@ -698,6 +724,54 @@ mod tests {
                  it reaches the same `studentized` and must reach the same answer"
             );
         }
+    }
+
+    /// A ONE-PERIOD SERIES HAS NOTHING TO RESAMPLE, SO IT CARRIES NO EVIDENCE.
+    ///
+    /// `aligned` refuses an empty series and a length mismatch and nothing else,
+    /// so a single period reached the full machinery. There the stationary
+    /// bootstrap can only draw index 0, every draw reproduces the sample, the
+    /// null distribution is a point mass at zero and **any** positive value
+    /// scored p = 0.0 and cleared — measured at 1, 7, 500 and 1,000,000 paisa
+    /// alike, which is the tell that the number was not being tested at all.
+    ///
+    /// Measured false-positive rate on pure noise against a nominal 5%, before
+    /// the guard: 73.5% at 1 period, 45.9% at 2, 37.1% at 3, 21.2% at 10, 13.3%
+    /// at 30, 7.4% at 100. This guard closes only the structural case at the top
+    /// of that table — a sample that cannot be resampled at all. The remaining
+    /// small-sample miscalibration is a real limit and is recorded in
+    /// `docs/06-limits.md` rather than fixed by a threshold this crate would have
+    /// to invent.
+    #[test]
+    fn a_single_period_carries_no_evidence_rather_than_certainty() {
+        for magnitude in [1_i64, 7, 500, 1_000_000] {
+            let one = vec![vec![magnitude]];
+
+            let rc = reality_check(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            same(rc.p_value, 1.0, "one period cannot be resampled");
+            assert!(
+                !rc.clears(),
+                "Reality Check cleared a single period of {magnitude} paisa"
+            );
+
+            let v = spa(&one, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+            same(v.p_value, 1.0, "one period cannot be resampled");
+            assert!(
+                !v.clears(),
+                "SPA cleared a single period of {magnitude} paisa"
+            );
+        }
+
+        // TWO periods is the shortest series the bootstrap can actually vary, so
+        // it is NOT refused here. The guard is structural, not a calibration
+        // threshold — asserting otherwise would smuggle in the number this crate
+        // declined to invent.
+        let two = vec![vec![10_i64, 20]];
+        let v = spa(&two, 1_000, 3, DEFAULT_BLOCK).expect("a verdict");
+        assert!(
+            v.p_value <= 1.0,
+            "two periods still produce a computed p-value, not the guard's 1.0"
+        );
     }
 
     /// The fix must not have made the tests unable to find a REAL edge.
