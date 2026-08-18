@@ -5396,13 +5396,13 @@
                      drawn, disabled and carries `universeRefusal(u)` whole —
                      the same sentence the deleted paragraph printed, on the
                      row it is about. -->
-                <div class="pk">
+                <div class="field">
                   <!-- THE SUB-CLAUSE IS ON THE CONTROL, NOT IN THE LABEL. "The
                        set this feed is asked for" is a true and useful sentence
                        and it is the FIRST thing `universeTitle` now says. In the
                        label it was a second line in one cell and no line in the
                        next, which is half of why this row had no baseline. -->
-                  <span class="plbl">Universe</span>
+                  <span class="lab">Universe</span>
                   <div class="dd">
                     <button
                       class="ddb"
@@ -5548,7 +5548,7 @@
                        one IS a refusal — §4 requires it named, and it is drawn
                        only when there is something to name. -->
                   {#if !reachKnown}
-                    <span class="pknote warn" title={reachWhy}>{reachWhy}</span>
+                    <span class="note warn" title={reachWhy}>{reachWhy}</span>
                   {/if}
 
                   <!-- ═══════ WHAT AN ARCHIVE HAS INSTEAD OF A UNIVERSE ═══════
@@ -5573,16 +5573,16 @@
                   {#if archiveCensus}
                     {@const c = archiveCensus}
                     {#if c.state === 'reading'}
-                      <span class="pknote">reading {active.display}'s folder…</span>
+                      <span class="note quiet">reading {active.display}'s folder…</span>
                     {:else if c.state === 'halted'}
-                      <span class="pknote wrap warn" title={c.why}>
+                      <span class="note wrap warn" title={c.why}>
                         the folder could not be read{c.path ? ` — ${c.path}` : ''}. This is a HALT
                         and not an empty folder: nothing was counted, so nothing below is a census
                         of anything.
                       </span>
                     {:else if c.state === 'days'}
                       <span
-                        class="pknote wrap"
+                        class="note quiet wrap"
                         title={`Walked by GET /folder.json?feed=${feeds.active ?? ''} when this feed was selected — pull::folder::read_reach, O(members). ${c.path ?? ''}`}
                       >
                         {n(c.files)} file(s) · {n(c.rows)} row(s) · {dayLabel(c.earliest)} – {dayLabel(
@@ -5592,13 +5592,13 @@
                           : "this feed's universe is the folder"}, read from it
                       </span>
                     {:else if c.state === 'blank'}
-                      <span class="pknote wrap warn">
+                      <span class="note wrap warn">
                         {n(c.files)} file(s) are there and not one carries a row. They were bought
                         and they are blank — which is a different thing from not having bought them,
                         and this is the only place the two are told apart.
                       </span>
                     {:else}
-                      <span class="pknote wrap warn">
+                      <span class="note wrap warn">
                         the folder is there and holds nothing{c.path ? ` — ${c.path}` : ''}. That is
                         an ANSWER, not a failure: the months have not been bought and put there yet.
                       </span>
@@ -5616,7 +5616,7 @@
                          instruments" at a server that was never asked. -->
                     {#if c.instruments === null}
                       <span
-                        class="pknote wrap warn"
+                        class="note wrap warn"
                         title="GET /folder.json emits `instruments` — every distinct name pull::archive::Member took off a file name in that folder, sorted. This server sent no such field, so this page cannot name what is in the folder and does not guess: the file names are the ONLY identity an archive has, and there is no ISIN, no security id and no master to fall back on. Restart the API on a build that emits it."
                       >
                         this server sends no instrument list for the folder — what is in it is not
@@ -5624,7 +5624,7 @@
                       </span>
                     {:else if c.instruments.length > 0}
                       <span
-                        class="pknote wrap"
+                        class="note quiet wrap"
                         title={`${c.instruments.length} distinct name(s), read off the file names in ${c.path ?? 'the folder'} and sorted. This is the whole identity an archive has — there is no ISIN, no security id and no master — so it is also the whole of what a universe could mean for this feed. First twenty: ${c.instruments.slice(0, 20).join(', ')}`}
                       >
                         {n(c.instruments.length)} instrument(s) named — {c.instruments
@@ -5648,7 +5648,7 @@
                            WHICH file and WHY. -->
                       {#if c.rejected.length > 0}
                         <span
-                          class="pknote wrap warn"
+                          class="note wrap warn"
                           title={c.rejected
                             .slice(0, 8)
                             .map((r) => `${r.path} — ${r.why}`)
@@ -5662,7 +5662,7 @@
                       {/if}
                       {#if c.collisions > 0}
                         <span
-                          class="pknote wrap warn"
+                          class="note wrap warn"
                           title="pull::folder::census_of counts the members whose instrument name a previous member had already claimed, rather than deduplicating in silence. GDFL nests Options/ and Futures/, so one stem can appear under both. Two files claiming one instrument is the `ambiguous` case D-0141 names on the folder side: it is not resolved by whichever was walked first."
                         >
                           {n(c.collisions)} file(s) name an instrument another file already named —
@@ -5670,7 +5670,7 @@
                         </span>
                       {/if}
                     {:else}
-                      <span class="pknote wrap warn">
+                      <span class="note wrap warn">
                         the folder names no instrument at all — this is the list being EMPTY, which
                         the server answered, and not a list it failed to send
                       </span>
@@ -5693,8 +5693,8 @@
                      member field. What they narrow is what this page counts,
                      measures and reports on — the ask, the census, the outcome
                      rows. -->
-                <div class="pk">
-                  <span class="plbl">Instruments in that universe</span>
+                <div class="field">
+                  <span class="lab">Instruments in that universe</span>
                   <div class="dd">
                     <button
                       class="ddb"
@@ -5794,7 +5794,7 @@
                     {/if}
                   </div>
                   <span
-                    class="pknote"
+                    class="note quiet"
                     class:warn={!reachKnown}
                     title={reachKnown
                       ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.`
@@ -5838,9 +5838,9 @@
                      is `/feeds.json`'s granularity floor: a feed that bottoms
                      out at a minute has the second rung permanently refused and
                      `rungRows` drops it. No vendor is named in this file. -->
-                <div class="pk">
+                <div class="field">
                   <span
-                    class="plbl"
+                    class="lab"
                     title="Bar lengths — the granularity field on the wire. Timeframe is the cascade's word for this rung and the word /db and /markets use for the same axis; bar length is what it means; granularity is what it is called on the wire. All three name one thing."
                     >Timeframe</span
                   >
@@ -5894,7 +5894,7 @@
                        decides whether the second rung is one of the rows
                        above. -->
                   {#if feedFinest}
-                    <span class="pknote wrap" title={`${feedFinest.because} — ${feedFinest.source}`}>
+                    <span class="note quiet wrap" title={`${feedFinest.because} — ${feedFinest.source}`}>
                       {feedFinest.short} One record at {feedFinest.rungPhrase} is a
                       {feedFinest.label}.
                     </span>
@@ -5906,7 +5906,7 @@
                          here is a server that did not send `finest` — and that
                          is a build to restart, not a vendor to wonder about. -->
                     <span
-                      class="pknote wrap warn"
+                      class="note wrap warn"
                       title="crates/pull carries a granularity floor for every feed it can name, and /feeds.json emits it as `finest` on every row — the finest rung, whether one record there is a bar, a conflated snapshot or a real tick stream, why nothing finer exists in the vendor's own terms, and where those words were read. This page holds no copy of that table: a hardcoded fallback would look exactly as authoritative as a reading, and the operator could not tell them apart. So nothing is refused here, and an unstated floor is not an unlimited one."
                     >
                       this server sent no granularity floor for {feedName(feeds.active)} — nothing
@@ -5944,7 +5944,7 @@
                        is the running commentary that made this strip unreadable.
 
                        THE `{#if}` IS OUTSIDE THE SPAN, not inside it. A
-                       `.pknote` carries its marker as `::before`, so an empty
+                       `.note` carries its marker as `::before`, so an empty
                        one is not invisible — it is a bare `·` sitting under a
                        control with nothing after it. Emptying the element and
                        keeping the element is how a cut leaves litter.
@@ -5954,7 +5954,7 @@
                        case, and it appears only when it is true. -->
                   {#if rungsChosen.length === 0}
                     <span
-                      class="pknote warn"
+                      class="note warn"
                       title="Three rungs are offered — one minute, one day, and the archives' one second — because they are the whole of what the four descriptors in pull::vendor declare between them, and because everything coarser is folded from bars this repository already holds. A rung the active vendor cannot publish at all is not listed: /feeds.json's granularity floor says no pull, entitlement, purchase or code change makes it exist, so there is no work behind the row. A rung cannot be ADDED from here: parse_granularity matches the directory name exactly and refuses anything else."
                     >
                       no timeframe ticked — nothing below can be counted
@@ -5967,7 +5967,7 @@
                        fetched. An absent answer is a state, not a default. -->
                   {#if rungServed === null && active}
                     <span
-                      class="pknote wrap warn"
+                      class="note wrap warn"
                       title="GET /feeds.json emits a history array carrying, per rung, whether Descriptor::granularities declares it. This server sent no such array, so this control cannot say which rungs the build actually fetches and does not guess. The server still refuses an undeclared rung by name — it will just be the run that tells you rather than this line."
                     >
                       this server states no per-rung `served` flag — which rungs the build fetches is
@@ -5988,14 +5988,14 @@
                      which is 2 September to one reader and 9 February to
                      another. These are text fields over an ISO value that never
                      leaves ISO, and the ▦ opens the grid. -->
-                <div class="pk wide2">
+                <div class="field wide">
                   <!-- "THE RANGE THE VENDOR ANSWERS" IS A REST FACT AND IS
                        FALSE FOR A FOLDER FEED. There is no vendor in that
                        sentence: the range is the files somebody bought and put
                        in a directory on this machine, and nothing about it is
                        answered by anybody. -->
                   <span
-                    class="plbl"
+                    class="lab"
                     title={(isFolderFeed
                       ? 'The range is whatever files are in the folder. '
                       : 'The range the vendor answers. ') +
@@ -6072,7 +6072,7 @@
                     </div>
                   </div>
                   <span
-                    class="pknote"
+                    class="note quiet"
                     class:warn={Boolean(fromDay) && Boolean(toDay) && !windowOk}
                   >
                     {#if windowOk}
@@ -6090,8 +6090,8 @@
                 </div>
 
                 {#if isFolderFeed}
-                  <div class="pk" class:bad={showProblems && problemFor.has('folder')}>
-                    <span class="plbl">Folder</span>
+                  <div class="field" class:bad={showProblems && problemFor.has('folder')}>
+                    <span class="lab">Folder</span>
                     <input
                       class="din mono"
                       bind:value={folder}
@@ -6108,14 +6108,14 @@
                          assumed equal: a reach read from one folder beside a
                          run against another is exactly the silent disagreement
                          this page exists to surface. -->
-                    <span class="pknote">no token · no rate budget</span>
-                    <!-- THE PATH WRAPS. A `.pknote` clips and ellipses by
+                    <span class="note quiet">no token · no rate budget</span>
+                    <!-- THE PATH WRAPS. A `.note` clips and ellipses by
                          default, and a PATH with its end cut off is worse than
                          no path at all — it looks like an answer and cannot be
                          acted on. Same defect the `.wrap` modifier exists for
                          one comment above. -->
                     {#if folderReach.body?.path}
-                      <span class="pknote wrap">
+                      <span class="note quiet wrap">
                         resolved: <button
                           class="pathbtn mono"
                           type="button"
@@ -7095,13 +7095,13 @@
 <!-- needs a row that is drawn, dead, and carrying `/feeds.json`'s own why.  -->
 <!-- ===================================================================== -->
 {#snippet feedRung()}
-  <div class="pk">
+  <div class="field">
     <!-- THE LABEL IS THE LABEL. Everything the sub-clause used to say — that
          this is the page's whole scope, what a change costs, and where the
          counts are read from — is on the button's `title`, one hover from the
          control it is about. A two-line label in one cell and a one-line label
          in the next is what broke this row's baseline. -->
-    <span class="plbl">Broker feed</span>
+    <span class="lab">Broker feed</span>
     <div class="dd">
       <button
         class="ddb"
@@ -7202,10 +7202,10 @@
     </div>
     <!-- THE SCOPE SENTENCE, KEPT WORD FOR WORD. It was a paragraph in a
          full-width block; it is this control's clause now, which is where every
-         other fact on this strip lives. A `.pknote` CLIPS, so the whole of it is
+         other fact on this strip lives. A `.note` CLIPS, so the whole of it is
          on the clause's own `title` as well — the page's standing rule. -->
     <span
-      class="pknote"
+      class="note quiet"
       class:warn={!reachKnown}
       title={`everything below is this feed's answer · ${scopeNote}`}
       >everything below is this feed's answer · {scopeNote}</span
@@ -7232,8 +7232,8 @@
        `segmentsReached` is unchanged and still gates everything downstream:
        ticked AND served. A disabled row cannot be ticked, so nothing below this
        control can be reached by a segment this build cannot fill. -->
-  <div class="pk">
-    <span class="plbl">Segments</span>
+  <div class="field">
+    <span class="lab">Segments</span>
     <!-- `tuck`: expired futures and expired options are `served: false` because
          only POST /pull/spot exists — there is no expired-contract route in
          this build at all. Two of the three rows were dead on every feed. -->
@@ -7276,7 +7276,7 @@
       onchange={(/** @type {Set<string>} */ sel) => (segSet = sel)}
     />
     <span
-      class="pknote"
+      class="note quiet"
       title={`The store keys on three segments and all three are drawn. ${segmentsUnserved
         .map((s) => `${s.label} — ${s.why}`)
         .join('\n\n')}`}
@@ -7614,7 +7614,7 @@
      `align-items: end` was the cause, and it is worth naming exactly, because
      the symptom pointed at the wrong control. Bottom-aligning grid items makes
      every cell's LAST pixel share a line. The cells do not have the same
-     content below their control: Universe carries one `.pknote`; Timeframe
+     content below their control: Universe carries one `.note`; Timeframe
      carries up to four (the feed's granularity floor, the dropped-rung notice,
      the ticked/refused tally, and the missing-`served` warning); Days to pull
      carries a two-field `.dates` block and its own note. Align the bottoms of
@@ -7629,7 +7629,7 @@
           the same y and every control sits directly under its own label. A
           longer tail now hangs BELOW its cell, which is where a tail belongs
           and where it cannot move anything above it.
-       2. One-line labels (see `.plbl`). Top-alignment alone is not enough: a
+       2. One-line labels (see `.lab`). Top-alignment alone is not enough: a
           label that wraps to two lines in one cell and one line in the next
           pushes that cell's control down by a line, and the row breaks again
           one level lower. Every sub-clause moved to the control's `title` —
@@ -7649,7 +7649,7 @@
     padding: 0;
     min-width: 0;
   }
-  .pk {
+  .field {
     display: flex;
     flex-direction: column;
     gap: var(--s2);
@@ -7668,10 +7668,10 @@
      `.dates` is capped rather than stretched. Two date fields spread across
      1,200px would read as the panel's most important control, and they are its
      last one. */
-  .pk.wide2 {
+  .field.wide {
     grid-column: 1 / -1;
   }
-  .pk.wide2 .dates {
+  .field.wide .dates {
     max-width: 560px;
   }
   /* ONE LINE, ALWAYS, AND THAT IS THE SECOND HALF OF THE ROW FIX. A label is a
@@ -7694,7 +7694,7 @@
 
      `line-height: var(--lab-h)` is what makes a label occupy the strip's label
      ROW exactly, which is the height the grid reserves for it. */
-  .plbl {
+  .lab {
     font-family: var(--mono);
     font-size: var(--fs-micro);
     font-weight: var(--w-semi);
@@ -7708,7 +7708,7 @@
     min-width: 0;
   }
   /* THE FEED PICKER INSIDE A BLANK STATE. The three refusals above the strip
-     render the same `feedRung` snippet, and a `.pk` is a flex column that would
+     render the same `feedRung` snippet, and a `.field` is a flex column that would
      take the whole width of an empty page. Clamped to one track's worth so it
      reads as the control it is in the strip. */
   .blankpick {
@@ -7741,7 +7741,7 @@
      clip. The reference uses flex because its notes are short by construction;
      these are generated and are not, so the marker is inline here and the
      clip stays where it was. Same two glyphs, same two meanings. */
-  .pknote {
+  .note {
     font-family: var(--mono);
     font-size: var(--fs-micro);
     line-height: 1.35;
@@ -7751,14 +7751,14 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .pknote::before {
+  .note::before {
     content: '· ';
     color: var(--faint);
   }
-  .pknote.warn {
+  .note.warn {
     color: var(--warn);
   }
-  .pknote.warn::before {
+  .note.warn::before {
     content: '▲ ';
     font-size: 8px;
     color: var(--warn);
@@ -7767,7 +7767,7 @@
      SENTENCE put in one is a sentence with its end cut off, which is the same
      defect as an ellipsed refusal. The vendor floor and the missing-`served`
      notice are sentences, so they wrap. */
-  .pknote.wrap {
+  .note.wrap {
     white-space: normal;
     overflow: visible;
     text-overflow: clip;
@@ -7816,7 +7816,7 @@
      string: Instruments and Universe reach the same width on a long name.
      Picker is shared and is not edited from here; the clip is applied from
      this page, to Pickers inside this strip only. */
-  .pk :global(.pbtn) {
+  .field :global(.pbtn) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -8129,10 +8129,10 @@
     box-shadow: 0 0 0 3px var(--acc-soft);
   }
   /* A REFUSED FIELD LOOKS REFUSED WHEREVER IT SITS. `.field` is the day cell
-     inside the strip; `.pk` is the archive folder rung, which is a whole
+     inside the strip; `.field` is the archive folder rung, which is a whole
      column of its own. Both carry `bad` from the same `problemFor` set. */
   .field.bad .din,
-  .pk.bad .din {
+  .field.bad .din {
     border-color: var(--down);
     background: var(--down-soft);
   }
