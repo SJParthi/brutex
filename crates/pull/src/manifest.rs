@@ -2618,6 +2618,35 @@ impl Manifest {
         self.index.get(key).map(|held| held.entry)
     }
 
+    /// Every entry this census holds, in the order they were appended.
+    ///
+    /// # Why this had to exist before a store could be verified
+    ///
+    /// [`Self::entry`] PROBES: it answers about a key the caller already has.
+    /// That is the right shape for every question this crate asked until now —
+    /// "does this month exist", "how many rows" — and it makes one question
+    /// unanswerable: *what does this counter claim, in total?*
+    ///
+    /// `crates/pull/src/scrub.rs` checks one entry against the file it
+    /// describes, and a scrub of the whole store is exactly a scrub of every
+    /// entry. Without an enumeration the caller has to already know the keys,
+    /// which means it can only verify the months it thought to ask about — and
+    /// the dangerous case is precisely the month nobody thought to ask about,
+    /// because the counter is the only thing that remembers it.
+    ///
+    /// # Cost
+    ///
+    /// **O(1) to call and O(entries) to walk, which is the honest bound**: the
+    /// backing `Vec` is already in memory, built once at load, and this hands
+    /// back a borrowed iterator over it. Nothing is allocated, cloned or
+    /// sorted. Walking every entry is inherent to the question — you cannot
+    /// verify a store you do not look at — and `CLAUDE.md` §3 rule 4 bounds the
+    /// PER-OPERATION cost, which here is one `Vec` step.
+    #[must_use]
+    pub fn all(&self) -> impl ExactSizeIterator<Item = Entry> + '_ {
+        self.log.iter().map(|held| held.entry)
+    }
+
     /// The newest row for one key — the entry and its closes. One hash probe.
     #[must_use]
     pub fn held(&self, key: &EntryKey) -> Option<Held> {
