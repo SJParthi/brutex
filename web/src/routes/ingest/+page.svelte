@@ -6173,22 +6173,29 @@
                      another. These are text fields over an ISO value that never
                      leaves ISO, and the ▦ opens the grid. -->
                 <div class="field wide">
-                  <!-- "THE RANGE THE VENDOR ANSWERS" IS A REST FACT AND IS
+                  <!-- "DAYS TO PULL" IS GONE AND ONLY THE HEADER WAS.
+                       It stacked a group heading above two fields that already
+                       carry their own — FROM DATE and TO DATE say what they are,
+                       and a third label above them naming the pair is the
+                       hierarchy the four rungs beside it do not have. Every
+                       other control on this strip is one label over one control.
+
+                       "THE RANGE THE VENDOR ANSWERS" IS A REST FACT AND IS
                        FALSE FOR A FOLDER FEED. There is no vendor in that
                        sentence: the range is the files somebody bought and put
                        in a directory on this machine, and nothing about it is
-                       answered by anybody. -->
-                  <span
-                    class="lab"
+                       answered by anybody. It moves to the pair it is about
+                       rather than being deleted with the heading that carried
+                       it — `.dates` is the element that IS the window. -->
+                  <div
+                    class="dates"
                     title={(isFolderFeed
                       ? 'The range is whatever files are in the folder. '
                       : 'The range the vendor answers. ') +
                       (isBroker
                         ? `${active.display} is a broker. The window is split to its per-request cap by the server and the rate budget is charged per request. Both ends are inclusive here; on the wire crates/pull must send the day after "to", which Dhan documents as non-inclusive.`
                         : 'Both ends are inclusive here and in every count on this page.')}
-                    >Days to {verb}</span
                   >
-                  <div class="dates">
                     <div
                       class="dcell field cal-open"
                       class:bad={(showProblems || staleWindow) && problemFor.has('from')}
@@ -7681,7 +7688,19 @@
      row and no bulk header, and a multi-choice one has "Select all N / Clear
      all" across its top and tints every row you tick. Scoped to this page, so
      the component's own reasoning still governs /db, /markets and /autopilot. */
-  .field :global(.pmenu .plist input) {
+  /* RADIOS ONLY. The first version of this hid EVERY control in a Picker menu
+     and that was a straight inconsistency: Segments and Timeframe lost their
+     boxes while the Instruments list twelve pixels away kept its native
+     `accent-color` checkbox, so one page ended up with two answers to "can I
+     tick more than one of these".
+
+     The rule is the one the affordance already implies. A CHECKBOX SAYS "you
+     may tick several" and it stays, everywhere, because that is a promise the
+     row cannot make on its own. A RADIO says "ticking this unticks the rest",
+     which is a thing the list ALREADY shows — exactly one row is tinted — so
+     the ring is the second mark that says nothing, and a column of five empty
+     ones is the gutter that read as dated. */
+  .field :global(.pmenu .plist input[type='radio']) {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -7699,14 +7718,14 @@
      sentence, floating alone at the left. Ordering the sentence after it puts
      the check back beside the name where it belongs, with no pixel offset to
      go stale: the wrap is still the flex container's to decide. */
-  .field :global(.pmenu .pwhy) {
+  .field :global(.pmenu .plist label:has(input[type='radio']) .pwhy) {
     padding-left: 0;
     order: 1;
   }
   /* THE CHECK, DRAWN RATHER THAN TYPED — two borders on a rotated box, the
      same technique `Picker` uses for its own tick, so it cannot come out as a
      missing glyph on a machine without the font. */
-  .field :global(.pmenu .plist label:has(input:checked))::after {
+  .field :global(.pmenu .plist label:has(input[type='radio']:checked))::after {
     content: '';
     flex: 0 0 auto;
     align-self: center;
@@ -7720,7 +7739,7 @@
   /* FOCUS HAS TO LAND SOMEWHERE VISIBLE. The input carried the ring and the
      input is out of the flow, so the row takes it — inset, so it reads as the
      row being focused rather than as a second border around it. */
-  .field :global(.pmenu .plist label:has(input:focus-visible)) {
+  .field :global(.pmenu .plist label:has(input[type='radio']:focus-visible)) {
     outline: 2px solid var(--acc);
     outline-offset: -2px;
   }
@@ -7729,6 +7748,29 @@
      need for a disabled box is gone with every other row's. */
   .field :global(.pmenu .plist label.pdis)::after {
     content: none;
+  }
+  /* THE CHECKBOX MATCHES THE ONE TWELVE PIXELS AWAY. `.inslist input` is a
+     native box at 14px tinted with `accent-color`; Picker draws its own at
+     18px. Two sizes of the same idiom on one strip is the drift this page
+     keeps removing, so the drawn one is brought to the native one's size. */
+  .field :global(.pmenu .plist input[type='checkbox']) {
+    width: 14px;
+    height: 14px;
+    /* AND THE CORNER COMES DOWN WITH THE BOX. Picker's 6px radius is right on
+       an 18px square; on a 14px one it is nearly half the side, so the box
+       rendered as a ROUNDEL — which is the one shape a checkbox may not have,
+       because round means radio and radio means the others untick. Shrinking
+       the square without shrinking its corner turned a multi-select into
+       something that looked single-select, twelve pixels from a native box
+       that still looked square. */
+    border-radius: 4px;
+  }
+  /* The tick inside a 14px box, scaled to it — Picker sizes its own for 18px
+     and it overhung the smaller square by about a pixel on each side. */
+  .field :global(.pmenu .plist input[type='checkbox']:checked)::after {
+    width: 3.5px;
+    height: 7px;
+    margin-top: -1px;
   }
   .ddb {
     appearance: none;
