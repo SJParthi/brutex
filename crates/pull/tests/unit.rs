@@ -5710,21 +5710,60 @@ fn the_bucket_width_is_a_runtime_value() {
 fn the_ladder_refuses_to_skip_a_rung() {
     use pull::fold::{Grain, LADDER, Ladder, Segment};
 
-    assert_eq!(LADDER.len(), 6, "3 segments x 2 granularities");
+    assert_eq!(
+        LADDER.len(),
+        10,
+        "3 segments x 3 grains, plus greeks on options"
+    );
 
-    // Daily across every segment BEFORE any minute work: the cheap pass first.
+    // SEGMENT-MAJOR, NOT GRAIN-MAJOR, AND THE DIFFERENCE IS NOT A PREFERENCE.
+    //
+    // This used to assert every segment at daily before any minute work, on
+    // the reasoning that the cheap pass should come first. The operator's rule
+    // is the other nesting -- a segment is finished ENTIRELY before the next is
+    // touched -- and it is the correct one for a reason the old order could not
+    // see: grain-major reaches expired options with spot's MINUTE bars still
+    // unpulled, and Groww's implied volatility cannot be solved for a
+    // one-minute option bar without the underlying's one-minute spot bar at the
+    // same minute. The old order made a whole segment uncomputable.
+    //
+    // `Derived` is the coarser rungs folded from one-minute bars rather than
+    // pulled, and it sits after the minute pass in every segment because
+    // folding a dirty month produces coarse bars built out of gaps.
+    //
+    // `Greeks` appears ONCE, under options: a future has no optionality and a
+    // spot series has neither strike nor expiry, so there is nothing to solve.
     assert_eq!(
         LADDER.map(|s| (s.segment, s.grain)),
         [
             (Segment::Spot, Grain::Daily),
-            (Segment::Futures, Grain::Daily),
-            (Segment::Options, Grain::Daily),
             (Segment::Spot, Grain::Minute),
+            (Segment::Spot, Grain::Derived),
+            (Segment::Futures, Grain::Daily),
             (Segment::Futures, Grain::Minute),
+            (Segment::Futures, Grain::Derived),
+            (Segment::Options, Grain::Daily),
             (Segment::Options, Grain::Minute),
+            (Segment::Options, Grain::Derived),
+            (Segment::Options, Grain::Greeks),
         ],
-        "spot before futures before options; daily before minute"
+        "each segment finished entirely before the next is touched"
     );
+
+    // NO SEGMENT IS REVISITED. The property the literal above only illustrates:
+    // once the ladder leaves a segment it never returns to it, which is what
+    // "finished entirely" means and what grain-major violated three times.
+    let mut seen: Vec<Segment> = Vec::new();
+    for stage in LADDER {
+        if seen.last() != Some(&stage.segment) {
+            assert!(
+                !seen.contains(&stage.segment),
+                "{:?} is returned to after the ladder had left it",
+                stage.segment
+            );
+            seen.push(stage.segment);
+        }
+    }
 
     let mut l = Ladder::new();
     assert_eq!(l.next(), Some(LADDER[0]), "the cheapest rung first");

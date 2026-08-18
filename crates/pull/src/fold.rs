@@ -453,6 +453,30 @@ pub enum Grain {
     Daily = 0,
     /// One bar per minute.
     Minute = 1,
+    /// The coarser rungs, FOLDED FROM THE ONE-MINUTE BARS RATHER THAN PULLED.
+    ///
+    /// 2, 3, 5, 10, 15, 30 and 60 minute bars are never asked of a vendor:
+    /// they are one-minute bars folded up, which is why `/db` reports nine
+    /// rungs held against the two that were ever fetched.
+    ///
+    /// That makes this a stage with a HARD PREDECESSOR rather than a bonus
+    /// pass. Folding a month whose one-minute pull was dirty produces coarse
+    /// bars built out of gaps, and nothing downstream can tell them from
+    /// complete ones — a month that looks finished and is not, which is the
+    /// whole failure this ladder exists to prevent.
+    Derived = 2,
+    /// The greeks, SOLVED FROM BARS ALREADY ON DISK.
+    ///
+    /// Options only, and that is physics rather than scheduling: a future has
+    /// no optionality and a spot series has neither strike nor expiry, so
+    /// there is nothing to solve for either. It appears once in [`LADDER`],
+    /// under `Options`, for that reason.
+    ///
+    /// `crates/greeks` needs the contract's own bar AND the underlying's spot
+    /// bar at the SAME minute. Both are guaranteed present by the order below
+    /// rather than hoped for: spot's minute pass is stage 2 and cannot be
+    /// skipped to reach this one.
+    Greeks = 3,
 }
 
 /// One rung: a segment at a granularity.
@@ -471,17 +495,10 @@ pub struct Stage {
 /// cheap pass across every segment before starting the expensive one surfaces a
 /// structural fault — a wrong path, a bad session bound, a dead credential —
 /// against the smallest possible amount of work.
-pub const LADDER: [Stage; 6] = [
+pub const LADDER: [Stage; 10] = [
+    // ── SPOT, FINISHED ENTIRELY, BEFORE ANY CONTRACT IS ASKED FOR ──────────
     Stage {
         segment: Segment::Spot,
-        grain: Grain::Daily,
-    },
-    Stage {
-        segment: Segment::Futures,
-        grain: Grain::Daily,
-    },
-    Stage {
-        segment: Segment::Options,
         grain: Grain::Daily,
     },
     Stage {
@@ -489,12 +506,38 @@ pub const LADDER: [Stage; 6] = [
         grain: Grain::Minute,
     },
     Stage {
+        segment: Segment::Spot,
+        grain: Grain::Derived,
+    },
+    // ── EXPIRED FUTURES ────────────────────────────────────────────────────
+    Stage {
+        segment: Segment::Futures,
+        grain: Grain::Daily,
+    },
+    Stage {
         segment: Segment::Futures,
         grain: Grain::Minute,
     },
     Stage {
+        segment: Segment::Futures,
+        grain: Grain::Derived,
+    },
+    // ── EXPIRED OPTIONS, AND THE ONLY SEGMENT THAT SOLVES GREEKS ───────────
+    Stage {
+        segment: Segment::Options,
+        grain: Grain::Daily,
+    },
+    Stage {
         segment: Segment::Options,
         grain: Grain::Minute,
+    },
+    Stage {
+        segment: Segment::Options,
+        grain: Grain::Derived,
+    },
+    Stage {
+        segment: Segment::Options,
+        grain: Grain::Greeks,
     },
 ];
 
@@ -562,7 +605,17 @@ impl Ladder {
     }
 }
 
-const _: () = assert!(LADDER.len() == 6);
+// THE COUNT IS PINNED SO A HALF-ADDED STAGE IS A BUILD FAILURE, not a rung the
+// ladder silently never reaches. 10 = spot, futures and options at day, minute
+// and derived, plus the one greeks stage options alone can have.
+const _: () = assert!(LADDER.len() == 10);
+// AND THE ORDER IS PINNED, not just the length. A ladder of the right size in
+// the wrong order is the defect this const catches: reordering it to
+// grain-major would still be ten stages and would still compile.
+const _: () = assert!(matches!(LADDER[0].segment, Segment::Spot));
+const _: () = assert!(matches!(LADDER[2].grain, Grain::Derived));
+const _: () = assert!(matches!(LADDER[3].segment, Segment::Futures));
+const _: () = assert!(matches!(LADDER[9].grain, Grain::Greeks));
 
 /// Folds raw snapshots at **any** width. Always exact.
 ///
