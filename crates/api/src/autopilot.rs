@@ -1580,38 +1580,31 @@ impl Default for Control {
 
 /// The environment variable that holds the autopilot on the ground.
 ///
-/// # The default was PAUSED and is now FLYING. This is why, and what was given
-/// up
+/// # The default is PAUSED, and this block used to say the opposite
 ///
-/// **What the old default assumed.** That this binary is started for many
-/// reasons and only one of them has a cost outside this machine — a rate budget
-/// spent, a token exercised, a vendor's logs written to — so an operator who
-/// starts it to look at a page should not thereby contact a vendor. That
-/// reasoning was sound and it is recorded, superseded rather than deleted, in
-/// `docs/05-decisions.md`.
+/// **What is true, and what [`stays_paused_from`] a hundred lines below
+/// enforces:** the autopilot flies only when this variable reads exactly
+/// [`AUTOPILOT_RUN`]. Absent, empty, mistyped, or not UTF-8 all stay on the
+/// ground, because every one of them is "the operator did not ask".
 ///
-/// **What it cost.** The owner's requirement is that pressing Run in an IDE
-/// produces a system that fills the store by itself with no further input. The
-/// tracked Run configuration sets no environment, so pressing Run reliably
-/// produced a process that came up paused and did nothing at all, for ever,
-/// while telling the operator to press a Resume they had not been told they
-/// would need. A default whose only effect is that the intended use of the
-/// binary silently does nothing is not a safeguard, it is a defect with a
-/// rationale.
+/// **What this block used to claim.** That the default had been changed to FLY,
+/// on the reasoning that a Run configuration setting no environment would
+/// otherwise come up paused and do nothing. That change was made and then
+/// REVERSED, and the reversal is documented at [`stays_paused_from`] — one
+/// session flying by default wrote 23,695 `pull.run` events before anyone
+/// looked. Fetching is the irreversible half of this program: it spends a shared
+/// vendor quota and writes to an append-only store, so the default must be the
+/// safe side of it.
 ///
-/// **What replaces the consent the default used to give.** Three things, none
-/// of them new and none of them removed:
+/// The prose was left behind by that reversal and is the reason this section now
+/// leads with the polarity rather than the history. A reader who stopped here
+/// would have concluded that pressing Run contacts a vendor.
 ///
-/// * the **twenty-second grace window** ([`GRACE_SECS`], counted down on the
-///   page by [`grace`]) — the one chance to say no before a socket opens, and
-///   it returns without contacting anything the moment the flag is set;
-/// * `POST /autopilot/pause` and `POST /autopilot/control action=stop`, which
-///   bite within one instrument;
-/// * this variable, set to [`AUTOPILOT_PAUSE`] before start, for a machine that
-///   must come up on the ground every time.
-///
-/// So the trigger is now "the operator started the binary", which is what the
-/// owner says it should mean, and saying no is still one click or one variable.
+/// **The controls, unchanged:** the twenty-second grace window
+/// ([`GRACE_SECS`], counted down by [`grace`]) before any socket opens;
+/// `POST /autopilot/pause` and `POST /autopilot/control action=stop`, which bite
+/// within one instrument; and this variable, set to [`AUTOPILOT_RUN`], which is
+/// the only thing that starts it at all.
 pub const AUTOPILOT_ENV: &str = "BRUTEX_AUTOPILOT";
 
 /// The one value that still starts it explicitly.
@@ -1622,19 +1615,20 @@ pub const AUTOPILOT_ENV: &str = "BRUTEX_AUTOPILOT";
 /// the only way to.
 pub const AUTOPILOT_RUN: &str = "run";
 
-/// The one value that holds it on the ground.
+/// A spelling kept accepted for an operator who already sets it.
 ///
-/// Compared exactly, not parsed leniently, and it is the same refusal to guess
-/// that [`AUTOPILOT_RUN`] has always had — pointed the other way. `PAUSE`,
-/// `paused`, `stop`, `false`, `0` and `no` all **fly**, because a variable that
-/// half-matches is how a machine ends up doing the opposite of what somebody
-/// thought they had set. One spelling, and the refusal to guess is the feature.
+/// **This doc used to say `PAUSE`, `paused`, `stop`, `false`, `0` and `no` all
+/// FLY.** They do not, and have not since the polarity was inverted: the switch
+/// is positive, so [`stays_paused_from`] grounds every value that is not exactly
+/// [`AUTOPILOT_RUN`] — this one included, along with an absent variable, an
+/// empty one, a typo and a value that is not UTF-8.
+/// `the_boot_default_pulls_nothing_and_only_the_exact_word_run_lets_it_fly`
+/// asserts `stays_paused_from(Some("pause"))` for this exact string, so the
+/// sentence above was already contradicted by a test in its own file.
 ///
-/// The asymmetry with the old default is deliberate and is the whole safety
-/// argument: under the old rule a typo left the machine on the ground doing
-/// nothing, which was silent; under this rule a typo leaves it flying, which is
-/// the state the page announces, the terminal banner names, and the grace
-/// window gives twenty seconds to refuse.
+/// The constant survives because it is harmless and because a value that reads
+/// as an instruction should mean what it says. It grants nothing that the
+/// variable's absence does not already grant.
 pub const AUTOPILOT_PAUSE: &str = "pause";
 
 /// Whether a value read from [`AUTOPILOT_ENV`] holds the autopilot on the

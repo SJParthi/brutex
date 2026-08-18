@@ -14453,3 +14453,232 @@ applied to the test window. The selection is now joint; the out-of-sample
 VALIDATION still measures the time-exit strategy. Recorded in
 `docs/06-limits.md` rather than implied away, and closing it means giving
 `walk` the levels.
+
+## D-0158 · 2026-08-18 · One law for rupees to paisa, because the second spelling was wrong
+
+`crates/pull/src/fno.rs`.
+
+`paisa_of` carried its own copy of the rupee-to-paisa conversion. The copy
+parsed the sign into the rupee half and then ADDED the unsigned fractional part,
+so `"-19200.05"` returned -1_919_995 — Rs -19,199.95, ten paise closer to zero
+than the text says and on the wrong side of the tick grid.
+
+It now calls `crate::csv::paisa`, which strips the sign, combines the halves and
+applies the sign to the total.
+
+**Why delete the spelling rather than correct it.** `CLAUDE.md` §7 fixes ONE law
+for this conversion. A second implementation of it is a second thing to get
+wrong, and this one already had been. Correcting it in place would have left two
+copies to keep in agreement forever.
+
+**Why nothing caught it.** No vendor publishes a negative STRIKE, and the strike
+is the only field this function reads. The bug was unreachable through the
+production call path and would have stayed unreachable — which is exactly the
+kind of defect a law about single implementations exists to prevent, rather than
+one a test was ever going to find by accident.
+
+`fno::tests::a_negative_value_is_converted_by_the_same_law_as_a_positive_one`
+pins both the value and the agreement between the two entry points.
+
+---
+
+## D-0159 · 2026-08-18 · The run identity frames the fourth field of the instrument key
+
+`crates/runner/src/identity.rs`.
+
+`InstrumentKey` has four fields. The instrument term framed three — exchange,
+segment, underlying — and the comment above it claimed it framed **every field
+of the key**. The missing one is `kind`, which carries `expiry`, `strike` and
+`side`.
+
+So every option on one underlying hashed to the same `RunId`: every strike, both
+sides, every expiry. So did a future against the spot index.
+
+**Why this is not cosmetic.** `CLAUDE.md` §3 rule 3 makes the identity the thing
+a run is recorded under, and requires that no computation happen without it. An
+identity that cannot separate two contracts does not record the second one — it
+overwrites the first, and §3 rule 5's byte-for-byte reproducibility is a
+statement about a key that no longer identifies anything.
+
+**Encoding.** A discriminant byte, then that variant's own fields at fixed width:
+expiry as year/month/day little-endian, strike as the raw `i64` paisa, side as
+one byte. The discriminant leads and the widths are fixed per variant, so no
+field boundary is ambiguous; the whole blob is length-prefixed like the string
+parts beside it, so it cannot run into a later term.
+
+**This changes every `RunId` this build produces.** No run is persisted anywhere
+today — the sweep is not reachable from a binary — so nothing is invalidated. It
+would not have been safe to defer past the point where one was.
+
+`identity::tests::two_contracts_that_differ_only_in_kind_do_not_collide` moves
+exactly one field of `kind` per assertion and holds every other field fixed,
+because a test that also varied the underlying would pass against the defect.
+
+---
+
+## D-0160 · 2026-08-18 · A degenerate sample scores zero in the studentized tests
+
+`crates/runner/src/bootstrap.rs`.
+
+`studentized` returned the RAW statistic when the standard error was zero. `spa`
+and `romano_wolf` take a maximum over t-RATIOS, so this fed a paisa mean into a
+comparison of dimensionless quantities — and because every recentred bootstrap
+draw for a constant series is exactly zero, the observed value could not be
+beaten. Both reported p = 0.0 and cleared for a strategy whose returns never
+moved.
+
+**Measured before the fix**, `spa` over a constant series of 7 paisa beside real
+noise: statistic 7.0, p 0.0000, `clears() == true`.
+
+**That it was a unit error and not a defensible reading** is settled by the
+verdict moving with magnitude: a constant of 1 scored p = 0.065 and failed, a
+constant of 2 scored p = 0.017 and passed. Two qualitatively identical zero-risk
+strategies, opposite answers, and at 1 the riskless series ranked BELOW an
+insignificant noise series.
+
+`crate::outcome` had already answered this question for its own t-statistic —
+"not an infinitely strong result -- it is a degenerate sample, and reporting it
+as zero refuses to dress one up as the other." This applies that same answer, so
+it follows a decided law rather than inventing one.
+
+**`reality_check` is deliberately unchanged.** It never called `studentized`.
+White's statistic is `sqrt(n) * mean`, un-studentized, so observed value and
+draws are both in paisa and the comparison is already in one unit; a riskless
+positive mean genuinely does beat what resampling noise produces. Asserting
+otherwise would have pinned a bug into the suite, and a first version of the test
+here did exactly that before the measurement corrected it.
+
+Covered by `a_zero_variance_strategy_does_not_clear_the_studentized_tests` at
+four magnitudes, and by `a_real_edge_still_clears_after_the_degenerate_guard`,
+which exists because a guard that refuses everything would pass the first test
+and be worthless.
+
+---
+
+## D-0161 · 2026-08-18 · `CLAUDE.md` §5 becomes the measured graph
+
+`CLAUDE.md`.
+
+The crate graph in §5 was a drawing, and it was wrong in three ways at once:
+
+* it named `web` and `cli`, and **neither exists as a crate**;
+* it omitted `greeks`, `costs`, `lake`, `telemetry` and `runner`, all of which do;
+* it drew every crate as a child of `core`, when `core`, `vocab`, `greeks` and
+  `telemetry` depend on **nothing** and `indicators` and `engine` depend only on
+  `vocab` — not on `core` at all.
+
+It is now derived from `cargo metadata --no-deps`. Twelve members, matching the
+twelve directories under `crates/` exactly.
+
+**Why the law rather than the document changed.** §10 says this file wins when it
+and a document disagree. That rule is about RULES. Here the file was wrong about
+a FACT — which crates exist and what they depend on — and a fact is measured, not
+adjudicated. Two crate manifests already recorded the gap in their own comments
+(D-0046 for `greeks`, D-0095 for `costs` and `runner`), so the tree had been
+carrying the contradiction in three places.
+
+**Two absences are now stated rather than drawn.** There is no `crates/web`, so
+gate 7's "browser crate depends on core alone" binds nothing and skips
+permanently — §2's toolchain boundary is what governs the front end since D-0052
+and D-0053. And there is no `cli`: the only binary is `api`, whose dependency set
+reaches neither `runner`, `engine`, `indicators`, `vocab` nor `costs`, so the
+sweep is compiled and tested but not reachable from an entry point.
+
+---
+
+## D-0162 · 2026-08-18 · C-02 and C-E-02 stated a flatness the live function does not have
+
+`docs/04-invariants.md`.
+
+Both rows asserted that per-bar support cost does not grow with what the
+combination requires — k=1 against k=8 — and C-E-02 added that **§6's absent
+depth parameter depends on this row**. Both were marked ✓, and both are proven by
+a bench measuring the free `engine::support`.
+
+**Since 7461f57 the sweep does not call that function.** It calls
+`Column::support`, which ANDs one bitmap per named position, so its per-bar cost
+is `O(k)` by construction and was measured at **7.307×** from k=1 to k=8 against
+the same 3.0× ceiling.
+
+The bench source had already worked this out and said so at length; what had
+never happened is the invariants file being brought into line with it. So the
+document, not the measurement, is what changes here:
+
+* **C-E-02** is narrowed to the row-major function it actually measures.
+* **C-E-02b** is added and carries the claim §6 depends on: the growth is linear
+  in depth, that is the design rather than a defect, and the quantity held
+  constant is cost per bar **per named position**.
+* **C-02** gains the same qualification in the workspace-wide table.
+
+**Five shipped bench rows had no invariant row at all** — C-E-05 through C-E-09,
+including both rows that measure the function the sweep actually calls. Gate 14
+checks only the ids a row LISTS, so rows that list nothing are invisible to it.
+All five are now documented.
+
+Every bench name cited was resolved against `crates/engine/benches/ratio.rs`
+before this entry was written; two first drafts named functions that do not
+exist, which is the defect D-0163 is about.
+
+---
+
+## D-0163 · 2026-08-18 · The proof the popcount filter was deleted for is now written
+
+`crates/engine/src/lib.rs`.
+
+The prefix join drops the textbook `popcount != k` skip. The comment authorising
+that deletion says the property "is proved by
+`every_generated_candidate_has_exactly_k_bits` instead".
+
+**No such test existed.** `rg` over all tracked files found the identifier
+exactly once — in that comment. `git log -S` over the whole history finds it in
+exactly ONE commit: the same one that removed the filter. Its diff adds two
+tests and names neither of them this. The proof was named into existence in the
+commit that needed it.
+
+The reasoning was correct — two (k−1)-sets sharing a prefix and differing in
+their highest position union to exactly k bits — which is why nothing broke. It
+was simply unproven, and gate 12 cannot see it: the block scanner reads runs of
+`///` and `//!`, and this is an ordinary `//` comment inside a function body.
+
+The test is now written. It walks the same exhaustive column space E-02 uses —
+every assignment of six bars over four bit patterns, at three thresholds — and
+asserts every itemset a level emits carries exactly that level's `k` bits, with a
+final assertion that the space produced any itemset at all so it cannot pass
+vacuously.
+
+**`Frontier::frequent`'s field doc is corrected in the same change.** It claimed
+the list is "ordered by support, ties broken by word order". `sort_canonically`
+keys on `(mask.words(), hits)` — words PRIMARY, and the `hits` tiebreak can never
+fire because a mask is unique within a level. The module header already said so;
+the field doc contradicted it.
+
+---
+
+## D-0164 · 2026-08-18 · Two autopilot doc blocks stated the opposite of their own code
+
+`crates/api/src/autopilot.rs`.
+
+The boot default was changed to FLY and then REVERSED — one session flying by
+default wrote 23,695 `pull.run` events before anyone looked. `stays_paused_from`
+carries the reversal: the switch is positive, so only the exact value `run`
+flies, and absent, empty, mistyped and non-UTF-8 all stay on the ground.
+
+**Two doc blocks were left behind by that reversal**, both above the code that
+contradicts them:
+
+* `AUTOPILOT_ENV`'s header still announced "The default was PAUSED and is now
+  FLYING" and that "the trigger is now the operator started the binary".
+* `AUTOPILOT_PAUSE`'s doc still said `PAUSE`, `paused`, `stop`, `false`, `0` and
+  `no` all **fly** — while `the_boot_default_pulls_nothing_and_only_the_exact_word_run_lets_it_fly`
+  asserts the opposite for that exact string, in the same file.
+
+A reader who stopped at either would have concluded that pressing Run in the IDE
+contacts a vendor. The operator's standing rule is that it must not, and the code
+has been correct throughout; only the prose was wrong.
+
+No behaviour changes. This entry exists because the tree carried a documented
+claim that a test in the same file already refuted, and nothing in CI compares a
+sentence against the code beneath it.
+
+---
+

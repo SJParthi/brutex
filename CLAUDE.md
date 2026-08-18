@@ -103,20 +103,48 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
 
 ## 5. Crate graph — acyclic
 
+**This is the MEASURED graph**, derived from `cargo metadata --no-deps` rather
+than drawn. The drawing it replaces was wrong in three ways at once and each was
+load-bearing: it named `web` and `cli`, neither of which exists as a crate; it
+omitted `greeks`, `costs`, `lake`, `telemetry` and `runner`, all of which do; and
+it drew every crate as a child of `core` when four of them depend on nothing at
+all and two depend only on `vocab`. A graph that cannot be checked against the
+manifests is a picture, not a law.
+
 ```
-core   (no dependencies)
- ├── store        fixed-stride bar files
- ├── indicators   bars in, condition bits out
- ├── vocab        the bit table and mask operations
- ├── engine       sweep, ranking
- ├── pull         vendor ingest
- ├── api          HTTP
- ├── web          browser UI, wasm32 — depends on core ONLY
- └── cli          operator entry point
+depends on NOTHING          core · vocab · greeks · telemetry
+
+core          <-- costs
+core telemetry <-- store · lake
+vocab         <-- indicators · engine
+core store telemetry            <-- pull
+core pull store telemetry       <-- api
+core costs engine indicators vocab  <-- runner
 ```
 
-`web` declaring any dependency other than `core` is a build failure, not a
-review comment. It compiles to WebAssembly where the filesystem does not exist.
+Twelve members, and the root `Cargo.toml` `members` list is exactly the twelve
+directories under `crates/`. The graph is acyclic and CI proves the two arrows
+that carry a rule: gate 9 that `core` depends on nothing, gate 9b that `greeks`
+does.
+
+**`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
+of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot
+reach the sweep. The only crate where the two halves may legally meet is one that
+is not on gate 22's list, and that is `runner` — which is why it exists and why
+keeping the join there preserves the gate rather than avoiding it.
+
+**The browser is not a crate.** It was drawn here as `web`, a wasm32 crate
+depending on `core` alone, and that has not been true since D-0052 and D-0053
+moved the front end to `web/` as an unrestricted directory. There is no
+`crates/web`, so the "depends on core ONLY" rule has nothing to bind and **CI
+gate 7 skips permanently**. §2's boundary is what governs the front end now: no
+crate may depend on its toolchain to build, test or run.
+
+**There is no `cli` either, and its absence is the live gap.** The only binary in
+the workspace is `api`, whose dependency set is `core`, `pull`, `store` and
+`telemetry` — so nothing that can be run reaches `runner`, `engine`,
+`indicators`, `vocab` or `costs`. The sweep compiles and is tested; it is not
+reachable from an entry point.
 
 ---
 
