@@ -577,6 +577,13 @@
        window look like a different control from the other. */
     font-variant-numeric: tabular-nums;
     padding: 11px 13px;
+    /* MEASURED AGAINST /ingest, WHICH IS THE FIELD THIS HAS TO MATCH. Every
+       other metric already agreed to the pixel — 16px, 600, 11px/13px, 9px
+       radius, mono — and the two still rendered 48px and 43px tall, because
+       this rule set no line-height and inherited a smaller one than the page's.
+       A five-pixel disagreement between the same control on two pages is the
+       drift that makes one of them look like a different product. */
+    line-height: var(--lh-base);
   }
   .din::placeholder {
     color: var(--faint);

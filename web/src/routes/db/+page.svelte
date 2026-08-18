@@ -4168,6 +4168,56 @@
    * the same fault: the reader asked for something and the page decided on
    * their behalf that they no longer want it, invisibly. This states the fact
    * and offers the button. */
+  /**
+   * THE DAY WINDOW OPENS ON THE SPAN THE STORE ACTUALLY HOLDS.
+   *
+   * Both fields opened on `dd Mon yyyy` while /ingest's opened on real dates,
+   * and that was the visible half of "these are not the same control". The
+   * other half was a five-pixel height difference, fixed in `DayField`.
+   *
+   * IT IS /ingest's RULE, NOT ITS VALUE. There the window is the ASK, so it
+   * seeds from what the feed can answer for. Here the window is a VIEW over
+   * what is already on disk, so it seeds from `dayBounds` — the first and last
+   * day this selection actually holds. Same principle the operator insisted on
+   * for /ingest: mapped to what is really there, never to a date typed into a
+   * source file.
+   *
+   * SEEDED ONCE PER SPAN, NOT PINNED. `dayBounds` moves when the feed, the
+   * instrument or the rung moves, and re-running this would overwrite a window
+   * the reader had narrowed — the silent change §4 bans. The guard is that both
+   * fields are empty, so a choice is never touched, and `stranded` is what
+   * speaks up if a chosen day stops being held.
+   */
+  $effect(() => {
+    if (fromDay === '' && toDay === '' && dayBounds[0] && dayBounds[1]) {
+      fromDay = dayBounds[0];
+      toDay = dayBounds[1];
+    }
+  });
+
+  /**
+   * EXACTLY ONE RUNG, ALWAYS, SEEDED FROM THE STORE.
+   *
+   * `timeframe === ''` used to mean "every rung at once" and there is no such
+   * view any more — see the comment where the `All rungs` row used to be. So the
+   * empty string is no longer a state this page can rest in: the moment the
+   * store answers, the finest rung it holds is selected.
+   *
+   * FINEST, NOT FIRST BY NAME. `tfAll` is already sorted by `tfCmp`, which
+   * orders by BAR LENGTH and not by text — as text these read `15min`, `1day`,
+   * `1min`, which is an ordering by first character and not by anything a bar
+   * length has. So `tfAll[0]` is the finest rung stored, which is the one the
+   * engine sweeps and the one a reader opening this page is most likely to want.
+   *
+   * IT DOES NOT OVERRIDE A CHOICE. The guard is that `timeframe` is empty, so
+   * this fires once per store reading and never again — a rung the operator
+   * picked is his, and `stranded` is what speaks up if the store stops holding
+   * it rather than this quietly moving him.
+   */
+  $effect(() => {
+    if (timeframe === '' && tfAll.length > 0) timeframe = tfAll[0][0];
+  });
+
   const stranded = $derived.by(() => {
     const out = [];
     if (picked && !instrumentKeys.has(picked)) {
@@ -4177,7 +4227,15 @@
       out.push({ rung: 'Segment', value: kind, clear: () => (kind = '') });
     }
     if (timeframe && !tfAll.some(([t]) => t === timeframe)) {
-      out.push({ rung: 'Timeframe', value: timeframe, clear: () => (timeframe = '') });
+      /* RE-SEEDS RATHER THAN CLEARING TO NOTHING. `''` used to mean "all rungs"
+         and there is no such view any more, so clearing would leave the page
+         with no rung at all. It moves to the first rung the store holds — the
+         same value the seeding effect would choose. */
+      out.push({
+        rung: 'Timeframe',
+        value: timeframe,
+        clear: () => (timeframe = tfAll[0]?.[0] ?? '')
+      });
     }
     if (expiry && !expiryOffered.includes(expiry)) {
       out.push({ rung: 'Expiry', value: expiry, clear: () => (expiry = '') });
@@ -5254,7 +5312,14 @@
            segment control" is exactly the question `CLAUDE.md` §4 says must be
            answered out loud rather than by an absence. The single segment the
            store holds is now stated rather than implied. -->
-      <div class="field" class:off={kinds.length < 2}>
+      <!-- NOT DISABLED, AND /ingest IS THE PRECEDENT. Its segments menu carries
+           no `disabled` at all: it draws all three rows, `tuck`s the two it
+           cannot serve, and lets the operator open them. This cell greyed itself
+           out whenever the store held fewer than two segments — which is the
+           ordinary case — so the control that answers "what segments are in
+           here" was dead exactly when somebody would ask it. A live control
+           holding one row answers the question; a grey one refuses it. -->
+      <div class="field">
         <span class="lab" title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
         <!-- A PICKER, NOT A TAB ROW. It was the only rung drawn as tabs, which
              made it look like a different kind of thing from the eight around
@@ -5269,7 +5334,6 @@
           single
           filter
           label="segments"
-          disabled={kinds.length < 2}
           title={kinds.length < 2
             ? `${kinds.length === 1 ? kinds[0][0] : 'Nothing'} is the only segment this store holds, so there is nothing to narrow. The store's own second field — INDEX, CASH, FNO.`
             : `${fmt(segmented.length)} instrument-month(s) across ${fmt(kinds.length)} segment(s). The store's own second field — INDEX, CASH, FNO.`}
@@ -5324,9 +5388,15 @@
           title={tfRefusal
             ? `No rung stored — ${tfRefusal}`
             : `${timeframe ? `${fmt(timeframed.length)} of ${fmt(universed.length)} instrument-month(s) at ${timeframe}. ${tfNote(timeframe)}` : `${fmt(tfAll.length)} rung(s) held, ${fmt(segmented.length)} instrument-month(s) across them`} Only rungs this store actually holds are listed — the list is counted off the rows, never off a fixed ladder.`}
-          summary={tfRefusal ? 'No rung stored' : timeframe ? timeframe : `All \u00b7 ${fmt(tfAll.length)}`}
+          summary={tfRefusal ? 'No rung stored' : timeframe || 'Pick a rung'}
           rows={[
-            { key: '', name: 'All rungs', detail: `${fmt(segmented.length)} held` },
+            /* NO "ALL RUNGS" ROW. A table mixing rungs is a table whose columns
+               stop meaning one thing: this file already records that "a month
+               holding both 1min and 1day rows has no single session size", so
+               `All · 9` produced a session count, a bars-per-session and a
+               change-% that belonged to no rung in particular. Exactly one rung
+               is selected at all times — seeded from the store by the effect
+               beside `stranded`. */
             ...tfAll.map(([tf, n]) => ({
               key: tf,
               name: tf,

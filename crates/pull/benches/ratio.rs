@@ -319,6 +319,56 @@ fn census_beats_the_scan_it_replaces() -> bool {
 /// so it never rehashes: `docs/07-o1-architecture.md` layer 3, O(1) **worst
 /// case** rather than average. A cost that tracked the census size would mean
 /// the probe had started to depend on how much is held.
+/// The per-lookup floor: the cheapest possible touch of the same manifest.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// C-12 divides one lookup cost by another, and a UNIFORM slowdown cancels in a
+/// quotient. An audit measured exactly that elsewhere in this workspace: a mask
+/// operation **174x slower passed its crate's ratio rows at 0.98x-1.00x**,
+/// because both legs moved together.
+///
+/// The denominator has to be something that cannot move when `entry` does. This
+/// reads the manifest's own held count and folds it — same struct, same pointer
+/// chased, no hash and no probe. The quotient is "how many of the cheapest
+/// manifest touches does one entry lookup cost".
+fn floor_ps(m: &Manifest) -> u128 {
+    cost_ps(20_000, || {
+        let n = black_box(m).len();
+        black_box(n.wrapping_add(1))
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<48} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<48} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-14 — one entry lookup costs a bounded multiple of the per-lookup floor.
+fn entry_lookup_stays_within_its_budget() -> bool {
+    /// Floors allowed per lookup. Measured below, then pinned.
+    const ALLOWED: u128 = 0;
+
+    let (m, _keep) = census(100_000);
+    let floor = floor_ps(&m);
+    println!("  the per-lookup floor is {floor} ps — one held-count read and an add");
+    let present = key(7);
+    let at = cost_ps(20_000, || black_box(&m).entry(black_box(&present)));
+    budget("C-14 entry lookup against the floor", floor, at, ALLOWED)
+}
+
 fn entry_lookup_is_flat() -> bool {
     let (one, _) = census(1_000);
     let (ten, _) = census(10_000);
@@ -480,6 +530,7 @@ fn main() {
     let mut ok = true;
     ok &= census_beats_the_scan_it_replaces();
     ok &= entry_lookup_is_flat();
+    ok &= entry_lookup_stays_within_its_budget();
     ok &= append_after_load_is_flat();
     if ok {
         println!("all ratios within the ceiling");
