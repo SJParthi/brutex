@@ -6,7 +6,7 @@
 //! | Ladder | Anchor | Positions | Live |
 //! |---|---|---|---:|
 //! | previous day, measured DOWN from the high | yesterday's H and L | 19–29 | 9 |
-//! | previous day, measured UP from the low | the same H and L | 69–70, 106–109 | 6 |
+//! | previous day, measured UP from the low | the same H and L | 69–71, 106–109 | 7 |
 //! | the last five completed sessions, UP from the low | five sessions' extremes | 110–120 | 11 |
 //!
 //! # Two ladders on one range, and why that is not a duplication
@@ -26,11 +26,27 @@
 //! D-0076 measured. That is the same base the current-session ladder uses and a
 //! different base from the pivot bands, which are fractions of the CPR width.
 //!
-//! # No division on the evaluation path
+//! # One level, one test
 //!
-//! The rung test is cross-multiplied, exactly as in [`crate::CurDayFib`]: the
-//! level is handed to `vocab::table::set_near` only so the band check happens in
-//! the crate that owns it, and the decision itself never divides.
+//! Each rung's level is materialised once, as an `i64`, and
+//! `vocab::table::set_near` is the only thing that decides whether the close sits
+//! inside the band around it.
+//!
+//! It used to be two decisions, and this section used to advertise the first of
+//! them: an exact cross-multiplied comparison against the UNROUNDED level, which
+//! needs no division. The level then handed to `vocab` was the TRUNCATED one, and
+//! `set_near` decided again against that. The two agree everywhere except at the
+//! band edge, where they are offset by the truncation remainder — under one paisa,
+//! and silent in both directions. A rung this module had accepted was dropped
+//! because `set_near` returns the mask unchanged whether the close was outside the
+//! band or the position was refused; and a close inside the band of the level
+//! `vocab` was actually told about never got asked, because the exact test had
+//! already skipped the rung.
+//!
+//! [`crate::CurDayFib`] was corrected the same way — its `rung_level` carries the
+//! measurement — and [`crate::gap`] is written that way from the start. The price
+//! is one division per rung, by a literal 1000, over ladders whose length is fixed
+//! at compile time.
 
 use vocab::{ConditionMask, Tolerance};
 
@@ -116,36 +132,43 @@ enum Direction {
     Up,
 }
 
-/// Is `close` within the band of rung `p` on this ladder?
+/// The price of rung `p` on this ladder — `anchor ∓ (p/1000)·R` — or `None` when
+/// it leaves `i64`.
 ///
-/// `level = anchor ∓ (p/1000)·R`, so `|close − level| ≤ tol` becomes an exact
-/// integer comparison once multiplied through by 1000. Two-sided rather than
-/// through `abs()`: `i64::MIN.abs()` panics in debug and wraps in release, which
-/// would make the two build profiles disagree and kill §3 rule 5.
-fn near(
-    close: i64,
-    anchor: i64,
-    p: i32,
-    range: i64,
-    direction: Direction,
-    tolerance: Tolerance,
-) -> bool {
-    if range <= 0 {
-        return false;
-    }
-    let c = i128::from(close);
-    let a = i128::from(anchor);
-    let rr = i128::from(range);
-    let pp = i128::from(p);
-    let residual = match direction {
-        Direction::Down => 1000 * (c - a) + pp * rr,
-        Direction::Up => 1000 * (c - a) - pp * rr,
+/// Materialised ONCE, so that the only test ever applied to a rung is the one
+/// `vocab::table::set_near` makes against this exact integer. The pair of a
+/// separate exact test and a separate materialisation is what the module doc
+/// describes, and it disagreed with itself at the band edge.
+///
+/// A level outside the type is `None` and the rung is skipped. It is not clamped:
+/// `i64::MAX` is a price a close can actually sit on, so a clamp fires the bit
+/// against a level the ladder never reached, and an `as` cast wraps it to the far
+/// end of the type where it is wrong for a different close.
+///
+/// `div_euclid` rather than `/`, matching [`crate::CurDayFib`]'s `rung_level`. Every
+/// rung numerator is non-negative and a real session's range is positive, so the two
+/// round identically on every input this ladder can be reached with; naming the
+/// rounding settles the sign cases rather than leaving them to an operand.
+fn rung_level(anchor: i64, p: i32, range: i64, direction: Direction) -> Option<i64> {
+    let step = (i128::from(p) * i128::from(range)).div_euclid(1000);
+    let level = match direction {
+        Direction::Down => i128::from(anchor) - step,
+        Direction::Up => i128::from(anchor) + step,
     };
-    let bound = i128::from(tolerance.milli()) * rr;
-    -bound <= residual && residual <= bound
+    i64::try_from(level).ok()
 }
 
-/// Set one ladder, deciding each rung by [`near`] and recording it through `vocab`.
+/// Set one ladder, deciding each rung ONCE and recording it through `vocab`.
+///
+/// # There is no range guard here, and there was one
+///
+/// `if range <= 0 { return mask }` stood at the top. `Tolerance::covers`, reached
+/// through `set_near` below, refuses a non-positive range before it looks at
+/// anything else — so the guard decided nothing that was not already decided, and a
+/// mutation deleting it survives every test in this crate. The refusal stays with
+/// the band. [`Prev5::bits`] keeps ITS guard, because that one is a different
+/// refusal: it declines a five-session span that does not fit `i64` at all, and no
+/// arithmetic downstream can tell a saturated span from a real one.
 fn emit(
     mut mask: ConditionMask,
     rungs: &[(i32, u16)],
@@ -155,19 +178,8 @@ fn emit(
     close: i64,
     tolerance: Tolerance,
 ) -> ConditionMask {
-    if range <= 0 {
-        return mask;
-    }
     for (p, index) in rungs {
-        if !near(close, anchor, *p, range, direction, tolerance) {
-            continue;
-        }
-        let step = i128::from(*p) * i128::from(range) / 1000;
-        let level = match direction {
-            Direction::Down => i128::from(anchor) - step,
-            Direction::Up => i128::from(anchor) + step,
-        };
-        let Ok(level) = i64::try_from(level) else {
+        let Some(level) = rung_level(anchor, *p, range, direction) else {
             continue;
         };
         // `unwrap_or(mask)` and not `if let Ok(next)`: `set_near` refuses only a
@@ -184,13 +196,18 @@ fn emit(
     mask
 }
 
-/// Both previous-day ladders, for one closing price. 15 positions.
+/// Both previous-day ladders, for one closing price. 16 positions.
+///
+/// **Sixteen, and this said fifteen.** The bullish ladder carries seven rungs, not
+/// six: 4.236 was computed and position 71 stopped being an orphan, and the two
+/// counts in this file were not moved with it. `POSITION_COUNT` is 27 and the
+/// `const` assertion beside it has been checking 9 + 7 + 11 the whole time.
 ///
 /// # Cost
 ///
-/// Fifteen cross-multiplied comparisons against a range fixed before the session
-/// opened. A compile-time constant count, no allocation, no division on the
-/// deciding path.
+/// Sixteen levels against a range fixed before the session opened, and the sixteen
+/// band tests `vocab` makes against them. A count fixed at compile time, no
+/// allocation, one division per rung by a literal 1000.
 #[must_use]
 pub fn prev_day_bits(levels: &DailyLevels, close: i64, tolerance: Tolerance) -> ConditionMask {
     let range = levels.pdh().saturating_sub(levels.pdl());
@@ -325,8 +342,8 @@ impl Prev5 {
     ///
     /// # Cost
     ///
-    /// Five comparisons to find the extremes plus eleven cross-multiplied rung
-    /// tests. Both counts are compile-time constants.
+    /// Five comparisons to find the extremes, eleven levels, and the eleven band
+    /// tests `vocab` makes against them. Every count here is fixed at compile time.
     #[must_use]
     pub fn bits(&self, close: i64, tolerance: Tolerance) -> ConditionMask {
         let mask = ConditionMask::ZERO;
@@ -341,8 +358,9 @@ impl Prev5 {
         // 1.84e19 span at `i64::MAX` and every rung is a fraction of the span, so the
         // whole ladder was laid out over half the range it names — rung 0.236 sat 2.17e18
         // paisa from the price position 111 claims. Refusing the ladder is the answer that
-        // claims nothing; `emit` treats a non-positive range the same way, for the same
-        // reason.
+        // claims nothing. A non-positive range reaching `emit` sets nothing either, because
+        // the band refuses one — but that refusal cannot tell a saturated span from a real
+        // one, so it is no substitute for this check.
         let Some(range) = high.checked_sub(low) else {
             return mask;
         };
@@ -593,34 +611,94 @@ mod tests {
         }
     }
 
-    /// [`near`] refuses a non-positive range itself, and does not lean on [`emit`]
-    /// having checked first.
+    /// A non-positive range decides nothing, and the refusal is the vocabulary's.
     ///
-    /// Both functions guard the range, and `emit` is the only caller `near` has inside
-    /// the library — so its own guard is reached from this test and nowhere else. The
-    /// arithmetic is why the guard is not redundant all the same: `bound` is
-    /// `tolerance.milli() * range`, so on a zero range the band collapses to
-    /// `residual == 0` and rung 0 of a flat session would report itself as an exact hit
-    /// on the anchor; on a NEGATIVE range — a corrupt record — the bound is negative,
-    /// `-bound <= residual && residual <= bound` is unsatisfiable for every close, and
-    /// the ladder would answer "nothing is near" for a reason nobody wrote down. A
-    /// second caller added to this module would get the refusal, not the arithmetic.
+    /// This replaces `near_refuses_a_zero_or_negative_range_without_measuring_it`, which
+    /// tested a private exact-comparison helper that no longer exists — the rung is
+    /// decided once now, and `vocab::table::set_near` is what decides it. Both refusals
+    /// are still worth pinning and the reasons are unchanged: on a zero range the band
+    /// collapses to the level itself, so rung 0 would otherwise report an exact hit on
+    /// the anchor; on a NEGATIVE range — a corrupt record — the band is negative and no
+    /// close can satisfy it, which is the right answer for a reason nobody wrote down
+    /// unless a test states it.
+    ///
+    /// `emit` is called directly because a negative range reaches it through neither
+    /// public entry point: `DailyLevels` refuses `pdh < pdl`, and [`Prev5::bits`] refuses
+    /// a five-session span that does not subtract.
     #[test]
-    fn near_refuses_a_zero_or_negative_range_without_measuring_it() {
-        // Exactly on the anchor, where the collapsed band would otherwise say "near".
-        assert!(
-            !near(10_000, 10_000, 0, 0, Direction::Down, tol()),
-            "rung 0 of a zero-range ladder must be refused, not called an exact hit"
+    fn a_non_positive_range_decides_nothing() {
+        let zero = emit(
+            ConditionMask::ZERO,
+            &PREV_DAY_DOWN,
+            10_000,
+            0,
+            Direction::Down,
+            10_000,
+            tol(),
         );
         assert!(
-            !near(10_000, 10_000, 500, -1_000, Direction::Up, tol()),
-            "a negative range is a broken record and cannot decide a rung"
+            zero.is_empty(),
+            "a zero-range ladder called the anchor an exact hit"
         );
-        // The same rung on a real range DOES fire, so the two refusals above are the
-        // range guard and not a fixture that could never have hit anything.
+        let negative = emit(
+            ConditionMask::ZERO,
+            &PREV_DAY_UP,
+            10_000,
+            -1_000,
+            Direction::Up,
+            10_000,
+            tol(),
+        );
+        assert!(negative.is_empty(), "a negative range decided a rung");
+        // The same ladder on a real range DOES fire, so the two refusals above are the
+        // range and not a fixture that could never have hit anything.
+        let live = emit(
+            ConditionMask::ZERO,
+            &PREV_DAY_DOWN,
+            10_000,
+            1_000,
+            Direction::Down,
+            9_764,
+            tol(),
+        );
         assert!(
-            near(10_000, 10_000, 0, 1_000, Direction::Down, tol()),
-            "rung 0 measured down from the anchor IS the anchor"
+            live.get(20),
+            "rung 0.236 of a 1,000-paisa range sits at 9_764 and the close is on it"
+        );
+    }
+
+    /// The rung is decided against the level `vocab` is handed, and against no other.
+    ///
+    /// # The disagreement this reproduces, in exact numbers
+    ///
+    /// `pdh − pdl = 12_345` and rung 0.382: `382 × 12_345 = 4_715_790`, so the rung sits
+    /// `4_715.790` paisa below the high, and the level the ladder can NAME — an `i64` of
+    /// paisa, §7 — is `4_715` below it, at `2_507_630`. The band is ten thousandths of the
+    /// range, 123.45 paisa.
+    ///
+    /// A close of `2_507_753` is 123 paisa above the named level and inside its band, and
+    /// 123.79 paisa above the unrounded one, outside THAT band. The shape this replaces
+    /// tested the unrounded level first, skipped the rung, and never asked `vocab` about
+    /// the level it would have set: position 21 stayed clear on a close the vocabulary's
+    /// own band covers. One paisa further out is outside both, which is the second
+    /// assertion — without it this would pass on a ladder that fires everywhere.
+    #[test]
+    fn the_rung_is_decided_against_the_level_the_vocabulary_is_handed() {
+        let x = levels(2_512_345, 2_500_000, 2_506_000);
+        assert_eq!(
+            x.pdh() - x.pdl(),
+            12_345,
+            "the fixture's range is the one the arithmetic above is about"
+        );
+        assert!(
+            prev_day_bits(&x, 2_507_753, tol()).get(21),
+            "a close inside the band of the level `vocab` was handed did not set rung \
+             0.382, so something upstream is deciding it against a different level"
+        );
+        assert!(
+            !prev_day_bits(&x, 2_507_754, tol()).get(21),
+            "one paisa further out is outside the band around that same level, so the \
+             edge asserted above is the band's and not a ladder that fires everywhere"
         );
     }
 
@@ -630,13 +708,13 @@ mod tests {
     /// Reachable only from a corrupt record, and that is exactly why it is worth a test:
     /// the band is a fraction of the RANGE, so a range near the width of the type gives a
     /// band near 1% of it, and rung 4.236 of such a range sits past `i64::MAX` while a
-    /// representable close is still inside that band. `near` therefore says yes about a
-    /// level that does not exist, and every alternative to the `try_from` invents one. A
-    /// saturating clamp — the policy `crate::daily` takes on the pivot ladder — pins the
-    /// level at `i64::MAX`, which is exactly where this close sits, so position 71 fires
-    /// against a price the ladder never reached; an `as` cast wraps it to the far end of
-    /// the type instead, where it is wrong for a different close. Skipping the rung is
-    /// the only answer that claims nothing.
+    /// representable close is still inside that band. The level therefore has to exist
+    /// before anything can be measured against it, and every alternative to the `try_from`
+    /// invents one. A saturating clamp — the policy `crate::daily` takes on the pivot
+    /// ladder — pins the level at `i64::MAX`, which is exactly where this close sits, so
+    /// position 71 fires against a price the ladder never reached; an `as` cast wraps it
+    /// to the far end of the type instead, where it is wrong for a different close.
+    /// Skipping the rung is the only answer that claims nothing.
     #[test]
     fn a_rung_whose_level_leaves_the_type_is_skipped_and_not_wrapped() {
         // 4.236 * RANGE, exactly: the rung numerator times a thousandth of the range.

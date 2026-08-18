@@ -143,9 +143,36 @@ impl<V: Copy> DatedTable<V> {
                 selected = row;
                 // A later row has displaced the one whose successor this was.
                 verified_from = None;
-            } else if verified_from.is_none() {
-                // Rows ascend, so the first row that has not started yet is the
-                // successor of whichever row is in force.
+            } else if verified_from.is_none() && matches!(row.value, Dated::Verified(_)) {
+                // Rows ascend, so this is the first row that has not started
+                // yet AND carries a value.
+                //
+                // The `Verified` half of that condition is the whole of the
+                // fix. `Refusal::verified_from` is documented as "the first day
+                // a verified rate exists again — the window's exclusive end",
+                // and this loop used to name the next row's start whatever that
+                // row held. The two answers are the same for every table this
+                // crate ships, because every shipped table is one refusal
+                // anchor followed by verified rows — and they differ the moment
+                // two unverified rows abut, which is a table shape the type
+                // permits and `is_shipping_shape` deliberately allows. In that
+                // shape the old spelling pointed a caller at a day that refuses
+                // again: a wrong answer wearing the shape of a right one.
+                //
+                // Stated as the property a caller actually reads the field for:
+                // `value_on(refusal.verified_from())` is `Ok` for every table
+                // and every day, which
+                // `the_day_a_refusal_names_is_a_day_that_answers` proves over a
+                // table with two unverified rows in a row.
+                //
+                // What this does NOT fix: `window_start` and `source` still
+                // come from the row in force at `day` alone. When two
+                // unverified rows with different citations abut, the widened
+                // window [`window_start`, `verified_from`) is reported with only
+                // the first row's citation. Widening the citation would mean
+                // concatenating two `&'static str`s, which no `const` table can
+                // do, and the alternative — reporting the narrower window — is
+                // the defect being removed here.
                 verified_from = Some(row.start);
             }
         }
@@ -430,6 +457,67 @@ mod tests {
         ]);
         let refusal = subject.value_on(TradeDay::MAX).expect_err("refuses");
         assert_eq!(refusal.verified_from(), None);
+        assert_eq!(refusal.window_start(), day(2050, 1, 1));
+    }
+
+    #[test]
+    fn the_day_a_refusal_names_is_a_day_that_answers() {
+        // Two unverified rows in a row — a shape the type permits and
+        // `is_shipping_shape` allows, and the only shape in which "the next row
+        // starts here" and "a verified value exists here" are different days.
+        let subject = table([
+            Some(DatedRow::unverified(day(2005, 1, 1), "the first gap")),
+            Some(DatedRow::unverified(day(2010, 1, 1), "a later gap")),
+            Some(DatedRow::verified(
+                day(2015, 1, 1),
+                9,
+                "the closing citation",
+            )),
+            None,
+            None,
+        ]);
+        for (asked, window_start, source) in [
+            (day(2005, 1, 1), day(2005, 1, 1), "the first gap"),
+            (day(2009, 12, 31), day(2005, 1, 1), "the first gap"),
+            (day(2010, 1, 1), day(2010, 1, 1), "a later gap"),
+            (day(2014, 12, 31), day(2010, 1, 1), "a later gap"),
+        ] {
+            let refusal = subject.value_on(asked).expect_err("both rows refuse");
+            // Naming the next row's start would answer 2010-01-01 for the first
+            // two days here, and 2010-01-01 refuses.
+            assert_eq!(
+                refusal.verified_from(),
+                Some(day(2015, 1, 1)),
+                "asked {asked}"
+            );
+            // The property the field exists for, asserted rather than assumed:
+            // the day a refusal sends a caller to is a day that answers.
+            let retry = refusal.verified_from().expect("a closed window");
+            assert_eq!(subject.value_on(retry), Ok(9), "asked {asked}");
+            // The window start and the citation still belong to the row in
+            // force, which is the limit `value_on`'s comment names.
+            assert_eq!(refusal.window_start(), window_start, "asked {asked}");
+            assert_eq!(refusal.source(), source, "asked {asked}");
+        }
+        // The anchor before the first gap is untouched by any of this.
+        assert_eq!(subject.value_on(day(2004, 12, 31)), Ok(1));
+        assert_eq!(subject.value_on(day(2015, 1, 1)), Ok(9));
+
+        // Two unverified rows at the end of the table close on nothing. The
+        // next row's start exists here (2051-01-01) and is not an answer, so
+        // this is the same defect with the opposite symptom: an invented end
+        // rather than a wrong one.
+        let trailing = table([
+            Some(DatedRow::unverified(day(2050, 1, 1), "a gap")),
+            Some(DatedRow::unverified(day(2051, 1, 1), "a later gap")),
+            None,
+            None,
+            None,
+        ]);
+        let refusal = trailing
+            .value_on(day(2050, 6, 1))
+            .expect_err("the first gap refuses");
+        assert_eq!(refusal.verified_from(), None, "the window never closes");
         assert_eq!(refusal.window_start(), day(2050, 1, 1));
     }
 

@@ -278,12 +278,23 @@ impl Merged {
 ///   `api::bench::every_order_and_pill_is_flat` measures the request path these
 ///   two feed at 2,787 and at 50,000 instruments.
 /// * `kept_isins` and `disputes` are `BTreeMap`, so they are **O(log n)
-///   comparisons per listing, not a probe**, and `kept_isins` allocates a
-///   `Vec<Vendor>` for each new ISIN. That is deliberate and is not a defect to
-///   repair: their ordering *is* the output order of the conflict and
+///   comparisons per listing, not a probe**. That is deliberate and is not a
+///   defect to repair: their ordering *is* the output order of the conflict and
 ///   eligibility lines, which `CLAUDE.md` §3 rule 5 requires to be identical
 ///   between two runs. A `HashMap` would trade a stated determinism guarantee
 ///   for a bound nobody measured.
+///
+/// `kept_isins` used to say it "allocates a `Vec<Vendor>` for each new ISIN",
+/// and it did — a `Vec` is a **multiset**, and the question asked of it is
+/// *which vendors kept this ISIN*, which is a **set**. One vendor keeping the
+/// same paper twice — the NSE row and the BSE row of one company carry one
+/// ISIN, and `InstrumentKey` carries the exchange, so both are kept and neither
+/// is a duplicate — pushed that vendor twice, and the eligibility walk below
+/// then emitted the identical dispute line once per push. The value is now a
+/// [`VendorSet`], the `u8` bitset this file already uses for `Merged::vendors`
+/// and `contributed`, so a repeat keep is idempotent by construction rather
+/// than by a `dedup` nobody wrote. It also removes the per-ISIN heap
+/// allocation, though that is a side effect and not the reason.
 ///
 /// Neither `BTreeMap` is on a request path. `merge` runs where the masters are
 /// parsed — `server::universe`, reached from `server::Site::load` once per
@@ -314,12 +325,21 @@ pub fn merge(sources: &[Source]) -> Merged {
     // And every ISIN each vendor KEPT, which is what a decline is checked
     // against. `BTreeMap` rather than `HashMap` so the conflict lines come out
     // in a stable order and two runs produce byte-identical output.
-    let mut kept_isins: BTreeMap<Isin, Vec<Vendor>> = BTreeMap::new();
+    //
+    // A SET PER ISIN, NOT A LIST. `VendorSet::with` is `|` on a `u8`, so the
+    // second time a vendor keeps the same ISIN it changes nothing — which is
+    // the property the eligibility walk below needs and a `Vec` did not have.
+    // `or_default` is `VendorSet::EMPTY` -- not assumed, but pinned by
+    // `core::vendor::tests::
+    //  a_vendor_set_is_a_set_and_every_vendor_has_its_own_bit`, which asserts
+    // both that `default()` is `EMPTY` and that adding twice is adding once.
+    let mut kept_isins: BTreeMap<Isin, VendorSet> = BTreeMap::new();
     for s in sources {
         for l in &s.kept {
             if let Some(i) = l.isin {
                 asserted.insert((l.key, i));
-                kept_isins.entry(i).or_default().push(s.vendor);
+                let keepers = kept_isins.entry(i).or_default();
+                *keepers = keepers.with(s.vendor);
             }
         }
     }
@@ -441,15 +461,27 @@ pub fn merge(sources: &[Source]) -> Merged {
             if !reason.judges_the_paper() {
                 continue;
             }
-            let Some(keepers) = kept_isins.get(&isin) else {
+            let Some(&keepers) = kept_isins.get(&isin) else {
                 continue;
             };
-            for keeper in keepers {
+            // ONE LINE PER KEEPER, AND A KEEPER IS COUNTED ONCE.
+            //
+            // The walk is over `Vendor::ALL` filtered by membership — a
+            // five-element const array, exactly the shape `contributed` above
+            // is built with, and for the same two reasons. It cannot repeat a
+            // vendor, so a vendor that kept this ISIN under two exchanges
+            // produces one dispute line and not two; and the order is
+            // `Vendor::ALL`'s, so it no longer depends on the order the CALLER
+            // handed the sources in. That is strictly more of what `CLAUDE.md`
+            // §3 rule 5 asks for, and the one production caller
+            // (`server::universe`, over `Vendor::MASTERED`) already passed them
+            // in ascending discriminant order, so no rendered line moves.
+            for keeper in Vendor::ALL.into_iter().filter(|&v| keepers.contains(v)) {
                 // A vendor listing the same ISIN twice — once kept, once
                 // declined — is a row shape neither master has, but it would
                 // be a statement about ONE vendor and not a cross-vendor
                 // disagreement, so it is not one.
-                if *keeper != s.vendor {
+                if keeper != s.vendor {
                     disputes.entry(isin).or_default().push(format!(
                         "{isin}: {} kept it, {} declined it as {}",
                         keeper.as_str(),
@@ -713,6 +745,93 @@ mod tests {
             let what = paper.reason();
             assert_eq!(m.eligibility.len(), 1, "{what} judges the paper");
         }
+    }
+
+    #[test]
+    fn one_vendor_keeping_an_isin_on_two_venues_disputes_it_once() {
+        // THE MULTISET USED AS A SET. `kept_isins` answers "which vendors kept
+        // this ISIN", which is a SET question, and it was a `Vec<Vendor>` that
+        // was PUSHED to once per kept listing. A vendor keeping the same paper
+        // on two venues is not a duplicate row and not an error: RELIANCE is
+        // INE002A01018 on NSE and on BSE, `InstrumentKey` carries the exchange,
+        // so both rows are legitimate keeps under one ISIN. That put `dhan` in
+        // the vector twice, and the eligibility walk emitted the SAME sentence
+        // once per entry.
+        //
+        // Without the `VendorSet` this asserts 2, and the operator's page
+        // carried a disagreement that was counted twice -- `Merged::eligibility`
+        // is what `/health` and the exit code count, so a doubled line is a
+        // doubled conflict count for one disagreement.
+        let reliance = Isin::new("INE002A01018").expect("valid");
+        let bse = Listing {
+            vendor_id: brutex_core::vendor::VendorId::new("500325").expect("a legal id"),
+            key: InstrumentKey {
+                exchange: Exchange::Bse,
+                segment: Segment::Cash,
+                underlying: Symbol::new("RELIANCE").expect("valid"),
+                kind: Kind::Equity,
+            },
+            isin: Some(reliance),
+            unsuffixed: None,
+        };
+        let m = merge(&[
+            from(Vendor::Dhan, vec![equity("RELIANCE", "INE002A01018"), bse]),
+            Source {
+                vendor: Vendor::Groww,
+                kept: Vec::new(),
+                declined: vec![(reliance, Skip::NotEquityListing)],
+            },
+        ]);
+        // Two keys -- the venue is part of the identity and the two rows do not
+        // merge. That is the input shape, asserted so a future change that
+        // merged them would fail here rather than make this test vacuous.
+        assert_eq!(m.len(), 2, "NSE and BSE are two instruments");
+        assert_eq!(
+            m.eligibility.len(),
+            1,
+            "one keeper, one decliner, ONE line: {:?}",
+            m.eligibility
+        );
+        let line = m.eligibility.first().expect("the one line");
+        assert!(line.contains("dhan kept it"), "{line}");
+        assert!(line.contains("groww declined it"), "{line}");
+        assert_eq!(m.verdict(), Verdict::Disputed);
+    }
+
+    #[test]
+    fn every_keeper_of_a_declined_isin_is_named_once_in_vendor_order() {
+        // THE OTHER HALF: making the multiset a set must not LOSE a keeper.
+        // Two different vendors keep the paper, a third declines it, and the
+        // walk over `Vendor::ALL` must produce one line per keeper -- in
+        // `Vendor::ALL` order, which no longer depends on the order the caller
+        // handed the sources in. Passed here DESCENDING (Zerodha, Dhan) on
+        // purpose; the lines still come out Dhan then Zerodha.
+        let disputed = Isin::new("INF090I01VS3").expect("valid");
+        let m = merge(&[
+            from(Vendor::Zerodha, vec![equity("FISTIPD3GP", "INF090I01VS3")]),
+            from(Vendor::Dhan, vec![equity("FISTIPD3GP", "INF090I01VS3")]),
+            Source {
+                vendor: Vendor::Groww,
+                kept: Vec::new(),
+                declined: vec![(disputed, Skip::NotEquityListing)],
+            },
+        ]);
+        assert_eq!(m.eligibility.len(), 2, "{:?}", m.eligibility);
+        assert!(
+            m.eligibility
+                .first()
+                .is_some_and(|l| l.contains("dhan kept it")),
+            "Dhan is before Zerodha in `Vendor::ALL`, whatever order the \
+             sources arrived in: {:?}",
+            m.eligibility
+        );
+        assert!(
+            m.eligibility
+                .get(1)
+                .is_some_and(|l| l.contains("zerodha kept it")),
+            "{:?}",
+            m.eligibility
+        );
     }
 
     #[test]

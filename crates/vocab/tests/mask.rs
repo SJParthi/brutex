@@ -108,19 +108,27 @@ impl Lcg {
         self.0
     }
 
+    /// **Every word is drawn.** This was four `next_u64()` calls followed by a
+    /// literal `0, 0` -- the smallest edit that made `from_words` compile when
+    /// the mask grew from four words to six. The cost was that no bar this
+    /// file generates ever held a bit above 255, so `intersect` folded zero
+    /// against zero in words 4 and 5, and the hit path could only ever MISS
+    /// there: replacing either word's `&` with a constant left every test in
+    /// this file green. Sized from [`vocab::mask::WORDS`], so the next
+    /// widening does not put the same two zeros back.
     fn next_mask(&mut self) -> ConditionMask {
-        ConditionMask::from_words([
-            self.next_u64(),
-            self.next_u64(),
-            self.next_u64(),
-            self.next_u64(),
-            0,
-            0,
-        ])
+        let mut words = [0u64; vocab::mask::WORDS];
+        for word in &mut words {
+            *word = self.next_u64();
+        }
+        ConditionMask::from_words(words)
     }
 
     /// A sparse mask, because the interesting hit tests are the ones that
-    /// nearly pass. Four uniform words almost never hit anything.
+    /// nearly pass. A candidate drawn like a bar almost never hits: a uniform
+    /// candidate needs every one of its ~192 set positions held, which no bar
+    /// in a run this size ever does. Six bits do it a fraction of the time,
+    /// which is the point.
     fn next_sparse(&mut self) -> ConditionMask {
         let mut m = ConditionMask::ZERO;
         for _ in 0..6 {
@@ -176,6 +184,110 @@ fn the_hit_test_agrees_with_the_naive_reference() {
         "400 draws and not one hit: the generator is producing candidates no \
          bar can satisfy, so this test is comparing two `false`s",
     );
+}
+
+/// **A bit in every word, including the highest, through `intersect` and
+/// through the hit path.**
+///
+/// The random masks above are this file's main instrument, and they only prove
+/// the words they populate. Even now that [`Lcg::next_mask`] fills all of them,
+/// a HIT in the top word is an accident of the seed -- the bar has to hold
+/// every position a sparse candidate asks for, which happens a handful of times
+/// in 400 draws and never at a position anyone chose. This fixture chooses
+/// them, one required bit and one spare bit per word, so the bar is a STRICT
+/// superset in every word and the answer is a hit for a reason.
+///
+/// What it kills in [`vocab::ConditionMask`], for every word `w` and not only
+/// the low ones:
+///
+/// * `hits`: `self.0[w] & candidate.0[w]` replaced by `0`, by `|` or by `^`,
+///   and the `^ candidate.0[w]` after it replaced by `|` or by `&`. Each one
+///   turns a genuine superset into a reported MISS, and before this test no
+///   asserted hit anywhere in the crate required a bit above word 3:
+///   `a_mask_hits_itself` stops at 200, `the_empty_candidate_hits_everything`
+///   requires nothing at all, `a_missing_bit_in_any_word_is_a_miss` asserts a
+///   hit only for the one bit its bar holds, and both anti-monotonicity tests
+///   assert an implication that a spurious miss satisfies. A word that can
+///   only ever answer MISS is a word no test is reading.
+/// * `hits`: `d_w` dropped from the `d0 | d1 | ...` fold. The holed bar below
+///   is missing exactly one required bit, in word `w` and nowhere else, so a
+///   fold that ignores that word answers HIT where the answer is MISS.
+/// * `intersect`: word `w`'s `&` replaced by `0`, `|` or `^`. An OR keeps the
+///   spare bit, an XOR drops the shared one and keeps the spare, and a zero
+///   drops both.
+///
+/// It proves nothing about `union` or `is_empty`; those have their own
+/// per-word test beside the type, and this one does not replace it.
+#[test]
+fn intersect_and_the_hit_path_carry_every_word_including_the_highest() {
+    let words = vocab::mask::WORDS;
+    let base = |w: usize| u32::try_from(w * 64).expect("a word base fits in a u32");
+
+    // The spare sits at offset 63, the top of its word, so the shift that sets
+    // it is the one that reaches the sign bit -- and in the last word that is
+    // `BITS - 1`, the highest position the mask has.
+    let candidate = (0..words).fold(ConditionMask::ZERO, |m, w| m.with_bit(base(w) + 5));
+    let bar = (0..words).fold(candidate, |m, w| m.with_bit(base(w) + 63));
+
+    let count = u32::try_from(words).expect("the word count fits in a u32");
+    assert_eq!(candidate.popcount(), count, "one required bit per word");
+    assert_eq!(
+        bar.popcount(),
+        count * 2,
+        "and one spare beside each of them"
+    );
+    assert!(
+        bar.get(ConditionMask::BITS - 1),
+        "the fixture must reach the highest addressable position; if it does \
+         not, the top word is being tested by a bit that is not in it",
+    );
+
+    assert!(
+        bar.hits(&candidate),
+        "a bar holding every required bit, in every word, is a HIT",
+    );
+    assert_eq!(
+        bar.hits(&candidate),
+        Naive::of(bar).hits(Naive::of(candidate)),
+        "the reference disagrees about a hit spanning every word",
+    );
+
+    // The intersection is exactly the candidate: every shared bit kept, every
+    // spare dropped, in every word.
+    let shared = bar.intersect(&candidate);
+    assert_eq!(
+        shared, candidate,
+        "intersect of a strict superset with the set is the set",
+    );
+    assert_eq!(
+        shared,
+        Naive::of(bar).intersect(Naive::of(candidate)).to_mask(),
+        "the reference disagrees about an intersection spanning every word",
+    );
+
+    for w in 0..words {
+        assert!(
+            shared.get(base(w) + 5),
+            "intersect lost word {w}'s shared bit"
+        );
+        assert!(
+            !shared.get(base(w) + 63),
+            "intersect kept word {w}'s spare bit, which only one side holds",
+        );
+
+        // One required bit missing, in word `w` and nowhere else.
+        let holed = bar.without_bit(base(w) + 5);
+        assert!(
+            !holed.hits(&candidate),
+            "word {w} is the only word missing a required bit and the hit test \
+             still answered HIT, so that word is not in the fold",
+        );
+        assert_eq!(
+            holed.hits(&candidate),
+            Naive::of(holed).hits(Naive::of(candidate)),
+            "the reference disagrees about a miss confined to word {w}",
+        );
+    }
 }
 
 /// **Anti-monotonicity, across every position.** Adding a required bit can

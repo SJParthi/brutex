@@ -503,9 +503,8 @@ impl Evaluator {
         Ok((self, vocab::table::only_live(mask)))
     }
 
-    /// Hand the finished session to the families that need yesterday.
     /// Hand the finished session to the families that need yesterday — **if it was a
-    /// regular one.**
+    /// regular one, and only as far as it can be handed.**
     ///
     /// A non-regular session's bars are emitted exactly like any other bar's: it is a real
     /// hour of real trading and every intraday position on it is a genuine measurement. What
@@ -517,22 +516,51 @@ impl Evaluator {
     /// the charter asks for: *"the previous-day anchor is the OHLC of the last regular
     /// trading session strictly before the Muhurat date"*. No walk is needed, because
     /// nothing overwrote it.
+    ///
+    /// # Three anchors, one session
+    ///
+    /// `prev5`, `yesterday` and `previous` are three views of the same completed session,
+    /// and all three are written here and nowhere else. They must therefore agree about
+    /// WHICH session that is. The body says what happens when the pivot ladder cannot be
+    /// built from it, which is the one case where they used to disagree.
     fn close_the_books(&mut self, was_regular: bool) {
         if !was_regular {
             return;
         }
         self.prev5
             .push_completed_session(self.running_high, self.running_low);
-        // A session whose levels are unusable leaves `yesterday` as it was rather
-        // than half-updating it: stale-and-consistent beats fresh-and-partial, and
-        // `DailyLevels` already refuses rather than inventing a ladder.
-        if let Ok(levels) = DailyLevels::from_previous_session(
+        // ABSENT, NOT STALE — and the difference is a whole day of wrong pivot bits.
+        //
+        // This was `if let Ok(levels) { self.yesterday = Some(levels) }`, under a comment
+        // arguing that keeping the ladder already installed was stale-and-consistent
+        // beating fresh-and-partial. It was neither, because the two assignments around it
+        // are unconditional: a session `DailyLevels` refuses left `yesterday` describing
+        // session N−2 while `prev5` and `previous` had already moved to N−1. The 44
+        // positions `crate::daily` owns and both previous-day Fibonacci ladders were then
+        // decided against a session that is not the previous one, on every bar of the next
+        // day, and nothing said so. A plausible ladder from the wrong day is
+        // indistinguishable from a ladder from the right one, which is §4's fallback that
+        // hides a failure in its quietest form.
+        //
+        // `.ok()` advances all three together and makes the refusal ABSENT instead. A
+        // position that cannot be evaluated evaluates false — `docs/03-vocabulary.md` §4 —
+        // and both `has_yesterday` and `warmed_up` report the absence, so a caller sees the
+        // loss rather than a substitute for it.
+        //
+        // WHAT IT COSTS, stated rather than implied: `warmed_up` can now go true → false,
+        // because `yesterday` is no longer write-once. Its own doc block carries that and
+        // what it means for `crate::column`.
+        //
+        // WHAT IT DOES NOT FIX: the refusal is still not NAMED. `Unusable` is dropped here
+        // exactly as it was before, so a caller learns "no ladder" and not "that session's
+        // own span left `i64`". Carrying the reason out needs a field on this type and a
+        // decision about what a consumer does with it, which is wider than this change.
+        self.yesterday = DailyLevels::from_previous_session(
             self.running_high,
             self.running_low,
             self.running_close,
-        ) {
-            self.yesterday = Some(levels);
-        }
+        )
+        .ok();
         self.previous = Some(PreviousSession {
             high: self.running_high,
             low: self.running_low,
@@ -546,7 +574,11 @@ impl Evaluator {
         self.prev5.filled()
     }
 
-    /// Whether the families that need yesterday can answer yet.
+    /// Whether the families that need yesterday can answer.
+    ///
+    /// Not "yet": this can go false again. A completed regular session the pivot ladder
+    /// cannot be built from clears it rather than leaving the session before it in place —
+    /// see [`Self::close_the_books`].
     #[must_use]
     pub const fn has_yesterday(&self) -> bool {
         self.yesterday.is_some()
@@ -602,7 +634,8 @@ impl Evaluator {
         self.warmed_up() && self.orb.every_window_closed()
     }
 
-    /// Has the RUN warmed up? Monotone, and one boundary for the whole sweep.
+    /// Has the RUN warmed up? One boundary for the whole sweep, and monotone on any run
+    /// whose completed sessions can each produce a pivot ladder.
     ///
     /// # Why this is separate from [`Self::every_family_can_answer`], and why that matters
     ///
@@ -616,7 +649,7 @@ impl Evaluator {
     ///
     /// | | Monotone? | False when |
     /// |---|---|---|
-    /// | `warmed_up` | **yes**, once true it stays true | the run has not seen five sessions, one previous day, or 200 candles |
+    /// | `warmed_up` | **yes** while every completed session is usable — see below | the run has not seen five sessions, one previous day, or 200 candles |
     /// | `every_family_can_answer` | no | additionally, during the first 60 minutes of any session |
     ///
     /// **Use `warmed_up` to choose where a sweep starts.** Using the other would discard the
@@ -626,6 +659,25 @@ impl Evaluator {
     /// Use `every_family_can_answer` to interpret a single bar: it is what says an
     /// `orb60_*` position is false because the window has not closed rather than because the
     /// price is elsewhere.
+    ///
+    /// # The one way this one can go BACKWARD
+    ///
+    /// [`Self::close_the_books`] clears `yesterday` when a completed regular session's own
+    /// span leaves `i64` and `DailyLevels` refuses to build a ladder from it. A run that was
+    /// warm therefore reports itself cold again for exactly as long as the pivot family
+    /// cannot answer. That is the honest report; the alternative is what stood here before,
+    /// which kept an older session's ladder and reported warm — a stale anchor wearing a
+    /// fresh label, and 44 positions decided against the wrong day.
+    ///
+    /// Reaching it needs a session spanning more than half the type, so it is a corrupt
+    /// record and not a market. It is named anyway because `crate::column` reads this signal
+    /// per bar and infers a CONTIGUOUS swept column from the monotonicity. The inference is
+    /// what weakens, not the column: `Column` already carries a source index per swept bar,
+    /// because a refusal can already punch a hole anywhere mid-stream.
+    /// `an_unusable_session_clears_the_pivot_anchor_instead_of_leaving_it_stale` pins the
+    /// clearing, and `only_the_run_level_signal_is_monotone` pins the monotonicity that
+    /// holds on every session a ladder CAN be built from.
+    ///
     /// # `previous.is_some()` is redundant today, and stays
     ///
     /// A verification sweep deleted it and nothing caught it — correctly, because nothing
@@ -1385,6 +1437,107 @@ mod tests {
             assert!(
                 !mask.get(u32::from(p)),
                 "daily position {p} was set from a session with no usable levels"
+            );
+        }
+    }
+
+    /// An unusable session takes the pivot anchor with it, rather than leaving it a day
+    /// behind the other two.
+    ///
+    /// # The state this reproduces
+    ///
+    /// `close_the_books` writes three views of one completed session: the five-session
+    /// ring, the pivot ladder, and the gap family's previous-session edge. Two of the three
+    /// were unconditional and the ladder was not, so a session `DailyLevels` refuses left
+    /// the ladder describing the session BEFORE it while the other two had moved on. Every
+    /// previous-day position on the next session was then decided against the wrong day —
+    /// not a crash, not an empty mask, just a plausible ladder from a day that is not
+    /// yesterday.
+    ///
+    /// Day one is ordinary, so a real ladder is installed and the premise below is not
+    /// vacuous. Day two carries two zero-range bars at opposite ends of the type: each is
+    /// legal on its own — `Candle::check` bounds `high - low` WITHIN a bar — while the
+    /// session's extremes come from two different bars and their span does not fit `i64`.
+    ///
+    /// # What each assertion is for
+    ///
+    /// The session count says the OTHER anchors advanced, which is what makes this the
+    /// advance-all-three fix and not the refuse-the-session one: a fix that declined to
+    /// push an unusable session would read 1 here. `previous` has no accessor and is not
+    /// asserted; it is written by the same unconditional statement as the push.
+    #[test]
+    fn an_unusable_session_clears_the_pivot_anchor_instead_of_leaving_it_stale() {
+        const HALF: i64 = i64::MAX / 2;
+        let session_open = |d: i64| d * DAY_MICROS + IST_OPEN_UTC_MICROS;
+        let flat = |ts: i64, price: i64| Candle {
+            ts_micros: ts,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            volume: 0,
+            open_interest: i64::MIN,
+        };
+
+        let mut e = fresh();
+        for m in 0..3_i64 {
+            let _ = e
+                .step(&flat(
+                    session_open(31_000) + m * MINUTE_MICROS,
+                    2_500_000 + m * 100,
+                ))
+                .expect("an ordinary bar");
+        }
+        // Day two's first bar closes day one's books.
+        let _ = e
+            .step(&flat(session_open(31_001), 2_500_000))
+            .expect("an ordinary bar the next day");
+        assert!(
+            e.has_yesterday(),
+            "the premise is wrong: an ordinary completed session installed no ladder, so \
+             nothing below can show a STALE one"
+        );
+        assert_eq!(e.sessions_completed(), 1, "day one did not complete");
+
+        // Day two is now made unusable, after it has already begun.
+        let _ = e
+            .step(&flat(session_open(31_001) + MINUTE_MICROS, -HALF - 2))
+            .expect("a zero-range bar at the bottom of the type is a real bar");
+        let _ = e
+            .step(&flat(session_open(31_001) + 2 * MINUTE_MICROS, HALF + 2))
+            .expect("a zero-range bar at the top of the type is a real bar");
+
+        // Day three's first bar closes day two's books.
+        let mask = e
+            .step(&flat(session_open(31_002), 2_500_000))
+            .expect("a sane bar on the third day");
+
+        assert_eq!(
+            e.sessions_completed(),
+            2,
+            "the unusable session was not counted, so the three anchors are being held \
+             back together and this test is measuring the wrong fix"
+        );
+        assert!(
+            !e.has_yesterday(),
+            "the pivot ladder survived a session it cannot have been built from, so it is \
+             day one's — the rolling window and the previous-session edge are on day two \
+             and the three anchors describe two different days"
+        );
+        for p in crate::daily::positions() {
+            assert!(
+                !mask.get(u32::from(p)),
+                "daily position {p} was decided against a session that is not yesterday"
+            );
+        }
+        for (_, p) in crate::fib::PREV_DAY_DOWN
+            .into_iter()
+            .chain(crate::fib::PREV_DAY_UP)
+        {
+            assert!(
+                !mask.get(u32::from(p)),
+                "previous-day Fibonacci position {p} was decided against a session that is \
+                 not yesterday"
             );
         }
     }

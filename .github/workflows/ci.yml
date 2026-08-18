@@ -4445,6 +4445,98 @@ jobs:
           crates/pull/src/ssm.rs 1
           '
 
+          # ---- rule 5d. `assert!` is a panic that clippy does not lint. -----
+          #
+          # THE HOLE. `clippy::panic` covers `panic!` and nothing else, and rule
+          # 5's grep above spells out four macros and two methods -- not one of
+          # them `assert!`. So a runtime `assert!(cond)` dropped into a shipping
+          # function is refused by no lint, counted by no rule, and named nowhere
+          # in this file. It is the same CLAUDE.md section 4 breach every other
+          # spelling on rule 5's list is -- degrade loudly or refuse, never die --
+          # and it was the one spelling nothing could see.
+          #
+          # WHY IT IS A SEPARATE RULE AND NOT THREE MORE ALTERNATIVES IN RULE 5'S
+          # PATTERN. Measured over this workspace's own production scope: 290
+          # occurrences of `assert!`, `assert_eq!` and `assert_ne!` across 41
+          # files. 286 OF THEM ARE COMPILE-TIME -- `const _: () = assert!(..)`
+          # items and `const NAME: T = { .. assert!(..) .. }` initialisers, the
+          # idiom this repository reaches for constantly because a const
+          # assertion fails the BUILD, and a build failure is the loudest refusal
+          # there is. Folding them into rule 5 would have produced a 41-line
+          # allowlist whose entries all say "these are const assertions", which is
+          # the mute button this gate exists to refuse, and it would go red every
+          # time somebody added a good one.
+          #
+          # SO THE RULE READS ONLY THE `fn` SCOPE, and the classifier is five
+          # lines because the delimiter is the thing not to get wrong here. It
+          # does NOT count braces and does NOT look for an item's end: braces live
+          # in string literals, and `crates/api/src/render.rs` is the proof --
+          # `const STYLE: &str` is a CSS literal full of `{`, `}` and `;`, and
+          # `crates/api/src/bars.rs` and `crates/api/src/calendar.rs` carry two
+          # more. Every end-of-item scanner tried against those three got them
+          # wrong. Instead each line carries the KIND of the last item opened
+          # above it:
+          #
+          #   * a line declaring a const ITEM -- `const NAME:` or `const _:`,
+          #     never `const fn`, which has no `:` after the name -- sets the kind
+          #     to const, but ONLY when it does not end in `;`. A complete
+          #     one-line const cannot contain a later line, so
+          #     `fn f() { const LIMIT: usize = 4; assert!(..) }` still scores that
+          #     assert as runtime. That was the one silent false negative worth
+          #     closing, and closing it costs one clause.
+          #   * a line declaring an `fn` sets the kind to fn.
+          #   * only lines whose kind is fn reach the grep.
+          #
+          # WHAT IT CANNOT SEE, said rather than discovered later:
+          #   * an `fn` DECLARED INSIDE a const initialiser flips the kind, and
+          #     the rest of that initialiser then reads as runtime. That is a
+          #     false POSITIVE -- loud, resolved by a human, and the direction
+          #     this repository errs in. Zero occurrences today.
+          #   * `debug_assert!` is deliberately NOT matched: the `_` before
+          #     `assert` fails the boundary guard. `[profile.release]` does not
+          #     set `debug-assertions`, so it defaults off and the macro compiles
+          #     to nothing in the shipped binary. It is not a shipping panic, and
+          #     claiming it was would be the overselling this gate's preamble
+          #     warns about.
+          #   * whether an assert inside a `const fn` is ever REACHED at runtime.
+          #     All three entries below are exactly that case, so each one is
+          #     traced to its callers rather than assumed.
+          #
+          # THE THREE ENTRIES:
+          #
+          #   crates/core/src/universe.rs 2
+          #     `MemberIndex::<N>::build`, a `pub const fn`. Its SIX production
+          #     call sites are all `pub static NAME: MemberIndex<N> =
+          #     MemberIndex::build(&TABLE);` at file scope -- FNO_INDEX, NTM_INDEX
+          #     and the four NIFTY_* -- so both assertions are const-evaluated and
+          #     a breach is a build failure, which is what the comment block above
+          #     them already says. The only runtime calls are in that file's own
+          #     `#[cfg(test)]` module, which this gate never scans, and one of them
+          #     exists precisely to OBSERVE the panic:
+          #     `a_table_size_that_is_not_a_power_of_two_is_refused` calls
+          #     `MemberIndex::<12>::build(&[])` at runtime because, in its own
+          #     words, a const panic is a build failure and a build failure is not
+          #     a red test.
+          #   crates/pull/src/manifest.rs 1
+          #   crates/store/src/layout.rs 1
+          #     The same shape twice: `Layout::declared`, a `pub const fn` whose
+          #     only callers are `pub const V1`/`V2`/`V3` in the same file. The
+          #     RUNTIME sibling is `Layout::declare`, which returns a `Result` and
+          #     names the offending field -- which is what section 4 asks for --
+          #     and both doc comments already say so: a const panic cannot format
+          #     a field name, and `declare` does.
+          #
+          # Pinned rather than removed, because removing any of the three removes
+          # a compile-time check that is doing real work. The count is a ceiling
+          # on the same ratchet every rule above uses: a third assert in either
+          # `declared`, a fifth in `build`, or a first one anywhere else, is a red
+          # build and a visible diff on this file.
+          allow_assert='
+          crates/core/src/universe.rs 2
+          crates/pull/src/manifest.rs 1
+          crates/store/src/layout.rs 1
+          '
+
           work=$(mktemp -d)
           corpus="$work/corpus"
           scope="$work/scope"
@@ -4733,6 +4825,44 @@ jobs:
           if [ ! -s "$work/disarm" ]; then
             echo "  none"
           fi
+
+          # Rule 5d's corpus: the lines whose nearest enclosing item is an `fn`.
+          # The whole argument is written above `allow_assert`; these are the five
+          # lines it describes. Read over `$corpus` and not `$scope`, so that a
+          # const assertion QUOTED IN A COMMENT -- and this file's crates quote
+          # them often -- cannot enter either side of the count.
+          awk '
+            {
+              p = $0; sub(/:[0-9]+:.*$/, "", p)
+              if (p != cur) { cur = p; kind = "fn" }
+              t = $0; sub(/^[^:]*:[0-9]+:/, "", t)
+              s = t; sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s)
+              if (s ~ /^(pub([ \t]*\([^)]*\))?[ \t]+)?const[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*:/) {
+                if (s !~ /;$/) kind = "const"
+                next
+              }
+              if (s ~ /(^|[^A-Za-z0-9_])fn[ \t]+[a-z_]/) kind = "fn"
+              if (kind == "fn") print
+            }
+          ' "$corpus" > "$work/fnscope"
+          fn_lines=$(awk 'END{print NR}' "$work/fnscope")
+          all_lines=$(awk 'END{print NR}' "$corpus")
+          echo
+          echo "rule 5d scope: ${fn_lines} line(s) inside an fn, $((all_lines - fn_lines))"
+          echo "               inside a const item and therefore compile-time"
+          # A classifier that stops matching would silently drop every line out of
+          # scope and this rule would print a clean zero over nothing at all --
+          # the failure mode gate 8 shipped with. A workspace with a function in
+          # it cannot have an empty fn scope.
+          if [ "$fn_lines" -eq 0 ]; then
+            echo "  REFUSED  rule 5d classified NO line as fn scope. The classifier"
+            echo "           above stopped matching; a silent zero is not a pass."
+            bad=1
+          fi
+          check 5d '(^|[^A-Za-z0-9_])assert(_eq|_ne)?!' \
+                "$allow_assert" \
+                'CLAUDE.md section 4 — a runtime assert is a panic clippy::panic does not lint' \
+                "$work/fnscope"
 
           echo
           if [ "$bad" -ne 0 ]; then

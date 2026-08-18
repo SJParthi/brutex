@@ -295,6 +295,53 @@ enum Slot<'a> {
     Many,
 }
 
+/// Every non-empty trading symbol the master lists, in one pre-sized set.
+///
+/// # Why this is not a `.filter().collect()`
+///
+/// It was one, and `collect` reserved **nothing**. A `HashSet` built by
+/// `FromIterator` reserves the iterator's size-hint *lower* bound, and
+/// `Filter` cannot know how many rows will survive its predicate, so that
+/// bound is `0` however long the master is. The table therefore starts empty
+/// and rehashes its way up — every key inserted so far re-hashed and re-placed
+/// at each doubling, ~18 of them on the 204,819-row master this module is
+/// sized for, all of it invisible because the answer comes out correct.
+///
+/// `docs/07-o1-architecture.md` layer 2 is the rule: reserve from a bound that
+/// is already known. `master.len()` is known before the walk and is an
+/// over-estimate only by the blank symbols, which is the right direction.
+///
+/// # The bound is the row count, not the row count doubled
+///
+/// D-0040 gave the manifest's index headroom because entries are appended to it
+/// *after* the load, and a reservation of exactly `n_valid` rehashed on the
+/// first one. Nothing is ever inserted into this set after it is returned — it
+/// is built once and only probed — so exact is exact, and the headroom would
+/// buy nothing but memory.
+///
+/// # What this does not change
+///
+/// The probe is what it always was, and the set is what it always was: the same
+/// symbols, the same absence of the blank one. This is a reservation, not a
+/// behaviour, and `the_symbol_index_is_reserved_from_the_master_not_the_survivors`
+/// asserts both halves so a future edit cannot buy the capacity by dropping the
+/// filter.
+fn symbol_index<'a>(master: &[VendorInstrument<'a>]) -> HashSet<&'a str> {
+    let mut symbols: HashSet<&'a str> = HashSet::with_capacity(master.len());
+    // A BLANK SYMBOL IS AN ABSENCE, NOT A NAME — the same rule the key index
+    // above applies to a blank ISIN. Indexing it would make every row that
+    // carries no symbol answer "yes, this feed lists it" for a published name
+    // that is itself blank, which is the confusion `VendorHasNoIsin` exists to
+    // keep apart from a real listing.
+    symbols.extend(
+        master
+            .iter()
+            .map(|row| row.trading_symbol)
+            .filter(|symbol| !symbol.is_empty()),
+    );
+    symbols
+}
+
 /// Resolve one index's published names against one feed's master.
 ///
 /// # The key is chosen by the FEED, not by the caller
@@ -342,12 +389,9 @@ pub fn resolve(
 
     // Only needed for the ISIN key: it answers "does this feed list the symbol
     // at all", which is what separates a vendor that has never heard of an
-    // instrument from one that lists it without an identity.
-    let by_symbol: HashSet<&str> = master
-        .iter()
-        .map(|row| row.trading_symbol)
-        .filter(|symbol| !symbol.is_empty())
-        .collect();
+    // instrument from one that lists it without an identity. Reserved from
+    // `master.len()` rather than collected — see `symbol_index`.
+    let by_symbol: HashSet<&str> = symbol_index(master);
 
     let mut rows = Vec::with_capacity(published.len());
     for row in published {
@@ -574,6 +618,81 @@ mod tests {
         assert_eq!(out.count(Verdict::Lacks), 0);
         assert!(out.is_sound());
         assert!(Verdict::VendorHasNoIsin.because().contains("exchange"));
+    }
+
+    /// **A set collected through a filter reserves for the survivors, and the
+    /// master is what goes in.**
+    ///
+    /// `HashSet`'s `FromIterator` reserves the size-hint *lower* bound, and
+    /// `Filter`'s lower bound is `0` whatever it is filtering — so
+    /// `master.iter().map(..).filter(..).collect()` sized this table for the
+    /// symbols that came out and rehashed every key already placed at each
+    /// doubling on the way there. Correct, and O(rows) with a growing constant
+    /// nobody could see, because the set it produced was identical.
+    ///
+    /// The two halves are asserted together on purpose. Capacity alone would
+    /// pass if a future edit bought it by dropping the `is_empty` filter, and
+    /// the membership alone is what the old code already satisfied.
+    ///
+    /// The row count is deliberately far above the survivor count: at three
+    /// survivors a `collect` reserves for three, so `capacity() >= 64` is false
+    /// under the defect and true under the fix, with no timing in it.
+    #[test]
+    fn the_symbol_index_is_reserved_from_the_master_not_the_survivors() {
+        let mut master = vendor(&[
+            ("1", "AAA", "INE000A01001"),
+            ("2", "BBB", "INE000B01002"),
+            ("3", "CCC", "INE000C01003"),
+        ]);
+        // Rows a vendor master really does carry: listed, and named by nothing
+        // this join can use.
+        for _ in 0..61 {
+            master.push(VendorInstrument {
+                vendor_id: "x",
+                trading_symbol: "",
+                isin: "",
+            });
+        }
+
+        let index = symbol_index(&master);
+        assert_eq!(
+            index.len(),
+            3,
+            "a blank symbol is an absence and is not indexed as a name"
+        );
+        for symbol in ["AAA", "BBB", "CCC"] {
+            assert!(index.contains(symbol), "{symbol} is listed by the master");
+        }
+        assert!(
+            !index.contains(""),
+            "the blank must not become a name every symbol-less row answers to"
+        );
+        assert!(
+            index.capacity() >= master.len(),
+            "the table must be reserved from the {} rows that go in, not from \
+             the {} symbols that come out — it holds {}",
+            master.len(),
+            index.len(),
+            index.capacity()
+        );
+
+        // AND THE JOIN IS UNCHANGED BY IT. The reservation is a cost, not a
+        // behaviour: the same master through `resolve` must still separate a
+        // symbol the feed lists without an ISIN from one it does not list.
+        let listed_without_isin = vendor(&[
+            ("1", "AAA", "INE000A01001"),
+            ("2", "BBB", ""),
+            ("3", "CCC", "INE000C01003"),
+        ]);
+        let out = resolve(
+            "Nifty Test",
+            "groww",
+            JoinKey::Isin,
+            &published(),
+            &listed_without_isin,
+        );
+        assert_eq!(out.count(Verdict::VendorHasNoIsin), 1);
+        assert!(out.is_sound());
     }
 
     #[test]

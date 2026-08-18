@@ -193,6 +193,22 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
 }
 
 /// C-I-05 — one bar's whole evaluation costs a bounded multiple of the floor.
+///
+/// # JUDGED HERE, PINNED NOWHERE ELSE
+///
+/// The verdict feeds `main`'s exit status, so gate 8 goes red on a breach. What this row
+/// does not have is a name outside this file. `docs/04-invariants.md` carries `C-I-01`
+/// through `C-I-04` and no `C-I-05`, and gate 14's coverage entry for this crate lists
+/// those same four ids and a floor of five measurement points. This row does not report
+/// through the helper that scan counts, so it contributes nothing to the count either.
+///
+/// Deleting the assertion below therefore deletes the measurement and every static check
+/// stays green. That is gate 12's own admission one level down: a claim can name a proof
+/// that exists, and nothing checks the proof still does anything. `main` holds the rows in
+/// an array of fixed length, so deleting a row WHOLE is a compile error — it cannot see a
+/// row gutted in place. The repair that can is a row in `docs/04-invariants.md` and the id
+/// added to gate 14's table; both files are outside this change and this is recorded
+/// rather than fixed.
 fn a_candle_stays_within_its_budget(floor: u128) -> bool {
     /// Floors allowed for one `step`.
     ///
@@ -257,6 +273,22 @@ fn column_per_bar_ps(n: i64) -> u128 {
 /// sessions and 200,000 is about a hundred and thirty-eight, and the run warms
 /// after five. A short leg that never warmed would take the no-push branch for
 /// every bar and this row would compare two different code paths.
+///
+/// # JUDGED HERE, PINNED NOWHERE ELSE — and something cites it
+///
+/// As `C-I-05`: the verdict feeds `main`'s exit status, so gate 8 refuses a breach, and
+/// nothing else in the repository names this row. It is absent from
+/// `docs/04-invariants.md` and from gate 14's coverage entry for this crate, whose floor
+/// of five measurement points this file clears with room to spare without it. So the
+/// comparison below can be deleted and every static check stays green.
+///
+/// The difference from `C-I-05` is that a production doc block depends on this one:
+/// `crate::column` cites `C-I-06` by id, twice, as the measurement behind its per-bar
+/// cost claim. Gate 12 accepts that citation on the strength of the bench PATH it names
+/// beside the id, and the path exists whatever this file contains — which is precisely
+/// what that module's own doc block says the gate cannot see. The repair is the same one:
+/// a row in `docs/04-invariants.md` and the id in gate 14's table, both outside this
+/// change.
 fn the_column_costs_the_same_per_bar_however_long_it_is() -> bool {
     let base = column_per_bar_ps(20_000);
     let at = column_per_bar_ps(200_000);
@@ -581,6 +613,16 @@ fn a_session_rollover_costs_what_an_ordinary_candle_costs() -> bool {
     )
 }
 
+/// How many rows this bench judges.
+///
+/// The array in `main` is annotated with it, so removing a row is a type error rather than
+/// a quiet loss of coverage. That is worth a line here because two of the six — `C-I-05`
+/// and `C-I-06`, see their own doc blocks — are named by no invariant row and by no entry
+/// in gate 14's coverage table, and gate 14's measurement-point floor for this crate is
+/// five against the several this file carries. Nothing else in CI would notice their
+/// removal. This notices exactly one shape of removal, the whole-row one, and says so.
+const ROWS: usize = 6;
+
 fn main() {
     println!("indicators — gate 8, ceiling {CEILING_PERMILLE} permille");
     println!(
@@ -590,17 +632,20 @@ fn main() {
     );
     let floor = floor_ps();
     println!("  the machine's floor is {floor} ps — one black-boxed wrapping_add");
-    let mut ok = true;
-    ok &= a_candle_stays_within_its_budget(floor);
-    ok &= a_candle_costs_the_same_however_many_came_before();
-    ok &= a_candle_costs_the_same_whatever_it_contains();
-    ok &= the_integer_square_root_is_bounded_and_flat_per_iteration();
-    ok &= a_session_rollover_costs_what_an_ordinary_candle_costs();
-    ok &= the_column_costs_the_same_per_bar_however_long_it_is();
-    if ok {
-        println!("all ratios within the ceiling");
-    } else {
+    // An array and not a running `&=`, for the reason above. Elements are evaluated left
+    // to right, so every row still runs and still prints in this order — none of them is
+    // short-circuited away by an earlier breach.
+    let verdicts: [bool; ROWS] = [
+        a_candle_stays_within_its_budget(floor),
+        a_candle_costs_the_same_however_many_came_before(),
+        a_candle_costs_the_same_whatever_it_contains(),
+        the_integer_square_root_is_bounded_and_flat_per_iteration(),
+        a_session_rollover_costs_what_an_ordinary_candle_costs(),
+        the_column_costs_the_same_per_bar_however_long_it_is(),
+    ];
+    if verdicts.contains(&false) {
         println!("A RATIO BREACHED ITS CEILING — see the lines marked BREACH.");
         std::process::exit(1);
     }
+    println!("all ratios within the ceiling");
 }

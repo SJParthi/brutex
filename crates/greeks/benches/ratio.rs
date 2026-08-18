@@ -207,20 +207,48 @@ fn the_full_greek_set_costs_the_same_whatever_the_contract_is() -> bool {
 /// arithmetic ceiling of [`MAX_ITERATIONS`] into a bound on time.
 fn one_model_evaluation_costs_the_same_however_hard_the_quote_is() -> bool {
     // Two quotes at opposite ends of what the solver finds easy: at the money
-    // with a fat vega, where Newton converges immediately, and deep out of the
+    // with a fat vega, where Newton converges immediately, and out of the
     // money with a thin one, where it does not.
-    let Ok(easy_quote) = AT_THE_MONEY.price(VOL, OptionKind::Call) else {
+    //
+    // EACH CONTRACT IS NAMED ONCE HERE AND READ FROM THAT NAME EVERYWHERE
+    // BELOW — the quote, the solve that reports the evaluation count, and the
+    // timing loop. It was named twice on the hard side: the count came from a
+    // solve of `OUT_OF_THE_MONEY` and the clock timed a solve of `DEEP_OUT`,
+    // so the C-G-03 quotient was one contract's picoseconds over a different
+    // contract's evaluation count and was a cost per evaluation of nothing.
+    //
+    // The mistake produced a plausible number rather than an error, which is
+    // why it survived: a quote struck at 24,000 sits inside `DEEP_OUT`'s
+    // arbitrage bounds and between its prices at MIN_VOLATILITY and
+    // MAX_VOLATILITY, so that solve ran, took its own path to a different
+    // implied volatility, and reported its own evaluation count — which was
+    // then thrown away in favour of the other contract's.
+    //
+    // `docs/04-invariants.md` already said so under C-G-03 -- "a strike ten
+    // times spot is used in C-G-01 and C-G-02 but NOT in C-G-03" -- so what
+    // was wrong was the code and not the intent. The figure recorded beside
+    // that row, 1.195x cost per evaluation, was taken from the mismatched
+    // pair and is stale until the gate is run again; this file cannot fix a
+    // document.
+    //
+    // This does NOT change `DEEP_OUT`'s role in C-G-01 and C-G-02 above, where
+    // nothing is solved and a strike ten times spot is exactly the far end of
+    // the axis those two want.
+    let easy_contract = &AT_THE_MONEY;
+    let hard_contract = &OUT_OF_THE_MONEY;
+
+    let Ok(easy_quote) = easy_contract.price(VOL, OptionKind::Call) else {
         refuse("a price at the money")
     };
-    let Ok(hard_quote) = OUT_OF_THE_MONEY.price(VOL, OptionKind::Call) else {
+    let Ok(hard_quote) = hard_contract.price(VOL, OptionKind::Call) else {
         refuse("a price out of the money")
     };
 
-    let easy = match AT_THE_MONEY.implied_volatility(easy_quote, OptionKind::Call) {
+    let easy = match easy_contract.implied_volatility(easy_quote, OptionKind::Call) {
         Ok(solved) => solved,
         Err(why) => refuse(&format!("a solve at the money — {why}")),
     };
-    let hard = match OUT_OF_THE_MONEY.implied_volatility(hard_quote, OptionKind::Call) {
+    let hard = match hard_contract.implied_volatility(hard_quote, OptionKind::Call) {
         Ok(solved) => solved,
         Err(why) => refuse(&format!("a solve out of the money — {why}")),
     };
@@ -241,14 +269,21 @@ fn one_model_evaluation_costs_the_same_however_hard_the_quote_is() -> bool {
     );
 
     let easy_total = cost_ps(2_000, || {
-        black_box(&AT_THE_MONEY).implied_volatility(black_box(easy_quote), OptionKind::Call)
+        black_box(easy_contract).implied_volatility(black_box(easy_quote), OptionKind::Call)
     });
     let hard_total = cost_ps(2_000, || {
-        black_box(&DEEP_OUT).implied_volatility(black_box(hard_quote), OptionKind::Call)
+        black_box(hard_contract).implied_volatility(black_box(hard_quote), OptionKind::Call)
     });
 
     // Integer division on integer picoseconds and an integer count. No float
     // arithmetic happens here; see the module header.
+    //
+    // Each numerator is the wall time of the solve whose count is its
+    // denominator — same contract, same quote, and the solver is deterministic
+    // (`greeks::solver::the_solver_is_idempotent_to_the_bit`), so
+    // the timed calls take the path that was counted. That identity is the
+    // whole content of C-G-03; without it the quotient is two unrelated
+    // numbers divided.
     let easy_each = easy_total / u128::from(easy.iterations.max(1));
     let hard_each = hard_total / u128::from(hard.iterations.max(1));
 

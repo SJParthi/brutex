@@ -1536,12 +1536,17 @@ struct CensusLock {
 impl CensusLock {
     /// Take the lock, or refuse naming the run that holds it.
     ///
-    /// `Ok(None)` inside the guard means the lock file could not be *opened* at
-    /// all, which happens when the directory is not a directory. That is not
-    /// this function's fault to report: the install fails on the same cause a
-    /// moment later and names it in the words an operator needs, and a test
-    /// that puts a file where the directory belongs expects that sentence
-    /// rather than a worse-worded twin from here.
+    /// `Ok(None)` inside the guard means the lock file could not be opened for
+    /// a reason that **also stops the install a moment later** — the path is
+    /// unusable for the whole directory, not for this one file. That refusal is
+    /// not this function's to word: `install_locked` fails on the same cause
+    /// and says it better, and two tests in `crates/pull/tests/census.rs`
+    /// expect that sentence rather than a worse-worded twin from here.
+    ///
+    /// **Every reason that leaves the census writable is an `Err`**, because a
+    /// lock that quietly becomes no lock is the `CLAUDE.md` §4 fallback that
+    /// hides a failure — see the arms below for which is which, and why the
+    /// division is by what the census can still do rather than by errno.
     fn take(path: &Path) -> Result<Self, String> {
         // BEST EFFORT, and deliberately not `?`. The lock lives beside the
         // census and on a first ever run neither exists, so the directory is
@@ -1590,22 +1595,45 @@ impl CensusLock {
             // `a_census_that_cannot_be_installed_names_what_is_left_uncounted`
             // assert, and they are right to.
             //
-            // ACCESS is the dangerous one, and the one that was silent: a
-            // root-owned `.man.lock` from a `sudo` run, a restrictive ACL, an
-            // immutable flag -- the census itself stays perfectly writable and
-            // only the LOCK is refused, so the old arm ran on unserialised
-            // with nothing to say. That is the §4 fallback that hides a
-            // failure, and it went live the day feeds began running
-            // concurrently.
-            Err(why) if why.kind() == std::io::ErrorKind::PermissionDenied => {
+            // A FAILURE OF THIS ONE FILE is the dangerous one, and the one that
+            // was silent. The lock is a SIBLING of the census, not a parent of
+            // it, so a refusal that belongs to the lock's own inode leaves
+            // `<vendor>.man` perfectly creatable and the install perfectly
+            // able to publish over another run's work. Two shapes reach it:
+            //
+            // * `PermissionDenied` -- a root-owned `.man.lock` from a `sudo`
+            //   run, a restrictive ACL, an immutable flag. The census itself
+            //   stays writable and only the LOCK is denied.
+            // * `IsADirectory` -- a directory occupying the lock's name, which
+            //   is what an interrupted tool or a mistyped `mkdir` leaves. It
+            //   was still deferring: the install never touches this path, so
+            //   nothing downstream reported it and the run went unserialised
+            //   with nothing to say. That is the one case the two tests cited
+            //   above do NOT cover, because they break the DIRECTORY and this
+            //   breaks the file inside it.
+            //
+            // Both are the §4 fallback that hides a failure, and both went live
+            // the day feeds began running concurrently. Enumerated by kind
+            // rather than inverted into "refuse unless the path is at fault"
+            // because a name past the host's limit is `InvalidFilename`, is the
+            // path's fault, and must keep deferring —
+            // `a_census_that_cannot_be_measured_stops_the_run` builds exactly
+            // that and expects the install's wording.
+            Err(why)
+                if matches!(
+                    why.kind(),
+                    ErrorKind::PermissionDenied | ErrorKind::IsADirectory
+                ) =>
+            {
                 return Err(format!(
                     "the census lock at {} exists but cannot be opened: {why}. \
-                     Refused rather than run without it -- the census itself is \
-                     still writable, so this run would have interleaved a \
+                     Refused rather than run without it -- the census beside it \
+                     is still writable, so this run would have interleaved a \
                      read-modify-write with any other and silently discarded \
                      one of them, while the loser's receipt still read 'every \
                      row accounted for' because its own books balanced. Fix the \
-                     ownership or permissions of that path and try again.",
+                     ownership, the permissions or the type of that path and \
+                     try again.",
                     lock_path.display()
                 ));
             }
@@ -1773,16 +1801,18 @@ fn publish(dir: &Path, tmp: &Path, path: &Path, image: &[u8]) -> std::io::Result
     fs::File::open(dir)?.sync_all()
 }
 
-/// The two facts about this module no external test can reach.
+/// The facts about this module no external test can reach.
 ///
 /// Most of it is proved from outside, in `crates/pull/tests/census.rs`, because
 /// that is where a caller stands — a folder goes in, bars and a counter come
-/// out, and the two are checked against each other. These two are here because
-/// one needs a 268,468,224-byte file on the disk to reach from outside, and the
-/// other is about a read that **does not happen**, which a caller cannot
-/// observe by definition. A boundary that is only ever tested one side of is a
-/// boundary nobody has checked; `pull::manifest` makes the same argument about
-/// [`MAX_ENTRIES`] and verifies it the same way.
+/// out, and the two are checked against each other. These are here because one
+/// needs a 268,468,224-byte file on the disk to reach from outside, one is about
+/// a read that **does not happen**, which a caller cannot observe by definition,
+/// and two are about [`CensusLock::take`]'s own arms — a private function whose
+/// interesting outcome is precisely that the ingest around it never starts. A
+/// boundary that is only ever tested one side of is a boundary nobody has
+/// checked; `pull::manifest` makes the same argument about [`MAX_ENTRIES`] and
+/// verifies it the same way.
 #[cfg(test)]
 #[allow(
     clippy::expect_used,
@@ -1795,7 +1825,109 @@ mod tests {
     use store::format::Bar;
     use store::header::Header;
 
-    use super::{MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand};
+    use super::{CensusLock, MAX_CENSUS_BYTES, beyond_ceiling, closes_in_hand, install_locked};
+
+    /// A scratch directory of this test's own, named after the line that asked
+    /// for it so two tests cannot collide in a shared `TMPDIR`.
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "brutex-ingest-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos())
+        ));
+        std::fs::create_dir_all(root.join("manifest")).expect("the manifest directory");
+        root
+    }
+
+    /// **A LOCK THAT CANNOT BE OPENED IS A REFUSAL, NOT A RUN WITHOUT ONE.**
+    ///
+    /// The `else` arm this replaces returned a guard holding nothing for *any*
+    /// open failure, and the run then read-modify-wrote the census with no
+    /// mutual exclusion at all: run A reads 20 entries, run B reads the same
+    /// 20, A installs 20+A, B installs 20+B over the top, and A's entries are
+    /// gone while both receipts read "every row accounted for".
+    ///
+    /// # Why a directory and not a permission bit
+    ///
+    /// The dangerous states are the ones that break the lock's own inode and
+    /// leave the census beside it writable. A root-owned `.man.lock` is the
+    /// one an operator hits, and it cannot be built in a test that must pass
+    /// unprivileged and must also pass **as** root, where a mode of `0` is not
+    /// a refusal at all. A directory at the lock's name is the same fault with
+    /// the same consequence and no such dependency: `open` says `IsADirectory`
+    /// on every host, for every user.
+    ///
+    /// The second half is what makes it a defect rather than an inconvenience.
+    /// The census is created here **after** the refusal, from this same test, to
+    /// prove the install would have gone through — so the old arm was not
+    /// deferring to a failure that reports itself, it was running unlocked.
+    #[test]
+    fn a_lock_whose_own_path_is_unopenable_refuses_while_the_census_stays_writable() {
+        let root = scratch("lock-is-a-dir");
+        let census = root.join("manifest").join("dhan.man");
+        std::fs::create_dir_all(census.with_extension("man.lock"))
+            .expect("a directory occupying the lock's name");
+
+        // `let Err … else` rather than `expect_err`, which would need a `Debug`
+        // on the guard — and the guard holds a `File` it is careful not to
+        // render.
+        let Err(why) = CensusLock::take(&census) else {
+            panic!("a lock that cannot be opened must refuse, never run unlocked")
+        };
+        assert!(
+            why.contains("man.lock"),
+            "the refusal names the path an operator has to fix: {why}"
+        );
+        assert!(
+            why.contains("interleaved"),
+            "and says what it prevented, not merely that something failed: {why}"
+        );
+
+        // THE HALF THAT MAKES IT A DEFECT. Nothing downstream would have
+        // reported this: the census is a sibling of the lock, so it writes.
+        std::fs::write(&census, b"the install had nothing stopping it")
+            .expect("the census beside the broken lock is writable, which is the whole point");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// **A PATH FAILURE STILL DEFERS, AND THIS IS WHY THAT IS SAFE.**
+    ///
+    /// A file where the manifest DIRECTORY belongs breaks the lock and the
+    /// census together, so `take` hands back a guard holding nothing and lets
+    /// [`install_locked`] word the refusal — which is what
+    /// `a_census_that_cannot_be_installed_names_what_is_left_uncounted` in
+    /// `crates/pull/tests/census.rs` asserts from the outside.
+    ///
+    /// That deferral is only defensible while the install really does fail on
+    /// the same cause, so the coupling is asserted here rather than reasoned
+    /// about in a comment: an install driven with the deferred guard refuses.
+    /// If a future change ever made this path installable, this test fails and
+    /// the arm above it becomes a silent unlocked run.
+    #[test]
+    fn a_broken_directory_defers_because_the_install_fails_on_the_same_cause() {
+        let root = scratch("dir-is-a-file");
+        std::fs::remove_dir_all(root.join("manifest")).expect("make room for the file");
+        std::fs::write(root.join("manifest"), b"NOT A DIRECTORY").expect("a file in the way");
+        let census = root.join("manifest").join("dhan.man");
+
+        let deferred = CensusLock::take(&census)
+            .expect("a path failure is the install's to report, in better words");
+        let why = install_locked(&deferred, &census, b"an image")
+            .expect_err("the install must fail on the same cause the lock did");
+        assert!(
+            why.contains("could not be published"),
+            "and that is the sentence the outside test expects: {why}"
+        );
+        assert!(
+            !census.exists(),
+            "nothing was published at the live path either"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     /// A bar at one instant with one close. Every other field is zero, which
     /// the store's own format calls a legal bar.

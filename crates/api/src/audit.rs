@@ -48,6 +48,54 @@
 //! Rotation would mean a second file, an ordering rule between the two and a
 //! deletion — and `CLAUDE.md` §3 rule 8 makes history append-only. The growth
 //! is stated on the page instead, in bytes, so nobody has to guess.
+//!
+//! # What a record does NOT identify, said plainly
+//!
+//! `CLAUDE.md` §3 rule 3: a run is identified by `blake3(mask ‖ direction ‖
+//! instrument ‖ timeframe ‖ params ‖ data_digest ‖ vocab_version ‖ commit)`.
+//! **No record written here carries that identity, and not one of the eight
+//! terms is on disk.** That is written down under §3 rule 6 rather than left
+//! for a reader to discover, because a file called an audit journal invites the
+//! assumption that a run can be reproduced from it, and this one cannot.
+//!
+//! Two reasons, and they are different reasons.
+//!
+//! **This journal is not about a sweep.** It records a PULL — `/pull/spot` and
+//! `/pull/fno`, the two forms [`Scope`] names. A pull has no mask, no
+//! direction, no ladder parameters and no condition vocabulary, so four of the
+//! eight terms do not exist for the thing being recorded and a hash over four
+//! absences would be the same value for every pull. The eight-term identity
+//! lives in `crates/runner/src/identity.rs` and it identifies a **sweep**.
+//!
+//! **The four that do apply are each blocked outside this file.**
+//!
+//! * `instrument` — [`Record::source`] holds what was ASKED FOR: a target name
+//!   or a folder, which expands to many instruments. It is text cut at
+//!   `SOURCE_CAPACITY`, not an `InstrumentKey`.
+//! * `timeframe` — there is no field. [`crate::ladder`] names the same gap from
+//!   the other side: nothing on a record distinguishes a day run from a minute
+//!   one, which is why its gate reads the store rather than this journal.
+//! * `data_digest` — nothing in the pull path computes one. [`Ingested`] carries
+//!   counters, and a digest over counters would be a different quantity wearing
+//!   the name, which §3 rule 1 is exactly about.
+//! * `commit` — `crates/runner` takes it from its caller precisely because §2
+//!   forbids a `build.rs` that shells out to `git`. Nothing hands one to this
+//!   crate either.
+//!
+//! **And there is nowhere to put them.** The field map below allocates every
+//! byte of the 256 but one: `OFF_KIND` is byte 118 and `OFF_SOURCE` begins at
+//! 120, so byte 119 is the whole of the free space and a BLAKE3 output is 32
+//! bytes. Recording an identity is therefore a **stride change** — a new
+//! [`VERSION`] and a new record length, which §3 rule 8 makes a new format
+//! rather than a mutation of this one — plus the `server` and `autopilot`
+//! callers that would have to supply the terms, plus the
+//! `docs/05-decisions.md` entry §9 requires for a locked choice.
+//! `api::audit::the_record_has_exactly_one_free_byte` is the arithmetic, so
+//! this paragraph cannot quietly go stale while the layout moves.
+//!
+//! Adding the fields anyway, filled with zeros no caller can populate, would be
+//! an empty column that reads as compliance. §4 — never a fallback that hides
+//! a failure.
 
 use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -1601,6 +1649,140 @@ mod tests {
             "guessing would put a later build's fields on the page as a run's \
              numbers, which is worse than a named refusal"
         );
+    }
+
+    /// EXACTLY ONE BYTE OF THIS RECORD IS FREE, WHICH IS WHY NO IDENTITY FITS.
+    ///
+    /// The module header states, under `CLAUDE.md` §3 rule 6, that this journal
+    /// carries none of the eight terms of §3 rule 3 and that recording them
+    /// would be a stride change. The load-bearing half of that claim is
+    /// arithmetic — a `blake3` output is 32 bytes and this record has one byte
+    /// spare — and a layout claim written only in prose goes stale the first
+    /// time an offset moves. So it is asserted, in two halves that catch
+    /// different mistakes.
+    ///
+    /// This proves nothing about whether an identity SHOULD be recorded. It
+    /// proves only that it cannot be recorded at this stride, which is the one
+    /// thing the header asserts on its own authority.
+    #[test]
+    fn the_record_has_exactly_one_free_byte() {
+        // HALF ONE — THE DECLARED MAP. Every field constant with its width,
+        // marked off against the stride. This catches an offset MOVED (two
+        // fields overlap, or a hole opens) and it catches a field WIDENED. It
+        // restates the constants, which is the price of checking them against
+        // each other; the existing `const _` blocks only pin the three
+        // adjacencies at the tail and say nothing about the counter block.
+        let map: [(usize, usize); 26] = [
+            (OFF_MAGIC, 4),
+            (OFF_VERSION, 2),
+            (OFF_SCOPE, 1),
+            (OFF_OUTCOME, 1),
+            (OFF_AT, 8),
+            (OFF_ELAPSED, 8),
+            (OFF_MEMBERS, 8),
+            (OFF_ROWS_READ, 8),
+            (OFF_BARS_STORED, 8),
+            (OFF_ROWS_FOLDED, 8),
+            (OFF_COUNTED, 8),
+            (OFF_BEFORE_OPEN, 8),
+            (OFF_AFTER_CLOSE, 8),
+            (OFF_BEFORE_WINDOW, 8),
+            (OFF_AFTER_WINDOW, 8),
+            (OFF_FAILURES, 8),
+            (OFF_FROM_DAYS, 4),
+            (OFF_TO_DAYS, 4),
+            (OFF_SOURCE_LEN, 2),
+            (OFF_NOTE_LEN, 2),
+            (OFF_SOURCE_KEPT, 1),
+            (OFF_NOTE_KEPT, 1),
+            (OFF_KIND, 1),
+            (OFF_SOURCE, SOURCE_CAPACITY),
+            (OFF_NOTE, NOTE_CAPACITY),
+            (OFF_CRC, 4),
+        ];
+        let mut used = [false; RECORD_LEN];
+        for (offset, width) in map {
+            // Marked through the slice's own iterator rather than by index,
+            // so the bound is checked once here instead of on every byte --
+            // `skip`/`take` would otherwise mark NOTHING for a field declared
+            // past the stride and the overlap check would pass vacuously.
+            assert!(
+                offset.saturating_add(width) <= RECORD_LEN,
+                "a field at {offset} of {width} bytes runs past the stride"
+            );
+            for (b, slot) in used.iter_mut().enumerate().skip(offset).take(width) {
+                assert!(
+                    !*slot,
+                    "byte {b} is claimed by two fields -- one of them is \
+                     overwriting the other on every append"
+                );
+                *slot = true;
+            }
+        }
+        let free: Vec<usize> = (0..RECORD_LEN).filter(|b| !used[*b]).collect();
+        assert_eq!(
+            free,
+            vec![119],
+            "the header's claim is that byte 119 is the WHOLE of the free \
+             space. A `blake3` run identity is 32 bytes, so if this list ever \
+             grows the header is what has to change with it"
+        );
+
+        // HALF TWO — WHAT THE WRITER ACTUALLY TOUCHES. Half one is a
+        // restatement and can be forgotten; this is derived from `image()`
+        // itself, so a field added to the writer and not to the list above is
+        // still caught. Every value is saturated and both texts are filled to
+        // capacity, so the only bytes that stay zero are bytes nothing writes.
+        let mut record = Record::of_run(
+            Scope::Fno,
+            at(1_751_356_800),
+            u64::MAX,
+            &"S".repeat(SOURCE_CAPACITY * 2),
+            window(),
+            &run(),
+        );
+        record.members = u64::MAX;
+        record.rows_read = u64::MAX;
+        record.bars_stored = u64::MAX;
+        record.rows_folded = u64::MAX;
+        record.counted = u64::MAX;
+        record.failures = u64::MAX;
+        record.from_days = u32::MAX;
+        record.to_days = u32::MAX;
+        record.source_bytes = u16::MAX;
+        record.note_bytes = u16::MAX;
+        record.drops = Drops {
+            before_open: u64::MAX,
+            after_close: u64::MAX,
+            before_window: u64::MAX,
+            after_window: u64::MAX,
+        };
+        record.note = keep(&"N".repeat(NOTE_CAPACITY * 2), NOTE_CAPACITY);
+        assert_eq!(record.source.len(), SOURCE_CAPACITY, "the text is full");
+        assert_eq!(record.note.len(), NOTE_CAPACITY, "and so is the note");
+
+        // Across every shape this build can write, so a byte written only for
+        // one kind, scope or outcome cannot hide behind a single sample.
+        for kind in [Kind::Run, Kind::MemberFailure] {
+            for scope in Scope::ALL {
+                for outcome in Outcome::ALL {
+                    record.kind = kind;
+                    record.scope = scope;
+                    record.outcome = outcome;
+                    let image = record.image();
+                    assert_eq!(
+                        image[119],
+                        0,
+                        "byte 119 is the free byte: nothing this build writes \
+                         may land there, and a {} / {} / {} record put \
+                         something in it",
+                        kind.label(),
+                        scope.label(),
+                        outcome.label()
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -51,6 +51,47 @@
 //! whole mechanism: a token that a vendor rejected and that Parameter Store
 //! still holds is a token nothing in this repository can fix.
 //!
+//! # UNWIRED — the mechanism above exists, is proven, and no run reaches it
+//!
+//! Everything in the section above describes a function, not a behaviour of any
+//! pull, and the difference matters enough to say here rather than to leave a
+//! maintainer to discover it: **[`CredentialReader`] has no caller outside
+//! `cfg(test)`.** `crates/pull/tests/unit.rs` drives both of its methods against
+//! a double, and `crates/pull/src/emit_sites.rs` — itself a `#[cfg(test)]`
+//! module — drives them for their log lines. Nothing that ships calls either.
+//!
+//! The credential a real pull uses is read somewhere else entirely.
+//! `crates/api/src/server.rs`'s `read_credential` calls
+//! [`crate::ssm::get_parameter`] directly, once per field named by the feed's
+//! auth row, and hands the value to `crate::http::Credential`. That path holds
+//! no [`SecretSource`], no [`CredentialReader`], and therefore **no re-read**: a
+//! vendor that answers 401 or 403 becomes a `fetch::FetchError::VendorRefused`
+//! and the run stops there, with the stale value never read a second time. So
+//! `CLAUDE.md` §8's re-read sentence is satisfied by this file and **not** by
+//! the pull.
+//!
+//! ## How it came to be unwired, which is the part worth not repeating
+//!
+//! The section below predicted that the change making the first live call would
+//! write one `impl ParameterStore` over an SDK client. The live call arrived by
+//! another road: [`crate::ssm`] hand-rolls `SigV4` over the same HTTP client the
+//! vendors use, takes no AWS SDK at all, and exposes a free function rather than
+//! an implementation of this port. It went **around** the port instead of
+//! through it — which is why [`ParameterStore`] still has no implementor outside
+//! the test double, and why the guard hanging off the port went with it.
+//!
+//! ## What wiring it needs, and why it is not done here
+//!
+//! An `impl SecretSource` (or `impl ParameterStore`) over [`crate::ssm`], and a
+//! call site in `crates/api`'s broker route that hands a rejected value back for
+//! the second read. Both are edits to other files, and one of them is in another
+//! crate; this note is the honest state until they are made. `CLAUDE.md` §3
+//! rule 6 — never claim a bound that was not met.
+//!
+//! **This is not dead code to delete.** The re-read is a `CLAUDE.md` §8
+//! requirement and the port is the seam D-0035 deferred the SDK behind; what was
+//! wrong was the header reading as though the guard were live.
+//!
 //! # Nothing here ever prints a credential
 //!
 //! [`Secret`] has a hand-written [`std::fmt::Debug`] that renders a redaction
@@ -99,6 +140,12 @@
 //! dependency then — with `cargo deny check` run against it and the result
 //! stated. Taking it *now* would add about a hundred transitive crates to
 //! `Cargo.lock` to support no call at all. See `docs/05-decisions.md` D-0035.
+//!
+//! **That paragraph is a plan the repository has since routed around**, and it
+//! is left standing because the reasoning still holds and the outcome did not.
+//! The live call arrived in [`crate::ssm`] with no SDK and no `impl
+//! ParameterStore` — see the unwired note above, which is where the consequence
+//! for this port is written down.
 
 use std::fmt;
 
@@ -415,6 +462,13 @@ impl<S: SecretSource> CredentialReader<S> {
     /// re-read returns the same dead value the pull halts loudly. It is never
     /// re-minted — a local mint would invalidate the token another system
     /// shares.
+    ///
+    /// **No caller outside `cfg(test)` reaches this**, so no pull performs the
+    /// re-read today — the live credential path goes through
+    /// [`crate::ssm::get_parameter`] and never comes here. This module's header
+    /// says what that leaves and what wiring it would take; the note is here as
+    /// well because this signature is where a maintainer checking "is the §8
+    /// guard live" arrives, and the answer is not visible from it.
     ///
     /// # Errors
     ///

@@ -25,6 +25,13 @@
 //! there is no constant-time claim on this path. `crate::batch::row` is the
 //! operation with a bound, and it is proved by
 //! `lake::batch::row_lookup_does_not_scan`.
+//!
+//! # Memory
+//!
+//! O(page bytes) is not the same as "however many bytes a header asked for".
+//! `MAX_PAGE_BYTES` is the ceiling on both the reservation and the
+//! decompressed output, and the comment on it says why an unbounded one is an
+//! abort rather than a refusal.
 
 use core::fmt;
 use std::io::{Cursor, Read, Seek};
@@ -57,6 +64,82 @@ impl fmt::Display for Codec {
     }
 }
 
+/// The most one page may claim to decompress to, and the most this reader
+/// will let one produce.
+///
+/// # Why a ceiling exists at all
+///
+/// `uncompressed_page_size` is a number the FILE chose, and until this
+/// constant existed the ZSTD arm of [`LakePageReader::decode`] spent it twice
+/// before anything checked it: `Vec::with_capacity(expect)` reserved it, and
+/// `read_to_end` then grew that vector to whatever the frame decoded to. The
+/// only guard was [`length`], which rejects a negative and nothing else.
+///
+/// AN OVERSIZED RESERVATION IS NOT A REFUSAL. `Vec::with_capacity` reports
+/// nothing: when the allocator says no it calls
+/// `std::alloc::handle_alloc_error`, which ABORTS rather than panics, so
+/// neither `catch_unwind` nor a test harness can see it, and the root
+/// `Cargo.toml`'s `panic = "abort"` removes even the theoretical unwind.
+/// `CLAUDE.md` §4 — degrade loudly and name the reason, or refuse — and an
+/// abort does neither. This is the same fault `crate::reader` bounds on a row
+/// group's `num_rows`; the comment there is the longer version of this one and
+/// the two are deliberately the same shape.
+///
+/// # The two halves are not the same size
+///
+/// The header field is an `i32`, so the largest lie it can tell is `i32::MAX`,
+/// about 2 GiB. That is far short of the 8 TiB an `i64` row count could ask
+/// for, and the outcome is MACHINE-DEPENDENT rather than certain: with this
+/// bound removed, the 2,147,483,647-byte reservation was observed SUCCEEDING
+/// on the darwin development machine, which overcommits, and the read then
+/// refused for the ordinary length disagreement two GiB later. A guard whose
+/// effect depends on the allocator's mood is not a guard; the point is that
+/// the size is decided here, where it can be named, and not there.
+///
+/// **The decompressed output is the unbounded half.** No header field caps it.
+/// A ZSTD RLE block costs four bytes and regenerates up to 128 KiB, so a page
+/// body of B bytes can decode to roughly `32768 * B`, and the length check
+/// that would catch the disagreement runs only AFTER `read_to_end` has
+/// finished growing. The `Read::take` in `decode` is what stops that, one byte
+/// past what the header promised, so the buffer never grows to the frame's own
+/// size.
+///
+/// # Why the ceiling is a constant and not the chunk's own length
+///
+/// `crate::reader` bounds a row count by `self.bytes.len()`, the file the
+/// count came from, because a row cannot be smaller than nothing. That ceiling
+/// cannot be transplanted here: a compressed page decompresses to MANY times
+/// the bytes that carry it — that is what compression is for — and the frame
+/// in `a_zstd_frame_that_outgrows_its_header_is_stopped_one_byte_past_it` is
+/// 13 bytes that decode to 131,072, a ratio of 10,082 to 1. The chunk's length,
+/// or any fixed multiple of it, would be a guess about compressibility, and a
+/// guess that came in low would refuse real pages.
+///
+/// A page SIZE is the thing that is actually bounded. 64 MiB is 8,388,608
+/// values of the widest lake column — `i64` and `f64` are both eight bytes —
+/// in a single page, against a real lake row group of 2,480 rows, the count
+/// `tests/real_lake.rs` names for the sampled F&O file, and against a Parquet
+/// writer's own page cap — `parquet::file::properties::DEFAULT_PAGE_SIZE` is
+/// `1024 * 1024` in 59.2, and the dictionary limit defaults to the same. The
+/// margin is
+/// three orders of magnitude, and no lake file was measured against it: the
+/// lake is 40 GB of operator data that is not on a CI runner, so the figure
+/// above is an argument from the format and the writer, NOT a measurement.
+///
+/// # What this does NOT fix
+///
+/// It bounds ONE page. A chunk holding thousands of tiny page headers, each
+/// with a bomb body, still pays a bounded allocation per page in sequence, and
+/// the total decompression WORK across such a chunk is bounded only by the
+/// chunk's own length, which is bounded only by the file. That is a time cost
+/// rather than a memory one and it is UNMEASURED.
+///
+/// Nor does it make allocation failure impossible: a legitimate multi-megabyte
+/// page still allocates, and a machine already at its limit can still lose
+/// that. What it removes is the case where one corrupt header field, or one
+/// four-byte block, demands gigabytes.
+const MAX_PAGE_BYTES: usize = 64 << 20;
+
 /// Walks the pages of one column chunk, decompressing each.
 pub(crate) struct LakePageReader {
     chunk: Bytes,
@@ -85,6 +168,11 @@ impl LakePageReader {
     /// short buffer for a truncated frame, and a short page decodes into
     /// plausible-looking values for the rows that survived. Comparing against
     /// the header turns silent corruption into a refusal.
+    ///
+    /// Nor is the ceiling [`MAX_PAGE_BYTES`] imposes. A length check can only
+    /// run once the buffer exists, and the buffer used to be sized — and then
+    /// grown — by numbers the file supplied. A refusal that arrives after an
+    /// allocation abort is not a refusal.
     fn decompress(&self, body: &[u8], expect: usize) -> PqResult<Bytes> {
         let out = self.decode(body, expect);
         if let Err(why) = &out {
@@ -113,16 +201,63 @@ impl LakePageReader {
                 Ok(Bytes::copy_from_slice(body))
             }
             Codec::Zstd => {
-                let mut dec = ruzstd::decoding::StreamingDecoder::new(body)
+                // BOUND THE HEADER'S NUMBER BEFORE IT BECOMES A CAPACITY.
+                // Everything below this line spends `expect`: the reservation
+                // takes it directly and the read cap is derived from it.
+                // [`MAX_PAGE_BYTES`] holds the reasoning — why an unbounded
+                // reservation is an abort rather than a refusal, and why the
+                // ceiling is a constant instead of the chunk's own length.
+                //
+                // THE UNCOMPRESSED ARM ABOVE NEEDS NO SUCH CHECK and does not
+                // get one. It never spends `expect`; it only compares it, and
+                // the bytes it copies are a slice of a column chunk already
+                // resident in memory. Giving it the ceiling too would read as
+                // one law but would refuse a legitimately large uncompressed
+                // page for a danger that arm does not have.
+                if expect > MAX_PAGE_BYTES {
+                    return Err(ParquetError::General(format!(
+                        "zstd page header claims {expect} uncompressed bytes, past the \
+                         {MAX_PAGE_BYTES}-byte ceiling this reader will materialise for one \
+                         page; refusing rather than reserving it"
+                    )));
+                }
+                let dec = ruzstd::decoding::StreamingDecoder::new(body)
                     .map_err(|e| ParquetError::General(format!("zstd frame refused: {e}")))?;
-                let mut out = Vec::with_capacity(expect);
-                dec.read_to_end(&mut out)
+
+                // ONE BYTE PAST THE PROMISE, and that byte is the whole
+                // mechanism: a cap of exactly `expect` would let a frame with
+                // more to give fill the buffer and then pass the length check
+                // below as though it had decoded correctly. The capacity is
+                // the same number, so the refusing read does not double the
+                // allocation on its way to failing.
+                //
+                // `usize` is no wider than `u64` on any target this workspace
+                // builds for, and `cap` is under the ceiling besides;
+                // `unwrap_or` gives that a total answer rather than an
+                // unreachable panic the coverage floor would then count.
+                let cap = expect.saturating_add(1);
+                let mut out = Vec::with_capacity(cap);
+                dec.take(u64::try_from(cap).unwrap_or(u64::MAX))
+                    .read_to_end(&mut out)
                     .map_err(|e| ParquetError::General(format!("zstd decode refused: {e}")))?;
                 if out.len() != expect {
-                    return Err(ParquetError::General(format!(
-                        "zstd page decoded to {} bytes, header says {expect}",
-                        out.len()
-                    )));
+                    // ONE `!=`, two reasons. Written this way rather than as
+                    // two guards so the comparison that decides whether a page
+                    // is accepted stays a single mutable point: gate 18 turning
+                    // it into `==` must break both tests below, not one.
+                    return Err(ParquetError::General(if out.len() > expect {
+                        format!(
+                            "zstd page decodes to more than the {expect} bytes its header \
+                             promised; the read stopped at {} rather than growing to whatever \
+                             the frame would have produced",
+                            out.len()
+                        )
+                    } else {
+                        format!(
+                            "zstd page decoded to {} bytes, header says {expect}",
+                            out.len()
+                        )
+                    }));
                 }
                 Ok(Bytes::from(out))
             }
@@ -493,6 +628,208 @@ mod tests {
              {text}"
         );
         let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    // -----------------------------------------------------------------------
+    // A PAGE HEADER THAT LIES ABOUT `uncompressed_page_size` USED TO BE
+    // BELIEVED TWICE, AND NEITHER BELIEF COULD BE OBSERVED FAILING.
+    //
+    // The ZSTD arm reserved the field and then let `read_to_end` grow past it,
+    // so a corrupt or hostile header reached `Vec::with_capacity` and the
+    // allocator, not a comparison. `Vec::with_capacity` cannot refuse — its
+    // failure is `handle_alloc_error`, an ABORT — so there is no assertion that
+    // could be written against the old behaviour on the abort itself. What CAN
+    // be asserted is the refusal that replaces it, which is what these two
+    // tests do: one for the header's claim, one for the frame's output.
+    //
+    // Both fixtures are built IN MEMORY. CI gate 1 walks every tracked file and
+    // allows no `.parquet` in this repository, and a page body is not a file
+    // anyway — a column chunk is a thrift page header followed by bytes, and
+    // that is exactly what `one_page_chunk` writes.
+    // -----------------------------------------------------------------------
+
+    use parquet_format_safe::DataPageHeader;
+    use parquet_format_safe::thrift::protocol::TCompactOutputProtocol;
+
+    /// The 13-byte hand-built frame from
+    /// `a_zstd_page_that_decodes_to_the_wrong_length_is_refused`, which decodes
+    /// to `ABCD`.
+    ///
+    /// Repeated rather than hoisted out of that test: its byte-by-byte
+    /// annotation is what makes it readable, and moving the bytes away from the
+    /// annotation would cost more than thirteen bytes of duplication.
+    const SMALL_FRAME: &[u8] = &[
+        0x28, 0xB5, 0x2F, 0xFD, 0x20, 0x04, 0x21, 0x00, 0x00, b'A', b'B', b'C', b'D',
+    ];
+
+    /// A frame of the same THIRTEEN bytes that decodes to 131,072 of them.
+    ///
+    /// 28 B5 2F FD  magic
+    /// A0           frame header: single segment, 4-byte content size
+    /// 00 00 02 00  content size = 131,072
+    /// 03 00 10     block header: last block, RLE, regenerated size 131,072
+    ///              (1 | 1<<1 | 131072<<3 = 0x100003)
+    /// 41           the byte to repeat, `A`
+    ///
+    /// This is not an exotic construction — it is one legal ZSTD block, the
+    /// cheapest expansion the format allows. It is here because a decompressor
+    /// bounded only by "what the frame decodes to" is bounded by nothing, and a
+    /// four-byte block is the proof.
+    const BOMB_FRAME: &[u8] = &[
+        0x28, 0xB5, 0x2F, 0xFD, 0xA0, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, 0x10, b'A',
+    ];
+
+    /// What [`BOMB_FRAME`] decodes to, in bytes.
+    const BOMB_BYTES: usize = 131_072;
+
+    /// Serialises one v1 `DATA_PAGE` header in front of `body`, the way a column
+    /// chunk carries it, so `get_next_page` can be driven end to end.
+    ///
+    /// `compressed_page_size` is taken from `body` rather than passed, because
+    /// a body extent that disagrees with the header is a DIFFERENT fault with
+    /// its own refusal (`page body {start}..{end} runs past the column chunk
+    /// end`) and would refuse these fixtures before the field under test was
+    /// ever read.
+    fn one_page_chunk(uncompressed_page_size: i32, body: &[u8]) -> Bytes {
+        let header = PageHeader {
+            type_: PageType::DATA_PAGE,
+            uncompressed_page_size,
+            compressed_page_size: i32::try_from(body.len()).expect("a test body fits an i32"),
+            crc: None,
+            data_page_header: Some(DataPageHeader {
+                num_values: 1,
+                // PLAIN values, RLE levels: the encodings `encoding()` above
+                // maps, so the page that comes back is a real `Page::DataPage`
+                // and not an encoding refusal wearing the wrong name.
+                encoding: parquet_format_safe::Encoding(0),
+                definition_level_encoding: parquet_format_safe::Encoding(3),
+                repetition_level_encoding: parquet_format_safe::Encoding(3),
+                statistics: None,
+            }),
+            index_page_header: None,
+            dictionary_page_header: None,
+            data_page_header_v2: None,
+        };
+
+        let mut out: Vec<u8> = Vec::new();
+        {
+            let mut proto = TCompactOutputProtocol::new(&mut out);
+            header
+                .write_to_out_protocol(&mut proto)
+                .expect("a page header this test just built serialises");
+        }
+        out.extend_from_slice(body);
+        Bytes::from(out)
+    }
+
+    /// **A PAGE HEADER CLAIMING MORE THAN THE CEILING IS REFUSED RATHER THAN
+    /// RESERVED.**
+    ///
+    /// `i32::MAX` is chosen because it is the widest lie the field can tell,
+    /// not because it is a round number: `uncompressed_page_size` is an `i32`,
+    /// so 2,147,483,647 is the largest value that survives `length()`'s sign
+    /// check, and `Vec::<u8>::with_capacity` of it asks for 2 GiB.
+    ///
+    /// **What the unbounded reader does with this input was run, once, by
+    /// deleting the bound and re-running this test.** It did not abort: darwin
+    /// overcommits, the 2 GiB reservation succeeded, and the refusal that
+    /// eventually arrived was the ordinary length disagreement — `zstd page
+    /// decoded to 4 bytes, header says 2147483647`. That is the honest result
+    /// and it is why the assertions below are written against the CEILING's
+    /// wording rather than against "an error happened": on a machine that does
+    /// not overcommit, or with a claim the allocator will not pretend to
+    /// satisfy, the same input is `handle_alloc_error` and there is no error to
+    /// assert on at all. Neither outcome is a refusal an operator can read.
+    ///
+    /// The sound half is not decoration. If the fixture stopped decoding — a
+    /// thrift change, a `ruzstd` change — the refusal below would still fire,
+    /// for a different reason, and would prove nothing.
+    #[test]
+    fn a_page_header_claiming_more_than_the_ceiling_is_refused_rather_than_reserved() {
+        let sound = one_page_chunk(4, SMALL_FRAME);
+        let mut reader = LakePageReader::new(sound, 1, Codec::Zstd);
+        match reader.get_next_page().expect("the sound page decodes") {
+            Some(Page::DataPage {
+                buf, num_values, ..
+            }) => {
+                assert_eq!(&buf[..], b"ABCD", "the fixture is a real, decodable page");
+                assert_eq!(num_values, 1);
+            }
+            other => panic!("expected a data page, got {other:?}"),
+        }
+
+        // ONLY `uncompressed_page_size` CHANGES. Every other byte is the one
+        // the sound fixture carried, so this is a header that lies rather than
+        // a chunk that is short — the two are different faults and the second
+        // already has its own refusal.
+        let lying = one_page_chunk(i32::MAX, SMALL_FRAME);
+        let mut reader = LakePageReader::new(lying, 1, Codec::Zstd);
+        let refused = reader
+            .get_next_page()
+            .expect_err("a 2 GiB claim over a 13-byte body must be refused");
+        let text = refused.to_string();
+        assert!(
+            text.contains(&i32::MAX.to_string()),
+            "the refusal must report the number the header gave, got: {text}"
+        );
+        assert!(
+            text.contains(&MAX_PAGE_BYTES.to_string()),
+            "and the ceiling it broke, so an operator can see which side moved, \
+             got: {text}"
+        );
+        assert!(
+            !text.contains("decoded to"),
+            "and it must land BEFORE the frame is decoded — a refusal that \
+             arrives after the allocation is the abort this bound exists to \
+             remove, got: {text}"
+        );
+    }
+
+    /// **A FRAME THAT OUTGROWS ITS HEADER IS STOPPED ONE BYTE PAST IT.**
+    ///
+    /// This is the half of the defect no header field bounds. `expect` is
+    /// capped by [`MAX_PAGE_BYTES`], but the OUTPUT of `read_to_end` was capped
+    /// by nothing at all: it grew to whatever the frame produced, and the
+    /// length check that would have caught the disagreement ran only once that
+    /// growth had finished. [`BOMB_FRAME`] is thirteen bytes; the vector had
+    /// reached 131,072 before anything compared it to the four the header
+    /// promised, and thirteen bytes is not the limit of that construction.
+    ///
+    /// The first assertion is the premise: the frame really is valid ZSTD and
+    /// really does expand 10,082-fold. Without it a refusal below could mean
+    /// nothing more than "those bytes are not a frame".
+    #[test]
+    fn a_zstd_frame_that_outgrows_its_header_is_stopped_one_byte_past_it() {
+        let r = LakePageReader::new(Bytes::new(), 0, Codec::Zstd);
+
+        let whole = r
+            .decode(BOMB_FRAME, BOMB_BYTES)
+            .expect("the hand-built bomb is a valid zstd frame");
+        assert_eq!(
+            whole.len(),
+            BOMB_BYTES,
+            "13 bytes in, 131,072 out — the premise of this test"
+        );
+        assert!(
+            whole.iter().all(|b| *b == b'A'),
+            "and every one of them the RLE byte"
+        );
+
+        // The same frame behind a header that promises four bytes.
+        let refused = r
+            .decode(BOMB_FRAME, 4)
+            .expect_err("a frame that outgrows its header must be refused");
+        let text = refused.to_string();
+        assert!(
+            text.contains("stopped at 5"),
+            "the read must halt one byte past the promise, which is the only \
+             evidence available that it did not keep going, got: {text}"
+        );
+        assert!(
+            !text.contains(&BOMB_BYTES.to_string()),
+            "and it must NOT have materialised all 131,072 bytes to find that \
+             out — that number in the message means the cap did nothing: {text}"
+        );
     }
 
     #[test]

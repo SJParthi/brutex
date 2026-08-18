@@ -712,6 +712,33 @@ pub fn land(
             // ABSENT IS NOT ZERO. `i64::MIN` is the null sentinel; a vendor
             // sending a literal 0 means zero open interest, which is a
             // measurement, and it must survive as one.
+            //
+            // THE SENTINEL COLLISION IS REFUSED AT THE DECODERS, NOT HERE, AND
+            // THAT IS DELIBERATE. `Some(i64::MIN)` arriving in this row would
+            // be flattened by the `unwrap_or` below into the same eight bytes
+            // as an absent field, and from `store::format::Bar` onward there is
+            // no third state to read them back apart with. Every decoder that
+            // can populate `RawRow::open_interest` therefore refuses that one
+            // value where the vendor's own text is still in hand:
+            // `crate::csv`'s `CsvError::OpenInterestSentinel`, and
+            // `crate::http`'s `one_number`, which every JSON shape reads its
+            // counts through (`decode_positional` never fills the column at
+            // all). Both are asserted —
+            // `an_open_interest_of_exactly_the_null_sentinel_refuses_the_file`
+            // and `the_null_sentinel_is_refused_where_the_vendor_still_owns_the_value`.
+            //
+            // A third check here would be the fourth answer to one question and
+            // the only one with nothing left to name — by this line the field
+            // is one `i64` among millions, with no line number, no column and
+            // no vendor text to put in the refusal. `crate::csv`'s note that
+            // "the guard for that belongs beside that decode in
+            // `crates/pull/src/fetch.rs`" predates `one_number` taking it at
+            // the JSON boundary instead.
+            //
+            // WHAT THIS DOES NOT COVER. `RawRow` is public with public fields,
+            // so a caller assembling one by hand — a test double, a decoder in
+            // another crate — can still hand this line `Some(i64::MIN)` and
+            // have it stored as the null. No shipped decoder can.
             open_interest: row.open_interest.unwrap_or(i64::MIN),
         };
         bars.push(bar);

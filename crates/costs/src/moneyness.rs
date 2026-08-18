@@ -30,28 +30,58 @@
 //! direction-relative one — and the arrow between them is a tested law:
 //! `moneyness = atm_offset` for a call, `moneyness = −atm_offset` for a put.
 //!
-//! # Half a step lands at the money, and that is deliberate
+//! # Half a step: the tie goes **down**, because the rung's tie goes up
 //!
-//! The rounding is **half toward zero**. A strike exactly `step / 2` from spot
-//! — the inclusive edge of the at-the-money band — rounds to `0` rather than to
-//! `±1`, which makes
+//! A strike exactly `step / 2` from spot is equidistant from two offsets, and
+//! the tie is broken toward the **smaller** one: `+step/2` is `0`, `−step/2`
+//! is `−1`.
+//!
+//! That is not a second convention invented here. It is
+//! [`crate::strike::at_the_money`]'s own tie — a spot exactly halfway between
+//! two rungs snaps **up**, invariant K-17 — read from the other end. The rung
+//! half a step above such a spot *is* the at-the-money rung, so it must read
+//! `0`; the rung half a step below it is one rung in, so it must read `−1`.
+//! Stated as the identity the two halves owe each other:
+//!
+//! ```text
+//! atm_offset(at_the_money(spot) + k·step, spot)  ==  k     for every spot
+//! ```
+//!
+//! proven over every paisa of a whole step of spots, on both grids, by
+//! `the_offset_counts_rungs_from_the_rung_at_the_money_names`.
+//!
+//! **What this replaces, and why it was wrong.** The rounding used to be half
+//! *toward zero*, which breaks the tie the opposite way below spot. On the
+//! 50-rupee grid with a spot of exactly ₹24,025.00 — a legal spot, on the grid
+//! of paisa the store keeps — that rule gave `0` to **both** ₹24,000 and
+//! ₹24,050, while `at_the_money` named only ₹24,050. One spot, two strikes
+//! wearing the `ATM` label, and a label that no longer resolves back to the
+//! strike it was read off: `strike_at(at_the_money(spot), ATM)` answered
+//! ₹24,050 for a strike of ₹24,000. Every strike below the midpoint was
+//! mislabelled by one step, not just the tie itself.
+//!
+//! # The at-the-money band is half open, and that is what it cost
 //!
 //! ```text
 //! moneyness_steps(...) == 0   ⟺   classify(...) == Moneyness::AtTheMoney
 //! ```
 //!
-//! an exact equivalence for **every** step, odd or even. Rounding half away
-//! from zero would put that boundary strike at `±1` while the bucket still
-//! called it at the money, and the two derived columns would contradict each
-//! other at every on-grid midpoint. The source records the same reasoning; the
-//! equivalence is proven here by
-//! `the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees`.
+//! is still an exact equivalence for **every** step, odd or even — `classify`
+//! is literally the sign of the moneyness. What changed is the band's shape:
+//! it is `(−step/2, +step/2]`, closed above and open below, where the source's
+//! `classify` used a band closed at both ends.
+//!
+//! Both could not be kept. A closed band exactly one step wide contains **two**
+//! rungs whenever spot sits at a midpoint, so it cannot coexist with a single
+//! at-the-money rung. The rung wins: it decides which contract is bought, where
+//! the band only decides a label. The equivalence and the band's exact edges
+//! are proven by `the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees`.
 //!
 //! # Integers only
 //!
 //! The source computed the offset over 28-digit decimals and its Rust twin
 //! reproduced that with a proof about ulp sizes. None of that crosses over.
-//! Every value here is `i64` paisa, the tie test is `2·|r|` against `d` in
+//! Every value here is `i64` paisa, the tie test is `2·r` against `d` in
 //! `i128` so it cannot overflow, and there is no `f64` on any path.
 
 use brutex_core::instrument::OptionSide;
@@ -71,7 +101,9 @@ use crate::strike::StrikeStep;
 pub enum Moneyness {
     /// The option has intrinsic value at this spot.
     InTheMoney,
-    /// The strike is the rung nearest spot, within half a step either way.
+    /// The strike is the rung [`crate::strike::at_the_money`] names for this
+    /// spot: within half a step above it, or less than half a step below it.
+    /// The band is half open on purpose — see the module documentation.
     AtTheMoney,
     /// The option has no intrinsic value at this spot.
     OutOfTheMoney,
@@ -190,12 +222,13 @@ impl core::fmt::Display for MoneynessSteps {
     }
 }
 
-/// How many steps above spot a strike sits, rounded half toward zero.
+/// How many steps above spot a strike sits, with the half-step tie going down.
 ///
 /// The **grid-relative** offset: positive means a higher strike, whichever side
-/// is being traded. This is the source's `moneyness.py::atm_offset` law
-/// verbatim, and it is *not* the moneyness — see [`moneyness_steps`], which is
-/// this with the trade direction applied.
+/// is being traded. This is the source's `moneyness.py::atm_offset` law with
+/// its tie rule replaced by the one [`crate::strike::at_the_money`] already
+/// uses (see the module documentation), and it is *not* the moneyness — see
+/// [`moneyness_steps`], which is this with the trade direction applied.
 ///
 /// # Errors
 ///
@@ -219,9 +252,10 @@ impl core::fmt::Display for MoneynessSteps {
 ///
 /// // 24,050 is one 50-point step above a spot of 24,000.
 /// assert_eq!(atm_offset(Paisa::from_raw(24_050_00), Paisa::from_raw(24_000_00), step), Ok(1));
-/// // Exactly half a step is at the money, both ways.
+/// // Exactly half a step: the tie goes down, to the smaller offset. Above spot
+/// // that is 0, below spot it is -1 — the two ends of one rule, not two rules.
 /// assert_eq!(atm_offset(Paisa::from_raw(24_025_00), Paisa::from_raw(24_000_00), step), Ok(0));
-/// assert_eq!(atm_offset(Paisa::from_raw(23_975_00), Paisa::from_raw(24_000_00), step), Ok(0));
+/// assert_eq!(atm_offset(Paisa::from_raw(23_975_00), Paisa::from_raw(24_000_00), step), Ok(-1));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 pub fn atm_offset(strike: Paisa, spot: Paisa, step: StrikeStep) -> Result<i32, CostError> {
@@ -241,20 +275,28 @@ pub fn atm_offset(strike: Paisa, spot: Paisa, step: StrikeStep) -> Result<i32, C
     // doubling below is free of a second guard.
     let numerator = i128::from(strike.raw()) - i128::from(spot.raw());
     let divisor = i128::from(step.raw());
-    // Truncating division and its remainder carry the numerator's sign.
-    let quotient = numerator / divisor;
-    let remainder = numerator % divisor;
-    // Half toward zero: bump away from zero only when strictly more than half a
-    // step remains. The exact-half tie keeps the truncated quotient, which is
-    // what makes zero coincide with the at-the-money band edge.
+    // Euclidean division, not truncating division. The divisor is a strike step
+    // and is always strictly positive, so the remainder is the distance ABOVE
+    // the rung below and satisfies `0 <= r < d` for **either** sign of the
+    // numerator — where `%` would hand back a negative remainder below spot and
+    // need a second, sign-dependent arm to interpret it.
+    let quotient = numerator.div_euclid(divisor);
+    let remainder = numerator.rem_euclid(divisor);
+    // One comparison decides the tie for both directions at once: step up only
+    // when strictly more than half a step remains above the rung below, so the
+    // exact half — `2·r == d` — stays on the lower offset.
     //
-    // The direction of the bump is the remainder's own sign, taken with
-    // `signum` rather than with a comparison. Inside this branch the remainder
-    // cannot be zero — `2·|r| > d > 0` forces `|r| > 0` — so a `r > 0` test
-    // would have an arm no input distinguishes from `r >= 0`: an equivalent
-    // mutant that no assertion could ever kill. `signum` has no such arm.
-    let offset = if 2 * remainder.abs() > divisor {
-        quotient + remainder.signum()
+    // That `>` is load-bearing, and unlike the `remainder > 0` branch this
+    // replaces (docs/06-limits.md §26) the mutant that weakens it to `>=` is
+    // caught rather than equivalent: both shipped grids are an even number of
+    // paisa, so `2·r == d` is reachable, and it is reached by
+    // `a_half_step_tie_goes_down_to_the_rung_at_the_money_names` on the NIFTY
+    // grid and by `the_offset_counts_rungs_from_the_rung_at_the_money_names`
+    // on both. The rule itself is `strike::at_the_money`'s own tie seen from
+    // the other end — see the module documentation — and nothing here
+    // re-decides it.
+    let offset = if 2 * remainder > divisor {
+        quotient + 1
     } else {
         quotient
     };
@@ -321,14 +363,17 @@ pub fn moneyness_steps(
 /// Which side of the money a strike is on, at a given spot.
 ///
 /// The source's `moneyness.py::classify` law with the at-the-money band fixed
-/// at half a step — the band its own per-grid view passes, and the only band
-/// under which the bucket and [`moneyness_steps`] agree at every midpoint.
+/// at half a step, **half open**: `(−step/2, +step/2]` around spot, closed
+/// above and open below. The source's band was closed at both ends, which
+/// admits two rungs at a midpoint spot and therefore cannot coexist with a
+/// single at-the-money rung — see the module documentation for which of the two
+/// yielded and why.
 ///
 /// It is exactly `moneyness_steps(..).bucket()`, and the test
 /// `the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees` proves
-/// that against an independent re-derivation of the source's own rule
-/// (`diff = spot − strike`; `|diff| ≤ band` is at the money; a call is in the
-/// money when `diff > 0`, a put when `diff < 0`).
+/// that against an independent re-derivation of the rule (`diff = spot −
+/// strike`; `−step ≤ 2·diff < step` is at the money; a call is in the money
+/// when `diff > 0`, a put when `diff < 0`).
 ///
 /// # Errors
 ///
@@ -407,16 +452,18 @@ mod tests {
 
     #[test]
     fn the_source_offset_pins_land_on_the_source_answers() {
-        // Every pin the predecessor hardcoded from its decimal oracle,
-        // in paisa. Half-toward-zero is the law being checked.
+        // The pins the predecessor hardcoded from its decimal oracle, in paisa,
+        // MINUS the two that are exact ties below spot. Those two are the only
+        // rows where this crate's tie rule and the predecessor's differ, they
+        // are now answered in `a_half_step_tie_goes_down_to_the_rung_at_the_money_names`
+        // beside the reason, and leaving them here under a name that claims
+        // they are the source's answers would be the claim that is false.
         let step = nifty_step();
         for (strike, spot, want) in [
             (2_405_000i64, 2_400_000i64, 1i32), // one step up
-            (2_402_500, 2_400_000, 0),          // exact +half tie -> 0
-            (2_397_500, 2_400_000, 0),          // exact -half tie -> 0
+            (2_402_500, 2_400_000, 0),          // exact +half tie -> 0, unchanged
             (2_407_505, 2_400_000, 2),          // 1.501 steps -> 2
             (2_407_495, 2_400_000, 1),          // 1.499 steps -> 1
-            (2_392_500, 2_400_000, -1),         // -1.5 -> -1, toward zero
             (2_392_495, 2_400_000, -2),         // -1.501 -> -2
             (5_000_000, 2_400_000, 520),        // far out of the money
         ] {
@@ -443,27 +490,50 @@ mod tests {
     }
 
     #[test]
-    fn a_tie_lands_at_the_money_and_one_paisa_past_it_does_not_on_either_side() {
+    fn a_half_step_tie_goes_down_to_the_rung_at_the_money_names() {
         let step = nifty_step();
         let spot = paisa(24_000);
-        // ±(k + 1/2) steps keep k. This is the assertion a half-away-from-zero
-        // rounding fails, and the whole reason the tie rule was chosen.
+        // (k + 1/2) steps keep k; -(k + 1/2) steps take -(k + 1). Both are the
+        // same rule — the tie goes to the SMALLER offset — and the second half
+        // is what half-toward-zero used to get wrong.
         assert_eq!(atm_offset(Paisa::from_raw(2_407_500), spot, step), Ok(1));
-        assert_eq!(atm_offset(Paisa::from_raw(2_392_500), spot, step), Ok(-1));
+        assert_eq!(atm_offset(Paisa::from_raw(2_392_500), spot, step), Ok(-2));
         assert_eq!(atm_offset(Paisa::from_raw(2_407_501), spot, step), Ok(2));
         assert_eq!(atm_offset(Paisa::from_raw(2_392_499), spot, step), Ok(-2));
-        // And at the money itself, one paisa either side of both band edges.
+        // The band edges themselves, one paisa either side of each. The upper
+        // edge is IN the band and the lower edge is not: `(-step/2, +step/2]`.
         assert_eq!(atm_offset(Paisa::from_raw(2_402_500), spot, step), Ok(0));
         assert_eq!(atm_offset(Paisa::from_raw(2_402_501), spot, step), Ok(1));
-        assert_eq!(atm_offset(Paisa::from_raw(2_397_500), spot, step), Ok(0));
+        assert_eq!(atm_offset(Paisa::from_raw(2_397_500), spot, step), Ok(-1));
+        assert_eq!(atm_offset(Paisa::from_raw(2_397_501), spot, step), Ok(0));
         assert_eq!(atm_offset(Paisa::from_raw(2_397_499), spot, step), Ok(-1));
+
+        // And the tie seen from the spot's end, which is the whole reason it
+        // goes this way: a spot exactly halfway between two rungs snaps UP
+        // (K-17), so the rung above it is the at-the-money one and reads 0,
+        // and the rung below it reads -1. Half-toward-zero gave 0 to BOTH,
+        // and this is the worked case the module documentation names.
+        let midpoint = Paisa::from_raw(2_402_500);
+        assert_eq!(at_the_money(midpoint, step), Ok(paisa(24_050)));
+        assert_eq!(atm_offset(paisa(24_050), midpoint, step), Ok(0));
+        assert_eq!(atm_offset(paisa(24_000), midpoint, step), Ok(-1));
+        // Exactly one rung on the whole grid wears the ATM label, and it is the
+        // one `at_the_money` named. Two of them was the defect.
+        assert_eq!(
+            (23_900i64..=24_150)
+                .step_by(50)
+                .filter(|&rupees| atm_offset(paisa(rupees), midpoint, step) == Ok(0))
+                .collect::<Vec<i64>>(),
+            vec![24_050]
+        );
     }
 
     #[test]
     fn the_offset_matches_a_nearest_multiple_search_across_four_whole_steps() {
         // A differential against an independently written search: minimise
-        // |n − k·d| over candidate k, ties preferring the smaller |k| (toward
-        // zero). Exact i128 distances, no rounding anywhere in the reference.
+        // |n − k·d| over candidate k, ties preferring the smaller k (down, the
+        // rule the module documentation derives from `at_the_money`'s snap).
+        // Exact i128 distances, no rounding anywhere in the reference.
         let step = nifty_step();
         let divisor = i128::from(step.raw());
         let spot = paisa(24_000);
@@ -477,7 +547,7 @@ mod tests {
             for candidate in (floor - 1)..=(floor + 2) {
                 let here = (numerator - candidate * divisor).abs();
                 let there = (numerator - best * divisor).abs();
-                if here < there || (here == there && candidate.abs() < best.abs()) {
+                if here < there || (here == there && candidate < best) {
                     best = candidate;
                 }
             }
@@ -510,8 +580,8 @@ mod tests {
     #[test]
     fn the_bucket_is_the_sign_of_the_moneyness_and_the_band_edge_agrees() {
         // The equivalence the tie rule exists for, checked against an
-        // INDEPENDENT re-derivation of the source's own classify rule over
-        // every paisa of two whole steps, on both grids and both sides.
+        // INDEPENDENT re-derivation of the classify rule over every paisa of
+        // two whole steps, on both grids and both sides.
         for step in [nifty_step(), banknifty_step()] {
             let spot = paisa(24_000);
             let width = step.raw();
@@ -522,9 +592,13 @@ mod tests {
                     let moneyness = moneyness_steps(strike, spot, step, side).expect("positive");
                     let bucket = classify(strike, spot, step, side).expect("positive");
                     assert_eq!(bucket, moneyness.bucket(), "the bucket is the sign");
-                    // The source's rule, written out again from scratch.
+                    // The rule, written out again from scratch. The band is
+                    // HALF OPEN — `(-step/2, +step/2]` measured on the strike,
+                    // which is `-step <= 2·diff < step` measured on `diff` —
+                    // because a closed band holds two rungs at a midpoint spot
+                    // and the at-the-money rung is one strike, not two.
                     let diff = spot.raw() - strike.raw();
-                    let band_edge = 2 * diff.abs() <= width;
+                    let band_edge = -width <= 2 * diff && 2 * diff < width;
                     let want = if band_edge {
                         Moneyness::AtTheMoney
                     } else if matches!(
@@ -546,30 +620,80 @@ mod tests {
                     }
                 }
             }
-            // Half a step either side, inclusive, on both sides of the trade.
-            assert_eq!(i64::from(at_the_money_seen), 2 * (width + 1));
+            // Half a step either side, the upper edge included and the lower
+            // one excluded, on both sides of the trade: exactly `width` strikes
+            // per side rather than `width + 1`. The band is one paisa narrower
+            // than the closed one it replaced, and that paisa is the tie.
+            assert_eq!(i64::from(at_the_money_seen), 2 * width);
         }
     }
 
     #[test]
     fn the_moneyness_and_the_strike_are_exact_inverses_of_each_other() {
         // Resolve a strike from a moneyness, then read the moneyness back off
-        // it: the round trip is the identity. This is the law that binds
-        // crate::strike and this module together, on both sides and both grids.
+        // THE SPOT IT WAS RESOLVED FOR: the round trip is the identity. This is
+        // the law that binds crate::strike and this module together, on both
+        // sides and both grids.
+        //
+        // Reading it back off the rung is the weaker statement this test used
+        // to make, and it was weak in exactly the place that was broken: a rung
+        // is on the grid, so the half-step tie never arose and the two tie
+        // rules could disagree unobserved. The spots below therefore include
+        // the exact midpoint between two rungs and one paisa either side of it.
         for step in [nifty_step(), banknifty_step()] {
-            let spot = paisa(24_000);
-            let atm = at_the_money(spot, step).expect("positive");
-            for side in [OptionSide::Call, OptionSide::Put] {
-                for steps in -50i32..=50 {
-                    let moneyness = MoneynessSteps::new(steps);
-                    let strike = strike_at(atm, moneyness, step, side).expect("within the grid");
-                    assert_eq!(
-                        moneyness_steps(strike, atm, step, side),
-                        Ok(moneyness),
-                        "{moneyness} as a {side:?} did not survive the round trip"
-                    );
+            // Both shipped grids are an even number of paisa, so the midpoint
+            // is exact and this test is not quietly rounding its own fixture.
+            assert_eq!(step.raw() % 2, 0, "an even step in paisa");
+            let half = step.raw() / 2;
+            let rung = paisa(24_000).raw();
+            for from_rung in [0, 1, -1, half - 1, half, half + 1] {
+                let spot = Paisa::from_raw(rung + from_rung);
+                let atm = at_the_money(spot, step).expect("positive");
+                for side in [OptionSide::Call, OptionSide::Put] {
+                    for steps in -50i32..=50 {
+                        let moneyness = MoneynessSteps::new(steps);
+                        let strike =
+                            strike_at(atm, moneyness, step, side).expect("within the grid");
+                        assert_eq!(
+                            moneyness_steps(strike, spot, step, side),
+                            Ok(moneyness),
+                            "{moneyness} as a {side:?} at spot {spot:?} did not survive"
+                        );
+                    }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn the_offset_counts_rungs_from_the_rung_at_the_money_names() {
+        // The identity the tie rule exists to make true, over EVERY paisa of a
+        // whole step of spots, on both grids:
+        //
+        //     atm_offset(at_the_money(spot) + k·step, spot) == k
+        //
+        // An off-grid spot is the normal case — an index level is whatever it
+        // is — so this sweeps a whole step of them rather than the handful a
+        // pin test can name. Under half-toward-zero every spot strictly above a
+        // rung's midpoint failed this at k = -1 and below, which is what made
+        // two strikes wear the ATM label for one spot.
+        for step in [nifty_step(), banknifty_step()] {
+            let base = paisa(24_000).raw();
+            let mut checked = 0u32;
+            for spot in base..(base + step.raw()) {
+                let spot = Paisa::from_raw(spot);
+                let atm = at_the_money(spot, step).expect("positive");
+                for k in -3i32..=3 {
+                    let strike = Paisa::from_raw(atm.raw() + i64::from(k) * step.raw());
+                    assert_eq!(
+                        atm_offset(strike, spot, step),
+                        Ok(k),
+                        "rung {k} from {atm:?} at spot {spot:?}"
+                    );
+                }
+                checked += 1;
+            }
+            assert_eq!(i64::from(checked), step.raw(), "a whole step of spots");
         }
     }
 
