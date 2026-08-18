@@ -15888,3 +15888,45 @@ minted the way version 2 was, with version 2 retired by number rather than
 deleted.
 
 ---
+
+## D-0196 · 2026-08-18 · Two boundary tests in `pattern.rs`, and an honest count of what is left
+
+`crates/indicators/src/pattern.rs`.
+
+Mutation testing over `crates/indicators` — its first run ever — showed the tests
+exercise its predicates well inside their ranges and **never on the value that
+decides them**. Two of those gaps are closed here.
+
+**`a_doji_is_neither_bullish_nor_bearish`.** `open == close` is the only input
+where `close > open` and `close >= open` disagree; every other bar is decided
+identically by both. A doji, plus one paisa either side so the predicates are
+shown to work rather than merely to refuse.
+
+**`the_body_thresholds_are_exact_at_the_boundary`.** A body of exactly 300
+permille, asserted `at_least(300)` AND `at_most(300)` — the two must meet, not
+overlap or gap — plus 301 and 299, which are the cases a `-> true` replacement
+cannot survive.
+
+### The count in §82 was from a partial run, and is corrected
+
+The package-scoped run tested **589 of 1,404** planned mutants and reported 49
+survivors, 9 of them here. A file-scoped run over `pattern.rs` alone then found
+**69 in this file**. The earlier figure was a partial pass reported as a total,
+which is the shape of error this repository's own §7b is about, and it was mine.
+
+**46 of the 69 are inside one function**, `Patterns::bits` — a long chain of `&&`,
+one clause per candlestick pattern. Killing an `&&` mutant needs an input where
+**exactly one conjunct is false**: a bar satisfying every clause of "hammer"
+except the one under test. That is about fifty hand-built bars and it is not
+done.
+
+**Four are equivalent.** `Shape::top` and `Shape::bottom` are
+`if open > close { open } else { close }`; at `open == close` both arms return
+the same number. The two in `Shape::of` are the same. Recorded rather than
+hunted.
+
+`docs/06-limits.md` §82 carries the corrected figures and what would close the
+rest.
+
+---
+

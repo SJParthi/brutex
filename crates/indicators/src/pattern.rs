@@ -1185,6 +1185,76 @@ mod degenerate {
         }
     }
 
+    /// THE BOUNDARY VALUE ITSELF, WHICH NO TEST HERE REACHED.
+    ///
+    /// `cargo-mutants` over this crate — its first run ever — left **49
+    /// survivors, nine of them in this file**, and they share one shape: a
+    /// comparison flipped by a single step, `>` to `>=` and `<` to `<=`. That is
+    /// not nine defects, it is one gap. Every test exercised these predicates on
+    /// values comfortably inside the range and never on the value that decides
+    /// them.
+    ///
+    /// It matters here more than in most crates: this file turns a bar into
+    /// condition bits. A comparison off by one step does not crash and does not
+    /// look wrong — it silently reclassifies bars at the edge, changing which
+    /// combinations the sweep finds and changing nothing a reader can see.
+    ///
+    /// # Four of the nine are equivalent and are not chased
+    ///
+    /// `Shape::top` and `Shape::bottom` are `if open > close { open } else
+    /// { close }`. At `open == close` both arms return the same number, so `>`
+    /// and `>=` compute the same function and no assertion can separate them.
+    /// The two inside `Shape::of` have the same shape. Recorded at
+    /// `docs/06-limits.md` §82 rather than hunted.
+    #[test]
+    fn a_doji_is_neither_bullish_nor_bearish() {
+        // `open == close` is exactly where `>` and `>=` disagree, and the only
+        // place they can: every other bar is decided identically by both.
+        let doji = Shape::of(&bar(0, 100, 110, 90, 100));
+        assert!(
+            !doji.bullish(),
+            "a bar that closed where it opened has not risen; `close >= open` \
+             would call this bullish and it is not"
+        );
+        assert!(
+            !doji.bearish(),
+            "and it has not fallen either; `close <= open` would call it bearish"
+        );
+
+        // One paisa either side, so the predicates are shown to work at all
+        // rather than merely to refuse.
+        assert!(Shape::of(&bar(0, 100, 110, 90, 101)).bullish());
+        assert!(Shape::of(&bar(0, 100, 110, 90, 99)).bearish());
+    }
+
+    /// `body_at_least` and `body_at_most` meet exactly at the threshold.
+    ///
+    /// Three mutants lived here: the function replaced by `true`, and the
+    /// cross-multiply's `*` turned into `+` and into `/`. All three need a case
+    /// whose answer is FALSE, which no test in this file had.
+    #[test]
+    fn the_body_thresholds_are_exact_at_the_boundary() {
+        // range 100, body 30 — exactly 300 permille.
+        let at = Shape::of(&bar(0, 100, 200, 100, 130));
+        assert_eq!(at.range, 100, "the fixture's range is what the maths uses");
+        assert_eq!(at.body, 30, "and its body");
+
+        assert!(
+            at.body_at_least(300),
+            "a body of exactly 300 permille IS at least 300"
+        );
+        assert!(
+            at.body_at_most(300),
+            "and it is at most 300 — the two must meet, not overlap or gap"
+        );
+        assert!(
+            !at.body_at_least(301),
+            "301 permille is more than this body, so `>=` must refuse it — the \
+             case a `-> true` replacement cannot survive"
+        );
+        assert!(!at.body_at_most(299), "and 299 is less than it");
+    }
+
     /// A one-sided doji is not a high wave candle.
     ///
     /// This is the input that exposed the defect, and finding it took two attempts.

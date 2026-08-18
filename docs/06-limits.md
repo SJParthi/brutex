@@ -4723,10 +4723,32 @@ combinations the sweep finds and changes nothing a reader can see.
 records for `engine`: a mutation that makes a loop not finish cannot be killed by
 an assertion, because the suite hangs rather than fails.
 
-**What would close it:** a boundary case per predicate — the value exactly at the
-threshold, and one step either side. Not 49 separate tests; the survivors cluster
-into about a dozen predicates, and one table-driven test per predicate covering
-`t-1`, `t`, `t+1` would kill most of them. **OPEN.**
+**CORRECTION, measured the same day.** The 589/49 figures above are from a run
+that tested **589 of 1,404 planned mutants** — a partial pass, and the survivor
+count with it. A file-scoped run over `pattern.rs` alone then found **69
+survivors in that one file**, against the 9 the partial run attributed to it.
+
+**The true scope is larger than this section first claimed, and concentrated.**
+Of those 69, **46 are inside a single function** — `Patterns::bits`, a long chain
+of `&&` conditions, one per candlestick pattern. Killing an `&&` mutant needs an
+input where **exactly one conjunct is false**: a bar that satisfies every clause
+of "hammer" except the one being tested. That is roughly one hand-built bar per
+clause, and there are dozens of clauses.
+
+The remaining 23 are the boundary shape this section describes, and two of them
+are now dead — `a_doji_is_neither_bullish_nor_bearish` and
+`the_body_thresholds_are_exact_at_the_boundary` (D-0195).
+
+**Four are equivalent and are not chased.** `Shape::top` and `Shape::bottom` are
+`if open > close { open } else { close }`; at `open == close` both arms return the
+same number, so `>` and `>=` compute the same function. The two inside
+`Shape::of` have the same shape.
+
+**What would close the rest:** for the boundary class, one table-driven test per
+predicate covering `t-1`, `t`, `t+1`. For `Patterns::bits`, a fixture per pattern
+with one clause negated at a time — the work is mechanical but it is roughly
+fifty hand-built bars, and it has not been done. **OPEN, and larger than one
+sitting.**
 
 ---
 
