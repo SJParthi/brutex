@@ -5513,7 +5513,15 @@ jobs:
             let bad = 0;
             for (const f of files) {
               const src = fs.readFileSync(f, "utf8");
-              const css = src.split("<style>")[1]?.split("</style>")[0];
+              // A `.css` file IS the stylesheet; a `.svelte` file carries one.
+              // `theme.css` is 2,052 lines and the first version of this gate
+              // globbed past it, along with `routes/+page.svelte`, whose path
+              // has no directory between `routes/` and the filename. A gate
+              // that names its inputs by hand misses the ones nobody thought
+              // of, so this walks the tree instead.
+              const css = f.endsWith(".css")
+                ? src
+                : src.split("<style>")[1]?.split("</style>")[0];
               if (!css) continue;
               const opens = (css.match(/\/\*/g) || []).length;
               const closes = (css.match(/\*\//g) || []).length;
@@ -5544,7 +5552,7 @@ jobs:
               process.exit(1);
             }
             console.log("no comment swallows a rule");
-          ' web/src/routes/*/+page.svelte web/src/routes/+layout.svelte web/src/lib/*.svelte
+          ' $(find web/src -name '"'"'*.svelte'"'"' -o -name '"'"'*.css'"'"' | sort)
 
       - name: Gate W4 — unused CSS does not grow
         run: |
