@@ -356,7 +356,7 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
     ok
 }
 
-/// C-14 — one entry lookup costs a bounded multiple of the per-lookup floor.
+/// C-26 — one entry lookup costs a bounded multiple of the per-lookup floor.
 fn entry_lookup_stays_within_its_budget() -> bool {
     /// Floors allowed per lookup.
     ///
@@ -382,7 +382,7 @@ fn entry_lookup_stays_within_its_budget() -> bool {
     println!("  the per-lookup floor is {floor} ps — one entry-count read and an add");
     let present = key(7);
     let at = cost_ps(20_000, || black_box(&m).entry(black_box(&present)));
-    budget("C-14 entry lookup against the floor", floor, at, ALLOWED)
+    budget("C-26 entry lookup against the floor", floor, at, ALLOWED)
 }
 
 fn entry_lookup_is_flat() -> bool {
