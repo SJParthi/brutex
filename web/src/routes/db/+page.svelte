@@ -1672,6 +1672,49 @@
   });
 
   /**
+   * EVERY INSTRUMENT THE CHOSEN UNIVERSE HOLDS, STORED OR NOT.
+   *
+   * # Why the store was the wrong source
+   *
+   * `instrumentRows` folds the STORE, so the rung offered only names that
+   * already have bars. With one instrument stored it offered one row — and
+   * "does this store hold TCS?" was a question the control could not be asked,
+   * because TCS was not in the list to ask about. A rung that can only name what
+   * you already have cannot tell you what you are missing, which on a page whose
+   * whole job is reporting the store is the question worth asking.
+   *
+   * /ingest sources the same rung from `/instruments.json` and offers all 213
+   * F&O underlyings whether or not a bar exists for any of them. This is that,
+   * on the reading this page already has: `masterRows()` is the catalogue and
+   * `universeKeys` is the membership join, both already here and both already
+   * used by `universeCount` two hundred lines up.
+   *
+   * # What each row carries
+   *
+   * `held` is the instrument-month count from the store, so a name with nothing
+   * behind it says so on its own row rather than being absent. That is the
+   * difference between "we hold none of it" and "it does not exist", which §4
+   * does not allow a control to blur.
+   *
+   * # Everything is still Everything
+   *
+   * `universeKeys === null` means NO JOIN — Everything, or a universe whose
+   * membership could not be read. There is no catalogue set to offer then, so it
+   * falls back to what the store holds, which is the only honest answer
+   * available: with no membership list there is nothing to be missing FROM.
+   */
+  const instrumentOffered = $derived.by(() => {
+    const held = new Map(instrumentRows.map((r) => [r.key, r]));
+    if (universeKeys === null) return instrumentRows;
+    const out = [];
+    for (const k of universeKeys) {
+      const h = held.get(k);
+      out.push({ key: k, months: h?.months ?? 0, bars: h?.bars ?? 0, short: h?.short ?? 0 });
+    }
+    return out.sort((a, b) => txt(a.key, b.key));
+  });
+
+  /**
    * THE THREE SEGMENTS THE STORE KEYS ON, ALWAYS ALL THREE.
    *
    * `kinds` below counts what is PRESENT, which is the right input for a total
@@ -5298,17 +5341,28 @@
                   ? instrumentRows[0].key
                   : `All · ${fmt(instrumentRows.length)} held`}
             rows={[
-              { key: '', name: 'All instruments', detail: `${fmt(instrumentRows.length)} held` },
-              ...instrumentRows.map((r) => ({
+              {
+                key: '',
+                name: 'All instruments',
+                detail: `${fmt(instrumentRows.length)} of ${fmt(instrumentOffered.length)} held`
+              },
+              ...instrumentOffered.map((r) => ({
                 key: r.key,
                 name: r.key,
                 /* BACKWARD-LOOKING, ALWAYS. "held" is what /store.json can
                    prove; what the vendor could serve is /ingest's question and
                    no endpoint this page calls can answer it. */
                 detail:
-                  r.short > 0
-                    ? `${fmt(r.months)} month(s) held · −${fmt(r.short)}`
-                    : `${fmt(r.months)} month(s) held`
+                  r.months === 0
+                    ? /* NOTHING STORED IS ITS OWN ANSWER, not `0 month(s) held`.
+                         The rung offers the whole universe now, so most rows on
+                         a fresh store are zero — and "0 month(s) held" reads as
+                         a measurement that came back zero, where "nothing
+                         stored" reads as the absence it is. */
+                      'nothing stored'
+                    : r.short > 0
+                      ? `${fmt(r.months)} month(s) held · −${fmt(r.short)}`
+                      : `${fmt(r.months)} month(s) held`
               }))
             ]}
             selected={new Set([picked])}
