@@ -572,6 +572,16 @@ impl Ladder {
     /// l.record(false);
     /// assert_eq!(l.next().map(|s| s.segment), Some(Segment::Spot), "still spot");
     ///
+    /// // SEGMENT-MAJOR: a clean day pass moves to spot's MINUTE, not to
+    /// // futures. A segment is finished entirely before the next is touched,
+    /// // because expired options cannot have their implied volatility solved
+    /// // without the underlying's spot bar at the same minute.
+    /// l.record(true);
+    /// assert_eq!(l.next().map(|s| s.segment), Some(Segment::Spot), "still spot");
+    /// assert_eq!(l.next().map(|s| s.grain), Some(Grain::Minute));
+    ///
+    /// // Spot's minute, then its derived rungs, and only then futures.
+    /// l.record(true);
     /// l.record(true);
     /// assert_eq!(l.next().map(|s| s.segment), Some(Segment::Futures));
     /// ```
