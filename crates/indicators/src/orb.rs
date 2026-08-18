@@ -392,6 +392,81 @@ mod tests {
         assert_eq!(minutes_since_open(open.ts_micros - MICROS_PER_MINUTE), None);
     }
 
+    /// THE WINDOW WIDENS TO ITS WIDEST BAR, AND EACH RELATION SITS AT ITS OWN POSITION.
+    ///
+    /// Two separate gaps, both invisible to a fixture whose opening range arrives on its
+    /// first bar.
+    ///
+    /// The fold widens with `bar.high > slot.high`. Turned into `==` it keeps only the
+    /// assignment that changes nothing, so the window never grows past the bar that
+    /// seeded it — every level this module publishes is then the FIRST minute's, and the
+    /// opening range means the opening minute. Here the high arrives at minute 2 and the
+    /// low at minute 3, so neither extreme can be carried by the seeding bar.
+    ///
+    /// The five relations are addressed as `base + n`, and nothing had ever asserted
+    /// WHICH of the five a given close lights. `base + 1` mutated to `base * 1` is
+    /// `base`: a close below the window puts up "above the high" instead of "below the
+    /// low", and the two are opposite claims about the same bar at neighbouring
+    /// positions. `base + 4` mutated to `base - 4` or `base * 4` addresses a position
+    /// this module does not own, `set_near` refuses it, and "near the low" is then
+    /// simply never set by anything.
+    ///
+    /// `>` to `>=` on the fold's two comparisons is NOT chased and is recorded in
+    /// `docs/06-limits.md`: at equality both write the value already held.
+    #[test]
+    fn the_window_takes_its_widest_bar_and_each_relation_keeps_its_own_position() {
+        let mut o = Orb::default();
+        // Minutes 0-4 are the 5-minute window. The high arrives at 2, the low at 3.
+        for (m, h, l) in [
+            (0_i64, 2_500_000_i64, 2_499_000_i64),
+            (1, 2_500_500, 2_499_000),
+            (2, 2_502_000, 2_499_000),
+            (3, 2_500_000, 2_496_000),
+            (4, 2_500_000, 2_499_000),
+        ] {
+            let _ = ok(&mut o, &at(m, h, l, 2_500_000));
+        }
+        // Minute 5 is past the window's end, so it is closed and publishes.
+        let _ = ok(&mut o, &at(5, 2_500_000, 2_499_000, 2_500_000));
+        assert_eq!(
+            o.extremes(0),
+            Some((2_502_000, 2_496_000)),
+            "the window did not widen past the bar that seeded it"
+        );
+
+        let (above, below, inside) = (86_u32, 87, 88);
+        let (near_high, near_low) = (89_u32, 90);
+
+        // A close below the window is BELOW it, and saying "above" is the opposite claim.
+        let under = o.bits(2_495_000, tol());
+        assert!(under.get(below), "a close under the window is not below it");
+        assert!(
+            !under.get(above),
+            "a close under the window claimed to be ABOVE it -- `base + 1` and `base` \
+             are neighbouring positions and opposite statements"
+        );
+        assert!(
+            !under.get(inside),
+            "a close under the window is not inside it"
+        );
+
+        // And above is above, so the pair is not satisfied by setting both.
+        let over = o.bits(2_503_000, tol());
+        assert!(over.get(above), "a close over the window is not above it");
+        assert!(!over.get(below), "a close over the window is not below it");
+
+        // The band is a hundredth of the 6,000-paisa span: 60 paisa either side.
+        assert!(
+            o.bits(2_496_000, tol()).get(near_low),
+            "a close ON the window low is not near it -- `base + 4` addresses a \
+             position this module does not own, and `set_near` refuses it silently"
+        );
+        assert!(
+            o.bits(2_502_000, tol()).get(near_high),
+            "a close ON the window high is not near it"
+        );
+    }
+
     /// A window no bar ever landed in publishes no level.
     ///
     /// `closed` and `seeded` answer different questions. `closed` means a bar arrived at or
