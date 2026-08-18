@@ -2578,6 +2578,94 @@ fn store_body(
 /// arm matches is only ever a feed that was NAMED and is not one this build
 /// reads. Every row now carries `"feed"` as well, so the default states itself
 /// instead of being assumed.
+/// THE SCRUB, over HTTP — the counter checked against the files it counts.
+///
+/// # Why this route exists and `/store.json` does not answer the question
+///
+/// Every completeness surface in this product — `/store.json`, `/db`, the
+/// coverage grid, and `crate::ladder`'s gate that decides whether the next rung
+/// may run — answers from the census, which is one file validated only against
+/// itself. This is the only route that OPENS A BAR FILE to check the census is
+/// telling the truth about it.
+///
+/// # It never repairs
+///
+/// `pull::scrub` compares and this reports. A counter silently corrected before
+/// an operator saw the disagreement is a repair nobody audited — `CLAUDE.md`
+/// §4 wants the reason surfaced rather than swallowed by a fix.
+///
+/// # Cost
+///
+/// O(1) per entry, and the walk is the ask: a scrub of a vendor is a scrub of
+/// every month it claims. Nothing is sorted and nothing is read whole.
+async fn verify_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    uri: axum::http::Uri,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let query = uri.query().unwrap_or("");
+    let asked = param(query, "feed");
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    let Some(feed) = ingest::parse_vendor(&asked) else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            headers,
+            no_such_feed_json(&asked),
+        );
+    };
+    // FRESH, NEVER THE STARTUP SNAPSHOT. A scrub answering from a census read
+    // at boot would verify a store that has since been written to.
+    let (censuses, _entries) = census_now(&site);
+    let Some(census) = censuses.iter().find(|c| c.vendor == feed) else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            headers,
+            no_such_feed_json(&asked),
+        );
+    };
+
+    let report = crate::verify::vendor(&site.store_root, census);
+    // A DISAGREEMENT IS NOT A SERVER FAULT, so it is 200 with the finding in
+    // the body: the request was answered correctly and the ANSWER is bad news.
+    // A refusal — a counter that could not be read at all — is 503, because
+    // then the question was never asked.
+    let code = if report.refused.is_some() {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        axum::http::StatusCode::OK
+    };
+    let t = report.tally;
+    let named = report
+        .named
+        .iter()
+        .map(|one| render::json_string(one))
+        .collect::<Vec<_>>()
+        .join(",");
+    let body = format!(
+        "{{\"feed\":{},\"verified\":{},\"say\":{},\"seen\":{},\"agreed\":{},\
+         \"missing\":{},\"rows\":{},\"bounds\":{},\"unreadable\":{},\
+         \"undrawn\":{},\"findings\":[{named}],\"refused\":{}}}",
+        render::json_string(feed.as_str()),
+        report.verified(),
+        render::json_string(&report.say()),
+        t.seen(),
+        t.agreed,
+        t.missing,
+        t.rows,
+        t.bounds,
+        t.unreadable,
+        report.undrawn,
+        report
+            .refused
+            .as_ref()
+            .map_or_else(|| "null".to_owned(), |why| render::json_string(why)),
+    );
+    (code, headers, body)
+}
+
 async fn store_json(
     axum::extract::State(site): axum::extract::State<Loaded>,
     uri: axum::http::Uri,
@@ -6846,6 +6934,8 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         )
         .route("/bars.json", axum::routing::get(bars_json))
         .route("/store.json", axum::routing::get(store_json))
+        // THE ONLY ROUTE THAT OPENS A BAR FILE TO CHECK THE COUNTER.
+        .route("/verify.json", axum::routing::get(verify_json))
         // READ FROM DISK, NOT `include_str!`. It is a file under `web/`, and a
         // crate that reaches into that tree at compile time is the coupling CI
         // gate 1e detaches the tree to find. D-0064.
