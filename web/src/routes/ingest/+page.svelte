@@ -7336,12 +7336,19 @@
          `feedFloor` and `maxDay` the grid and the refusals do rather than
          restating a number that could drift from them. -->
     <p class="calnote">
-      {dayLabel(feedFloor.at && feedFloor.at > minDay ? feedFloor.at : minDay)} – {dayLabel(maxDay)}
-      can be picked. Faint days hold no session; struck-through days are outside what this field may
-      take.
+      {dayLabel(minDay)} – {dayLabel(maxDay)} can be picked. Faint days hold no session;
+      struck-through days are outside what this field may take.
+      <!-- THE FLOOR IS STATED, NOT ENFORCED. It used to be both the sentence
+           AND the bound, so this line advertised the feed's floor as the
+           pickable span. The grid now offers the server's whole span and the
+           floor is a property of the ASK, so the sentence has to say what the
+           vendor will actually return rather than what the control will let
+           you choose. Silence here would be the §4 failure; a narrower control
+           was simply the wrong place to put the warning. -->
       {#if feedFloor.at && feedFloor.at > minDay}
-        <br />The floor is the feed's, not this page's: {floorSentence} Pick a feed or a timeframe
-        that reaches further back and the earlier days open up.
+        <br />Earlier days are pickable and this feed will not answer for all of them:
+        {floorSentence} A day before that returns nothing from this feed — pick a feed or a
+        timeframe that reaches further back to fill it.
       {/if}
       <!-- A FOLDER FEED HAS NO FLOOR TO PRINT, AND THIS IS WHAT IT HAS INSTEAD.
            Not a rule about how far back a vendor will answer — there is no
