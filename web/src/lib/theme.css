@@ -1809,20 +1809,62 @@ th.num .sort {
    and in a flex row it made that column taller and broke the line the eye was
    following. Here it cannot: the note row is as tall as the tallest note and
    every field uses it. */
+/* ONE CONTROL-STRIP VOCABULARY, AND IT IS THIS ONE.
+   `.strip` > `.field` > `.lab` / `.ctl` / `.note` is what `web/design` draws,
+   and it is what every route must use.
+
+   IT WAS DEAD CODE, MEASURED. Before this change no route file used `.lab` or
+   `.ctl` at all: /ingest had grown a private copy called `.pk` / `.plbl` /
+   `.pknote` and /db a second one called `.cell` / a bare span / `.count`. Three
+   spellings of one control, two of them maintained by hand inside 9,000-line
+   page files, and neither matching the design source. That is why the two pages
+   did not look alike and why neither looked like `web/design/db.html` — not a
+   styling accident, a vocabulary that nothing was pointed at. */
 .strip {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  grid-template-rows: var(--lab-h) var(--ctl-h) auto;
-  gap: var(--s2) var(--s4);
+  /* NO ROW TEMPLATE HERE, AND THAT IS THE FIX RATHER THAN THE REGRESSION.
+     It used to declare three explicit tracks and pin every `.field` to
+     `grid-row: span 3` through `subgrid`. That aligns beautifully for ONE band
+     of fields and cannot wrap: /db carries ten rungs plus a full-width day
+     window and has to fall to a second band under six tracks, and a pinned row
+     cannot do that. /db's own workaround was `grid-template-rows: none`, which
+     is how it left this vocabulary in the first place.
+
+     The alignment moves INTO the field below, where it survives wrapping. */
+  gap: var(--s6) var(--s4);
   padding: var(--s6);
   align-items: start;
+  min-width: 0;
 }
+/* THE FIELD CARRIES ITS OWN THREE TRACKS — label, control, note — so a rung
+   aligns with its neighbours no matter which band it wrapped onto.
+
+   `minmax`, NOT A FIXED HEIGHT, and the difference was measured on /db: with
+   flat `var(--ctl-h)` the row resolved to 42px while the rungs in it were
+   88-104px, every one overflowed its own track, and the day window drew
+   straight through the feed rung's note. A floor aligns the common case; the
+   ceiling lets a genuinely taller control (the two-date window, a wrapped
+   summary) grow instead of clipping. `CLAUDE.md` §4 — degrade loudly, never
+   silently truncate. */
 .strip .field {
   display: grid;
-  grid-template-rows: subgrid;
-  grid-row: span 3;
-  gap: var(--s2);
+  grid-template-rows: minmax(var(--lab-h), auto) minmax(var(--ctl-h), auto) auto;
+  row-gap: var(--s2);
+  align-content: start;
   min-width: 0;
+}
+/* THE FULL-WIDTH RUNG. A day window is not a dropdown and does not belong in a
+   track beside four of them; `1 / -1` starts its own band at EVERY track count,
+   where `span 2` would finish a row of dropdowns and then break it. */
+.strip .field.wide {
+  grid-column: 1 / -1;
+}
+/* A RUNG THAT CANNOT BE USED IS DRAWN AND DISABLED, NEVER HIDDEN — `CLAUDE.md`
+   §4. "Why is there no segment control" is a question an absence answers badly. */
+.strip .field.off .lab,
+.strip .field.off .ctl {
+  opacity: 0.55;
 }
 /* The action column keeps the grid's shape and hides the two rows it has no
    content for, rather than collapsing and pulling the button up a row. */

@@ -4926,7 +4926,7 @@
       <span class="lead">Query</span>
       {@render feedRung()}
       {#each [0, 1, 2, 3, 4] as i (i)}
-        <div class="cell" aria-hidden="true">
+        <div class="field" aria-hidden="true">
           <span class="skel line" style="width:{44 + ((i * 11) % 26)}px"></span>
           <span class="skel" style="width:{96 + ((i * 17) % 40)}px;height:18px;border-radius:5px"
           ></span>
@@ -4937,7 +4937,7 @@
     <section class="strip sub" aria-hidden="true">
       <span class="lead">Contract</span>
       {#each [0, 1] as i (i)}
-        <div class="cell mcell">
+        <div class="field mcell">
           <span class="skel line" style="width:{40 + i * 14}px"></span>
           <span class="skel" style="width:{110 + i * 20}px;height:18px;border-radius:5px"></span>
           <span class="skel line" style="width:{64 + i * 10}px"></span>
@@ -4947,7 +4947,7 @@
     <div class="anchor" aria-hidden="true">
       <span class="skel line" style="width:150px;height:19px"></span>
       <span class="px"><span class="skel line" style="width:78px;height:19px"></span></span>
-      <p class="count"><span class="skel line" style="width:64%"></span></p>
+      <p class="note quiet"><span class="skel line" style="width:64%"></span></p>
     </div>
     <div class="tbl">
       <div class="tbl-scroll">
@@ -5048,8 +5048,8 @@
       <!-- THE UNIVERSE RUNG — the cascade's second step. `tierRefusal` is
            unchanged and still whole on the row it belongs to, and a refusal is
            DRAWN AND DISABLED rather than hidden. -->
-      <div class="cell">
-        <span title="Which membership to hold this store against — the cascade's second rung."
+      <div class="field">
+        <span class="lab" title="Which membership to hold this store against — the cascade's second rung."
           >Universe</span
         >
         <!-- THE SAME SEARCHABLE `Picker` AS EVERY OTHER RUNG. It was a
@@ -5080,7 +5080,7 @@
              line; the whole of it is on the button's `title` above and in this
              node for anything that reads the document rather than looks at it.
              `CLAUDE.md` §4: degrade loudly and name the reason. -->
-        <span class="count" class:warn={Boolean(universeRefusal)}>
+        <span class="note" class:warn={Boolean(universeRefusal)}>
           {#if universeRefusal}
             {chosenUniverse.label} is not narrowing this table — {universeRefusal}
           {:else if universe && universeCount.get(universe)}
@@ -5116,8 +5116,8 @@
            `.picker` root, its own filter box and its own tick per row, so this
            rung cannot drift from the same control on /markets and /ingest. -->
       {#if instrumentRows.length > 0}
-        <div class="cell">
-          <span title="Held, not offered — every name here is a name this store can prove it has."
+        <div class="field">
+          <span class="lab" title="Held, not offered — every name here is a name this store can prove it has."
             >Instrument</span
           >
           <Picker
@@ -5146,7 +5146,7 @@
             selected={new Set([picked])}
             onchange={(/** @type {Set<string>} */ sel) => (filter = [...sel][0] ?? '')}
           />
-          <span class="count">
+          <span class="note quiet">
             {picked
               ? `${picked} — one instrument of ${fmt(instrumentRows.length)} held`
               : `${fmt(instrumentRows.length)} instrument(s) held here`}
@@ -5192,8 +5192,8 @@
            segment control" is exactly the question `CLAUDE.md` §4 says must be
            answered out loud rather than by an absence. The single segment the
            store holds is now stated rather than implied. -->
-      <div class="cell" class:off={kinds.length < 2}>
-        <span title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
+      <div class="field" class:off={kinds.length < 2}>
+        <span class="lab" title="The store's own second field — INDEX, CASH, FNO.">Segment</span>
         <!-- A PICKER, NOT A TAB ROW. It was the only rung drawn as tabs, which
              made it look like a different kind of thing from the eight around
              it; it writes the same `kind` the cascade reads. Two or three
@@ -5216,7 +5216,7 @@
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
         />
-        <span class="count"
+        <span class="note quiet"
           >{kinds.length < 2
             ? `${kinds.length === 1 ? kinds[0][0] : 'nothing'} \u2014 the only segment this store holds`
             : `${fmt(segmented.length)} instrument-month(s) here`}</span
@@ -5244,8 +5244,8 @@
            sentence, so the one state the refusal was written for was the one
            state the reader never saw it in. The `Picker` is already
            `disabled={Boolean(tfRefusal)}`. -->
-      <div class="cell" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
-        <span title="Bar length — the rung each row is stored at.">Timeframe</span>
+      <div class="field" class:off={Boolean(tfRefusal)} title={tfRefusal ?? undefined}>
+        <span class="lab" title="Bar length — the rung each row is stored at.">Timeframe</span>
         <!-- SEARCHABLE, LIKE THE REST. Nine rungs today and ten in
              `store::path::Timeframe::KNOWN`; the list is short now and the
              filter costs nothing, and consistency across the nine rungs is
@@ -5268,7 +5268,7 @@
           selected={new Set([timeframe])}
           onchange={(/** @type {Set<string>} */ sel) => (timeframe = [...sel][0] ?? '')}
         />
-        <span class="count" class:warn={Boolean(tfRefusal)}>
+        <span class="note" class:warn={Boolean(tfRefusal)}>
           {#if tfRefusal}
             No bar length — {tfRefusal}
           {:else if timeframe}
@@ -5302,8 +5302,8 @@
            flex row, capped so a pair of date fields cannot spread across
            1,200px and read as the panel's most important control when it is
            its last one. Same rule, same reason, same numbers. -->
-      <div class="cell wide2">
-        <span title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
+      <div class="field wide">
+        <span class="lab" title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
           >Days to show</span
         >
         <div class="dates">
@@ -5320,7 +5320,7 @@
               max={toDay || undefined}
               aria-label="First day to show"
             />
-            <span class="count">{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span>
+            <span class="note quiet">{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span>
           </div>
 
           <div class="dcell">
@@ -5332,7 +5332,7 @@
               min={fromDay || undefined}
               aria-label="Last day to show"
             />
-            <span class="count">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
+            <span class="note quiet">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
           </div>
         </div>
       </div>
@@ -5495,8 +5495,8 @@
            document where anything that reads rather than looks will find it.
            `undefined` rather than `''` so a rung with nothing to explain
            carries no attribute at all. -->
-      <div class="cell" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
-        <span title="Which contract — futures and options show nothing without one.">Expiry</span>
+      <div class="field" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
+        <span class="lab" title="Which contract — futures and options show nothing without one.">Expiry</span>
         <!-- THE SAME `Picker` THE OTHER THREE USE, so this control is
              searchable like them. It was 77 lines of hand-rolled dropdown with
              no filter box, which is why an expiry could only be found by
@@ -5536,7 +5536,7 @@
           selected={new Set(expiry ? [expiry] : [])}
           onchange={(/** @type {Set<string>} */ sel) => (expiry = [...sel][0] ?? '')}
         />
-        <span class="count" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
+        <span class="note" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
           {#if expiryRefusal}
             No contract — {expiryRefusal}
           {:else if expiry}
@@ -5552,8 +5552,8 @@
         </span>
       </div>
 
-      <div class="cell mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
-        <span title="An absolute price on the chain.">Strike</span>
+      <div class="field mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
+        <span class="lab" title="An absolute price on the chain.">Strike</span>
         <Picker
           single
           filter
@@ -5564,7 +5564,7 @@
           selected={strikePick}
           onchange={(/** @type {Set<string>} */ sel) => (strikePick = new Set(sel))}
         />
-        <span class="count" class:warn={Boolean(strikeRefusal)}>
+        <span class="note" class:warn={Boolean(strikeRefusal)}>
           {#if strikeRefusal}
             No strike chain — {strikeRefusal}
           {:else}
@@ -5587,8 +5587,8 @@
       <!-- MONEYNESS IS A SEPARATE CONTROL AND STAYS ONE. A strike is an
            absolute price and a rung is a distance from spot; the same tick
            means two different queries and neither is a view of the other. -->
-      <div class="cell mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
-        <span
+      <div class="field mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
+        <span class="lab"
           title="A distance measured along that chain — the same 35,000 is ITM-2 for a call and OTM+2 for a put, which is why it is its own control."
           >Moneyness</span
         >
@@ -5605,7 +5605,7 @@
         <!-- THE REFUSAL IS SAID ONCE. When there is no chain the ladder's
              reason STARTS with the chain's, so the clause narrows to the part
              that is still true after a chain arrives. -->
-        <span class="count" class:warn={Boolean(strikeRefusal || moneyRefusal)}>
+        <span class="note" class:warn={Boolean(strikeRefusal || moneyRefusal)}>
           {#if strikeRefusal}
             No ladder — a rung is a distance measured along a chain, so there is nothing to place
             one on. There would be none with a chain either: {NO_SPOT}
@@ -5636,11 +5636,11 @@
            option" is said instead, on the clause, with the control still open
            and the expiry gate named as the usual cause. -->
       <div
-        class="cell"
+        class="field"
         class:off={Boolean(sideRefusal || sideEmpty)}
         title={sideRefusal ?? sideEmpty ?? undefined}
       >
-        <span title="Which side of the contract — calls or puts.">Side</span>
+        <span class="lab" title="Which side of the contract — calls or puts.">Side</span>
         <!-- SEARCHABLE AND SINGLE, LIKE EVERY OTHER RUNG. Two options today,
              and the consistency is the point: nine rungs that behave nine ways
              is nine things to learn. -->
@@ -5662,7 +5662,7 @@
           selected={new Set([side])}
           onchange={(/** @type {Set<string>} */ sel) => (side = [...sel][0] ?? '')}
         />
-        <span class="count" class:warn={Boolean(sideRefusal || sideEmpty)}>
+        <span class="note" class:warn={Boolean(sideRefusal || sideEmpty)}>
           {#if sideRefusal}
             No side — {sideRefusal}
           {:else if sideEmpty}
@@ -6726,12 +6726,12 @@
      reason. A tick cannot say why it is unavailable.
      ====================================================================== -->
 {#snippet feedRung()}
-  <div class="cell">
+  <div class="field">
     <!-- THE CAPTION IS THE CAPTION. What the italic sub-clause used to say —
          that this is the page's whole scope, and where it is chosen — is on
          the button's `title` now, one hover from the control it is about, and
          the clause below states the same in the document. -->
-    <span>Broker feed</span>
+    <span class="lab">Broker feed</span>
     <div class="picker" data-drop="feed">
       <button
         class="mnyb"
@@ -6814,7 +6814,7 @@
          answers are NAMED rather than counted: a "0 held" under a feed nobody
          chose, or under a read that failed, is a claim about a disk nobody
          reached. -->
-    <span class="count" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
+    <span class="note" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
       {#if feeds.error}
         the feed list could not be read, so nothing below is scoped to anything
       {:else if error}
@@ -6893,7 +6893,7 @@
 
   /* ====================================================================
      THE CONTROL VOCABULARY — `.segs`, `.strip`, `.lead`, `.cell`, `.picker`,
-     `.mnyb`, `.menu`, `.opt`, `.anchor`, `.sym`, `.px`, `.count`, `.pager`.
+     `.mnyb`, `.menu`, `.opt`, `.anchor`, `.sym`, `.px`, `.note`, `.pager`.
 
      WHAT THIS BLOCK REPLACES: `.sel`, `.pickers`, `.pk`, `.plbl`, `.pknote`,
      `.dd`, `.ddb`, `.ddm`, `.ddr`, `.ddnone`, `.dates`, `.dlbl`, `.ask` and
@@ -6998,7 +6998,7 @@
      every clause closes the cell on the same line.
 
      WHAT PAYS FOR IT IS CLIPPING, WHICH THIS STRIP ALREADY CHOSE. The
-     caption, the `.mnyb` face, `Picker`'s face and the `.count` clause are all
+     caption, the `.mnyb` face, `Picker`'s face and the `.note` clause are all
      `nowrap`/ellipsis with the whole text on a `title` and in the document —
      that was the rule before this change and it is why narrowing a cell costs
      no fact. */
@@ -7092,7 +7092,7 @@
      all — the lone feed rung stretched to `max-content`, which on a blank page
      is the width of its longest caption. /ingest solves the identical problem
      with `.blankpick { max-width: 320px }`; this is that rule. */
-  .strip.solo .cell {
+  .strip.solo .field {
     width: 300px;
     max-width: 100%;
   }
@@ -7109,7 +7109,7 @@
   /* THE STRIP'S NAME IS A HEADING ABOVE IT, NOT A GUTTER BESIDE IT. As a flex
      child with a right hairline it was a tenth column competing with the nine
      rungs for the one line. `1 / -1` takes the full track count whatever
-     `auto-fit` resolves to — the same rule /ingest uses for `.pk.wide2`, and
+     `auto-fit` resolves to — the same rule /ingest uses for `.pk.wide`, and
      the reason it is `-1` rather than `span 9` is that the last line is
      wherever the window says it is. */
   .lead {
@@ -7140,7 +7140,7 @@
      divider separates cells sharing one box, and there is no shared box now,
      just tracks with a real gap between them. Keeping either would draw the
      bar's furniture around a grid that is not a bar. */
-  .strip .cell {
+  .strip .field {
     position: relative;
     display: flex;
     flex-direction: column;
@@ -7157,7 +7157,7 @@
   /* A RUNG THAT CANNOT BE USED SAYS SO ON ITS CAPTION AND ITS CONTROL, NEVER ON
      ITS CLAUSE. The clause is the refusal; dimming it would be the page
      whispering the one sentence that has to be read. */
-  .strip .cell.off > span:first-of-type {
+  .strip .field.off > span:first-of-type {
     opacity: 0.55;
   }
   /* THE CAPTION IS /INGEST'S `.plbl`, WHICH IS THE SHARED `.lab` IN
@@ -7167,7 +7167,7 @@
      Two faces for one label is most of why the two strips did not read as the
      same control. `--lab-h` is the height the grid reserves for a label row,
      so it is also what keeps every rung's control on one baseline. */
-  .strip .cell > span:first-of-type {
+  .strip .field > span:first-of-type {
     font-family: var(--mono);
     font-size: var(--fs-micro);
     font-weight: var(--w-semi);
@@ -7188,7 +7188,7 @@
      membe…" is a label the page spent its width failing to say. Each clause
      moved onto the caption's own `title`, whole, which is where a gloss on a
      word belongs — and the substantive fact was never in the gloss anyway: it
-     is the `.count` clause under the control. A rule left standing for a node
+     is the `.note` clause under the control. A rule left standing for a node
      nothing builds is how the sub-clause finds its way back. */
   /* THE CLAUSE IS /INGEST'S `.pknote`: MONO at `--fs-micro`, and it opens with
      a `· ` the way every caption in that strip does. The bullet is generated
@@ -7196,7 +7196,7 @@
      cannot forget it. Two lines are kept from the bar-era rule below — see
      the measurement there; /ingest reaches the same place with `.pknote.wrap`
      on the notes that need it. */
-  .strip .cell > .count {
+  .strip .field > .note {
     margin: 0;
     font-family: var(--mono);
     font-size: var(--fs-micro);
@@ -7232,14 +7232,14 @@
     white-space: normal;
     line-height: 1.35;
   }
-  .strip .cell > .count::before {
+  .strip .field > .note::before {
     content: '· ';
     color: var(--faint);
   }
-  .strip .cell > .count.warn {
+  .strip .field > .note.warn {
     color: var(--warn);
   }
-  .strip .cell > .count.warn::before {
+  .strip .field > .note.warn::before {
     color: var(--warn);
   }
   /* THE FIND BOX AND THE TWO CONTRACT RUNGS ASK FOR MORE OF THE ROW, and they
@@ -7258,12 +7258,12 @@
      room" is a whole track — `span 2` where two tracks exist, and nothing
      where they do not, which is what `auto-fit` already handles by wrapping.
      Left as a no-op they would read as live sizing to the next reader. */
-  .strip .cell.combo,
-  .strip .cell.mcell {
+  .strip .field.combo,
+  .strip .field.mcell {
     min-width: 0;
   }
 
-  /* ---- THE DAY WINDOW, WHICH IS /INGEST'S `.pk.wide2` AND `.dates` --------
+  /* ---- THE DAY WINDOW, WHICH IS /INGEST'S `.pk.wide` AND `.dates` --------
      `1 / -1` rather than `span 2` is the rule /ingest states and the reason is
      worth keeping: a spanning item is placed on the first line that FITS it,
      so `span 2` let the window finish a row of rungs whenever an odd count
@@ -7271,10 +7271,10 @@
      whatever the last line happens to be, so it is right at every track count,
      including one, where `span 2` grows an implicit second column and pushes
      the panel past its own box. */
-  .strip .cell.wide2 {
+  .strip .field.wide {
     grid-column: 1 / -1;
   }
-  .strip .cell.wide2 .dates {
+  .strip .field.wide .dates {
     max-width: 560px;
   }
   .dates {
@@ -7303,10 +7303,10 @@
     white-space: nowrap;
   }
   /* THE COUNT CLAUSE INSIDE A `.dcell` IS NOT A CHILD OF `.cell`, so the
-     `.strip .cell > .count` rule above cannot reach it — `>` is the whole
+     `.strip .field > .note` rule above cannot reach it — `>` is the whole
      reason, and it is the right selector there. Stated again here at the same
      metrics so both ends of the window read like every other rung's clause. */
-  .dcell > .count {
+  .dcell > .note {
     margin: 0;
     font-family: var(--mono);
     font-size: var(--fs-micro);
@@ -7317,7 +7317,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .dcell > .count::before {
+  .dcell > .note::before {
     content: '· ';
     color: var(--faint);
   }
@@ -7468,7 +7468,7 @@
    * rung taller than its neighbours — the row broken by a string rather than
    * by a rule. Picker is shared and is not edited from here, so the clip is
    * applied from this page, to Pickers inside this strip only. */
-  .strip .cell :global(.pbtn) {
+  .strip .field :global(.pbtn) {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -7618,14 +7618,14 @@
      dropdowns and a pair of dates read as one strip. The focus outline is
      restored with them: suppressing it was only defensible while the CELL drew
      a focus underline for the whole group, and that rule is deleted above. */
-  .strip .cell .din {
+  .strip .field .din {
     width: 100%;
     max-width: none;
     font-size: var(--fs-base);
     padding: 11px 13px;
     border-radius: 9px;
   }
-  .strip .cell .dbtn {
+  .strip .field .dbtn {
     font-size: var(--fs-base);
     padding: 11px 10px;
     border-radius: 9px;
@@ -7642,7 +7642,7 @@
      wrapping. The floor is dropped here and the month ellipses like every
      other face in the strip — `Sep 2024` is eight characters and reaches that
      point long after the captions do. */
-  .strip .cell .dval {
+  .strip .field .dval {
     font-size: var(--fs-base);
     min-width: 0;
     overflow: hidden;
@@ -7723,7 +7723,7 @@
      Bars, complete, bars missing, coverage and months — the same figures with
      the same sub-clauses and the same flash, on one rule under the anchor
      instead of in six boxes above the fold. The sixth is the `.px` above. */
-  .anchor .count {
+  .anchor .note {
     width: 100%;
     display: flex;
     flex-wrap: wrap;
@@ -7735,14 +7735,14 @@
     font-size: var(--fs-xs);
     color: var(--faint);
   }
-  .anchor .count .k {
+  .anchor .note .k {
     font-size: var(--fs-micro);
     font-weight: var(--w-bold);
     letter-spacing: var(--track-caps);
     text-transform: uppercase;
     color: var(--acc);
   }
-  .anchor .count b {
+  .anchor .note b {
     font-family: var(--mono);
     font-variant-numeric: tabular-nums;
     font-size: var(--fs-sm);
@@ -7752,7 +7752,7 @@
   /* The meter keeps its length and loses its band: at this size a full-width
      track would be the widest thing on the line and would read as the answer
      rather than as one term of it. */
-  .anchor .count .meter {
+  .anchor .note .meter {
     width: 84px;
     flex: none;
   }
@@ -8808,7 +8808,7 @@
     /* THE CELL'S UNDERLINE WIPES IN FROM NOTHING. It is a focus signal, so it
        is a transition on a transform and never on the outline itself — the
        ring the control inside owns has to be right on the frame it lands. */
-    .strip .cell::after {
+    .strip .field::after {
       transition: transform var(--d-state) var(--ease-out);
     }
     /* A ROW ANIMATES ITS HOVER TINT AND NOTHING ELSE. Its `box-shadow` is the
@@ -9060,11 +9060,11 @@
     order: -1;
   }
   /* THE STATS LINE KEEPS ITS FIGURES AND HIDES ITS CLAUSES. See the comment
-     at the `<p class="count terse">` for the sentence this replaced. The `.u`
+     at the `<p class="note quiet terse">` for the sentence this replaced. The `.u`
      spans still render into the accessibility tree and still carry their
      titles; they are simply not competing with the numbers for the eye. */
-  .count.terse > .u,
-  .count.terse .u {
+  .note.terse > .u,
+  .note.terse .u {
     position: absolute;
     width: 1px;
     height: 1px;
