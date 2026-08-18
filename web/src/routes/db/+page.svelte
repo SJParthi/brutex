@@ -50,6 +50,7 @@
   import { untrack } from 'svelte';
   import { feeds } from '$lib/feeds.svelte.js';
   import Picker from '$lib/Picker.svelte';
+  import DayField from '$lib/DayField.svelte';
   /* THE FEED'S OWN MASTER, ALREADY ON HAND. `+layout.svelte` calls
      `loadCatalogue(feeds.active)` on every feed change, so the universe rung
      costs this page NO request — it is a join against a list the layout has
@@ -5306,34 +5307,40 @@
         <span class="lab" title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
           >Days to show</span
         >
-        <div class="dates">
-          <div class="dcell">
-            <span
-              class="dlbl"
-              title="Only bars on or after this day. Spot only — a contract's window is its expiry."
-              >From date</span
-            >
-            <input
-              class="tin"
-              type="date"
-              bind:value={fromDay}
-              max={toDay || undefined}
-              aria-label="First day to show"
-            />
-            <span class="note quiet">{fromDay ? `on or after ${fromDay}` : 'any earlier day'}</span>
-          </div>
+        <!-- THE PRODUCT'S OWN CALENDAR, AND THIS FILE HAS DEMANDED ONE IN
+             WRITING FOR LONGER THAN IT HAD ONE. Twenty lines below, the month
+             window's comment reads "The product's OWN calendar, never the
+             platform's ... There is not one on this page and there must never
+             be" — and directly above it sat two `<input type="date">`.
 
-          <div class="dcell">
-            <span class="dlbl" title="Only bars on or before this day. Spot only.">To date</span>
-            <input
-              class="tin"
-              type="date"
-              bind:value={toDay}
-              min={fromDay || undefined}
-              aria-label="Last day to show"
-            />
-            <span class="note quiet">{toDay ? `on or before ${toDay}` : 'any later day'}</span>
-          </div>
+             `<input type="date">` renders in the OS locale, so `02/09/2024` is
+             the 2nd of September to one reader and the 9th of February to
+             another, and no rule on this page can reach its text or its popup
+             to say which. `dd Mon yyyy` cannot be misread in any locale, and it
+             is what `$lib/dates.js` already renders every other date in this
+             product as — so until now the DISPLAYED day and the EDITABLE day
+             disagreed on the same screen.
+
+             `$lib/DayField.svelte` is that control and it was written for
+             exactly this: its own header names /db's platform input as the
+             defect it exists to remove. It had no importer anywhere in the
+             tree. One component, both pages, and the two can no longer drift —
+             the same argument `Picker` settles for every other rung here. -->
+        <div class="dates">
+          <DayField
+            label="From date"
+            value={fromDay}
+            max={toDay}
+            onchange={(/** @type {string} */ d) => (fromDay = d)}
+            boundsReason="Only bars on or after this day. Spot only — a contract's window is its expiry, so this is ignored once an expiry is chosen."
+          />
+          <DayField
+            label="To date"
+            value={toDay}
+            min={fromDay}
+            onchange={(/** @type {string} */ d) => (toDay = d)}
+            boundsReason="Only bars on or before this day. Spot only — a contract's window is its expiry, so this is ignored once an expiry is chosen."
+          />
         </div>
       </div>
       
@@ -7283,44 +7290,14 @@
     flex-wrap: wrap;
     gap: var(--s5);
   }
-  .dcell {
-    flex: 1 1 190px;
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: var(--s2);
-  }
   /* THE END'S OWN LABEL SITS UNDER THE RUNG'S. It is `--fs-mini` in the sans
      face where the rung caption above it is `--fs-micro` mono, which is
      /ingest's pairing: the rung is named once in the strip's label voice, and
      From/To are a quieter second level inside it rather than two more rungs. */
-  .dlbl {
-    font-size: var(--fs-mini);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    white-space: nowrap;
-  }
   /* THE COUNT CLAUSE INSIDE A `.dcell` IS NOT A CHILD OF `.cell`, so the
      `.strip .field > .note` rule above cannot reach it — `>` is the whole
      reason, and it is the right selector there. Stated again here at the same
      metrics so both ends of the window read like every other rung's clause. */
-  .dcell > .note {
-    margin: 0;
-    font-family: var(--mono);
-    font-size: var(--fs-micro);
-    line-height: 1.35;
-    color: var(--faint);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .dcell > .note::before {
-    content: '· ';
-    color: var(--faint);
-  }
 
   /* THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, AND IT POINTS
      UP. Both halves of that are deliberate. It is taken out of the flow because
@@ -7936,9 +7913,11 @@
      value is monospace and tabular for the same reason every figure on this
      page is: `Sep 2024` and `Mar 2020` are the same width, so the two ends of
      the window line up and the arrow between them stays centred. */
-  .dcell {
-    position: relative;
-  }
+  /* `.dcell` WENT WITH THE MARKUP IT POSITIONED. It was the last rule in this
+     block still matching anything, and only because /db's own day inputs
+     borrowed the class; `$lib/DayField.svelte` owns that element now and
+     carries its own `position: relative`. Its siblings below have been dead
+     since the month calendar was removed. */
   .dwrap {
     display: flex;
     align-items: center;

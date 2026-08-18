@@ -133,6 +133,28 @@ function istFields(d) {
 }
 
 /**
+ * TODAY, IN IST, AS `yyyy-mm`. The month a calendar opens on when nothing else
+ * has named one.
+ *
+ * # Why this is here and not in the component that needs it
+ *
+ * `$lib/DayField.svelte` needs a month to draw when its value and both its
+ * bounds are empty. Computing it there would mean a second `Intl.DateTimeFormat`
+ * configured with a second copy of the `Asia/Kolkata` / `h23` pair above, and
+ * two spellings of "now in IST" are two answers the day one of them is edited.
+ * The clock lives in this module because every other date in this product is
+ * rendered through it.
+ *
+ * @param {Date | number | string | null | undefined} [d] Defaults to now.
+ * @returns {string} `yyyy-mm`, or `''` when there is no instant to read.
+ */
+export function istMonth(d) {
+  const f = istFields(d ?? Date.now());
+  if (f === null) return '';
+  return `${f.y}-${String(f.mo).padStart(2, '0')}`;
+}
+
+/**
  * A calendar day in IST. `02 Sep 2024`.
  *
  * Accepts a `Date`, epoch milliseconds, or anything `Date.parse` accepts —
