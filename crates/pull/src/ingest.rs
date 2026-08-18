@@ -1551,13 +1551,66 @@ impl CensusLock {
             let _ = fs::create_dir_all(dir);
         }
         let lock_path = path.with_extension("man.lock");
-        let Ok(lock) = fs::OpenOptions::new()
+        // A LOCK THAT CANNOT BE TAKEN IS A REFUSAL, NEVER A RUN WITHOUT ONE.
+        //
+        // This arm used to be `else { return Ok(Self { _held: None }) }` — any
+        // failure to OPEN the lock file yielded a guard holding nothing, and
+        // the run proceeded to read-modify-write the census unserialised. A
+        // root-owned `.man.lock` left by one `sudo` run, a restrictive ACL, an
+        // immutable flag, a full disk: each turned the mutual exclusion off
+        // and said nothing, while the sentence twelve lines below explains at
+        // length why two concurrent installs are unacceptable. The guard
+        // documented the hazard and then opened the door to it.
+        //
+        // IT BECAME LIVE TODAY. The ingest page now runs feeds CONCURRENTLY,
+        // so two chains can reach the census at once on one machine — the
+        // exact interleaving this lock exists to prevent, previously held off
+        // only by the runs being serial.
+        //
+        // `CLAUDE.md` §4: degrade loudly and name the reason, or refuse. There
+        // is no third option, and a silent un-locked run is the fallback that
+        // hides a failure — the loser's receipt still reads "every row
+        // accounted for", because its own books balanced.
+        let lock = match fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(&lock_path)
-        else {
-            return Ok(Self { _held: None });
+        {
+            Ok(lock) => lock,
+            // AN ACCESS FAILURE REFUSES; A PATH FAILURE STILL DEFERS.
+            //
+            // The two causes are not the same, and the original best-effort
+            // arm was right about one of them. If the PATH is wrong -- no such
+            // directory, a file where the directory belongs, a name past the
+            // host's limit -- the install fails on the same cause a moment
+            // later and names it in the words an operator needs, and this
+            // function must not pre-empt it with a worse-worded twin. That is
+            // what `a_census_that_cannot_be_measured_stops_the_run` and
+            // `a_census_that_cannot_be_installed_names_what_is_left_uncounted`
+            // assert, and they are right to.
+            //
+            // ACCESS is the dangerous one, and the one that was silent: a
+            // root-owned `.man.lock` from a `sudo` run, a restrictive ACL, an
+            // immutable flag -- the census itself stays perfectly writable and
+            // only the LOCK is refused, so the old arm ran on unserialised
+            // with nothing to say. That is the §4 fallback that hides a
+            // failure, and it went live the day feeds began running
+            // concurrently.
+            Err(why) if why.kind() == std::io::ErrorKind::PermissionDenied => {
+                return Err(format!(
+                    "the census lock at {} exists but cannot be opened: {why}. \
+                     Refused rather than run without it -- the census itself is \
+                     still writable, so this run would have interleaved a \
+                     read-modify-write with any other and silently discarded \
+                     one of them, while the loser's receipt still read 'every \
+                     row accounted for' because its own books balanced. Fix the \
+                     ownership or permissions of that path and try again.",
+                    lock_path.display()
+                ));
+            }
+            // Every other cause is the path's, and the install reports it.
+            Err(_) => return Ok(Self { _held: None }),
         };
         if lock.try_lock().is_err() {
             return Err(format!(

@@ -5787,11 +5787,15 @@ fn the_ladder_refuses_to_skip_a_rung() {
     }
     assert!(l.finished());
     assert_eq!(l.next(), None, "nothing left to climb");
-    assert_eq!(l.completed(), 6);
+    assert_eq!(l.completed(), LADDER.len(), "every rung climbed");
 
     // Recording past the end does not overflow.
     l.record(true);
-    assert_eq!(l.completed(), 6);
+    assert_eq!(
+        l.completed(),
+        LADDER.len(),
+        "a record past the last rung is absorbed, not counted"
+    );
 }
 
 // ──────────────── dynamic selection, and the automatic work list ────────────
