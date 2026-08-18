@@ -841,6 +841,82 @@ mod tests {
         p.step(bar).expect("this fixture bar is sane")
     }
 
+    /// THE GAP PATTERNS: EVERY CLAUSE ISOLABLE, INCLUDING THE COMPARISON.
+    ///
+    /// Bits 202 and 203 are three clauses each, and unlike the piercing pattern
+    /// **all three can be negated one at a time** — nothing here constrains the
+    /// price relative to the prior body, so a doji breaks a direction clause
+    /// without disturbing the others.
+    ///
+    /// Six mutants live on these two lines: four `&&` turned into `||`, and the
+    /// two comparisons flipped one step. The comparison needs the boundary value
+    /// itself — `bar0.open` exactly equal to `bar1.open`, which `>` refuses and
+    /// `>=` accepts.
+    #[test]
+    fn every_clause_of_the_gap_patterns_is_required_and_the_gap_is_strict() {
+        // 202: prior bearish, current bullish, current opens ABOVE prior open.
+        let prior_down = at(10, 200, 210, 90, 100);
+        let up = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &prior_down);
+            ok(&mut p, bar0).get(202)
+        };
+
+        assert!(
+            up(&at(11, 210, 260, 205, 250)),
+            "the fixture must fire first"
+        );
+        assert!(
+            !up(&at(11, 210, 260, 205, 210)),
+            "a current bar that closed where it opened has not risen; the \
+             `bar0.bullish()` clause carries this alone"
+        );
+        assert!(
+            !up(&at(11, 190, 260, 185, 250)),
+            "opening BELOW the prior open is not a gap up, whatever the close did"
+        );
+        assert!(
+            !up(&at(11, 200, 260, 195, 250)),
+            "opening EXACTLY at the prior open is not a gap either -- the \
+             comparison is strict, and `>=` would call this a gap"
+        );
+
+        // The prior bar's own direction, negated with a doji so nothing else moves.
+        let mut p = Patterns::default();
+        let _prev = ok(&mut p, &at(10, 200, 210, 90, 200));
+        assert!(
+            !ok(&mut p, &at(11, 210, 260, 205, 250)).get(202),
+            "a prior bar that closed where it opened was not a decline, so this \
+             is no reversal; the `bar1.bearish()` clause carries this alone"
+        );
+
+        // 203 is the mirror: prior bullish, current bearish, opening BELOW.
+        let prior_up = at(10, 100, 210, 90, 200);
+        let down = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &prior_up);
+            ok(&mut p, bar0).get(203)
+        };
+
+        assert!(
+            down(&at(11, 90, 95, 40, 50)),
+            "the mirror fixture fires too"
+        );
+        assert!(
+            !down(&at(11, 90, 95, 40, 90)),
+            "a doji has not fallen; `bar0.bearish()` carries this"
+        );
+        assert!(
+            !down(&at(11, 110, 115, 40, 50)),
+            "opening ABOVE the prior open is not a gap down"
+        );
+        assert!(
+            !down(&at(11, 100, 115, 40, 50)),
+            "and opening EXACTLY at it is not a gap down either -- strict, so \
+             `<=` would wrongly accept this"
+        );
+    }
+
     /// EACH CLAUSE OF A TWO-BAR PATTERN IS LOAD-BEARING ON ITS OWN.
     ///
     /// Bit 161 fires on five conditions joined by `&&`. `cargo-mutants` turns
