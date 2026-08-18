@@ -42,7 +42,7 @@ see the note at the end of this section for what that cost.
 | `pull` | vendor ingest, rate governor, credential read | `core`, `store`, `telemetry` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry` | ✓ |
 | `runner` | the sweep driven end to end: trades, the exit grid, walk-forward, PBO, the bootstrap, the audit | `core`, `vocab`, `indicators`, `engine`, `costs` | ✓ |
-| `cli` | the operator entry point for the sweep: generated bars in, ladder walked, report out | `runner`, `engine`, `indicators`, `costs` | ✓ |
+| `cli` | the operator entry point for the sweep: generated bars in, ladder walked, report out | `runner`, `engine`, `indicators`, `costs`, `core`, `store` | ✓ |
 
 **Thirteen crates, all of them real.** (The sentence said eleven while the table
 held twelve; `cli` makes it thirteen — D-0169.) `web/` is a directory at the repository root
