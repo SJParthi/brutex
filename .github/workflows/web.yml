@@ -122,3 +122,53 @@ jobs:
             echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
             echo "the ratchet keeps its meaning."
           fi
+
+      # ----------------------------------------------------------------------
+      # GATE W4 — ORPHANED CSS DOES NOT GROW.
+      #
+      # The Svelte compiler already finds this and already prints it; nothing
+      # read it. 86 distinct selectors are styled in `db` and `ingest` for
+      # markup that no longer exists — a whole inline calendar superseded by
+      # `DayField`, an entire earlier generation of the view bar (`.viewbar`,
+      # `.vtab`, `.vbudget`, `.vsum`) superseded by `.segs`/`.seg`, and a month
+      # toggle. Each is a rule whose markup was deleted while the styling, and
+      # usually the reasoning in the comment beside it, stayed behind.
+      #
+      # That is not cosmetic. It is the measurable signature of the pattern
+      # that produced the worst findings on this page: safeguards that were
+      # written, argued for in a comment, and then orphaned by a later markup
+      # deletion, leaving the comment still asserting a guarantee the code no
+      # longer delivers. `.seg` is the proof it cuts both ways — the orphaned
+      # CSS is what let the removed view toggle be RESTORED to its original
+      # shape rather than guessed at.
+      #
+      # A RATCHET AT 86, for the same reason W3 is a ratchet: a floor of zero
+      # would mean deleting 86 rules inside the commit that adds the gate. That
+      # cleanup is also not mechanisable — an attempt to remove them by line
+      # number cut a selector out of a comma-separated list and left a dangling
+      # `.sortbtn,`, failing the build. It has to be done by hand, a rule at a
+      # time, and this gate is what makes that work measurable and keeps the
+      # number from climbing while it waits.
+      #
+      # Counted DISTINCT, because the client and server passes each report the
+      # same selector once.
+      # ----------------------------------------------------------------------
+      - name: Gate W4 — unused CSS does not grow
+        run: |
+          CEILING=86
+          npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
+          FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
+                  | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')
+          echo "distinct unused CSS selectors: $FOUND (ceiling $CEILING)"
+          if [ "$FOUND" -gt "$CEILING" ]; then
+            echo
+            echo "A rule was added for markup that does not exist, or markup was"
+            echo "deleted and its styling left behind. The second is how this"
+            echo "repository loses safeguards: the comment beside the rule keeps"
+            echo "asserting a guarantee the page no longer delivers."
+            exit 1
+          fi
+          if [ "$FOUND" -lt "$CEILING" ]; then
+            echo "Fewer than the ceiling. Lower CEILING to $FOUND in this file so"
+            echo "the ratchet keeps its meaning."
+          fi

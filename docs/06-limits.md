@@ -4624,6 +4624,23 @@ no-surviving-mutant rule apply to **crates**, and nothing equivalent exists for
 the browser. Gate W2 proves the tests that exist run; it proves nothing about
 how much they cover.
 
+**86 distinct CSS selectors are styled for markup that does not exist**, across
+`db` and `ingest`. Gate W4 pins that number; it does not reduce it. The set
+includes a whole inline calendar superseded by `DayField`, an entire earlier
+generation of the view bar — `.viewbar`, `.vtab`, `.vbudget`, `.vsum` —
+superseded by `.segs`/`.seg`, and a month toggle. This is the measurable
+signature of the pattern behind the worst findings in this tree: a safeguard is
+written, argued for in a comment, and then orphaned by a later markup deletion,
+leaving the comment asserting a guarantee the page no longer delivers.
+
+**The cleanup is not mechanisable, and that is a measured claim.** Deleting the
+rules by the line numbers the compiler reports cut a selector out of a
+comma-separated list and left a dangling `.sortbtn,`, which failed the build.
+The compiler reports one line per selector, and a rule may list several; a
+line-based edit cannot tell a whole rule from one member of a list. It has to be
+done by hand, a rule at a time, and Gate W4 exists to keep the number from
+climbing while that waits.
+
 **`web` is not yet in `ci-ok`'s `needs` list.** That list lives in `ci.yml`, so
 until one line is added there, a red Gate W does not block a merge.
 
