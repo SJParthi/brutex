@@ -1790,6 +1790,34 @@
     }
   ];
 
+  /**
+   * WHICH CONTRACT RUNGS THE CHOSEN SEGMENT ACTUALLY HAS.
+   *
+   * All four were drawn together, always, all four dead on a spot store. That is
+   * wrong twice over: wrong that they are dead, and wrong that they are the SAME
+   * four for every segment, because the three segments do not have the same
+   * parts.
+   *
+   *   Spot             no expiry, no strike, no side. A continuous series has no
+   *                    contract to narrow at all.
+   *   Expired futures  an EXPIRY and nothing else. A future settles on a day; it
+   *                    carries no strike and no call/put side.
+   *   Expired options  expiry, strike, side — and moneyness, a distance measured
+   *                    along a strike chain, which means nothing until strikes
+   *                    exist.
+   *
+   * A strike box under Expired futures is not a disabled control, it is a control
+   * that does not exist for that thing — drawing it dead says "this could be
+   * filled" about something that never could.
+   */
+  const contractRungs = $derived(
+    kind === 'futures'
+      ? { expiry: true, strike: false, money: false, side: false }
+      : kind === 'options'
+        ? { expiry: true, strike: true, money: true, side: true }
+        : { expiry: false, strike: false, money: false, side: false }
+  );
+
   /** Which of the three a stored row belongs to, off its own name. */
   /** @param {{expiry: string | null, instrument: string}} r */
   function segOf(r) {
@@ -5894,17 +5922,22 @@
          OPEN WHENEVER THERE IS SOMETHING TO CHOOSE. `open={!expiryRefusal}` —
          the fold is the exception, not the default, so a store that does hold
          contracts is unchanged from before this commit. -->
-    <details class="cfold" open={!expiryRefusal}>
-      <summary>
-        <span class="lead">Contract</span>
-        {#if expiryRefusal}
-          <span class="note warn">nothing stored to narrow — no expiry, strike, ladder or side</span>
-        {:else}
-          <span class="note quiet">{fmt(expiriesAll.length)} expiry(ies) held</span>
-        {/if}
-      </summary>
+    <!-- ══ ALWAYS DRAWN. WHAT VARIES IS WHICH RUNGS ARE IN IT ══
+         It folded behind one line, and the fold carried its OWN `Contract` lead
+         while the section inside kept another — so the page printed the word
+         twice, which read as a stray empty box beside the heading.
+         It does not fold now. The section is always open and each rung is drawn
+         only when the chosen segment actually HAS it. That is better than the
+         fold: a control that does not exist for a thing is not the same as a
+         control disabled for it. See `contractRungs`. -->
     <section class="strip sub" aria-label="Contract">
       <span class="lead">Contract</span>
+      {#if !contractRungs.expiry}
+        <span class="note quiet"
+          >Spot is a continuous series — no expiry, strike, ladder or side to narrow. Choose Expired
+          futures or Expired options above and the rungs those contracts have appear here.</span
+        >
+      {/if}
 
       <!-- THE EXPIRY, AND IT IS THE STRIP'S FIRST CELL BECAUSE IT IS ITS
            COARSEST RUNG: a strike belongs to a contract, and a contract is an
@@ -5929,129 +5962,135 @@
            document where anything that reads rather than looks will find it.
            `undefined` rather than `''` so a rung with nothing to explain
            carries no attribute at all. -->
-      <div class="field" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
-        <span class="lab" title="Which contract — futures and options show nothing without one.">Expiry</span>
-        <!-- THE SAME `Picker` THE OTHER THREE USE, so this control is
-             searchable like them. It was 77 lines of hand-rolled dropdown with
-             no filter box, which is why an expiry could only be found by
-             scrolling. `single` because every control on this page is single
-             select; `filter` because that is the whole point of the change. -->
-        <Picker
-          single
-          filter
-          label="expiries"
-          disabled={Boolean(expiryRefusal)}
-          summary={expiryRefusal
-            ? 'No contract stored'
-            : expiry
-              ? dayLabel(expiry)
-              : `None chosen · ${fmt(expiryOffered.length)} here`}
-          rows={[
-            {
-              /* THE UNCHOSEN ROW IS DRAWN AND IT DOES NOT SAY "ALL". It is the
-                 state that HOLDS CONTRACTS BACK — a bar belongs to one
-                 contract, and two expiries under one heading would be a series
-                 no contract ever traded. */
-              key: '',
-              name: 'None chosen',
-              detail: `${fmt(contractHere)} contract row(s) held back`,
-              why:
-                contractHere > 0
-                  ? 'This is a refusal, not an empty store. Indices and equities carry no expiry and are unaffected — they are in the table below already.'
-                  : undefined
-            },
-            ...expiryOffered.map((d) => ({
-              key: d,
-              name: dayLabel(d),
-              detail: `${fmt(expiryCount.get(d) ?? 0)} instrument-month(s)`,
-              title: `Contracts expiring ${dayLabel(d)} — the store's own key for it is ${d}.`
-            }))
-          ]}
-          selected={new Set(expiry ? [expiry] : [])}
-          onchange={(/** @type {Set<string>} */ sel) => (expiry = [...sel][0] ?? '')}
-        />
-        <span class="note" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
-          {#if expiryRefusal}
-            No contract — {expiryRefusal}
-          {:else if expiry}
-            {fmt(expiryCount.get(expiry) ?? 0)} row(s) on this contract{#if expiryHeld > 0}
-              · {fmt(expiryHeld)} on another expiry are not shown{/if}
-          {:else if expiryHeld > 0}
-            {fmt(expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
-            belongs to one contract, so nothing here blends two
-          {:else}
-            {fmt(expiriesAll.length)} expiry/expiries stored · no contract row is in this selection,
-            so nothing is being held back
-          {/if}
-        </span>
-      </div>
+      {#if contractRungs.expiry}
+        <div class="field" class:off={Boolean(expiryRefusal)} title={expiryRefusal ?? undefined}>
+          <span class="lab" title="Which contract — futures and options show nothing without one.">Expiry</span>
+          <!-- THE SAME `Picker` THE OTHER THREE USE, so this control is
+               searchable like them. It was 77 lines of hand-rolled dropdown with
+               no filter box, which is why an expiry could only be found by
+               scrolling. `single` because every control on this page is single
+               select; `filter` because that is the whole point of the change. -->
+          <Picker
+            single
+            filter
+            label="expiries"
+            disabled={Boolean(expiryRefusal)}
+            summary={expiryRefusal
+              ? 'No contract stored'
+              : expiry
+                ? dayLabel(expiry)
+                : `None chosen · ${fmt(expiryOffered.length)} here`}
+            rows={[
+              {
+                /* THE UNCHOSEN ROW IS DRAWN AND IT DOES NOT SAY "ALL". It is the
+                   state that HOLDS CONTRACTS BACK — a bar belongs to one
+                   contract, and two expiries under one heading would be a series
+                   no contract ever traded. */
+                key: '',
+                name: 'None chosen',
+                detail: `${fmt(contractHere)} contract row(s) held back`,
+                why:
+                  contractHere > 0
+                    ? 'This is a refusal, not an empty store. Indices and equities carry no expiry and are unaffected — they are in the table below already.'
+                    : undefined
+              },
+              ...expiryOffered.map((d) => ({
+                key: d,
+                name: dayLabel(d),
+                detail: `${fmt(expiryCount.get(d) ?? 0)} instrument-month(s)`,
+                title: `Contracts expiring ${dayLabel(d)} — the store's own key for it is ${d}.`
+              }))
+            ]}
+            selected={new Set(expiry ? [expiry] : [])}
+            onchange={(/** @type {Set<string>} */ sel) => (expiry = [...sel][0] ?? '')}
+          />
+          <span class="note" class:warn={Boolean(expiryRefusal) || expiryHeld > 0}>
+            {#if expiryRefusal}
+              No contract — {expiryRefusal}
+            {:else if expiry}
+              {fmt(expiryCount.get(expiry) ?? 0)} row(s) on this contract{#if expiryHeld > 0}
+                · {fmt(expiryHeld)} on another expiry are not shown{/if}
+            {:else if expiryHeld > 0}
+              {fmt(expiryHeld)} future/option row(s) HELD BACK until an expiry is chosen — a bar
+              belongs to one contract, so nothing here blends two
+            {:else}
+              {fmt(expiriesAll.length)} expiry/expiries stored · no contract row is in this selection,
+              so nothing is being held back
+            {/if}
+          </span>
+        </div>
+      {/if}
 
-      <div class="field mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
-        <span class="lab" title="An absolute price on the chain.">Strike</span>
-        <Picker
-          single
-          filter
-          label="strikes"
-          disabled={chainAll.length === 0}
-          summary={strikeSummary}
-          rows={strikeRows}
-          selected={strikePick}
-          onchange={(/** @type {Set<string>} */ sel) => (strikePick = new Set(sel))}
-        />
-        <span class="note" class:warn={Boolean(strikeRefusal)}>
-          {#if strikeRefusal}
-            No strike chain — {strikeRefusal}
-          {:else}
-            {fmt(chainAll.length)} strike(s) · {strikeText(chainAll[0].strike)} to {strikeText(
-              chainAll[chainAll.length - 1].strike
-            )}{#if chainStep !== null}
-              · grid {strikeText(chainStep)} apart{/if}<!--
-              WHY EVERY ROW IN THE PANEL READS `no bars` WHILE THE GATE IS
-              SHUT. The counts here are taken over `expiryGated`, so with no
-              expiry chosen they are all zero — correctly, because that is what
-              clicking one returns. Left unsaid, a panel of zeroes over a chain
-              the store demonstrably holds reads as a broken count.
-              -->{#if !expiry && expiryHeld > 0}
-              · every count here is zero until an expiry is chosen — {fmt(expiryHeld)} contract
-              row(s) are held back{/if}
-          {/if}
-        </span>
-      </div>
+      {#if contractRungs.strike}
+        <div class="field mcell" class:off={Boolean(strikeRefusal)} title={strikeRefusal ?? undefined}>
+          <span class="lab" title="An absolute price on the chain.">Strike</span>
+          <Picker
+            single
+            filter
+            label="strikes"
+            disabled={chainAll.length === 0}
+            summary={strikeSummary}
+            rows={strikeRows}
+            selected={strikePick}
+            onchange={(/** @type {Set<string>} */ sel) => (strikePick = new Set(sel))}
+          />
+          <span class="note" class:warn={Boolean(strikeRefusal)}>
+            {#if strikeRefusal}
+              No strike chain — {strikeRefusal}
+            {:else}
+              {fmt(chainAll.length)} strike(s) · {strikeText(chainAll[0].strike)} to {strikeText(
+                chainAll[chainAll.length - 1].strike
+              )}{#if chainStep !== null}
+                · grid {strikeText(chainStep)} apart{/if}<!--
+                WHY EVERY ROW IN THE PANEL READS `no bars` WHILE THE GATE IS
+                SHUT. The counts here are taken over `expiryGated`, so with no
+                expiry chosen they are all zero — correctly, because that is what
+                clicking one returns. Left unsaid, a panel of zeroes over a chain
+                the store demonstrably holds reads as a broken count.
+                -->{#if !expiry && expiryHeld > 0}
+                · every count here is zero until an expiry is chosen — {fmt(expiryHeld)} contract
+                row(s) are held back{/if}
+            {/if}
+          </span>
+        </div>
+      {/if}
 
       <!-- MONEYNESS IS A SEPARATE CONTROL AND STAYS ONE. A strike is an
            absolute price and a rung is a distance from spot; the same tick
            means two different queries and neither is a view of the other. -->
-      <div class="field mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
-        <span class="lab"
-          title="A distance measured along that chain — the same 35,000 is ITM-2 for a call and OTM+2 for a put, which is why it is its own control."
-          >Moneyness</span
-        >
-        <Picker
-          single
-          filter
-          label="rungs"
-          disabled={moneyRefusal !== null}
-          summary={mnySummary}
-          rows={mnyRows}
-          selected={mnySelected}
-          onchange={onMnyPick}
-        />
-        <!-- THE REFUSAL IS SAID ONCE. When there is no chain the ladder's
-             reason STARTS with the chain's, so the clause narrows to the part
-             that is still true after a chain arrives. -->
-        <span class="note" class:warn={Boolean(strikeRefusal || moneyRefusal)}>
-          {#if strikeRefusal}
-            No ladder — a rung is a distance measured along a chain, so there is nothing to place
-            one on. There would be none with a chain either: {NO_SPOT}
-          {:else if moneyRefusal}
-            The ladder is not drawn — {moneyRefusal}
-          {:else}
-            {fmt(ladderRungs.length)} rung(s), {ladderRungs[0]} to {ladderRungs[
-              ladderRungs.length - 1
-            ]} — every position this chain reaches on both sides of the money
-          {/if}
-        </span>
-      </div>
+      {#if contractRungs.money}
+        <div class="field mcell" class:off={Boolean(moneyRefusal)} title={moneyRefusal ?? undefined}>
+          <span class="lab"
+            title="A distance measured along that chain — the same 35,000 is ITM-2 for a call and OTM+2 for a put, which is why it is its own control."
+            >Moneyness</span
+          >
+          <Picker
+            single
+            filter
+            label="rungs"
+            disabled={moneyRefusal !== null}
+            summary={mnySummary}
+            rows={mnyRows}
+            selected={mnySelected}
+            onchange={onMnyPick}
+          />
+          <!-- THE REFUSAL IS SAID ONCE. When there is no chain the ladder's
+               reason STARTS with the chain's, so the clause narrows to the part
+               that is still true after a chain arrives. -->
+          <span class="note" class:warn={Boolean(strikeRefusal || moneyRefusal)}>
+            {#if strikeRefusal}
+              No ladder — a rung is a distance measured along a chain, so there is nothing to place
+              one on. There would be none with a chain either: {NO_SPOT}
+            {:else if moneyRefusal}
+              The ladder is not drawn — {moneyRefusal}
+            {:else}
+              {fmt(ladderRungs.length)} rung(s), {ladderRungs[0]} to {ladderRungs[
+                ladderRungs.length - 1
+              ]} — every position this chain reaches on both sides of the money
+            {/if}
+          </span>
+        </div>
+      {/if}
 
       <!-- OPTION TYPE — the strip's last and finest cell, where the approved
            design draws it. Two values the store can hold and one that means no
@@ -6069,48 +6108,49 @@
            undo it is the one that just went dead. "This selection reaches no
            option" is said instead, on the clause, with the control still open
            and the expiry gate named as the usual cause. -->
-      <div
-        class="field"
-        class:off={Boolean(sideRefusal || sideEmpty)}
-        title={sideRefusal ?? sideEmpty ?? undefined}
-      >
-        <span class="lab" title="Which side of the contract — calls or puts.">Side</span>
-        <!-- SEARCHABLE AND SINGLE, LIKE EVERY OTHER RUNG. Two options today,
-             and the consistency is the point: nine rungs that behave nine ways
-             is nine things to learn. -->
-        <Picker
-          single
-          filter
-          label="sides"
-          disabled={Boolean(sideRefusal)}
-          summary={sideRefusal ? 'No option stored' : side ? side : `Both \u00b7 ${fmt(sideOffered.length)}`}
-          rows={[
-            { key: '', name: 'Both', detail: `${fmt(mnyFilteredCount)} row(s)` },
-            ...sideOffered.map((s) => ({
-              key: s,
-              name: s,
-              detail: `${fmt(sideCount.get(s) ?? 0)} row(s)`,
-              title: s === 'CE' ? 'Calls.' : 'Puts.'
-            }))
-          ]}
-          selected={new Set([side])}
-          onchange={(/** @type {Set<string>} */ sel) => (side = [...sel][0] ?? '')}
-        />
-        <span class="note" class:warn={Boolean(sideRefusal || sideEmpty)}>
-          {#if sideRefusal}
-            No side — {sideRefusal}
-          {:else if sideEmpty}
-            No option here — {sideEmpty}
-          {:else if side}
-            {fmt(sideCount.get(side) ?? 0)} of {fmt(sidedHere)} option row(s) here are {side} — every
-            row without a side is out of the table too
-          {:else}
-            {fmt(sidedHere)} option row(s) here · both sides, which narrows nothing
-          {/if}
-        </span>
-      </div>
+      {#if contractRungs.side}
+        <div
+          class="field"
+          class:off={Boolean(sideRefusal || sideEmpty)}
+          title={sideRefusal ?? sideEmpty ?? undefined}
+        >
+          <span class="lab" title="Which side of the contract — calls or puts.">Side</span>
+          <!-- SEARCHABLE AND SINGLE, LIKE EVERY OTHER RUNG. Two options today,
+               and the consistency is the point: nine rungs that behave nine ways
+               is nine things to learn. -->
+          <Picker
+            single
+            filter
+            label="sides"
+            disabled={Boolean(sideRefusal)}
+            summary={sideRefusal ? 'No option stored' : side ? side : `Both \u00b7 ${fmt(sideOffered.length)}`}
+            rows={[
+              { key: '', name: 'Both', detail: `${fmt(mnyFilteredCount)} row(s)` },
+              ...sideOffered.map((s) => ({
+                key: s,
+                name: s,
+                detail: `${fmt(sideCount.get(s) ?? 0)} row(s)`,
+                title: s === 'CE' ? 'Calls.' : 'Puts.'
+              }))
+            ]}
+            selected={new Set([side])}
+            onchange={(/** @type {Set<string>} */ sel) => (side = [...sel][0] ?? '')}
+          />
+          <span class="note" class:warn={Boolean(sideRefusal || sideEmpty)}>
+            {#if sideRefusal}
+              No side — {sideRefusal}
+            {:else if sideEmpty}
+              No option here — {sideEmpty}
+            {:else if side}
+              {fmt(sideCount.get(side) ?? 0)} of {fmt(sidedHere)} option row(s) here are {side} — every
+              row without a side is out of the table too
+            {:else}
+              {fmt(sidedHere)} option row(s) here · both sides, which narrows nothing
+            {/if}
+          </span>
+        </div>
+      {/if}
     </section>
-    </details>
 
 
     <!-- ==================================================================
@@ -7630,38 +7670,12 @@
      take the two REFUSALS with it. "Why is there no strike control" is exactly
      the question `CLAUDE.md` §4 says must be answered out loud rather than by
      an absence, so the strip stays and its cells go `.off`. */
-  /* THE CONTRACT FOLD. Marker suppressed and redrawn for the reason the
-     calendar's disclosure gives on /ingest: the platform triangle is drawn by
-     the OS at the OS's size and is the one mark on the page no rule here
-     reaches. The summary is a flex row so the lead and its count sit on one
-     line at the same baseline the open strip's `.lead` uses. */
-  .cfold {
-    min-width: 0;
-  }
-  .cfold > summary {
-    display: flex;
-    align-items: baseline;
-    gap: var(--s4);
-    padding: var(--s3) 0;
-    cursor: pointer;
-    list-style: none;
-  }
-  .cfold > summary::-webkit-details-marker {
-    display: none;
-  }
-  .cfold > summary::before {
-    content: '\25B8';
-    flex: 0 0 auto;
-    font-size: 10px;
-    line-height: 1;
-    color: var(--acc);
-  }
-  .cfold[open] > summary::before {
-    transform: rotate(90deg);
-  }
-  .cfold > summary:hover .lead {
-    color: var(--ink);
-  }
+  /* THE FOLD'S CSS IS GONE WITH THE FOLD — six rules, removed BY NAME rather
+     than as a line range. A first attempt cut from the fold's comment to the
+     next selector and took the seven ported `:global(.pmenu …)` rules with it,
+     which un-hid every radio and collapsed the bar table's own container. That
+     is the hazard `CLAUDE.md`-adjacent notes keep restating: a CSS range is not
+     a rule, and only the rule's own text bounds it. */
   /* ══ THE SAME SELECTION /ingest DRAWS, PORTED VERBATIM ══
 
      `Picker` is shared, so both pages already had the same MARKUP. What they
@@ -8330,7 +8344,19 @@
      changes. */
   .tbl {
     flex: 1;
-    min-height: 0;
+    /* A FLOOR, NOT `0`. `min-height: 0` lets this flex child give up ALL of its
+       height when the siblings above it want more, and `.board` is a
+       fixed-height flex column — so on a short viewport the strip, the contract
+       section, the anchor and the pager between them took 709 of 727 pixels and
+       this box was left with NINETEEN. The table inside was 2,030px tall and
+       fully rendered; fifty rows sat in the DOM and none of them was on screen,
+       under a pager cheerfully reporting "1–50 of 4,500".
+       Measured, and it is why a folded Contract strip appeared to fix a table
+       that was never broken. `min-height: 0` is still what stops a flex child
+       from refusing to shrink at all, so the floor replaces it rather than
+       removing it: shrink, yes — to nothing, no. Past the floor the page
+       scrolls, which is the honest outcome. */
+    min-height: 220px;
     display: flex;
     flex-direction: column;
     position: relative; /* the drawer's containing block */
