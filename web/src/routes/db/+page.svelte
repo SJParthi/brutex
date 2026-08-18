@@ -5135,25 +5135,33 @@
              line; the whole of it is on the button's `title` above and in this
              node for anything that reads the document rather than looks at it.
              `CLAUDE.md` §4: degrade loudly and name the reason. -->
-        <span class="note" class:warn={Boolean(universeRefusal)}>
-          {#if universeRefusal}
-            {chosenUniverse.label} is not narrowing this table — {universeRefusal}
-          {:else if universe && universeCount.get(universe)}
-            {fmt(universeCount.get(universe).held)} of {fmt(
-              universeCount.get(universe).members
-            )} member(s) held · {fmt(
-              universeCount.get(universe).members - universeCount.get(universe).held
-            )} not stored · {fmt(universed.length)} instrument-month(s) stored in it
-          {:else}
-            {fmt(deco.length)} held · no membership list
-          {/if}
-          {#if outsideMaster && outsideMaster.months > 0}
-            · {fmt(outsideMaster.months)} stored instrument-month(s) across {fmt(
-              outsideMaster.instruments
-            )} instrument(s) are not listed by {feedName}'s master — they are held, no membership
-            universe can reach them, and Everything is where they show.
-          {/if}
-        </span>
+        <!-- ══ THE COUNTED CLAUSE GOES; THE TWO SENTENCES THAT ARE NOT COUNTS
+             STAY ══
+             `N held · no membership list` drew on every load under a button
+             reading `Everything`, and the picked-universe branch counted members
+             held against members known — both facts, neither of them news, and
+             both now on the control's `title`.
+             WHAT STAYS IS WHAT A COUNT CANNOT SAY. `universeRefusal` is a
+             refusal, and `outsideMaster` names rows that ARE held and that no
+             membership universe can reach — an operator who does not read that
+             sentence concludes the store is smaller than it is. Both draw only
+             when true.
+             THE `{#if}` IS OUTSIDE THE SPAN, not inside it. A `.note` carries
+             its marker as `::before`, so an emptied one is not invisible — it is
+             a bare `·` under a control. /ingest learned this the hard way. -->
+        {#if universeRefusal || (outsideMaster && outsideMaster.months > 0)}
+          <span class="note" class:warn={Boolean(universeRefusal)}>
+            {#if universeRefusal}
+              {chosenUniverse.label} is not narrowing this table — {universeRefusal}
+            {/if}
+            {#if outsideMaster && outsideMaster.months > 0}
+              {fmt(outsideMaster.months)} stored instrument-month(s) across {fmt(
+                outsideMaster.instruments
+              )} instrument(s) are not listed by {feedName}'s master — they are held, no membership
+              universe can reach them, and Everything is where they show.
+            {/if}
+          </span>
+        {/if}
       </div>
 
       <!-- THE INSTRUMENT RUNG. It WRITES THE TEXT BOX beside it and owns no
@@ -5201,11 +5209,10 @@
             selected={new Set([picked])}
             onchange={(/** @type {Set<string>} */ sel) => (filter = [...sel][0] ?? '')}
           />
-          <span class="note quiet">
-            {picked
-              ? `${picked} — one instrument of ${fmt(instrumentRows.length)} held`
-              : `${fmt(instrumentRows.length)} instrument(s) held here`}
-          </span>
+          <!-- RESTATEMENT, BOTH WAYS. `1 instrument(s) held here` under a
+               button reading `All · 1 held`, and the picked branch reprinted the
+               name the button already shows. Neither fact is lost: the `h1.sym`
+               below already carries both on its own title, in fuller words. -->
         </div>
       {/if}
 
@@ -5263,6 +5270,9 @@
           filter
           label="segments"
           disabled={kinds.length < 2}
+          title={kinds.length < 2
+            ? `${kinds.length === 1 ? kinds[0][0] : 'Nothing'} is the only segment this store holds, so there is nothing to narrow. The store's own second field — INDEX, CASH, FNO.`
+            : `${fmt(segmented.length)} instrument-month(s) across ${fmt(kinds.length)} segment(s). The store's own second field — INDEX, CASH, FNO.`}
           summary={kind ? kind : `All \u00b7 ${fmt(kinds.length)}`}
           rows={[
             { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
@@ -5271,11 +5281,12 @@
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
         />
-        <span class="note quiet"
-          >{kinds.length < 2
-            ? `${kinds.length === 1 ? kinds[0][0] : 'nothing'} \u2014 the only segment this store holds`
-            : `${fmt(segmented.length)} instrument-month(s) here`}</span
-        >
+        <!-- BOTH BRANCHES RESTATED THE FACE. `INDEX — the only segment this
+             store holds` under a button reading `All · 1`, and it wrapped to
+             two lines, so this was the one cell that made the strip's row
+             heights ragged. On the control's `title` now. The cell already
+             carries `.off` when there is nothing to choose, which is the
+             visible refusal. -->
       </div>
 
       <!-- THE BAR-LENGTH RUNG — the cascade's third step, and the control the
@@ -5310,6 +5321,9 @@
           filter
           label="rungs"
           disabled={Boolean(tfRefusal)}
+          title={tfRefusal
+            ? `No rung stored — ${tfRefusal}`
+            : `${timeframe ? `${fmt(timeframed.length)} of ${fmt(universed.length)} instrument-month(s) at ${timeframe}. ${tfNote(timeframe)}` : `${fmt(tfAll.length)} rung(s) held, ${fmt(segmented.length)} instrument-month(s) across them`} Only rungs this store actually holds are listed — the list is counted off the rows, never off a fixed ladder.`}
           summary={tfRefusal ? 'No rung stored' : timeframe ? timeframe : `All \u00b7 ${fmt(tfAll.length)}`}
           rows={[
             { key: '', name: 'All rungs', detail: `${fmt(segmented.length)} held` },
@@ -5323,22 +5337,18 @@
           selected={new Set([timeframe])}
           onchange={(/** @type {Set<string>} */ sel) => (timeframe = [...sel][0] ?? '')}
         />
-        <span class="note" class:warn={Boolean(tfRefusal)}>
-          {#if tfRefusal}
-            No bar length — {tfRefusal}
-          {:else if timeframe}
-            {fmt(timeframed.length)} of {fmt(universed.length)} instrument-month(s) at {timeframe} · {tfNote(
-              timeframe
-            )}
-          {:else}
-            <!-- THE COUNT, NOT THE ROLL-CALL. Nine rungs spelled out needed
-                 581px in a 143px cell, so the list was cut after the second
-                 and the count itself never appeared. Every rung and its tally
-                 is one click away in the menu below, and the whole string is
-                 on this cell's title. -->
-            {fmt(tfAll.length)} rung(s) held
-          {/if}
-        </span>
+        <!-- ══ THE COUNTS GO; THE REFUSAL STAYS ══
+             `1 rung(s) held` drew under a button reading `All · 1`, and the
+             picked branch counted rows at a rung the button already names. Both
+             are on the control's `title` now — the same cut /ingest made to its
+             five captions, for the same reason.
+             `tfRefusal` is NOT a count and does not move: it is the §4 case and
+             draws only when there is a refusal to name. The `{#if}` is OUTSIDE
+             the span, because a `.note` carries its marker as `::before` and an
+             emptied one paints a bare `·` under the control. -->
+        {#if tfRefusal}
+          <span class="note warn">No bar length — {tfRefusal}</span>
+        {/if}
       </div>
       <!-- ==================================================================
            THE DAY WINDOW — SPOT ONLY, AND ABSENT RATHER THAN DISABLED.
@@ -5358,9 +5368,13 @@
            1,200px and read as the panel's most important control when it is
            its last one. Same rule, same reason, same numbers. -->
       <div class="field wide">
-        <span class="lab" title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
-          >Days to show</span
-        >
+        <!-- "DAYS TO SHOW" IS GONE AND ONLY THE HEADING WAS — the same cut
+             /ingest made to "Days to pull". It stacked a group label over two
+             fields that already carry their own, FROM DATE and TO DATE, and no
+             other control on this strip has that extra level.
+             The sentence it held moves to `.dates`, the element that IS the
+             window, rather than being deleted with the heading that carried
+             it. -->
         <!-- THE PRODUCT'S OWN CALENDAR, AND THIS FILE HAS DEMANDED ONE IN
              WRITING FOR LONGER THAN IT HAD ONE. Twenty lines below, the month
              window's comment reads "The product's OWN calendar, never the
@@ -5380,7 +5394,10 @@
              defect it exists to remove. It had no importer anywhere in the
              tree. One component, both pages, and the two can no longer drift —
              the same argument `Picker` settles for every other rung here. -->
-        <div class="dates">
+        <div
+          class="dates"
+          title="The window in days. Spot only — a contract's window is its expiry, so these are ignored once an expiry is chosen."
+        >
           <DayField
             label="From date"
             value={fromDay}
@@ -6959,20 +6976,29 @@
     <!-- THE STATES BEFORE A STORE ANSWERS ARE NAMED RATHER THAN COUNTED: a
          "0 held" under a feed nobody chose, or under a read that failed, is a
          claim about a disk nobody reached. -->
-    <span class="note" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
-      {#if feeds.error}
-        the feed list could not be read, so nothing below is scoped to anything
-      {:else if error}
-        the store could not be read for this feed — every count on this page is this feed's store,
-        so none is shown
-      {:else if !feeds.active}
-        no feed is chosen, so no store has been read — this control is the page's whole scope
-      {:else if loading && rows.length === 0}
-        reading this feed's store — every count below is this feed's store
-      {:else}
-        {fmt(deco.length)} held · read {clock(fetchedAt)}
-      {/if}
-    </span>
+    <!-- `N held · read <clock>` IS GONE. The pane head above already carries
+         `as of <clock>` beside a Refresh button, so this restated the one fact
+         on screen twice, and the held count is the face of every rung below it.
+         Every branch that remains is a refusal or an in-flight state.
+         THE `{#if}` WRAPS THE SPAN. Left inside it, the normal state — no error,
+         a feed chosen, not loading — rendered an EMPTY `.note`, and a `.note`
+         carries its marker as `::before`, so "empty" paints a bare `·` under the
+         control. Emptying the element and keeping the element is how a cut
+         leaves litter. -->
+    {#if feeds.error || error || !feeds.active || (loading && rows.length === 0)}
+      <span class="note" class:warn={Boolean(error) || Boolean(feeds.error) || !feeds.active}>
+        {#if feeds.error}
+          the feed list could not be read, so nothing below is scoped to anything
+        {:else if error}
+          the store could not be read for this feed — every count on this page is this feed's store,
+          so none is shown
+        {:else if !feeds.active}
+          no feed is chosen, so no store has been read — this control is the page's whole scope
+        {:else}
+          reading this feed's store — every count below is this feed's store
+        {/if}
+      </span>
+    {/if}
   </div>
 {/snippet}
 
