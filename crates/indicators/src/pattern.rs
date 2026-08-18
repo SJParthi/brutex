@@ -841,6 +841,82 @@ mod tests {
         p.step(bar).expect("this fixture bar is sane")
     }
 
+    /// EVERY SHADOW RATIO MEETS ITS THRESHOLD EXACTLY, AND ZERO RANGE IS NOT A BAR.
+    ///
+    /// The `Shape` ratios are cross-multiplied — `upper * 1000 >= range *
+    /// permille` — and three mutations live on each: the `*` turned into `+`,
+    /// into `/`, and the whole predicate replaced by `true`. All three need a
+    /// case whose answer is FALSE and a threshold hit exactly, which no test in
+    /// this file had.
+    ///
+    /// `is_doji`, `is_long` and `is_small` add `range > 0`. A zero-range bar —
+    /// open, high, low and close all equal — is the only input where `>` and
+    /// `>=` disagree there, and it is a real bar: a halted or untraded minute
+    /// prints exactly that.
+    #[test]
+    fn the_shadow_ratios_are_exact_and_a_zero_range_bar_is_none_of_them() {
+        // range 100, upper 20, lower 30, body 50.
+        // open 130 close 180 -> body 50, top 180, bottom 130.
+        // high 200 -> upper 20. low 100 -> lower 30. range 100.
+        let sh = Shape::of(&mk(0, 130, 200, 100, 180));
+        assert_eq!(sh.range, 100, "the fixture's range is what the maths uses");
+        assert_eq!(sh.upper, 20, "and its upper shadow");
+        assert_eq!(sh.lower, 30, "and its lower");
+        assert_eq!(sh.body, 50, "and its body");
+
+        // 20/100 = 200 permille, exactly.
+        assert!(sh.upper_at_most(200), "20 of 100 IS at most 200 permille");
+        assert!(!sh.upper_at_most(199), "and is not at most 199");
+        assert!(sh.upper_vs_range(200), "it is also at least 200");
+        assert!(
+            !sh.upper_vs_range(201),
+            "but not at least 201 -- the case a `-> true` replacement cannot \
+             survive, and the one that forces the cross-multiply to multiply"
+        );
+
+        // 30/100 = 300 permille, exactly.
+        assert!(sh.lower_at_most(300), "30 of 100 IS at most 300 permille");
+        assert!(!sh.lower_at_most(299), "and is not at most 299");
+        assert!(sh.lower_vs_range(300), "and at least 300");
+
+        // Against the BODY rather than the range: 30/50 = 600, 20/50 = 400.
+        assert!(sh.lower_vs_body(600), "30 of a 50 body IS 600 permille");
+        assert!(!sh.lower_vs_body(601), "and not 601");
+        assert!(sh.upper_vs_body(400), "20 of a 50 body IS 400 permille");
+        assert!(
+            !sh.upper_vs_body(401),
+            "and not 401 -- these two ratios divide by the BODY, so a bar with \
+             a large body and the same shadows must answer differently"
+        );
+
+        // ── range > 0, and the bar that makes it matter ──────────────────────
+        //
+        // A halted minute prints open == high == low == close. Its range is
+        // zero, its body is zero, and `body_at_most` is `0 <= 0` — true for
+        // every threshold. Without the `range > 0` guard EVERY such bar would be
+        // a doji, a long body and a small body at once, which is three
+        // contradictory bits on a bar that never traded.
+        let flat = Shape::of(&mk(0, 100, 100, 100, 100));
+        assert_eq!(flat.range, 0, "a halted minute has no range");
+        let thr = Thresholds::CLASSICAL;
+        assert!(!flat.is_doji(thr), "a bar that never traded is not a doji");
+        assert!(!flat.is_long(thr), "nor a long body");
+        assert!(!flat.is_small(thr), "nor a small one");
+
+        // And a real bar still classifies, so the guard refuses only the flat one.
+        let tiny = Shape::of(&mk(0, 100, 200, 100, 101));
+        assert!(
+            tiny.is_doji(thr),
+            "a one-paisa body over a 100 range is a doji"
+        );
+        let big = Shape::of(&mk(0, 100, 200, 100, 190));
+        assert!(
+            big.is_long(thr),
+            "and a 90-of-100 body is a long one -- the guard refuses only the \
+             flat bar, not every bar"
+        );
+    }
+
     /// THE GAP PATTERNS: EVERY CLAUSE ISOLABLE, INCLUDING THE COMPARISON.
     ///
     /// Bits 202 and 203 are three clauses each, and unlike the piercing pattern
