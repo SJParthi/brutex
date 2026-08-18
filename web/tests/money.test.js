@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { group, rupee, LOC } from '../src/lib/money.js';
+import { group, rupee, LOC, exact, whole, oneDp } from '../src/lib/money.js';
 
 test('the grouping is INDIAN, which is a fact about this runtime', () => {
   // Crores and lakhs, not thousands and millions. On an ICU-less build every
@@ -79,4 +79,58 @@ test('the safe-integer edge is where this stops being exact, and it is far away'
   // silently wrong.
   assert.ok(Number.MAX_SAFE_INTEGER / 100 > 9e13, 'the exact range exceeds ₹90 billion');
   assert.equal(rupee(2_512_345), '25,123.45', 'and an index quote is nowhere near it');
+});
+
+/* ── the em dash, which Intl does not supply ──────────────────────────── */
+
+test('Intl renders a non-answer as though it were one, and these do not', () => {
+  // This is the whole reason the three below exist. `/db` shipped the left-hand
+  // column at 126 call sites while `/audit` guarded the same values: two pages,
+  // one quantity, two different words for not knowing.
+  assert.equal(new Intl.NumberFormat(LOC).format(NaN), 'NaN');
+  assert.equal(new Intl.NumberFormat(LOC).format(Infinity), '∞');
+  assert.equal(exact(NaN), '—');
+  assert.equal(whole(NaN), '—');
+  assert.equal(oneDp(NaN), '—');
+});
+
+test('every shape of "no number" is the same em dash', () => {
+  for (const nothing of [NaN, Infinity, -Infinity]) {
+    assert.equal(exact(nothing), '—', `exact(${nothing})`);
+    assert.equal(whole(nothing), '—', `whole(${nothing})`);
+    assert.equal(oneDp(nothing), '—', `oneDp(${nothing})`);
+  }
+});
+
+test('ZERO IS A NUMBER AND IS NEVER THE DASH', () => {
+  // The counterpart of the `?? 0` defect on /audit: a counted zero must not
+  // become an unknown any more than an unknown may become a zero.
+  assert.equal(exact(0), '0');
+  assert.equal(whole(0), '0');
+  assert.equal(oneDp(0), '0');
+});
+
+test('exact does NOT round, because a record count is already whole', () => {
+  // Rounding here would hide a fractional value that should never have arrived
+  // from the store at all.
+  assert.equal(exact(1234), '1,234');
+  assert.equal(exact(1234.7), '1,234.7');
+});
+
+test('whole rounds, because a fold or an average is not a count', () => {
+  assert.equal(whole(1234.7), '1,235');
+  assert.equal(whole(1234.2), '1,234');
+  assert.equal(whole(-1234.7), '-1,235');
+});
+
+test('oneDp keeps a ratio that would lose its meaning as an integer', () => {
+  assert.equal(oneDp(99.94), '99.9');
+  assert.equal(oneDp(0.04), '0');
+  assert.equal(oneDp(12345.67), '12,345.7', 'and it still groups');
+});
+
+test('all three group the Indian way, so no page disagrees with another', () => {
+  assert.equal(exact(87828617), '8,78,28,617');
+  assert.equal(whole(87828617.4), '8,78,28,617');
+  assert.equal(oneDp(87828617), '8,78,28,617');
 });

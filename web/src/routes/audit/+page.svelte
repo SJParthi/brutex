@@ -84,6 +84,7 @@
   // this and fixed itself; `stampLabel` is what it fixed itself with, and this
   // is the third and last spelling of the rule joining the other two.
   import { stampLabel } from '$lib/dates.js';
+  import { whole, oneDp } from '$lib/money.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -145,10 +146,11 @@
   /* ══════════════════════════════════════════════════════════════════════
      FORMATTING — Indian grouping, IST, and no invented precision
      ══════════════════════════════════════════════════════════════════════ */
-  const IN = new Intl.NumberFormat('en-IN');
-  const n0 = (/** @type {number} */ n) => (Number.isFinite(n) ? IN.format(Math.round(n)) : '—');
-  const n1 = (/** @type {number} */ n) =>
-    Number.isFinite(n) ? new Intl.NumberFormat('en-IN', { maximumFractionDigits: 1 }).format(n) : '—';
+  // ONE SPELLING OF THE GROUPING, NOT FIVE. `en-IN` was constructed
+  // independently here, on `/db`, twice on this page and on `/ingest` — and the
+  // spellings had DIVERGED: `/db`'s rendered an unknown as the literal "NaN".
+  const n0 = whole;
+  const n1 = oneDp;
 
   /* The server sends epoch seconds. Formatting them in Asia/Kolkata is exact
      whatever this browser's zone is, which is why the zone is named here

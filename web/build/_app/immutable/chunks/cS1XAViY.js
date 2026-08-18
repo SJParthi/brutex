@@ -1,0 +1,1 @@
+var e=`en-IN`,t=t=>Number(t).toLocaleString(e),n=t=>(t/100).toLocaleString(e,{minimumFractionDigits:2,maximumFractionDigits:2}),r=e=>Number.isFinite(e)?t(e):`—`,i=e=>Number.isFinite(e)?t(Math.round(e)):`—`;export{i as a,n as i,r as n,t as r,e as t};

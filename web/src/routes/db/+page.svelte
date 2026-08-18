@@ -84,6 +84,7 @@
   // drives them under `node --test`.
   import { denominators, denomKey, isSole, rollUpMonths } from '$lib/completeness.js';
   import { basisPoints, bpsText, dirOf } from '$lib/bps.js';
+  import { exact } from '$lib/money.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -503,9 +504,12 @@
      formatter feeds `fmt`, which is called 36 times across the headline
      counters, the month cards, the receipt prose and every table cell.
      `audit/+page.svelte:145` pins the same way. */
-  const nf = new Intl.NumberFormat('en-IN');
-  /** @param {number} n */
-  const fmt = (n) => nf.format(n);
+  // AND IT NOW DASHES AN UNKNOWN. `nf.format(NaN)` is the string "NaN" and
+  // `format(Infinity)` is "∞" — a non-answer rendered as though it were one, at
+  // all 126 of this page's call sites, while `/audit` guarded the same values.
+  // `exact` does not round, because a record count is already whole and
+  // rounding one would hide a fractional value that should never have arrived.
+  const fmt = exact;
   /* FIXED TWO DECIMALS, ALWAYS. Adaptive precision made the digit count change
      from row to row, so the column's decimal point moved and the eye had to
      re-find it on every line. A column of numbers is a column or it is not. */
