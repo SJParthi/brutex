@@ -2533,12 +2533,19 @@
       // refusal NAMES IT: which feed, at which timeframe, and from when. "Out
       // of range" tells an operator nothing he can act on; this tells him to
       // move the date, the feed or the rung, and which one would be enough.
-      if (feedFloor.at && value < feedFloor.at) {
-        out.push({
-          field,
-          why: `${Name} is ${dayLabel(value)}, and ${floorSentence} Move it to ${dayLabel(feedFloor.at)} or later, or pick a feed or a timeframe that reaches further back. ${feedFloor.src.join(' · ')}`
-        });
-      } else if (dayNum(value) < dayNum(minDay)) {
+      // THE FEED'S FLOOR NO LONGER REFUSES THE WINDOW, at the operator's
+      // instruction: one window is asked of every ticked feed, and each feed
+      // reaches back a different distance, so a floor that blocks the FORM
+      // makes the earliest-reaching feed unusable because a later-reaching one
+      // is also ticked. The floor is a property of the ASK, so it is applied
+      // where the ask is made.
+      //
+      // IT IS NOT SILENT, and that is the half CLAUDE.md §4 cares about. The
+      // clause under the day window still states each ticked feed's floor by
+      // name, with the date and the citation, so an operator asking for 2015
+      // from a feed that answers from 2021 is told what he will get before he
+      // presses. What changed is that it INFORMS instead of BLOCKING.
+      if (dayNum(value) < dayNum(minDay)) {
         out.push({
           field,
           why: `${Name} is ${dayLabel(value)}, earlier than ${dayLabel(minDay)} — the floor the server's own picker offers (crates/api/src/calendar.rs).`
