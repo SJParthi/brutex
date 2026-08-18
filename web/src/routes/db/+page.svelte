@@ -3428,6 +3428,30 @@
    * ONE PASS over the rows already in memory, no sort and no new request —
    * `barRows` is what the table is about to draw anyway.
    */
+  /**
+   * THE SPAN THE DAY FIELDS MAY REACH — /ingest's, not the store's.
+   *
+   * `dayBounds` below is the first and last day the LOADED ROWS hold, and
+   * handing that to `DayField` as `min`/`max` made the calendar unable to leave
+   * the store: with one month on disk the year pad offered exactly one chip,
+   * `2026`, where /ingest's offers twelve. A reader could not navigate to 2015
+   * to ask whether anything was there, because the control refused the question
+   * before it was asked.
+   *
+   * So the BOUNDS are the whole span — 01 Jan 2015, the floor the server's own
+   * picker offers, to today in IST — and `dayBounds` keeps its other job: it is
+   * still what the bounds SENTENCE reports, so the reader is still told exactly
+   * where the store starts and stops. The two were one value doing two jobs and
+   * only one of them wanted the narrow number.
+   *
+   * `FLOOR_YEAR` is 2015 here for the same reason it is 2015 on /ingest: it is
+   * the floor `crates/api/src/calendar.rs` offers, and the two pages must not
+   * disagree about how far back a day may be named.
+   */
+  const FLOOR_YEAR = 2015;
+  const spanFloor = `${FLOOR_YEAR}-01-01`;
+  const spanCeil = $derived(istDayKey(Date.now()));
+
   const dayBounds = $derived.by(() => {
     let lo = '';
     let hi = '';
@@ -4277,9 +4301,45 @@
    * rather than this quietly moving him.
    */
   $effect(() => {
-    if (fromDay === '' && toDay === '' && dayBounds[0] && dayBounds[1]) {
-      fromDay = dayBounds[0];
-      toDay = dayBounds[1];
+    if (fromDay === '' && toDay === '' && spanCeil) {
+      fromDay = spanFloor;
+      toDay = spanCeil;
+    }
+  });
+
+  /**
+   * EXACTLY ONE SEGMENT AND EXACTLY ONE INSTRUMENT, SEEDED.
+   *
+   * The `All segments` and `All instruments` head rows are gone — every rung on
+   * this page is `single`, so "all of them" was never a member of the set being
+   * offered, only the way to leave the rung unanswered. With the rows gone the
+   * empty string is no longer a state the page can rest in, so each seeds itself
+   * the moment there is something to seed from.
+   *
+   * ONE INSTRUMENT IS NOT A NARROWING, IT IS A CORRECTION. The bars table has no
+   * instrument column — `b.instrument` appears only on a row's `title` — so a
+   * table blended across instruments printed OPEN, HIGH, LOW and CLOSE from
+   * different price scales with nothing on screen saying which row belonged to
+   * which name. Exactly one instrument is the only selection under which those
+   * columns mean anything, the same argument that took `All rungs` off Timeframe.
+   *
+   * PREFER SOMETHING HELD. Both seeds pick a member with rows behind it where
+   * one exists, because a page that opens on an empty table over a store that
+   * holds data has answered a question nobody asked. It falls back to the first
+   * offered member when the store holds none of them — which is honest: the
+   * table is empty because the store is.
+   */
+  $effect(() => {
+    if (kind === '' && segmentRows.length > 0) {
+      const held = kinds[0]?.[0];
+      kind = held ?? segmentRows[0].key;
+    }
+  });
+
+  $effect(() => {
+    if (filter === '' && instrumentOffered.length > 0) {
+      const held = instrumentOffered.find((r) => r.months > 0);
+      filter = (held ?? instrumentOffered[0]).key;
     }
   });
 
@@ -5341,11 +5401,10 @@
                   ? instrumentRows[0].key
                   : `All · ${fmt(instrumentRows.length)} held`}
             rows={[
-              {
-                key: '',
-                name: 'All instruments',
-                detail: `${fmt(instrumentRows.length)} of ${fmt(instrumentOffered.length)} held`
-              },
+              /* NO "ALL INSTRUMENTS" ROW, for the reason `All rungs` went from
+                 Timeframe: this rung is `single`, so "all of them" is not a
+                 member of the set it offers. One name is chosen at all times and
+                 the head row was the only way to leave it unchosen. */
               ...instrumentOffered.map((r) => ({
                 key: r.key,
                 name: r.key,
@@ -5443,10 +5502,7 @@
             : kinds.length === 1
               ? kinds[0][0]
               : `All \u00b7 ${fmt(kinds.length)}`}
-          rows={[
-            { key: '', name: 'All segments', detail: `${fmt(textMatched.length)} held` },
-            ...segmentRows
-          ]}
+          rows={segmentRows}
           selected={new Set([kind])}
           onchange={(/** @type {Set<string>} */ sel) => (kind = [...sel][0] ?? '')}
         />
@@ -5576,8 +5632,8 @@
           <DayField
             label="From date"
             value={fromDay}
-            min={dayBounds[0]}
-            max={toDay || dayBounds[1]}
+            min={spanFloor}
+            max={toDay || spanCeil}
             onchange={(/** @type {string} */ d) => (fromDay = d)}
             boundsReason={dayBounds[0]
               ? `This store holds ${dayLabel(dayBounds[0])} to ${dayLabel(dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or after this day — spot only, since a contract's window is its expiry.`
@@ -5586,8 +5642,8 @@
           <DayField
             label="To date"
             value={toDay}
-            min={fromDay || dayBounds[0]}
-            max={dayBounds[1]}
+            min={fromDay || spanFloor}
+            max={spanCeil}
             onchange={(/** @type {string} */ d) => (toDay = d)}
             boundsReason={dayBounds[1]
               ? `This store holds ${dayLabel(dayBounds[0])} to ${dayLabel(dayBounds[1])} for the current selection; days outside it are struck through because there is no bar there to show. Only bars on or before this day — spot only, since a contract's window is its expiry.`

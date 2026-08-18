@@ -498,6 +498,156 @@ mod tests {
         );
     }
 
+    /// Blanking keeps the shape and the numbering. Cutting would destroy both.
+    ///
+    /// # What this catches
+    ///
+    /// A walk-forward scores a combination on the TEST window while the indicators keep
+    /// the state the TRAINING bars legitimately gave them, and the obvious way to write
+    /// that is to cut the column down to the test range. A cut RENUMBERS
+    /// [`Column::sources`], which is the one defect `sources` exists to remove:
+    /// `first_swept + j` runs one behind from the first refused bar onward, so every
+    /// outcome after it is read off the wrong bar — silently, and only on data that
+    /// contains a refusal.
+    ///
+    /// **So the fixture contains a refusal inside the swept region.** On a clean column
+    /// blanking and cutting agree about every index, and a test built on one could not
+    /// tell the two implementations apart.
+    ///
+    /// Five claims, each failing a different wrong implementation: the row count is
+    /// unchanged (a cut shortens it), the source vector is unchanged (a cut renumbers
+    /// it), the census is unchanged (no bar was re-offered), every row before the
+    /// boundary can no longer satisfy a mask that requires anything (a no-op leaves them
+    /// firing), and every row at or after it is bit-for-bit what it was (an off-by-one
+    /// boundary blanks a test row and under-reports the fold).
+    /// A warm column whose SWEPT region contains a refusal.
+    ///
+    /// The same corruption `sources_maps_a_column_position_to_its_bar_even_across_a_refusal`
+    /// plants, and for the same reason: high below low, deep inside the swept region, so
+    /// the column's positions and the caller's bar indices run out of step. On a clean
+    /// column the two agree everywhere, and nothing built on one can tell a renumbering
+    /// implementation from an honest one.
+    fn column_across_a_refusal() -> Column {
+        let mut bars = run(8);
+        let victim = bars.len() - 20;
+        if let Some(b) = bars.get_mut(victim) {
+            *b = Candle::new(
+                b.ts_micros,
+                b.open,
+                b.low - 100,
+                b.high,
+                b.close,
+                1,
+                OI_NULL,
+            );
+        }
+        let column = Column::build(&bars, &mut evaluator(Availability::Absent));
+        assert_eq!(
+            column.census().high_below_low,
+            1,
+            "the fixture must actually contain a refusal, or every test built on it \
+             proves nothing"
+        );
+        column
+    }
+
+    #[test]
+    fn clearing_before_a_boundary_blanks_the_training_rows_and_renumbers_nothing() {
+        let built = column_across_a_refusal();
+
+        // A real bar index from the middle of the column, so both sides are non-empty.
+        let middle = built.sources().len() / 2;
+        let boundary = built
+            .sources()
+            .get(middle)
+            .copied()
+            .expect("a column built from eight sessions has a middle row");
+
+        let mut cleared = built.clone();
+        cleared.clear_before(boundary);
+
+        assert_eq!(
+            cleared.bits().len(),
+            built.bits().len(),
+            "a row disappeared: the column was CUT, and a cut renumbers `sources`"
+        );
+        assert_eq!(
+            cleared.sources(),
+            built.sources(),
+            "a source index moved, which is exactly the renumbering `sources` prevents"
+        );
+        assert_eq!(
+            cleared.census(),
+            built.census(),
+            "the census counts OFFERED bars, and blanking offers nothing"
+        );
+        assert_eq!(
+            cleared.first_swept(),
+            built.first_swept(),
+            "the first swept bar is a fact about the input, not about a fold boundary"
+        );
+
+        let mut blanked = 0_usize;
+        let mut still_firing = 0_usize;
+        for ((&source, was), now) in built
+            .sources()
+            .iter()
+            .zip(built.bits().iter())
+            .zip(cleared.bits().iter())
+        {
+            if source < boundary {
+                assert!(
+                    now.is_empty(),
+                    "the row from bar {source} is before the boundary {boundary} and \
+                     still carries bits, so a training bar can still be counted as a hit"
+                );
+                // The documented consequence, said the way the sweep says it. A mask
+                // hits a bar iff `(bits & mask) == mask`, so a zeroed row satisfies
+                // nothing that requires a bit — and still satisfies the EMPTY mask,
+                // which has no conditions and is not a strategy.
+                //
+                // The precondition is ASSERTED, not guarded on. `if !was.is_empty()`
+                // would silently skip the check on a row that carried nothing, and a
+                // skipped check is the vacuous pass the counters below exist to rule
+                // out. A swept bar always sets something, so say that and let it fail.
+                assert!(
+                    !was.is_empty(),
+                    "the row from bar {source} carried no bits before the call, so \
+                     blanking it changes nothing and `hits` cannot notice"
+                );
+                assert!(
+                    !now.hits(was),
+                    "the blanked row from bar {source} still satisfies the mask its own \
+                     bits formed, so `hits` cannot tell it from a live row"
+                );
+                assert!(
+                    now.hits(&ConditionMask::ZERO),
+                    "`(0 & 0) == 0`: the empty mask hits every row, blanked or not"
+                );
+                blanked += 1;
+            } else {
+                assert_eq!(
+                    now, was,
+                    "the row from bar {source} is at or after the boundary {boundary} \
+                     and was changed, so the comparison is off by one"
+                );
+                if !now.is_empty() {
+                    still_firing += 1;
+                }
+            }
+        }
+        assert!(
+            blanked > 0,
+            "the boundary fell before every row, so nothing was blanked and the \
+             assertions above are vacuous"
+        );
+        assert!(
+            still_firing > 0,
+            "no row after the boundary carries a bit, so the test window is dead too and \
+             `clear_before` cannot be distinguished from zeroing the whole column"
+        );
+    }
+
     #[test]
     fn an_empty_slice_gives_an_empty_column() {
         let mut ev = evaluator(Availability::Absent);
@@ -605,6 +755,72 @@ mod tests {
         let mut a = evaluator(Availability::Absent);
         let mut b = evaluator(Availability::Absent);
         assert_eq!(Column::build(&bars, &mut a), Column::build(&bars, &mut b));
+    }
+
+    /// `clear_before` ZEROES BELOW THE BOUNDARY AND KEEPS THE BOUNDARY ITSELF.
+    ///
+    /// Four mutants lived here and they are four different wrong answers:
+    /// replacing the whole function with `()` (clear nothing), `<` to `<=`
+    /// (also clear the boundary row), `<` to `>` (clear the wrong side), and
+    /// `<` to `==` (clear only one row).
+    ///
+    /// `crate::validate` uses this to build a fold's TEST column: every bar
+    /// before the boundary is blanked so the walk cannot see its own training
+    /// data. Each of those four mutations leaks or destroys exactly the bars
+    /// that separation depends on, and none of them looks wrong from outside —
+    /// a leaked training bar makes an out-of-sample result better, not broken.
+    #[test]
+    fn clear_before_blanks_below_the_boundary_and_keeps_the_boundary_row() {
+        let bars = warm_run();
+        let mut ev = evaluator(Availability::Absent);
+        let column = Column::build(&bars, &mut ev);
+        let sources = column.sources().to_vec();
+        assert!(
+            sources.len() >= 4,
+            "this fixture must sweep several bars or the boundary cases coincide"
+        );
+
+        // A boundary in the middle, taken from the column's OWN source indices
+        // so it is a real one rather than a guess about the warm-up length.
+        let mid = sources.len() / 2;
+        let boundary = match sources.get(mid) {
+            Some(&s) => s,
+            None => unreachable!("mid is inside a slice of length >= 4"),
+        };
+        let before: Vec<ConditionMask> = column.bits().to_vec();
+
+        let mut cleared = column;
+        cleared.clear_before(boundary);
+
+        let mut zeroed = 0_usize;
+        let mut kept = 0_usize;
+        for (i, (&source, bits)) in sources.iter().zip(cleared.bits()).enumerate() {
+            let was = before.get(i).copied().unwrap_or(ConditionMask::ZERO);
+            if source < boundary {
+                assert!(
+                    bits.is_empty(),
+                    "row {i} sources bar {source}, below the {boundary} boundary, \
+                     and must be blank -- a `>` or `==` comparison leaves it set \
+                     and leaks a training bar into the test window"
+                );
+                zeroed = zeroed.saturating_add(1);
+            } else {
+                assert_eq!(
+                    *bits, was,
+                    "row {i} sources bar {source}, at or after the {boundary} \
+                     boundary, and must be untouched -- `<=` blanks the boundary \
+                     row itself and throws away a bar the fold is meant to test"
+                );
+                kept = kept.saturating_add(1);
+            }
+        }
+
+        assert!(
+            zeroed > 0,
+            "the fixture must actually clear something, or a function replaced \
+             by `()` passes this test"
+        );
+        assert!(kept > 0, "and must keep something, or `>` passes it");
     }
 
     #[test]
