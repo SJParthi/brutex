@@ -231,7 +231,7 @@
   /**
    * @typedef {{
    *   action: string,
-   *   tone: 'done' | 'partial' | 'refused',
+   *   tone: 'done' | 'partial' | 'refused' | 'unknown',
    *   code: number,
    *   why: string,
    *   at: number
@@ -1383,8 +1383,20 @@
       // rejected `fetch` is not required to settle with an `Error`.
       const cause = /** @type {{ message?: unknown } | null | undefined} */ (e);
       const why = String(cause?.message ?? e);
-      receipt = { action, tone: 'refused', code, why, at: Date.now() };
-      note(`POST ${CONTROL} action=${action} failed — ${why}`);
+      // `unknown` AND NOT `refused`, WHICH IS THE WHOLE OF THIS BRANCH.
+      //
+      // A refusal is a claim about what the SERVER did. Reaching here is a
+      // claim about what THIS PAGE knows: the request may have arrived, been
+      // acted on, and had its answer lost on the way back. Writing `refused`
+      // stated the stronger fact, and the 2-second poll below then adopted a
+      // status showing the autopilot RUNNING -- so the page displayed "refused"
+      // and "running" at once, with nothing reconciling them and no way for an
+      // operator to tell which was true.
+      //
+      // The tone the page can defend is that it does not know. The status deck
+      // is the authority and says so in the receipt.
+      receipt = { action, tone: 'unknown', code, why, at: Date.now() };
+      note(`POST ${CONTROL} action=${action} did not complete — ${why}`);
     } finally {
       control = { busy: false };
     }
@@ -1730,18 +1742,31 @@
               class:done={receipt.tone === 'done'}
               class:partial={receipt.tone === 'partial'}
               class:refused={receipt.tone === 'refused'}
+              class:unknown={receipt.tone === 'unknown'}
               role="status"
             >
               <b
                 >POST /autopilot/control action={receipt.action} → {receipt.code || 'no answer'} · {receipt.tone ===
-                'refused'
-                  ? 'refused'
-                  : receipt.tone === 'partial'
-                    ? 'accepted, and NOT complete'
-                    : 'accepted'}</b
+                'unknown'
+                  ? 'NO ANSWER — it may still have taken effect'
+                  : receipt.tone === 'refused'
+                    ? 'refused'
+                    : receipt.tone === 'partial'
+                      ? 'accepted, and NOT complete'
+                      : 'accepted'}</b
               >
               {receipt.why}
-              <span class="verb">The server’s own sentence, verbatim, at {istTime(receipt.at)} IST.</span>
+              <!-- THE PROVENANCE LINE IS NOT ONE SENTENCE. On every other tone
+                   `why` IS the server's sentence and saying so is what makes it
+                   trustworthy. On `unknown` there is no server sentence at all —
+                   `why` is this page's own error text — and printing "the
+                   server's own sentence, verbatim" over it is a false
+                   attribution on top of a false verdict. -->
+              <span class="verb"
+                >{receipt.tone === 'unknown'
+                  ? `This page’s own words at ${istTime(receipt.at)} IST — the request did not complete, so the server said nothing. The state above is the authority.`
+                  : `The server’s own sentence, verbatim, at ${istTime(receipt.at)} IST.`}</span
+              >
             </div>
           {/if}
         </div>
@@ -2565,6 +2590,13 @@
   .receipt.refused {
     --tone: var(--down);
     --bgc: var(--down-soft);
+  }
+  /* AMBER AND NOT `--down`. Red on this product means a refusal or a price that
+     fell — both facts about what happened. Not knowing is a severity, not a
+     direction, and it must not read as the refusal it replaced. */
+  .receipt.unknown {
+    --tone: var(--warn);
+    --bgc: var(--warn-soft);
   }
   .receipt b {
     display: block;
