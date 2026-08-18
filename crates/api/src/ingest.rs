@@ -3590,3 +3590,68 @@ mod route_tests {
         assert!(json.contains(r#""of":9"#), "{json}");
     }
 }
+
+/// Turns a settled expiry into the discovery ask that finds its contracts.
+///
+/// # Why the month and not the day
+///
+/// `pull::chain::month` walks one (underlying, year, month) because that is how
+/// the vendor keys it: there is no call that returns the contracts of a single
+/// date directly, only the expiries of a month and then the contracts of one
+/// expiry. So a request naming ONE settled expiry is answered by discovering
+/// its month and keeping the contracts that expired on the day asked for.
+///
+/// That is why the existing [`FnoRequest`] shape is enough and did not have to
+/// widen: the month is derivable from the expiry the operator already gives.
+///
+/// # Cost
+///
+/// Two field reads. The discovery it feeds is one request for the month's
+/// expiries and one per expiry, which is `pull::chain`'s bound and not this
+/// function's.
+#[must_use]
+pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
+    pull::fno::Ask {
+        underlying: request.underlying.as_str().to_owned(),
+        year: request.expiry.year(),
+        month: request.expiry.month(),
+        // Empty: this is the EXPIRIES ask, and the expiry it discovers is what
+        // keys the contracts ask that follows. `pull::fno` refuses a contracts
+        // request with no expiry by name, which is what makes the order of the
+        // two calls a type-level fact rather than a convention.
+        expiry: String::new(),
+    }
+}
+
+/// Keeps the contracts this request actually asked for.
+///
+/// # Why a filter and not a narrower discovery
+///
+/// The vendor answers a whole month; the operator asked for one expiry and one
+/// series. Discovering less is not on offer — there is no call for it — so the
+/// narrowing happens here, once, over an answer already in hand.
+///
+/// # Cost
+///
+/// One pass over the month's contracts, two comparisons each. No allocation per
+/// contract beyond the ones kept.
+#[must_use]
+pub fn matching(chain: &pull::chain::Chain, request: &FnoRequest) -> Vec<pull::fno::Found> {
+    let wanted = request.expiry.to_string();
+    chain
+        .contracts
+        .iter()
+        .filter(|found| {
+            let right_series = match request.series {
+                Series::Futures => found.contract.is_future(),
+                Series::Options => found.contract.is_option(),
+            };
+            // THE EXPIRY IS COMPARED THROUGH THE CONTRACT'S OWN NAME, which is
+            // where this store keeps it — `-<YYYY-MM-DD>-FUT` and
+            // `-<YYYY-MM-DD>-<strike>-CE|PE`. Re-deriving it from the vendor's
+            // spelling would be a second parser for a value already parsed.
+            right_series && found.contract.as_str().contains(&wanted)
+        })
+        .cloned()
+        .collect()
+}
