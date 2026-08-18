@@ -16172,3 +16172,30 @@ it still refuses the 174x regression by a factor of 43.
 
 ---
 
+## D-0203 · 2026-08-18 · `crates/runner` gains a floor-relative budget — ten of thirteen
+
+The seventh of the nine ratio-only crates, and the last of the ones this session
+could reach. `runner` drives the whole sweep, so its per-bar cost is the one that
+multiplies across every bar of every run.
+
+**The floor** walks the same slice with one `wrapping_add` per bar — same loop,
+same bounds checks, same memory traffic, none of the indicator work.
+
+**Measured**, three consecutive runs: **1270.202, 990.494, 968.863** floors at a
+floor of ~336 ps. The **1.31x spread is the workspace's widest**, and that is
+expected rather than alarming: the numerator runs the whole `Evaluator` — ten
+indicator families, session rollovers, an EMA state machine — against a
+denominator of one add.
+
+**The magnitude is the finding, not a worry.** A thousand of the cheapest
+per-bar operations is what turning one bar into 280 condition bits costs. Nobody
+had ever written that number down, and knowing it is the only way to notice it
+becoming two thousand.
+
+**Budget 5,000**, sized on the worst observed with about 4x left over, still
+refusing the 174x regression by a factor of 44.
+
+**Two crates remain ratio-only**: `api` and `pull`.
+
+---
+

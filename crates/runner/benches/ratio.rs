@@ -210,8 +210,27 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
 
 /// C-R-04 — one bar's column build costs a bounded multiple of the per-bar floor.
 fn the_column_build_stays_within_its_budget() -> bool {
-    /// Floors allowed per offered bar. Measured below, then pinned.
-    const ALLOWED: u128 = 0;
+    /// Floors allowed per offered bar.
+    ///
+    /// Measured, arm64 laptop, release, three consecutive runs: **1270.202,
+    /// 990.494, 968.863** floors, at a floor of ~336 ps. The 1.31x spread is the
+    /// widest of the workspace's budgets, and that is expected: the numerator
+    /// runs the whole `Evaluator` — ten indicator families, session rollovers,
+    /// an EMA state machine — against a denominator of one add.
+    ///
+    /// The MAGNITUDE is the point rather than a worry. A thousand of the
+    /// cheapest per-bar operations is what turning one bar into 280 condition
+    /// bits costs, and knowing that number is the only way to notice it becoming
+    /// two thousand.
+    ///
+    /// **5,000**, sized on the worst observed with roughly 4x left over — the
+    /// same rule the other eight budgets apply. It still refuses the 174x
+    /// uniform regression: such a build would read about 221,000 floors and be
+    /// refused by a factor of 44.
+    ///
+    /// A breach is NOT a column-length dependence; C-R-01 is that row. It means
+    /// every bar got dearer at once, which a quotient cannot see.
+    const ALLOWED: u128 = 5_000;
 
     let bars = synthetic::sessions(8);
     let floor = floor_ps_per_bar(&bars);
@@ -338,6 +357,7 @@ fn main() {
         the_column_build_costs_the_same_per_bar_at_every_column_length(),
         the_report_costs_nothing_per_bar(),
         the_identity_does_not_depend_on_how_many_bars_the_digest_covered(),
+        the_column_build_stays_within_its_budget(),
     ];
     let breached = rows.iter().filter(|ok| !**ok).count();
     if breached > 0 {
