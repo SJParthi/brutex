@@ -17,28 +17,42 @@
 //! # Cost
 //!
 //! Lookup is one hash, one mask and a bounded probe of [`MemberIndex`] — a
-//! table this file builds at compile time. The worst probe is asserted at
-//! `<= 8` by `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`,
-//! which walks each table the way `contains` does and counts the steps, and
-//! measured, on the six tables this file now builds, at:
+//! table this file builds at compile time. **Two bounds, not one.** A HIT
+//! stops at the slot holding the symbol; a MISS cannot, and runs on to the
+//! first EMPTY slot. The miss is therefore never the shorter walk, and it is
+//! measured separately rather than assumed to fit under the hit's number:
 //!
-//! | table | members | slots | worst probe |
-//! |---|---|---|---|
-//! | `NTM_INDEX` | 750 | 2048 | 6 |
-//! | `FNO_INDEX` | 213 | 1024 | 7 |
-//! | `NIFTY_500_INDEX` | 500 | 2048 | 5 |
-//! | `NIFTY_200_INDEX` | 200 | 1024 | 6 |
-//! | `NIFTY_100_INDEX` | 100 | 512 | 5 |
-//! | `NIFTY_50_INDEX` | 50 | 256 | 3 |
+//! | table | members | slots | worst hit | worst miss |
+//! |---|---|---|---|---|
+//! | `NTM_INDEX` | 750 | 2048 | 6 | 11 |
+//! | `FNO_INDEX` | 213 | 1024 | 7 | 10 |
+//! | `NIFTY_500_INDEX` | 500 | 2048 | 5 | 8 |
+//! | `NIFTY_200_INDEX` | 200 | 1024 | 6 | 9 |
+//! | `NIFTY_100_INDEX` | 100 | 512 | 5 | 7 |
+//! | `NIFTY_50_INDEX` | 50 | 256 | 3 | 9 |
 //!
-//! [`of_equity`] probes all six, so a membership question costs at most 32
-//! probe steps rather than 13. That is three times what it was and it is still
-//! a CONSTANT — none of those numbers moves when a list grows within its
-//! table, which is the property `CLAUDE.md` §3 rule 4 asks for. The four
-//! appended tables came in at D-0089; sizing them the way [`MemberIndex`]
-//! merely *permits* rather than the way its bound was *measured* put the NIFTY
-//! 500 at 13 steps, and [`NIFTY_500_INDEX`] records why they are a quarter
-//! full instead of half.
+//! The hit column is asserted at `<= 8` by
+//! `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1` and
+//! the miss column at `<= 12` by
+//! `core::universe::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`,
+//! each walking the table the way `contains` does and counting the steps. The
+//! miss column is not a sample of unlucky strings: it is the longest run of
+//! occupied slots in each table plus one, taken over every slot, which is the
+//! worst case over EVERY string that can miss whatever it hashes to.
+//!
+//! **This section carried the hit column alone and called it "the worst
+//! probe".** [`of_equity`] is the caller, and the question it is asked most is
+//! about a name outside every tier — an SME listing, a BSE-only share — which
+//! is a MISS in all six tables and so the case the stated bound did not cover.
+//! Six misses is at most **54** steps measured (72 by the asserted per-table
+//! bound), not the 32 the hit column sums to; back when there were two tables
+//! it was 21 rather than the 13 this paragraph used to quote. None of those
+//! numbers moves when a list grows within its table, so it is still the
+//! CONSTANT `CLAUDE.md` §3 rule 4 asks for — 54 is just the honest constant
+//! and 32 was the flattering one. The four appended tables came in at D-0089;
+//! sizing them the way [`MemberIndex`] merely *permits* rather than the way its
+//! bound was *measured* put the NIFTY 500 at 13 hit steps, and
+//! [`NIFTY_500_INDEX`] records why they are a quarter full instead of half.
 //!
 //! **This paragraph said "a binary search over a sorted array — O(log n) on 750
 //! entries, so at most 10 comparisons ... a perfect hash would make it O(1) and
@@ -4103,10 +4117,17 @@ pub fn of_equity(symbol: &str) -> Universe {
 ///
 /// # Cost
 ///
-/// One [`MemberIndex::position`] probe — hash, mask, at most 6 steps, the
-/// bound `the_probe_length_is_bounded_which_is_what_makes_it_o1` pins — one
-/// index, and one 12-byte parse. Constant in the size of the list, which is
-/// what `CLAUDE.md` §3 rule 4 requires.
+/// One [`MemberIndex::position`] probe — hash, mask, at most 6 steps when the
+/// symbol IS a Total Market constituent and at most 11 when it is not — one
+/// index, and one 12-byte parse. Two numbers because a hit and a miss are
+/// different walks: the hit stops at the matching slot, the miss runs on to
+/// the first empty one. `the_probe_length_is_bounded_which_is_what_makes_it_o1`
+/// pins the first and
+/// `a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too` pins the
+/// second; the miss is what the `NIFTY` and `ZZZZNOTREAL` lines of the example
+/// below exercise.
+/// Both are constant in the size of the list, which is what `CLAUDE.md` §3
+/// rule 4 requires.
 ///
 /// # Why the parse is not cached
 ///
@@ -4167,12 +4188,28 @@ pub fn nse_isin(symbol: &str) -> Option<Isin> {
 /// # What this is
 ///
 /// A power-of-two table of `Option<&str>` filled by linear probing at compile
-/// time. Lookup hashes once, masks, and probes. The table is sized so it is at
-/// most half full, which bounds the probe length: with 750 entries in 2048
-/// slots the expected probe is under 1.5, and the worst observed is asserted by
-/// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1` —
-/// which walks the table the way `contains` does and pins a NUMBER — so the
-/// bound is measured rather than assumed.
+/// time. Lookup hashes once, masks, and probes.
+///
+/// "Power-of-two" is a REQUIREMENT and not a description of the tables that
+/// happen to exist. The probe advances with `& (N - 1)`, which is the modulo
+/// `N` this walk needs only when `N - 1` is a solid run of low bits; at any
+/// other size the step function cycles inside part of the table and cannot
+/// reach the rest. [`Self::build`] asserts it. It did not until now — this
+/// line asserted it in prose, the termination argument below rested on it, and
+/// nothing checked it.
+///
+/// The table is sized so it is at most half full, which is a TERMINATION
+/// property and not a cost one. Half full means an empty slot EXISTS; the
+/// power-of-two size is what lets a probe reach one; together they end the
+/// loop. Neither says how many steps it takes, so the steps are measured, and
+/// measured twice because a hit and a miss are different walks:
+/// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`
+/// pins the hit at `<= 8` and
+/// `core::universe::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`
+/// pins the miss at `<= 12`. Both walk the table the way [`Self::contains`]
+/// does and both pin a NUMBER, so the bounds are measured rather than assumed.
+/// With 750 entries in 2048 slots the expected probe is under 1.5; the worst
+/// is 6 on a hit and 11 on a miss.
 ///
 /// Costs one slot per entry whether or not it holds anything, and [`Self::ords`]
 /// adds a `usize` beside each — 8 bytes a slot on a 64-bit target, 16 KiB on
@@ -4209,8 +4246,12 @@ impl<const N: usize> MemberIndex<N> {
     ///
     /// # Panics
     ///
-    /// At COMPILE time if the table cannot hold the list — a `const` panic is
-    /// a build error, not a runtime one, so an over-full table can never ship.
+    /// At COMPILE time if `N` is not a power of two, or if the table cannot
+    /// hold the list — a `const` panic is a build error, not a runtime one, so
+    /// neither a mis-sized nor an over-full table can ever ship. The two guard
+    /// DIFFERENT properties and only the second was here; see the comment on
+    /// the first assertion for the twelve-slot table that satisfies one and
+    /// breaks the other.
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
@@ -4222,6 +4263,35 @@ impl<const N: usize> MemberIndex<N> {
                   runtime panic."
     )]
     pub const fn build(members: &[&'static str]) -> Self {
+        // THE MASK IS A MODULO ONLY WHEN N IS A POWER OF TWO, AND THE PROBE
+        // REACHES EVERY SLOT ONLY WHEN THE MASK IS A MODULO.
+        //
+        // `mask` and both probe loops step with `& (N - 1)`. That walks the
+        // whole table exactly once before repeating only if `N - 1` is a solid
+        // run of low bits. At N = 12 it is `0b1011`: from slot 8 the walk is 9,
+        // 10, 11, then `12 & 11 == 8` -- a four-slot cycle that never reaches
+        // the eight slots below it. This loop would spin forever on a full
+        // cluster and `position` would answer `None` for a member the table
+        // holds.
+        //
+        // The half-full assertion below does NOT cover this, and the doc on
+        // this type used to read as though it did. Half full guarantees an
+        // empty slot EXISTS; it says nothing about the probe being able to
+        // reach one. `MemberIndex::<12>::build(&[])` satisfies the second
+        // assertion (0 * 2 <= 12) and breaks the first.
+        //
+        // Every table in this workspace already is a power of two -- the six
+        // below and the three in `crate::vendor` -- so this pins a property
+        // that holds rather than changing one, and it is here so the next
+        // table cannot be the first to break it silently. A `static` is a
+        // build failure; `a_table_size_that_is_not_a_power_of_two_is_refused`
+        // proves the runtime call is refused too, and
+        // `the_probe_reaches_every_slot_only_because_n_is_a_power_of_two`
+        // proves the arithmetic this rests on.
+        assert!(
+            N.is_power_of_two(),
+            "the table size must be a power of two so `& (N - 1)` is a modulo"
+        );
         assert!(
             members.len() * 2 <= N,
             "the table must stay at most half full so probing stays bounded"
@@ -4231,8 +4301,9 @@ impl<const N: usize> MemberIndex<N> {
         let mut i = 0;
         while i < members.len() {
             let mut at = mask(fnv1a(members[i]), N);
-            // Linear probing. Terminates because the table is at most half
-            // full, which the assert above guarantees.
+            // Linear probing. Terminates because an empty slot exists (the
+            // half-full assertion) and this step function can reach it (the
+            // power-of-two assertion). Both are needed; neither alone.
             while slots[at].is_some() {
                 at = (at + 1) & (N - 1);
             }
@@ -4267,11 +4338,25 @@ impl<const N: usize> MemberIndex<N> {
     /// constant time: `crate::universe::nse_isin` is one call to this plus one
     /// index.
     ///
-    /// The bound is proved by
-    /// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`,
-    /// which asserts the worst probe is `<= 8` for all five tiers; it measures 6
-    /// on 750 members and 7 on 213. `docs/06-limits.md` carries the same figures
-    /// and D-0065 is where the correction from `binary_search` is signed.
+    /// # Two bounds, because a hit and a miss are different walks
+    ///
+    /// `core::universe::the_probe_length_is_bounded_which_is_what_makes_it_o1`
+    /// asserts `<= 8` and measures 6 on 750 members and 7 on 213 — **and it
+    /// probes only for symbols the table HOLDS.** A miss cannot stop at a
+    /// match; it runs on to the first empty slot, which is never the shorter
+    /// walk. That is not the rare case: `crate::universe::of_equity` probes six
+    /// tables, and a name outside every tier misses in all six.
+    ///
+    /// So the miss is measured too, by
+    /// `core::universe::a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`,
+    /// which asserts `<= 12` and measures 11 on 750 members and 10 on 213. It
+    /// takes the worst over every SLOT rather than over a list of sample
+    /// strings, so it is the true worst case over every possible miss and not a
+    /// lucky draw.
+    ///
+    /// `docs/06-limits.md` §11 still carries the hit figures alone and is the
+    /// stale copy to fix; `CLAUDE.md` §10 says which of the two wins. D-0065 is
+    /// where the correction from `binary_search` is signed.
     #[must_use]
     #[expect(
         clippy::indexing_slicing,
@@ -4340,6 +4425,11 @@ impl<const N: usize> MemberIndex<N> {
 /// truncate on a 32-bit pointer target before the mask could narrow it. After
 /// the mask the value is at most `n - 1`, which fits any pointer width this
 /// engine builds for.
+///
+/// `n` must be a power of two — `hash & (n - 1)` is the modulo `n` a probe
+/// needs only then, and it is `0` for `n = 0` after the subtraction wraps.
+/// [`MemberIndex::build`] asserts that for every table, and this function is
+/// `pub(crate)` and reached from nowhere that does not go through one.
 ///
 /// `pub(crate)` for the same reason [`MemberIndex::slots`] is: a probe-length
 /// test in another module of this crate must start where `contains` starts,
@@ -4431,11 +4521,31 @@ pub static NIFTY_50_INDEX: MemberIndex<256> = MemberIndex::build(&NIFTY_50);
 ///
 /// The entry point every caller outside this module uses, so that "which list
 /// is this in" is answered in one place from the whole key rather than from a
-/// bare string a caller had to remember to derive correctly. An index is
-/// [`Universe::INDEX`] and is never looked up in the equity lists — a spot
-/// index is not a constituent of itself, and `NIFTY` appears in
-/// [`FNO_UNDERLYINGS`] as the *underlying of its options*, which is a different
-/// fact from being a share.
+/// bare string a caller had to remember to derive correctly.
+///
+/// # An index IS looked up in the equity lists
+///
+/// **This paragraph said "an index is [`Universe::INDEX`] and is never looked
+/// up in the equity lists".** The `Kind::Index` arm one line below unions
+/// [`of_equity`] into the answer and always has, so the sentence denied the
+/// call it sat on top of — and then went on to explain what that very call
+/// finds. The true fact it was reaching for is the narrower one in the next
+/// paragraph.
+///
+/// What happens: an index is `INDEX ∪ of_equity(symbol)`. `NIFTY` is in
+/// [`FNO_UNDERLYINGS`] as the *underlying of its options*, so the NIFTY spot
+/// index carries `INDEX` and `FNO` together. `api::server`'s F&O filter
+/// depends on that overlap: treating the two as disjoint drops NIFTY from the
+/// one view that most needs it.
+///
+/// What the lookup does NOT do is make an index a share. No spot index appears
+/// in [`NIFTY_TOTAL_MARKET`] or in any of the four tier arrays, so
+/// `TOTAL_MARKET` and the tier bits stay clear for an index without anything
+/// here having to special-case them —
+/// `no_spot_index_is_a_constituent_of_an_equity_list` asserts that data fact and
+/// `an_index_is_its_own_universe_and_a_live_derivative_is_in_none` asserts the
+/// answer it produces. Being the underlying of a contract and being a
+/// constituent of an index are different facts, read from different files.
 #[must_use]
 pub fn of_instrument(key: &InstrumentKey) -> Universe {
     match key.kind {
@@ -4557,32 +4667,78 @@ mod tests {
         }
     }
 
+    /// The longest walk `position` performs for a symbol the table HOLDS.
+    ///
+    /// Module-level rather than nested inside one test because the miss bound
+    /// is measured beside it and the two must agree about what a step is. A
+    /// second copy of this loop would be free to count differently and the
+    /// comparison between the two numbers would then mean nothing -- the same
+    /// argument `MemberIndex::contains` makes for delegating to `position`.
+    ///
+    /// The start index comes from `mask` and `fnv1a` themselves, never from a
+    /// re-implementation: a copy is free to disagree with the thing under test
+    /// and would then measure a probe nobody performs.
+    fn worst_probe<const N: usize>(idx: &MemberIndex<N>, members: &[&str]) -> usize {
+        let mut worst = 0;
+        for m in members {
+            let start = mask(fnv1a(m), N);
+            let mut at = start;
+            let mut steps = 1;
+            while let Some(held) = idx.slots[at] {
+                if held == *m {
+                    break;
+                }
+                at = (at + 1) & (N - 1);
+                steps += 1;
+            }
+            worst = worst.max(steps);
+        }
+        worst
+    }
+
+    /// The longest walk `position` performs for a symbol the table does NOT
+    /// hold -- taken over every slot, so over every string that can miss.
+    ///
+    /// A miss cannot stop at a match, so it runs to the first EMPTY slot. Its
+    /// cost therefore depends only on where it starts, and the worst start is
+    /// the head of the longest run of occupied slots. Walking all `N` starts
+    /// computes exactly that, which is why this is a BOUND and not a sample:
+    /// no list of unlucky strings could beat it, and no lucky list could hide
+    /// it. Sampling is how the hit number came to be quoted for both.
+    fn worst_miss_probe<const N: usize>(idx: &MemberIndex<N>) -> usize {
+        let mut worst = 0;
+        for start in 0..N {
+            let mut at = start;
+            let mut steps = 1;
+            // Terminates for the same two reasons `position` does: the table
+            // is at most half full so an empty slot exists, and `N` is a power
+            // of two so this step function can reach it. `MemberIndex::build`
+            // asserts both.
+            while idx.slots[at].is_some() {
+                at = (at + 1) & (N - 1);
+                steps += 1;
+            }
+            worst = worst.max(steps);
+        }
+        worst
+    }
+
     #[test]
     fn the_probe_length_is_bounded_which_is_what_makes_it_o1() {
-        // THE CLAIM UNDER TEST. `binary_search` cost ~10 comparisons and grew
-        // with the list; this must not grow at all. Measured by walking the
-        // table the same way `contains` does and counting the steps.
+        // THE CLAIM UNDER TEST, AND ONLY HALF OF IT. `binary_search` cost ~10
+        // comparisons and grew with the list; this must not grow at all.
+        // Measured by walking the table the same way `contains` does and
+        // counting the steps.
         //
         // The bound is asserted as a NUMBER, not as "small": a probe length
         // that crept up with a future member would otherwise pass silently.
-        fn worst_probe<const N: usize>(idx: &MemberIndex<N>, members: &[&str]) -> usize {
-            let mut worst = 0;
-            for m in members {
-                let start = mask(fnv1a(m), N);
-                let mut at = start;
-                let mut steps = 1;
-                while let Some(held) = idx.slots[at] {
-                    if held == *m {
-                        break;
-                    }
-                    at = (at + 1) & (N - 1);
-                    steps += 1;
-                }
-                worst = worst.max(steps);
-            }
-            worst
-        }
-
+        //
+        // Every symbol here is one the table HOLDS, so every walk measured
+        // below is a HIT, and this test says nothing about a miss. It was read
+        // as though it did -- the `<= 8` it pins was quoted as the probe bound
+        // in four places, and `of_equity`'s commonest input misses in all six
+        // tables. The miss is bounded separately, and higher, by
+        // `a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too`.
         let ntm = worst_probe(&NTM_INDEX, &NIFTY_TOTAL_MARKET);
         let fno = worst_probe(&FNO_INDEX, &FNO_UNDERLYINGS);
         assert!(
@@ -4620,6 +4776,200 @@ mod tests {
             "worst probe: NTM {ntm}, FNO {fno}, 500 {n500}, 200 {n200}, \
              100 {n100}, 50 {n50}"
         );
+    }
+
+    #[test]
+    fn a_miss_probes_further_than_a_hit_and_its_bound_is_measured_too() {
+        // THE OTHER HALF OF THE BOUND, AND THE HALF THAT WAS NEVER MEASURED.
+        //
+        // `the_probe_length_is_bounded_which_is_what_makes_it_o1` walks the
+        // table only for symbols it HOLDS. A hit stops at the matching slot; a
+        // miss cannot, and runs on to the first EMPTY slot, so it is never the
+        // shorter walk. The `<= 8` that test pins was quoted -- in this file's
+        // header, on `MemberIndex`, on `position` and on `nse_isin` -- as
+        // though it covered both.
+        //
+        // It does not, and the gap is not academic. `of_equity` probes six
+        // tables and the question it is asked most is about a name outside
+        // every tier: `crate::vendor::Skip::SmeBoard` declines 1,117 real
+        // shares on exactly that ground, and every one of them is a miss six
+        // times over.
+        let ntm = worst_miss_probe(&NTM_INDEX);
+        let fno = worst_miss_probe(&FNO_INDEX);
+        let n500 = worst_miss_probe(&NIFTY_500_INDEX);
+        let n200 = worst_miss_probe(&NIFTY_200_INDEX);
+        let n100 = worst_miss_probe(&NIFTY_100_INDEX);
+        let n50 = worst_miss_probe(&NIFTY_50_INDEX);
+
+        // Pinned as a NUMBER for the same reason the hit bound is: a table
+        // whose clusters merged would cost more without answering anything
+        // differently, and nothing else in this crate would notice. 12 is one
+        // step above the worst measured, which is the same headroom the hit
+        // bound of 8 leaves over its worst of 7.
+        for (name, slots, worst) in [
+            ("NTM", 2048, ntm),
+            ("FNO", 1024, fno),
+            ("NIFTY 500", 2048, n500),
+            ("NIFTY 200", 1024, n200),
+            ("NIFTY 100", 512, n100),
+            ("NIFTY 50", 256, n50),
+        ] {
+            assert!(
+                worst <= 12,
+                "{name} in {slots} slots must MISS in at most 12 steps, got {worst}"
+            );
+        }
+
+        // A miss is never cheaper than a hit on the same table, which is why
+        // quoting one number for both was wrong in the unsafe direction. It is
+        // provable rather than lucky: a member sits inside the occupied run its
+        // own start slot begins, so the hit stops at or before the empty slot
+        // the miss walks to.
+        for (name, hit, miss) in [
+            ("NTM", worst_probe(&NTM_INDEX, &NIFTY_TOTAL_MARKET), ntm),
+            ("FNO", worst_probe(&FNO_INDEX, &FNO_UNDERLYINGS), fno),
+            ("NIFTY 500", worst_probe(&NIFTY_500_INDEX, &NIFTY_500), n500),
+            ("NIFTY 200", worst_probe(&NIFTY_200_INDEX, &NIFTY_200), n200),
+            ("NIFTY 100", worst_probe(&NIFTY_100_INDEX, &NIFTY_100), n100),
+            ("NIFTY 50", worst_probe(&NIFTY_50_INDEX, &NIFTY_50), n50),
+        ] {
+            assert!(
+                miss >= hit,
+                "{name}: a miss ({miss}) cannot cost less than a hit ({hit})"
+            );
+        }
+
+        // What `of_equity` actually costs when the answer is NONE: six misses.
+        // The header quotes this sum, so it is computed here rather than added
+        // up by hand in a comment that cannot be re-run.
+        let six = ntm + fno + n500 + n200 + n100 + n50;
+        assert!(
+            six <= 72,
+            "of_equity is six probes and each is bounded at 12, got {six}"
+        );
+        println!(
+            "worst miss: NTM {ntm}, FNO {fno}, 500 {n500}, 200 {n200}, \
+             100 {n100}, 50 {n50} -- of_equity total {six}"
+        );
+
+        // And the walk above is the walk `position` performs, not a model of
+        // it: a symbol the table does not hold is answered `None`, having
+        // ended at the empty slot this counted to.
+        assert_eq!(NTM_INDEX.position("ZZZZNOTREAL"), None);
+        assert!(NIFTY_50_INDEX.position("RELIANCE").is_some());
+    }
+
+    #[test]
+    fn the_probe_reaches_every_slot_only_because_n_is_a_power_of_two() {
+        // WHAT THE COMPILE-TIME ASSERTION IN `build` IS FOR, PROVED ON THE
+        // ARITHMETIC RATHER THAN ON A TABLE.
+        //
+        // `build` and `position` both step with `at = (at + 1) & (N - 1)`.
+        // That is a modulo -- and therefore a walk over every slot -- only when
+        // `N - 1` is a solid run of low bits. The half-full assertion
+        // guarantees an empty slot EXISTS; this is what guarantees the probe
+        // can REACH it, and the type's doc used to rest the second on the
+        // first.
+        //
+        // The real guard is the `const` assertion, because every table in this
+        // workspace is a `static` and a `const` panic is a build failure: a bad
+        // N cannot ship, and cannot be constructed here to walk either. So the
+        // property is proved on the step function itself, and the refusal is
+        // proved separately by
+        // `a_table_size_that_is_not_a_power_of_two_is_refused`.
+        fn slots_reached(n: usize, from: usize) -> usize {
+            let mut seen = vec![false; n];
+            let mut at = from;
+            for _ in 0..n {
+                seen[at] = true;
+                at = (at + 1) & (n - 1);
+            }
+            seen.iter().filter(|s| **s).count()
+        }
+
+        // A power of two: every start reaches all N slots, so a probe always
+        // finds the empty slot the half-full assertion guarantees exists.
+        for n in [2_usize, 4, 8, 16, 256, 512, 1024, 2048] {
+            for from in [0, 1, n / 2, n - 1] {
+                assert_eq!(slots_reached(n, from), n, "N={n} starting at {from}");
+            }
+        }
+
+        // N = 12 is the counter-example the assertion exists for, and it is the
+        // one the finding named. `N - 1` is `0b1011`; from slot 8 the walk is
+        // 9, 10, 11, then `12 & 11 == 8`. Four slots, forever, while eight sit
+        // empty and unreachable below them -- `build` would spin and `position`
+        // would answer `None` for a member the table holds.
+        assert_eq!(
+            slots_reached(12, 8),
+            4,
+            "the mask cycles instead of walking"
+        );
+        assert!(slots_reached(12, 8) < 12);
+        // It is not only slot 8: no start on a 12-slot table sees everything.
+        for from in 0..12 {
+            assert!(slots_reached(12, from) < 12, "N=12 from {from}");
+        }
+
+        // Every table size this workspace builds satisfies the requirement --
+        // the six here and the three in `crate::vendor` -- which is why adding
+        // the assertion changed no behaviour and only closed the hole.
+        for n in [2048_usize, 1024, 512, 256, 16, 8] {
+            assert!(n.is_power_of_two(), "{n} is a shipped table size");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "power of two")]
+    fn a_table_size_that_is_not_a_power_of_two_is_refused() {
+        // The assertion fires at COMPILE time for a `static`, which is how
+        // every real table is declared and the form that actually guards the
+        // invariant. That form cannot be tested from here: a `const` panic is
+        // a build failure, and a build failure is not a red test.
+        //
+        // So the same call is made at RUNTIME, where the same assertion panics
+        // and can be observed. Twelve slots for an empty list is the case that
+        // shows the two assertions are not one: `0 * 2 <= 12` satisfies the
+        // half-full rule, so before this change `build` accepted a table whose
+        // probe could not walk.
+        let _refused: MemberIndex<12> = MemberIndex::build(&[]);
+    }
+
+    #[test]
+    fn no_spot_index_is_a_constituent_of_an_equity_list() {
+        // THE DATA FACT `of_instrument` RESTS ON, now that its doc says what it
+        // actually does. An index is `INDEX u of_equity(symbol)` -- the equity
+        // lists ARE consulted for it -- and the reason that does not turn the
+        // NIFTY spot index into a share is not a special case in the code. It
+        // is that no index appears in any of the five constituent arrays.
+        //
+        // Checked rather than asserted in a comment, because the arrays are
+        // transcriptions and the next refresh could add a row. If one ever
+        // does, `of_instrument` starts stamping TOTAL_MARKET on a spot index
+        // and nothing else in this crate would catch it.
+        for idx in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50"] {
+            assert!(
+                !NIFTY_TOTAL_MARKET.contains(&idx),
+                "{idx} is an index, not a Total Market constituent"
+            );
+            assert!(!NIFTY_500.contains(&idx), "{idx} is not a NIFTY 500 name");
+            assert!(!NIFTY_200.contains(&idx), "{idx} is not a NIFTY 200 name");
+            assert!(!NIFTY_100.contains(&idx), "{idx} is not a NIFTY 100 name");
+            assert!(!NIFTY_50.contains(&idx), "{idx} is not a NIFTY 50 name");
+            // And it IS in the F&O list, which is the other half of the same
+            // sentence: the underlying of a contract, not a share.
+            assert!(
+                FNO_UNDERLYINGS.contains(&idx),
+                "{idx} is the underlying of its own options"
+            );
+            // So the bit set is exactly FNO -- no tier bit, and no INDEX bit,
+            // because `of_equity` does not know it was handed an index.
+            assert_eq!(
+                of_equity(idx),
+                Universe::FNO,
+                "{idx} is an F&O underlying and nothing else"
+            );
+        }
     }
 
     #[test]

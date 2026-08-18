@@ -4,9 +4,55 @@ on:
   push:
     branches: [main]
   pull_request:
+  # TWO EVENTS THAT ARE NOT A COMMIT, AND WHY A GATE SET NEEDS THEM.
+  #
+  # Every gate in this file was only ever executed by a push or a pull request,
+  # so `main` was validated exactly once -- at the instant it was written -- and
+  # never again. That is not the same as `main` being green, because half of
+  # what these gates read is not in the repository:
+  #
+  #   * `dtolnay/rust-toolchain@stable` resolves to whatever stable is TODAY, and
+  #     gate 6b runs clippy with `-D warnings`. A new lint turns a green tree red
+  #     with no commit.
+  #   * gate 3 runs `cargo deny check`, whose verdict is the RustSec advisory
+  #     database at fetch time. A disclosure published tomorrow is a real failure
+  #     of a tree nobody touched, and it is the one this repository most wants to
+  #     hear about early.
+  #   * `ubuntu-24.04` is an image that is rebuilt; gate 8's ratio and gate 18's
+  #     baseline are timings taken on it.
+  #
+  # `workflow_dispatch` is the manual half: an operator can ask the question
+  # "is main green right now" without inventing a commit to ask it with, which is
+  # what an empty commit on a shared tree amounts to.
+  #
+  # `schedule` is the unattended half. Weekly rather than daily, DELIBERATELY:
+  # gate 18 installs cargo-mutants from source and gate 8 runs the bench suite,
+  # so a run is expensive, and a cadence nobody reads is a cadence that gets
+  # switched off. Monday morning is before the week's work rather than after it.
+  #
+  # SCHEDULED RUNS ONLY EVER FIRE ON THE DEFAULT BRANCH. GitHub takes the cron
+  # from the workflow file on `main`, so this line does nothing at all until it
+  # is merged there -- said out loud because a cron that has never fired reads
+  # identically to one that is broken.
+  workflow_dispatch:
+  schedule:
+    # 03:17 UTC Monday. Not on the hour: GitHub queues cron runs and the ones on
+    # the hour queue longest, which for a job set this long is real delay.
+    - cron: "17 3 * * 1"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # THE EVENT NAME IS PART OF THE GROUP, AND IT HAS TO BE NOW THAT THERE ARE FOUR.
+  #
+  # `cancel-in-progress` cancels the older run whenever a newer one joins the
+  # group. Before the two events above, the group was one push-or-PR series per
+  # ref and cancelling the older member of it is exactly right. With a cron and a
+  # manual button added, `github.ref` for all three of push-to-main, the weekly
+  # run and a dispatch is `refs/heads/main` -- so a Monday 03:17 run landing on
+  # top of a push to main would CANCEL the push's validation, and the commit
+  # would carry a cancelled check for a reason that has nothing to do with it.
+  # Splitting by event keeps the "newest wins" behaviour inside each series and
+  # never across them.
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -39,8 +85,41 @@ jobs:
       - name: Gate 1 — extension allowlist
         run: |
           set -euo pipefail
-          # The ONLY extensions this repository may contain OUTSIDE web/.
-          allowed='rs|toml|md|lock|html|css|yml|json'
+          # THE ONLY EXTENSIONS THIS REPOSITORY MAY CONTAIN OUTSIDE web/, and this
+          # line is now CLAUDE.md section 2 quoted rather than section 2 widened:
+          # "Allowed tracked extensions: `.rs` `.toml` `.md` `.lock` `.html`
+          # `.css` `.yml` (the last only under `.github/`)."
+          #
+          # IT USED TO READ `rs|toml|md|lock|html|css|yml|json` FOR EVERY PATH,
+          # which is wider than the law in two separate ways, and the tree was
+          # only clean because a SECOND gate cleaned up after this one: gate 1b
+          # confines `.json` and `.yml` to `.github/`, `.claude/` and `web/`. Two
+          # gates disagreeing about the same rule is not defence in depth -- gate
+          # 1's list is the sentence a reader takes as the statement of section 2,
+          # and a wider sentence is a wrong one. So the split is by PATH here too,
+          # exactly as the `web/` exception already is.
+          allowed='rs|toml|md|lock|html|css'
+          # `.yml` ONLY UNDER `.github/`. The parenthesis in section 2 is part of
+          # the rule, and nothing enforced it here. Both tracked `.yml` files --
+          # this workflow and `auto-merge.yml` -- already live there, so this
+          # narrowing costs nothing today and is the point at which a `.yml`
+          # dropped at the root becomes a red build rather than a gate-1b one.
+          github_allowed="${allowed}|yml"
+          # `.json` IS NOT IN SECTION 2'S LIST AT ALL, and exactly one tracked
+          # file carries it: `.claude/launch.json`, the run configuration
+          # IntelliJ and the preview tools read. Gate 1b already sanctions
+          # `.claude/` by path and states the reason -- operator tooling, not
+          # source, not shipped -- so this line makes gate 1 agree with gate 1b
+          # instead of being wider than gate 1b AND wider than the law.
+          #
+          # THE DIVERGENCE THAT REMAINS IS NAMED RATHER THAN LEGISLATED AWAY.
+          # Section 2 does not permit `.json` anywhere outside `web/`, and a file
+          # exists that needs it. Resolving that is a CLAUDE.md edit and a
+          # `docs/05-decisions.md` entry, which a CI gate must not make on its
+          # own -- a gate that widens the law to match the tree is the shape this
+          # whole file exists to refuse. What it can honestly do is refuse json
+          # everywhere the tree does not already have it, and say so here.
+          claude_allowed="${allowed}|json"
           # Under web/ ONLY, the browser languages are allowed -- D-0052. This
           # is narrowed by PATH, not relaxed by extension: putting `ts` on the
           # line above would permit a build script anywhere in the tree, which
@@ -61,8 +140,10 @@ jobs:
             # hard rule is untouched, so a .ts under crates/ fails here exactly
             # as it always did.
             case "$f" in
-              web/*) list="$web_allowed" ; where='web/' ;;
-              *)     list="$allowed"     ; where='outside web/' ;;
+              web/*)     list="$web_allowed"    ; where='web/' ;;
+              .github/*) list="$github_allowed" ; where='.github/' ;;
+              .claude/*) list="$claude_allowed" ; where='.claude/' ;;
+              *)         list="$allowed"        ; where='outside web/' ;;
             esac
             if ! printf '%s\n' "$ext" | grep -Eq "^(${list})$"; then
               printf 'FORBIDDEN FILE  %s  (extension %s, %s)\n' \
@@ -74,8 +155,10 @@ jobs:
             echo
             echo "This repository is Rust only outside web/. See CLAUDE.md section 2"
             echo "and docs/05-decisions.md D-0052."
-            echo "Outside web/: ${allowed//|/ }"
-            echo "Under  web/: ${web_allowed//|/ }"
+            echo "Outside web/:  ${allowed//|/ }"
+            echo "Under .github/: ${github_allowed//|/ }"
+            echo "Under .claude/: ${claude_allowed//|/ }"
+            echo "Under  web/:    ${web_allowed//|/ }"
             exit 1
           fi
           echo "OK — every tracked file is in the allowlist for where it lives."
@@ -2152,8 +2235,29 @@ jobs:
           # A rule that arrives after the hot loop is a rule that arrives after
           # somebody has already put an emit in it.
           #
+          # `runner` IS ON THIS LIST, AND ITS ABSENCE WAS THE HOLE.
+          #
+          # The three crates below hold the vocabulary, the mask and the ladder.
+          # None of them holds a LOOP OVER BARS: `crates/runner` does. It is the
+          # crate that walks candles into `indicators`, drives `engine` level by
+          # level, prices every trial through `crate::trade` and resamples the
+          # whole thing per bootstrap draw -- so the per-bar and per-trial
+          # innermost loops this rule is written about are literally in the one
+          # crate the rule did not reach. A `telemetry::emit` added to
+          # `runner::trade` or `runner::bootstrap` would have been invisible here
+          # while costing exactly what the paragraph above says it costs.
+          #
+          # It is added to THIS gate and not to gate 22's dependency clause, and
+          # that separation is deliberate; gate 22 says why in its own comment.
+          # Zero logging and a pinned dependency set are two different rules, and
+          # runner satisfies the first while legitimately failing the second.
+          #
+          # MEASURED BEFORE IT WAS ADDED: 17 tracked sources under
+          # `crates/runner/src`, zero matches for any of the four patterns below,
+          # so this widening is a hole closed and not a red build deferred.
+          #
           # NO UNTRUSTED INPUT: `git ls-files` and the static list below.
-          swept='vocab engine indicators'
+          swept='vocab engine indicators runner'
           bad=0
           scanned=0
           for c in $swept; do
@@ -2221,6 +2325,8 @@ jobs:
             exit 1
           fi
           echo "OK — ${scanned} swept source file(s) scanned, none logs per combination."
+          echo "     (vocab, engine, indicators AND runner — the per-bar and"
+          echo "      per-trial loops are in the last of those.)"
 
   # ==========================================================================
   # GATES 3-6 — the toolchain gates.
@@ -2254,6 +2360,7 @@ jobs:
           # that a `println!` added to a TEST also has to be declared, which is a
           # line of bookkeeping rather than a failure mode.
           : > /tmp/prints.txt
+          : > /tmp/handles.txt
           for f in $(git ls-files 'crates/*/src/*.rs' 'crates/*/src/**/*.rs' | sort -u); do
             grep -vE '^[[:space:]]*(//|\*)' "$f" > /tmp/code.txt || true
             # `(^|[^A-Za-z_])` and not `\b`: BSD and GNU disagree about `\b`, and
@@ -2265,6 +2372,43 @@ jobs:
                 printf '%s:%s!:%s\n' "$(echo "$f" | sed 's|crates/||')" "$m" "$c" >> /tmp/prints.txt
               fi
             done
+            # A HANDLE IS A PRINT TOO, AND FIVE MACRO NAMES ARE NOT THE SURFACE.
+            #
+            # `writeln!(std::io::stderr(), "...")` reaches the same terminal as
+            # `eprintln!`, is none of the five names above, and therefore appeared
+            # in neither clause: not in the declaration that is supposed to be the
+            # COMPLETE inventory of what this workspace prints, and not in clause
+            # B below, which keys off the word `eprint`. Both clauses could be
+            # walked past by choosing a different spelling, which makes the
+            # declaration a list of the ways somebody happened to write it rather
+            # than a statement about the code.
+            #
+            # THE PATTERN IS THE HANDLE, NOT THE MACRO, and that choice is the
+            # whole design. `write!` and `writeln!` appear over five hundred times
+            # here and nearly every one writes into a `Formatter` or a `String` in
+            # a `Display` impl -- counting those would produce a declaration
+            # nobody could read, which is a declaration nobody does read. What is
+            # rare, and what actually names the PROCESS's own stream, is
+            # `stderr()` / `stdout()`, and there is one spelling of each.
+            #
+            # WHAT IT DELIBERATELY DOES NOT MATCH:
+            #   * `.stdout(std::process::Stdio::null())` in api/src/server.rs --
+            #     the parentheses are not empty, so this is a `Command` builder
+            #     and not a stream. Reproduced against that line.
+            #   * the words "stdout"/"stderr" inside an HTML string in
+            #     api/src/logs.rs and inside a message in telemetry/src/sink.rs.
+            #     Neither carries `()`.
+            #   * `let e = io::stderr(); writeln!(e, ...)` is caught at the BIND,
+            #     not at the write, which is the same site and enough.
+            #   * a handle obtained some other way -- through a trait object, or
+            #     `libc::write(2, ...)`. A text scan cannot see either, and gate
+            #     22 clause B is what refuses `libc::` in the swept crates.
+            #
+            # MEASURED: zero across the workspace today, so this starts empty.
+            c=$(grep -cE '(^|[^A-Za-z0-9_])std(err|out)\(\)' /tmp/code.txt || true)
+            if [ "$c" -gt 0 ]; then
+              printf '%s:handle:%s\n' "$(echo "$f" | sed 's|crates/||')" "$c" >> /tmp/handles.txt
+            fi
           done
 
           # CLAUSE A — the print surface is exactly this, and every line says
@@ -2352,6 +2496,36 @@ jobs:
             fail=1
           fi
 
+          # CLAUSE A2 — the same question, asked of the handle spellings.
+          #
+          # Its declared list is EMPTY and that is the measurement, not an
+          # oversight: nothing in this workspace names `stderr()` or `stdout()`
+          # today. An empty declaration against an empty measurement is the
+          # strongest state this clause can be in, and the day somebody adds the
+          # first one they will be told to write it down here with the same
+          # sentence clause A asks for — which kind is it, and where is the event
+          # that goes with it.
+          declared_handles=''
+          # Both sides normalised the same way, because an empty `printf` emits a
+          # blank line and an empty file emits nothing, and comparing those two
+          # would fail on the healthy case forever.
+          want_h=$( { printf '%s\n' $declared_handles | grep . || true; } | sort)
+          got_h=$( { grep . /tmp/handles.txt || true; } | sort)
+          echo "  declared stream handles: ${want_h:-<none>}"
+          echo "  measured stream handles: ${got_h:-<none>}"
+          if [ "$want_h" != "$got_h" ]; then
+            echo
+            echo "  REFUSED  the set of writes to a process stream is not the"
+            echo "           declared one."
+            diff <(printf '%s\n' "$want_h") <(printf '%s\n' "$got_h") || true
+            echo
+            echo '           writeln!(io::stderr(), ...) is a diagnostic wearing'
+            echo "           a different macro. If it is on a production path,"
+            echo "           emit the event beside it and declare it above; if it"
+            echo "           is gone, delete its line."
+            fail=1
+          fi
+
           # CLAUSE B — a crate that writes to stderr must be ABLE to log.
           #
           # Structural rather than a proximity heuristic. Proximity was tried and
@@ -2359,15 +2533,58 @@ jobs:
           # error's event and was scored as covered by it. This instead refuses
           # the state that makes a silent diagnostic INEVITABLE rather than
           # merely possible — a crate whose only channel is stderr.
-          for f in $(grep 'eprint' /tmp/prints.txt | cut -d: -f1 | sort -u); do
+          #
+          # THE MANIFEST TEST WAS `grep -E '^telemetry' Cargo.toml`, AND THAT IS
+          # A DIFFERENT QUESTION FROM THE ONE THIS CLAUSE ASKS. It matches at the
+          # start of ANY line in the whole file, so a `telemetry = { … }` sitting
+          # under `[dev-dependencies]` counted as proof that SHIPPING code can
+          # emit. A dev-dependency links into tests, benches and examples and into
+          # no release build at all, so a crate in that state has exactly the
+          # property this clause exists to refuse — stderr is its only channel
+          # where it matters — and the gate would have called it `ok`. It also
+          # matched a `telemetry` line inside a comment, of which these manifests
+          # have several, for the reason gate 22 clause A already records: text in
+          # a comment is text.
+          #
+          # So the answer now comes from the `[dependencies]` table and nowhere
+          # else. Comments are stripped first, and the `[dependencies.telemetry]`
+          # table-header spelling is accepted too, because it is a real
+          # dependency declaration and refusing to understand it would be a false
+          # negative rather than a strict reading. A dotted `telemetry.path = …`
+          # inside the flat table is matched by the `[=.]` alternation.
+          #
+          # WHAT IT STILL CANNOT SEE: `[target.'cfg(...)'.dependencies]`. Gate 22
+          # refuses that spelling outright for the three crates it pins; here it
+          # would read as "no telemetry dependency" and REFUSE, which is the safe
+          # direction — a loud false positive that a human resolves, never a
+          # silent pass.
+          #
+          # Verified against the tree: `api`, `pull`, `store` and `lake` all
+          # declare telemetry in the flat table and still answer yes; `core` and
+          # `costs` answer no, as they should.
+          has_telemetry() {
+            m="crates/$1/Cargo.toml"
+            [ -f "$m" ] || return 1
+            code=$(sed 's/#.*//' "$m")
+            if printf '%s\n' "$code" | grep -qE '^\[dependencies\.telemetry\]'; then return 0; fi
+            printf '%s\n' "$code" | sed -n '/^\[dependencies\]/,/^\[/p' \
+              | grep -qE '^telemetry[[:space:]]*[=.]'
+          }
+          # Both files, because clause A2's handles are the same hazard as an
+          # `eprintln!` and were not reaching this loop at all.
+          for f in $( { cat /tmp/prints.txt /tmp/handles.txt \
+                        | grep -E 'eprint|:handle:' || true; } | cut -d: -f1 | sort -u); do
             crate=$(echo "$f" | cut -d/ -f1)
             [ "$crate" = "telemetry" ] && continue   # it IS the logger
-            if grep -qE '^telemetry' "crates/$crate/Cargo.toml"; then
+            if has_telemetry "$crate"; then
               echo "  ok       $crate writes to stderr and can also emit"
             else
               echo "  REFUSED  crate '$crate' writes to stderr but declares no"
-              echo "           telemetry dependency, so stderr is the ONLY channel"
-              echo "           it has. Add the dependency and emit the event."
+              echo "           telemetry dependency in its [dependencies] table,"
+              echo "           so stderr is the ONLY channel it has in a shipping"
+              echo "           build. Add the dependency and emit the event."
+              echo "           A dev-dependency does not answer this: it links"
+              echo "           into tests and into no release build."
               fail=1
             fi
           done
@@ -2751,7 +2968,47 @@ jobs:
           # and gate 22 printed OK. Everything below is the repair, and each
           # clause names the bypass it now refuses.
           fail=0
-          SWEEP='vocab indicators engine'
+          # TWO LISTS, BECAUSE THIS GATE ASKS TWO DIFFERENT QUESTIONS.
+          #
+          # It shipped with ONE list doing both jobs, and that is why
+          # `crates/runner` -- the crate that actually drives a sweep -- was in
+          # neither. Widening the single list to include it would have failed
+          # clause A instantly and correctly, so the crate stayed out of the
+          # filesystem clauses too, and the gate's promise ("the sweep cannot go
+          # and find data on its own") did not cover the sweep's driver.
+          #
+          #   PINNED  the crates whose DEPENDENCY SET is fixed. Clause A pins each
+          #           of these to an exact `want`, ships no allowlist, and that is
+          #           what makes `indicators` and `engine` unable to name each
+          #           other. CLAUDE.md section 5 states this rule and states its
+          #           consequence: "The only crate where the two halves may
+          #           legally meet is one that is not on gate 22's list, and that
+          #           is `runner`." `runner` therefore MUST NOT be added here --
+          #           it depends on `brutex_core`, `vocab`, `indicators`, `engine`
+          #           and `costs` by design, and pinning it would contradict the
+          #           law this gate exists to enforce rather than extend it.
+          #   SWEEP   the crates that MAY NOT REACH A FILESYSTEM. That is a
+          #           capability question, not a graph question, and it is true of
+          #           `runner` for exactly the reason it is true of the other
+          #           three: it takes a slice of candles the caller already holds
+          #           and its own manifest says so -- "NO ARROW TO `store`,
+          #           DELIBERATELY". Clauses B through E now hold it to that.
+          #
+          # MEASURED BEFORE THE WIDENING, against `crates/runner`: clause B zero
+          # hits over `src/` and `benches/`; clause C zero imports; clause D three
+          # `include_str!` calls, all plain literals, all `.rs` or `.toml`
+          # (`lib.rs`, `synthetic.rs`, `../Cargo.toml`); clause E zero. So this is
+          # a hole closed, not a red build handed to somebody else.
+          #
+          # WHAT IS STILL NOT PINNED, said rather than implied: nothing stops
+          # `crates/runner` declaring `store` in its manifest, because clause A
+          # does not read it. Clause C would refuse the `use`, and clause B the
+          # `std::fs` call that followed -- so the capability is still refused at
+          # the two places it has to be exercised, and only the DECLARATION is
+          # unguarded. Closing that needs a `want` for `runner` in clause A, which
+          # needs CLAUDE.md section 5 to be rewritten first.
+          PINNED='vocab indicators engine'
+          SWEEP='vocab indicators engine runner'
 
           # ── CLAUSE A — the dependency closure cannot reach a filesystem ────────
           #
@@ -2775,7 +3032,7 @@ jobs:
           # hopeful one. The authoritative parser is Rust:
           # `engine::tests::declared_dependencies`, which handles all four and is
           # tested against all four.
-          for c in $SWEEP; do
+          for c in $PINNED; do
             m="crates/$c/Cargo.toml"
             # Comments stripped first. A comment mentioning `[dev-dependencies]` is
             # not a `[dev-dependencies]` table, and three of these manifests
@@ -2936,7 +3193,206 @@ jobs:
             echo "pulled by mistake are never used. Keep the capability absent."
             exit 1
           fi
-          echo "OK — vocab, indicators and engine cannot reach a bar."
+          echo "OK — vocab, indicators, engine and runner cannot reach a bar,"
+          echo "     and the first three declare exactly the dependencies pinned above."
+
+      - name: Gate 24 — no writable memory mapping
+        run: |
+          set -euo pipefail
+          # WHY. CLAUDE.md section 4's table bans one outright, and gives the
+          # reason in one line: "A writable memory mapping — It raises a signal
+          # on a full disk, and a signal cannot be caught."
+          #
+          # That is not a stylistic preference. A store on a full disk is the
+          # normal end state of a backtesting archive, and the failure mode of a
+          # writable map there is `SIGBUS` at the instant of the store, delivered
+          # to a thread that is executing a plain assignment. There is no `Result`
+          # at that point and no unwinding to catch -- and `[profile.release]`
+          # sets `panic = "abort"` (gate 25 below), so even a handler would not
+          # give the process anywhere to go. `write(2)` returns `ENOSPC` and the
+          # code can refuse and say so. That is the whole argument.
+          #
+          # NOTHING ENFORCED IT. `memmap2 = "0.9"` sits in the root manifest's
+          # `[workspace.dependencies]`, so any member may take it with one line,
+          # and gate 22 refuses the whole `memmap` family only inside the four
+          # SWEPT crates -- which are exactly the crates that never touch the
+          # store. `crates/store`, the one place a map would actually be reached
+          # for, was covered by no gate at all.
+          #
+          # A READ-ONLY MAP IS NOT BANNED and this gate does not refuse one.
+          # Section 4 names the WRITABLE mapping. Reading a mapped region cannot
+          # raise the signal this rule is about at all -- a truncated file can,
+          # which is a different hazard with a different answer -- so
+          # `Mmap::map` and `MmapOptions` are deliberately absent from the
+          # pattern below.
+          #
+          # THE SPELLINGS, and why each one:
+          #   MmapMut          the type. Naming it is enough; you cannot use one
+          #                    without it appearing.
+          #   MmapRaw          the same capability with the borrow checker taken
+          #                    off, which is strictly worse.
+          #   map_mut(         `MmapOptions::map_mut`, the constructor.
+          #   map_anon(        an anonymous map is always writable. It has no
+          #                    file behind it and so cannot hit ENOSPC on a
+          #                    store -- but it CAN on a full tmpfs or with
+          #                    overcommit off, the delivery is still SIGBUS, and
+          #                    an allocation this workspace can make with `Vec`
+          #                    is not worth an uncatchable one.
+          #   map_copy(        copy-on-write: writable, and each dirtied page is
+          #                    a fresh commit that can fail the same way. The
+          #                    trailing `(` is what separates it from
+          #                    `map_copy_read_only`, which is fine and is not
+          #                    matched.
+          #
+          # WHAT IT CANNOT SEE, said rather than implied: a name assembled at
+          # compile time. `crates/runner/src/lib.rs:744` already writes
+          # `concat!("Mmap", "Options")` deliberately -- it is a TEST asserting
+          # gate 22's banned list, split so that the assertion does not trip the
+          # gate it asserts about -- which is proof that the evasion is known and
+          # cheap. A text scan cannot follow it. What this gate buys is that the
+          # ORDINARY way of writing it is a red build, which is what stops it
+          # arriving by habit rather than by intent.
+          #
+          # MEASURED BEFORE IT WAS WRITTEN: zero occurrences of any of the five
+          # over every tracked `.rs` under `crates/`, and no member declares
+          # `memmap2` at all. So this gate starts green and there is no
+          # allowlist -- section 4 says "without exception", and a gate for an
+          # unconditional rule must not ship the mechanism for excusing it.
+          #
+          # NO UNTRUSTED INPUT: `git ls-files` and the pattern below.
+          BANNED_MAP='MmapMut|MmapRaw|(^|[^A-Za-z0-9_])map_mut\(|(^|[^A-Za-z0-9_])map_anon(_mut)?\(|(^|[^A-Za-z0-9_])map_copy\('
+          scanned=0
+          work=$(mktemp -d)
+          : > "$work/hits"
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            scanned=$((scanned + 1))
+            # Whole-line comments dropped first, the filter gates 17, 22 and 23
+            # already use: a comment discussing this rule is not a violation of
+            # it, and this very repository writes those at length.
+            #
+            # AWK-STYLE LINE NUMBERS WOULD BE WRONG HERE and are not claimed:
+            # `grep -n` after the strip numbers the STRIPPED stream, so the
+            # number shown is not the number in the file. The file name is what
+            # is load-bearing and the hit text is quoted in full, which is enough
+            # to find it -- gate 17 records the same trade-off and solves it with
+            # awk because it reports many; this one expects to report none ever.
+            { grep -vE '^[[:space:]]*(//|\*)' "$f" \
+              | { grep -E "$BANNED_MAP" || true; } \
+              | sed "s|^|${f}: |" >> "$work/hits"; } || true
+          done < <(git ls-files 'crates/**/*.rs')
+
+          echo "scanned ${scanned} tracked source file(s) under crates/"
+          if [ "$scanned" -eq 0 ]; then
+            echo "GATE 24 SCANNED NOTHING. A gate that reads no file is not a gate."
+            exit 1
+          fi
+          if [ -s "$work/hits" ]; then
+            echo 'WRITABLE MEMORY MAPPING:'
+            sed 's/^/  /' "$work/hits"
+            echo
+            echo "GATE 24 FAILED."
+            echo
+            echo "CLAUDE.md section 4 bans a writable memory mapping without"
+            echo "exception: it raises SIGBUS on a full disk and a signal cannot"
+            echo "be caught, least of all under panic = abort. Write through the"
+            echo "file API, check the error, and refuse loudly."
+            exit 1
+          fi
+          echo "OK — no crate maps a file or an anonymous region writably."
+
+      - name: Gate 25 — the release profile still refuses silent wrapping
+        run: |
+          set -euo pipefail
+          # WHY. Two keys in the root manifest are load-bearing for correctness
+          # rather than for speed, and NO GATE READ EITHER OF THEM. Deleting one
+          # line from `[profile.release]` changes what a shipped binary DOES,
+          # with `cargo build`, `cargo test`, `cargo clippy`, `cargo deny` and
+          # every other gate in this file still green.
+          #
+          # `overflow-checks = true`. Rust checks overflow in `dev` by default
+          # and WRAPS in `release`. Without this key the two profiles disagree
+          # about what a bug is: a price that overflows panics in a test run and
+          # silently becomes a plausible wrong number in the shipped one. The
+          # manifest's own comment says it -- "a wrapped price is a plausible
+          # number that is wrong" -- and CLAUDE.md section 4 bans exactly that
+          # shape, a fallback that hides a failure.
+          #
+          # This is also the key the arithmetic discipline is written against.
+          # The lint floor denies `clippy::cast_possible_truncation`,
+          # `cast_sign_loss` and `cast_possible_wrap`, and the workspace answers
+          # with `checked_`/`saturating_` at every site that can exceed a bound
+          # -- the census below counts them live. Every one of those was chosen
+          # by an author who believed the unchecked spelling would PANIC. Turn
+          # this key off and that belief is false everywhere at once.
+          #
+          # `panic = "abort"`. Its absence is not silent in the same way, but it
+          # is the premise gate 24 argues from one step above -- there is no
+          # unwinding to catch anything with -- and it is what makes a panic a
+          # crash with a core rather than a half-unwound store write. A change to
+          # it is a decision, so it belongs in `docs/05-decisions.md` and not in
+          # a quiet diff.
+          #
+          # WHAT THIS GATE DOES NOT DO: it does not measure anything, and it
+          # cannot tell whether a `saturating_` at a given site was the right
+          # choice. It reads two keys and refuses their absence. That is a small
+          # claim, and it is the one that was missing.
+          #
+          # NO UNTRUSTED INPUT: the tracked root manifest and the patterns below.
+          [ -f Cargo.toml ] || { echo "GATE 25: no root Cargo.toml"; exit 1; }
+          # Comments stripped first -- a comment mentioning a key is not a key,
+          # and this manifest discusses both of them at length directly above the
+          # table. Same defect gate 22 clause A records.
+          rel=$(sed 's/#.*//' Cargo.toml | sed -n '/^\[profile\.release\]/,/^\[/p')
+          bad=0
+          if [ -z "$rel" ]; then
+            echo "  REFUSED  Cargo.toml has no [profile.release] table at all"
+            bad=1
+          fi
+          if printf '%s\n' "$rel" | grep -qE '^overflow-checks[[:space:]]*=[[:space:]]*true[[:space:]]*$'; then
+            echo "  present  [profile.release] overflow-checks = true"
+          else
+            echo "  REFUSED  [profile.release] no longer sets overflow-checks = true."
+            echo "           release would WRAP where dev panics, and every"
+            echo "           checked_/saturating_ site in the workspace was"
+            echo "           written believing the opposite."
+            bad=1
+          fi
+          if printf '%s\n' "$rel" | grep -qE '^panic[[:space:]]*=[[:space:]]*"abort"[[:space:]]*$'; then
+            echo '  present  [profile.release] panic = "abort"'
+          else
+            echo '  REFUSED  [profile.release] no longer sets panic = "abort".'
+            echo "           That is a decision, and docs/05-decisions.md is"
+            echo "           where a decision goes."
+            bad=1
+          fi
+          # And the other direction: a profile that turns the check back OFF.
+          # `[profile.bench]` inherits release, so gate 8 measures the shipped
+          # arithmetic -- unless something re-enables wrapping under it.
+          off=$( { sed 's/#.*//' Cargo.toml \
+                   | grep -nE '^overflow-checks[[:space:]]*=[[:space:]]*false' || true; } )
+          if [ -n "$off" ]; then
+            printf '  REFUSED  a profile switches overflow checking back off:\n%s\n' "$off"
+            bad=1
+          else
+            echo "  present  no profile sets overflow-checks = false"
+          fi
+          # The census is REPORTING, not a rule. It is here so the log carries
+          # the size of what these two keys are protecting, and so a reader can
+          # see the number move.
+          sat=$( { git ls-files 'crates/**/*.rs' | xargs grep -ohE '(saturating|checked|wrapping)_[a-z_]+' \
+                   || true; } | wc -l | tr -d ' ')
+          echo "  context  ${sat} explicit saturating_/checked_/wrapping_ site(s) in tracked sources"
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "GATE 25 FAILED."
+            echo
+            echo "Silent wrapping is not an acceptable answer to an arithmetic"
+            echo "mistake in a backtesting engine. CLAUDE.md section 4."
+            exit 1
+          fi
+          echo "OK — the release profile still panics on overflow and aborts on panic."
+
       - name: Gate 19 — a failure an operator can see is a failure the log records
         run: |
           set -euo pipefail
@@ -3269,12 +3725,38 @@ jobs:
           '
 
           # (crate, fn) for every tracked crate, built once.
+          #
+          # COMMENT LINES ARE DROPPED BEFORE THE `fn` IS READ, and until they were
+          # a row could be satisfied by a function that exists only in prose. The
+          # extraction was `grep -ohE '\bfn name'` over the whole file, so
+          #
+          #   /// ... and `fn constraint` is what used to live here
+          #
+          # put `pull constraint` in this table exactly as a real declaration
+          # would. Measured on this tree: THREE such phantoms -- `api tests`,
+          # `pull constraint`, `telemetry expensive` -- none of them currently
+          # named by a row, which is luck rather than a property. A gate whose
+          # proof table can be extended by writing a comment is a gate a comment
+          # can satisfy.
+          #
+          # The filter is the one gates 17, 22 and 23 already use: drop lines
+          # whose first non-blank token is `//` or `*`. It is conservative in the
+          # safe direction -- a `fn` declaration cannot sit on a line beginning
+          # `//` -- and it does NOT strip a trailing comment on a code line, nor
+          # the opening line of a `/* */` block. Both remain, and both are
+          # documented the same way in gate 17.
+          #
+          # One file at a time rather than `xargs`, because the filter is
+          # per-file. That is slower and it is 189 files.
           fns="$work/fns"; : > "$fns"
           for c in $(git ls-files 'crates/*/Cargo.toml' \
                      | sed 's|^crates/||; s|/Cargo.toml$||'); do
-            { git ls-files "crates/$c/*.rs" \
-              | xargs -r grep -ohE '\bfn [a-z_][a-z_0-9]*' \
-              | sed "s|^fn |${c} |" >> "$fns"; } || true
+            while IFS= read -r one; do
+              [ -n "$one" ] || continue
+              { grep -vE '^[[:space:]]*(//|\*)' "$one" || true; } \
+                | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
+                | sed "s|^fn |${c} |" >> "$fns"
+            done < <(git ls-files "crates/$c/*.rs")
           done
           sort -u -o "$fns" "$fns"
 
@@ -3635,9 +4117,10 @@ jobs:
           #                 substring search, which layer 12 names as "the
           #                 named exception and stays O(universe)" and
           #                 docs/06-limits.md §24 measures at 6.53 ms.
-          #     census.rs   held_series and held_entries. Both run in
-          #                 `Site::new` beside the manifest load, both sort the
-          #                 store's own held keys, and both are sorted for
+          #     census.rs   held_series ONLY, and the word ONLY is a correction --
+          #                 see the paragraph below this list. It runs in
+          #                 `Site::new` beside the manifest load, sorts the
+          #                 store's own held keys, and is sorted for
           #                 REPRODUCIBILITY rather than for display: the pager
           #                 addresses a row by ordinal, and HashMap order is
           #                 not stable between processes. docs/06-limits.md §32.
@@ -3826,6 +4309,50 @@ jobs:
           # count. It is neither the candidate count nor the frequent-itemset count,
           # so it does not grow with the sweep. Called once per rendered report at
           # the coarsest boundary this crate has, and the render touches no bar.
+          # `crates/api/src/census.rs` — THE SECOND OF ITS TWO SORTS IS PER REQUEST,
+          # AND THIS ENTRY SAID THE OPPOSITE. The startup group above used to name
+          # `held_series` AND `held_entries` together under a heading that reads
+          # "Never in a handler. If any of these moves into one, the entry is wrong
+          # and must be deleted rather than re-pinned." One of them had already
+          # moved, and nothing here noticed.
+          #
+          # WHAT IS ACTUALLY TRUE, traced rather than assumed:
+          #   held_series   startup only. Its one production call site is
+          #                 `Site::new` (server.rs), and every other reference is
+          #                 in that file's or census.rs's own tests.
+          #   held_entries  startup AND per request. `Site::new` calls it, and so
+          #                 does `server::census_now`, which is reached from THREE
+          #                 route handlers: `instruments_json` (`/instruments.json`),
+          #                 `store_json` (`/store.json`) and `audit_json::store_block`
+          #                 (`/audit.json`). That is not an accident to be fixed --
+          #                 `census_now`'s own doc explains it, and the reason is a
+          #                 real defect it repaired: the cached startup snapshot went
+          #                 on showing 20.4 M rows against a live 139.7 M after four
+          #                 hours of backfill, so a monitoring page was understating
+          #                 the store 6.8x. A page that must be current cannot read a
+          #                 snapshot.
+          #
+          # SO THE ENTRY STAYS AT 2 AND THE REASON CHANGES, which is the difference
+          # between an allowlist and a mute button. The bound is no longer "it runs
+          # once"; it is what the sort is OVER: one `(Series, YearMonth)` per
+          # instrument-month some vendor manifest holds -- 194 on this operator's
+          # disk, per census.rs's own measurement -- and never the instrument
+          # universe, which is the quantity layer 12 is written about. It grows with
+          # what has been INGESTED, so it is a number that moves, and NO BENCH
+          # MEASURES IT: `docs/06-limits.md` §32 covers the startup call and predates
+          # the per-request one. That is an honest gap and is recorded here rather
+          # than papered over by leaving the old sentence in place.
+          #
+          # THIS GATE CANNOT DECIDE THE QUESTION, said plainly: "per request" is not
+          # decidable from text, which rule 4's own preamble states. What a gate CAN
+          # do is refuse to carry a justification that a five-minute trace falsifies.
+          #
+          # STALE IN THE SOURCE TOO, NAMED RATHER THAN EDITED: `held_entries`' own
+          # doc comment still reads "it runs where `held_series` runs — once, at
+          # startup", and `held_series`' reads "not on a request path". The first of
+          # those two sentences is now false. `crates/api` belongs to another line of
+          # work; correcting it there is that owner's change, and this note is the
+          # report.
           allow_sort='
           crates/runner/src/audit.rs 1
           crates/runner/src/bootstrap.rs 1
@@ -4241,19 +4768,27 @@ jobs:
           # written. That is the same reason docs/06-limits.md exists.
           #
           # WHAT COUNTS AS NAMING THE PROOF, in the order it is tried:
-          #   1. `crate::module::name` that resolves to an `fn name` under
-          #      crates/<crate>/. Gate 10's technique, with gate 10's fix: the
-          #      crate segment is CHECKED, not thrown away, so a same-named
-          #      function in another crate does not satisfy the claim.
+          #   1. `crate::module::name` that resolves to a TEST OR BENCH `fn name`
+          #      under crates/<crate>/. Gate 10's technique, with gate 10's fix:
+          #      the crate segment is CHECKED, not thrown away, so a same-named
+          #      function in another crate does not satisfy the claim. And unlike
+          #      gate 10 the symbol must carry `#[test]`/`#[bench]` or live in a
+          #      `tests/` or `benches/` file -- a production function is what a
+          #      claim is ABOUT and can never be what proves it. See the two
+          #      tables built below.
           #   2. A tracked `crates/**/tests/*.rs` or `crates/**/benches/*.rs`
           #      path. This is the form the benches already use.
-          #   3. An invariant row id -- `C-12`, `M-17`, `S-11` -- that EXISTS
-          #      in docs/04-invariants.md AND whose own "Proven by" cell names
-          #      a test that resolves by rule 1. This is the form the code
-          #      already writes, and it chains: a row gate 10 would refuse
-          #      cannot launder a claim through this gate either.
+          #   3. An invariant row id -- `C-12`, `M-17`, `S-11`, `C-E-07`, `AU-05`
+          #      -- that EXISTS in docs/04-invariants.md AND whose own "Proven
+          #      by" cell names a test that resolves by rule 1. This is the form
+          #      the code already writes, and it chains: a row gate 10 would
+          #      refuse cannot launder a claim through this gate either. The id
+          #      is matched WHOLE; see the regex's own comment for the family of
+          #      cost rows that a shorter match used to redirect.
           # A src path is NOT proof. Naming the file the claim is written in
-          # proves nothing, and that is the whole defect class.
+          # proves nothing, and that is the whole defect class -- and neither is
+          # naming a function in it, which is the same defect one level down and
+          # is what rule 1 above now refuses.
           #
           # NO UNTRUSTED INPUT REACHES THIS STEP. The inputs are `git ls-files`,
           # docs/04-invariants.md and the static patterns below -- the
@@ -4284,27 +4819,122 @@ jobs:
           #     `git ls-files`, so a local run and CI disagree until `git add`.
           #
           # THE ESCAPE HATCH IS HERE, NEVER IN THE CODE. `path max_blocks`,
-          # gate 1d's and gate 11's mechanism. IT IS DELIBERATELY EMPTY. Every
-          # unproven claim on the tree today is reported by name in the log,
-          # and pinning them here on the way in would have converted twelve
-          # findings into one line nobody reads.
+          # gate 1d's and gate 11's mechanism. It was DELIBERATELY EMPTY while
+          # twelve findings were being worked through, so that all twelve stayed
+          # named in this step's log rather than becoming one line nobody reads.
+          #
+          # THE THREE BELOW ARE WHAT TIGHTENING RULE 1 FOUND, and each is one of
+          # the two weaknesses this gate documents about itself above rather than
+          # a new kind of defect. They are DECLARED and not fixed for the reason
+          # gate 11 gives about `crates/pull/src/totp.rs` and gate 23 gives about
+          # `crates/api/src/logs.rs`: the files belong to other lines of work, a
+          # tree two sessions share cannot have one of them editing the other's
+          # crates, and blocking a build on a finding its owner has not seen yet
+          # is not this gate's job. Each entry is the REPORT, and it is meant to
+          # be removed in the change that answers it.
+          #
+          # The count is a CEILING and a drop is only a `::warning`, so an owner
+          # who fixes one of these does not have to touch this file in the same
+          # commit. A RISE is a refusal, which is the ratchet.
+          #
+          #   crates/pull/src/manifest.rs 2
+          #     BOTH ARE NEGATIVE CLAIMS, the case this gate says out loud it
+          #     cannot separate from positive ones. The module header at :1 says
+          #     a filtered census "is not O(1) and is not claimed to be"; the
+          #     `held_keys` doc at :2655 says "O(keys) ... the one operation on
+          #     this type that is not O(1)". Both are the most honest sentence
+          #     available and both trip the trigger. What made them pass BEFORE
+          #     is the actual defect: the first names `store::crc::crc32c` and
+          #     the second names `api::census::held_series`, two ordinary
+          #     production functions, and rule 1 accepted either as proof. Closed
+          #     by citing `docs/06-limits.md` §17 and §32 -- which both blocks
+          #     already reference in prose -- as an UNVERIFIED, or by naming the
+          #     bench that measures the walk.
+          #   crates/runner/src/trade.rs 1
+          #     The module header, and the trigger is English: "the worst case is
+          #     a heavy loss" is a statement about a TRADING OUTCOME, not about a
+          #     bound. Its `a::b::c` tokens are `costs::fill::worst_case_fills`,
+          #     `costs::trip::price` and `crate::outcome::edge`, all production
+          #     functions, so it too was proven by the thing it is written about.
+          #     Closed by one word -- the sentence is already unverified in the
+          #     sense this gate means.
           allow_claim='
+          crates/pull/src/manifest.rs 2
+          crates/runner/src/trade.rs 1
           '
 
           inv=docs/04-invariants.md
           work=$(mktemp -d)
 
-          # (crate, fn) for every tracked crate, built once. A fixed-string
-          # lookup afterwards, so `store::proptest::roundtrip` is not satisfied
-          # by an `fn roundtrip` in crates/api.
+          # TWO TABLES, AND THE SECOND ONE IS THE REPAIR.
+          #
+          # `fns` is (crate, fn) for every tracked crate. A fixed-string lookup
+          # afterwards, so `store::proptest::roundtrip` is not satisfied by an
+          # `fn roundtrip` in crates/api.
+          #
+          # `proving` is the subset that can actually PROVE something, and rule 1
+          # below reads that one. Rule 1 used to accept any `fn` of the right name
+          # in the right crate, so a cost claim could name the very function it
+          # was written above -- "O(1); see `api::census::held_entries`" resolves
+          # against `held_entries` itself -- and the gate would print it as proven.
+          # A production function is the SUBJECT of a claim, never its evidence.
+          #
+          # WHAT COUNTS AS PROVING, and the second half is why `#[test]` alone is
+          # the wrong test:
+          #   * an `fn` whose immediately preceding attribute run mentions `test`
+          #     or `bench` -- `#[test]`, `#[bench]`, `#[tokio::test]`, and yes
+          #     `#[cfg(test)]` on a test-only helper, which is test code either
+          #     way;
+          #   * ANY `fn` declared in a tracked `tests/` or `benches/` file. This
+          #     clause is load-bearing: a `harness = false` bench carries NO
+          #     attribute at all, and gate 10 records that rows C-01 through C-13
+          #     are proven by exactly those. Requiring the attribute and nothing
+          #     else would have failed every bench-proven claim in the workspace.
+          #
+          # MEASURED BEFORE IT WAS TIGHTENED, which is the only reason it could be
+          # tightened in one change: of the 93 blocks that resolve by rule 1 on
+          # this tree, ZERO resolve against a non-proving function. So the rule
+          # goes from "any function" to "a test or a bench" with no allowlist and
+          # no refusal added. If a later audit finds this claim generous, the
+          # thing to re-run is the count, not the reasoning.
+          #
+          # RULE 3 READS `proving` TOO. It chains through an invariant row's own
+          # "Proven by" cell, and a chain that can be satisfied by a production
+          # function launders exactly what rule 1 just stopped accepting.
+          #
+          # Comment lines are dropped before either table is read, for the reason
+          # gate 10 states at length above its own copy of this: a `fn` name that
+          # exists only in prose was entering the table.
           fns="$work/fns"; : > "$fns"
+          proving="$work/proving"; : > "$proving"
           for c in $(git ls-files 'crates/*/Cargo.toml' \
                      | sed 's|^crates/||; s|/Cargo.toml$||'); do
-            { git ls-files "crates/$c/*.rs" \
-              | xargs -r grep -ohE '\bfn [a-z_][a-z_0-9]*' \
-              | sed "s|^fn |${c} |" >> "$fns"; } || true
+            while IFS= read -r one; do
+              [ -n "$one" ] || continue
+              case "$one" in */tests/*|*/benches/*) harness=1 ;; *) harness=0 ;; esac
+              code=$( { grep -vE '^[[:space:]]*(//|\*)' "$one" || true; } )
+              printf '%s\n' "$code" \
+                | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
+                | sed "s|^fn |${c} |" >> "$fns"
+              # The attribute run is tracked forward rather than looked back at:
+              # an attribute sets the flag, a `fn` consumes it, and any other
+              # non-blank line clears it. So `#[cfg(test)]` above a `mod tests {`
+              # does NOT mark the functions inside that module -- the `mod` line
+              # clears the flag, and each `#[test]` inside sets it again for
+              # itself. A test-module HELPER with no attribute of its own is
+              # therefore not proof, which is right: it is not a test.
+              printf '%s\n' "$code" | awk -v P="$harness" '
+                BEGIN { tf = 0 }
+                { t = $0; sub(/^[ \t]+/, "", t)
+                  if (t ~ /^#\[/) { if (t ~ /test|bench/) tf = 1; next }
+                  if (t ~ /(^|[^A-Za-z0-9_])fn [a-z_]/) { if (tf || P) print $0; tf = 0; next }
+                  if (t != "") tf = 0 }' \
+                | { grep -ohE '\bfn [a-z_][a-z_0-9]*' || true; } \
+                | sed "s|^fn |${c} |" >> "$proving"
+            done < <(git ls-files "crates/$c/*.rs")
           done
           sort -u -o "$fns" "$fns"
+          sort -u -o "$proving" "$proving"
 
           # A block is a maximal run of consecutive `///` or `//!` lines. Any
           # other line ends it. One tab-separated record per block, so the
@@ -4332,7 +4962,8 @@ jobs:
 
           nb=$(awk 'END{print NR}' "$blocks")
           echo "walked ${walked} tracked .rs file(s) under crates/"
-          echo "  $(awk 'END{print NR}' "$fns") (crate, fn) pair(s) to resolve against"
+          echo "  $(awk 'END{print NR}' "$fns") (crate, fn) pair(s) in the workspace,"
+          echo "  $(awk 'END{print NR}' "$proving") of them a test or a bench — only those prove a claim"
           echo "  ${nb} doc block(s)"
           # A glob that matches nothing is the failure mode gate 8 shipped with
           # for the whole life of the repository, reporting success throughout.
@@ -4342,7 +4973,13 @@ jobs:
           fi
 
           trigger='[Oo]\(1\)|constant[ -]time|never scans?|worst[ -]case|\bflat\b'
-          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close)s?'
+          # `director(y|ies)` joins the list for the same reason every other noun
+          # on it is here: `crates/pull/src/archive.rs:818` says "not simply two
+          # flat directories", which is a statement about a SHAPE ON DISK and
+          # carries no cost claim at all. That block was refused by this gate on
+          # the tree as committed, so widening the list here takes a live red to
+          # green rather than pre-empting a hypothetical one.
+          notclaim='(struct|table|bar|file|field|list|array|layout|namespace|case|month|day|session|price|close|director(y|ies))s?'
 
           refused="$work/refused"; : > "$refused"
           claimed=0; by_test=0; by_path=0; by_row=0; by_unverified=0
@@ -4355,19 +4992,40 @@ jobs:
             text="$1"
             for t in $( { printf '%s' "$text" \
                           | grep -oE '\b[a-z_]+::[a-z_]+::[a-z_0-9]+\b' || true; } ); do
-              if grep -qxF "${t%%::*} ${t##*::}" "$fns"; then echo test; return 0; fi
+              if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo test; return 0; fi
             done
             for p in $( { printf '%s' "$text" \
                           | grep -oE 'crates/[A-Za-z0-9_./-]*/(tests|benches)/[A-Za-z0-9_.-]+\.rs' \
                           || true; } ); do
               if git ls-files --error-unmatch "$p" >/dev/null 2>&1; then echo path; return 0; fi
             done
-            for r in $( { printf '%s' "$text" | grep -oE '\b[A-Z]-[0-9][0-9]\b' || true; } ); do
+            # `[A-Z]+(-[A-Z]+)?-nn` AND NOT `[A-Z]-nn`, WHICH RESOLVED THE WRONG
+            # ROW. docs/04-invariants.md carries two families of id: `E-07` is an
+            # ENGINE CORRECTNESS row and `C-E-07` is the COST row for the same
+            # area, and there are 11 `C-E-`, 12 `C-K-`, 5 `C-V-`, 4 `C-T-`, 4
+            # `C-I-` and 9 more across `C-R-`, `C-L-` and `C-G-`. Under the old
+            # pattern a block citing `C-E-07` matched the substring `E-07` --
+            # `-` is not a word character, so `\b` sits happily before the `E` --
+            # and this gate then went and read the CORRECTNESS row's "Proven by"
+            # cell. Every cost claim in the workspace was validated against a row
+            # about something else, and deleting a cost bench left the gate green.
+            # It also meant the 12 multi-letter prefixes (`AU-`, `IC-`, `CV-`,
+            # `SS-`, `SK-`, `SF-`, `HF-`, `GF-`, `GW-`, `ST-`, `CJ-`, `AJ-`,
+            # `NP-`) matched nothing at all and could never satisfy rule 3.
+            #
+            # `D-0095` still does not match, and that is deliberate: a decision id
+            # carries four digits, so `-[0-9][0-9]\b` fails on it. Decisions are
+            # not proofs.
+            #
+            # Measured on this tree: the fix moved exactly one block from REFUSED
+            # to proven-by-row (crates/engine/benches/ratio.rs:399) and moved none
+            # the other way.
+            for r in $( { printf '%s' "$text" | grep -oE '\b[A-Z]+(-[A-Z]+)?-[0-9][0-9]\b' || true; } ); do
               row=$( { grep -E "^\| *${r} *\|" "$inv" || true; } | head -1)
               [ -n "$row" ] || continue
               for t in $( { printf '%s' "$row" \
                             | grep -oE '`[a-z_]+::[a-z_]+::[a-z_0-9]+`' | tr -d '`' || true; } ); do
-                if grep -qxF "${t%%::*} ${t##*::}" "$fns"; then echo row; return 0; fi
+                if grep -qxF "${t%%::*} ${t##*::}" "$proving"; then echo row; return 0; fi
               done
             done
             return 0
@@ -4379,7 +5037,23 @@ jobs:
             # `flat` is stripped of its non-cost senses BEFORE the trigger runs,
             # so the exclusion cannot accidentally swallow a real claim in the
             # same block -- only the words it names.
-            scrub=$(printf '%s' "$text" | sed -E "s/[Ff]lat +${notclaim}//g")
+            # AN IDENTIFIER SPELLED `flat` IS NOT THE ENGLISH WORD, and this
+            # sed runs BEFORE the noun list because it is a different kind of
+            # exclusion: the noun list says "flat table is not a cost claim",
+            # this says "`Bar::flat(...)` is not the word at all". Measured
+            # cause: `crates/costs/src/trip.rs` carries FOUR doctests calling
+            # `Bar::flat(Paisa::from_raw(100_00))`, and `crates/runner/src/trade.rs`
+            # links `[`costs::fill::Bar::flat`]` in prose. All five read as cost
+            # claims here and were then "proven" by whatever `a::b::c` token the
+            # doctest's `use` lines happened to contain -- two heuristics
+            # cancelling, which is the worst way for a gate to be green.
+            #
+            # Two forms only, both unambiguous: `flat` immediately after a path
+            # separator, and `flat` immediately before an open parenthesis.
+            # "the fee is flat" and "flat 20 rupees" are untouched.
+            scrub=$(printf '%s' "$text" \
+                    | sed -E 's/[A-Za-z0-9_]::flat/ /g; s/[Ff]lat[ ]*\(/ (/g' \
+                    | sed -E "s/[Ff]lat +${notclaim}//g")
             printf '%s' "$scrub" | grep -qE "$trigger" || continue
             claimed=$((claimed + 1))
             if printf '%s' "$text" | grep -q 'UNVERIFIED'; then
@@ -5184,6 +5858,27 @@ jobs:
     name: Gate 18 — no surviving mutant
     runs-on: ubuntu-24.04
     needs: build
+    # THIS JOB HAD NO CLOCK, AND A JOB WITH NO CLOCK DOES NOT FAIL — IT VANISHES.
+    #
+    # Without `timeout-minutes` a job inherits GitHub's 6-hour ceiling, and what
+    # happens at that ceiling is a CANCELLATION, not a failure: the step never
+    # reports, the log is cut mid-line, and the run page shows a grey square. Two
+    # runs ended exactly that way having tested ZERO mutants, and nothing
+    # distinguishes that from a gate that had nothing to do. `ci-ok` does catch
+    # it -- it refuses any `needs` result that is not `success` -- so the build
+    # went red, for a reason no reader could name. A gate whose failure mode is
+    # unreadable teaches people to re-run it rather than read it.
+    #
+    # 240 MINUTES, AND THE NUMBER IS DERIVED RATHER THAN PICKED. It has to be
+    # under the 6-hour ceiling so that THIS clock fires first and GitHub records
+    # a timeout against this job with the log intact. It has to be over the
+    # budget the step below computes, or the step's own arithmetic would be a
+    # lie. The step reserves 40 minutes of it for `cargo install cargo-mutants`
+    # (built from source; the toolchain cache does not cover `~/.cargo/bin`) and
+    # for the unmutated baseline, and spends the remaining 200 on mutants. If
+    # this number changes, JOB_MINUTES in the step must change with it — they are
+    # two halves of one statement and the step says so.
+    timeout-minutes: 240
     steps:
       # THE WHOLE HISTORY, because this gate's scope IS the diff. With the
       # default shallow clone there is no merge base to diff against and the
@@ -5240,6 +5935,91 @@ jobs:
             exit 0
           fi
           echo "Mutating only the lines this change touched, against $base."
+
+          # ── THE ARITHMETIC, BEFORE THE WORK AND NOT INSTEAD OF IT ─────────────
+          #
+          # `--in-diff` bounds WHICH lines are mutated. It does not bound HOW
+          # MANY, and the two are only loosely related: `crates/indicators`
+          # generates 1,404 mutants over eleven files, 527 of them in
+          # `pattern.rs` alone, so a single commit touching one dense function can
+          # produce more mutants than a whole sparse crate. An audit counted 8,499
+          # for a branch-length diff, which at the per-mutant cost below is 278.7
+          # hours -- 46x the ceiling. That run did not fail. It was cancelled,
+          # having tested nothing, which is the state this block exists to make
+          # impossible.
+          #
+          # So the count is taken FIRST, with `--list`, which builds nothing and
+          # runs no test. If the work does not fit, this step says so with the
+          # numbers on screen and exits 1. A gate that cannot finish enforces
+          # nothing; a gate that says "I cannot finish, here is the arithmetic"
+          # at least reports honestly, and CLAUDE.md section 3 rule 6 asks for
+          # exactly that rather than a bound quietly not met.
+          #
+          # THE PER-MUTANT FIGURE IS NOT MEASURED BY THIS GATE, and is labelled
+          # rather than presented as fact -- golden rule 6. 118 s is what the
+          # audit measured for this workspace's suite on this runner class, and
+          # 120 is that rounded up. It is an ESTIMATE used to decide whether to
+          # start, never a claim about a particular run. The real per-mutant cost
+          # is roughly the baseline suite time, so it moves with the suite; when
+          # it does, this constant is the thing to re-measure and the log below
+          # is where the disagreement will show.
+          JOB_MINUTES=240        # MUST match timeout-minutes on the job above.
+          RESERVE_MINUTES=40     # cargo install + the unmutated baseline.
+          PER_MUTANT_SECONDS=120 # the audit's 118 s, rounded up. NOT measured here.
+          MUTANT_TIMEOUT=900     # the --timeout below: the per-mutant HANG bound.
+
+          if ! cargo mutants --list --in-diff /tmp/changed.diff > /tmp/mutant-list.txt 2>/tmp/mutant-list.err; then
+            echo "GATE 18 FAILED — cargo-mutants could not even enumerate the"
+            echo "mutants for this diff. That is not an empty diff and it is not"
+            echo "a pass; something about the workspace or the diff is wrong."
+            cat /tmp/mutant-list.err
+            exit 1
+          fi
+          n=$( { grep -c . /tmp/mutant-list.txt || true; } | tr -d ' ')
+          budget_s=$(( (JOB_MINUTES - RESERVE_MINUTES) * 60 ))
+          ceiling=$(( budget_s / PER_MUTANT_SECONDS ))
+          est_s=$(( n * PER_MUTANT_SECONDS ))
+          worst_s=$(( n * MUTANT_TIMEOUT ))
+          echo
+          echo "  mutants in this diff        ${n}"
+          echo "  budget                      ${budget_s} s (${JOB_MINUTES} min job − ${RESERVE_MINUTES} min reserve)"
+          echo "  estimate at ${PER_MUTANT_SECONDS} s each     ${est_s} s"
+          echo "  worst case at ${MUTANT_TIMEOUT} s each   ${worst_s} s  (every mutant hangs; not expected)"
+          echo "  ceiling                     ${ceiling} mutant(s)"
+          echo
+          if [ "$n" -eq 0 ]; then
+            # Not the same as an empty diff, which was already handled above: the
+            # diff touched source that generates no mutant at all -- comments, a
+            # `use` line, a doc block. Saying nothing here would read as a pass
+            # over work that was never attempted.
+            echo "OK — the changed lines generate no mutant (comments, imports or"
+            echo "     documentation only). Nothing was tested and nothing is claimed."
+            exit 0
+          fi
+          if [ "$n" -gt "$ceiling" ]; then
+            echo "GATE 18 FAILED — this diff cannot be mutation-tested inside the"
+            echo "job's clock, and this step will not start work it knows will be"
+            echo "cancelled half-done."
+            echo
+            echo "  ${n} mutants x ${PER_MUTANT_SECONDS} s = ${est_s} s against a ${budget_s} s budget."
+            echo
+            echo "THE TWO WAYS FORWARD, in order of preference:"
+            echo "  1. Land the change in smaller commits. CLAUDE.md section 9"
+            echo "     asks for no surviving mutant ON TOUCHED MODULES, and that"
+            echo "     is a per-change obligation — a branch-length diff is many"
+            echo "     changes wearing one hat, which is why the number is this"
+            echo "     large. On a push to main the base is HEAD~1 and a normal"
+            echo "     commit measures well under the ceiling (18 for a recent"
+            echo "     three-commit span)."
+            echo "  2. If the change genuinely is one unit, run it locally —"
+            echo "     cargo mutants --in-diff <diff> --timeout ${MUTANT_TIMEOUT}"
+            echo "     — and record the result in the pull request, or shard this"
+            echo "     job across a matrix. Raising JOB_MINUTES is NOT one of the"
+            echo "     ways: 240 is already most of GitHub's 6-hour ceiling, and"
+            echo "     past it the job is cancelled rather than failed, which is"
+            echo "     the state this block was written to remove."
+            exit 1
+          fi
 
           # `--test-tool=cargo` and the workspace's own suite. The timeout is
           # generous per mutant because a mutant that hangs is a mutant the

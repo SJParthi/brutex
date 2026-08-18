@@ -18,7 +18,7 @@
 //! Five keys are required — `seq`, `ms`, `level`, `target`, `msg` — because
 //! without any one of them the line cannot be placed, filtered or read.
 
-use crate::event::Event;
+use crate::event::{Event, MAX_FIELDS};
 use crate::json::{LineFault, Scan};
 use crate::level::Level;
 use crate::value::OwnedValue;
@@ -64,6 +64,12 @@ impl Record {
     /// A linear walk over at most [`crate::MAX_FIELDS`] entries — twelve —
     /// which is a constant, not a scan. A map here would be an allocation per
     /// record to search twelve things.
+    ///
+    /// **Twelve is enforced by [`Record::decode`], not merely produced by the
+    /// writer.** It used to be the latter only: [`crate::Event`] cannot hold a
+    /// thirteenth field, but this type is built from bytes, and a hand-edited
+    /// line with thousands of members turned this constant into exactly the
+    /// scan the sentence above says it is not. See `object`.
     #[must_use]
     pub fn field(&self, key: &str) -> Option<&OwnedValue> {
         self.fields
@@ -188,10 +194,50 @@ impl Record {
     }
 }
 
-/// The `fields` object: keys to scalars, nothing nested.
+/// The `fields` object: keys to scalars, nothing nested, **at most
+/// [`MAX_FIELDS`] members**.
+///
+/// # Why the member count is bounded and not merely documented
+///
+/// [`Record::field`] says it is "a linear walk over at most `MAX_FIELDS`
+/// entries — twelve — which is a constant, not a scan", and that sentence was
+/// a description of the WRITER rather than a property of this function.
+/// [`crate::Event`] cannot hold a thirteenth field — `items` is a
+/// `[_; MAX_FIELDS]` array and the encoder counts the rest into `"dropped"` —
+/// but this decoder is handed bytes, not an `Event`, and it pushed one entry
+/// per member with no ceiling at all.
+///
+/// A hand-edited or foreign line therefore made the documented O(1) lookup a
+/// scan of whatever the line happened to carry. The arithmetic is not
+/// theoretical: `crate::MAX_LINE_BYTES` lets the reader accumulate a 64 KiB
+/// run, and `"a":1,` is six bytes, so **one line can carry about ten thousand
+/// members** — ten thousand string comparisons per `field` call, and a
+/// ten-thousand-entry `Vec` allocated to hold them, on a path whose whole
+/// claim is that it is a constant. `CLAUDE.md` §3 rule 4.
+///
+/// So the grammar this decoder accepts is narrowed to the grammar its own
+/// writer produces: after the twelfth member only `}` may follow, and a comma
+/// there is refused through the same [`LineFault::Unexpected`] arm that
+/// already refuses any other byte in a separator position. The offset names
+/// the exact comma that would have introduced the thirteenth field.
+///
+/// Refused rather than truncated to twelve, for the reason `TooDeep` is
+/// refused rather than flattened: a line with thirteen fields is not a line
+/// this crate wrote, and silently keeping a prefix of it would be a fallback
+/// that hides the fault — `CLAUDE.md` §4. The tail reader counts the refusal
+/// in `Tail::malformed` and steps over it, so one such line never blanks the
+/// page around it.
+///
+/// **What this does NOT bound** is the number of members in the top-level
+/// object, or inside a value under an unknown key: those are stepped over
+/// rather than collected, so they cost the scan they are worth and allocate
+/// nothing per member. The ceiling here is on what ends up in
+/// [`Record::fields`], which is the only thing [`Record::field`] walks.
 fn object(scan: &mut Scan<'_>) -> Result<Vec<(String, OwnedValue)>, LineFault> {
     scan.expect(b'{')?;
-    let mut out = Vec::new();
+    // Exactly the writer's ceiling, once: a legal line never needs to grow
+    // this and an illegal one never gets to.
+    let mut out = Vec::with_capacity(MAX_FIELDS);
     scan.skip_space();
     if scan.peek() == Some(b'}') {
         scan.bump();
@@ -206,7 +252,12 @@ fn object(scan: &mut Scan<'_>) -> Result<Vec<(String, OwnedValue)>, LineFault> {
         out.push((key, scalar(scan)?));
         scan.skip_space();
         match scan.peek() {
-            Some(b',') => scan.bump(),
+            // THE GUARD IS ON THE COMMA, NOT ON THE PUSH. A comma is what
+            // promises another member, so refusing it at the ceiling refuses
+            // the thirteenth field before its key, its value and its
+            // allocation exist. A twelve-field line closes on `}` and is
+            // untouched by this.
+            Some(b',') if out.len() < MAX_FIELDS => scan.bump(),
             Some(b'}') => {
                 scan.bump();
                 return Ok(out);
@@ -325,7 +376,7 @@ fn signed(scan: &mut Scan<'_>) -> Result<i64, LineFault> {
               test that cannot panic cannot fail."
 )]
 mod tests {
-    use super::Record;
+    use super::{MAX_FIELDS, Record};
     use crate::encode::line;
     use crate::event::Event;
     use crate::json::LineFault;
@@ -708,5 +759,74 @@ mod tests {
             "and it decodes to false rather than being refused or read as true"
         );
         assert_eq!(decoded.seq, 9, "the rest of the line survives it");
+    }
+
+    /// **`Record::field`'s "twelve entries, a constant, not a scan" IS TWELVE
+    /// ONLY BECAUSE THE DECODER REFUSES A THIRTEENTH.**
+    ///
+    /// The ceiling was a property of the writer and nothing else. `Event`
+    /// cannot hold a thirteenth field — its storage is a `[_; MAX_FIELDS]`
+    /// array and the encoder counts the rest into `"dropped"` — but `decode`
+    /// is handed bytes, and it pushed one entry per member of the `fields`
+    /// object with no bound at all. `crate::MAX_LINE_BYTES` lets the reader
+    /// accumulate 64 KiB before it refuses a run, and `"a":1,` is six bytes,
+    /// so one hand-edited or foreign line could carry about ten thousand
+    /// members — ten thousand string comparisons per `field` call, on the one
+    /// lookup whose whole claim is that it is a constant.
+    ///
+    /// Both sides of the boundary are pinned here, so neither an off-by-one in
+    /// the guard nor a return to the unbounded push can pass: twelve is the
+    /// widest legal line and still decodes whole, and thirteen is refused at
+    /// the comma that would have introduced it.
+    #[test]
+    fn a_line_carrying_more_fields_than_an_event_can_hold_is_refused_at_the_thirteenth() {
+        let head = r#"{"seq":1,"ts":"x","ms":2,"level":"info","target":"t","msg":"m","fields":"#;
+        let members = |n: usize| {
+            (0..n)
+                .map(|i| format!("\"k{i}\":{i}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        // TWELVE IS LEGAL, and is exactly what the widest event this crate can
+        // build writes. A guard that fired one member early would take this.
+        let twelve = members(MAX_FIELDS);
+        let widest = format!("{head}{{{twelve}}}}}");
+        let ok = Record::decode(widest.as_bytes()).expect("twelve is the writer's own ceiling");
+        assert_eq!(ok.fields.len(), MAX_FIELDS);
+        assert_eq!(
+            ok.field("k11").and_then(OwnedValue::as_u64),
+            Some(11),
+            "and the twelfth is kept, not dropped on the floor"
+        );
+
+        // THIRTEEN IS REFUSED, at the comma rather than somewhere further
+        // along, so the fault names the byte that broke the ceiling.
+        let over = format!("{head}{{{twelve},\"k12\":12}}}}");
+        assert_eq!(
+            Record::decode(over.as_bytes()),
+            Err(LineFault::Unexpected {
+                at: head.len() + 1 + twelve.len(),
+                found: b',',
+            }),
+            "a thirteenth field is refused where it starts: {over}"
+        );
+
+        // AND THE SHAPE THE CEILING EXISTS FOR. Two thousand members is a
+        // `field` lookup two thousand comparisons long and a two-thousand-entry
+        // `Vec` to hold them. It is refused before the thirteenth key is even
+        // read, so neither exists.
+        let flood = format!("{head}{{{}}}}}", members(2_000));
+        assert!(
+            matches!(
+                Record::decode(flood.as_bytes()),
+                Err(LineFault::Unexpected { found: b',', .. })
+            ),
+            "a line hand-edited into thousands of fields is refused, not collected"
+        );
+        // Refused, and therefore counted: `tail` puts a line that will not
+        // decode in `Tail::malformed` and steps over it, so this never blanks
+        // the page around it. It is the same treatment the number past `u64`
+        // above gets, for the same reason.
     }
 }

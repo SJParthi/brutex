@@ -680,6 +680,11 @@ impl Sink {
     /// one at zero. That read is one block from the end and nothing more; see
     /// `resume_seq`.
     ///
+    /// A file that does not end in a newline is **terminated before the first
+    /// append**, so the record the previous process was killed in the middle
+    /// of stays one line of its own rather than being fused onto. See
+    /// `terminate_torn_tail`, which also says what that does not recover.
+    ///
     /// # Errors
     ///
     /// The failure in its own words, prefixed with the path. **Opening is the
@@ -701,15 +706,19 @@ impl Sink {
             )
         })?;
         let path = current_path(&config.dir);
-        let target = FileTarget::open(&path)
+        let mut target = FileTarget::open(&path)
             .map_err(|e| format!("{}: cannot open the event stream — {e}", path.display()))?;
-        let bytes = target.len();
-        Ok(Self::around(
-            config,
-            Box::new(target),
-            bytes,
-            resume_seq(&path),
-        ))
+        let found = target.len();
+        let seq = resume_seq(&path);
+        // THE TORN TAIL IS CLOSED BEFORE THE FIRST APPEND. See
+        // `terminate_torn_tail`: without this the first event of the new
+        // process fuses onto whatever the old one was killed in the middle of.
+        let (bytes, torn) = terminate_torn_tail(&mut target, &path, found);
+        let sink = Self::around(config, Box::new(target), bytes, seq);
+        if let Some(why) = torn {
+            sink.report(&why);
+        }
+        Ok(sink)
     }
 
     /// The same sink around somewhere other than a file.
@@ -1211,6 +1220,131 @@ fn resume_seq(path: &Path) -> u64 {
         .rev()
         .find_map(|line| Record::decode(line).ok())
         .map_or(0, |record| record.seq)
+}
+
+/// Whether the file's last byte is anything but a newline.
+///
+/// One `open`, one `seek` and a one-byte `read`, at open time only — never on
+/// the write path, which is the row of the cost table in this module's header
+/// that says the rotation check never reaches for `metadata`.
+///
+/// **A read that fails answers "no".** This cannot tell a whole file from a
+/// torn one without looking, and a guess in the other direction would append a
+/// newline to a file whose last line is complete — turning a clean tail into a
+/// blank line the reader then has to step over. Doing nothing is the answer
+/// that cannot make an intact file worse.
+///
+/// That silence is not a fallback hiding a failure, because the same file is
+/// unreadable to `crate::tail`, which names it in `Tail::errors` on every
+/// query. A log nobody can read is already reported by the surface whose job
+/// that is; this one does not report it a second time on a guess.
+fn ends_mid_line(path: &Path, len: u64) -> bool {
+    if len == 0 {
+        return false;
+    }
+    let Ok(last) = crate::tail::read_at(path, len.saturating_sub(1), 1) else {
+        return false;
+    };
+    // Compared as bytes rather than through `first()`, so there is no `None`
+    // arm for a one-byte `read_exact` that cannot produce one — an arm no test
+    // could ever reach is a region the coverage gate would carry forever.
+    last != b"\n"
+}
+
+/// Closes a torn tail before anything is appended to it, and says so.
+///
+/// Returns the running byte count the sink starts from, and the notice naming
+/// the tear when there was one.
+///
+/// # What this is for
+///
+/// `Sink::emit` already terminates a line its own `write_all` tore — a disk
+/// that fills mid-line — because the next event appended at that offset would
+/// otherwise fuse onto the fragment: one unparseable line, and **two** events
+/// lost where `dropped` counts one. That fix cannot cover the other way a line
+/// ends mid-write, because the process that would have written the byte is
+/// gone: a `SIGKILL` between the iterations of a `write_all` that the kernel
+/// split, or a power cut with the last page still in the cache.
+///
+/// `resume_seq` does not close it either, and reading it is what makes the gap
+/// look shut: it finds the last COMPLETE line and carries on from there, so a
+/// restart knows the fragment is there and appends past it anyway.
+///
+/// **Measured on this tree**, as the shape rather than on a real power cut —
+/// three whole lines, a fragment appended by hand, reopen, emit one event:
+/// the reader returned `records=3 malformed=1 partial_tail=false` while the
+/// sink reported `written=1 dropped=0`. The new event was inside the corrupt
+/// line, the writer believed it had landed, and nothing anywhere counted the
+/// torn one. Two events behind one `malformed`, and a `written` that disagreed
+/// with the file.
+///
+/// One byte at open closes it, exactly as one byte in `emit` closes the other
+/// half: the fragment becomes a line of its own, which the reader counts in
+/// [`crate::Tail::malformed`] — visible, and exactly one event's worth — and
+/// the first event of the new process starts clean.
+///
+/// # What it does NOT recover, and does not pretend to
+///
+/// * **The torn event's own bytes.** They were never written. What is
+///   recovered is the *next* event and the count.
+/// * **Its sequence number.** `resume_seq` resumes from the last DECODABLE
+///   line, so the number the torn event carried is handed to the next one and
+///   `Tail::missing` reports no hole. That was true before this change and is
+///   neither caused nor fixed by it; the honest reading of the file is "one
+///   malformed line here", which is what the reader now says.
+/// * **`Health::is_loud`.** There is no counter in [`Health`] for a record
+///   torn by another process, and adding a field is a change to
+///   `crates/api/src/logs.rs`, which builds a `Health` by exhaustive literal.
+///   The notice reaches [`Health::last_error`] and `/logs.json`; the HTML
+///   banner is keyed on `is_loud()` and stays quiet.
+///
+/// # Why it spends the one stderr notice
+///
+/// `Sink::report` prints once per sink and never again, so a torn tail at open
+/// takes the notice a later write failure would have had. That is the right
+/// way round: a write failure still reaches the page through `dropped` and
+/// `is_loud()`, and this one does not reach the page at all. Loud where the
+/// other surface is silent, per `CLAUDE.md` §4.
+///
+/// # Why the parameter is `&mut dyn Target`
+///
+/// `&mut dyn Target` RATHER THAN `&mut FileTarget`, for the reason [`Target`]
+/// exists at all: the arm where the terminating byte itself cannot be written
+/// is a full disk, and a developer's machine does not enter that state on
+/// request. A refusing double does, and it is the same seam
+/// `a_write_that_cannot_land_is_counted_and_named_rather_than_silently_lost`
+/// already uses. The indirect call happens once, at open.
+fn terminate_torn_tail(target: &mut dyn Target, path: &Path, len: u64) -> (u64, Option<String>) {
+    if !ends_mid_line(path, len) {
+        return (len, None);
+    }
+    match target.append(b"\n") {
+        // The byte is part of the file now, so the running count owns it too —
+        // a count that disagreed with the file would move the roll decision by
+        // one byte for the life of the sink.
+        Ok(()) => (
+            len.saturating_add(1),
+            Some(format!(
+                "{}: the last line had no newline — a record torn by a kill or a power \
+                 cut. It has been terminated, so it is ONE line the reader counts in \
+                 Tail::malformed and the next event starts clean; the torn record's own \
+                 bytes are gone and are not recoverable",
+                path.display()
+            )),
+        ),
+        // NOTHING FURTHER IS LOST BY CARRYING ON. The file was already
+        // unwritable-or-worse and the very next append will say so in its own
+        // words; refusing to open here would lose the events that explain it.
+        Err(e) => (
+            len,
+            Some(format!(
+                "{}: the last line had no newline and the terminating byte could not be \
+                 written — {e}; the next event will fuse onto the torn record and both \
+                 will read as one malformed line",
+                path.display()
+            )),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -3247,6 +3381,338 @@ mod tests {
         assert!(said.contains("Sink"), "{said}");
         assert!(said.contains("dropped"), "{said}");
         assert!(said.contains("keep_files"), "{said}");
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A TORN TAIL FROM A KILL IS NOT FUSED ONTO BY THE NEXT PROCESS.**
+    ///
+    /// `emit` already terminates a line its own `write_all` tore. The other
+    /// way a line ends mid-write has no such repair available, because the
+    /// process that would have written the byte is gone: a kill between the
+    /// iterations of a split `write_all`, or a power cut with the last page
+    /// still in the cache.
+    ///
+    /// `resume_seq` reads the last COMPLETE line, so the restart knew the
+    /// fragment was there and appended past it anyway. Run against this exact
+    /// fixture with the fix disabled, the reader said
+    /// `records=3 malformed=1 partial_tail=false` while the sink said
+    /// `written=1 dropped=0`: the new event was inside the corrupt line, the
+    /// writer believed it had landed, and nothing counted the torn one.
+    ///
+    /// **`malformed` is 1 both before and after, and that is the point rather
+    /// than a weakness of the test.** Before, one `malformed` stood for two
+    /// lost events and neither was named; after, it stands for exactly the one
+    /// that was torn. What flips is everything around it: the file's last byte,
+    /// the record count, which record is newest, and `last_error`.
+    ///
+    /// The second half is the mutation that matters as much: a guard that
+    /// fired on EVERY open would put a blank line in front of every restart's
+    /// first event, and no assertion above would notice.
+    #[test]
+    fn a_file_that_ends_mid_line_is_terminated_at_open_and_not_appended_onto() {
+        let dir = scratch("torn-tail-on-open");
+        {
+            let sink = Sink::open(&Config::new(&dir)).expect("opens");
+            for _ in 0..3 {
+                assert!(sink.emit(&Event::info("t", "whole")).is_written());
+            }
+        }
+        // The shape a kill leaves: complete lines, then one that stops.
+        let mut bytes = std::fs::read(current_path(&dir)).expect("the file");
+        bytes.extend_from_slice(
+            br#"{"seq":4,"ts":"x","ms":5,"level":"info","target":"t","msg":"tor"#,
+        );
+        std::fs::write(current_path(&dir), &bytes).expect("torn");
+
+        let again = Sink::open(&Config::new(&dir)).expect("reopens");
+        let closed = std::fs::read(current_path(&dir)).expect("the file");
+        assert_eq!(
+            closed.last(),
+            Some(&b'\n'),
+            "the tear is closed AT OPEN, before anything is emitted through it"
+        );
+        assert_eq!(
+            again.health().current_bytes,
+            u64::try_from(closed.len()).unwrap(),
+            "and the running count owns the byte it wrote — a count that \
+             disagreed with the file moves the roll decision for the life of \
+             the sink"
+        );
+        // Named, and on the surface `/logs.json` renders.
+        let health = again.health();
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|said| said.contains("no newline")),
+            "the tear is named rather than repaired in silence: {health:?}"
+        );
+
+        assert!(again.emit(&Event::info("t", "after the tear")).is_written());
+        let found = crate::tail::tail(&dir, again.keep_files(), &crate::tail::Query::last(10));
+        assert_eq!(
+            found.records.len(),
+            4,
+            "three whole lines and the new one — fused, the new event is inside \
+             the corrupt line and this is 3: {found:?}"
+        );
+        assert_eq!(found.records[0].message, "after the tear");
+        assert_eq!(
+            found.malformed, 1,
+            "and the torn record is ONE malformed line, counted, which is \
+             exactly one event's worth"
+        );
+        // Stated rather than credited to the fix: the file ends on a line
+        // boundary, so the reader has no fragment to report. It read false
+        // before the fix too, because the FUSED line also ended in a newline —
+        // which is precisely why `partial_tail` could not be the thing that
+        // told anybody an event had been swallowed.
+        assert!(!found.partial_tail, "{found:?}");
+
+        // A FILE THAT ENDS PROPERLY IS NOT TOUCHED.
+        let before = std::fs::metadata(current_path(&dir)).expect("stat").len();
+        let third = Sink::open(&Config::new(&dir)).expect("reopens");
+        assert_eq!(
+            std::fs::metadata(current_path(&dir)).expect("stat").len(),
+            before,
+            "a whole file gains no byte on open"
+        );
+        assert_eq!(third.health().current_bytes, before);
+        assert!(
+            third.health().last_error.is_none(),
+            "and nothing is reported about a file that was never torn"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **THE TERMINATING BYTE CAN ITSELF FAIL, AND THAT IS SAID RATHER THAN
+    /// ASSUMED AWAY.**
+    ///
+    /// The arm is a full disk at the moment of restart, which is not a state a
+    /// developer's machine enters on request — so it is driven through the
+    /// [`Target`] seam, the same way the failed-append policy is. Two things
+    /// are pinned: the running count does NOT claim a byte that was never
+    /// written, and the notice says the next event will fuse rather than
+    /// implying the tear was closed.
+    #[test]
+    fn a_tear_that_cannot_be_closed_is_named_and_the_count_claims_no_byte() {
+        let dir = scratch("torn-tail-cannot-close");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let torn = b"{\"seq\":1,\"ms\"";
+        std::fs::write(current_path(&dir), torn).expect("torn");
+
+        let brittle = Arc::new(Brittle::default());
+        brittle.refuse();
+        let mut target = Arc::clone(&brittle);
+        let (bytes, why) = super::terminate_torn_tail(
+            &mut target,
+            &current_path(&dir),
+            u64::try_from(torn.len()).unwrap(),
+        );
+        assert_eq!(
+            bytes,
+            u64::try_from(torn.len()).unwrap(),
+            "the count is the file's real length: nothing was appended"
+        );
+        let said = why.expect("a tear that could not be closed is still reported");
+        assert!(said.contains("could not be written"), "{said}");
+        assert!(
+            said.contains("fuse"),
+            "and it says what will happen next rather than implying a repair: {said}"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A TAIL THAT CANNOT BE EXAMINED IS LEFT EXACTLY AS IT WAS FOUND.**
+    ///
+    /// `ends_mid_line` has to look at the last byte, and looking can refuse.
+    /// The wrong answer to "I could not tell" is to append anyway: on a file
+    /// whose last line is complete that puts a blank line in front of the
+    /// restart's first event, on every open, forever. So the unknown case does
+    /// nothing at all, and this pins that it really does nothing — not one
+    /// byte, and no claim in `last_error` about a file nobody could read.
+    ///
+    /// A **write-only** file is the portable way to reach it: `FileTarget`
+    /// opens it for appending and `read_at`, which opens for reading, refuses.
+    /// The same caveat the read-only-directory fixture above carries applies —
+    /// as root the mode decides nothing and this proves nothing.
+    #[test]
+    fn a_tail_that_cannot_be_examined_is_left_exactly_as_it_was_found() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = scratch("torn-tail-unreadable");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let torn = b"{\"seq\":1,\"ms\"";
+        std::fs::write(current_path(&dir), torn).expect("torn");
+        let mut write_only = std::fs::metadata(current_path(&dir))
+            .expect("stat")
+            .permissions();
+        write_only.set_mode(0o222);
+        std::fs::set_permissions(current_path(&dir), write_only).expect("write-only");
+
+        let sink = Sink::open(&Config::new(&dir)).expect("a log that cannot be read still opens");
+        let health = sink.health();
+        let on_disk = std::fs::metadata(current_path(&dir)).expect("stat").len();
+
+        let mut restored = std::fs::metadata(current_path(&dir))
+            .expect("stat")
+            .permissions();
+        restored.set_mode(0o644);
+        std::fs::set_permissions(current_path(&dir), restored).expect("restore");
+
+        assert_eq!(
+            on_disk,
+            u64::try_from(torn.len()).unwrap(),
+            "not one byte was appended on a guess"
+        );
+        assert_eq!(health.current_bytes, on_disk);
+        assert!(
+            health.last_error.is_none(),
+            "and nothing is claimed about a file nobody could look at: {health:?}"
+        );
+        assert_eq!(
+            health.next_seq, 1,
+            "`resume_seq` could not read it either, which is its own stated limit"
+        );
+        let _ignored = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A real file whose descriptor will not be pointed anywhere else.
+    ///
+    /// `Brittle` refuses everything, so a sink around it cannot show what
+    /// happens to the bytes AFTER a roll that renamed and could not reopen —
+    /// the appends refuse too. This one keeps writing through the descriptor it
+    /// already holds, which is exactly what a real [`FileTarget`] does, and
+    /// exactly why the bytes land in the file the rename moved.
+    #[derive(Debug)]
+    struct WontReopen {
+        file: std::fs::File,
+    }
+
+    impl Target for WontReopen {
+        fn append(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+            use std::io::Write as _;
+            self.file.write_all(bytes)
+        }
+
+        fn sync(&self) -> std::io::Result<()> {
+            self.file.sync_all()
+        }
+
+        fn reopen(&mut self, _path: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ))
+        }
+    }
+
+    /// **A ROLL THAT RENAMED AND THEN COULD NOT REOPEN WRITES INTO
+    /// `events.1.ndjson`, BEHIND `Health::path`'S BACK.**
+    ///
+    /// `roll` unlinks, renames the set up, renames the current file to `.1`,
+    /// and only then reopens. Every step before the reopen has a test naming
+    /// it — `a_rotation_error_that_is_not_absence_is_reported_rather_than_swallowed`
+    /// covers the unlink and the rename — and the reopen had none: the one test
+    /// that reached it did so through `Brittle`, whose `append` refuses as
+    /// well, so every event after the failure was `Dropped` and the state this
+    /// leaves behind was never observed.
+    ///
+    /// The state is worth a test because it is the one degradation here that is
+    /// not visible on the surface that reports it. `rotation_failures` counts
+    /// the roll and `is_loud` says so, but `Health::path` still names
+    /// `events.ndjson` — which by then does not exist, because the rename
+    /// completed and the create that would have remade it did not. The
+    /// descriptor the sink still holds names the renamed inode, so every later
+    /// event lands in `events.1.ndjson` instead.
+    ///
+    /// Nothing is lost, and that is asserted too: the reader walks the set
+    /// rather than the one path, so the events are all on the page. What is
+    /// wrong is only where `Health` says they are.
+    #[test]
+    fn a_roll_that_renames_and_cannot_reopen_writes_into_the_file_it_rolled() {
+        let dir = scratch("roll-reopen-refuses");
+        std::fs::create_dir_all(&dir).expect("the directory");
+        let file = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(current_path(&dir))
+            .expect("the current file");
+        let sink = Sink::with_target(
+            &Config::new(&dir)
+                .with_max_file_bytes(MIN_FILE_BYTES)
+                .with_keep_files(2),
+            Box::new(WontReopen { file }),
+        )
+        .expect("opens");
+
+        // Over half the bound, so the second event rolls. The arithmetic is
+        // the one `a_roll_that_fails_is_counted_and_the_event_is_written_anyway`
+        // spells out: the message ceiling alone cannot get there.
+        let fat = "x".repeat(MAX_MESSAGE_BYTES);
+        let wide = "y".repeat(MAX_STR_VALUE_BYTES);
+        let emit_fat = || {
+            sink.emit(
+                &Event::info("t", &fat)
+                    .with("pad_a", wide.as_str())
+                    .with("pad_b", wide.as_str()),
+            )
+        };
+
+        assert!(emit_fat().is_written());
+        let span = sink.health().current_bytes;
+        assert!(
+            span.saturating_mul(2) > MIN_FILE_BYTES,
+            "the line must be over half the bound or nothing rolls: span {span}"
+        );
+        assert!(
+            current_path(&dir).exists(),
+            "the premise: it is there first"
+        );
+
+        // The roll: unlink of the absent oldest succeeds, the rename succeeds,
+        // the reopen refuses. The event is written anyway.
+        assert!(emit_fat().is_written());
+        // And no roll is re-attempted, so the third lands the same way.
+        assert!(emit_fat().is_written());
+
+        let health = sink.health();
+        assert_eq!(
+            health.rotation_failures, 1,
+            "the reopen failure is a FAILED roll, counted once: {health:?}"
+        );
+        assert_eq!(health.rotations, 0, "and not counted as a roll as well");
+        assert!(health.is_loud());
+        assert!(
+            health
+                .last_error
+                .as_deref()
+                .is_some_and(|said| said.contains("cannot open the next file")),
+            "named by the step that refused, not by the rename before it: {health:?}"
+        );
+        assert!(
+            health.current_bytes > MIN_FILE_BYTES,
+            "the current file grows past its bound, which is the documented \
+             degradation: {health:?}"
+        );
+
+        // THE PART NOTHING ELSE SAYS. `Health` names a path that is not there.
+        assert_eq!(health.path, current_path(&dir));
+        assert!(
+            !current_path(&dir).exists(),
+            "the rename completed and the create that would have remade it did \
+             not, so Health::path names a file that does not exist"
+        );
+        assert_eq!(
+            lines_of(&rotated_path(&dir, 1)).len(),
+            3,
+            "and all three events are in the file the roll moved aside"
+        );
+
+        // Nothing is LOST by it: the reader walks the set, not the one path.
+        let found = crate::tail::tail(&dir, sink.keep_files(), &crate::tail::Query::last(10));
+        assert_eq!(found.records.len(), 3, "{found:?}");
+        assert_eq!(found.malformed, 0);
         let _ignored = std::fs::remove_dir_all(&dir);
     }
 }
