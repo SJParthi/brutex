@@ -153,10 +153,17 @@ pub struct Frontier {
     /// the mask's word array, which is a total order over the whole 384-bit
     /// space and is therefore stable across processes and machines.
     ///
-    /// **This is ordered by support only where support ties are broken by that
-    /// word order.** It is not a ranking by edge, profitability or any other
-    /// outcome — no document defines one, so this module does not invent one
-    /// (`CLAUDE.md` §3.1).
+    /// **This is canonical MASK order, not support order.** The wording here used
+    /// to say the opposite — "ordered by support, ties broken by word order" —
+    /// and the code has never done that: `sort_canonically` keys on
+    /// `(mask.words(), hits)`, so the word array is the PRIMARY key and `hits` is
+    /// a tiebreak that can never fire, because a mask is unique within a level.
+    /// The module header states it correctly; this field doc contradicted it.
+    ///
+    /// It is not a ranking by edge, profitability or any other outcome — no
+    /// document defines one, so this module does not invent one
+    /// (`CLAUDE.md` §3.1). A reader who wants the strongest first must sort, and
+    /// must first decide what "strongest" means.
     pub frequent: Vec<Itemset>,
     /// Candidates the join produced at this level, counting each time it was
     /// produced. The join reaches the same k-set from several pairs, so this is
@@ -1131,6 +1138,68 @@ mod tests {
                     .fold(ConditionMask::default(), |m, &b| m.with_bit(b))
             })
             .collect()
+    }
+
+    /// THE PROPERTY THE DELETED `popcount != k` FILTER USED TO ENFORCE.
+    ///
+    /// The prefix join drops the textbook `popcount != k` skip and justifies the
+    /// deletion in a comment: `a` and `b` share a prefix of k−2 positions and
+    /// differ only in their highest, so `a.union(b)` has exactly k bits and the
+    /// branch could never be taken. That reasoning is correct and it was
+    /// **unproven** — the comment cited this test by name and no such test had
+    /// ever been written. `git log -S` over the whole history finds the
+    /// identifier in exactly one commit: the one that removed the filter.
+    ///
+    /// So this is the assertion the deletion was authorised by. It walks the
+    /// same exhaustive column space `the_apriori_kept_set_equals_the_brute_force_kept_set`
+    /// uses — every assignment of six bars drawn from four bit patterns, at three
+    /// thresholds — and checks that every itemset a level emits carries exactly
+    /// that level's `k` bits. A join that paired across prefixes, or a
+    /// `without_highest` that cleared the wrong bit, would put a k−1 or k+1
+    /// itemset in a level and this refuses it.
+    #[test]
+    fn every_generated_candidate_has_exactly_k_bits() {
+        const P: u32 = 4;
+        let live: Vec<u32> = (0..P).collect();
+        let shapes: [&[u32]; 4] = [&[], &[0, 1], &[1, 2], &[0, 1, 2, 3]];
+
+        let mut checked = 0_u64;
+        for assignment in 0..4_usize.pow(6) {
+            let column: Vec<ConditionMask> = (0..6)
+                .map(|slot| {
+                    let pick = (assignment / 4_usize.pow(slot)) % 4;
+                    shapes
+                        .get(pick)
+                        .copied()
+                        .unwrap_or(&[])
+                        .iter()
+                        .fold(ConditionMask::default(), |m, &b| m.with_bit(b))
+                })
+                .collect();
+
+            for min_hits in 1..=3_u64 {
+                let sweep = Ladder::with_min_hits(min_hits).walk(&column, &live);
+                for level in &sweep.levels {
+                    for set in &level.frequent {
+                        assert_eq!(
+                            set.mask.popcount(),
+                            level.k,
+                            "level k={} emitted a {}-bit itemset at min_hits={min_hits}, \
+                             assignment={assignment}: the prefix join is the only thing \
+                             standing in for the popcount filter it replaced",
+                            level.k,
+                            set.mask.popcount()
+                        );
+                        checked = checked.saturating_add(1);
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "the space produced no itemset at all, so this asserted nothing — \
+             a test that cannot fail is the defect this file bans"
+        );
     }
 
     /// **E-02 — the completeness proof.** Apriori's kept set equals brute force's,
