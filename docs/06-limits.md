@@ -210,8 +210,8 @@ then they stay in this table and out of any claim.
 
 ## 9. What the lake actually contains
 
-Measured 2026-08-01 by a full read of all 284 one-minute Parquet files for the
-three engine instruments plus India VIX — 1,706,290 bars. These are
+Measured 2026-08-01 by a full read of all 284 one-minute Parquet files for
+NIFTY, BANKNIFTY and SENSEX plus India VIX — 1,706,290 bars. These are
 observations of the data on disk, not claims about the exchange.
 
 **Resolved.** A bar timestamp is the **open** of its minute. Three independent
@@ -230,7 +230,7 @@ write boundary is exact rather than merely close.
 
 | Limit | Consequence |
 |---|---|
-| **SENSEX history begins 2022-09-01**, not 2020-01 | NIFTY and BANKNIFTY have 2 years 8 months that SENSEX does not. A cross-instrument sweep before 2022-09 has no SENSEX data at all. Never present a three-instrument result over a window SENSEX cannot cover. |
+| **SENSEX history begins 2022-09-01**, not 2020-01 | NIFTY and BANKNIFTY have 2 years 8 months that SENSEX does not. A cross-instrument sweep before 2022-09 has no SENSEX data at all. D-0017 has since dropped SENSEX from the swept set, so no sweep can produce that result; the gap still binds any comparison drawn against the SENSEX bars left on disk. |
 | **India VIX does not print every minute** | 449 of 1,630 dates deviate from 375 bars, against 13 for NIFTY. Gaps are single scattered minutes with no time-of-day concentration — 2024-06 has 7,088 VIX bars against 7,125 NIFTY bars. The `vix_at_entry` / `vix_at_exit` stamp therefore **cannot assume a VIX bar exists for its index bar**, and must carry an explicit absence rather than a zero. |
 | **375 bars per day is the common case, not the rule** | 13 NIFTY days, 8 SENSEX days and 449 VIX days differ. Ten sessions sit wholly or partly outside 09:15–15:29: three weekend budget sessions, four evening Muhurat sessions, one afternoon Muhurat session, one circuit-halt pair, and the 2021-02-24 outage day which runs to 16:59 with a 3.5-hour hole. Any code that hardcodes 375 is wrong on those days. |
 | **Parquet footer statistics are absent** | The writer emitted no min/max/null-count for any column chunk. Integrity verification during conversion requires reading column data; there is no cheap footer path. |

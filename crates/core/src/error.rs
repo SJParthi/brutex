@@ -86,7 +86,7 @@ impl fmt::Display for InstrumentError {
         match self {
             Self::UnknownExchange => f.write_str("unknown exchange"),
             Self::NotSweepable => f.write_str(
-                "instrument is storable but not sweepable; the engine surface is fixed at three",
+                "instrument is storable but not sweepable; the engine surface is fixed at two",
             ),
             Self::Malformed => f.write_str("malformed instrument identifier"),
             Self::FieldTooWide { field, len } => write!(
