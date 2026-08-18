@@ -565,21 +565,6 @@
       calc(100% - 11px) 55%,
       calc(100% - 7px) 55%;
   }
-  .csel {
-    flex: 1 1 auto;
-    min-width: 0;
-    appearance: none;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r1);
-    color: var(--ink);
-    font-family: var(--mono);
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    padding: 5px 7px;
-    text-align: center;
-    cursor: pointer;
-  }
   .cal-w,
   .cal-g {
     display: grid;

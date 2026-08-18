@@ -6466,7 +6466,7 @@ jobs:
 
       - name: Gate W4 — unused CSS does not grow
         run: |
-          CEILING=33
+          CEILING=10
           npm --prefix web run build 2>&1 | tee /tmp/build.log >/dev/null
           FOUND=$(grep -F 'Unused CSS selector' /tmp/build.log \
                   | sed -E 's/.*selector "([^"]+)".*/\1/' | sort -u | wc -l | tr -d ' ')

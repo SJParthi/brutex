@@ -7430,95 +7430,6 @@
     flex-wrap: wrap;
     gap: var(--s5);
   }
-  /* THE END'S OWN LABEL SITS UNDER THE RUNG'S. It is `--fs-mini` in the sans
-     face where the rung caption above it is `--fs-micro` mono, which is
-     /ingest's pairing: the rung is named once in the strip's label voice, and
-     From/To are a quieter second level inside it rather than two more rungs. */
-  /* THE COUNT CLAUSE INSIDE A `.dcell` IS NOT A CHILD OF `.cell`, so the
-     `.strip .field > .note` rule above cannot reach it — `>` is the whole
-     reason, and it is the right selector there. Stated again here at the same
-     metrics so both ends of the window read like every other rung's clause. */
-
-  /* THE COMPLAINT ABOUT A WINDOW THIS PAGE REFUSES TO REORDER, AND IT POINTS
-     UP. Both halves of that are deliberate. It is taken out of the flow because
-     a two-line sentence inside a 232px cell would widen the cell and reflow the
-     whole strip the moment the two ends cross. It hangs ABOVE the field rather
-     than below because below is where the calendar opens, and a message the
-     popup covers is a message that was not delivered. */
-  /* NO `.derr.on` PAIR HERE. The approved design toggles this node with a
-     class because it is always in its DOM; this one is gated by an `{#if}` on
-     `rangeInverted`{
-    position: absolute;
-    left: var(--s5);
-    bottom: calc(100% - var(--s2));
-    z-index: 25;
-    width: 246px;
-    font-style: normal;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    line-height: 1.4;
-    white-space: normal;
-    color: var(--down);
-    background: var(--panel);
-    border: 1px solid color-mix(in srgb, var(--down) 55%, var(--line));
-    border-radius: var(--r2);
-    padding: var(--s3) var(--s4);
-    box-shadow: var(--e2);
-  } AND THAT IS NOT AN OMISSION. Only the FROM
-     end ever draws this complaint — it is the bound that is too late — so a rule
-     anchoring it to the To cell's right edge would be a rule for a node nothing
-     builds, which is how a control comes back without anyone deciding to bring
-     it back. If the message ever has to be said at both ends, the rule belongs
-     here beside the one above it. */
-
-  /* ---- THE CONTROL FACE ----------------------------------------------
-     `.mnyb` is the strip's own select-lookalike: a button drawn to the exact
-     metrics of the fields beside it, with the caret painted on rather than
-     inherited from a native `<select>`. Feed, Universe, Month and the holes
-     toggle wear it; Strike, Moneyness and Instrument are `$lib/Picker.svelte`,
-     whose own face is brought to the same metrics below.
-
-     WHY THOSE FOUR ARE NOT `Picker`S: a `Picker` row is a checkbox, and these
-     four need a row that is DRAWN, DISABLED and carries its own refusal — the
-     feed that is not ready, the universe tier with no source on the wire. A
-     tick cannot say why it is unavailable. */
-  /* `.scopeline .feedname` IS GONE WITH THE READOUT IT PAINTED. It drew a span
-     of plain text to `.mnyb`'s exact metrics — same size, same weight, same
-     mono family — so that the strip's rhythm survived the feed not being a
-     control here. It survived it too well: the face was indistinguishable from
-     the six dropdowns beside it and refused every press, and the one real
-     selector was in the top bar. The feed is a `.mnyb` now, so the rule has
-     nothing to bring to the same metrics, and a rule kept for a node nothing
-     builds is how a readout comes back without anyone deciding to bring it
-     back. Feed, Universe, Timeframe, Month and the holes toggle now wear the
-     face below; Strike, Moneyness and Instrument are `$lib/Picker.svelte`,
-     brought to the same metrics further down. */
-  /* THE FEED FACE IS /INGEST'S `.ddb`, WHICH IS `Picker`'S `.pbtn` UNDER A
-   * DIFFERENT NAME.
-   *
-   * The feed cannot BE a `Picker` — on either page — and the reason is the
-   * same one /ingest records: a Picker row is a checkbox, and a feed the
-   * server refuses needs a row that is drawn, dead, and carrying
-   * `/feeds.json`'s own reason. A tick cannot say why it is unavailable. So
-   * the menu stays hand-rolled here and the FACE is brought to Picker's
-   * metrics instead, property for property — 15px semibold mono, 11px/14px
-   * padding, 9px radius, the caret at 17px/12px — which is exactly what
-   * /ingest does and why its five controls read as one control.
-   *
-   * What this replaced was the bar-era face: borderless, `padding: 0 20px 0
-   * 0`, a 19px line box, the caret pulled in to 6px. Beside eight bordered
-   * Pickers it read as a link someone had left in the strip. */
-  /* THE TOGGLE WEARS THE SAME FACE AND OPENS NOTHING, so it drops the caret
-     rather than drawing one that points at a menu that does not exist. Pressed
-     is a STATE and is drawn as one — the holes filter being on is the single
-     most consequential thing this strip can be doing to the table under it. */
-  .mnyb.toggle {
-    background-image: none;
-    padding-right: 0;
-  }
-  .mnyb.toggle[aria-pressed='true'] {
-    color: var(--acc);
-  }
 
   /* THE SHARED `Picker` NOW WEARS ITS OWN FACE, AND DELETING A RULE IS THE
    * WHOLE OF THE FIX.
@@ -7547,47 +7458,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  /* ---- THE MENU -------------------------------------------------------
-     Drawn to `Picker`'s own popup metrics, so a menu opened from a `.mnyb` and
-     a menu opened from a `.pbtn` are the same object two cells apart. */
-  /* Drawn and refused, never absent: a row missing from the list reads as a set
-     that does not exist rather than one this page cannot count. The whole reason
-     is on the row's own `title`. */
-  /* THE MONTH'S STATE SPINE, on the row where the card's used to be. The pip is
-     the only colour a month row carries, and it carries the same three states
-     the card band did — the rules for it are further down and are shared with
-     the table, so a month that reads "gap" here reads "gap" there. */
-  .opt .ct .pip {
-    margin-right: var(--s2);
-  }
-  /* ---- THE FIND BOX'S LISTBOX ----------------------------------------
-     THE SAME `.menu` AS EVERY OTHER POPUP IN THE STRIP, so the combobox's
-     suggestions and the month menu are one object two cells apart — which is
-     the whole reason `.menu` and `.opt` are written once above.
-
-     WHAT IT ADDS IS ONE THING: it is in the DOM at all times, because
-     `aria-controls` on the field names it and an IDREF that resolves to
-     nothing is a broken promise. So it is HIDDEN rather than absent, and
-     `display: none` is the right hiding — it takes the node out of the a11y
-     tree and out of the layout while `aria-expanded="false"` on the field says
-     the same thing in the same breath. `visibility` or an opacity would leave
-     a 380px-tall invisible box over the table. */
-  .menu.list {
-    display: none;
-  }
-  .menu.list.shown {
-    display: block;
-  }
-  /* THE HIGHLIGHT IS NOT `:hover`. In this pattern the FIELD holds the focus
-     and `aria-activedescendant` names the row, so the row has no focus ring of
-     its own to inherit — without this the arrow keys would move a highlight
-     nothing on screen shows. It is drawn the same way `.opt:hover` is, plus
-     the accent rule, so pointer and keyboard land on one appearance. */
-  .opt.cur {
-    background: var(--panel-2);
-    box-shadow: inset 2px 0 0 var(--acc);
   }
   /* SHOWN AND REFUSED, which is right on a page that has one search and wrong in a
      row of borderless faces, so the box is taken off HERE — three class names
@@ -7642,33 +7512,6 @@
     gap: var(--s4);
     min-width: 0;
   }
-  .px .k {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--acc);
-  }
-  .px .p {
-    font-size: var(--fs-2xl);
-    font-weight: var(--w-bold);
-    letter-spacing: -0.03em;
-    line-height: 1;
-    color: var(--ink-hi);
-    font-variant-numeric: tabular-nums;
-  }
-  /* NEUTRAL, AND DELIBERATELY. On the approved design this chip is the signed
-     change and wears green or red; here it is a denominator, and green and red
-     on this page mean DIRECTION and nothing else. A denominator has none. */
-  .px .d {
-    font-size: var(--fs-sm);
-    font-weight: var(--w-semi);
-    padding: 2px var(--s4);
-    border-radius: var(--r1);
-    background: var(--panel-2);
-    color: var(--dim);
-    white-space: nowrap;
-  }
   .actions {
     display: flex;
     align-items: center;
@@ -7703,27 +7546,6 @@
     border-top: 1px solid var(--line);
     font-size: var(--fs-xs);
     color: var(--faint);
-  }
-  .anchor .note .k {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--acc);
-  }
-  .anchor .note b {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-sm);
-    font-weight: var(--w-bold);
-    color: var(--ink);
-  }
-  /* The meter keeps its length and loses its band: at this size a full-width
-     track would be the widest thing on the line and would read as the answer
-     rather than as one term of it. */
-  .anchor .note .meter {
-    width: 84px;
-    flex: none;
   }
 
   .asof {
@@ -7821,16 +7643,13 @@
     border-radius: var(--r-full);
     background: var(--n7);
   }
-  [data-state='full'] .meter .fill,
-  .meter[data-state='full'] .fill {
+  [data-state='full'] .meter .fill{
     background: var(--n7);
   }
-  [data-state='near'] .meter .fill,
-  .meter[data-state='near'] .fill {
+  [data-state='near'] .meter .fill{
     background: color-mix(in srgb, var(--warn) 55%, var(--n7));
   }
-  [data-state='gap'] .meter .fill,
-  .meter[data-state='gap'] .fill {
+  [data-state='gap'] .meter .fill{
     background: var(--warn);
   }
 
@@ -8588,7 +8407,6 @@
     font-weight: var(--w-semi);
     font-variant-numeric: tabular-nums;
   }
-  .pager .kbd,
   .dclose .kbd {
     margin: 0 1px;
   }
@@ -8604,11 +8422,7 @@
        column while `aria-sort` had already moved. The page then said one
        thing to a screen reader and the opposite to an eye. A state indicator
        has to be right on the frame it changes, so it changes on that frame. */
-    .sortbtn,
-    .dval,
-    .dbtn,
-    .calnav,
-    .cmon {
+    .sortbtn{
       transition:
         background-color var(--d-hover) var(--ease-out),
         border-color var(--d-hover) var(--ease-out),
@@ -8804,21 +8618,6 @@
    * delivered. */
   .bgrid thead th.numh .caret {
     order: -1;
-  }
-  /* THE STATS LINE KEEPS ITS FIGURES AND HIDES ITS CLAUSES. See the comment
-     at the `<p class="note quiet terse">` for the sentence this replaced. The `.u`
-     spans still render into the accessibility tree and still carry their
-     titles; they are simply not competing with the numbers for the eye. */
-  .note.terse > .u,
-  .note.terse .u {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
   }
 
   /* ------------------------------------------------------------------
