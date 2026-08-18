@@ -47,6 +47,20 @@
   import { onMount, untrack } from 'svelte';
   import { store, syncStore, refreshStore, watchStore, foldMonths } from '$lib/store.svelte.js';
   import { notAReceipt, RECEIPT_HEADER } from '$lib/receipt.js';
+  // IMPORTED AS `request`, AND THE ALIAS IS THE WHOLE POINT.
+  //
+  // `readFolder` declares its own `const ask` for probing folder segments. A
+  // module-scope `import { ask }` is shadowed by it, so `await ask(url)` inside
+  // that helper called THE HELPER, not the wrapper -- an unbounded recursion
+  // that builds clean, type-checks clean, and is invisible to every test in
+  // this tree because none of them drive `readFolder`. It shipped in 74ad3a9
+  // and was removed by accident when 6eee183 rewrote the call site back to a
+  // bare `fetch`.
+  //
+  // The name is the fix. `request` cannot be shadowed by anything here, and
+  // `web/tests/timeout.test.js` now refuses a bare `fetch` anywhere in
+  // `web/src` so the ceiling cannot be reverted silently a second time.
+  import { ask as request } from '$lib/ask.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -1486,7 +1500,7 @@
     /** @param {string | null} segment */
     const ask = async (segment) => {
       const at = segment ? `&segment=${segment}` : '';
-      const r = await fetch(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
+      const r = await request(`/folder.json?feed=${encodeURIComponent(wire)}${at}`);
       return { ok: r.ok, data: await r.json(), segment };
     };
     const first = await ask(null);
@@ -3229,7 +3243,7 @@
     try {
       const answers = await Promise.all(
         list.map((f) =>
-          fetch(`/instruments.json?feed=${encodeURIComponent(f.wire)}`)
+          request(`/instruments.json?feed=${encodeURIComponent(f.wire)}`)
             .then((r) => {
               if (!r.ok) throw new Error(`${f.display}: /instruments.json answered HTTP ${r.status}`);
               return r.json();
@@ -3679,7 +3693,7 @@
     if (pilot.busy) return;
     pilot = { ...pilot, busy: true, error: null };
     try {
-      const r = await fetch('/ingest/status.json');
+      const r = await request('/ingest/status.json');
       if (!r.ok) throw new Error(`/ingest/status.json answered HTTP ${r.status}`);
       const j = await r.json();
       pilot = {
@@ -5230,7 +5244,12 @@
       for (const b of group) {
         sent = { done: sent.done, of: bodies.length, label: b.label };
         try {
-          const r = await fetch('/pull/spot', {
+          const r = await request('/pull/spot', {
+            // A PULL IS THE ONE ROUTE WHOSE WORK IS NOT LOCAL, so it carries
+            // its own ceiling rather than the 15 s every other read gets. The
+            // operator's Cancel signal below still applies: `ask` answers to
+            // both.
+            ms: 120_000,
             method: 'POST',
             headers: { 'content-type': 'application/x-www-form-urlencoded' },
             body: b.body,

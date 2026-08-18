@@ -804,7 +804,7 @@ export function surveyStores(list) {
 
   surveyFlight = Promise.all(
     feedsIn.map((f) =>
-      fetch(`/store.json?feed=${encodeURIComponent(f.wire)}`)
+      ask(`/store.json?feed=${encodeURIComponent(f.wire)}`)
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
         .then((d) => {
           const rows = Array.isArray(d) ? d : [];
