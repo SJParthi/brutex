@@ -54,7 +54,6 @@
    * on the input with the bound stated under the grid.
    */
   import { MON, istMonth } from '$lib/dates.js';
-  import Picker from '$lib/Picker.svelte';
 
   let {
     /** `yyyy-mm-dd`, or `''` for "no bound". The caller owns it. */
@@ -256,8 +255,83 @@
     return Array.from({ length: Math.max(1, hi - lo + 1) }, (_, i) => lo + i);
   });
 
-  const atFloor = $derived(Boolean(min) && shown <= min.slice(0, 7));
-  const atCeil = $derived(Boolean(max) && shown >= max.slice(0, 7));
+  /**
+   * WHICH FACE THE PANEL IS SHOWING.
+   *
+   * The month and the year were two `Picker`s in the header, and `Picker` is
+   * the STRIP's control — 42px rows, an 18px radio, a 380px scroll box, and a
+   * panel that hangs `position: absolute` off the button it belongs to. Inside
+   * a 320px calendar that panel has nowhere to hang but OVER THE GRID: opening
+   * the year drew a scrolling list of radio buttons across the forty-two days
+   * it was supposed to be steering.
+   *
+   * `routes/ingest` fixed its own copy of this first; this is that fix brought
+   * to the component /db uses, so the two calendars in this product are one
+   * design rather than two. Days, then the twelve months, then the years — each
+   * REPLACING the grid in place and drilling back down to it. Nothing overlaps
+   * anything and `.calbody` holds the day face's height so the note and the
+   * footer do not move when the face changes.
+   *
+   * @type {'day' | 'month' | 'year'}
+   */
+  let pad = $state('day');
+
+  /** The twelve months of the year on screen, each carrying its own refusal. */
+  const months = $derived(
+    MON.map((label, i) => {
+      const ym = `${shown.slice(0, 4)}-${String(i + 1).padStart(2, '0')}`;
+      return {
+        ym,
+        label,
+        off: (Boolean(min) && ym < min.slice(0, 7)) || (Boolean(max) && ym > max.slice(0, 7))
+      };
+    })
+  );
+
+  /** What the caption says, which is always the unit the arrows move. */
+  const caption = $derived(
+    pad === 'day'
+      ? `${MON[Number(shown.slice(5, 7)) - 1] ?? ''} ${shown.slice(0, 4)}`
+      : pad === 'month'
+        ? shown.slice(0, 4)
+        : `${years[0]} – ${years[years.length - 1]}`
+  );
+  /** What the caption OPENS, named rather than left to be guessed. */
+  const captionWhy = $derived(
+    pad === 'day'
+      ? 'Pick a month instead of paging one at a time.'
+      : pad === 'month'
+        ? 'Pick a year.'
+        : 'Back to the days.'
+  );
+
+  const atFloor = $derived(
+    pad === 'day'
+      ? Boolean(min) && shown <= min.slice(0, 7)
+      : pad === 'month'
+        ? Number(shown.slice(0, 4)) <= years[0]
+        : true
+  );
+  const atCeil = $derived(
+    pad === 'day'
+      ? Boolean(max) && shown >= max.slice(0, 7)
+      : pad === 'month'
+        ? Number(shown.slice(0, 4)) >= years[years.length - 1]
+        : true
+  );
+
+  /** The arrows move the unit the caption names, whichever face is up. */
+  /** @param {number} by */
+  function step(by) {
+    if (pad === 'day') view = addMonths(shown, by);
+    else if (pad === 'month') view = `${String(Number(shown.slice(0, 4)) + by).padStart(4, '0')}-${shown.slice(5, 7)}`;
+  }
+  /* THE CAPTION DRILLS UP AND A CHOICE DRILLS BACK DOWN — days to months to
+     years, and a picked year lands on the months of that year rather than
+     jumping straight to a grid no month has been chosen for. */
+  function zoom() {
+    pad = pad === 'day' ? 'month' : pad === 'month' ? 'year' : 'day';
+  }
 
   /** @type {HTMLDivElement | null} */
   let panel = $state(null);
@@ -269,6 +343,10 @@
       return;
     }
     view = '';
+    // ALWAYS ON THE DAYS. A panel that reopened on the month pad because that
+    // is where it was left would answer a question the reader did not ask
+    // twice in a row.
+    pad = 'day';
     openId = id;
   }
 
@@ -340,82 +418,101 @@
       bind:this={panel}
       onkeydown={onKey}
     >
+      <!-- ONE CAPTION BETWEEN TWO ARROWS, and the caption is the control. It
+           was two `Picker`s; see `pad` for why a strip control inside a 320px
+           popover could only ever draw over the grid it steers. The arrows
+           always move the unit the caption names, so the pair reads as one
+           instrument on all three faces. -->
       <div class="cal-h">
         <button
           type="button"
           class="nav"
-          aria-label="Previous month"
+          aria-label="Back"
           disabled={atFloor}
-          onclick={() => (view = addMonths(shown, -1))}>‹</button
+          onclick={() => step(-1)}>&lsaquo;</button
         >
-        <!-- MONTH AND YEAR ARE `Picker`S, NOT `<select>`S, AND THE REASON IS A
-             LIMIT RATHER THAN A PREFERENCE.
-
-             `.csel` already carried `appearance: none`, so the CLOSED control
-             was styled and looked right. What could never be styled is the OPEN
-             option list: a `<select>`'s popup is drawn by the operating system,
-             not the page, so on macOS it renders the OS blue highlight and its
-             own tick -- a control from a different product appearing in the
-             middle of this one, and no amount of CSS reaches it. That is not a
-             thing to tune; it is a thing to stop using.
-
-             `Picker` draws its own list, so the calendar's two menus now match
-             every other menu in this product, including inside a popover. -->
-        <div class="cpick">
-          <Picker
-            single
-            label="months"
-            summary={MON[Number(shown.slice(5, 7)) - 1] ?? 'Month'}
-            title="The month this grid is showing."
-            rows={MON.map((name, i) => ({ key: String(i + 1).padStart(2, '0'), name }))}
-            selected={new Set([shown.slice(5, 7)])}
-            onchange={(/** @type {Set<string>} */ sel) => {
-              const m = [...sel][0];
-              if (m) view = `${shown.slice(0, 4)}-${m}`;
-            }}
-          />
-        </div>
-        <div class="cpick">
-          <Picker
-            single
-            label="years"
-            summary={shown.slice(0, 4)}
-            title="The year this grid is showing."
-            rows={years.map((y) => ({ key: String(y), name: String(y) }))}
-            selected={new Set([shown.slice(0, 4)])}
-            onchange={(/** @type {Set<string>} */ sel) => {
-              const y = [...sel][0];
-              if (y) view = `${y}-${shown.slice(5, 7)}`;
-            }}
-          />
-        </div>
+        <button
+          type="button"
+          class="calcap"
+          aria-label={`${caption}. ${captionWhy}`}
+          title={captionWhy}
+          aria-expanded={pad !== 'day'}
+          onclick={zoom}
+        >
+          <span class="capt">{caption}</span>
+          <span class="capc" class:on={pad !== 'day'} aria-hidden="true">&#9662;</span>
+        </button>
         <button
           type="button"
           class="nav"
-          aria-label="Next month"
+          aria-label="Forward"
           disabled={atCeil}
-          onclick={() => (view = addMonths(shown, 1))}>›</button
+          onclick={() => step(1)}>&rsaquo;</button
         >
       </div>
 
-      <div class="cal-w" aria-hidden="true">
-        {#each ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as d (d)}<span>{d}</span>{/each}
-      </div>
+      <!-- ONE BOX, THREE FACES, ONE HEIGHT. The days, the twelve months and the
+           years each fill the same block, so the bounds note and the footer
+           under it do not move when the reader changes face. -->
+      <div class="calbody">
+        {#if pad === 'month'}
+          <div class="calpad" role="group" aria-label="Months of {shown.slice(0, 4)}">
+            {#each months as m (m.ym)}
+              <button
+                type="button"
+                class="padc"
+                disabled={m.off}
+                class:on={m.ym === shown}
+                title={m.off
+                  ? `${m.label} ${shown.slice(0, 4)} is outside what this field may take.`
+                  : `Show ${m.label} ${shown.slice(0, 4)}.`}
+                onclick={() => {
+                  view = m.ym;
+                  pad = 'day';
+                }}
+              >
+                {m.label}
+              </button>
+            {/each}
+          </div>
+        {:else if pad === 'year'}
+          <div class="calpad" role="group" aria-label="Years this field may take">
+            {#each years as y (y)}
+              <button
+                type="button"
+                class="padc"
+                class:on={String(y) === shown.slice(0, 4)}
+                title={`Show the months of ${y}.`}
+                onclick={() => {
+                  view = `${String(y).padStart(4, '0')}-${shown.slice(5, 7)}`;
+                  pad = 'month';
+                }}
+              >
+                {y}
+              </button>
+            {/each}
+          </div>
+        {:else}
+          <div class="cal-w" aria-hidden="true">
+            {#each ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as d (d)}<span>{d}</span>{/each}
+          </div>
 
-      <div class="cal-g">
-        {#each cells as c (c.iso)}
-          <button
-            type="button"
-            class="day"
-            class:other={c.other}
-            class:on={c.iso === value}
-            class:no={!c.ok}
-            disabled={!c.ok}
-            aria-current={c.iso === value ? 'date' : undefined}
-            title={c.ok ? undefined : boundsReason || 'Outside what this field may take.'}
-            onclick={() => pick(c.iso)}>{c.day}</button
-          >
-        {/each}
+          <div class="cal-g">
+            {#each cells as c (c.iso)}
+              <button
+                type="button"
+                class="day"
+                class:other={c.other}
+                class:on={c.iso === value}
+                class:no={!c.ok}
+                disabled={!c.ok}
+                aria-current={c.iso === value ? 'date' : undefined}
+                title={c.ok ? undefined : boundsReason || 'Outside what this field may take.'}
+                onclick={() => pick(c.iso)}>{c.day}</button
+              >
+            {/each}
+          </div>
+        {/if}
       </div>
 
       <!-- THE BOUNDS SAY THEMSELVES, UNDER THE GRID THEY BOUND. A struck cell
@@ -549,21 +646,117 @@
     opacity: 0.35;
     cursor: not-allowed;
   }
-  /* THE TWO HEADER MENUS. `Picker` sizes its button for a strip rung; inside a
-     calendar header it has to sit on one line with two arrows, so the wrapper
-     takes the width `.csel` used to and the button is scaled down to match. */
-  .cpick {
+  /* THE CAPTION IS THE CONTROL, and it takes the width the two menus took. One
+     target between the arrows, so the header reads as a single instrument
+     rather than as four things that happen to sit on a line. */
+  .calcap {
     flex: 1 1 auto;
     min-width: 0;
-  }
-  .cpick :global(.pbtn) {
-    padding: 5px 22px 5px 8px;
-    font-size: var(--fs-xs);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s3);
+    padding: 4px var(--s4);
+    appearance: none;
+    background: none;
+    border: 1px solid transparent;
     border-radius: var(--r1);
-    text-align: center;
-    background-position:
-      calc(100% - 11px) 55%,
-      calc(100% - 7px) 55%;
+    color: var(--ink);
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: var(--track-caps);
+    cursor: pointer;
+  }
+  .calcap:hover {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--acc);
+  }
+  .calcap:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 1px;
+  }
+  .capt {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* THE CARET SAYS WHICH WAY THE PANEL IS ABOUT TO GO — down while the days
+     show, up while a pad does. 11px, not 9: below about ten a triangle in a
+     mono face reads as punctuation rather than as a direction. */
+  .capc {
+    flex: 0 0 auto;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--dim);
+  }
+  .calcap:hover .capc {
+    color: var(--acc);
+  }
+  .capc.on {
+    transform: rotate(180deg);
+    color: var(--acc);
+  }
+  /* ONE HEIGHT FOR THREE FACES. Six 6px-padded rows of `--fs-xs` plus the
+     weekday strip is the day face; without a floor here the panel would shrink
+     when the months face opened and the bounds note, the disclosure and the
+     footer would all jump up under the pointer. */
+  .calbody {
+    min-height: 196px;
+    display: flex;
+    flex-direction: column;
+  }
+  /* THE MONTHS AND THE YEARS. Three columns filling the block the days leave,
+     so twelve chips are one glance rather than a scroll. `grid-auto-rows`
+     rather than a fixed four: the year span comes from the caller's bounds and
+     is not always twelve. */
+  .calpad {
+    flex: 1 1 auto;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    grid-auto-rows: minmax(34px, 1fr);
+    gap: var(--s2);
+    align-content: stretch;
+    overflow-y: auto;
+  }
+  .padc {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    appearance: none;
+    font-family: var(--mono);
+    font-size: var(--fs-xs);
+    font-weight: var(--w-semi);
+    font-variant-numeric: tabular-nums;
+    border: 1px solid transparent;
+    border-radius: var(--r1);
+    background: none;
+    color: var(--ink);
+    cursor: pointer;
+  }
+  .padc:hover:not(:disabled) {
+    background: var(--panel-2);
+    border-color: var(--line);
+    color: var(--acc);
+  }
+  /* STRUCK, NOT ABSENT — the same rank the day grid gives a refused day, so a
+     month outside the span reads the same way on both faces. */
+  .padc:disabled {
+    color: var(--faint);
+    cursor: not-allowed;
+    text-decoration: line-through;
+  }
+  .padc.on {
+    background: var(--acc);
+    border-color: var(--acc);
+    color: var(--panel);
+    font-weight: var(--w-bold);
+  }
+  .padc:focus-visible {
+    outline: 2px solid var(--acc);
+    outline-offset: 1px;
   }
   .cal-w,
   .cal-g {
@@ -641,8 +834,15 @@
     cursor: not-allowed;
   }
   @media (prefers-reduced-motion: no-preference) {
+    .capc {
+      transition:
+        transform var(--d-state, 180ms) var(--ease-out),
+        color var(--d-hover) var(--ease-out);
+    }
     .day,
     .nav,
+    .padc,
+    .calcap,
     .din,
     .dbtn {
       transition:

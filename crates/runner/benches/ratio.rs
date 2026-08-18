@@ -166,6 +166,68 @@ fn per_unit<T>(units: u128, reps: u32, mut f: impl FnMut() -> T) -> u128 {
 /// to `u64::MAX`, which empties the k=1 frontier and makes the ladder cost
 /// nothing, leaving the `Column::build` pass over the bars. The other half is
 /// not silently dropped — it is [`engine`]'s to bound, and `C-E-01` bounds it.
+/// The per-bar floor: the cheapest possible walk over the same bars.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// C-R-01 divides one per-bar cost by another per-bar cost of the same
+/// operation, and a UNIFORM slowdown cancels in a quotient. An audit measured
+/// exactly that elsewhere in this workspace: a mask operation **174x slower
+/// passed its crate's ratio rows at 0.98x-1.00x**, because both legs moved
+/// together.
+///
+/// The denominator has to be something that cannot move when `Column::build`
+/// does. This walks the same slice touching each bar's timestamp with one
+/// `wrapping_add` — the same loop, the same bounds checks, the same memory
+/// traffic, and none of the indicator work. So the quotient is "how many of the
+/// cheapest per-bar things does building one bar's condition bits cost".
+fn floor_ps_per_bar(bars: &[indicators::Candle]) -> u128 {
+    per_unit(u128::try_from(bars.len()).unwrap_or(1), REPS, || {
+        let mut acc = 0_i64;
+        for b in black_box(bars) {
+            acc = acc.wrapping_add(black_box(b).ts_micros);
+        }
+        black_box(acc)
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<58} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<58} {at_ps:>8} ps/bar = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-R-04 — one bar's column build costs a bounded multiple of the per-bar floor.
+fn the_column_build_stays_within_its_budget() -> bool {
+    /// Floors allowed per offered bar. Measured below, then pinned.
+    const ALLOWED: u128 = 0;
+
+    let bars = synthetic::sessions(8);
+    let floor = floor_ps_per_bar(&bars);
+    println!("  the per-bar floor is {floor} ps — one black-boxed wrapping_add");
+    let neutered = Ladder::with_min_hits(u64::MAX);
+    let at = per_unit(u128::try_from(bars.len()).unwrap_or(1), REPS, || {
+        Sweeper::new(neutered).run(black_box(&bars), &mut evaluator())
+    });
+    budget(
+        "C-R-04 column build against the per-bar floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 fn the_column_build_costs_the_same_per_bar_at_every_column_length() -> bool {
     let short = synthetic::sessions(8);
     let long = synthetic::sessions(32);
