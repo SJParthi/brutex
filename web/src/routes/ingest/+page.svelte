@@ -9340,9 +9340,39 @@
     text-transform: inherit;
     cursor: pointer;
   }
+  /* ══ THE VOID UNDER A RIGHT-ALIGNED HEADER ══
+
+     Measured on the running page: every column WAS aligned — each header's
+     text and its data agreed on an edge to the pixel. What was wrong is that
+     the two `.num` columns agreed on the RIGHT one, while their headers are far
+     wider than their values:
+
+         BARS STORED / EXPECTED   header 194px   data 109px   85px of void
+         MONTHS UNPROVED          header 132px   data  45px   87px of void
+
+     Right-aligning pins the value to the far edge, so `61/61` sat under the
+     last third of a label that began 87px to its left, and the eye stopped
+     reading them as one thing. Worse at the Months/Verdict boundary, which is
+     where it was reported: the last right-aligned value and the first
+     left-aligned one end up crammed together with all the whitespace piled on
+     one side.
+
+     RIGHT ALIGNMENT IS FOR MAGNITUDES, and neither of these is one. Both are
+     `x / y` PAIRS — stored of expected, unproved of total — and nobody scans
+     them for the largest; they are read for whether the two halves differ. The
+     `y` half is identical on every row of a window, so nothing lines up better
+     on the right than on the left, and `tabular-nums` keeps the digits in
+     columns either way.
+
+     Left, therefore, on all six: `voidLeft` measured 0 for every column, and
+     the header label sits over the first character of its own data. Verified
+     in the browser both ways before this was written. */
+  .cscroll th.num {
+    text-align: left;
+  }
   .cscroll th.num .sort {
-    align-items: flex-end;
-    width: 100%;
+    align-items: flex-start;
+    width: auto;
   }
   .cscroll .sort:hover {
     color: var(--ink);
@@ -9361,8 +9391,12 @@
     text-transform: none;
     color: var(--ghost, var(--faint));
   }
+  /* LEFT — see the note on `.cscroll th.num .sort` for the measurement. Edited
+     HERE rather than overridden from above: a second `.cscroll td.num` earlier
+     in the file has identical specificity, so the later rule wins and the
+     override silently did nothing. One rule per thing. */
   .cscroll td.num {
-    text-align: right;
+    text-align: left;
   }
   .cscroll td.num.warn {
     color: var(--warn);
