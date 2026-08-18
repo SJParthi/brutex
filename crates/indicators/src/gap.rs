@@ -564,6 +564,44 @@ mod tests {
         assert_eq!(g.leg(), None, "no leg was established");
     }
 
+    /// THE OPENING CANDLE'S HIGH IS THE MAX OVER ITS THREE BARS, NOT THE LAST BAR'S.
+    ///
+    /// `today_bars == 0` picks the branch that SEEDS the extremes; every later bar of the
+    /// candle takes the branch that compares. Turn that `==` into `!=` and the two swap:
+    /// the first bar compares against whatever the previous session left behind, and
+    /// bars two and three each RE-SEED — so the candle ends up holding the last bar's
+    /// extremes rather than the widest of the three.
+    ///
+    /// Every fixture above opens with three bars of the same shape, where the last bar's
+    /// high IS the max and the two readings agree. This one spikes on the FIRST bar and
+    /// settles back, which is what an opening minute does: the gap is 99,000 paisa and
+    /// the mutation measures it as 64,000, a leg 35% short with every rung on it moved.
+    ///
+    /// `>` to `>=` and `<` to `<=` on the two comparisons below are NOT chased and are
+    /// recorded in `docs/06-limits.md`: at equality both write the value already held.
+    #[test]
+    fn the_opening_candles_extreme_is_the_widest_bar_and_not_the_last() {
+        let mut g = GapFib::new();
+        // Yesterday's last three bars top out at 2_501_000.
+        for m in 0..6 {
+            let _ = ok(&mut g, &at(30_000, m, 2_501_000, 2_499_000, 2_500_000));
+        }
+        // Today gaps up and settles back INSIDE its own opening minute.
+        for (m, high) in [(0_i64, 2_600_000_i64), (1, 2_570_000), (2, 2_565_000)] {
+            let _ = ok(&mut g, &at(30_001, m, high, 2_550_000, 2_560_000));
+        }
+        assert_eq!(
+            g.leg(),
+            Some(GapLeg {
+                x1: 2_501_000,
+                x2: 2_600_000,
+                direction: Direction::Up,
+            }),
+            "the leg was measured to a bar that is not the candle's high -- the \
+             opening spike is what the gap is, and settling back does not shrink it"
+        );
+    }
+
     /// A real gap up establishes the leg the sheet describes.
     #[test]
     fn a_gap_up_establishes_the_sheets_leg() {
