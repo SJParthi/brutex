@@ -162,7 +162,16 @@
   // failure costs the type-ahead and nothing else. Logged rather than
   // swallowed — a feature that quietly does not exist is worse than one that
   // says why.
-  fetch("/instruments.json")
+  //
+  // A CEILING, AND IT IS SPELLED OUT RATHER THAN IMPORTED. Every other request
+  // in this product goes through `$lib/ask.js`, which cannot be used here: this
+  // file is a CLASSIC script, injected by `render.rs:1130` as
+  // `<script src defer>` and served raw by `assets.rs`, so it has no module
+  // scope to import into. `AbortSignal.timeout` is the same guarantee written
+  // out — without it a Rust process that accepted the connection and wedged
+  // left the type-ahead permanently "loading" with the console line below never
+  // printing, which is the silent shape section 4 bans.
+  fetch("/instruments.json", { signal: AbortSignal.timeout(15000) })
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
     .then((list) => index(Array.isArray(list) ? list : []))
     .catch((why) => {

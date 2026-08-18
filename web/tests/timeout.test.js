@@ -20,7 +20,23 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const src = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
+const web = join(dirname(fileURLToPath(import.meta.url)), '..');
+const src = join(web, 'src');
+
+/**
+ * THE SECOND FRONT END, which lives outside `src/` and outside every bundler.
+ *
+ * `web/typeahead.js` is a classic script served raw by `crates/api/src/assets.rs`
+ * and injected into the Rust-rendered pages by `render.rs:1130`. It is not
+ * bundled by Vite, not seen by `svelte-check`, and was not walked by this test
+ * — so its `fetch("/instruments.json")` sat without a ceiling while all fourteen
+ * in `src/` were converted. A gate whose reach is "the directory I happened to
+ * think of" is the same failure as the convention it guards.
+ *
+ * It cannot import `$lib/ask.js`: a classic script has no module scope. It
+ * spells `AbortSignal.timeout` out instead, which this test accepts.
+ */
+const OUTSIDE_SRC = [join(web, 'typeahead.js')];
 
 /**
  * Every file under `web/src`, at any depth.
@@ -42,13 +58,22 @@ function walk(dir) {
 test('no call site reaches the network without a ceiling', () => {
   /** @type {string[]} */
   const bare = [];
-  for (const file of walk(src)) {
+  for (const file of [...walk(src), ...OUTSIDE_SRC]) {
     if (!/\.(js|svelte)$/.test(file)) continue;
     if (file.endsWith(join('lib', 'ask.js'))) continue; // the one legal `fetch`
+
     const text = readFileSync(file, 'utf8');
     text.split('\n').forEach((line, i) => {
       // `globalThis.fetch` in a comment is prose; a call is `fetch(`.
-      if (/(^|[^.\w])fetch\s*\(/.test(line) && !line.trim().startsWith('//') && !line.trim().startsWith('*')) {
+      // PER LINE, NOT PER FILE. A file-level allowance would let one guarded
+      // `fetch` excuse a bare one three lines below it.
+      const guarded = /AbortSignal\.timeout/.test(line);
+      if (
+        /(^|[^.\w])fetch\s*\(/.test(line) &&
+        !guarded &&
+        !line.trim().startsWith('//') &&
+        !line.trim().startsWith('*')
+      ) {
         bare.push(`${file.slice(src.length + 1)}:${i + 1}: ${line.trim().slice(0, 70)}`);
       }
     });
