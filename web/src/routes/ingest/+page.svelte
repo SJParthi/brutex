@@ -9242,26 +9242,79 @@
     overflow: auto;
     overscroll-behavior: contain;
   }
+  /* ══ ONE TYPE SCALE PER ROW, AND THIS TABLE HAD TWO ══
+
+     Measured on the running page, not guessed: `ADANIENT` rendered at 12.5px,
+     `0 / 4,80,375` at 17px, `1 · not counted` at 12.5px, `Pull 61` at 13.5px.
+     A 4.5px jump between neighbouring cells in the same row.
+
+     The cause is that `.num` is not a table rule at all. In `$lib/theme.css` it
+     shares its declaration with `.stat > .v` — the big value on a METRIC TILE —
+     so it carries `--fs-data`, a 17px DISPLAY scale, and applying it to a cell
+     drops a headline into a data row. `table` sets 12.5px underneath it, and
+     the two never met.
+
+     Both complaints came out of that one fault. The row read as two tables
+     because two of six columns were a third larger; and the header row read as
+     unaligned because `vertical-align: bottom` lines up boxes of different
+     heights by their bottom edge, which puts text of different sizes on
+     different baselines.
+
+     So: one size for every cell in this table, at `--fs-sm` — up from 12.5,
+     which was genuinely small for fifty rows, and down from a display scale
+     that was never meant for a cell. THE FIGURES DO NOT LOSE THEIR EMPHASIS:
+     they keep `--w-semi`, `tabular-nums` and `--ink-hi` from `.num`, so they
+     still lead the row — by weight and colour, which is how a data table
+     should do it, rather than by being physically bigger than their neighbours.
+
+     Scoped to `.cscroll`. `.num` is shared with the tiles on three other pages
+     and is not edited from here. */
+  .cscroll th,
+  .cscroll td {
+    font-size: var(--fs-sm);
+  }
+  /* `td.num` CARRIES THE DISPLAY SCALE ON ITSELF, so setting `td` is not enough
+     — `.num` is more specific than the element and wins at 17px. Named here
+     rather than reaching into the shared rule. */
+  .cscroll td.num {
+    font-size: var(--fs-sm);
+  }
+  /* THE CHIP AND THE BUTTON ARE NOT BODY TEXT and keep their own scales. A
+     first pass set every descendant with `:global(*)` and blew the VERDICT chip
+     up to 15px — the one thing on this row the operator had already called
+     legible at 12. A chip is sized to be a chip. The button moves to the row's
+     scale because it is the only cell whose content a reader has to READ and
+     then PRESS, and at 13.5 it was the smallest thing in the row. */
+  .cscroll td :global(.btn) {
+    font-size: var(--fs-sm);
+  }
+  /* The two-line header keeps its own smaller scale — a column's NAME and its
+     UNIT are labels, not data, and they are the one pair on this table that is
+     already consistent across all six columns. */
+  .cscroll .hrow {
+    font-size: var(--fs-mini);
+  }
+  .cscroll .hsub {
+    font-size: var(--fs-micro);
+  }
   .cscroll th {
     vertical-align: bottom;
   }
-  /* ══ THE SLACK GOES INTO THE NAME, NOT BETWEEN THE FIGURES ══
+  /* THE SLACK IS THE DEFAULT `auto` DISTRIBUTION AGAIN, AND THAT IS A FIX
+     UNDOING ITS OWN WORKAROUND.
 
-     `table` is `width: 100%` on the default `auto` layout, so every column got
-     a share of the leftover width — and the share landed as EMPTY SPACE inside
-     each column rather than as a wider column, which is why the gap between
-     Verdict and Attempts was a band of air while the gap between Attempts and
-     Next step was almost nothing. Six arbitrary gutters instead of one rhythm.
+     `th:first-child { width: 100% }` stood here to stop the leftover width
+     landing as ragged empty space inside six columns. It worked, and it was
+     treating a symptom: the columns sized unevenly because two of them carried
+     a 17px display scale and four carried 12.5px, so `auto` was balancing boxes
+     whose contents were a third apart. Handing all the slack to the name column
+     hid that — and cost 592px of empty band beside a 150px name.
 
-     Handing the whole slack to the first column makes every column after it
-     exactly its own content plus the same padding either side — `thead th` and
-     `tbody td` already agree on that padding at `var(--s5)`, so the rhythm is
-     already defined and was only being drowned. The instrument name is the
-     right place for the slack: it is the column a reader scans down, and it is
-     the one whose content varies most. */
-  .cscroll th:first-child {
-    width: 100%;
-  }
+     With one type scale across the row, `auto` measured at 1440px gives
+     245 / 311 / 229 / 237 / 227 / 164 — the even rhythm the rule was written to
+     force, arrived at by the columns actually agreeing rather than by one of
+     them absorbing everything. Measured both ways in the browser before this
+     was removed. */
   /* A HEADER THAT IS NOT A BUTTON STILL STACKS ITS UNIT UNDER ITS NAME.
      `.sort` is the flex column that puts "bars, from the NSE calendar" on its
      own line under "Bars stored / expected"; the one column with no sort
