@@ -2174,6 +2174,40 @@
   let toDay = $state('');
   let fromText = $state('');
   let toText = $state('');
+
+  /**
+   * THE WINDOW OPENS ON THE WHOLE SPAN, at the operator's instruction.
+   *
+   * From is `minDay` — 01 Jan 2015, the floor the server's own picker offers —
+   * and To is `maxDay`, the newest day that can be asked for, which moves with
+   * the clock and with the 15:30 close rather than being a stored constant.
+   * Both fields used to open empty, which meant the census below could not
+   * draw at all until two dates were typed.
+   *
+   * SEEDED ONCE, NOT PINNED. The guard is what makes this a default rather
+   * than a lock: `maxDay` changes at midnight and when a session closes, and
+   * re-running this would overwrite a window the operator had chosen —
+   * `CLAUDE.md` §4's silent change, and the exact hazard `typing` exists to
+   * prevent one control down.
+   *
+   * IT OPENS OVER THE CAP, AND THAT IS THE INSTRUCTION RATHER THAN A BUG.
+   * 01 Jan 2015 to today is about 4,250 days and `MAX_WINDOW_DAYS` is 3,653,
+   * so the refusal draws on load with the day to start on and a button that
+   * applies it. Stated here because a form that opens invalid is a real
+   * decision and not an accident: the operator asked for the whole span in
+   * front of him, and the page says what one request can carry rather than
+   * quietly narrowing what he asked for.
+   *
+   * `setDay` is the one writer — it moves the ISO value and the text together,
+   * so the label can never be left behind by the value.
+   */
+  let seeded = false;
+  $effect(() => {
+    if (seeded || !isValidIso(maxDay) || !isValidIso(minDay)) return;
+    seeded = true;
+    setDay('from', minDay);
+    setDay('to', maxDay);
+  });
   /** The refusal a typed string earned, per field. Cleared the moment one takes. */
   /** @type {{ from: string | null, to: string | null }} */
   let typedErr = $state({ from: null, to: null });
@@ -3469,13 +3503,6 @@
   function insClearShown() {
     const next = new Set(insOff);
     for (const r of insSelectable) next.add(r.key);
-    insOff = next;
-    cPage = 1;
-  }
-  /** Every name in THIS pool, unticked. A name outside it is not touched. */
-  function insClearAll() {
-    const next = new Set(insOff);
-    for (const m of insPool) next.add(m.key);
     insOff = next;
     cPage = 1;
   }
@@ -5519,20 +5546,22 @@
 
 <div class="pane">
   <div class="pane-head">
-    <span class="pane-title">Ingest</span>
-    {#if active}
-      <span class="tag acc">{active.display}</span>
-      <!-- `pull::vendor::SourceKind::label`, off the wire. The word here used
-           to be `transport`, whose vocabulary (`broker`, `archive`) was
-           invented in the API handler and existed nowhere else — a second
-           spelling of the split `kind` already carried. -->
-      {#if active.kind_label}
-        <span class="tag">{active.kind_label}</span>
-      {:else}
-        <span class="tag warn" title={SOURCE_KIND_UNSTATED}>source kind not stated</span>
-      {/if}
-      <span class="tag info">{RUNGS.find((r) => r.dir === rung)?.label ?? rung}</span>
-    {/if}
+    <!-- ══ THE TITLE AND THE THREE CHIPS ARE GONE, AT THE OPERATOR'S
+         INSTRUCTION ══
+         "INGEST · DHAN · REST API · 1 MINUTE" restated four things the page
+         states better a few pixels lower: the nav above has `Ingest` marked
+         current, and the feed, its transport and the rung are each the FACE of
+         a control in the strip. A band that repeats the controls under it is
+         the running commentary this page has been shedding all along.
+
+         THE REFUSAL BRANCH IS NOT LOST. `source kind not stated` drew here when
+         the server sent no kind — §4 — and it still draws, on the form itself,
+         where the shape of the request is decided. Checked before this was
+         cut, not assumed.
+
+         The run status and the link to /audit stay: neither is a restatement,
+         and the status is the only thing on the page that says a pull is on the
+         wire while you are looking somewhere else. -->
     <span class="spacer"></span>
     {#if phase === 'running'}
       <span class="status busy" aria-live="polite">
@@ -6370,46 +6399,16 @@
                    header still names the window, the sessions and the series
                    count, so nothing here is the only place a number exists. -->
 
-              <!-- ================================ THE TWO BULK ACTIONS =====
-                   One clears the selection; the other would clear the store,
-                   and it cannot. Both are drawn, because a control that is
-                   missing says nothing and a control that is refused says
-                   exactly what stands in the way. -->
-              <div class="acts">
-                <button
-                  class="qb"
-                  type="button"
-                  disabled={insCount === 0}
-                  title={insCount === 0
-                    ? 'Nothing is ticked, so there is nothing to clear.'
-                    : `Unticks all ${n(insCount)} instrument(s). The chosen universe stays, so the list you are picking from does not disappear — and nothing is deleted from the store.`}
-                  onclick={insClearAll}
-                >
-                  Clear all instruments
-                </button>
-                <!-- THE LONG GREY SENTENCE BESIDE THIS BUTTON IS ON THE BUTTON.
-                     It read "Deleting is refused, not missing: the store is
-                     append-only (§3 rule 8) and the server registers no delete
-                     route. The button stays so the absence is visible." — every
-                     word of which is now the first two sentences of the `title`
-                     below. It was a paragraph of grey prose in a control panel
-                     that the mockup draws as two quiet buttons and nothing else;
-                     it is not deleted, it is on the control it is about.
-
-                     THE LABEL IS THE LABEL. "— no route deletes" was the refusal
-                     wedged into the button's face, which is what made this
-                     control read as an error message rather than as a button. It
-                     is `disabled`, which is the visible refusal; the reason is
-                     one hover away and the sentence is longer than any label. -->
-                <button
-                  class="qb danger"
-                  type="button"
-                  disabled
-                  title="Deleting is refused, not missing, and the button stays so the absence is visible. There is no route that deletes a bar: crates/api/src/server.rs registers no DELETE at all, and CLAUDE.md §3 rule 8 makes the store append-only — a month file is never mutated in place and never removed. Deleting bars is an operator action on the store directory itself, outside this application."
-                >
-                  Delete all stored bars
-                </button>
-              </div>
+              <!-- ══ THE TWO BULK ACTIONS ARE GONE, AT THE OPERATOR'S
+                   INSTRUCTION ══
+                   "Clear all instruments" unticked all fifty — the instruments
+                   menu has its own "Clear all" inside it, which is the same act
+                   next to the thing it acts on. "Delete all stored bars" was
+                   permanently disabled and always would be: there is no DELETE
+                   route in crates/api at all and §3 rule 8 makes a month file
+                   unmutatable in place and unremovable. It stood as a visible
+                   absence; the absence is now stated here instead, where it
+                   costs no control on the form. -->
             </fieldset>
 
             <!-- THE LOCK NAMES ITSELF. `<fieldset disabled>` greys every control
@@ -9188,55 +9187,9 @@
      side of a hairline, so neither is on the path to the form's own controls.
      They were left-aligned in the flow of the strip with a paragraph of grey
      prose beside them, which read as three more things to fill in. */
-  .acts {
-    grid-column: 1 / -1;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--s4);
-    flex-wrap: wrap;
-    /* NO SECOND HAIRLINE. `.ask` sits directly above these two and already
-       draws the rule that ends the controls; a border here would put two lines
-       three text-rows apart and read as a mistake. Space alone separates the
-       foot's two members. */
-    margin-top: calc(-1 * var(--s3));
-  }
-  /* QUIET BY DEFAULT. `--dim` rather than `--ink`: these two are the panel's
-     last controls, not its verb, and the submit button below is the only thing
-     on this form that should read as loud. Colour arrives on hover, which is
-     where intent is. */
-  .qb {
-    padding: var(--s3) var(--s5);
-    border-radius: var(--r2);
-    border: 1px solid var(--line);
-    background: transparent;
-    color: var(--dim);
-    font: inherit;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    cursor: pointer;
-  }
-  .qb:hover:not(:disabled) {
-    border-color: var(--line-hard);
-    color: var(--ink);
-    background: var(--panel-2);
-  }
-  .qb:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  /* AN OUTLINE, NOT A FILL. A filled red button is a button that has already
-     decided; this one is permanently refused and its whole job is to be VISIBLE
-     as an absence. The border carries the warning and the face stays quiet. */
-  .qb.danger {
-    border-color: var(--down);
-    color: var(--dim);
-    background: transparent;
-  }
-  .qb.danger:hover:not(:disabled) {
-    color: var(--down);
-    background: var(--down-soft);
-  }
+  /* `.acts`, `.qb` and `.qb.danger` are gone with the two buttons they drew.
+     Neither was reported by Gate W4 — the same blind spot `.cbar` sat in — so
+     the test is again "does any markup match", not "did the compiler complain". */
 
   /* ---- the census ---- */
   .census {
