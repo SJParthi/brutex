@@ -806,14 +806,38 @@ fn a_counter_behind_its_bytes_opens_and_a_counter_ahead_of_them_is_refused() {
     );
 }
 
+/// A truncation back to the bare header is REFUSED, not quietly fallen back from.
+///
+/// # This test used to assert the opposite, and it was wrong in the direction
+/// that loses data
+///
+/// It was called `a_header_that_outran_its_file_falls_back_one_generation` and
+/// it asserted that ten committed bars could vanish while the file opened
+/// clean at `records() == 0`. Its premise — *"the records never reached the
+/// disk; the header slot did"* — is a state [`BarFile::append`] cannot produce:
+/// it writes the records and `sync_all`s them BEFORE writing any slot that
+/// names them, and a slot torn mid-write fails its CRC and does not decode at
+/// all. `set_len(HEADER_LEN)` does not simulate that ordering. It destroys ten
+/// committed records.
+///
+/// The test directly above this one already asserts `CounterExceedsFile` for
+/// *"a truncation that lands on a record boundary"*, and `HEADER_LEN` is record
+/// boundary zero — so the two tests asserted opposite answers to one question
+/// and the more dangerous one won on a technicality of where an `if` sat.
+///
+/// The refusal it now expects comes from hoisting that `if` out of the
+/// `discarded != 0` arm in `BarFile::validated`. A truncation landing exactly
+/// on an older commit's extent leaves `discarded == 0` by construction, which
+/// is why the guard could never see it; `claimed` — the highest `n_valid` over
+/// every slot that still decodes — proved the loss the whole time, from a local
+/// one line above the guard that ignored it.
 #[test]
-fn a_header_that_outran_its_file_falls_back_one_generation() {
+fn a_truncation_back_to_the_header_is_refused_rather_than_silently_accepted() {
     let scratch = Scratch::new("outran");
     {
         let mut file = open(scratch.root()).expect("create");
         assert!(file.append(&batch(0, 10)).is_ok());
     }
-    // The records never reached the disk; the header slot did.
     let bars = bars_path().to_path_buf(scratch.root());
     fs::OpenOptions::new()
         .write(true)
@@ -822,9 +846,15 @@ fn a_header_that_outran_its_file_falls_back_one_generation() {
         .set_len(HEADER_LEN)
         .unwrap();
 
-    let file = open(scratch.root()).expect("the previous generation is intact");
-    assert_eq!(file.records(), 0, "the tail is lost, the file is not");
-    assert_eq!(file.header().generation, 0);
+    assert_eq!(
+        outcome(open(scratch.root())),
+        Err(StoreError::Format {
+            path: bars,
+            source: FormatError::CounterExceedsFile,
+        }),
+        "ten committed bars are gone and a surviving slot still claims them — \
+         opening clean here is how a month reports complete while holding nothing"
+    );
 }
 
 #[test]

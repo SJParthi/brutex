@@ -899,13 +899,37 @@ impl BarFile {
         // and `store::file::the_discarded_count_is_the_bytes_past_the_counter`
         // pins it against `offset_of` directly.
         let discarded = bytes_past_the_counter(layout, len, header.n_valid);
+
+        // A SLOT CLAIMING MORE BARS THAN THE HEADER WE FELL BACK TO IS A LOSS,
+        // WHETHER OR NOT THERE IS A RAGGED TAIL. This guard used to sit INSIDE
+        // the `discarded != 0` arm below, and the case it could not see is the
+        // one that loses data in silence: a truncation landing EXACTLY on an
+        // older commit's record extent leaves `discarded == 0` by construction,
+        // so the check was never evaluated and the file opened clean one
+        // generation short. `SLOT_COUNT == 2`, so the older commit is always
+        // the immediately preceding append -- the vulnerable length is the file
+        // as it stood one append ago, which is exactly where a lost tail
+        // naturally lands.
+        //
+        // THE SEPARATING VALUE WAS ALREADY IN A LOCAL. `claimed` is
+        // `highest_claim`'s maximum `n_valid` over every slot that still
+        // decodes -- magic, version, stride and a CRC over all 64 bytes -- and
+        // a tail truncation cannot reach offset 0, so the slot naming the lost
+        // bars survives to prove they existed. The comment above this block
+        // reasoned that catching this needed block checksums the build does not
+        // write; it did not, it needed this `if` one level out.
+        //
+        // IT CANNOT FIRE ON AN HONEST INTERRUPTED APPEND. `append` writes the
+        // records and `sync_all`s them BEFORE writing any slot that names them,
+        // and a torn slot fails its CRC and does not decode at all -- so in
+        // the benign case `claimed == header.n_valid` and this is silent.
+        if claimed > header.n_valid {
+            return Err(StoreError::Format {
+                path: bars_path,
+                source: FormatError::CounterExceedsFile,
+            });
+        }
         if discarded != 0 {
-            if claimed > header.n_valid {
-                return Err(StoreError::Format {
-                    path: bars_path,
-                    source: FormatError::CounterExceedsFile,
-                });
-            }
             note_tail_past_the_commit(&bars_path, len, header.n_valid, discarded);
         }
 
