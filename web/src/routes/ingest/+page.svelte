@@ -7142,6 +7142,7 @@
       tuck
       label="feeds"
       summary={active?.display ?? (feeds.all.length ? 'Select a feed' : 'No feeds')}
+      title={`${active?.display ?? 'No feed selected'} · ${active?.kind_label ?? 'source kind not stated by this server'}. THE PAGE'S WHOLE SCOPE: everything below this control is this feed's answer. Every count is read from /instruments.json?feed=${feeds.active ?? ''} and every bar is pulled from this feed alone. A bar belongs to the vendor that supplied it, so changing this changes what is pulled and what is counted; it is not a different view of one thing.`}
       rows={feeds.all.map((f) => ({
         key: f.wire,
         name: f.display,

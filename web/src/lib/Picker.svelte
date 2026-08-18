@@ -453,9 +453,31 @@
     overflow-y: auto;
     background: var(--raise, #243046);
     border: 1px solid var(--line, #26334a);
-    border-radius: 10px;
-    padding: 5px;
-    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.7);
+    border-radius: 14px;
+    padding: 6px;
+    box-shadow:
+      0 24px 60px rgba(0, 0, 0, 0.55),
+      0 2px 8px rgba(0, 0, 0, 0.35),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    /* THE PANEL ARRIVES RATHER THAN APPEARING. 120ms is under the ~150ms where
+       motion starts to feel like waiting, so it reads as responsive rather than
+       animated -- the point is to show WHERE the panel came from, which a menu
+       that simply exists cannot. */
+    transform-origin: top center;
+    animation: pop 0.12s cubic-bezier(0.2, 0.9, 0.3, 1);
+  }
+  @keyframes pop {
+    from {
+      opacity: 0;
+      transform: translateY(-4px) scale(0.985);
+    }
+  }
+  /* MOTION IS A PREFERENCE AND IT IS HONOURED. A reader who has asked the OS
+     for less of it gets the panel with no travel at all. */
+  @media (prefers-reduced-motion: reduce) {
+    .pmenu {
+      animation: none;
+    }
   }
   /* A filterable list is the one case that needs the room: the search box, the
      two bulk actions and a long name all have to fit on one line. */
@@ -490,6 +512,10 @@
     line-height: 1.2;
     padding: 18px 16px;
     outline: none;
+  }
+  .pq::placeholder {
+    color: var(--faint);
+    font-weight: 500;
   }
   .pq:focus {
     border-color: var(--acc, #22d3ee);
@@ -535,15 +561,38 @@
        small and separate — 28px between a name and the sentence under it would
        read as two rows. */
     gap: 3px 28px;
-    padding: 9px 12px;
-    min-height: 38px;
-    border-radius: 7px;
+    padding: 11px 13px;
+    min-height: 42px;
+    border-radius: 10px;
     cursor: pointer;
     font-size: var(--fs-sm);
-    transition: background 0.12s;
+    position: relative;
+    transition:
+      background 0.13s ease,
+      transform 0.13s ease;
   }
   .plist label:hover {
     background: var(--panel2, #161f30);
+  }
+  /* THE CHOSEN ROW LOOKS CHOSEN WITHOUT BEING READ. The control glyph alone
+     carried this, which means the answer to "what is selected" was a 17px
+     circle the eye has to find. A tinted row and an accent rail on its edge
+     put it in peripheral vision. */
+  .plist label:has(input:checked) {
+    background: color-mix(in srgb, var(--acc, #22d3ee) 11%, transparent);
+  }
+  .plist label:has(input:checked)::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 0 3px 3px 0;
+    background: var(--acc, #22d3ee);
+  }
+  .plist label:active:not(.pdis) {
+    transform: scale(0.994);
   }
   /* DRAWN, NOT DROPPED, AND IT LOOKS LIKE WHAT IT IS. Struck through and dimmed
      so no reader mistakes it for a choice they merely have not made yet — and
@@ -576,12 +625,65 @@
     color: var(--dim, #95a0b6);
     white-space: normal;
   }
+  /* THE NATIVE CONTROL IS WHAT READ AS DATED, and `accent-color` cannot fix it:
+     the platform still draws its own ring, its own fill and its own focus.
+     Drawn here instead -- same semantics, same keyboard behaviour, same
+     `:checked` state, because it is still a real `input` underneath. */
   .plist input {
-    accent-color: var(--acc, #22d3ee);
-    width: 17px;
-    height: 17px;
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    margin: 0;
     cursor: pointer;
     flex: 0 0 auto;
+    border: 1.5px solid var(--dim, #68738a);
+    background: transparent;
+    display: grid;
+    place-content: center;
+    transition:
+      border-color 0.13s ease,
+      background 0.13s ease;
+  }
+  /* A CHECKBOX IS A SQUARE AND A RADIO IS A CIRCLE, and that distinction is
+     load-bearing rather than decorative: it is the only thing on screen saying
+     whether ticking this one unticks the others. */
+  .plist input[type='checkbox'] {
+    border-radius: 6px;
+  }
+  .plist input[type='radio'] {
+    border-radius: 50%;
+  }
+  .plist input:hover:not(:disabled) {
+    border-color: var(--acc, #22d3ee);
+  }
+  .plist input:checked {
+    border-color: var(--acc, #22d3ee);
+    background: var(--acc, #22d3ee);
+  }
+  .plist input:checked::after {
+    content: '';
+    display: block;
+  }
+  /* The tick is a rotated rectangle with two borders -- no glyph, so it cannot
+     be a font the reader does not have. */
+  .plist input[type='checkbox']:checked::after {
+    width: 4.5px;
+    height: 9px;
+    margin-top: -2px;
+    border: solid var(--bg, #0b1220);
+    border-width: 0 2px 2px 0;
+    transform: rotate(43deg);
+  }
+  .plist input[type='radio']:checked::after {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--bg, #0b1220);
+  }
+  .plist input:focus-visible {
+    outline: 2px solid var(--acc, #22d3ee);
+    outline-offset: 2px;
   }
   /* Name takes the space and clips; detail keeps its own width on the right.
      Wrapping either one breaks the single row height the list depends on. */
