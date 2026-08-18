@@ -4624,22 +4624,42 @@ no-surviving-mutant rule apply to **crates**, and nothing equivalent exists for
 the browser. Gate W2 proves the tests that exist run; it proves nothing about
 how much they cover.
 
-**86 distinct CSS selectors are styled for markup that does not exist**, across
-`db` and `ingest`. Gate W4 pins that number; it does not reduce it. The set
-includes a whole inline calendar superseded by `DayField`, an entire earlier
-generation of the view bar — `.viewbar`, `.vtab`, `.vbudget`, `.vsum` —
-superseded by `.segs`/`.seg`, and a month toggle. This is the measurable
-signature of the pattern behind the worst findings in this tree: a safeguard is
-written, argued for in a comment, and then orphaned by a later markup deletion,
-leaving the comment asserting a guarantee the page no longer delivers.
+**35 distinct CSS selectors are styled for markup that does not exist**, down
+from 86. Gate W4 pins the number and prints a new ceiling whenever it falls.
 
-**The cleanup is not mechanisable, and that is a measured claim.** Deleting the
-rules by the line numbers the compiler reports cut a selector out of a
-comma-separated list and left a dangling `.sortbtn,`, which failed the build.
-The compiler reports one line per selector, and a rule may list several; a
-line-based edit cannot tell a whole rule from one member of a list. It has to be
-done by hand, a rule at a time, and Gate W4 exists to keep the number from
-climbing while that waits.
+What came out of `/db` was a whole inline calendar superseded by `DayField`, an
+entire earlier generation of the view bar — `.viewbar`, `.vtab`, `.vbudget`,
+`.vsay`, `.vsum` — superseded by `.segs`/`.seg`, a month toggle and a date
+field: 266 lines, and in most cases the explaining comment with them, because
+it explained an element that is gone. This is the measurable signature of the
+pattern behind the worst findings in this tree: a safeguard is written, argued
+for in a comment, then orphaned by a later markup deletion, leaving the comment
+asserting a guarantee the page no longer delivers.
+
+*Commit `126152a`'s message says "86 -> 39" and "39, down from 86". The number
+is **35**, in that commit and now — it was typed before it was computed. The
+gate's ceiling in the same commit is correct.*
+
+**Removal is by proof, not by taste, and not by line number.** A selector goes
+only when one of its class tokens appears nowhere outside `<style>`: every token
+in a compound or descendant selector must be present for it to match, so one
+absent token makes the selector unmatchable. `:not(` is excluded, where an
+absent token makes the selector always true instead of never.
+
+**A line-based edit cannot do this.** The compiler reports one line per
+SELECTOR and a rule may list several, so deleting "the rule at line N" cut a
+selector out of a comma-separated list, left a dangling `.sortbtn,` and failed
+the build. The working version parses the style block — brace depth, quoted
+strings, comments — recurses into `@media` bodies but not `@keyframes`, and
+when only some members of a list are dead removes those members and keeps the
+rule for its live siblings.
+
+**The remaining 35 need a judgement per selector**, because each has a class
+token that DOES appear in the markup — `.anchor .note .k`, `.menu.list.shown`,
+`.meter[data-state='full'] .fill` — so only the combination is unmatchable, and
+deciding that needs someone who knows whether the markup is coming back.
+`ingest` is also unpruned: its edit was overwritten by a concurrent session
+writing that file, and the work is a short repeat once it is free.
 
 **`web` is not yet in `ci-ok`'s `needs` list.** That list lives in `ci.yml`, so
 until one line is added there, a red Gate W does not block a merge.
