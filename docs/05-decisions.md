@@ -15808,3 +15808,83 @@ see.
 
 ---
 
+
+## D-0195 · 2026-08-18 · One bar schema for every feed; provenance is the path, not a column
+
+The expired-F&O work needs two fields the store has never held: **implied
+volatility** and **spot**. The two vendors supply them differently, and the
+first design proposed here was wrong about what follows from that.
+
+Dhan's `POST /v2/charts/rollingoption` returns open, high, low, close, volume,
+open interest, **implied volatility**, **spot** and the realised **strike**
+(`Dhan Docs/14-expired-options-data.md`). Groww's candles return a seven-element
+row — timestamp, OHLC, volume, open interest — and **nothing else**
+(`Groww Docs/11-backtesting.md`): no implied volatility, no spot, ever.
+
+**The rejected design** was a per-feed shape: Dhan's rows carrying two fields
+that Groww's rows would null forever. The operator's ruling, and it is correct:
+*"feed wise we should not have separate separate columns — we need to have all
+the columns, and based on feed it should be selected, auto internally populated
+or fetched or feed-provided."*
+
+## Why that is better and not merely simpler
+
+**A per-feed schema is a dynamic schema, which §4 bans outright.** Two shapes
+means every reader branches on the vendor before it can read a row, and the
+branch is exactly what `crates/pull/src/vendor.rs`'s own law exists to remove.
+
+**Provenance costs nothing, because the path already carries it.** A bar lives
+at `bars/<feed>/...`, so "is this implied volatility the vendor's or this
+build's?" is answered by WHERE THE FILE IS. No provenance byte, no flag, no
+second lookup — §4's "the path is the index" applied to a question that looked
+like it needed a column. A file under `bars/dhan/` holds Dhan's own figure; a
+file under `bars/groww/` holds one this build computed.
+
+## How each column is filled
+
+| Column | Dhan | Groww |
+|---|---|---|
+| open, high, low, close | vendor | vendor |
+| volume | vendor | vendor |
+| open interest | vendor | vendor (null off-FNO, which Groww sends as `null`) |
+| **spot** | vendor sends it | READ FROM THIS STORE — the underlying's own series, joined on timestamp |
+| **implied volatility** | vendor sends it | COMPUTED — `crates/greeks` BSM |
+
+Groww's spot is not calculated and not estimated: the underlying is parsed out
+of the contract name (`NSE-NIFTY-30Sep25-24650-CE` -> `NIFTY`) and its spot bar
+at the SAME timestamp is already on disk.
+
+## The ladder is a data dependency, not caution
+
+`crates/pull/src/fold.rs` orders the pull Spot -> Futures -> Options, daily
+before minute, and that has been described here as failing cheap first. It is
+also a **correctness requirement**: Groww's implied volatility cannot be solved
+for a one-minute option bar unless the underlying's one-minute spot bar for that
+same minute is already stored. Pull options before spot and every Groww IV is
+uncomputable. This is now the strongest argument for driving the ladder.
+
+## Stored as sent, never manipulated
+
+The operator's rule: *"whichever Dhan sends we need to store and save the same —
+no data manipulation or changes are ever accepted."* So implied volatility is
+`f64`, exactly the float the vendor sends. Prices remain paisa `i64` under §7 —
+that is not manipulation, because a two-decimal tick converts exactly and §7
+fixes the grid.
+
+`f64::NEG_INFINITY` is the implied-volatility null and `i64::MIN` the spot null,
+matching the open-interest sentinel §7 already sets. A `0.0` would be an
+invented measurement, which is the manipulation the rule forbids.
+
+## What is NOT settled
+
+**The risk-free rate has no source.** `greeks::bsm::Contract` needs a rate, and
+nothing in this tree supplies one. Groww's implied volatility cannot be solved
+honestly until it does, and a guessed rate produces a number that looks real and
+is not. Named here rather than defaulted.
+
+**This is store format version 3** and is not written yet. Version 2 is the
+current definition and §3 rule 8 forbids mutating it in place; version 3 must be
+minted the way version 2 was, with version 2 retired by number rather than
+deleted.
+
+---
