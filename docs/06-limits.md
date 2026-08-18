@@ -4706,6 +4706,17 @@ serves exactly one file out of `web/` while its own doc says of `web/src`:
 that rather than extend it. Closing the duplication is a decision about how the
 Rust side serves the front end, not a fix.
 
+**DECIDED, NOT LEFT OPEN — see `docs/05-decisions.md` D-0198.** The merge is
+technically available: `assets.rs` already serves one file out of `web/` root,
+so a shared module there breaks no stated rule. It is refused because
+`render.rs` states the contract one line above the tag it emits — *"a fetch that
+fails costs the type-ahead and nothing else"* — and a module importing a second
+file makes two things that must be served correctly instead of one. If
+`/prefix.js` 404s, the import fails BEFORE the script's own error handling
+exists to run, so the sentence written to say why never prints. A bounded,
+self-announcing failure would become an unbounded silent one, to remove twenty
+duplicated lines.
+
 **What is enforced meanwhile:** `web/tests/twofrontends.test.js` refuses a drift
 in the prefix bound, which is the number that must agree — raise it in one copy
 and the type-ahead on the Rust-rendered pages answers a different question from

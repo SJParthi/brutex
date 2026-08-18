@@ -15983,3 +15983,54 @@ is a new entry, not a silent one.
 `docs/06-limits.md` gains nothing here beyond §82, which already records the 61.
 
 ---
+
+## D-0198 · 2026-08-18 · The two front ends keep their duplicate index, because merging it would trade a bounded failure for a silent one
+
+`web/typeahead.js`, `web/src/lib/prefix.js`, `crates/api/src/render.rs`.
+
+`web/typeahead.js` carries its own copy of the prefix index that
+`$lib/prefix.js` holds for the SvelteKit app — same bound, same `Map`, same
+build loop. One O(1) claim, two implementations, and only one of them driven by
+a test. The obvious repair is to share the module. **It is refused, and the
+reason is not that the file is in a crate.**
+
+**The merge is technically available.** `assets.rs`'s doc forbids serving
+`web/src` — *"Nothing under it is ever served"* — but it already serves
+`web/typeahead.js` from `web/` **root**, so a shared module at root breaks no
+stated rule. And `typeahead.js` is a self-contained IIFE that writes nothing to
+`window`, so converting it to a module loses no global. It would take a second
+served path in `assets.rs`, `type="module"` in `render.rs:1130`, and one test
+updated.
+
+**What it would cost is the contract `render.rs` states in the line above that
+tag:** *"a fetch that fails costs the type-ahead and nothing else — the form
+above still searches."* That page is server-rendered and complete before any
+script runs; the script is progressive enhancement over it, and its failure is
+**bounded to itself and announced** — `typeahead.js` catches its own fetch
+failure and logs a sentence saying the type-ahead is unavailable and search
+still works.
+
+A module importing a second file makes **two** things that must be served
+correctly instead of one. If `/prefix.js` 404s — a deploy that updated one
+constant and not the other, a path typo — the import fails **before** the
+script's own error handling exists to run, so the console line written precisely
+to say why never prints. That converts a bounded, self-announcing failure into
+an unbounded silent one. Trading that for the removal of a twenty-line
+duplication is a bad exchange, and it is the exact shape CLAUDE.md §4 bans.
+
+**What is done instead.** `web/tests/twofrontends.test.js` refuses a drift in
+`MAX_PREFIX`, the one value that must agree — raise it in one copy and the
+type-ahead on the Rust-rendered pages answers a different question from the
+SPA's, with neither page saying so. It also fails deliberately if
+`typeahead.js` ever stops building its own index, so a guard that has outlived
+its subject is deleted rather than left reading as coverage.
+
+**What would change this.** If the Rust-rendered pages ever stop being
+server-complete — if a row appears that only the script can draw — the
+progressive-enhancement argument is gone and the merge becomes the better trade.
+That is a change to `render.rs`, and it is a new entry, not a silent one.
+
+`docs/06-limits.md` §82 records the duplication and now points here for why it
+stands.
+
+---
