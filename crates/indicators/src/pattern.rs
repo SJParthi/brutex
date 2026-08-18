@@ -978,6 +978,29 @@ mod tests {
             "a close ABOVE the prior open is an engulfing, not a piercing -- the \
              two are different bits and this clause is what separates them"
         );
+
+        // ── THE BOUNDARY VALUES, WHICH THE THREE ABOVE DO NOT REACH ──────────
+        //
+        // Negating a clause with a value well past its threshold kills the `&&`
+        // and leaves the COMPARISON untouched: 95 against a low of 90 is refused
+        // by `<` and by `<=` alike. Only the threshold value itself separates
+        // them, and a first version of this test did not have it -- measured, by
+        // re-running mutation and finding 475, 476 and 477 still alive.
+        assert!(
+            !fires(&at(11, 90, 180, 85, 170)),
+            "an open EXACTLY at the prior low has not gapped below it; `<=` \
+             would accept this and `<` must not"
+        );
+        assert!(
+            !fires(&at(11, 80, 180, 75, 150)),
+            "a close EXACTLY at the prior body's midpoint has not passed it; \
+             `>=` would accept this and `>` must not"
+        );
+        assert!(
+            !fires(&at(11, 80, 205, 75, 200)),
+            "a close EXACTLY at the prior open is a full retracement, not a \
+             partial pierce; `<=` would accept this and `<` must not"
+        );
     }
 
     /// All 62 positions are live, plain, and named `pat_*`.
