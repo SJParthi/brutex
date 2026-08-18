@@ -16225,3 +16225,44 @@ factor is exactly that, and `docs/06-limits.md` records it as a **2.4 ms stall a
 
 ---
 
+## D-0205 · 2026-08-18 · `crates/api` gains a floor-relative budget — the last of the nine
+
+**Twelve of thirteen crates now carry one.** The thirteenth is `cli`, which makes
+no cost claim and therefore needs none.
+
+At the start of this session **three** crates had a floor-relative budget:
+`vocab`, `indicators` and `engine`. The other nine were ratio-only, and a ratio
+divides one cost by another of the same operation — so a slowdown that moves both
+legs cancels entirely. That is not hypothetical here: an audit measured a mask
+operation **174x slower passing its crate's ratio rows at 0.98x–1.00x**.
+
+**The floor** is one integer written into a `String` — the smallest unit of work
+any page in this crate is built from, one allocation and one integer-to-text
+conversion. It cannot move when a render does.
+
+**Measured**, three consecutive runs: **529.464, 493.599, 528.448** floors at a
+floor of 20,771–21,041 ps. **Budget 2,100**, sized on the worst observed with
+about 4x left over, refusing the 174x regression by a factor of 43.
+
+**What the magnitude says.** A whole instruments page at 50,000 rows costs about
+five hundred single-number writes. C-14 and C-15 already bound the per-row and
+marginal figures; this row exists so that **all three rising together** is still
+visible, which no quotient between them can show.
+
+### The complete set
+
+| crate | budget row |
+|---|---|
+| vocab, indicators, engine | pre-existing |
+| core | C-09b (D-0173) |
+| telemetry | C-T-04 (D-0175) |
+| costs | C-K-13 |
+| greeks | C-G-05 (D-0200) |
+| lake | C-L-04 (D-0201) |
+| store | C-17 (D-0202) |
+| runner | C-R-04 (D-0203) |
+| pull | C-26 (D-0204) |
+| **api** | **C-27, here** |
+
+---
+

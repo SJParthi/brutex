@@ -297,9 +297,9 @@ fn gate(label: &str, m: &Measured) -> bool {
 /// built from. The quotient is "how many one-number writes does a whole page
 /// cost".
 fn floor_ps() -> u128 {
+    use std::fmt::Write as _;
     cost_ps(2_000, || {
         let mut out = String::with_capacity(8);
-        use std::fmt::Write as _;
         let _ignored = write!(out, "{}", black_box(50_000_u32));
         black_box(out)
     })
@@ -324,8 +324,24 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
 
 /// C-27 — one dashboard render costs a bounded multiple of the per-render floor.
 fn the_dashboard_stays_within_its_budget(f: &Fixtures) -> bool {
-    /// Floors allowed per render. Measured below, then pinned.
-    const ALLOWED: u128 = 0;
+    /// Floors allowed per render.
+    ///
+    /// Measured, arm64 laptop, release, three consecutive runs: **529.464,
+    /// 493.599, 528.448** floors, at a floor of 20,771–21,041 ps. A 1.07x
+    /// spread.
+    ///
+    /// **2,100**, sized on the worst observed with roughly 4x left over — the
+    /// same rule the other ten budgets apply. It still refuses the 174x uniform
+    /// regression this file's ratios would report as ok: such a render would
+    /// read about 92,000 floors and be refused by a factor of 43.
+    ///
+    /// **What the magnitude says**, and it is worth stating: a whole instruments
+    /// page at 50,000 rows costs about five hundred single-number writes. That
+    /// is a page, not a per-row cost — C-14 and C-15 are the rows that bound the
+    /// per-row and marginal figures. This one exists so that all three of them
+    /// getting dearer at once is still visible, which no quotient between them
+    /// can show.
+    const ALLOWED: u128 = 2_100;
 
     let floor = floor_ps();
     println!("  the per-render floor is {floor} ps — one number written to a String");
