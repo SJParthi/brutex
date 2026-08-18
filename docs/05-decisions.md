@@ -14993,3 +14993,42 @@ being told. The floor remains the operator's to set.
 
 ---
 
+## D-0173 · 2026-08-18 · `crates/core` gains the floor-relative budget its ratios cannot replace
+
+`crates/core/benches/ratio.rs`.
+
+Every row in this file divided one decode cost by another decode cost, and **a
+uniform slowdown cancels in a quotient**. An audit measured exactly that
+elsewhere in this workspace: a mask operation **174x slower passed its crate's
+ratio rows at 0.98x–1.00x**, because both legs of every quotient moved together.
+
+`vocab`, `indicators` and `engine` each carry a floor-relative budget for that
+reason. Nine crates did not. This is the first of them.
+
+**The floor** is the cheapest possible touch of the same eleven fields — eleven
+`str::len` reads and a sum, over the same `MasterRow`. Same struct, same eleven
+pointers chased, no parsing. It cannot move when `decode_master_row` does, so the
+quotient is "how many of the cheapest per-row things does one decode cost".
+
+**Measured**, arm64 laptop, release, `lto = "fat"`, four consecutive runs:
+**33.823, 35.329, 35.972, 35.899** floors, at a floor of 2,104–2,146 ps. The
+spread is tight because both legs are pointer-chasing rather than
+arithmetic-bound.
+
+**Budget 110**, sized on the WORST observed and not the mean — the same rule
+`engine` applies to its own. That leaves 3.06x for a different microarchitecture
+and still refuses the 174x uniform regression by a factor of 57.
+
+A breach of this row is **not** a data dependence; C-09 is the row for that. It
+means every input got dearer at once, which is the thing a quotient cannot see.
+
+Documented as `C-09b`, so gate 14 can see it: gate 14 checks only the ids a row
+LISTS, and a bench row named by no invariant row is invisible to it — which is
+how five of `engine`'s nine rows went undocumented until D-0162.
+
+**Eight crates still have ratio-only benches** — `api`, `costs`, `greeks`,
+`lake`, `pull`, `runner`, `store`, `telemetry` — and are recorded as OPEN at
+`docs/06-limits.md` §81.
+
+---
+
