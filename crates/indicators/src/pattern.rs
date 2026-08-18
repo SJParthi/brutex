@@ -917,6 +917,74 @@ mod tests {
         );
     }
 
+    /// THE HARAMI PAIR: CONTAINMENT IS TWO CLAUSES, NOT ONE.
+    ///
+    /// Bits 159 and 160 fire when the current body sits wholly inside the prior
+    /// one. That containment is TWO separate clauses — a top under the prior
+    /// body's upper edge and a bottom over its lower edge — and an `&&` turned
+    /// into `||` makes either one alone sufficient, which is a bar poking out of
+    /// the prior body in one direction being called an inside bar.
+    ///
+    /// Three of the four clauses on each bit are isolable. The prior bar's own
+    /// direction is not: making `bar1` a doji collapses its open and close onto
+    /// one price, so the two containment bounds become the same number and the
+    /// second clause fails alongside the first. Recorded rather than faked.
+    #[test]
+    fn the_harami_body_must_be_contained_on_both_sides() {
+        // bar1 bearish, open 200 close 100 — the containing body.
+        let down = at(10, 200, 210, 90, 100);
+        let inside_up = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &down);
+            ok(&mut p, bar0).get(159)
+        };
+
+        assert!(
+            inside_up(&at(11, 120, 185, 115, 180)),
+            "a bullish body from 120 to 180 sits wholly inside 100..200"
+        );
+        assert!(
+            !inside_up(&at(11, 120, 215, 115, 210)),
+            "a top ABOVE the prior open is not contained; `||` would accept this \
+             on the strength of the bottom alone"
+        );
+        assert!(
+            !inside_up(&at(11, 90, 185, 85, 180)),
+            "and a bottom BELOW the prior close is not contained either -- both \
+             bounds are required, which is what the `&&` between them means"
+        );
+        assert!(
+            !inside_up(&at(11, 150, 185, 115, 150)),
+            "a bar that closed where it opened has not risen, so it is no \
+             bullish harami however well contained it is"
+        );
+
+        // 160 is the mirror: a bearish body inside a bullish one.
+        let up = at(10, 100, 210, 90, 200);
+        let inside_down = |bar0: &Candle| -> bool {
+            let mut p = Patterns::default();
+            let _prev = ok(&mut p, &up);
+            ok(&mut p, bar0).get(160)
+        };
+
+        assert!(
+            inside_down(&at(11, 180, 185, 115, 120)),
+            "a bearish body from 180 down to 120 sits wholly inside 100..200"
+        );
+        assert!(
+            !inside_down(&at(11, 210, 215, 115, 120)),
+            "a top above the prior close is not contained"
+        );
+        assert!(
+            !inside_down(&at(11, 180, 185, 85, 90)),
+            "nor is a bottom below the prior open"
+        );
+        assert!(
+            !inside_down(&at(11, 150, 185, 115, 150)),
+            "and a doji has not fallen, so it is no bearish harami"
+        );
+    }
+
     /// THE DARK-CLOUD MIRROR: EVERY CLAUSE AND EVERY THRESHOLD.
     ///
     /// Bit 162 is bit 161 reflected — prior bar up, current bar down, gapping
