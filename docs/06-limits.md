@@ -4686,3 +4686,47 @@ a separate workflow, which could never have been made blocking by any file in
 this tree: `needs:` cannot name a job in another workflow.
 
 ---
+
+## 82. `crates/indicators` has 49 surviving mutants, and they are almost all boundaries
+
+Measured 2026-08-18, `cargo-mutants 26.2.0`, first run ever over this crate:
+**589 mutants, 506 caught, 49 missed, 32 unviable, 2 timed out.**
+
+| file | survivors |
+|---|---|
+| `pattern.rs` | 9 |
+| `lib.rs` | 9 |
+| `gap.rs` | 8 |
+| `orb.rs` | 6 |
+| `evaluator.rs` | 6 |
+| `fib.rs` | 5 |
+| `column.rs` | 4 |
+| `daily.rs` | 2 |
+
+**The shape is one shape.** Nearly every survivor is a comparison flipped by one
+step — `>` to `>=`, `<` to `<=`, `<` to `==`. A handful are `||` to `&&` and
+`+` to `*`.
+
+That is a single diagnosis: **the tests exercise these predicates on values well
+inside the range, and never on the boundary value itself.** A candle whose body
+is comfortably larger than the threshold proves nothing about a candle whose body
+is exactly the threshold, and `Shape::body_at_least`, `Shape::top`,
+`Shape::bottom`, `GapFib::fold` and `Orb::fold` are all decided by exactly that
+comparison.
+
+**Why it matters here more than elsewhere.** This crate turns a bar into
+condition bits. A boundary that is off by one step does not crash and does not
+look wrong — it silently reclassifies bars near the edge, which changes which
+combinations the sweep finds and changes nothing a reader can see.
+
+**Two timed out**, which is the non-terminating class `docs/06-limits.md` §79
+records for `engine`: a mutation that makes a loop not finish cannot be killed by
+an assertion, because the suite hangs rather than fails.
+
+**What would close it:** a boundary case per predicate — the value exactly at the
+threshold, and one step either side. Not 49 separate tests; the survivors cluster
+into about a dozen predicates, and one table-driven test per predicate covering
+`t-1`, `t`, `t+1` would kill most of them. **OPEN.**
+
+---
+

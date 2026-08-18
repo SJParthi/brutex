@@ -15775,3 +15775,36 @@ caller. Recorded here so the driver is written against it rather than against an
 assumption.
 
 ---
+
+## D-0194 · 2026-08-18 · `crates/costs` gains a floor-relative budget
+
+`crates/costs/benches/ratio.rs`. The third of the nine ratio-only crates, after
+`core` (D-0173) and `telemetry` (D-0175).
+
+Same reason as both: every row here divided one charge-stack cost by another, and
+a uniform slowdown cancels in a quotient — the failure that let a mask operation
+run **174x slower while passing its crate's ratio rows at 0.98x**.
+
+**The floor** is one multiply and one add on the same two fill prices. Same
+values, same registers, no rate table, no rounding, no branch on side. It cannot
+move when `charge_stack` does, so the quotient is "how many integer operations
+does a whole Indian F&O charge stack cost".
+
+**Measured**, four consecutive runs: **36.140, 36.942, 37.388, 39.627** floors, at
+a floor of 889–1,039 ps. The spread is 1.10x — both legs are register arithmetic
+and neither touches memory or the allocator, so this is the tightest of the three
+budgets so far (`telemetry`'s is 1.9x because it writes to disk).
+
+**Budget 120**, sized on the worst observed and not the mean. That leaves 3.03x
+for a different microarchitecture and still refuses the 174x regression by a
+factor of 54.
+
+A breach of this row is **not** a trade-size dependence — C-K-10 is the row for
+that. It means every trade got dearer at once, which is what a quotient cannot
+see.
+
+**Six crates remain ratio-only**: `api`, `greeks`, `lake`, `pull`, `runner`,
+`store`. Recorded at `docs/06-limits.md` §81.
+
+---
+

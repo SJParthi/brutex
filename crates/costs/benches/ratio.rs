@@ -478,6 +478,78 @@ fn nse_rates() -> Option<Rates> {
 /// thousand lots cost more than one lot, something is accumulating per lot; if
 /// a large premium costs more than a small one, something is accumulating per
 /// rupee.
+/// The per-stack floor: the cheapest arithmetic on the same fills.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row in this file divides one charge-stack cost by another, and a
+/// UNIFORM slowdown cancels in a quotient. An audit measured exactly that
+/// elsewhere in this workspace: a mask operation **174x slower passed its
+/// crate's ratio rows at 0.98x-1.00x**, because both legs moved together.
+/// `vocab`, `indicators`, `engine`, `core` and `telemetry` each carry a
+/// floor-relative budget for that reason; this crate did not.
+///
+/// The denominator has to be something that cannot move when `charge_stack`
+/// does. This multiplies and adds the same two fill prices — same values, same
+/// registers, no rate table, no rounding, no branch on side. The quotient is
+/// "how many integer operations does a whole Indian F&O charge stack cost".
+fn floor_ps(fills: Fills) -> u128 {
+    cost_ps(|| {
+        let a = black_box(fills).buy().raw();
+        let b = black_box(fills).sell().raw();
+        black_box(a.wrapping_mul(65).wrapping_add(b))
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on the trade. A breached BUDGET says
+/// the cost rose for every trade at once, which no ratio here can report.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<52} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<52} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-K-13 — one charge stack costs a bounded multiple of the per-stack floor.
+fn the_charge_stack_stays_within_its_budget() -> bool {
+    /// Floors allowed per charge stack.
+    ///
+    /// Measured, arm64 laptop, release, four consecutive runs: **36.140, 36.942,
+    /// 37.388, 39.627** floors, at a floor of 889–1,039 ps. The spread is 1.10x
+    /// — both legs are register arithmetic on the same two prices, so neither
+    /// touches memory or the allocator.
+    ///
+    /// **120**, sized on the worst observed and not the mean, the same rule
+    /// `engine` and `core` apply. That leaves 3.03x for a different
+    /// microarchitecture and still refuses the 174x uniform regression this
+    /// file's ratios would report as ok — such a stack would read about 6,500
+    /// floors and be refused by a factor of 54.
+    ///
+    /// A breach of this is NOT a trade-size dependence; C-K-10 is the row for
+    /// that. It means every trade got dearer at once, which a quotient cannot
+    /// see.
+    const ALLOWED: u128 = 120;
+
+    let (Some(fills), Some(rates)) = (flat_fills(100_00, 120_00), nse_rates()) else {
+        return false;
+    };
+    let floor = floor_ps(fills);
+    println!("  the per-stack floor is {floor} ps — one multiply and one add");
+    let at = cost_ps(|| charge_stack(black_box(fills), black_box(65), black_box(&rates)));
+    budget("C-K-13 charge stack against the floor", floor, at, ALLOWED)
+}
+
 fn the_trade_size_does_not_change_the_charge_stack_cost() -> bool {
     let (Some(fills), Some(rates)) = (flat_fills(100_00, 120_00), nse_rates()) else {
         return false;
@@ -653,6 +725,7 @@ fn main() {
     ok &= the_calendar_position_does_not_change_the_expiry_cost();
     ok &= the_stage_two_pre_history_windows_still_refuse();
     ok &= the_trade_size_does_not_change_the_charge_stack_cost();
+    ok &= the_charge_stack_stays_within_its_budget();
     ok &= the_entry_point_costs_the_same_whatever_it_is_asked();
     ok &= the_stage_three_refusals_are_still_refusals();
 
