@@ -6885,7 +6885,14 @@
                        on every row but the one the sweep is holding, and a sort
                        control that cannot reorder anything is a control that
                        lies about what it does. -->
-                  <th class="num">
+                  <!-- NOT `.num`. `.num` right-aligns a column because a
+                       COLUMN OF FIGURES is compared down its last digit —
+                       `0 / 4,500` under `0 / 4,500`. This column holds a
+                       phrase, "1 · not counted", and right-aligning a phrase
+                       between two left-aligned neighbours is what put a band of
+                       air between Verdict and Next step. It reads left, with
+                       the two text columns it belongs to. -->
+                  <th>
                     <span class="hrow">Attempts</span>
                     <span class="hsub">asked, and counted</span>
                   </th>
@@ -6966,7 +6973,7 @@
                            `attempts_max` for the feed it is on — so where the
                            count exists it is READ, and where it does not the
                            cell says why instead of drawing a dash. -->
-                      <td class="num mono">
+                      <td class="mono">
                         {#if r.state === 'retry' && feedLadder}
                           <span
                             class="info"
@@ -7774,9 +7781,17 @@
      A NUDGE WOULD NOT HAVE HELD. A margin tuned against today's four notes is
      wrong the moment a fifth appears, and the fifth is a `{#if}` away in half
      these cells. */
+  /* `auto-fill`, NOT `auto-fit`, AND THE DIFFERENCE IS THE RAGGED ROW.
+     Five controls into a three-track row leaves two on the second, and
+     `auto-fit` COLLAPSES the empty tracks and stretches the survivors across
+     them — so Segments and Timeframe rendered half again as wide as the three
+     above them, and the strip read as two different grids stacked. `auto-fill`
+     keeps the empty tracks, so every control is the same width at every count
+     and the columns line up down the rows. The leftover is one clean gap at
+     the end of the short row instead of distortion spread across it. */
   .pickers {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(248px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
     gap: var(--s6) var(--s5);
     align-items: start;
     border: 0;
@@ -9255,6 +9270,23 @@
   }
   .cscroll th {
     vertical-align: bottom;
+  }
+  /* ══ THE SLACK GOES INTO THE NAME, NOT BETWEEN THE FIGURES ══
+
+     `table` is `width: 100%` on the default `auto` layout, so every column got
+     a share of the leftover width — and the share landed as EMPTY SPACE inside
+     each column rather than as a wider column, which is why the gap between
+     Verdict and Attempts was a band of air while the gap between Attempts and
+     Next step was almost nothing. Six arbitrary gutters instead of one rhythm.
+
+     Handing the whole slack to the first column makes every column after it
+     exactly its own content plus the same padding either side — `thead th` and
+     `tbody td` already agree on that padding at `var(--s5)`, so the rhythm is
+     already defined and was only being drowned. The instrument name is the
+     right place for the slack: it is the column a reader scans down, and it is
+     the one whose content varies most. */
+  .cscroll th:first-child {
+    width: 100%;
   }
   /* A HEADER THAT IS NOT A BUTTON STILL STACKS ITS UNIT UNDER ITS NAME.
      `.sort` is the flex column that puts "bars, from the NSE calendar" on its
