@@ -6724,425 +6724,24 @@
       </section>
       {/if}
 
-      <!-- ══════════════════════════ THE CENSUS ══════════════════════════
-           EVERY SERIES IN THE WINDOW, AND WHAT THE STORE ACTUALLY HOLDS FOR
-           IT. There was no such surface here at all: the form asked for a
-           window and nothing on screen said whether that window was already
-           filled, so the only way to find out was to start a pull.
+      <!-- ══ THE CENSUS IS GONE, AT THE OPERATOR'S INSTRUCTION ══
+           "Every series in that window" drew a heading, a verdict pill strip,
+           a store-read line, a five-column paginated table over every ticked
+           instrument — stored against expected, months unproved, a verdict and
+           a next step — and its pager. It was the largest surface on the page
+           and it sat between the form and nothing.
 
-           EVERY NUMBER IS MEASURED and the header of each column says its
-           unit. Stored comes from /store.json, expected from the NSE calendar
-           over the days INSIDE the window, in flight from /ingest/status.json,
-           and out-of-reach from the same feed floor that refuses a day in the
-           date control above. Nothing here is generated and nothing is
-           extrapolated. -->
-      <!-- ══ NOTHING BELOW EXISTS UNTIL THERE IS A WINDOW TO COUNT ══
+           NO DATA WAS TOUCHED AND NONE COULD BE. This deletes a READING, not a
+           store: `/store.json` is a GET, `crates/api/src/server.rs` registers
+           no DELETE at all, and `CLAUDE.md` §3 rule 8 makes a month file
+           unmutatable in place and unremovable. Every bar this table counted is
+           still on disk and /db still reports it.
 
-           This section drew on every load. With no dates picked it rendered a
-           heading, a verdict strip reading "No window", a paginated table with
-           five column headers and their unit captions, an empty body repeating
-           the same sentence, a pager reading "0 of 0 series", and two footer
-           paragraphs defining terms for numbers that were not on screen —
-           SEVEN blocks, all of them saying the same thing: you have not picked
-           a window yet.
-
-           The date field says that already, in three words, where the window
-           is chosen. A census of nothing is not a census, and drawing its
-           chrome so it can announce its own emptiness is the noise that made
-           this page unreadable before it was ever used.
-
-           WHEN THERE IS A WINDOW, EVERY WORD OF IT COMES BACK. Nothing here is
-           deleted and no refusal is hidden: this is a section that has nothing
-           to report until it does. -->
-      {#if windowOk}
-      <section class="census">
-        <h2 class="sec">
-          Every series in that window
-          <span class="cnt mono">{n(censusRows.length)}</span>
-          <em>{censusSub}</em>
-        </h2>
-
-        <div class="cgrid">
-          <!-- THE STRIP: one verdict in a sentence, the retry judgement under
-               it, the non-zero counts as filters, the total they must reach,
-               and the one bulk action. -->
-          <div class="lstrip {censusVerdict.tone}">
-            <!-- REMOVED: the verdict sentence. The Verdict COLUMN in the table
-                 below carries the same classification, per row. -->
-
-            {#if censusPills.length > 0}
-              <div class="lpills">
-                {#each censusPills as p (p.k)}
-                  <button
-                    class="lp"
-                    type="button"
-                    aria-pressed={cBucket === p.k}
-                    class:on={cBucket === p.k}
-                    title={(cBucket === p.k
-                      ? 'Showing only these. Click again to show every series. — '
-                      : `Click to show only these ${n(p.count)} — `) + VERDICT[p.k][2]}
-                    onclick={() => {
-                      cBucket = cBucket === p.k ? null : p.k;
-                      cPage = 1;
-                    }}
-                  >
-                    <span
-                      class="dot"
-                      class:up={VERDICT[p.k][0] === 'up'}
-                      class:down={VERDICT[p.k][0] === 'down'}
-                      class:warn={VERDICT[p.k][0] === 'warn'}
-                      class:acc={VERDICT[p.k][0] === 'info'}
-                    ></span>
-                    <span class="n">{n(p.count)}</span>
-                    {VERDICT[p.k][1]}
-                  </button>
-                {/each}
-              </div>
-            {/if}
-
-            <!-- THE PARTITION HAS TO ADD UP AND THE SUM IS ON SCREEN. A tidy
-                 number that hides a series nobody accounted for is the failure
-                 §4 bans, so the mismatch shouts rather than rounding. -->
-            {#if censusRows.length > 0}
-              {#if censusDrawn === censusRows.length}
-                <span class="ltot">of {n(censusRows.length)} series</span>
-              {:else}
-                <span class="ltot bad">
-                  MISMATCH — {n(censusRows.length)} series, {n(censusDrawn)} accounted for
-                </span>
-              {/if}
-            {/if}
-
-            {#if censusShort > 0}
-              <div class="lact">
-                <button
-                  class="btn primary sm"
-                  type="button"
-                  disabled={rerunBlock !== null}
-                  title={rerunBlock
-                    ? `Cannot be pressed: ${rerunBlock}`
-                    : `Sends the ${n(wireBodies.length)} request(s) the form above describes — ${dayLabel(from)} – ${dayLabel(to)}, one per ticked timeframe — and re-reads the store after. It asks for the whole target: SpotRequest carries no member field, so it cannot be narrowed to the short series. The month files inside the window are what it fills.`}
-                  onclick={() => start()}
-                >
-                  Pull the {n(censusShort)} month file(s) this window is short
-                </button>
-                {#if rerunShort}
-                  <span class="hint warn" title={rerunBlock}>Cannot be pressed: {rerunShort}</span>
-                {/if}
-              </div>
-            {/if}
-          </div>
-
-          <!-- WHEN THE READING WAS TAKEN, AND A PRESS TO TAKE IT AGAIN. A
-               census over a stale store is a census that lies quietly. -->
-          <div class="cbar">
-            <span class="hint" class:warn={storeRead.error !== null}>
-              {#if storeRead.error}
-                The store could not be read, so no row below is drawn rather than every row being
-                drawn as empty: {storeRead.error}
-              {:else if storeRead.busy}
-                Reading <span class="mono">/store.json?feed={feeds.active}</span>…
-              {:else if storeRead.at}
-                {n(storeRead.rows)} instrument-month row(s) read from
-                <span class="mono">/store.json?feed={feeds.active}</span> at {stampLabel(
-                  storeRead.at
-                )}
-                · {n(heldInWindow)} of them are inside this window
-              {:else}
-                The store has not been read yet.
-              {/if}
-            </span>
-            <span class="hint" class:warn={pilot.error !== null}>
-              {#if pilot.error}
-                The sweep ladder could not be read, so no row is marked retrying and none is marked
-                failed — both of those are that route's evidence, not this page's guess:
-                {pilot.error}
-              {:else if feedHalt}
-                The sweep has HALTED for {feedName(feeds.active)}: {feedHalt}
-              {:else if pilot.inFlight}
-                In flight now: <span class="mono">{pilot.inFlight.instrument}</span>
-                {pilot.inFlight.month} ({n(pilot.inFlight.index)} of {n(pilot.inFlight.of)})
-              {:else if pilot.at}
-                The sweep names nothing in flight, so no row is marked retrying.
-              {:else}
-                The sweep ladder has not been read.
-              {/if}
-            </span>
-            <span class="spacer"></span>
-            <button
-              class="btn ghost sm"
-              type="button"
-              disabled={storeRead.busy || pilot.busy}
-              title={storeRead.busy || pilot.busy
-                ? 'A reading is already in flight. A second press would duplicate it, and /store.json rebuilds the census server-side.'
-                : 'Reads /store.json and /ingest/status.json again. Every number below is one of those two answers — nothing here is cached beyond this press.'}
-              onclick={() => {
-                refreshStore();
-                readPilot();
-              }}
-            >
-              {storeRead.busy || pilot.busy ? 'Reading…' : 'Re-read the store'}
-            </button>
-          </div>
-
-          <div class="cscroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>
-                    <button class="sort" type="button" onclick={() => sortCensus('sym')}>
-                      <span class="hrow"
-                        >Instrument{cSort.key === 'sym' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
-                      >
-                      <span class="hsub">NSE trading symbol</span>
-                    </button>
-                  </th>
-                  {#if segmentsReached.length > 1}
-                    <th>
-                      <button class="sort" type="button" onclick={() => sortCensus('seg')}>
-                        <span class="hrow"
-                          >Segment{cSort.key === 'seg' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
-                        >
-                        <span class="hsub">what the route fills</span>
-                      </button>
-                    </th>
-                  {/if}
-                  {#if rungsChosen.length > 1}
-                    <th>
-                      <button class="sort" type="button" onclick={() => sortCensus('tf')}>
-                        <span class="hrow"
-                          >Timeframe{cSort.key === 'tf' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
-                        >
-                        <span class="hsub">one bar covers</span>
-                      </button>
-                    </th>
-                  {/if}
-                  <th class="num">
-                    <button
-                      class="sort"
-                      type="button"
-                      title="Stored is counted from /store.json. Expected is the NSE sessions inside the chosen window times the rung's bars per session — weekends and the holidays this page carries excluded. A rung with no stated bars-per-session has no expectation and prints a dash."
-                      onclick={() => sortCensus('got')}
-                    >
-                      <span class="hrow"
-                        >Bars stored / expected{cSort.key === 'got'
-                          ? cSort.dir > 0
-                            ? ' ▲'
-                            : ' ▼'
-                          : ''}</span
-                      >
-                      <span class="hsub">bars, from the NSE calendar</span>
-                    </button>
-                  </th>
-                  <th class="num">
-                    <button class="sort" type="button" onclick={() => sortCensus('unproved')}>
-                      <span class="hrow"
-                        >Months unproved{cSort.key === 'unproved'
-                          ? cSort.dir > 0
-                            ? ' ▲'
-                            : ' ▼'
-                          : ''}</span
-                      >
-                      <span class="hsub">of {n(windowMonths.length)} in the window</span>
-                    </button>
-                  </th>
-                  <th>
-                    <button
-                      class="sort"
-                      type="button"
-                      title={`Worst first, and the order is a claim about what you have to do: ${VORDER.map((k) => VERDICT[k][1]).join(' → ')}. Not alphabetical — the label is prose and prose has no order.`}
-                      onclick={() => sortCensus('state')}
-                    >
-                      <span class="hrow"
-                        >Verdict{cSort.key === 'state' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
-                      >
-                      <span class="hsub">measured, not reported</span>
-                    </button>
-                  </th>
-                  <th>
-                    <button
-                      class="sort"
-                      type="button"
-                      title="Ranks by the number the button prints: how many month files inside the window are neither settled nor out of reach."
-                      onclick={() => sortCensus('act')}
-                    >
-                      <span class="hrow"
-                        >Next step{cSort.key === 'act' ? (cSort.dir > 0 ? ' ▲' : ' ▼') : ''}</span
-                      >
-                      <span class="hsub">pull, or nothing</span>
-                    </button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {#if censusSlice.length === 0}
-                  {@const why = censusBlocker()}
-                  <tr>
-                    <td colspan={censusColCount}>
-                      <div class="empty">
-                        <b>{why[0]}</b>
-                        {why[1]}
-                      </div>
-                    </td>
-                  </tr>
-                {:else}
-                  {#each censusSlice as r (r.id)}
-                    <tr>
-                      <td>
-                        <b class="mono">{r.sym}</b>
-                        <span class="kindtag">{r.kind}</span>
-                      </td>
-                      {#if segmentsReached.length > 1}
-                        <td class="mono">{r.segLabel}</td>
-                      {/if}
-                      {#if rungsChosen.length > 1}
-                        <td class="mono">{r.tfLabel}</td>
-                      {/if}
-                      <td
-                        class="num mono"
-                        title={r.per === null
-                          ? `${r.tfLabel} has no bars-per-session this page can state, so ${n(r.got)} stored bar(s) are counted and nothing is claimed about what they should be.`
-                          : `${n(r.got)} stored against ${n(r.exp)} expected — ${n(windowSessions)} NSE session(s) inside the window × ${n(r.per)} bar(s) per session, over ${n(r.months.length)} month file(s).`}
-                      >
-                        <span class:up={r.per !== null && r.got >= r.exp} class:warn={r.per !== null && r.got < r.exp}
-                          >{n(r.got)}</span
-                        >
-                        / {r.per === null ? '—' : n(r.exp)}
-                      </td>
-                      <td
-                        class="num mono"
-                        class:warn={r.unproved > 0}
-                        class:up={r.unproved === 0}
-                        title={r.unproved > 0
-                          ? `${n(r.unproved)} of the ${n(r.months.length)} month file(s) in the window are not settled: ${r.months.filter((m) => m.k !== 'ok' && m.k !== 'beyond').map((m) => `${monthLabel(m.month)} ${VERDICT[m.k][1]}`).join(', ')}.`
-                          : `All ${n(r.months.length)} month file(s) in the window are settled — matched the calendar, or out of this feed's reach.`}
-                      >
-                        {n(r.unproved)}/{n(r.months.length)}
-                      </td>
-                      <td>
-                        <span
-                          class="tag"
-                          class:up={VERDICT[r.state][0] === 'up'}
-                          class:down={VERDICT[r.state][0] === 'down'}
-                          class:warn={VERDICT[r.state][0] === 'warn'}
-                          class:info={VERDICT[r.state][0] === 'info'}
-                          title={VERDICT[r.state][2]}>{VERDICT[r.state][1]}</span
-                        >
-                      </td>
-                      <td>
-                        {#if r.unproved === 0}
-                          <span
-                            class="dash"
-                            title={r.state === 'beyond'
-                              ? VERDICT.beyond[2]
-                              : 'Nothing to ask for: every month file in this window is settled.'}
-                            >—</span
-                          >
-                        {:else}
-                          {@const sp = shortSpan(r)}
-                          <button
-                            class="btn sm"
-                            type="button"
-                            disabled={phase === 'running' || problems.length > 0 || sp === null}
-                            title={phase === 'running'
-                              ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
-                              : problems.length > 0
-                                ? `The request above has ${n(problems.length)} thing(s) to fix first: ${problems[0].why}`
-                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. That is ${dayLabel(sp?.from ?? '')} – ${dayLabel(sp?.to ?? '')}: the days covering the ${n(r.unproved)} unsettled month file(s) of this series, clipped to the window you chose. It CANNOT be narrowed to ${r.sym}: api::ingest::SpotRequest carries no member field, so the server answers for the whole target — what this narrows is the window and the rung, and the outcome list below is built for this row.`}
-                            onclick={() => pullRow(r)}
-                          >
-                            Pull {n(r.unproved)}
-                          </button>
-                        {/if}
-                      </td>
-                    </tr>
-                  {/each}
-                {/if}
-              </tbody>
-            </table>
-          </div>
-
-          <!-- THE PAGER. Six controls and the count they move through. Every
-               disabled one says on its face why it is disabled. -->
-          <div class="pager">
-            <span class="of">
-              <b class="mono"
-                >{censusSorted.length === 0
-                  ? '0'
-                  : `${n((censusPage - 1) * PAGE_SIZE + 1)}–${n(Math.min(censusPage * PAGE_SIZE, censusSorted.length))}`}</b
-              >
-              of {n(censusSorted.length)} series{cBucket
-                ? ` marked "${VERDICT[cBucket][1]}" · ${n(censusRows.length)} in all`
-                : ''}
-            </span>
-            <span class="pages">
-              <button
-                class="pg"
-                type="button"
-                disabled={censusPage === 1}
-                title={censusPage === 1 ? 'First page — already on it' : 'First page'}
-                onclick={() => (cPage = 1)}>«</button
-              >
-              <button
-                class="pg"
-                type="button"
-                disabled={censusPage === 1}
-                title={censusPage === 1 ? 'Previous page — this is the first' : 'Previous page'}
-                onclick={() => (cPage = censusPage - 1)}>‹</button
-              >
-              {#each pageList(censusPage, censusPages) as it (it)}
-                {#if typeof it === 'string'}
-                  <span class="pg gap" title="Pages between the two shown">…</span>
-                {:else}
-                  <button
-                    class="pg"
-                    type="button"
-                    class:on={it === censusPage}
-                    aria-current={it === censusPage ? 'page' : undefined}
-                    title={it === censusPage ? `Page ${n(it)} — you are on it` : `Page ${n(it)}`}
-                    onclick={() => (cPage = it)}>{n(it)}</button
-                  >
-                {/if}
-              {/each}
-              <button
-                class="pg"
-                type="button"
-                disabled={censusPage === censusPages}
-                title={censusPage === censusPages ? 'Next page — this is the last' : 'Next page'}
-                onclick={() => (cPage = censusPage + 1)}>›</button
-              >
-              <button
-                class="pg"
-                type="button"
-                disabled={censusPage === censusPages}
-                title={censusPage === censusPages ? 'Last page — already on it' : 'Last page'}
-                onclick={() => (cPage = censusPages)}>»</button
-              >
-            </span>
-          </div>
-        </div>
-
-        <!-- ══ TWO FOOTERS FOLDED INTO ONE DISCLOSURE ══
-
-             Both were true, both were long, and both drew under the census on
-             every load whether or not anything on screen depended on them. One
-             defined `stored` and `expected`; the other stated the holiday
-             table's own bounds. Together they were a wall of prose under a
-             table, which is where a reader stops reading and therefore where a
-             page should put the least.
-
-             NOT DELETED — §4's limit-stating is exactly what the second one
-             does, and `docs/06-limits.md` is the other place it lives. Folded,
-             so the reader who wants the definitions clicks once and the reader
-             who wants the numbers is not made to scroll past them.
-
-             The fold OPENS ITSELF when the window reaches outside the holiday
-             table, because there the second paragraph stops being a definition
-             and becomes a caveat on a number that is on screen. A limit that
-             applies right now is not something to make somebody hunt for. -->
-      <!-- REMOVED: "What stored and expected mean" — a glossary under the table. Not a control and not a column. -->
-      </section>
-      {/if}
+           WHAT LEAVES WITH IT: the only per-series view of stored-against-
+           expected on this page, and the per-row "Pull N" that narrowed a
+           window to one series' unsettled months. The run card above still
+           reports what a pull actually did, instrument by instrument, and the
+           form still refuses a request the server would. -->
     </div>
   {/if}
 </div>
@@ -8058,6 +7657,65 @@
      forcing the row wider than the panel. */
   .field :global(.pmenu) :global(.pct) {
     max-width: 45%;
+  }
+
+  /* ══ THE STRIP'S MENUS ARE DENSE. THE COMPONENT'S DEFAULTS ARE NOT ══
+
+     `$lib/Picker.svelte` is sized for a 750-name instrument search, where an
+     `--fs-lg` box with 18px of padding is the control you are actually there
+     to use and a 42px row is a comfortable target in a list you will scroll
+     for a while. In the STRIP the same metrics open a panel where the search
+     box is taller than three of the six rows under it — a six-item universe
+     list where the biggest object on screen is a box for narrowing six items.
+
+     Scoped here, on the operator's instruction, rather than changed in the
+     component: `Picker` is shared with /db, /markets and /autopilot, and this
+     is the same rule the `.pbtn` clip and the `.pmenu` width above already
+     follow — the page adjusts the shared control for its own strip and does
+     not edit it for everyone.
+
+     NOTHING SEMANTIC MOVES. A radio is still a circle and a checkbox still a
+     square — that distinction is the only thing on screen saying whether
+     ticking one unticks the rest, and the component's own comment is right
+     that it is load-bearing. They are 15px instead of 18px. */
+  .field :global(.pmenu .phead) {
+    padding: var(--s3) var(--s2) var(--s4);
+  }
+  .field :global(.pmenu .pq) {
+    font-size: var(--fs-base);
+    padding: var(--s4) var(--s5);
+    border-radius: var(--r3);
+  }
+  /* "Matches name or detail" IS THE NARRATION THIS PAGE HAS BEEN CUTTING. A
+     search box that searches what is in it needs no caption under it. */
+  .field :global(.pmenu .phint) {
+    display: none;
+  }
+  .field :global(.pmenu .pact button) {
+    padding: var(--s3);
+  }
+  .field :global(.pmenu .plist label) {
+    min-height: 0;
+    padding: var(--s3) var(--s5);
+    gap: 2px var(--s5);
+    border-radius: var(--r2);
+  }
+  .field :global(.pmenu .plist input) {
+    width: 15px;
+    height: 15px;
+  }
+  /* The reason under a row is indented past the control it belongs to, and
+     that indent is measured from the control — a 45px gutter beside a 15px
+     box is a sentence floating in the middle of the row. */
+  .field :global(.pmenu .pwhy) {
+    padding-left: calc(15px + var(--s5));
+    font-size: var(--fs-micro);
+  }
+  /* A menu that can be half the window tall is a menu that covers the form it
+     belongs to. Six universes, three segments and two rungs all fit well
+     inside this; the instrument search is not one of these — it is `.ddm`. */
+  .field :global(.pmenu) {
+    max-height: 320px;
   }
   .ddb {
     appearance: none;
@@ -9229,181 +8887,11 @@
     background: var(--down-soft);
   }
 
-  /* ---- the census ---- */
-  .census {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s4);
-    min-width: 0;
-  }
-  h2.sec {
-    display: flex;
-    align-items: center;
-    gap: var(--s4);
-    flex-wrap: wrap;
-    margin: var(--s4) 0 0;
-    font-size: var(--fs-mini);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    font-weight: var(--w-bold);
-  }
-  h2.sec .cnt {
-    font-size: var(--fs-mini);
-    color: var(--acc);
-    background: var(--acc-soft);
-    padding: 1px 7px;
-    border-radius: 9px;
-    letter-spacing: 0;
-  }
-  h2.sec em {
-    font-style: normal;
-    font-size: var(--fs-mini);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--dim);
-    font-weight: var(--w-reg);
-  }
-  .cgrid {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    box-shadow: var(--e1);
-    overflow: hidden;
-    min-width: 0;
-  }
-  .cbar {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    flex-wrap: wrap;
-    padding: var(--s3) var(--s5);
-    border-bottom: 1px solid var(--line);
-  }
-  /* THE TABLE SCROLLS INSIDE ITS OWN BOX. A wide table that widens the page
-     puts the form's own controls off screen. */
-  .cscroll {
-    max-height: min(58vh, 640px);
-    overflow: auto;
-    overscroll-behavior: contain;
-  }
-  .cscroll th {
-    vertical-align: bottom;
-  }
-  .cscroll .sort {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 1px;
-    background: none;
-    border: 0;
-    padding: 0;
-    font: inherit;
-    color: inherit;
-    letter-spacing: inherit;
-    text-transform: inherit;
-    cursor: pointer;
-  }
-  .cscroll th.num .sort {
-    align-items: flex-end;
-    width: 100%;
-  }
-  .cscroll .sort:hover {
-    color: var(--ink);
-  }
-  .cscroll .hrow {
-    font-size: var(--fs-mini);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-  }
-  /* A COLUMN THAT CANNOT STATE ITS OWN UNIT IN THE HEADER is a column whose
-     meaning lives in a tooltip. The second line is not decoration. */
-  .cscroll .hsub {
-    font-size: var(--fs-micro);
-    font-weight: var(--w-reg);
-    letter-spacing: 0;
-    text-transform: none;
-    color: var(--ghost, var(--faint));
-  }
-  .cscroll td.num {
-    text-align: right;
-  }
-  .cscroll td.num.warn {
-    color: var(--warn);
-  }
-  .cscroll td.num.up {
-    color: var(--up);
-  }
-  .cscroll .kindtag {
-    margin-left: var(--s3);
-    font-size: var(--fs-micro);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--faint);
-  }
-  .cscroll .dash {
-    color: var(--faint);
-  }
-  .cscroll .empty b {
-    display: block;
-    color: var(--ink);
-    margin-bottom: var(--s2);
-  }
-
-  /* ---- the pager ---- */
-  .pager {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    flex-wrap: wrap;
-    padding: var(--s3) var(--s5);
-    border-top: 1px solid var(--line);
-    background: var(--bg-2);
-    font-size: var(--fs-xs);
-    color: var(--faint);
-  }
-  .pager .of b {
-    color: var(--ink);
-    font-weight: var(--w-semi);
-  }
-  .pages {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: var(--s2);
-  }
-  .pg {
-    min-width: 26px;
-    padding: var(--s2) var(--s3);
-    border-radius: var(--r2);
-    border: 1px solid var(--line);
-    background: var(--panel);
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-    cursor: pointer;
-  }
-  .pg:hover:not(:disabled) {
-    border-color: var(--line-hard);
-    background: var(--panel-2);
-  }
-  .pg:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .pg.on {
-    border-color: var(--acc);
-    color: var(--acc);
-    background: var(--acc-soft);
-    font-weight: var(--w-bold);
-  }
-  .pg.gap {
-    border-color: transparent;
-    background: none;
-    cursor: default;
-    color: var(--faint);
-  }
+  /* `.census`, `h2.sec`, `.cgrid`, `.cbar`, `.cscroll`, `.pager`, `.pages` and
+     `.pg` are gone with the section they drew. Gate W4 counts exactly this —
+     styling left behind by a markup deletion, its comment still asserting a
+     layout the page no longer has. `.ohead .sort` is NOT touched: the outcome
+     list has its own sort buttons and they are live. */
 
   .blank .alt {
     display: block;
