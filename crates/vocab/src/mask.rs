@@ -197,6 +197,120 @@ impl ConditionMask {
 
 #[cfg(test)]
 mod tests {
+
+    /// THE MASK ALGEBRA IS EXERCISED IN EVERY WORD, NOT ONLY THE LOW ONES.
+    ///
+    /// `cargo-mutants` over this crate found **thirteen survivors here**, and
+    /// every one was in a word the tests never reached:
+    ///
+    /// * `union` words 4 and 5 — `|` mutates to `^` and nothing notices
+    /// * `intersect` word 5 — `&` mutates to `|` or `^` and nothing notices
+    /// * `is_empty` — all five `|` in the fold, to `&` or `^`
+    ///
+    /// The cause is structural rather than careless. The table defines 280
+    /// positions, so a mask built from real bits never sets anything above word
+    /// 4, and word 5 (bits 320..383) is unallocated. But these three operations
+    /// run over all six words whatever the vocabulary holds, so a defect in the
+    /// part no position reaches is a defect no test reaches either — until the
+    /// table grows into it, at which point the sweep is silently wrong.
+    ///
+    /// This drives every word deliberately, including the unallocated one.
+    #[test]
+    fn every_word_of_the_mask_algebra_is_exercised_including_the_unallocated_one() {
+        // One bit in each of the six words, chosen so `b >> 6` walks 0..=5.
+        let per_word: [u32; WORDS] = [1, 65, 129, 193, 257, 321];
+
+        for (word, &bit) in per_word.iter().enumerate() {
+            assert_eq!(
+                bit >> 6,
+                u32::try_from(word).unwrap_or(u32::MAX),
+                "bit {bit} must live in word {word}"
+            );
+
+            // ── is_empty: one bit anywhere is not empty ──────────────────────
+            // Kills `|`->`&` in the fold: an AND of six words is zero whenever
+            // ANY word is zero, so a single-bit mask would read as empty.
+            let one = ConditionMask::default().with_bit(bit);
+            assert!(
+                !one.is_empty(),
+                "a mask with bit {bit} set (word {word}) is not empty"
+            );
+
+            // ── union: a SHARED bit must survive ─────────────────────────────
+            // Kills `|`->`^`: exclusive-or clears a bit set on both sides, so
+            // the union of a mask with itself would lose it.
+            let joined = one.union(&one);
+            assert!(
+                joined.get(bit),
+                "union must keep a bit both sides set, in word {word}"
+            );
+            assert_eq!(
+                joined.popcount(),
+                1,
+                "and must invent none beside it, in word {word}"
+            );
+
+            // ── intersect: only the SHARED bit ───────────────────────────────
+            // Kills `&`->`|` and `&`->`^`. `other` carries a DIFFERENT bit in
+            // the same word, so an OR would keep two and an XOR would keep the
+            // two unshared ones and drop the shared one.
+            let other = ConditionMask::default().with_bit(bit).with_bit(bit ^ 2);
+            let both = one.intersect(&other);
+            assert!(
+                both.get(bit),
+                "intersect keeps the bit both sides set, in word {word}"
+            );
+            assert_eq!(
+                both.popcount(),
+                1,
+                "intersect keeps ONLY the shared bit, in word {word}"
+            );
+        }
+
+        // ── is_empty's fold: one case per operator, and the arithmetic matters ──
+        //
+        // `is_empty` is `(w0 | w1 | w2 | w3 | w4 | w5) == 0` — FIVE operators,
+        // and a mutation replaces exactly one. A first version of this test set
+        // one bit per word at the SAME position in each, and four mutants
+        // survived it: with `w0 ^ w1` both being `1 << 1`, that pair cancels to
+        // zero, but the four remaining `|` still OR in the other non-zero words,
+        // so the answer stays right and the defect stays hidden.
+        //
+        // To kill the operator at position k, exactly the two words it joins
+        // must be EQUAL and non-zero with every other word zero. Then `^` folds
+        // the pair to zero, the rest contribute nothing, and `is_empty` wrongly
+        // answers true.
+        for k in 0..WORDS - 1 {
+            let low = u32::try_from(k).unwrap_or(0) * 64 + 7;
+            let pair = ConditionMask::default().with_bit(low).with_bit(low + 64);
+            assert_eq!(pair.popcount(), 2, "two bits, in words {k} and {}", k + 1);
+            assert!(
+                !pair.is_empty(),
+                "words {k} and {} both hold bit 7; a fold that cancels them \
+                 reads this as empty, and it is not",
+                k + 1
+            );
+        }
+
+        // A bit in every word at once, which no single mutation should hide.
+        let all = per_word
+            .iter()
+            .fold(ConditionMask::default(), |m, &b| m.with_bit(b));
+        assert_eq!(
+            all.popcount(),
+            u32::try_from(WORDS).unwrap_or(u32::MAX),
+            "one bit per word"
+        );
+        assert!(
+            !all.is_empty(),
+            "and a mask that full is certainly not empty"
+        );
+
+        assert!(
+            ConditionMask::ZERO.is_empty(),
+            "and the empty mask still reads empty, which is the other half"
+        );
+    }
     use super::*;
 
     #[test]

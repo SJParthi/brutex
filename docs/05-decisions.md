@@ -15161,3 +15161,44 @@ numbers, and the check that caught it was reading the file rather than assuming.
 
 ---
 
+## D-0176 · 2026-08-18 · The mask algebra was tested in four words of six
+
+`crates/vocab/src/mask.rs`.
+
+`cargo-mutants` over this crate — never run on it before — found **24 survivors
+in 235**, and **thirteen were here**: `union` words 4 and 5, `intersect` word 5,
+and every one of the five `|` in `is_empty`.
+
+**The cause is structural, not careless.** The table defines 280 positions, so a
+mask built from real bits never sets anything above word 4, and word 5 (bits
+320..383) is unallocated. But `union`, `intersect` and `is_empty` run over all
+six words whatever the vocabulary holds. A defect in the part no position reaches
+is a defect no test reaches — **until the table grows into it**, at which point
+the sweep is silently wrong and nothing says so.
+
+That is the worst shape a bug can have in this crate: latent, invisible, and
+armed by ordinary growth.
+
+### The first fix killed nine of thirteen, and the arithmetic is why
+
+A first version set one bit per word at the SAME position in each. Four
+`| -> ^` mutants in `is_empty` survived it. With `w0 ^ w1` where both are
+`1 << 1`, that pair cancels to zero — but the four remaining `|` still OR in the
+other non-zero words, so the answer stays right and the defect stays hidden.
+
+`is_empty` is five operators and a mutation replaces exactly one. To kill the
+operator at position k, **exactly the two words it joins must be equal and
+non-zero, with every other word zero**. Then `^` folds the pair to zero, the rest
+contribute nothing, and `is_empty` wrongly answers true. One case per operator.
+
+**Re-measured: 163 mutants, 154 caught, 9 unviable, 0 survived.**
+
+### What this does not close
+
+Eleven survivors remain in `crates/vocab/src/tolerance.rs` — ten `- -> +` in the
+const ladder-gap computation and one `< -> <=` in `lesser`. That file was being
+edited by a second session throughout, and editing another session's
+work-in-progress is how two changes become one conflict. **OPEN.**
+
+---
+
