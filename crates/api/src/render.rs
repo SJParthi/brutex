@@ -2476,7 +2476,7 @@ pub fn store_page(view: &StoreView<'_>) -> String {
     //
     // References rather than `find`: the filter's semantics are preserved
     // exactly, including the order and the (currently impossible) case of two
-    // censuses sharing a vendor. D-0170.
+    // censuses sharing a vendor. D-0171.
     let mine: Vec<&VendorCensus> = view
         .censuses
         .iter()

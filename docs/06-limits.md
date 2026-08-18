@@ -4535,7 +4535,7 @@ default.
 **The headline is the refutation rate.** Of 47 constructs that looked like O(1)
 violations, exactly one survived scrutiny. The per-operation discipline is real.
 
-### The one confirmed violation — fixed, D-0170
+### The one confirmed violation — fixed, D-0171
 
 `crates/api/src/render.rs`. The `/store` HTML page ran `.cloned()` over the
 censuses, and `VendorCensus` boxes a whole `Manifest` — a `Vec<Held>` plus a
