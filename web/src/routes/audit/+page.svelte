@@ -215,7 +215,25 @@
 
     /** @param {number} target */
     set(target) {
-      if (!Number.isFinite(target)) target = 0;
+      // A FIGURE NOBODY SENT IS NOT ZERO, AND THIS LINE USED TO SAY IT WAS.
+      //
+      // Together with the `?? 0` at every call site, a `/audit.json` that
+      // omitted `store.bars` -- an older payload, a partial answer, a field
+      // renamed server-side -- rendered "0 bars stored" across a store holding
+      // millions. `n0` already formats a non-finite number as an em dash, and
+      // this coercion is what stopped it ever seeing one. The page had the
+      // right formatter and could not reach it.
+      //
+      // `NaN` is carried rather than animated: a count-up towards an unknown
+      // is a transition through numbers the store never held, which is the
+      // same objection the first-value branch below already makes.
+      if (!Number.isFinite(target)) {
+        this.#to = Number.NaN;
+        this.#shown = null;
+        this.#started = true;
+        cancelAnimationFrame(this.#raf);
+        return;
+      }
       if (target === this.#to) return;
       const previous = this.v;
       this.#to = target;
@@ -844,12 +862,17 @@
   const tGen = new Tally();
 
   $effect(() => {
-    tBars.set(payload?.store?.bars ?? 0);
-    tIm.set(payload?.store?.instrument_months ?? 0);
-    tRuns.set(payload?.journal?.records ?? 0);
-    tLoud.set(counts.loud ?? 0);
-    tMonths.set(coverage?.present ?? 0);
-    tGen.set(payload?.store?.generation ?? 0);
+    // `?? NaN` AND NOT `?? 0`. The nullish default is kept because the field
+    // may genuinely be absent, but what it defaults TO is now the unknown that
+    // `n0` renders as an em dash, rather than a zero indistinguishable from a
+    // store that really holds nothing. Zero means zero here, the same way
+    // CLAUDE.md section 7 means it for the open-interest sentinel.
+    tBars.set(payload?.store?.bars ?? Number.NaN);
+    tIm.set(payload?.store?.instrument_months ?? Number.NaN);
+    tRuns.set(payload?.journal?.records ?? Number.NaN);
+    tLoud.set(counts.loud ?? Number.NaN);
+    tMonths.set(coverage?.present ?? Number.NaN);
+    tGen.set(payload?.store?.generation ?? Number.NaN);
   });
 
   const stale = $derived(load.state === 'error' && payload !== null);
