@@ -88,6 +88,12 @@
   import { catalogue, loadCatalogue, search } from '$lib/index.svelte.js';
   import { feeds } from '$lib/feeds.svelte.js';
   import { monthLabel, stampLabel } from '$lib/dates.js';
+  // `group`, `rupee` AND THE LOCALE ITSELF LIVE IN `$lib/money.js` so a test can
+  // drive them. Their claim -- "8,78,28,617 and never 87,828,617" -- is a
+  // property of the RUNTIME's ICU data and not of this code: a build without the
+  // full set falls back to `en-US` grouping and prints the wrong shape
+  // confidently, in the digit grouping a reader uses to judge magnitude.
+  import { group, rupee, LOC } from '$lib/money.js';
   // A REQUEST THAT CANNOT END IS A SPINNER THAT LIES. `ask` is `fetch` with a
   // ceiling; see `$lib/ask.js` for why the wrapper exists rather than a signal
   // threaded through every call site.
@@ -104,7 +110,6 @@
   /* ======================================================================
      PRIMITIVES
      ====================================================================== */
-  const LOC = 'en-IN';
   const IST_OFFSET = 19800; // +05:30 in seconds. Used for BUCKETING only.
 
   /** The IST calendar day a UTC second falls in, as an integer. */
@@ -121,11 +126,6 @@
    */
   const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-  /** Indian digit grouping — 8,78,28,617 and never 87,828,617. */
-  const group = (n) => Number(n).toLocaleString(LOC);
-  /** Paisa integer -> a rupee string. THE ONLY DIVIDE, and it is at the edge. */
-  const rupee = (paisa) =>
-    (paisa / 100).toLocaleString(LOC, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   const cap = (s) => String(s ?? '').charAt(0).toUpperCase() + String(s ?? '').slice(1);
 
   /**
