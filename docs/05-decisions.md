@@ -16080,3 +16080,32 @@ never measured.
 
 ---
 
+## D-0200 · 2026-08-18 · `crates/greeks` gains a floor-relative budget — four of thirteen
+
+The fourth of the nine ratio-only crates, after `core` (D-0173), `telemetry`
+(D-0175) and `costs`.
+
+Same reason each time: every row divided one price cost by another, and a uniform
+slowdown cancels in a quotient — the failure that let a mask operation run **174x
+slower while passing its crate's ratio rows at 0.98x**.
+
+**The floor** is one fused multiply-add on the same contract's own fields. No
+`exp`, no CDF, no branch on moneyness. It cannot move when `price` does, so the
+quotient is "how many float operations does one Black-Scholes price cost".
+
+**Measured**, four consecutive runs: **29.966, 30.025, 29.798, 31.418** floors at
+a floor of ~739 ps. The **1.05x spread is the tightest of the workspace's
+budgets** — both legs are register float arithmetic touching neither memory nor
+the allocator, where `telemetry`'s equivalent varies 1.9x because it writes to
+disk.
+
+**Budget 100**, sized on the worst observed. Leaves 3.18x for a different
+microarchitecture and refuses the 174x regression by a factor of 52.
+
+Documented as C-G-05 and verified against gate 10's own resolver before this
+entry was written.
+
+**Five crates remain ratio-only**: `api`, `lake`, `pull`, `runner`, `store`.
+
+---
+

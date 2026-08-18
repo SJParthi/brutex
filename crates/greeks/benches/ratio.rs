@@ -155,6 +155,82 @@ const FIVE_YEARS: Contract = Contract {
 };
 
 /// The claim: a closed-form price does not care what it is pricing.
+/// The per-price floor: the cheapest float arithmetic on the same contract.
+///
+/// # Why a ratio alone cannot see a regression
+///
+/// Every row here divides one price cost by another, and a UNIFORM slowdown
+/// cancels in a quotient. An audit measured exactly that elsewhere in this
+/// workspace: a mask operation **174x slower passed its crate's ratio rows at
+/// 0.98x-1.00x**, because both legs moved together. `vocab`, `indicators`,
+/// `engine`, `core`, `telemetry` and `costs` each carry a floor-relative budget
+/// for that reason; this crate did not.
+///
+/// The denominator has to be something that cannot move when `price` does. This
+/// multiplies and adds the same contract's own fields — same values, same
+/// registers, no `exp`, no CDF, no branch on moneyness. The quotient is "how
+/// many float operations does one Black-Scholes price cost".
+fn floor_ps(c: &'static Contract) -> u128 {
+    cost_ps(20_000, || {
+        let s = black_box(c).spot;
+        let k = black_box(c).strike;
+        black_box(s.mul_add(1.000_1, k))
+    })
+}
+
+/// Prints one budget in floors and returns whether it held.
+///
+/// A breached RATIO says the cost depends on the contract. A breached BUDGET
+/// says the cost rose for every contract at once, which no ratio here reports.
+fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
+    if floor == 0 {
+        println!("  {label:<52} UNMEASURABLE — the floor timed at zero");
+        return false;
+    }
+    let floors = at_ps.saturating_mul(1_000) / floor;
+    let ok = floors <= allowed.saturating_mul(1_000);
+    println!(
+        "  {label:<52} {at_ps:>8} ps = {}.{:03} floors, budget {allowed}   {}",
+        floors / 1_000,
+        floors % 1_000,
+        if ok { "ok" } else { "OVER BUDGET" }
+    );
+    ok
+}
+
+/// C-G-05 — one price costs a bounded multiple of the per-price floor.
+fn a_price_stays_within_its_budget() -> bool {
+    /// Floors allowed per price.
+    ///
+    /// Measured, arm64 laptop, release, four consecutive runs: **29.966, 30.025,
+    /// 29.798, 31.418** floors, at a floor of ~739 ps. The 1.05x spread is the
+    /// tightest of the seven budgets in this workspace — both legs are register
+    /// float arithmetic on the same two fields, touching neither memory nor the
+    /// allocator.
+    ///
+    /// **100**, sized on the worst observed and not the mean, the same rule
+    /// `engine`, `core` and `costs` apply. That leaves 3.18x for a different
+    /// microarchitecture and still refuses the 174x uniform regression this
+    /// file's ratios would report as ok — such a price would read about 5,200
+    /// floors and be refused by a factor of 52.
+    ///
+    /// A breach is NOT a contract dependence; C-G-01 is the row for that. It
+    /// means every contract got dearer at once, which a quotient cannot see.
+    const ALLOWED: u128 = 100;
+
+    let floor = floor_ps(&AT_THE_MONEY);
+    println!("  the per-price floor is {floor} ps — one fused multiply-add");
+    let at = cost_ps(20_000, || {
+        black_box(&AT_THE_MONEY).price(black_box(VOL), OptionKind::Call)
+    });
+    budget(
+        "C-G-05 price against the per-price floor",
+        floor,
+        at,
+        ALLOWED,
+    )
+}
+
 fn a_price_costs_the_same_whatever_the_contract_is() -> bool {
     let one = |c: &'static Contract| {
         cost_ps(20_000, || {
@@ -298,6 +374,7 @@ fn main() {
     println!("gate 8 — crates/greeks, ceiling {CEILING_PERMILLE} permille");
     let mut ok = true;
     ok &= a_price_costs_the_same_whatever_the_contract_is();
+    ok &= a_price_stays_within_its_budget();
     ok &= the_full_greek_set_costs_the_same_whatever_the_contract_is();
     ok &= one_model_evaluation_costs_the_same_however_hard_the_quote_is();
     if ok {
