@@ -3493,6 +3493,55 @@ jobs:
           fi
           echo "OK — the release profile still panics on overflow and aborts on panic."
 
+      - name: Gate 27 — every invariant row id names exactly one invariant
+        run: |
+          set -eu
+          # D-0045 found `C-14`..`C-17` naming two invariants each and fixed
+          # them. It also wrote down the reason the collision had been invisible:
+          # "Nothing in CI checks row-id uniqueness -- gate 10 checks only that a
+          # named test exists." D-0209 hit the SAME collision again in the SAME
+          # ids, because two later entries assigned C-16 and C-17 to another
+          # crate and one of them recorded that it had "verified against gate
+          # 10's own resolver" -- the check D-0045 had already named as blind to
+          # this. D-0215 then found 44 MORE, across 88 rows: three overloaded
+          # letters, `I`, `P` and `G`, each naming two unrelated subjects.
+          #
+          # Three entries said this should be a gate. This is the gate. It is
+          # cheap now only because the tree is clean for the first time.
+          #
+          # WHAT IT CANNOT SEE: whether two ids that are DIFFERENT describe the
+          # same invariant. That is a judgement, not a string comparison.
+          #
+          # NO UNTRUSTED INPUT: one tracked document and the pattern below.
+          f=docs/04-invariants.md
+          ids=$(grep -oE '^\| *`?[A-Z][A-Z-]*-[0-9]{2,3}[a-z]?`? *\|' "$f" \
+                | sed -E 's/^\| *`?//; s/`? *\|$//')
+          n=$( { printf '%s\n' "$ids" | grep -c . || true; } )
+          # A pattern that stops matching is the failure mode gate 8 shipped
+          # with: it reported success while measuring nothing.
+          if [ "$n" -eq 0 ]; then
+            echo "GATE 27 FOUND NO ROWS. Either the document moved or the pattern"
+            echo "stopped matching. A silent zero is not a pass."
+            exit 1
+          fi
+          dupes=$( { printf '%s\n' "$ids" | sort | uniq -d || true; } )
+          echo "read ${n} invariant row id(s) in ${f}"
+          if [ -n "$dupes" ]; then
+            echo
+            echo "AN ID NAMES MORE THAN ONE INVARIANT:"
+            for d in $dupes; do
+              printf '  %s\n' "$d"
+              grep -nE "^\| *\`?${d}\`? *\|" "$f" | cut -c1-110 | sed 's/^/      /'
+            done
+            echo
+            echo "A citation to a duplicated id resolves to whichever row comes"
+            echo "first, which is a coincidence and not a citation. Renumber the"
+            echo "NEWER family onto free ids by the evidence rule D-0045 set and"
+            echo "D-0215 reapplied: whichever side is cited from OUTSIDE this"
+            echo "document keeps the letter. C-18..C-25 stay retired."
+            exit 1
+          fi
+          echo "OK — ${n} rows, all ids unique."
       - name: Gate 26 — every HTTPS client installs the TLS provider
         run: |
           set -eu

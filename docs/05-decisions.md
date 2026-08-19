@@ -10112,7 +10112,10 @@ built yet.
 ## D-0109 · 2026-08-11 · A flat bar is neither direction, a period speaks only when it completes, and a rung past the type refuses — four locked choices from the first fix phase
 
 **Status: locked.** Commits `646c6a8`, `934f72a`, `7ab6135`, `33c38b2`. Invariants
-`I-01`…`I-09` in `docs/04-invariants.md`. Findings `F-…` in `docs/11-findings.md`, marked
+`IF-01`…`IF-09` in `docs/04-invariants.md` — **renumbered from `I-01`…`I-09` by
+D-0215**, which found that letter naming two unrelated subjects. `I-01`…`I-09`
+still exist and mean instrument identity, so this citation had stopped being
+ambiguous and started being simply wrong. Findings `F-…` in `docs/11-findings.md`, marked
 `FIXED` with those shas — a row cannot be marked fixed without one.
 
 ### 1. A flat bar is neither bullish nor bearish, in the ring as well as on the bar
@@ -10198,7 +10201,8 @@ which is the argument for having one.
 
 **Status: locked.** `Calendar` and `CHARTER_NON_REGULAR_IST_DAYS` in
 `crates/indicators/src/evaluator.rs`. `Evaluator::new` defaults to the charter's six;
-`Evaluator::with_calendar` takes an explicit set. Invariants `I-10`…`I-12`.
+`Evaluator::with_calendar` takes an explicit set. Invariants `IF-10`…`IF-12`,
+renumbered from `I-10`…`I-12` by D-0215 for the same reason.
 
 ### The rule, and the mechanism that was not there
 
@@ -16960,3 +16964,78 @@ and reported independently, and a cross-month ranking is a statistical decision
 about what "best over 68 months" means, not a loop. It does not sweep F&O:
 `store::catalog` counts contract paths and returns none, per §1. And it is not
 reachable from the web page, which still needs the `api → runner` arrow.
+
+---
+
+### D-0215 — three letters each named two subjects, and D-0045's own rule settled all three
+
+**Decision.** `docs/04-invariants.md` had **44 ids naming two unrelated
+invariants each, across 88 rows**. Three overloaded letters, not 44 typos. The
+newer family in each pair moves:
+
+| letter | keeps it | moves to | rows |
+|---|---|---|---|
+| `I` | Instrument identity and the vendor merge | the indicator fold → **`IF-*`** | 22 |
+| `P` | Ingest | the pull order → **`PO-*`** | 13 |
+| `G` | Greeks | the rung, which bar length and where it lands → **`RG-*`** | 9 |
+
+**Result: 611 rows, 611 distinct ids. Zero duplicates.**
+
+**Which side moved was decided by evidence, exactly as D-0045 ruled.** That entry
+settled the `C-14`…`C-17` collision by asking which side is cited from outside the
+document, and the same question answers this one. Measured, with `C-I-*` and
+`C-G-*` excluded so the complexity families did not inflate the count:
+
+* **`P` — 113 citations**, from `crates/pull/src/config.rs`, `secret.rs`,
+  `rate.rs`, `lib.rs`, and **gate 10's own allowlist**, which names `P-03`. All
+  mean Ingest. The pull-order rows are cited from nowhere.
+* **`G` — cited from `crates/greeks/src/lib.rs` and `solver.rs`**, and `G-10` and
+  `G-28` exist only in the Greeks sections, so that family is the contiguous one.
+* **`I` — `I-30` … `I-38` are unique to instrument identity** and `I-38` is cited
+  from `crates/core/src/vendor.rs`. The indicator-fold rows had two citations,
+  both in this ledger, both repointed below.
+
+**The check that passed was the dangerous one.** After renumbering, a scan for
+citations that no longer resolve found **none** — and that is not the safe
+result. `I-01`…`I-09` still exist, because instrument identity kept the letter.
+Two entries in this ledger — D-0109's *"Invariants `I-01`…`I-09`"* and D-0110's
+*"Invariants `I-10`…`I-12`"* — both meant the **indicator fold**, and had
+silently stopped being ambiguous and started being simply **wrong**. A dangling
+citation announces itself; a citation that resolves to the wrong row does not.
+Both are repointed at `IF-*`, in place, because leaving them would be worse than
+the append-only rule they bend.
+
+**`crates/greeks/src/lib.rs` had refused to use an invariant row because of this.**
+Its header explained that the file *"carries **two** families numbered
+`G-01`…`G-09`"* and that *"a row id that resolves to whichever comes first in the
+file is not a citation, it is a coincidence."* That is the clearest statement of
+the defect anywhere in the repository, and it was written by someone who chose to
+work around it rather than fix it. The obstruction is gone; the reasoning is kept
+in place, because it is what made this findable.
+
+**A collision created while fixing one, and caught by the same check.** D-0214's
+five batch-sweep rows were `BA-01`…`BA-05` only after this: they were first
+written as `L-01`…`L-05`, and `L-*` is **the lake reader**, cited from
+`docs/05-decisions.md` as `L-02…L-07`. They were also sitting in the `Store`
+section while describing `cli`. Both are corrected here — they now have their own
+section. **The uniqueness scan that found the 44 found these five too**, which is
+the argument for running it rather than trusting a careful edit.
+
+**Nothing else had to move.** No bench prints a bare `I-`, `P-` or `G-` label —
+the complexity families are `C-I-*`, `C-G-*` and are untouched. Gate 10's
+allowlist names `P-03`, `X-01` and `X-13`, and `P-03` stayed in `Ingest`, so the
+allowlist is not stale. Simulated afterwards: **733 named tests resolve, and the
+only three that do not are the three the allowlist already exempts.**
+
+**And the gate that stops a fourth recurrence, written here rather than asked
+for a fourth time.** D-0045 recorded that row-id uniqueness was unchecked.
+D-0209 recorded it again, after the same collision returned in the same ids.
+Recording a missing check three times is not a plan. **Gate 27** reads every row
+id and refuses a duplicate, naming the id and both conflicting rows with their
+line numbers, and pointing the reader at the evidence rule rather than leaving
+them to invent one. It was proved to FAIL on a reintroduced duplicate before it
+was trusted, because a gate that cannot fail is worthless. It is cheap only
+because the tree is clean for the first time.
+
+**What it cannot see:** whether two ids that DIFFER describe the same invariant.
+That is a judgement, not a string comparison, and no gate will hold it.

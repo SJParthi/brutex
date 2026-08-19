@@ -68,10 +68,17 @@
 //! `greeks::solver::the_reported_cost_is_every_model_evaluation`. See
 //! [`solver`] and `docs/06-limits.md` §18.
 //!
-//! Named as tests rather than as an invariant row on purpose: `docs/04-invariants.md`
-//! carries **two** families numbered `G-01`…`G-09` — the pull-granularity rows
-//! and this crate's — and a row id that resolves to whichever comes first in
-//! the file is not a citation, it is a coincidence.
+//! Named as tests rather than as an invariant row **because of a collision that
+//! has since been fixed, and the reasoning is kept because it is what made the
+//! fix findable.** `docs/04-invariants.md` used to carry **two** families
+//! numbered `G-01`…`G-09` — the pull-granularity rows and this crate's — and, as
+//! this comment put it, *a row id that resolves to whichever comes first in the
+//! file is not a citation, it is a coincidence.*
+//!
+//! D-0215 moved the pull-granularity rows to `RG-*`, so `G-*` is now this crate
+//! alone and a row id here would resolve. Naming tests is still the stronger
+//! citation — a test name cannot be renumbered out from under a reader — so this
+//! stays as it is by choice rather than by obstruction.
 //!
 //! # Every refusal is loud
 //!
