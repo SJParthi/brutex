@@ -2221,12 +2221,35 @@ pub async fn fly(site: Loaded) {
     // ONE CONVERSION FROM RUNG TO DIRECTORY, and it is the store's own. A
     // literal `Timeframe::MINUTE_1` here would be a second answer to "where do
     // these bars go" beside `pull::ingest::Plan::timeframe`.
-    let granularity = pull::vendor::Granularity::Minute1;
+    //
+    // BOTH PULLED RUNGS, ALTERNATING — and this is the difference between an
+    // autopilot that backfills and one that cannot start.
+    //
+    // It was `let granularity = Granularity::Minute1;`, one value, used by the
+    // only production call to `round`. The ladder gate refuses the minute rung
+    // for a month whose DAY rung is not held, and nothing ever asked for the
+    // day rung, so every tick was refused with "the 1day pass comes first" and
+    // the backfill could not make the first move. Measured in the journal on
+    // 2026-08-18: four consecutive NOT STARTED rounds, zero bars, and the only
+    // daily month on disk was one an operator had pulled by hand.
+    //
+    // Two is the whole set rather than a simplification: `store_timeframe`
+    // answers `Some` for exactly `DAY_1` and the minute rungs, and every
+    // coarser rung is DERIVED from the minute one inside `ingest::derive_all`
+    // rather than fetched. So a vendor is asked for two things and the store
+    // builds the other seven.
+    //
+    // Alternating rather than "day until complete, then minute" on purpose: the
+    // gate already refuses an out-of-order rung cheaply, so attempting both in
+    // turn is self-correcting, needs no completion predicate of its own, and
+    // cannot wedge on a day rung that will never finish because one instrument
+    // is delisted.
+    let mut day_rung_next = true;
+    let granularity = pull::vendor::Granularity::Day1;
     let Some(timeframe) = granularity.store_timeframe() else {
         site.autopilot.publish(|status| {
             status.phase = Phase::Halted;
-            status.detail =
-                String::from("the one-minute rung has no directory in this store build");
+            status.detail = String::from("the daily rung has no directory in this store build");
         });
         return;
     };
@@ -2265,7 +2288,23 @@ pub async fn fly(site: Loaded) {
             dwell_paused(&site.autopilot).await;
             continue;
         }
-        let waited = round(&site, &mut feeds, &series, granularity).await;
+        // WHICH RUNG THIS TICK IS FOR. Flipped before the call so a `continue`
+        // above cannot leave the same rung selected forever.
+        let rung = if day_rung_next {
+            pull::vendor::Granularity::Day1
+        } else {
+            pull::vendor::Granularity::Minute1
+        };
+        day_rung_next = !day_rung_next;
+        // THE SERIES IS PER RUNG, not computed once. `tracked_series` answers
+        // "which instrument-months does this timeframe still owe", and the day
+        // rung and the minute rung owe different ones — sharing one list would
+        // have the day pass chasing the minute pass's gaps.
+        let Some(rung_timeframe) = rung.store_timeframe() else {
+            continue;
+        };
+        let rung_series = tracked_series(&site, rung_timeframe);
+        let waited = round(&site, &mut feeds, &rung_series, rung).await;
         // BETWEEN UNITS, ALWAYS. The sweep itself awaits on every request, so
         // this is belt and braces for the one path that might not — a tick that
         // decides there is nothing to do and loops.
@@ -4813,6 +4852,60 @@ mod tests {
         assert!(
             !control.stopped(started_later),
             "resuming does not cancel anything"
+        );
+    }
+
+    /// The autopilot asks for BOTH pulled rungs, not just the minute one.
+    ///
+    /// # The deadlock this pins
+    ///
+    /// `fly` used one hardcoded `Granularity::Minute1`. The ladder gate refuses
+    /// the minute rung for any month whose DAY rung is not held, and nothing in
+    /// the process ever asked for the day rung — so the backfill could not make
+    /// its first move and every tick recorded "the 1day pass comes first".
+    /// Nothing was broken in a way a test could see: `round` was called, it
+    /// returned a wait, the loop slept, and the store stayed empty.
+    ///
+    /// Reading the source is the honest check here. The alternative is driving
+    /// `fly` itself, which needs a live store, a clock past the grace window
+    /// and a vendor — and a test that arranges all three still cannot prove
+    /// which rung was asked for without reading the journal it writes.
+    #[test]
+    fn the_backfill_drives_the_day_rung_as_well_as_the_minute_rung() {
+        let me = include_str!("autopilot.rs");
+        let body = me.split_once("async fn fly").expect("fly exists").1;
+        let body = &body[..body
+            .find("\n}\n")
+            .expect("fly's body ends at a column-0 brace")];
+        let code: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            code.contains("Granularity::Day1"),
+            "the daily rung must be asked for somewhere in `fly`; without it \
+             the ladder gate refuses every minute round forever and the store \
+             never receives a first bar"
+        );
+        assert!(
+            code.contains("Granularity::Minute1"),
+            "and the minute rung too — it is the one the engine sweeps"
+        );
+        // BOTH REACH `round`, which is the only thing that pulls. Naming a rung
+        // in a comment or a status string would satisfy the two assertions
+        // above while changing nothing.
+        let asked = code
+            .find("round(&site")
+            .expect("`fly` reaches the vendor through `round`");
+        let chose = code
+            .find("day_rung_next")
+            .expect("the rung alternates rather than being fixed");
+        assert!(
+            chose < asked,
+            "the rung is chosen BEFORE the round is run, so the choice is what \
+             the vendor is asked for rather than a label attached afterwards"
         );
     }
 
