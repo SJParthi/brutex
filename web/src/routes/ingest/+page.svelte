@@ -66,6 +66,8 @@
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
   import { build as buildFind, probe as probeFind, symbolCount } from '$lib/find.js';
+  // A STORE KEY CARRIES ITS SEGMENT, AND THE CENSUS HAS TO READ IT.
+  import { parseKey, segmentOf } from '$lib/instrument.js';
   // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
   // and for the measurement of what used to reset on every reload.
   import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
@@ -3919,6 +3921,41 @@
     busy: store.state === 'reading'
   });
 
+  /**
+   * BARS BY (UNDERLYING, SEGMENT, RUNG, MONTH) — the index the census was
+   * missing, and the reason it reported the same number three times.
+   *
+   * `store.byCell` is keyed `instrument|tf|month` where `instrument` is the
+   * WHOLE store key. The census probed it with the MEMBER's key —
+   * `NSE-INDEX-BANKNIFTY` — inside a loop over the chosen segments, and the
+   * segment never entered the probe. So Spot, Expired futures and Expired
+   * options all read the spot row and printed identical counts. Measured on the
+   * running store: 58,305 bars reported under all three at 1 minute, when the
+   * store holds 58,305 spot bars, 0 futures and 26 option contracts.
+   *
+   * That is the failure wearing a success's clothes that §4 bans: a segment
+   * with nothing in it reported a full one's holdings, so "do I hold expired
+   * futures" answered yes off another segment's data.
+   *
+   * ONE PASS OVER THE CELLS, and the segment comes from the KEY's own tail
+   * rather than from what was ticked. A contract segment sums across every
+   * contract of that underlying, because one (name, segment, rung, month) row
+   * on the census is many keys in the store — 26 of them here.
+   */
+  const barsBySeg = $derived.by(() => {
+    /** @type {Map<string, number>} */
+    const by = new Map();
+    if (!storeMine) return by;
+    for (const c of store.readable) {
+      const p = parseKey(c.instrument);
+      const seg = segmentOf(p);
+      if (seg === null || p.underlying === null) continue;
+      const k = `${p.underlying}|${seg}|${c.timeframe}|${c.month}`;
+      by.set(k, (by.get(k) ?? 0) + c.rows);
+    }
+    return by;
+  });
+
   /** The sweep's ladder — what is in flight, and whether a feed has halted. */
   /**
    * @type {{
@@ -4064,7 +4101,9 @@
           for (const ym of windowMonths) {
             const sessions = sessionsByMonth.get(ym) ?? 0;
             const expect = r.per === null ? null : sessions * r.per;
-            const held = storeRead.bars.get(`${key}|${r.dir}|${ym}`);
+            // WITH `s.key` IN IT. Without the segment this probe answered
+            // the same number for every segment in the loop.
+            const held = barsBySeg.get(`${m.symbol}|${s.key}|${r.dir}|${ym}`);
             const bars = held === undefined ? null : held;
             // A MONTH THE FEED CANNOT REACH IS NOT A GAP. The floor is the
             // same one the date control refuses a day with.
