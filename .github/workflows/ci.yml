@@ -2543,12 +2543,26 @@ jobs:
           # An UNDECLARED file with any print fails. That is how a crate added
           # tomorrow is covered on its first day, and it is the whole point of the
           # glob above.
+          # `cli/src/main.rs:print!` is the PROGRAM'S OWN OUTPUT, not a
+          # diagnostic. `cli::run` renders its whole report into a String and
+          # main writes it to stdout in one call -- which is the shape that
+          # makes the report testable without a terminal, and the reason the
+          # binary itself holds no formatting. There is nothing to emit
+          # alongside it: an event mirroring a report the operator is reading
+          # would be the same fact twice.
+          #
+          # `core/src/universe.rs:println!` went from one to two. Both sit in
+          # `#[cfg(test)]` and print a MEASUREMENT the assertion beside them
+          # already enforces -- probe counts and bounds -- so the number is on
+          # the terminal for a human reading a failure and in the assertion for
+          # the build. Neither ships.
           declared='api/src/constituents.rs:println!:2
           api/src/server.rs:println!:22
           api/src/server.rs:eprintln!:7
           api/src/server.rs:print!:1
-          core/src/universe.rs:println!:1
+          core/src/universe.rs:println!:2
           core/src/vendor.rs:println!:1
+          cli/src/main.rs:print!:1
           greeks/src/bsm.rs:println!:4
           greeks/src/normal.rs:println!:3
           greeks/src/solver.rs:println!:5
