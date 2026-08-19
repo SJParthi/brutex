@@ -952,6 +952,7 @@ mod tests {
                         worst: -150,
                         forced: 1,
                     },
+                    ..crate::validate::FoldResult::default()
                 },
                 crate::validate::FoldResult {
                     index: 1,
@@ -977,6 +978,7 @@ mod tests {
                         worst: 220,
                         forced: 2,
                     },
+                    ..crate::validate::FoldResult::default()
                 },
             ],
         };

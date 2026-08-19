@@ -665,20 +665,36 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
         &Sweeper::new(Ladder::with_min_hits(min_hits)),
         move || fresh,
     );
+    // PBO, WHICH USED TO BE A `None` FOR A REASON THAT IS NOW FIXED.
+    //
+    // `pbo::place` ranks a fold's candidates in-sample, finds where the winner
+    // lands OUT of sample, and returns that placement. It needs both vectors,
+    // and `FoldResult` kept only the chosen candidate until `in_sample_all` and
+    // `out_of_sample_all` were added -- so the input did not exist to pass and no
+    // constant could have supplied it.
+    //
+    // A fold that chose nothing yields no placement and is skipped rather than
+    // counted as a failure: `place` returns `None` on an empty or mismatched
+    // pair, and filtering is the honest reading of "this fold had nothing to
+    // judge".
+    let placements: Vec<_> = folds
+        .folds
+        .iter()
+        .filter_map(|f| runner::pbo::place(&f.in_sample_all, &f.out_of_sample_all))
+        .collect();
+    let overfit =
+        (!placements.is_empty()).then(|| runner::pbo::probability_of_overfitting(&placements));
+
     out.push_str(&audit::render(
         Some(&taken),
         Some(&exits),
         Some(&folds),
-        // PBO AND THE BOOTSTRAP STAY `None`, AND NOT FOR WANT OF A CONSTANT.
-        //
-        // `pbo::place` needs the in-sample and out-of-sample result of EVERY
-        // candidate in each fold; `FoldResult` keeps only the chosen one, so the
-        // input does not exist to be passed. The bootstrap needs one return
-        // series per strategy, which nothing in this workspace assembles today.
-        //
-        // Both are a change to `runner` rather than a number this file can name,
-        // and the report prints NOT SUPPLIED rather than implying they ran.
-        None,
+        overfit.as_ref(),
+        // THE BOOTSTRAP STAYS `None`, and unlike PBO it is not a data gap that
+        // this commit closes. It needs one RETURN SERIES per strategy -- a value
+        // per period, per candidate -- where PBO needed one number per candidate.
+        // Nothing in the workspace assembles that, and the report prints NOT
+        // SUPPLIED rather than implying it ran.
         None,
         12,
     ));

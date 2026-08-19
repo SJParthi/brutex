@@ -99,7 +99,7 @@ impl Summary {
 }
 
 /// One fold: what was chosen on the past, and what it did on the future.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FoldResult {
     /// Position in the walk, from zero.
     pub index: usize,
@@ -203,6 +203,27 @@ pub struct FoldResult {
     pub in_sample: Summary,
     /// What it did on the bars it had never seen.
     pub out_of_sample: Summary,
+    /// EVERY candidate's in-sample score, in the order they were priced.
+    ///
+    /// # Why the whole vector and not just the winner
+    ///
+    /// `crate::pbo` asks where the IN-SAMPLE winner lands in the OUT-OF-SAMPLE
+    /// ranking. That question needs a ranking, and a ranking needs every
+    /// candidate -- the winner alone cannot be placed against anything. This
+    /// loop already computes the number for every candidate and, until now,
+    /// discarded all but the maximum. Keeping it costs one `Vec` per fold and
+    /// is the whole reason PBO could not be computed.
+    ///
+    /// The metric is the SAME one selection used -- the sharpest grid cell's
+    /// pessimistic total. A PBO computed against a different metric would be
+    /// asking whether some other procedure generalises.
+    pub in_sample_all: Vec<i64>,
+    /// The same candidates, same order, scored on bars the sweep never saw.
+    ///
+    /// Positionally aligned with [`Self::in_sample_all`] -- `pbo::place` refuses
+    /// a pair of unequal length, and a misalignment here would place the winner
+    /// against another candidate's rank, which is worse than not computing it.
+    pub out_of_sample_all: Vec<i64>,
 }
 
 /// A whole walk-forward.
@@ -470,6 +491,10 @@ pub fn walk_forward(
         // is an open question recorded in `docs/06-limits.md`, not one this
         // comment should settle by describing the code as something else.
         let mut best: Option<(ConditionMask, Summary, ExitPick)> = None;
+        // KEPT, NOT DISCARDED. The loop below already scores every candidate;
+        // until now only the maximum survived it. `crate::pbo` needs the whole
+        // ranking, so the mask and its score are collected as they are computed.
+        let mut scored: Vec<(ConditionMask, i64)> = Vec::with_capacity(closed.kept.len());
         let mut priced: u64 = 0;
         for item in &closed.kept {
             priced = priced.saturating_add(1);
@@ -488,6 +513,7 @@ pub fn walk_forward(
                 continue;
             }
             let s = Summary::of(&walk(train, &train_column, &item.mask, horizon, direction));
+            scored.push((item.mask, cell.pessimistic));
             if best
                 .as_ref()
                 .is_none_or(|(_, _, pick)| cell.pessimistic > pick.pessimistic)
@@ -526,11 +552,37 @@ pub fn walk_forward(
         // OUT OF SAMPLE. The column runs from bar zero so the indicators hold
         // what they would genuinely have held, and the trade walk is confined to
         // the test window by `restricted`.
+        let mut oos_all: Vec<i64> = Vec::new();
         let (out_of_sample, out_of_sample_exit) = match chosen {
             Some(mask) => {
                 let upto = bars.get(..fold.test.end).unwrap_or(bars);
                 let full = Column::build(upto, &mut evaluator());
                 let confined = restricted(&full, fold.test.start);
+                // EVERY CANDIDATE ON THE TEST BARS, in the same order, by the
+                // same metric selection used. This is the pass PBO needs and it
+                // is not free: it is a second grid per candidate, so a fold costs
+                // about twice what it did. That is what an answer to "is my
+                // SELECTION fooling me" costs, and the alternative was not
+                // computing it at all.
+                oos_all = scored
+                    .iter()
+                    .map(|(mask, _)| {
+                        let g = crate::grid::evaluate(
+                            upto,
+                            &confined,
+                            mask,
+                            horizon,
+                            side_of(direction),
+                            DEFAULT_RUNGS,
+                        );
+                        // `sharpest` then `best`, the SAME fallback the in-sample loop
+                        // uses. A different tie-break on the two sides would rank the
+                        // same candidate by two rules and make the placement meaningless.
+                        g.sharpest()
+                            .or_else(|| g.best())
+                            .map_or(0, |c| c.pessimistic)
+                    })
+                    .collect();
                 let plain = Summary::of(&walk(upto, &confined, &mask, horizon, direction));
 
                 // THE CHOSEN EXIT, APPLIED. `docs/06-limits.md` §70 recorded
@@ -576,6 +628,8 @@ pub fn walk_forward(
             in_sample,
             out_of_sample,
             out_of_sample_exit,
+            in_sample_all: scored.iter().map(|(_, v)| *v).collect(),
+            out_of_sample_all: oos_all,
         });
     }
     out
