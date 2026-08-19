@@ -6358,7 +6358,22 @@ jobs:
         run: |
           CEILING=61
           npm --prefix web run check 2>&1 | tee /tmp/check.log || true
-          FOUND=$(grep -oE '[0-9]+ ERRORS' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
+          # BOTH OF SVELTE-CHECK'S SUMMARY FORMATS, because it does not always
+          # pick the same one and this gate reported the difference as "it did
+          # not run".
+          #
+          #   machine:  ... COMPLETED 325 FILES 61 ERRORS 1 WARNINGS ...
+          #   human:    svelte-check found 61 errors and 1 warning in 11 files
+          #
+          # The old pattern matched `ERRORS` only. On this runner svelte-check
+          # emitted the HUMAN line, so `FOUND` came back `missing` and the gate
+          # failed with "svelte-check produced no ERRORS line — it did not run"
+          # while the log directly above it read "found 64 errors". A gate that
+          # cannot tell a formatting change from a broken tool blocks a branch
+          # for a reason nobody can act on, so it now reads either form.
+          # `-i` for the case and `ERRORS?` for the singular; `tail -1` still
+          # takes the SUMMARY, which is the last such line in both formats.
+          FOUND=$(grep -oiE '[0-9]+ ERRORS?' /tmp/check.log | tail -1 | grep -oE '[0-9]+' || echo missing)
           if [ "$FOUND" = missing ]; then
             echo "svelte-check produced no ERRORS line — it did not run, and a"
             echo "gate that cannot run must fail rather than pass."

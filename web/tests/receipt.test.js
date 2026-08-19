@@ -34,6 +34,11 @@ test('a 200 with no receipt marker is refused, whatever it carries', () => {
     marker: 'pull-fno',
     hasVerdict: true
   });
+  // `assert.ok` FIRST, as every other case in this file does. It is not a type
+  // ceremony: `notAReceipt` returns `null` when the answer IS a receipt, so
+  // reaching `.reason` without this would read a field off nothing on the very
+  // regression the test exists to catch — the refusal quietly not happening.
+  assert.ok(other, 'a different marker is not this route\'s receipt');
   assert.match(other.reason, /it carried pull-fno/);
 });
 
@@ -78,6 +83,7 @@ test('the API is not behind this route is said in the answer, not inferred', () 
     marker: RECEIPT_SPOT,
     hasVerdict: true
   });
+  assert.ok(verdict, 'the route is not behind this server, so nothing it sent is a receipt');
   assert.match(verdict.reason, /The API is not behind this route/);
   assert.match(verdict.reason, /Nothing was asked of any vendor/);
 });
