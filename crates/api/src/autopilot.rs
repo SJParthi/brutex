@@ -3668,6 +3668,117 @@ mod tests {
         );
     }
 
+    /// **WHICH FEEDS THE PULL LOOP ACTUALLY DRIVES, BY NAME.**
+    ///
+    /// `drivable` is derived from `DESCRIPTORS` rather than written out, and
+    /// nothing asserted what it derives. So "is this vendor reachable from the
+    /// pull loop at all" was a question answered by reading the filter and
+    /// tracing `store_vendor` and `floor_day` by hand — which is a question a
+    /// test should answer, and the exact question asked of Zerodha after its
+    /// descriptor landed.
+    ///
+    /// NO CATCH-ALL, for the reason `expected_day_word` in `pull::vendor` has
+    /// none: the failure this pins is a feed silently entering or leaving the
+    /// loop, and a `_ =>` arm would let either happen unremarked. A sixth feed
+    /// must be named here, and naming it is the moment to ask whether it is
+    /// meant to be driven.
+    #[test]
+    fn the_drivable_feeds_are_the_three_brokers_and_nothing_else() {
+        let yesterday = Day::new(2026, 8, 18).expect("2026-08-18");
+        let driven: Vec<pull::vendor::Feed> =
+            drivable(yesterday).into_iter().map(|f| f.feed).collect();
+
+        assert_eq!(
+            driven,
+            vec![
+                pull::vendor::Feed::Dhan,
+                pull::vendor::Feed::Groww,
+                pull::vendor::Feed::Zerodha,
+            ],
+            "the loop drives every broker with a store prefix and a floor, in \
+             descriptor order — the two archives have no HTTP transport and no \
+             floor, so they are skipped here rather than refused inside a sweep"
+        );
+
+        // AND EACH ONE CARRIES WHAT A REQUEST NEEDS, so "drivable" is not a
+        // list of feeds that would refuse at the first socket. These are the
+        // four facts `broker_window` reads off the descriptor before it opens
+        // one.
+        for feed in driven {
+            let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
+                panic!("{} is driven, so it is HTTP", feed.display());
+            };
+            assert!(
+                feed.store_vendor().is_some(),
+                "{}: nowhere to file its bars",
+                feed.display()
+            );
+            assert!(
+                !spec.base_url.is_empty(),
+                "{}: no host to ask",
+                feed.display()
+            );
+            assert!(
+                spec.budget.per_second.is_some(),
+                "{}: an ungoverned feed spends the operator's quota",
+                feed.display()
+            );
+            // BOTH RUNGS, because the operator asks for exactly these two and
+            // a feed serving one of them would half-fail at the ladder rather
+            // than refuse at the door.
+            for rung in [
+                pull::vendor::Granularity::Minute1,
+                pull::vendor::Granularity::Day1,
+            ] {
+                assert!(
+                    feed.serves(rung),
+                    "{} is driven and does not serve {rung}",
+                    feed.display()
+                );
+                // EVERY SERVED RUNG RESOLVES TO AN ENDPOINT. `path_for`
+                // answers the rung's own route where it has one and the feed's
+                // default path otherwise, so an empty answer is a rung with
+                // nowhere to ask.
+                let path = spec.path_for(rung);
+                assert!(
+                    !path.is_empty(),
+                    "{}: {rung} is served and resolves to no endpoint",
+                    feed.display()
+                );
+                // AND A RUNG IS ONLY REQUIRED TO HAVE A WORD WHERE THE WIRE
+                // ASKS FOR ONE.
+                //
+                // This first demanded an interval word or a per-rung route of
+                // every served rung, and Dhan's daily rung has neither and is
+                // correct: its daily endpoint is the feed's DEFAULT path and
+                // takes no interval field at all, which is why
+                // `granularity_tokens` carries one row and `rung_routes`
+                // carries one row and neither of them is `Day1`. Demanding a
+                // word there would demand a spelling for something the vendor
+                // does not ask to be spelled.
+                //
+                // What must hold is narrower and is the real failure: a path
+                // that CONTAINS the rung as a segment renders it, so a missing
+                // word would put an empty segment in the URL.
+                let path_names_the_rung = path.iter().any(|seg| {
+                    matches!(
+                        seg,
+                        pull::vendor::PathSegment::Value {
+                            value: pull::vendor::ParamValue::Granularity,
+                            ..
+                        }
+                    )
+                });
+                assert!(
+                    !path_names_the_rung || spec.granularity_token(rung).is_some(),
+                    "{}: {rung} is a PATH SEGMENT here and has no word, so the \
+                     URL would carry an empty segment",
+                    feed.display()
+                );
+            }
+        }
+    }
+
     // ------------------------------------------------------------- resume
 
     /// **Restart resumes; it does not start over.**
