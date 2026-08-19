@@ -6912,7 +6912,17 @@ async fn roll_one(
     // a 230-day ask to ONE expiry would file eight months of bars under a
     // single contract. The chunk's own end names the contract its own bars
     // belong to.
-    let expiry = pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, window.to())
+    // A PRE-FLIGHT CHECK, AND ITS VALUE IS DELIBERATELY DISCARDED.
+    //
+    // Asked before the socket opens: if this underlying has no expiry regime
+    // for that cadence, not one bar can be filed whatever comes back, and
+    // learning it after the round-trip spends a request on something the
+    // calendar already knew.
+    //
+    // The ANSWER is not kept, because one expiry cannot name a rolling answer —
+    // see the split below. This asks whether the regime exists, not what it
+    // resolves to.
+    pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, window.to())
         .map_err(|why| format!("{label}: {why}"))?;
 
     // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
@@ -6974,54 +6984,174 @@ async fn roll_one(
         return Ok(0);
     }
 
-    let contract = brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
-        expiry,
-        // THE STRIKE THE VENDOR RESOLVED, not the offset that was asked for.
-        // `ATM+10` is a question; the answer carries the price it meant, and
-        // filing under the question would put every month's ATM+10 in one file.
-        //
-        // THIS READ `overlay.spot` AND THE COMMENT ABOVE IS THE ONE IT BROKE.
-        //
-        // Spot is the UNDERLYING's price; the strike is the OPTION's. Two
-        // different numbers, and the code took the wrong one — so every offset
-        // of one expiry resolved to whatever the underlying happened to be
-        // trading at on the first bar, which is the SAME value for all 21 of
-        // them. Twenty-one strikes, one contract path, one file. Nothing would
-        // have errored: the receipt would have said STORED with plausible
-        // counts, and the corruption would have surfaced years later as a
-        // BANKNIFTY option series whose strike tracked the index.
-        //
-        // `strike` was not in `requiredData`, was not parsed by
-        // `rolling::read`, and had no field on its `Row`. All three now exist.
-        //
-        // THE FIRST ROW'S, and that is a choice rather than an accident: a
-        // rolling series is ATM-relative, so a long answer can cross a strike
-        // step. The first bar names the contract the request resolved to at its
-        // start, which is the only one every bar in the answer is guaranteed to
-        // share a file with.
-        strike: brutex_core::price::Paisa::from_raw(
-            rows.first().and_then(|r| r.strike).ok_or_else(|| {
-                format!(
-                    "{label}: the vendor sent no strike for this offset, so the \
-                     contract it resolved to has no name — nothing was filed \
-                     rather than bars being written under a guessed strike"
-                )
-            })?,
-        ),
-        side: if option_type == "CALL" {
-            brutex_core::instrument::OptionSide::Call
-        } else {
-            brutex_core::instrument::OptionSide::Put
-        },
-    })
-    .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
+    // ONE ANSWER IS MANY CONTRACTS, AND IT WAS FILED AS ONE.
+    //
+    // This is the whole meaning of the word "rolling". The request names a
+    // CADENCE and an ORDINAL — near weekly, ATM+10, CALL — not a contract, and
+    // the vendor answers whatever satisfied that description at each minute. A
+    // chunk here is up to a calendar month, so with `expiryFlag: WEEK` a single
+    // answer spans FOUR OR FIVE distinct weekly contracts, and the underlying
+    // strike steps whenever spot moves a strike width.
+    //
+    // The vendor says so in its own response shape: `data.ce.strike` is an
+    // ARRAY, one entry per timestamp. It would be a scalar if the contract were
+    // fixed for the answer.
+    //
+    // The code took ONE expiry — computed from the chunk's last day — and ONE
+    // strike — the first row's — and filed every bar under that pair. So every
+    // bar before the final week was attributed to a contract that did not exist
+    // yet, and bars either side of a strike step were merged. Nothing errors:
+    // the arrays are the same length, the prices convert, the census counts the
+    // rows, the receipt says STORED.
+    //
+    // The two comments this replaces each saw half of it. One said "the chunk's
+    // own end names the contract its own bars belong to" — true against a
+    // 230-day ask, still false against 31 days. The other said "a long answer
+    // can cross a strike step" and then took the first row anyway.
+    //
+    // SPLIT ON THE KEY, NOT GROUPED INTO A MAP. The rows arrive in timestamp
+    // order and a contract's life is contiguous within them, so a run of equal
+    // keys is a contract. One pass, no allocation per group beyond the bars it
+    // actually files, and no hashing — `docs/07-o1-architecture.md` law 3.
+    let key_at =
+        |row: &pull::rolling::Row| rolling_key(row, asked.underlying.as_str(), flag, code, &label);
 
-    let bars: Vec<store::format::Bar> = rows.iter().map(|r| r.bar).collect();
+    let mut total = 0usize;
+    let mut at = 0usize;
+    while at < rows.len() {
+        let key = key_at(
+            rows.get(at)
+                .ok_or_else(|| format!("{label}: row vanished"))?,
+        )?;
+        let mut end = at.saturating_add(1);
+        while let Some(row) = rows.get(end) {
+            if key_at(row)? != key {
+                break;
+            }
+            end = end.saturating_add(1);
+        }
+        let group = rows
+            .get(at..end)
+            .ok_or_else(|| format!("{label}: rows vanished"))?;
+
+        let (expiry_day, strike) = key;
+        let expiry = brutex_core::instrument::Expiry::new(
+            expiry_day.year(),
+            expiry_day.month(),
+            expiry_day.day(),
+        )
+        .map_err(|why| format!("{label}: {why}"))?;
+        let contract =
+            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
+                expiry,
+                // THE STRIKE THE VENDOR RESOLVED, not the offset that was
+                // asked for. `ATM+10` is a question; the answer carries the
+                // price it meant, and filing under the question would put every
+                // month's ATM+10 in one file.
+                strike: brutex_core::price::Paisa::from_raw(strike),
+                side: if option_type == "CALL" {
+                    brutex_core::instrument::OptionSide::Call
+                } else {
+                    brutex_core::instrument::OptionSide::Put
+                },
+            })
+            .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
+
+        total = total.saturating_add(land_rolling_group(
+            group,
+            contract,
+            asked,
+            site,
+            wire,
+            security_id,
+            endpoint,
+            window,
+            &label,
+        )?);
+        at = end;
+    }
+    Ok(total)
+}
+
+/// WHICH CONTRACT ONE ROLLING BAR BELONGS TO — its expiry and its strike.
+///
+/// # Why per row and not per answer
+///
+/// A rolling request names a cadence and an ordinal, never a contract, so the
+/// answer's contract changes as the calendar crosses an expiry and as spot
+/// crosses a strike step. The vendor states this in its response shape: `strike`
+/// is an ARRAY, one entry per timestamp. Asking the question once for the whole
+/// answer is what merged four or five weekly contracts into one file.
+///
+/// # Errors
+///
+/// A stamp outside the calendar, an underlying with no expiry regime for that
+/// cadence, or a bar the vendor sent no strike for — each named. A missing
+/// strike is a refusal rather than a default, because a guessed strike names a
+/// different contract.
+fn rolling_key(
+    row: &pull::rolling::Row,
+    underlying: &str,
+    flag: &'static str,
+    code: &'static str,
+    label: &str,
+) -> Result<(Day, i64), String> {
+    let day = crate::autopilot::day_of(row.bar.ts_micros)
+        .ok_or_else(|| format!("{label}: a bar stamp outside the calendar"))?;
+    // THE EXPIRY FOR THIS BAR'S OWN DAY. `expiry_of` answers "the Nth expiry on
+    // or after this day", which is exactly the question the vendor answered
+    // minute by minute.
+    let expiry = pull::rolling::expiry_of(underlying, flag, code, day)
+        .map_err(|why| format!("{label}: {why}"))?;
+    let strike = row.strike.ok_or_else(|| {
+        format!(
+            "{label}: the vendor sent no strike for a bar, so the contract it \
+             resolved to has no name — nothing was filed rather than bars being \
+             written under a guessed strike"
+        )
+    })?;
+    Ok((
+        Day::new(expiry.year(), expiry.month(), expiry.day())
+            .map_err(|why| format!("{label}: {why}"))?,
+        strike,
+    ))
+}
+
+/// Files ONE contract's run of rows from a rolling answer.
+///
+/// # Why this is its own function
+///
+/// A rolling answer holds several contracts and each is filed separately — see
+/// the split in [`roll_one`]. Lifting the landing out keeps that loop about
+/// *where one contract ends and the next begins*, which is the part that was
+/// wrong, rather than about `Plan` construction.
+///
+/// # Errors
+///
+/// The first landing failure, named. One contract's failure is the caller's to
+/// interpret; this reports and does not decide.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every one is a distinct fact about the one contract being filed, \
+              and a struct to carry them would be `Plan` with a different name"
+)]
+fn land_rolling_group(
+    group: &[pull::rolling::Row],
+    contract: brutex_core::instrument::Contract,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    security_id: &str,
+    endpoint: &str,
+    window: pull::session::Window,
+    label: &str,
+) -> Result<usize, String> {
+    let bars: Vec<store::format::Bar> = group.iter().map(|r| r.bar).collect();
     // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
     // neither a spot nor a volatility has nothing to overlay, and a file of
     // null rows costs a block per 170 bars to answer what an absent file
     // answers better.
-    let overlays: Vec<store::format::Overlay> = rows
+    let overlays: Vec<store::format::Overlay> = group
         .iter()
         .map(|r| r.overlay)
         .filter(store::format::Overlay::states_something)
@@ -7030,7 +7160,9 @@ async fn roll_one(
     let request = pull::fetch::BarRequest {
         instrument_id: security_id.to_owned(),
         listing: pull::vendor::Listing::Derivative,
-        window: asked.window,
+        // THE CHUNK'S WINDOW, not the operator's whole range. The answer being
+        // filed came from this chunk and no other.
+        window,
         granularity: asked.granularity,
     };
     let plan = pull::ingest::Plan {

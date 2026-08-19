@@ -410,6 +410,31 @@ pub fn read(body: &str, side: &str, scale: PriceScale) -> Result<Vec<Row>, Rolli
     let held = root.get("data").unwrap_or(&root);
     let key = side_key(side);
     let one = held.get(key).ok_or(RollingError::NoSide { key })?;
+    // A NULL SIDE IS AN EMPTY ANSWER, NOT A MALFORMED ONE.
+    //
+    // The vendor's own example response carries `"pe": null` — that is the
+    // documented shape for "this side listed nothing", and it is the ordinary
+    // answer for a strike offset or an expiry ordinal that never existed.
+    //
+    // It was read as a shape error. `get(key)` returns `Some(Value::Null)`,
+    // which passes the `NoSide` check above and then fails on the next line as
+    // `NotAnArray { field: "timestamp" }` — so an unremarkable "no such
+    // contract" was reported as a vendor answer this build could not
+    // understand, counted as a FAILURE, and `fno_roll` turned the month into a
+    // 502 reading "the month is incomplete and must not be read as held".
+    //
+    // On one healthy index month that is 252 planned requests, of which the
+    // ones for offsets the vendor never listed are ordinary and expected. False
+    // alarms on that scale are worse than no alarm: they train an operator to
+    // read 502 as noise, which is exactly when a real one arrives.
+    //
+    // `roll_one` already has the right handling one layer up — an empty row set
+    // returns `Ok(0)` and is explicitly not a fault. This routes the null case
+    // to it. An ABSENT key keeps `NoSide`, because a body with no side object
+    // at all is a shape this build has not seen and should not quietly accept.
+    if one.is_null() {
+        return Ok(Vec::new());
+    }
 
     let stamps = array(one, "timestamp")?;
     let open = same_length(one, "open", stamps.len())?;
@@ -672,6 +697,41 @@ mod tests {
     /// Order is not taste. `CLAUDE.md` §3 rule 5 makes a rerun byte-identical,
     /// and a body serialised from a map would order two ways across runs — so a
     /// receipt quoting it would differ for a reason no reader could act on.
+    /// **A NULL SIDE IS AN EMPTY ANSWER AND NOT A FAILURE.**
+    ///
+    /// The vendor's own documented response carries `"pe": null`. Reading that
+    /// as a shape error turned every strike offset the vendor never listed into
+    /// a counted failure, and `fno_roll` turned the month into a 502.
+    #[test]
+    fn a_side_the_vendor_answered_null_reads_as_no_rows_rather_than_a_bad_shape() {
+        let body = r#"{"data":{"ce":{"timestamp":[1756698300],"open":[354],"high":[354],
+            "low":[354],"close":[354],"volume":[1]},"pe":null}}"#;
+
+        let put = read(body, "PUT", PriceScale::Rupees).expect("a null side is an empty answer");
+        assert!(put.is_empty(), "no rows, and no error");
+
+        // AND THE OTHER SIDE OF THE SAME BODY STILL READS. A null on one side
+        // must not cost the side that answered.
+        let call = read(body, "CALL", PriceScale::Rupees).expect("the answered side reads");
+        assert_eq!(call.len(), 1);
+    }
+
+    /// An absent side keeps its refusal.
+    ///
+    /// `null` is the vendor saying "nothing here"; a missing key is a body with
+    /// no side object at all, which is a shape this build has not seen and must
+    /// not quietly read as empty.
+    #[test]
+    fn a_side_that_is_absent_entirely_is_still_refused_by_name() {
+        let body = r#"{"data":{"ce":{"timestamp":[],"open":[],"high":[],"low":[],
+            "close":[],"volume":[]}}}"#;
+
+        assert_eq!(
+            read(body, "PUT", PriceScale::Rupees),
+            Err(RollingError::NoSide { key: "pe" })
+        );
+    }
+
     #[test]
     fn the_request_body_is_the_same_bytes_every_time_and_asks_for_iv_and_spot() {
         let once = body(&spec(), &ask());
