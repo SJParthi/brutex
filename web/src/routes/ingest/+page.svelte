@@ -2902,10 +2902,11 @@
     // This is the same fact where a run is about to be started. It is a
     // MEASUREMENT, not a vendor claim: the span was read by walking the folder,
     // so comparing a window against it is arithmetic rather than an opinion.
-    // THE TICKED-VERSUS-REQUESTED GAP IS A CAUTION, not a banner of its own.
-    // It is permanent for as long as SpotRequest carries no member field, so
-    // it belongs where the other standing facts about this run are, behind one
-    // count — not stacked above the button as a second alert.
+    // AN EMPTY TICK LIST IS A CAUTION, not a banner of its own. It belongs
+    // where the other standing facts about this run are, behind one count —
+    // not stacked above the button as a second alert. It draws only when
+    // nothing at all is ticked; a narrowed selection reaches the wire intact
+    // and has nothing to warn about.
     if (askGap) {
       out.push(askGap);
     }
@@ -3533,14 +3534,14 @@
   // and nothing on it could be ticked. Its own label conceded it: "read, not
   // chosen".
   //
-  // WHAT THE WIRE CARRIES AND WHAT THE PAGE MEASURES ARE TWO DIFFERENT FACTS,
-  // and both are on screen. `api::ingest::SpotRequest` has no member field, so
-  // the REQUEST names a target and the server resolves it — a tick cannot
-  // narrow a pull, and `askGap` says so in words the moment the two numbers
-  // differ. What a tick DOES decide is what this page counts: the ask
-  // arithmetic, every row of the census below, and the outcome list after a
-  // run. Those are measurements of the operator's own selection and they were
-  // being taken over a set nobody chose.
+  // WHAT THE WIRE CARRIES AND WHAT THE PAGE MEASURES ARE THE SAME FACT, and
+  // that is newer than most of the prose around it. `SpotRequest` carries
+  // `members: HashSet<Symbol>`; `wireBodyFor` appends one `member=` per tick
+  // for a strict subset and NOTHING when every name is ticked, because naming
+  // all and naming none are the same ask and 750 query fields to say
+  // "everything" is waste. A tick therefore decides both what this page counts
+  // — the ask arithmetic, every row of the census, the outcome list — and what
+  // the server actually walks.
   //
   // A NAME THIS FEED CANNOT SERVE IS DRAWN, REFUSED AND TOLD WHY — never
   // dropped. Dropping it teaches the reader the name does not exist, which is
@@ -3817,19 +3818,31 @@
    * THE DIFFERENCE BETWEEN WHAT IS TICKED AND WHAT THE WIRE ASKS FOR, in
    * words, whenever the two are not the same number.
    *
-   * The tick list decides what this page counts, measures and reports on. The
-   * REQUEST names a target and nothing else — `api::ingest::SpotRequest` has no
-   * member field — so a narrowed selection does not narrow the pull. Silence
-   * here would be the page implying it sends a list it cannot send.
+   * THIS LINE SAID THE OPPOSITE, AND IT WAS WRONG IN THE DIRECTION THAT COSTS.
+   * It read "the REQUEST cannot be narrowed to them ... no member field, so
+   * target=X asks the server for all N either way", and it drew whenever the
+   * ticked count differed from the reach — which is exactly the case where the
+   * request IS narrowed. The whole chain honours a tick and has for some time:
+   * `wireBodyFor` appends one `member=` per ticked name, `parse_spot` collects
+   * them into `SpotRequest.members` and REFUSES rather than skips one it cannot
+   * read, and `broker_run` puts every candidate through
+   * `asked.members.contains(..)` — one hash probe each. The page was telling the
+   * operator their selection was being ignored while the server honoured it.
+   *
+   * WHAT IS STILL WORTH SAYING IS THE EMPTY CASE, and only that. Naming no
+   * member asks for the SET — what `target=` means on its own, and what the
+   * autopilot sends. The run is NOT gated on a tick: `ladder` gates on the
+   * universe having names, not on one of them being chosen. So an operator who
+   * unticks everything gets all of them, and an empty selection does not look
+   * like "everything" on a form.
    */
   const askGap = $derived.by(() => {
-    if (!reachKnown || insCount === reach) return null;
+    if (!reachKnown || insCount > 0) return null;
     return (
-      `${n(insCount)} of ${n(reach)} instrument(s) are ticked, and the count above is theirs. ` +
-      `The REQUEST cannot be narrowed to them: api::ingest::SpotRequest carries target, window, feed and ` +
-      `granularity and no member field, so target=${target} asks the server for all ${n(reach)} either way. ` +
-      `What the ticks change is what this page counts, measures and reports on — the census below, the ` +
-      `outcome rows, and this line.`
+      `Nothing is ticked, and an empty selection is not an empty request: naming no member asks for the ` +
+      `whole set, so target=${target} pulls all ${n(reach)} instrument(s). Tick the names you want and the ` +
+      `request carries them — one member= per tick, and the server refuses a name it cannot read rather ` +
+      `than dropping it.`
     );
   });
 
@@ -4151,11 +4164,15 @@
   /**
    * WHAT IS IN THE SEARCH BOX. Text, and it never becomes a request.
    *
-   * `api::ingest::SpotRequest` carries target, window, feed and granularity
-   * and NO member field, so no control on this page can narrow a pull to one
-   * symbol. This narrows what is DRAWN. The box says so on its face and the
-   * pager keeps the unfiltered total beside the filtered one, so a reader can
-   * never mistake a shorter table for a smaller ask.
+   * IT NARROWS WHAT IS DRAWN AND DELIBERATELY NOT WHAT IS ASKED. Not because
+   * the request cannot carry names — `SpotRequest.members` exists and the tick
+   * list above already fills it — but because ONE control should decide what a
+   * run covers. Two of them narrowing one ask is the defect `members` was
+   * added to remove: the picker said `1 of 213 ticked`, the receipt said
+   * `ASKED 1 instrument(s)` and the run pulled all 213.
+   *
+   * The pager keeps the unfiltered total beside the filtered one, so a reader
+   * can never mistake a shorter table for a smaller ask.
    */
   let cQuery = $state('');
 
@@ -6081,7 +6098,7 @@
                       class="ddb"
                       type="button"
                       aria-expanded={drop === 'ins'}
-                      title={`Ticked — this is what is counted. ${insSummary}. ${reachKnown ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.` : reachWhy} A tick decides what this page counts — the ask line, the census below and the outcome list after a run. It cannot narrow the REQUEST: api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so target=${target} asks for all ${reachKnown ? n(reach) : '—'} either way.`}
+                      title={`Ticked — this is what is counted. ${insSummary}. ${reachKnown ? `${n(reach)} of the ${n(catalogue.rows.length)} instrument(s) ${active.display} contributes to a tracked universe carry this one. That is NOT the size of its master: /instruments.json returns the merged tracked catalogue — index, F&O underlyings and NIFTY Total Market — while the master itself holds every listing the vendor publishes and /health reports that separately.` : reachWhy} A tick decides what this page counts — the ask line, the census below and the outcome list after a run — AND what the run walks: each ticked name goes out as its own member= field, api::ingest::parse_spot collects them into SpotRequest.members, and broker_run filters every candidate through them. Ticking every name sends no member at all, deliberately: naming all and naming none are the same ask, and target=${target} then covers all ${reachKnown ? n(reach) : '—'}.`}
                       onclick={(e) => {
                         e.stopPropagation();
                         drop = drop === 'ins' ? null : 'ins';
@@ -6845,7 +6862,7 @@
                   disabled={rerunBlock !== null}
                   title={rerunBlock
                     ? `Cannot be pressed: ${rerunBlock}`
-                    : `Sends the same POST /pull/spot again for ${dayLabel(from)} – ${dayLabel(to)}. It cannot be narrowed to the ${n(shortCount)} short instruments: SpotRequest carries no member field, so the whole target is asked for or nothing is.`}
+                    : `Sends the same POST /pull/spot again for ${dayLabel(from)} – ${dayLabel(to)}, carrying whatever is ticked above. It is NOT narrowed to the ${n(shortCount)} short instruments, and that is this page's limit rather than the route's: SpotRequest does carry a member set and broker_run filters on it, but nothing here builds a member list out of the short set — it re-sends the ticked one. Untick down to the short names and the request follows.`}
                   onclick={() => start()}
                 >
                   Pull the window again — {n(shortCount)} short
@@ -6983,12 +7000,17 @@
                already in the pager at the foot, and a line here restating it
                would be the narration this page had removed from it.
 
-               IT NARROWS THE VIEW AND IT CANNOT NARROW THE ASK. That is a
-               missing FIELD, not a missing widget -- `api::ingest::SpotRequest`
-               carries target, window, feed and granularity and no member list.
-               So the pager keeps the unfiltered total beside the filtered one
-               and the title says it outright, because a table that got shorter
-               after typing looks exactly like a request that got smaller. -->
+               IT NARROWS THE VIEW AND IT MUST NOT NARROW THE ASK -- and the
+               reason is NOT that the request cannot carry names. It can:
+               `SpotRequest.members` exists and the tick list above already
+               fills it. That is exactly why this box must not: two controls
+               narrowing one ask is how they drift apart, which is the defect
+               `members` was added to FIX -- the button said `1 of 213 ticked`,
+               the receipt said `ASKED 1` and the run pulled 213.
+               One control chooses what is PULLED and it is the tick list. This
+               one chooses what is DRAWN. The pager keeps the unfiltered total
+               beside the filtered one, because a table that got shorter after
+               typing looks exactly like a request that got smaller. -->
           <div class="cfind">
             <input
               class="search"
@@ -6997,7 +7019,7 @@
               oninput={() => (cPage = 1)}
               placeholder="Find among {n(censusNames)} name(s) — any part of the trading symbol"
               aria-label="Find a trading symbol in the census"
-              title={`Narrows what this table DRAWS and nothing else. api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so no control on this page can narrow a pull to one symbol — the ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
+              title={`Narrows what this table DRAWS and nothing else. The ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. What narrows a PULL is the instrument tick list — it sends one member= per name and the server filters on it — and this box deliberately does not, because two controls narrowing one request is how the button, the receipt and the run come to give three answers to one question. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
             />
           </div>
           <div class="cscroll">
@@ -7217,7 +7239,7 @@
                               ? 'A pull is already on the wire — /pull/spot is synchronous and this page sends one at a time.'
                               : problems.length > 0
                                 ? `The request above has ${n(problems.length)} thing(s) to fix first: ${problems[0].why}`
-                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. That is ${dayLabel(sp?.from ?? '')} – ${dayLabel(sp?.to ?? '')}: the days covering the ${n(r.unproved)} unsettled month file(s) of this series, clipped to the window you chose. It CANNOT be narrowed to ${r.sym}: api::ingest::SpotRequest carries no member field, so the server answers for the whole target — what this narrows is the window and the rung, and the outcome list below is built for this row.`}
+                                : `POST /pull/spot — target=${target}, vendor=${feeds.active}, granularity=${r.tf}, from=${sp?.from}, to=${sp?.to}. That is ${dayLabel(sp?.from ?? '')} – ${dayLabel(sp?.to ?? '')}: the days covering the ${n(r.unproved)} unsettled month file(s) of this series, clipped to the window you chose. It is NOT narrowed to ${r.sym}: this body carries whatever is ticked above, so the server answers for all of those. That is this page's limit and not the route's — SpotRequest carries a member set and broker_run filters on it; pullRow simply reuses the ticked body. What this DOES narrow is the window and the rung, and the outcome list below is built for this row.`}
                             onclick={() => pullRow(r)}
                           >
                             Pull {n(r.unproved)}
@@ -7319,11 +7341,15 @@
 <!-- ===================================================================== -->
 <!-- THE INSTRUMENTS RUNG.                                                  -->
 <!--                                                                        -->
-<!-- Present, visible, and NOT SELECTABLE — and the reason is a missing      -->
-<!-- FIELD, not a missing widget. `api::ingest::SpotRequest` carries target, -->
-<!-- window, feed and granularity; there is no member list on it, so a       -->
-<!-- subset of these names has nothing to travel on. A picker here would     -->
-<!-- take ticks and send a request that ignored them.                        -->
+<!-- IT USED TO SAY THESE NAMES WERE NOT SELECTABLE, "and the reason is a    -->
+<!-- missing FIELD, not a missing widget" — that SpotRequest had no member   -->
+<!-- list, so a subset had nothing to travel on and a picker would take      -->
+<!-- ticks and send a request that ignored them.                             -->
+<!--                                                                        -->
+<!-- BOTH HALVES HAVE SINCE STOPPED BEING TRUE, and the comment one level    -->
+<!-- down already knew it: "now that the list above is the control". The     -->
+<!-- picker exists, `SpotRequest.members` exists, `wireBodyFor` sends one    -->
+<!-- member= per tick and `broker_run` filters on them.                      -->
 <!--                                                                        -->
 <!-- What it DOES answer is the question the count alone cannot: which names -->
 <!-- this feed cannot serve. Those are shown and marked rather than absent,  -->
