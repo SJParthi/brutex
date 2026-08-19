@@ -970,6 +970,53 @@ mod tests {
         }
     }
 
+    /// **A close exactly ON a band edge is INSIDE it, not outside.**
+    ///
+    /// `if close > upper` and `if close < lower` are strict, and the inside test
+    /// below them is `lower <= close && close <= upper` — inclusive on both
+    /// sides. Mutating either strict comparison to its non-strict form makes the
+    /// edge belong to **both** relations at once, so a bar sitting exactly one
+    /// sigma above the VWAP reports itself as above the band AND inside it.
+    ///
+    /// `exactly_one_relation_holds_per_band` already asserts the exclusivity,
+    /// and it did not catch this: its four closes are round numbers that never
+    /// land on a computed edge. The edge has to be COMPUTED from the live VWAP
+    /// and sigma to be tested, which is what this does.
+    #[test]
+    fn a_close_exactly_on_a_band_edge_is_inside_that_band() {
+        let mut v = Vwap::for_slice(Availability::Present);
+        for minute in 0..60 {
+            let price = 2_500_000 + (minute * 137) % 4_000;
+            assert!(v.step(&at(minute, price, 1_000 + minute), tol()).is_ok());
+        }
+        let vwap = v.value().expect("a primed session has a vwap");
+        let sigma = v.sigma().expect("and a sigma");
+        assert!(
+            sigma > 0,
+            "the fixture must have spread, or the edges collapse"
+        );
+
+        for (band, (multiple, (above, below, _, _, inside))) in
+            BAND_SIGMA.iter().zip(BAND_POSITIONS).enumerate()
+        {
+            let offset = i64::try_from(multiple * i128::from(sigma)).expect("fits");
+            for (edge, name) in [
+                (vwap.saturating_add(offset), "upper"),
+                (vwap.saturating_sub(offset), "lower"),
+            ] {
+                let mask = v.bits(edge, tol());
+                assert!(
+                    mask.get(u32::from(inside)),
+                    "band {band}: a close on the {name} edge is inside it"
+                );
+                assert!(
+                    !mask.get(u32::from(above)) && !mask.get(u32::from(below)),
+                    "band {band}: a close on the {name} edge is not outside it"
+                );
+            }
+        }
+    }
+
     /// The bands nest: inside band 1 implies inside bands 2 and 3.
     #[test]
     fn the_bands_nest_outward() {
