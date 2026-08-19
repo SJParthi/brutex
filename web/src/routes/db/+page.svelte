@@ -6321,6 +6321,21 @@
              clears the three warnings.
              ============================================================== -->
         <span class="segs" role="tablist" aria-label="View">
+          <!-- THE COUNT COMES FROM THE STORE, NOT FROM WHAT IS LOADED.
+               It read `barSorted.length`, which is the FETCHED rows -- and
+               leaving the Bars view runs `barState = { files: [] }` by design,
+               because a view nobody is looking at should not hold 58,305 rows
+               in memory. The side effect was that the tab read `Bars 0` while
+               standing on Coverage: the one moment the number exists to be
+               read, since a count on a tab is there to say what is on the OTHER
+               side.
+               `0` is not a formatting slip, it is a measurement claim, and it
+               was false -- the same `null`-versus-zero rule this page keeps
+               everywhere else. `total` is `matched.reduce((a, r) => a + r.rows)`
+               off /store.json, which carries `rows` per instrument-month, so the
+               honest number is available without opening a single bar file.
+               THE PAGER STILL READS `barSorted.length`, and must: it can only
+               page through rows that are actually loaded. -->
           {#each VIEWS as v (v.key)}
             <button
               class="seg"
@@ -6331,7 +6346,7 @@
               title={v.title}
               onclick={() => (view = v.key)}
               >{v.label}<span class="c"
-                >{fmt(v.key === 'bars' ? barSorted.length : sorted.length)}</span
+                >{fmt(v.key === 'bars' ? total : sorted.length)}</span
               ></button
             >
           {/each}
