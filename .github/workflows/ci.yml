@@ -1167,7 +1167,11 @@ jobs:
           # None names an org, an env, an account or a field of a credential.
           # They are seven words a broker chose for its own JSON, and this
           # repository can no more rename them than it can rename `open`.
-          rolling_word='rollingoption ce pe iv oi spot strike'
+          # `1` `2` `3` are Dhan's expiry ORDINALS -- near, next, far -- and `4`
+          # is the one past the end, present only in the test that proves an
+          # ordinal the vendor does not serve is REFUSED rather than guessed at.
+          # Four single digits. None can be an org, an env or a vendor.
+          rolling_word='rollingoption ce pe iv oi spot strike 1 2 3 4'
 
           # ---- group 25: TEST SCAFFOLD NAMES AND ONE BOUND.
           #
