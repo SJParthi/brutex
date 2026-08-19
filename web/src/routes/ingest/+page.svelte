@@ -827,20 +827,18 @@
     {
       key: 'futures',
       label: 'Expired futures',
-      note: 'contracts that have already settled · 503 — no transport in this build',
-      served: false,
-      short:
-        'No expired future is listed anywhere this page can read, and no route in this build fetches one.',
-      why: 'THREE REASONS, ALL MEASURED.\n\n1. Not in the master. core::vendor::decode_master_row declines every FUT row as Skip::LiveContract — "live derivative contract". Both vendors purge the master on expiry and the earliest expiry in either one is three days from now, so every derivative row a master carries is a LIVE contract and none of it is backtest data. A declined row never reaches api::merge::Merged::by_key, so /instruments.json emits no FNO row and this control has nothing to offer.\n\n2. Not fetchable. POST /pull/fno exists and parses in full, then answers 503 with audit Outcome::NotStarted: "expired F&O has no local-archive path and no HTTP transport in this build".\n\n3. Not the same request. api::ingest::FnoRequest carries ONE underlying, ONE series and ONE settled expiry — no set — so a segment naming a whole target has nothing to put on the wire. This form drives /pull/spot only.\n\nExpired history comes from the vendors’ historical endpoints and from the existing lake, never from the live instrument master. Until one of those is wired to a route, this row is a refusal and not a gap.'
+      note: 'contracts that have already settled · discovered per month',
+      served: true,
+      short: null,
+      why: 'POST /pull/fno — expiries first, then the contracts each one held, then their candles. The route walks a MONTH: the window you choose names it, and every settled expiry inside it is pulled. A window running to today is refused, because a contract that has not settled is not history.'
     },
     {
       key: 'options',
       label: 'Expired options',
-      note: 'contracts that have already settled · 503 — no transport in this build',
-      served: false,
-      short:
-        'Same three reasons as expired futures — purged from the master, no transport, one contract per request.',
-      why: 'THREE REASONS, ALL MEASURED, and they are the futures ones.\n\n1. Not in the master. core::vendor::decode_master_row declines every CE and PE row as Skip::LiveContract after parsing its expiry and strike. Both vendors purge on expiry, so the ~148,000 contracts a live chain would add are all live and none of them is history.\n\n2. Not fetchable. POST /pull/fno answers 503 — no local-archive path and no HTTP transport in this build.\n\n3. Not the same request. One underlying, one series, one expiry per request, and the expiry must be strictly behind today (api::ingest::parse_fno refuses Refusal::LiveContract otherwise). There is no route that takes a target and a segment together.'
+      note: 'every strike each settled expiry held',
+      served: true,
+      short: null,
+      why: 'POST /pull/fno with series=opt — the same walk as expired futures, and it runs only after them. Dhan reaches ATM±10 strikes on an index and ATM±3 on a stock; Groww serves every listed strike by name. One unreadable contract name is reported and counted, never skipped.'
     }
   ];
 
@@ -2560,10 +2558,53 @@
     return start;
   }
 
+  /**
+   * THE EXPIRED-F&O REQUESTS, one per feed per settled series per underlying.
+   *
+   * A DIFFERENT ROUTE AND A DIFFERENT SHAPE, which is why they are built here
+   * rather than folded into `wireBodies`. `/pull/spot` fills a whole target in
+   * one request; `/pull/fno` names ONE underlying, because discovery is keyed
+   * on the underlying's own expiry list and there is no call that takes a set.
+   *
+   * NO `granularity` AND NO `expiry`. The route walks the month the window
+   * names and pulls every settled expiry inside it — the shape an operator
+   * actually asks for, and the shape the vendor publishes. An expiry field
+   * would narrow it to one, which is the old one-at-a-time form.
+   *
+   * These run AFTER every spot body, never beside them: `pull::fold`'s ladder
+   * puts spot before futures and futures before options, and a derivative
+   * request that arrives first is refused for want of the spot month.
+   */
+  const fnoBodies = $derived(
+    feedsChosen.flatMap((v) =>
+      segmentsReached
+        .filter((seg) => seg.key === 'futures' || seg.key === 'options')
+        .flatMap((seg) =>
+          ticked.map((m) => {
+            const p = new URLSearchParams();
+            p.set('underlying', m.symbol ?? m.key);
+            p.set('series', seg.key === 'futures' ? 'fut' : 'opt');
+            p.set('vendor', v);
+            p.set('from', floorFor(v, '1day'));
+            p.set('to', to);
+            return {
+              dir: seg.key,
+              vendor: v,
+              route: '/pull/fno',
+              label: `${feedName(v)} · ${seg.label} · ${m.symbol ?? m.key}`,
+              from: floorFor(v, '1day'),
+              body: p.toString()
+            };
+          })
+        )
+    )
+  );
+
   const wireBodies = $derived(
     feedsChosen.flatMap((v) =>
       rungsChosen.map((r) => ({
         dir: r.dir,
+        route: '/pull/spot',
         /* THE FEED THIS BODY BELONGS TO. `runPull` groups on it: the vendor is
            already inside `body` as a form field, and digging it back out of a
            URLSearchParams to decide scheduling would be reading the wire to
@@ -5418,7 +5459,14 @@
     e?.preventDefault?.();
     showProblems = true;
     if (problems.length > 0 || phase === 'running') return;
-    await runPull(wireBodies, new Set(ticked.map((m) => m.key)));
+    await runPull(
+      /* SPOT FIRST, THEN THE DERIVATIVES — concatenated here so ONE chain per
+         feed carries the whole ladder. The sort inside `runPull` puts them in
+         the order the server will accept; this only decides what is in the
+         run. */
+      [...wireBodies, ...fnoBodies],
+      new Set(ticked.map((m) => m.key))
+    );
   }
 
   /**
@@ -5505,8 +5553,15 @@
        minute pass was refused, and the operator saw a run that reported bars
        and left the rung they actually sweep empty.
        Sorted here rather than by reordering `RUNGS` because the display order
-       is a separate decision that this must not silently change. */
-    const PULL_ORDER = ['1day', '1min', '1s'];
+       is a separate decision that this must not silently change.
+
+       THE DERIVATIVE SEGMENTS ARE ON THE SAME LIST, and after both spot rungs.
+       `pull::fold`'s ladder is spot, then futures, then options — each waiting
+       on the one before it to FINISH — so a single ordered list per feed is the
+       whole sequencing rule. Across feeds nothing is ordered at all: the chains
+       are awaited together, and two brokers share no rate ceiling, no census
+       and no manifest lock. */
+    const PULL_ORDER = ['1day', '1min', '1s', 'futures', 'options'];
     const ladderRank = (/** @type {string} */ dir) => {
       const at = PULL_ORDER.indexOf(dir);
       /* A RUNG NOBODY RANKED GOES LAST, NEVER FIRST. `indexOf` answers -1 for
@@ -5532,7 +5587,7 @@
       for (const b of group) {
         sent = { done: sent.done, of: bodies.length, label: b.label };
         try {
-          const r = await request('/pull/spot', {
+          const r = await request(b.route ?? '/pull/spot', {
             // A PULL IS THE ONE ROUTE WHOSE WORK IS NOT LOCAL, so it carries
             // its own ceiling rather than the 15 s every other read gets. The
             // operator's Cancel signal below still applies: `ask` answers to
