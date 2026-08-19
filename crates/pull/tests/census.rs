@@ -133,8 +133,17 @@ impl Drop for Scratch {
 /// One `TrueData` index member: `date,time,price,volume,open_interest`.
 ///
 /// The same eight rows `integration.rs` drives, and they are the same eight for
-/// a reason: four are declined, three become bars, and **one folds into a bar
+/// a reason: two are declined, five become bars, and **one folds into a bar
 /// that is already open**. That last row is the whole of `rows_folded`.
+///
+/// # Why five and not three
+///
+/// `09:14:59` and `15:30:00` sit outside the published session, and this build
+/// used to DROP them. It no longer does — operator's rule of 2026-08-19:
+/// whatever the vendor provides is stored. Only the three rows outside the
+/// operator's WINDOW are declined now, which is a different question: those are
+/// the extra day this build's own `toDate + 1` asked for, not data the vendor
+/// volunteered.
 const BODY: &str = "\
 20221002,10:00:00,38400.00,0,0
 20221003,09:14:59,38410.00,0,0
@@ -148,12 +157,17 @@ const BODY: &str = "\
 
 /// Rows in [`BODY`].
 const ROWS: usize = 8;
-/// How many become bars.
-const BARS: usize = 3;
+/// How many become bars. Five: the three inside the session, plus the pre-open
+/// and post-close rows this build now keeps rather than discards.
+const BARS: usize = 5;
 /// How many fold into a bar that is already open — 09:15:30 into 09:15:00.
 const FOLDED: usize = 1;
-/// How many are declined by the window or the session.
-const DROPPED: usize = 4;
+/// How many are declined — by the WINDOW only. A row outside the session is
+/// KEPT and counted separately; only a row outside the window is dropped.
+const DROPPED: usize = 2;
+/// How many are kept although the exchange's timetable did not expect them:
+/// `09:14:59` and `15:30:00`.
+const OUTSIDE_SESSION: usize = 2;
 
 /// The vendor whose census these tests write.
 const VENDOR: Vendor = Vendor::Groww;
@@ -347,7 +361,18 @@ fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
          volume, high, low and close are IN that bar, so it is neither a bar \
          nor a drop"
     );
+    // THE CENSUS COUNTS DROPS, AND A KEPT ROW IS NOT ONE. The two rows outside
+    // the session are stored, so they appear in `bars_stored` and must NOT
+    // appear here — a row on both sides of `balances()` would make the books
+    // reconcile by double-counting.
     assert_eq!(done.census.total() as usize, DROPPED);
+    assert_eq!(
+        ROWS,
+        BARS + FOLDED + DROPPED,
+        "and the three categories are still the whole of what was read — the \
+         two outside-session rows are inside BARS, not beside it"
+    );
+    assert_eq!(OUTSIDE_SESSION, 2, "09:14:59 and 15:30:00");
     assert_eq!(
         ROWS,
         BARS + FOLDED + DROPPED,
@@ -361,9 +386,17 @@ fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
 
     // The folded row is not a claim about arithmetic: it is in the bar.
     let file = bar_file(&store, "NIFTY");
-    let first = file.read_record(0).expect("record 0");
+    // RECORD 0 IS NOW THE PRE-OPEN ROW. `09:14:59` used to be discarded, so the
+    // first record was `09:15:00`. It is kept now, so it sorts first — and the
+    // fold this test is about is one record along.
+    let preopen = file.read_record(0).expect("record 0");
+    assert_eq!(preopen.open, 3_841_000, "38410.00, the 09:14:59 row, kept");
+    let first = file.read_record(1).expect("record 1");
     assert_eq!(first.open, 3_844_565, "38445.65, the first snapshot");
-    assert_eq!(first.close, 3_845_000, "38450.00, the folded one");
+    assert_eq!(
+        first.close, 3_845_000,
+        "38450.00, the folded one — 09:15:30 is still IN the 09:15 bar"
+    );
 }
 
 // ===========================================================================
@@ -397,7 +430,11 @@ fn a_re_run_leaves_the_census_byte_for_byte() {
     // re-run offers every bar and commits none, and the receipt said "Bars
     // stored 375" over a run that wrote nothing at all. `bars_committed` is
     // what tells the two apart, so it is the one field that MUST differ here.
-    assert_eq!(first.bars_committed, 3, "the first run wrote the month");
+    assert_eq!(
+        first.bars_committed, 5,
+        "the first run wrote the month — five bars, because the two rows \
+         outside the published session are kept rather than discarded"
+    );
     assert_eq!(
         second.bars_committed, 0,
         "and the second wrote nothing — the file already held it byte for byte"
@@ -485,13 +522,18 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store, &narrow);
-    assert_eq!(first.bars_stored, 2);
+    // FOUR, NOT TWO. A one-day window now keeps the pre-open and post-close
+    // rows the vendor sent rather than discarding them.
+    assert_eq!(first.bars_stored, 4);
+    // AND THE CENSUS AGREES WITH THE FILE. Four, for the same reason: the
+    // counter records what the month HOLDS, and it now holds the pre-open and
+    // post-close rows too.
     assert_eq!(
         census_of(&store)
             .entry(&key("NIFTY"))
             .expect("the month is in the census")
             .rows,
-        2
+        4
     );
 
     let wider = BarRequest {
@@ -511,17 +553,23 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
     let entry = census.entry(&key("NIFTY")).expect("still recorded");
     let file = bar_file(&store, "NIFTY");
     assert_eq!(
-        entry.rows, 3,
-        "the entry counts the FILE, not the one-bar batch that was offered"
+        entry.rows, 5,
+        "the entry counts the FILE, not the one-bar batch that was offered — \
+         five now, since the pre-open and post-close rows are kept"
     );
     assert_eq!(entry.rows, file.header().n_valid);
     assert_eq!(
         entry.first_ts_micros,
         file.read_record(0).expect("record 0").ts_micros
     );
+    // THE LAST RECORD, ADDRESSED AS THE LAST. This read index 2 because the
+    // file held three records; it holds five now that the pre-open and
+    // post-close rows are kept, and a literal index is a test that has to be
+    // edited every time the fixture grows.
+    let last = file.header().n_valid.saturating_sub(1);
     assert_eq!(
         entry.last_ts_micros,
-        file.read_record(2).expect("record 2").ts_micros
+        file.read_record(last).expect("the last record").ts_micros
     );
     assert_eq!(
         census.entries(),

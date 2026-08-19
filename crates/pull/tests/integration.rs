@@ -144,7 +144,11 @@ const BODY: &str = "\
 /// How many rows [`BODY`] holds.
 const ROWS: usize = 8;
 /// How many of them survive the window, the session and the fold.
-const BARS: usize = 3;
+/// Five: the three inside the published session, plus `09:14:59` and
+/// `15:30:00`, which this build KEEPS rather than discards — operator's rule of
+/// 2026-08-19, whatever the vendor provides is stored. Only rows outside the
+/// operator's WINDOW are declined.
+const BARS: usize = 5;
 
 /// The first and last day the operator asked for.
 fn window() -> Window {
@@ -234,11 +238,15 @@ fn moment_of(bar: &Bar) -> IstMoment {
 }
 
 // ===========================================================================
-// P-02 — a bar outside the requested window is never stored
+// P-02 — a bar outside the requested WINDOW is never stored
+//
+// The session half of this invariant was removed on 2026-08-19. A row outside
+// the exchange's published hours is now KEPT and counted apart; only a row
+// outside the operator's window is dropped. See `fetch::land`.
 // ===========================================================================
 
 #[test]
-fn a_bar_outside_the_window_or_the_session_is_never_stored() {
+fn a_bar_outside_the_requested_window_is_never_stored() {
     let scratch = Scratch::new("WINDOW");
     let archive = archive_with_the_fixture(&scratch);
     let store_root = scratch.store();
@@ -255,17 +263,31 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
     assert_eq!(done.rows_read, ROWS, "every row of the fixture was read");
     assert_eq!(done.bars_stored, BARS);
 
-    // Each refusal is counted under its own reason. One total would not say
-    // whether the vendor ignored the range or included the pre-open auction.
+    // THE CENSUS COUNTS DROPS, AND A SESSION VERDICT IS NO LONGER ONE.
+    //
+    // Two rows fall outside the exchange's published hours — `09:14:59` and
+    // `15:30:00` — and both are now STORED. A row cannot be in `bars_stored`
+    // and in the drop census at once: `balances()` reconciles rows read
+    // against bars stored plus folded plus dropped, so double-counting would
+    // make the books add up by counting one row twice.
     assert_eq!(done.census.of(DropReason::BeforeWindow), 1);
-    assert_eq!(done.census.of(DropReason::BeforeSessionOpen), 1);
-    assert_eq!(done.census.of(DropReason::AtOrAfterSessionClose), 1);
     assert_eq!(done.census.of(DropReason::AfterWindow), 1);
-    assert_eq!(done.census.total(), 4);
+    assert_eq!(
+        done.census.of(DropReason::BeforeSessionOpen),
+        0,
+        "the pre-open row is kept, so it is not a drop"
+    );
+    assert_eq!(
+        done.census.of(DropReason::AtOrAfterSessionClose),
+        0,
+        "and neither is the post-close one"
+    );
+    assert_eq!(done.census.total(), 2);
 
     // THE INVARIANT, READ OFF THE DISK. Not "the pipeline said it dropped
-    // four" — every record the file actually holds is inside the operator's
-    // window and inside the exchange's session.
+    // two" — every record the file actually holds is inside the operator's
+    // WINDOW. The session is no longer a filter: what the vendor sent inside
+    // the asked range is what the file holds.
     let bars = stored_bars(&store_root);
     assert_eq!(bars.len(), BARS, "the file holds what the run reported");
     let window = window();
@@ -276,22 +298,33 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
             "{} is outside the requested window",
             at.day()
         );
+        // THE SESSION IS NO LONGER A FILTER, AND THIS ASSERTED THAT IT WAS.
+        //
+        // Operator's rule of 2026-08-19: whatever the vendor provides is
+        // stored. The cost of the old rule was measured on a real run —
+        // `rows_read 58,500` against `bars_stored 58,305`, 195 rows the vendor
+        // sent thrown away because NSE moved the INDEX close to 15:15 on
+        // 2026-08-03 while the vendor kept sending through 15:29. Under §8 that
+        // discard is permanent.
+        //
+        // So the two rows outside the published hours are asserted PRESENT
+        // rather than absent — the opposite of what the two lines here
+        // demanded. What they asserted is now asserted positively, by the
+        // `minutes` vector below: the 09:14 and 15:30 buckets are named in it.
         assert!(
-            at.minute_of_day() >= SESSION_OPEN_MINUTE,
-            "a bar before the session open reached the disk"
-        );
-        assert!(
-            at.minute_of_day() < SESSION_CLOSE_MINUTE,
-            "a bar at or after the session close reached the disk"
+            at.minute_of_day() < 24 * 60,
+            "a stored bar's minute is a real minute of a real day"
         );
     }
 
-    // And the three that survived are the three expected ones, at the minute
-    // each bucket opens rather than at the snapshot that opened it.
+    // And the FIVE that survived are the five expected ones, at the minute each
+    // bucket opens rather than at the snapshot that opened it.
     let days: Vec<Day> = bars.iter().map(|bar| moment_of(bar).day()).collect();
     assert_eq!(
         days,
         vec![
+            Day::new(2022, 10, 3).expect("2022-10-03"),
+            Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 4).expect("2022-10-04"),
@@ -301,10 +334,20 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
         .iter()
         .map(|bar| moment_of(bar).minute_of_day())
         .collect();
+    // THE PRE-OPEN AND POST-CLOSE MINUTES ARE HERE, and that is the change.
+    // `SESSION_OPEN_MINUTE - 1` is the 09:14 bucket the 09:14:59 snapshot
+    // opened; `SESSION_CLOSE_MINUTE` is the 15:30 bucket. Both used to be
+    // discarded; both are stored now, because the vendor sent them.
     assert_eq!(
         minutes,
-        vec![SESSION_OPEN_MINUTE, SESSION_CLOSE_MINUTE - 1, 9 * 60 + 20],
-        "the first and last minutes the exchange trades are both inside"
+        vec![
+            SESSION_OPEN_MINUTE - 1,
+            SESSION_OPEN_MINUTE,
+            SESSION_CLOSE_MINUTE - 1,
+            SESSION_CLOSE_MINUTE,
+            9 * 60 + 20
+        ],
+        "everything the vendor sent inside the window is on disk, in order"
     );
     assert_eq!(
         SESSION_CLOSE_MINUTE - SESSION_OPEN_MINUTE,
@@ -312,16 +355,22 @@ fn a_bar_outside_the_window_or_the_session_is_never_stored() {
         "and those two minutes bound the 375-bar session the charter records"
     );
 
-    // The fold is visible in the first bar: two snapshots inside 09:15 became
-    // one bar whose open is the first and whose close is the last, in file
-    // order. A window filter that ran after the fold would have folded a
-    // dropped row into a kept bar and this would be 3_841_000.
-    assert_eq!(bars[0].open, 3_844_565, "38445.65 in paisa, the first");
-    assert_eq!(bars[0].close, 3_845_000, "38450.00 in paisa, the last");
-    assert_eq!(bars[0].high, 3_845_000);
-    assert_eq!(bars[0].low, 3_844_565);
-    assert_eq!(bars[1].close, 3_850_000);
-    assert_eq!(bars[2].close, 3_860_000);
+    // BARS[0] IS THE PRE-OPEN BUCKET NOW, kept rather than discarded, so the
+    // fold this test is about has moved one along.
+    assert_eq!(bars[0].open, 3_841_000, "38410.00, the 09:14:59 row");
+
+    // The fold is visible in bars[1]: two snapshots inside 09:15 became one bar
+    // whose open is the first and whose close is the last, in file order. A
+    // WINDOW filter that ran after the fold would have folded a dropped row
+    // into a kept bar — that is still the thing being pinned, and it still
+    // holds, because the window checks still run before the fold.
+    assert_eq!(bars[1].open, 3_844_565, "38445.65 in paisa, the first");
+    assert_eq!(bars[1].close, 3_845_000, "38450.00 in paisa, the last");
+    assert_eq!(bars[1].high, 3_845_000);
+    assert_eq!(bars[1].low, 3_844_565);
+    assert_eq!(bars[2].close, 3_850_000);
+    assert_eq!(bars[3].close, 3_851_000, "38510.00, the 15:30:00 row, kept");
+    assert_eq!(bars[4].close, 3_860_000);
 }
 
 #[test]
@@ -345,7 +394,9 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
 
     let done = run(&archive, &store_root, &request);
     assert_eq!(done.failures, Vec::new(), "no member failed");
-    assert_eq!(done.bars_stored, 2);
+    // FOUR: the two inside the session plus the pre-open and post-close rows
+    // the vendor sent, which are now kept.
+    assert_eq!(done.bars_stored, 4);
     assert_eq!(
         done.census.of(DropReason::AfterWindow),
         2,
@@ -353,7 +404,7 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
     );
 
     let bars = stored_bars(&store_root);
-    assert_eq!(bars.len(), 2);
+    assert_eq!(bars.len(), 4);
     for bar in &bars {
         assert_eq!(
             moment_of(bar).day(),
@@ -434,8 +485,8 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store_root, &narrow);
-    assert_eq!(first.bars_stored, 2);
-    assert_eq!(stored_bars(&store_root).len(), 2);
+    assert_eq!(first.bars_stored, 4);
+    assert_eq!(stored_bars(&store_root).len(), 4);
 
     let wider = BarRequest {
         instrument_id: String::new(),
@@ -451,9 +502,14 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
     assert_eq!(second.bars_stored, 1);
 
     let bars = stored_bars(&store_root);
-    assert_eq!(bars.len(), 3, "the second day was appended to the first");
+    // FIVE: the first day's four — two inside the session, plus the pre-open
+    // and post-close rows now kept — and the second day's one.
+    assert_eq!(bars.len(), 5, "the second day was appended to the first");
+    let last = bars.last().expect("a bar");
     assert_eq!(
-        moment_of(&bars[2]).day(),
-        Day::new(2022, 10, 4).expect("2022-10-04")
+        moment_of(last).day(),
+        Day::new(2022, 10, 4).expect("2022-10-04"),
+        "and it is the LAST record, addressed as such rather than by a literal \
+         index that has to be edited every time the fixture grows"
     );
 }

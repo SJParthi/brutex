@@ -633,10 +633,23 @@ impl BarSource for FakeSource {
 /// What one window produced: the bars that survived, and why the rest did not.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Landed {
-    /// Bars inside the window and the session, ready for the store.
+    /// Bars inside the window, ready for the store.
     pub bars: Vec<Bar>,
-    /// Every discarded row, by reason. The total equals rows in minus bars out.
+    /// Every DISCARDED row, by reason. The total equals rows in minus bars out.
+    ///
+    /// Only window reasons reach it now. A row outside the published session is
+    /// KEPT — see [`Self::outside_session`] — and counting it here as well
+    /// would break `Ingested::balances`, which reconciles rows read against
+    /// bars stored plus folded plus dropped. A row cannot be on both sides.
     pub census: DropCensus,
+    /// Bars kept although they fell outside the venue's published hours.
+    ///
+    /// Not a drop and not silence: the operator's rule is that whatever the
+    /// vendor sends is stored, and this is the number that says how much of
+    /// what was stored the exchange's own timetable did not expect. A jump here
+    /// after a session change is the signal that a row in
+    /// `crate::vendor`'s session table has gone stale.
+    pub outside_session: u32,
 }
 
 /// Converts a vendor price to paisa.
@@ -675,6 +688,7 @@ pub fn land(
 ) -> Result<Landed, FetchError> {
     let mut bars = Vec::with_capacity(raw.rows.len());
     let mut census = DropCensus::default();
+    let mut outside_session = 0u32;
 
     for (i, row) in raw.rows.iter().enumerate() {
         // W1 LIVES HERE. The encoding is dispatched, never assumed. A vendor
@@ -738,9 +752,49 @@ pub fn land(
                 raw: row.timestamp,
                 why,
             })?;
+        // A SESSION-HOURS VERDICT IS COUNTED AND KEPT. A WINDOW ONE IS DROPPED.
+        //
+        // Operator's rule, 2026-08-19: **whatever the vendor provides, we
+        // store.** This discarded every row outside the venue's session, and
+        // the cost was measured on a real run — `rows_read 58,500` against
+        // `bars_stored 58,305`. 195 rows the vendor sent, thrown away, and
+        // thrown away SILENTLY: no drop event reaches the log, so the only
+        // trace is the difference between two counters nobody was subtracting.
+        //
+        // Those 195 are thirteen August sessions × fifteen minutes. NSE moved
+        // the INDEX close to 15:15 on 2026-08-03 while the vendor kept sending
+        // through 15:29, and this line decided the vendor was wrong. Under §8's
+        // append-only rule that decision is permanent: the rows cannot be
+        // recovered by re-running, because the file already holds the prefix.
+        //
+        // A raw store has no business adjudicating that. If a 15:20 index print
+        // is stale, it is stale in a bar the sweep can see and reason about —
+        // and the sweep has the vocabulary for it. Destroying it at ingest
+        // removes the evidence along with the problem, and it makes the store's
+        // completeness depend on this build knowing three closing bells
+        // exactly, which the CAS row's own comment admits it does not.
+        //
+        // THE WINDOW CHECKS STAY, and they are a different question. The
+        // operator asked for a range; a bar outside it is not data the vendor
+        // volunteered, it is the `toDate + 1` this build itself sent coming
+        // back — and a bar from the next month would break the one-month-per-
+        // file rule `month_of` enforces. So `BeforeWindow` and `AfterWindow`
+        // still drop, and the two session reasons are counted and kept.
+        //
+        // The census still counts them, so the receipt can say how many bars
+        // fell outside the published hours. Counted and kept is a different
+        // thing from counted and gone.
         if let Some(reason) = verdict {
-            census.count(reason);
-            continue;
+            if matches!(
+                reason,
+                crate::session::DropReason::BeforeWindow | crate::session::DropReason::AfterWindow
+            ) {
+                census.count(reason);
+                continue;
+            }
+            // KEPT, AND COUNTED SOMEWHERE ELSE. Counting it in `census` too
+            // would put one row on both sides of `balances()`.
+            outside_session = outside_session.saturating_add(1);
         }
 
         let price = |raw: i64, field: &'static str| {
@@ -833,7 +887,11 @@ pub fn land(
                 )),
             ),
     );
-    Ok(Landed { bars, census })
+    Ok(Landed {
+        bars,
+        census,
+        outside_session,
+    })
 }
 
 /// Fetches one window and lands it, in one call.
