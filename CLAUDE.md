@@ -117,15 +117,23 @@ depends on NOTHING          core · vocab · greeks · telemetry
 core          <-- costs
 core telemetry <-- store · lake
 vocab         <-- indicators · engine
-core store telemetry            <-- pull
+core costs store telemetry      <-- pull
 core pull store telemetry       <-- api
-core costs engine indicators vocab  <-- runner
+core costs engine indicators vocab         <-- runner
+core costs engine indicators runner store  <-- cli
 ```
 
-Twelve members, and the root `Cargo.toml` `members` list is exactly the twelve
-directories under `crates/`. The graph is acyclic and CI proves the two arrows
-that carry a rule: gate 9 that `core` depends on nothing, gate 9b that `greeks`
-does.
+Thirteen members, and the root `Cargo.toml` `members` list is exactly the
+thirteen directories under `crates/`. The graph is acyclic and CI proves the two
+arrows that carry a rule: gate 9 that `core` depends on nothing, gate 9b that
+`greeks` does.
+
+**This block is hand-maintained and has drifted once.** D-0208 corrected five
+statements in this section against `cargo metadata --no-deps`: the member count,
+a missing `cli` row, `pull`'s `costs` arrow (decided by D-0206 and never drawn
+here), `cli`'s dependency set, and the banner sentence below. Gates 9 and 9b pin
+one arrow each; **nothing pins this block as a whole**, so check it against the
+manifests rather than trusting it.
 
 **`indicators` and `engine` may not name each other.** Gate 22 clause A pins both
 of their dependency sets to `vocab` alone and ships no allowlist, so a bar cannot
@@ -147,20 +155,33 @@ only binary was `api`, whose dependency set is `core`, `pull`, `store` and
 unreachable from any entry point, and the three render surfaces that display it
 had no caller at all.
 
-`cli` depends on `runner`, `engine` and `indicators`, and **deliberately not on
-`store`**. The operator's standing rule is that neither a vendor pull nor the
-bars already on disk may be used, so its only input is `runner::synthetic`,
-generated in-process. It declines the capability rather than declining to use
-it — the same reasoning gate 22 applies to the swept crates.
+`cli` depends on `runner`, `engine`, `indicators`, `costs`, `store` and `core` —
+**six arrows, and `store` is one of them.**
+
+It was once deliberately *not*, on the reasoning that the operator's standing
+rule forbade both a vendor pull and the bars already on disk, leaving
+`runner::synthetic` as the only honest input. **That is no longer what the crate
+does, and the sentence is not merely stale — it argued for an absence that has
+been filled.** `cli sweep-stored` loads one real instrument-month through
+`store::file::BarFile` and sweeps it. The arrow is what makes the run identity
+§3 rule 3 demands recordable at all: a synthetic bar has no instrument to name,
+and naming one would be the invention §3 rule 1 forbids. D-0208.
+
+What survives from that reasoning is the half about gate 22, and it is the half
+that carries the rule: `cli` declines to be a *swept* crate, not to be a caller.
 
 It is **not** on gate 22's list and must never be added to one: clause A pins
 `vocab`, `indicators` and `engine` to `vocab` alone. `cli` is a caller, exactly
 as `runner` is.
 
-Every report it renders is led by a banner saying the bars were generated. A
-sweep over invented data is byte-identical in shape to one over real data, and
-without that line it would be the failure wearing a success's clothes that §4
-bans.
+Every report it renders is led by a **provenance banner, and there are two of
+them making opposite claims** — `PROVENANCE` says the bars were GENERATED,
+`STORED_PROVENANCE` says REAL MARKET DATA and must not carry the generated one's
+disclaimer. A sweep over invented data is byte-identical in shape to one over
+real data, so the banner is the only thing separating them, and
+`the_generated_and_stored_banners_make_opposite_claims` fails the build if they
+ever converge. Without that line either would be the failure wearing a success's
+clothes that §4 bans.
 
 ---
 

@@ -42,7 +42,7 @@ see the note at the end of this section for what that cost.
 | `pull` | vendor ingest, rate governor, credential read | `core`, `store`, `telemetry`, `costs` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry` | ✓ |
 | `runner` | the sweep driven end to end: trades, the exit grid, walk-forward, PBO, the bootstrap, the audit | `core`, `vocab`, `indicators`, `engine`, `costs` | ✓ |
-| `cli` | the operator entry point for the sweep: generated bars in, ladder walked, report out | `runner`, `engine`, `indicators`, `costs`, `core`, `store` | ✓ |
+| `cli` | the operator entry point for the sweep: generated **or stored** bars in, ladder walked, report out — `sweep` takes `runner::synthetic`, `sweep-stored` takes one real instrument-month off disk, and a different provenance banner leads each | `runner`, `engine`, `indicators`, `costs`, `core`, `store` | ✓ |
 
 **Thirteen crates, all of them real.** (The sentence said eleven while the table
 held twelve; `cli` makes it thirteen — D-0169.) `web/` is a directory at the repository root

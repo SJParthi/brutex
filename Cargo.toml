@@ -41,10 +41,19 @@ members = [
     # THE ENTRY POINT THE SWEEP NEVER HAD. Until this member existed the only
     # binary was `api`, whose dependency set names none of `runner`, `engine`,
     # `indicators`, `vocab` or `costs` -- so the ladder, the vocabulary and every
-    # statistical stage were compiled, tested and unreachable. It depends on
-    # `runner`, `engine` and `indicators`, and deliberately NOT on `store`: the
-    # operator's standing rule forbids both a vendor pull and the bars already on
-    # disk, so the only honest input is `runner::synthetic`. See D-0169.
+    # statistical stage were compiled, tested and unreachable. See D-0169.
+    #
+    # It depends on `runner`, `engine`, `indicators`, `costs`, `store` and `core`.
+    # `store` IS among them, and this comment used to say the opposite -- that the
+    # crate was deliberately NOT on `store` because the operator's standing rule
+    # forbids both a vendor pull and the bars already on disk, leaving
+    # `runner::synthetic` as the only honest input. `cli sweep-stored` reads a real
+    # instrument-month through `store::file::BarFile`, so that argued for an
+    # absence which has been filled. Corrected by D-0208, which also names the four
+    # other places CLAUDE.md section 5 had drifted.
+    #
+    # What still holds is the gate 22 half: `cli` is a CALLER, never a swept crate,
+    # and must never be added to that gate's list.
     "crates/cli",
 ]
 

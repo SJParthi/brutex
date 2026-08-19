@@ -16371,3 +16371,87 @@ Dhan demonstrably writes `Invalid_Authentication` into a body field, and that
 field's name is not in `docs/00-charter.md`. Filling one in from memory to make
 the table look complete is §3 rule 1's invention. The row stays `None` until the
 vendor's page is read.
+
+---
+
+### D-0208 — §5's "measured" graph had drifted from the manifests it is measured from
+
+**Decision.** `CLAUDE.md` §5's graph block and its `cli` paragraph are corrected
+against `cargo metadata --no-deps`. The root `Cargo.toml` comment on the
+`crates/cli` member is corrected in the same change, because it carries the same
+sentence.
+
+**Why.** §5 opens by declaring itself *"the MEASURED graph, derived from `cargo
+metadata --no-deps` rather than drawn"*, and closes by saying that a graph which
+cannot be checked against the manifests is a picture and not a law. It had
+stopped matching the tree in **five** places — four against the manifests and one
+against the code:
+
+* **"Twelve members"** — there are **thirteen**, and the root `members` list has
+  held thirteen since D-0169 added `crates/cli`.
+* **The graph block omits `cli` altogether.** Every other member has a row. That
+  omission is *why* the count read twelve: the block enumerates twelve crates and
+  the prose below it then discusses a thirteenth at length.
+* **`core store telemetry <-- pull`** omits `costs` — an arrow **D-0206 decided**
+  and this block was never updated for.
+* **"`cli` depends on `runner`, `engine` and `indicators`, and deliberately not
+  on `store`"** — `crates/cli/Cargo.toml` declares **six**: `runner`, `engine`,
+  `indicators`, `costs`, `store` and `core`.
+* **"Every report it renders is led by a banner saying the bars were
+  generated"** — there are **two** provenance banners making opposite claims.
+  `PROVENANCE` says GENERATED; `STORED_PROVENANCE` says REAL MARKET DATA and is
+  asserted *not* to carry the generated one's disclaimer. The old sentence
+  described the only banner that existed before `sweep-stored`, and as written it
+  now says a report over real bars claims to be invented — the inverse of the
+  §4 failure it was put there to prevent.
+
+**The fourth is the one that mattered.** It did not merely misstate a fact; it
+stated a **rationale for an absence that is no longer absent**, and the rationale
+was the operator's standing rule against reading bars off disk. `store` is not
+only declared — it is used: `cli/src/stored.rs` takes `store::file::BarFile` and
+`store::path::{FileKind, StorePath, Timeframe, YearMonth}`, and `cli
+sweep-stored` reads exactly those bars. A reader who believed the sentence would
+conclude that command cannot exist.
+
+**What is NOT changed, and why.** The "declines the capability rather than
+declining to use it" construction is kept where it is still true: `cli` remains
+off gate 22's list by intent, and §5 still says so. That reasoning is real and
+still governs `indicators` and `engine`. Only its attachment to `store` is wrong,
+and only that is removed.
+
+**§10's assumption ran backwards here, and that is the finding worth keeping.**
+§10 says that when `CLAUDE.md` and a document disagree, the file wins and the
+document is the stale copy to fix. In this case the **document was right and the
+law was stale**: `docs/01-architecture.md` §1 already carried `pull`'s `costs`
+arrow and all six of `cli`'s, because `crates/core/tests/graph.rs` parses that
+table and checks every arrow in it against the manifests — seven tests, all
+green, on the same tree where §5 said twelve members and no `store`.
+
+The mechanism is the whole explanation: **the gate-checked copy stayed true and
+the authoritative copy drifted, because nothing checks the authoritative copy.**
+§10's precedence rule is about resolving a *contradiction*; it is not evidence
+about which copy is correct, and reading it as such is how a wrong §5 survives a
+green build. One thing the architecture doc's prose column got wrong too — it
+said `cli` takes "generated bars in", which `sweep-stored` contradicts — and that
+column is not gate-checked either. Fixed here.
+
+**Alternatives considered.**
+
+* *Leave §5 and record the drift in `docs/06-limits.md` instead.* Rejected. §10
+  makes `CLAUDE.md` the file that wins a disagreement, so a wrong §5 is not a
+  stale copy of something truer — it **is** the authority, and a reader who
+  follows §10 has no reason to look further.
+* *Regenerate the block from `cargo metadata` in a CI gate instead of by hand.*
+  Attractive, and deliberately **not done here**: that is a new gate, not a
+  correction, and shipping it inside a fix would hide the fix. Recorded as open —
+  gates 9 and 9b pin two arrows each, and nothing pins the block as a whole. Until
+  such a gate exists §5 is hand-maintained and will drift again.
+
+**Cost.** Documentation and one manifest comment. No dependency is added or
+removed, no gate changes, and the graph is acyclic before and after — every arrow
+corrected here already existed in the manifests. Nothing recompiles.
+
+**What this does NOT license.** It does not add `runner` to `crates/api`. That
+arrow is still absent, `api` still declares `core`, `pull`, `store`, `telemetry`,
+`axum` and `tokio` and names the sweep crates zero times, and it still has no
+sweep route among its twenty-two. Closing that is its own decision.
