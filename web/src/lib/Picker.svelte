@@ -183,9 +183,35 @@
    * that draws.
    */
   const blocked = $derived(new Set(rows.filter((r) => r.disabled).map((r) => r.key)));
-  /** How many rows a bulk action can actually reach, in the whole list and in what is shown. */
-  const freeAll = $derived(rows.length - blocked.size);
-  const freeShown = $derived(shown.filter((r) => !r.disabled).length);
+  /**
+   * How many rows a bulk action can actually reach, in the whole list and in
+   * what is shown.
+   *
+   * `skipBulk` COUNTS HERE, AND ITS ABSENCE WAS A BUTTON THAT DID NOTHING.
+   *
+   * `selectAll` skips two kinds of row — `disabled`, which can never be ticked,
+   * and `skipBulk`, which CAN be ticked individually but must not be swept in.
+   * These two counts only ever subtracted the first, so the label and the action
+   * disagreed by exactly the `skipBulk` rows.
+   *
+   * Measured on /ingest's Segments: three rows, none disabled, two carrying
+   * `skipBulk: s.short !== null`. The button read "Select all 3"; `selectAll`
+   * reached one row — Spot — which was ALREADY ticked, so pressing it changed
+   * nothing at all and the control looked broken. It was not broken; it was
+   * reporting a number it had no intention of honouring.
+   *
+   * The comment over that button already states the rule — "THE COUNT IS WHAT
+   * THE BUTTON WILL ACTUALLY DO" — so this is the code catching up with its own
+   * stated intent rather than a new policy. `skipBulk` was added after these two
+   * derivations and they were never revisited.
+   *
+   * The predicate is now the SAME EXPRESSION `selectAll` uses, so the two cannot
+   * drift again: a row is free when it is neither blocked nor skipped.
+   */
+  const free = (/** @type {{disabled?: boolean, skipBulk?: boolean}} */ r) =>
+    !r.disabled && !r.skipBulk;
+  const freeAll = $derived(rows.filter(free).length);
+  const freeShown = $derived(shown.filter(free).length);
 
   /**
    * THE TWO HALVES OF WHAT IS SHOWN, and they are only two when `tuck` is on.
@@ -253,7 +279,7 @@
     // A bulk action is a convenience. A convenience that manufactures a refusal
     // is worse than no bulk action, and the row stays individually clickable so
     // nothing is taken away from someone who means it.
-    for (const r of shown) if (!r.disabled && !r.skipBulk) next.add(r.key);
+    for (const r of shown) if (free(r)) next.add(r.key);
     emit(next);
   }
   function clearAll() {
