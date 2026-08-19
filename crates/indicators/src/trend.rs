@@ -1010,6 +1010,77 @@ fn step_structure(
 mod tests {
     use super::*;
 
+    /// **True range picks the widest of the three classical spans, including the
+    /// two that need a previous close.**
+    ///
+    /// Written against mutation survivors rather than from the formula. A
+    /// crate-wide `cargo mutants` run had never reached this file; a file-scoped
+    /// one found **14 survivors in `Atr::true_range` alone**, every one of them a
+    /// comparison or a sign. The three cases below are the ones a bar can
+    /// actually produce:
+    ///
+    /// * **inside bar** — `high - low` is widest, neither gap term competes;
+    /// * **gap up** — the previous close sits BELOW the low, so `high - previous`
+    ///   exceeds `high - low` and must win;
+    /// * **gap down** — the previous close sits ABOVE the high, so
+    ///   `previous - low` exceeds `high - low` and must win.
+    ///
+    /// The gap cases are what kill `if hc < 0` mutated to `if hc > 0`: under that
+    /// mutation a positive `hc` is negated, goes negative, loses every comparison,
+    /// and the answer silently falls back to `high - low`.
+    #[test]
+    fn true_range_is_the_widest_span_including_both_gaps() {
+        // No previous close: the span is all there is.
+        let mut atr = Atr::new(3);
+        assert_eq!(
+            atr.true_range(&candle(0, 110, 100, 105)),
+            10,
+            "with no previous close the range is high - low"
+        );
+
+        // Seed a previous close, then an INSIDE bar: neither gap term competes.
+        atr.fold(&candle(0, 110, 100, 105));
+        assert_eq!(
+            atr.true_range(&candle(1, 108, 102, 106)),
+            6,
+            "inside bar: high - low wins, both gap spans are smaller"
+        );
+
+        // GAP UP. previous close 105, next bar entirely above it.
+        // hl = 130 - 120 = 10; hc = 130 - 105 = 25; lc = 105 - 120 = -15 -> 15.
+        assert_eq!(
+            atr.true_range(&candle(2, 130, 120, 125)),
+            25,
+            "gap up: high - previous is widest and must not be discarded"
+        );
+
+        // GAP DOWN. previous close 105, next bar entirely below it.
+        // hl = 90 - 80 = 10; hc = 90 - 105 = -15 -> 15; lc = 105 - 80 = 25.
+        assert_eq!(
+            atr.true_range(&candle(3, 90, 80, 85)),
+            25,
+            "gap down: previous - low is widest and must not be discarded"
+        );
+    }
+
+    /// A tie between two spans still answers, and answers the same number.
+    ///
+    /// The boundary the `>` comparisons sit on: `if hc > widest` keeps `widest`
+    /// when they are equal, and a mutation to `>=` swaps which of two identical
+    /// numbers is stored. That cannot change the answer — which is why the
+    /// equality case is asserted here and NOT claimed as a kill.
+    #[test]
+    fn a_tie_between_spans_answers_the_shared_value() {
+        let mut atr = Atr::new(3);
+        atr.fold(&candle(0, 110, 100, 110));
+        // hl = 120 - 110 = 10; hc = 120 - 110 = 10; lc = 110 - 110 = 0.
+        assert_eq!(
+            atr.true_range(&candle(1, 120, 110, 115)),
+            10,
+            "hl and hc are equal; the answer is that value either way"
+        );
+    }
+
     fn candle(ts: i64, high: i64, low: i64, close: i64) -> Candle {
         Candle {
             ts_micros: ts,

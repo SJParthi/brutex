@@ -17039,3 +17039,54 @@ because the tree is clean for the first time.
 
 **What it cannot see:** whether two ids that DIFFER describe the same invariant.
 That is a judgement, not a string comparison, and no gate will hold it.
+
+---
+
+### D-0216 — the mutation run that never finished was the wrong instrument
+
+**Decision.** `crates/indicators` is mutation-tested **file by file**, not
+crate-wide, and `docs/06-limits.md` §87 records the four complete verdicts that
+produced. Two tests kill six survivors in `Atr::true_range`; the eight that remain
+there are proved equivalent and are not chased.
+
+**Why.** §84 records a crate-wide `cargo mutants -p indicators --timeout 200` that
+**reached 608 of 1,379 mutants before the session ended**, and lists four files as
+unmeasured at that width. That entry then stood unchanged, and the reason is the
+instrument rather than the crate: **a run that does not finish yields a partial
+count, a partial count is comparable with nothing, and nobody can act on it.**
+Measured instead one `--file` at a time: four complete verdicts in about
+seventeen minutes.
+
+**`column.rs` never had a problem.** 24 mutants, 23 caught, one unviable, **zero
+survivors** — in 35 seconds. It sat on an "unmeasured" list, which a reader takes
+as unknown risk, and it was not unknown; nobody had asked it the question in a
+way that could be answered.
+
+**The kill, stated as measured rather than as intended.** `trend.rs` went from
+**28 survivors to 22**. Six died, all in `Atr::true_range`, to two tests written
+against the survivor list rather than from the formula — the gap-up case is what
+kills `if hc < 0` mutated to `if hc > 0`, because under that mutation a positive
+gap is negated, loses every comparison, and the answer falls back to `high - low`
+without saying so.
+
+**Eight are equivalent, and the proof is in §87 rather than asserted here.** They
+reduce to one fact repeated: `low <= high`, so `previous - low >= previous - high`,
+so the larger gap span always wins the later comparison whatever the sign guard
+does. Chasing them would mean writing a test that cannot fail, which §4 bans. The
+code's own comment had already said it — *"the risk is theoretical — the habit is
+not"*.
+
+**An error of mine, recorded because it is the kind that produces a confident
+wrong number.** I reported "14 survivors killed, 14 → 0" while the re-run was
+**still in flight**: the comparison grepped a file `cargo mutants` had not yet
+written, and `grep -c` on a missing file returns `0`. The real figure is six.
+Every mutation number in §87 was taken after the process exited, and the entry
+says so.
+
+**What this does NOT claim.** The other 14 `trend.rs` survivors — in
+`SuperTrend::fold`, `SwingDetector::fold`, `SwingDetector::confirm` and
+`Structure::classify` — are **not** analysed and **not** claimed equivalent, nor
+are `session.rs`'s 14 or `vwap.rs`'s 13. They are measured, named, and open. A
+crate-wide percentage is deliberately not quoted: the four files here are complete
+and `pattern.rs` is not, so any total would mix a finished measurement with an
+unfinished one, which is the error this entry exists to correct.

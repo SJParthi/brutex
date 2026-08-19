@@ -5049,6 +5049,74 @@ that is not there, which is indistinguishable from a vendor that sent no name.
 
 ---
 
+## 87. The crate-wide mutation run was the wrong instrument, and four files were never unmeasured for the reason recorded
+
+§84 records a crate-wide `cargo mutants -p indicators --timeout 200` that
+**reached 608 of 1,379 planned mutants before the session ended**, and lists
+`column.rs`, `session.rs`, `trend.rs` and `vwap.rs` as unmeasured at that width.
+That entry has stood unchanged since, and the reason is the instrument rather
+than the crate: **a run that does not finish produces a partial number, and a
+partial number is not comparable with anything, so nobody can act on it.**
+
+### File-scoped runs finish, and they finish in minutes
+
+Measured 2026-08-19, `cargo-mutants 26.2.0`, one `--file` run per file:
+
+| file | mutants | caught | missed | unviable | wall clock |
+|---|---|---|---|---|---|
+| `column.rs` | 24 | 23 | **0** | 1 | **35 s** |
+| `session.rs` | 134 | 120 | 14 | 0 | 5 m |
+| `vwap.rs` | 92 | 75 | 13 | 3 + 1 timeout | 6 m |
+| `trend.rs` | 121 | 76 | 28 | 17 | 5 m |
+
+**Four complete verdicts in about seventeen minutes**, against a crate-wide run
+that reached 44% and stopped. The whole-crate invocation is the honest thing to
+report a crate-wide *figure* from; it is the wrong thing to *work* from.
+
+**`column.rs` had zero survivors all along.** It was listed as unmeasured, which
+reads as unknown risk, and it was not — 23 of 24 caught, the twenty-fourth
+unviable. A file named in an unmeasured list is not a file with a problem.
+
+### `Atr::true_range`: 14 survivors, 6 killed, and 8 that no assertion can reach
+
+Two tests — `true_range_is_the_widest_span_including_both_gaps` and
+`a_tie_between_spans_answers_the_shared_value` — took `trend.rs` from **28
+survivors to 22**, all six kills inside `Atr::true_range`. The remaining **eight
+are equivalent**, and the proof is short enough to state rather than assert:
+
+```rust
+let hc = if hc < 0 { -hc } else { hc };   // hc = high - previous
+let lc = if lc < 0 { -lc } else { lc };   // lc = previous - low
+if hc > widest { widest = hc; }
+if lc > widest { widest = lc; }
+```
+
+* `< → <=` on either line: at `hc == 0`, `-0 == 0`. Identical function.
+* `< → ==` on either line: differs only where `hc < 0`, i.e. `previous > high`.
+  There, `|hc| = previous - high` and `lc = previous - low`, and `low <= high`
+  gives `lc >= |hc|` — so `lc` wins the later comparison either way.
+* `delete -` on either line: an un-negated negative never wins `> widest`, since
+  `widest` starts at `hl >= 0`; and the negated value would have lost to `lc`
+  anyway, by the same inequality.
+* `> → >=` on lines 289 and 292: when the two are equal the assignment stores the
+  same number.
+
+**Each is the same fact twice**: the two gap spans are ordered by `low <= high`,
+so the sign guard is defensive rather than load-bearing. The code's own comment
+already said as much — *"These are already `i128` so the risk is theoretical —
+the habit is not."* Chasing these would mean writing a test that cannot fail,
+which `CLAUDE.md` §4 bans outright.
+
+### What is NOT claimed
+
+The other 14 `trend.rs` survivors — 5 in `SuperTrend::fold`, 4 in
+`SwingDetector::fold`, 3 in `SwingDetector::confirm`, 2 in `Structure::classify`
+— **have not been analysed and are not claimed equivalent.** Nor have
+`session.rs`'s 14 or `vwap.rs`'s 13. They are measured, named in this table, and
+open.
+
+---
+
 ## 86. Listing what the store holds is O(entries), and that is the floor
 
 `store::catalog::walk` walks the tree under `root/bars` and returns one row per
