@@ -31,7 +31,25 @@ Futures, options and single stocks may be **stored**. They are never swept.
 **Rust is the only language in this repository.**
 
 Allowed tracked extensions: `.rs` `.toml` `.md` `.lock` `.html` `.css` `.yml`
-(the last only under `.github/`).
+(the last only under `.github/`), and `.json` only under `.claude/`.
+
+Four files are allowed **by name** rather than by extension, because a repository
+cannot exist without them and none is source: `LICENSE`, `CODEOWNERS`,
+`.gitignore`, `.gitattributes`.
+
+**Both parentheses are the rule, not a note.** A `.yml` outside `.github/` and a
+`.json` outside `.claude/` are the same build failure any other extension is.
+
+The `.claude/` clause covers **operator tooling, which is neither source nor
+shipped**: no crate reads it, no build step opens it, and gate 1e's premise —
+that the workspace builds with the front end moved aside — is untouched by it.
+Exactly one tracked file uses it, `.claude/launch.json`, which carries the two
+run configurations `docs/07-plan.md` §0 names. It was written into gate 1 and
+gate 1b first and into this list second; gate 1's own comment refused to close
+the gap on its own, in these words: *"Resolving that is a `CLAUDE.md` edit and a
+`docs/05-decisions.md` entry, which a CI gate must not make on its own — a gate
+that widens the law to match the tree is the shape this whole file exists to
+refuse."* D-0210 is that entry, and this sentence is that edit.
 
 **One exception, and it is a path, not a language.** Under `web/` — and nowhere
 else — the front end is unrestricted. Any language, any framework, any

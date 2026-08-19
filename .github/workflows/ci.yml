@@ -105,20 +105,27 @@ jobs:
           # narrowing costs nothing today and is the point at which a `.yml`
           # dropped at the root becomes a red build rather than a gate-1b one.
           github_allowed="${allowed}|yml"
-          # `.json` IS NOT IN SECTION 2'S LIST AT ALL, and exactly one tracked
-          # file carries it: `.claude/launch.json`, the run configuration
-          # IntelliJ and the preview tools read. Gate 1b already sanctions
-          # `.claude/` by path and states the reason -- operator tooling, not
-          # source, not shipped -- so this line makes gate 1 agree with gate 1b
-          # instead of being wider than gate 1b AND wider than the law.
+          # `.json` is in section 2's list ONLY under `.claude/`, and exactly one
+          # tracked file carries it: `.claude/launch.json`, which holds the two
+          # run configurations docs/07-plan.md section 0 names. It is read by the
+          # PREVIEW TOOLS. It is NOT read by IntelliJ -- an earlier version of
+          # this comment said "IntelliJ and the preview tools", and IntelliJ takes
+          # its run entries from .idea/ or .run/*.xml, neither of which is
+          # tracked. An operator opening the clone in IntelliJ still gets that
+          # IDE's own Cargo auto-detection of the `api` binary, which is the
+          # thing section 0 says is the IDE inferring rather than the repository
+          # promising. Gate 1b already sanctions `.claude/` by path and states the
+          # reason -- operator tooling, not source, not shipped -- so this line
+          # makes gate 1 agree with gate 1b instead of being wider than gate 1b
+          # AND wider than the law.
           #
-          # THE DIVERGENCE THAT REMAINS IS NAMED RATHER THAN LEGISLATED AWAY.
-          # Section 2 does not permit `.json` anywhere outside `web/`, and a file
-          # exists that needs it. Resolving that is a CLAUDE.md edit and a
-          # `docs/05-decisions.md` entry, which a CI gate must not make on its
-          # own -- a gate that widens the law to match the tree is the shape this
-          # whole file exists to refuse. What it can honestly do is refuse json
-          # everywhere the tree does not already have it, and say so here.
+          # THE DIVERGENCE THIS COMMENT USED TO NAME IS NOW CLOSED, and closed the
+          # way this comment demanded rather than the way a gate could have taken
+          # on its own. It read: "Resolving that is a CLAUDE.md edit and a
+          # `docs/05-decisions.md` entry, which a CI gate must not make on its own
+          # -- a gate that widens the law to match the tree is the shape this whole
+          # file exists to refuse." Section 2 now carries the `.claude/` clause and
+          # D-0210 is the entry. The gate did not move; the law did.
           claude_allowed="${allowed}|json"
           # Under web/ ONLY, the browser languages are allowed -- D-0052. This
           # is narrowed by PATH, not relaxed by extension: putting `ts` on the

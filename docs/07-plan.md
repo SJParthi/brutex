@@ -49,12 +49,23 @@ by building the workspace with `web/` moved aside.
 
 * **The first Run compiles the workspace in release and takes minutes.** It is
   one click, not one second. Later runs are incremental.
-* **The run configuration itself is not in the clone.** `.claude/` is ignored by
-  root `.gitignore:30`, and a tracked IntelliJ `.run/*.xml` is an extension gate
-  1 forbids outside `web/`. What the operator actually gets today is IntelliJ's
-  own Cargo auto-detection of the `api` binary, which does produce a working Run
-  entry — but it is the IDE inferring it, **not this repository promising it**.
-  Closing that needs a decision entry and a gate 1 amendment. **OPEN.**
+* **A run configuration IS in the clone; an *IntelliJ* one is not.** This row
+  used to read "The run configuration itself is not in the clone" and say that
+  closing it "needs a decision entry and a gate 1 amendment — **OPEN**". Both
+  halves are now done and the row was the last thing that did not know it.
+  `.claude/launch.json` is **tracked** — `.gitignore:30` ignores `.claude/`
+  *except that one file*, and says so — and it carries exactly the two
+  configurations the table below names, in the preview tools' format. Gate 1 and
+  gate 1b were amended to admit `.json` under `.claude/`, and `CLAUDE.md` §2 and
+  D-0210 closed the law half.
+
+  **What is still true, and is the part that mattered:** IntelliJ does not read
+  that file. It takes run entries from `.idea/` or `.run/*.xml`, neither tracked.
+  An operator opening the clone in IntelliJ still gets that IDE's own Cargo
+  auto-detection of the `api` binary — a working Run entry, but **the IDE
+  inferring it rather than this repository promising it**. Promising it to
+  IntelliJ specifically is still **OPEN**, and is a smaller question than this
+  row used to state.
 * **`web/build` can be stale.** Nothing ties it to `web/src`; see
   `docs/06-limits.md` §38 and D-0068's cost list.
 

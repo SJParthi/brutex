@@ -16538,3 +16538,80 @@ resolve, 0 refusals.
 
 **What this does NOT license.** It does not renumber anything in `crates/api`,
 and it does not touch the retired `C-18` … `C-25` band.
+
+---
+
+### D-0210 — `.json` under `.claude/`, which the gate had been asking for in writing
+
+**Decision.** `CLAUDE.md` §2's extension list gains **`.json`, only under
+`.claude/`**. Exactly one tracked file uses it: `.claude/launch.json`.
+
+**Why the gate could not do this itself, in its own words.** Gate 1 had already
+narrowed its extension list by path and admitted `.json` under `.claude/` so that
+it would stop being wider than gate 1b *and* wider than §2. It then refused to go
+the last step, and wrote down why:
+
+> THE DIVERGENCE THAT REMAINS IS NAMED RATHER THAN LEGISLATED AWAY. Section 2
+> does not permit `.json` anywhere outside `web/`, and a file exists that needs
+> it. Resolving that is a `CLAUDE.md` edit and a `docs/05-decisions.md` entry,
+> which a CI gate must not make on its own — **a gate that widens the law to
+> match the tree is the shape this whole file exists to refuse.**
+
+That is the correct instinct and it is why this entry exists rather than a
+one-word edit to a shell variable. **The gate did not move; the law did.**
+
+**Why the carve-out is narrow enough to be safe.** `.claude/` is operator
+tooling: no crate reads it, no build step opens it, `cargo build`, `cargo test`
+and `cargo clippy` never look at it, and gate 1e's premise — the workspace builds
+with the front end moved aside — is untouched. It is neither source nor shipped.
+The clause is by **path**, exactly as `.yml`-under-`.github/` and the `web/`
+exception already are, so a `.json` dropped at the root is the same red build it
+has always been.
+
+**What the file actually is, corrected.** `.claude/launch.json` carries the two
+run configurations `docs/07-plan.md` §0's table names — the `api` binary on 8080
+and the Vite dev server on 5173. Gate 1's comment described it as "the run
+configuration IntelliJ and the preview tools read". **The IntelliJ half was
+wrong** and is fixed here: IntelliJ takes run entries from `.idea/` or
+`.run/*.xml`, neither of which is tracked. The preview tools read this format.
+
+**Two stale rows fall out of this, and both are corrected in the same change.**
+`docs/07-plan.md` §0 said *"The run configuration itself is not in the clone"*
+and that closing it *"needs a decision entry and a gate 1 amendment. **OPEN**"*.
+The gate 1 amendment had **already happened**; the file **is** tracked, because
+`.gitignore:30` ignores `.claude/` *except that one file* and says so in its own
+header. The row was the last thing that did not know the work was done. What
+survives is smaller and still true: **IntelliJ** gets its Run entry from its own
+Cargo auto-detection, which is the IDE inferring rather than this repository
+promising, and promising it to IntelliJ specifically is still open.
+
+**Alternatives considered.**
+
+* *Untrack `.claude/launch.json` and leave §2 alone.* Rejected: it is the only
+  artefact in the clone that names the two run configurations §0's procedure
+  depends on, and deleting it to preserve a sentence makes the operator
+  procedure less reproducible in order to make the law shorter.
+* *Allow `.json` everywhere and rely on gate 1b to confine it.* Rejected for the
+  reason gate 1's comment already gives — two gates disagreeing about one rule is
+  not defence in depth, and the wider sentence is the one a reader believes.
+* *Add a `.run/*.xml` for IntelliJ at the same time.* Rejected as scope: `.xml`
+  is not in §2's list either, so it is a second extension decision, and it should
+  be taken on its own evidence rather than carried in behind this one.
+
+**A second, smaller divergence found while checking the first, and closed with
+it.** Gate 1 also admits four files by NAME rather than extension —
+`allowed_names='LICENSE|CODEOWNERS|.gitignore|.gitattributes'`, checked before the
+extension test so a dotfile is never read as carrying an extension. §2 listed
+none of them, so by the letter of the law this repository's own `.gitignore` was
+forbidden. That is not a real risk — the gate has always allowed them — but it is
+the same defect as the `.json` one and it would have been dishonest to correct §2
+into a state that was still wrong. §2 now names all four.
+
+**Cost.** Two clauses in §2, one corrected comment in gate 1, one corrected row in
+`docs/07-plan.md` §0. No gate logic changes — gate 1's `claude_allowed` and
+`allowed_names` lines already admitted both before this entry, which is precisely
+the divergence the entry closes.
+
+**What this does NOT license.** No other extension anywhere, and no `.json`
+outside `.claude/`. `web/` remains the only path where the language rule itself
+is lifted.
