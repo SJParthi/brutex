@@ -5117,12 +5117,31 @@ open.
 
 ---
 
-## 86. Listing what the store holds is O(entries), and that is the floor
+## 86. Listing what the store holds is O(entries log entries), and that is the floor
 
 `store::catalog::walk` walks the tree under `root/bars` and returns one row per
 spot instrument-month. **Its cost grows with the number of files.** It cannot
 not: listing N things is N units of work, and no arrangement of the store
 changes that.
+
+### The sort, which this section used to omit
+
+The heading said `O(entries)` and the real figure is `O(entries) + O(held log
+held)` — `crates/store/src/catalog.rs:210` sorts and dedups the held rows before
+returning them. That was absent from this section, from the module header and
+from the function's own `# Cost` block, so all three understated the same
+function in the same direction.
+
+**The sort is not removable.** `read_dir` returns entries in whatever order the
+filesystem gives, and this function's output addresses a page by ordinal — a
+listing whose row 5 changes between two runs over identical bytes is not a
+listing. The alternative orderings cost the same or more: a `BTreeSet` is
+`O(n log n)` on insert, and a hash set is O(n) but returns nothing repeatable.
+
+It is allowlisted under CI gate 11 rule 4 rather than removed, and the allowance
+carries that reason. This is a CLI path — `crates/cli/src/batch.rs` is the only
+caller — and never a request path, which is why the sort is affordable here and
+would not be inside a handler.
 
 ### Why this is not a rule-4 breach
 

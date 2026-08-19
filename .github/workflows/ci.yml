@@ -4580,6 +4580,14 @@ jobs:
           crates/api/src/server.rs 2
           crates/pull/src/archive.rs 1
           crates/pull/src/manifest.rs 1
+          # `catalog::walk` returns a listing addressed by ORDINAL, built from a
+          # `read_dir` whose order the filesystem chooses. A page whose row 5
+          # differs between two runs over identical bytes is not a listing, and
+          # every deterministic alternative costs the same or more: a `BTreeSet`
+          # is O(n log n) on insert and a hash set returns nothing repeatable.
+          # CLI-only -- `crates/cli/src/batch.rs` is the sole caller -- so it is
+          # never on a request path. docs/06-limits.md section 86.
+          crates/store/src/catalog.rs 1
           '
 
           # ---- rule 5. CLAUDE.md section 4: refuse, never die. --------------

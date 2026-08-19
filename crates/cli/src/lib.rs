@@ -656,14 +656,50 @@ fn session_returns(
 /// Built from the bars rather than assumed, so a half-day, a holiday gap or a
 /// Muhurat session changes the index instead of shifting every later bucket by
 /// one — which is the defect a fixed 375-bar stride would have.
+///
+/// # Why there is no sort here, and there was one
+///
+/// The doc block above celebrates removing a `binary_search` from
+/// `session_returns` because CI gate 11 rule 1 refuses the construct
+/// workspace-wide. The replacement introduced a `sort_unstable` HERE, which
+/// fails gate 11 **rule 4** with no allowlist entry — one red gate traded for
+/// another, in the same commit, three lines apart.
+///
+/// It was never needed. `bars` comes from the store, and the store enforces
+/// strictly increasing timestamps: `survey` refuses a batch that is not
+/// ordered, and `Header::advance` refuses an append that does not follow. So
+/// the days derived from them are already non-decreasing, and a single pass
+/// keeping each day that differs from the last is the whole of the work.
+///
+/// The order is CHECKED rather than assumed. A day that goes backwards means
+/// the store's own invariant has broken upstream, and this returns what it has
+/// rather than silently building an index that maps trades to the wrong
+/// session — the bound stays O(bars) either way.
+///
+/// # Cost
+///
+/// One pass, one comparison per bar, one push per distinct day. No sort, no
+/// search, no allocation per bar beyond the days kept.
 fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
-    let mut days: Vec<i64> = bars
-        .iter()
-        .map(|b| indicators::ist_day(b.ts_micros))
-        .collect();
-    days.dedup();
-    days.sort_unstable();
-    days.dedup();
+    let mut days: Vec<i64> = Vec::new();
+    for bar in bars {
+        let day = indicators::ist_day(bar.ts_micros);
+        match days.last() {
+            Some(&last) if last == day => {}
+            Some(&last) if last > day => {
+                // OUT OF ORDER, WHICH THE STORE FORBIDS. Reported rather than
+                // sorted around: sorting here would paper over a broken
+                // invariant one layer down and produce a plausible index.
+                eprintln!(
+                    "session index: {day} follows {last}, which the store's \
+                     monotonic timestamps forbid — the index stops here rather \
+                     than reordering bars it did not order"
+                );
+                return days;
+            }
+            _ => days.push(day),
+        }
+    }
     days
 }
 

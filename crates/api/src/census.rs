@@ -653,10 +653,27 @@ pub fn held_series(censuses: &[VendorCensus]) -> Vec<Series> {
 /// vendor holds, and nothing else. **194 rows instead of 7,056**, and the first
 /// one has data in it.
 ///
-/// # Cost
+/// # Cost — and this said "once, at startup", which is false
 ///
-/// O(entries log entries), and it runs where [`held_series`] runs — once, at
-/// startup, in `api::server::Site::new`. `docs/06-limits.md` §32 covers both.
+/// **O(entries log entries), on FOUR PER-REQUEST PATHS.** `census_now` calls
+/// this, and `census_now` is reached by `/instruments.json`, `/verify.json`,
+/// `/store.json` and `/audit.json` — every one of them a live HTTP handler.
+///
+/// The old sentence claimed it "runs where `held_series` runs — once, at
+/// startup". That is still true of [`held_series`], and it stopped being true
+/// of this function when `census_now` was introduced. `docs/06-limits.md` §32
+/// is about the startup call and predates the per-request one; §41.1 documents
+/// the WALK and not the sort on top of it.
+///
+/// CI's own gate comment already records the sentence as stale and deliberately
+/// leaves it — so the only place the falsity was written down was a note about
+/// not editing it. A cost claim a reader can see asserted and cannot see hold is
+/// the shape this repository treats as worse than an undocumented cost: the
+/// second invites a measurement, the first ends the question.
+///
+/// What is genuinely bounded here is the row count, and that is the point of
+/// the function: 194 rows instead of 7,056. What is not bounded is the number
+/// of entries it walks and sorts to produce them, which grows with the store.
 ///
 /// Sorted newest month first, then by series, because a store is read the way a
 /// bank statement is: the recent end matters most. Deterministic for the reason
