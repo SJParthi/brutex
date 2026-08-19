@@ -68,8 +68,21 @@ pub struct Ask {
     pub interval: &'static str,
     /// First day, `YYYY-MM-DD`.
     pub from: String,
-    /// Last day, `YYYY-MM-DD`. At most [`RollingSpec::max_days_per_call`] after
-    /// [`Self::from`]; splitting a wider window is the caller's job.
+    /// The `toDate` **as it goes on the wire**, which Dhan documents as
+    /// NON-INCLUSIVE — `docs/14-expired-options-data.md`, request table:
+    /// *"End date (non-inclusive)"*.
+    ///
+    /// # Why this field is the wire value and not the operator's last day
+    ///
+    /// The two differ by a day, and getting it wrong loses the last day of
+    /// every window silently: the vendor answers, the rows parse, the books
+    /// balance, and one session is simply missing. `fetch::wire_end` already
+    /// owns that conversion for the bars endpoint — the same vendor, the same
+    /// rule — so the caller passes what that function returns rather than this
+    /// module growing a second answer to one question.
+    ///
+    /// At most [`RollingSpec::max_days_per_call`] after [`Self::from`];
+    /// splitting a wider window is the caller's job.
     pub to: String,
 }
 
@@ -666,6 +679,35 @@ mod tests {
         assert_eq!(of(""), None);
         assert_eq!(of("1.2.3"), None);
         assert_eq!(of("9223372036854775807"), None, "overflow is not a value");
+    }
+
+    /// **THE VENDOR'S `toDate` IS NON-INCLUSIVE, AND THE SAME CONVERTER OWNS IT.**
+    ///
+    /// `docs/14-expired-options-data.md` states it in the request table, and
+    /// `fetch::wire_end` already applies it for this vendor's bars endpoint.
+    /// Two answers to one question is how the last day of every window goes
+    /// missing while every count still balances.
+    #[test]
+    fn the_end_date_this_carries_is_the_exclusive_one_the_vendor_documents() {
+        use crate::session::Day;
+        use crate::vendor::{Feed, RangeEnd, Transport};
+
+        let Transport::Http(dhan) = Feed::Dhan.descriptor().transport else {
+            panic!("Dhan is an HTTP broker");
+        };
+        assert_eq!(
+            dhan.range_end,
+            RangeEnd::Exclusive,
+            "the descriptor already records what the docs say"
+        );
+        let last = Day::new(2025, 9, 30).expect("a real day");
+        let wire = crate::fetch::wire_end(last, dhan.range_end).expect("it converts");
+        assert_eq!(
+            wire.to_string(),
+            "2025-10-01",
+            "the day AFTER the operator's last, because the vendor excludes it \
+             — an ask that carried 2025-09-30 would lose that whole session"
+        );
     }
 
     /// **THE CONTRACT SET IS THE DESCRIPTOR'S CROSS PRODUCT, AND IT IS BOUNDED.**

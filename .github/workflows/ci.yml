@@ -1151,6 +1151,40 @@ jobs:
           # redacts it in Debug.
           zerodha_row='zerodha instrument_token api-key'
 
+          # ---- group 24: DHAN'S ROLLING-OPTION VOCABULARY, and it is wire
+          # vocabulary in the same sense every row above is.
+          #
+          # `rollingoption` is the path segment of Dhan's expired-options
+          # endpoint (`docs/14-expired-options-data.md`). `ce` and `pe` are the
+          # two objects one answer carries -- the vendor's spelling of CALL and
+          # PUT, which the REQUEST spells the other way, and `rolling::side_key`
+          # is the one place those two spellings meet. `iv`, `oi`, `spot` and
+          # `strike` are four of the nine words its `requiredData` array admits,
+          # named in the request because the vendor DEFAULTS that array to a
+          # subset and a default is a decision taken elsewhere that changes what
+          # lands on disk.
+          #
+          # None names an org, an env, an account or a field of a credential.
+          # They are seven words a broker chose for its own JSON, and this
+          # repository can no more rename them than it can rename `open`.
+          rolling_word='rollingoption ce pe iv oi spot strike'
+
+          # ---- group 25: TEST SCAFFOLD NAMES AND ONE BOUND.
+          #
+          # `contractpath` is a scratch directory in `tests/broker.rs`; `bin` is
+          # the extension that test counts to prove two contracts do not share a
+          # file. `call` and `put` are the two labels its loop prints so a
+          # failure names which side it was on -- English words in an assertion
+          # message, never a path.
+          #
+          # `9223372036854775807` is `i64::MAX` written out, and it is there to
+          # prove `shift_six` REFUSES it rather than wrapping: a volatility that
+          # overflows is not a volatility. A number with no decimal point cannot
+          # be a parameter path segment in any case; it is listed because the
+          # scanner is shape-based and shape alone cannot tell a bound from a
+          # name, which is the same reason `19200` and `2019` are already here.
+          rolling_scaffold='contractpath bin call put 9223372036854775807'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1158,6 +1192,7 @@ jobs:
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
           ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
+          ${rolling_word} ${rolling_scaffold}
           ${ssm_leak_fixture}"
           bad=0
           while IFS= read -r word; do
