@@ -66,6 +66,9 @@
   // index over distinct symbols; see `$lib/find.js` for why an infix index
   // rather than the prefix one the typeahead uses.
   import { build as buildFind, probe as probeFind, symbolCount } from '$lib/find.js';
+  // THE SELECTION LIVES IN THE ADDRESS BAR. See `$lib/urlstate.js` for why,
+  // and for the measurement of what used to reset on every reload.
+  import { encode as encodeSel, decode as decodeSel, same as sameSel } from '$lib/urlstate.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -5719,6 +5722,129 @@
   }
 
   let showRaw = $state(false);
+
+  /* ══════════════════ THE SELECTION IN THE ADDRESS BAR ══════════════════
+
+     WHAT THIS FIXES, MEASURED. Every control here was in-memory state that
+     nothing wrote down. Recorded from the running page, reloaded, and diffed:
+
+       universe      F&O Underlyings  ->  NIFTY 50        RESET
+       instruments   All 211 ticked   ->  All 50 ticked   RESET
+       feed          Groww            ->  Groww           kept, by accident
+       segments      Spot             ->  Spot            kept, by accident
+       timeframe     1 minute         ->  1 minute        kept, by accident
+
+     The three that "survived" were already sitting on the default. In the
+     operator's words: "whatever we have selected before pull, even after pull
+     it needs to be the same -- if not, how will I know which one got selected?"
+
+     THE FEED IS THE ONE THAT HAD TO BE WRITTEN DOWN RATHER THAN RECOMPUTED.
+     The others reset to a CONSTANT; the feed does not. `pick.js` chooses it by
+     "most bars wins", so the default moves whenever the store does -- and a
+     pull moves the store. Measured after one run: groww 132,132 bars, dhan 0.
+     An operator who chose Dhan, pulled, and reloaded came back on Groww with
+     every count silently rescoped. So an explicit feed in the URL beats the
+     computed default, which is what `urlFeedPinned` below is for.
+
+     IT IS THE URL AND NOT STORAGE, so the answer to "which one got selected"
+     is readable, bookmarkable and sendable, rather than hidden in a browser
+     nobody can inspect. */
+
+  /** What the address bar asked for, drained as each prerequisite arrives. */
+  let urlWant = $state(/** @type {ReturnType<typeof decodeSel> | null} */ (null));
+  /** Set once the feed named in the URL has been applied, so `pick.js` cannot
+      win a later race against it. */
+  let urlFeedPinned = $state(false);
+  /** Set once the ticked list has been rebuilt, which needs the catalogue. */
+  let urlMembersDone = $state(false);
+  /** No writing until the reading is finished, or hydration overwrites itself. */
+  let urlHydrated = $state(false);
+
+  /** The selection as this page would spell it. One definition, read by the
+      writer below and by nothing else. */
+  const selectionSearch = $derived(
+    encodeSel({
+      feeds: pullFeeds.size > 0 ? pullFeeds : feeds.active ? [feeds.active] : [],
+      universe,
+      // ALL TICKED IS `null`, WHICH IS NO FIELD AT ALL -- the same rule
+      // `wireBodyFor` follows on the wire, and it keeps a 750-name selection
+      // from putting 750 fields on a query string to say "everything".
+      members: insOff.size === 0 ? null : ticked.map((m) => m.symbol),
+      segs: segSet,
+      rungs: rungSet,
+      from: fromDay,
+      to: toDay
+    })
+  );
+
+  onMount(() => {
+    const want = decodeSel(window.location.search);
+    urlWant = want;
+    // THE FIELDS WITH NO ASYNC PREREQUISITE, applied at once.
+    if (want.universe) universe = want.universe;
+    if (want.segs) segSet = new Set(want.segs);
+    if (want.rungs) {
+      rungSet = new Set(want.rungs);
+      // A RUNG THAT CAME FROM THE URL IS THE OPERATOR'S, and the effect that
+      // moves an untouched rung onto whatever the feed serves must not treat
+      // it as a default it may overwrite.
+      rungTouched = true;
+    }
+    if (want.from) setDay('from', want.from);
+    if (want.to) setDay('to', want.to);
+    if (want.from || want.to) windowTouched = true;
+    urlHydrated = true;
+  });
+
+  /* THE FEED, ONCE THE FEED LIST HAS LANDED. `loadFeeds` sets `feeds.active`
+     from the store; this puts the operator's own choice back on top of it. */
+  $effect(() => {
+    const wantFeeds = urlWant?.feeds;
+    // NARROWED HERE AND NOT INSIDE `untrack`. The guard cannot travel across a
+    // callback boundary, so the value it proved has to.
+    if (!wantFeeds || urlFeedPinned || feeds.all.length === 0) return;
+    untrack(() => {
+      const named = [...wantFeeds].filter((w) => feeds.all.some((f) => f.wire === w));
+      if (named.length > 0) {
+        feeds.active = named[0];
+        // ONE NAMED FEED IS THE SCOPE FEED AND NOT A FAN-OUT. `pullFeeds`
+        // empty means "the scope feed", so seeding it with a single entry
+        // would say the same thing twice and drift from `feeds.active`.
+        pullFeeds = named.length > 1 ? new Set(named) : new Set();
+      }
+      urlFeedPinned = true;
+    });
+  });
+
+  /* THE TICKED LIST, ONCE THE CATALOGUE HAS LANDED. The URL carries the ticked
+     SYMBOLS; this page stores the EXCLUDED keys, so the two are converted here
+     and nowhere else. A symbol the master no longer lists simply does not
+     match, which un-ticks it -- and that is visible on the control's own face
+     as a smaller count rather than being silently widened back to everything. */
+  $effect(() => {
+    const keep = urlWant?.members;
+    if (!keep || urlMembersDone || insPool.length === 0) return;
+    untrack(() => {
+      insOff = new Set(insPool.filter((m) => !keep.has(m.symbol)).map((m) => m.key));
+      urlMembersDone = true;
+    });
+  });
+
+  /* THE WRITER. `replaceState` and never `pushState`: a selection is not a
+     place you navigated to, and one history entry per tick would make the back
+     button walk the operator backwards through their own form one checkbox at
+     a time. Guarded by `sameSel` so a derivation re-running does not write an
+     address that has not changed. */
+  $effect(() => {
+    const next = selectionSearch;
+    if (!urlHydrated) return;
+    untrack(() => {
+      const now = window.location.search.replace(/^\?/, '');
+      if (sameSel(now, next)) return;
+      const url = next ? `${window.location.pathname}?${next}` : window.location.pathname;
+      window.history.replaceState(window.history.state, '', url);
+    });
+  });
 
   onMount(() => {
     const tick = setInterval(() => (nowMs = Date.now()), 500);
