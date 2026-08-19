@@ -278,6 +278,38 @@ pub const fn side_key(side: &str) -> &'static str {
     if side.len() == 4 { "ce" } else { "pe" }
 }
 
+/// The endpoint one rolling request is posted to.
+///
+/// # Why the path is all literals here
+///
+/// Dhan carries every varying value in the BODY, not in the URL — the
+/// underlying, the cadence, the ordinal, the offset and the side are all
+/// fields of the JSON. So the path is the descriptor's segments joined to the
+/// base, and nothing in it depends on the ask. A feed that later put one of
+/// them in the path would be a row in `RollingSpec::path`, not an edit here.
+///
+/// # Cost
+///
+/// One allocation, proportional to the URL. O(1) in the request.
+#[must_use]
+pub fn url(spec: &RollingSpec, base_url: &str) -> String {
+    let mut out = String::from(base_url);
+    for segment in spec.path {
+        out.push('/');
+        match *segment {
+            crate::vendor::PathSegment::Literal(word) => out.push_str(word),
+            // A ROLLING PATH IS ALL LITERALS AT THE ONE FEED THAT HAS ONE, and
+            // a placeholder left standing is more honest than a value invented
+            // for it — the request then fails at the vendor naming the segment
+            // rather than here naming nothing.
+            crate::vendor::PathSegment::Value { placeholder, .. } => {
+                out.push_str(placeholder);
+            }
+        }
+    }
+    out
+}
+
 /// The POST body for one ask.
 ///
 /// # Why the fields are written in a fixed order

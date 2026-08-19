@@ -6606,6 +6606,31 @@ async fn fno_walk(
         expiry: String::new(),
     };
 
+    // WHICH SHAPE THIS VENDOR ANSWERS IN, and the two are not variations of
+    // one request.
+    //
+    // Groww publishes NAMES: ask a month's expiries, then each expiry's
+    // contracts, then fetch by the name it gave back. Dhan publishes none — its
+    // endpoint takes a cadence, an ordinal, a strike OFFSET and a side, so
+    // there is nothing to discover and the walk has no first step.
+    //
+    // Sending the name-walk at Dhan is what produced the 502s of 2026-08-19:
+    // `chain::month` asks the descriptor for `by_name()`, Dhan's answers None,
+    // and the walk refused before a bar could be fetched. The refusal was
+    // right and the request was the wrong shape.
+    if let Some(rolling) = spec.fno.by_offset() {
+        return fno_roll(&page, facts, asked, site, &wire, rolling).await;
+    }
+    if spec.fno.by_name().is_none() {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            "this feed declares no expired-derivative history at all, so there \
+             is nothing to ask it for",
+        );
+    }
+
     // EXPIRIES FIRST, THEN CONTRACTS — and the ordering is enforced by `?`
     // inside `chain::month` rather than by this call site's good manners. A
     // refused expiries call returns before one contracts URL is built, which is
@@ -6648,6 +6673,278 @@ async fn fno_walk(
         }
         Ok(chain) => fno_report(&page, facts, &chain, asked, site, &wire).await,
     }
+}
+
+/// One contract of the product: build, post, read, name it, file it.
+///
+/// # Errors
+///
+/// A sentence naming what could not be done, for the caller to count and quote.
+/// Every arm names the contract it was working on, because "a request failed"
+/// with 252 in flight tells an operator nothing.
+#[allow(clippy::too_many_arguments)]
+async fn roll_one(
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    security_id: &str,
+    word: &'static str,
+    flag: &'static str,
+    code: &'static str,
+    strike: &'static str,
+    option_type: &'static str,
+    endpoint: &str,
+    rolling: pull::vendor::RollingSpec,
+) -> Result<usize, String> {
+    let label = format!("{word} {flag}/{code} {strike} {option_type}");
+    // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
+    //
+    // Asked first on purpose: if this underlying has no regime for that cadence
+    // the contract cannot be filed whatever comes back, and finding that out
+    // after the round-trip spends a request to learn something the calendar
+    // already knew.
+    let expiry = pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, asked.window.to())
+        .map_err(|why| format!("{label}: {why}"))?;
+
+    let ask = pull::rolling::Ask {
+        security_id: security_id.to_owned(),
+        instrument: word,
+        expiry_flag: flag,
+        expiry_code: code,
+        strike,
+        side: option_type,
+        interval: asked.granularity.dir(),
+        from: asked.window.from().to_string(),
+        // EXCLUSIVE ON THE WIRE, which the vendor documents and
+        // `fetch::wire_end` owns. Passing the operator's last day loses that
+        // session silently — the answer parses, the books balance, one day is
+        // absent.
+        to: pull::fetch::wire_end(asked.window.to(), wire.spec.range_end)
+            .map_err(|why| format!("{label}: {why}"))?
+            .to_string(),
+    };
+
+    let body = pull::rolling::body(&rolling, &ask);
+    let answer = wire
+        .source
+        .post_json(endpoint, body)
+        .await
+        .map_err(|why| format!("{label}: {why}"))?;
+    let rows = pull::rolling::read(&answer, option_type, wire.spec.prices)
+        .map_err(|why| format!("{label}: {why}"))?;
+    if rows.is_empty() {
+        // NOT A FAILURE. A strike the vendor never listed for this expiry is an
+        // ordinary empty answer, and counting it as a fault would report ~200
+        // failures on a healthy month.
+        return Ok(0);
+    }
+
+    let contract = brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
+        expiry,
+        // THE STRIKE THE VENDOR RESOLVED, not the offset that was asked for.
+        // `ATM+10` is a question; the answer carries the price it meant, and
+        // filing under the question would put every month's ATM+10 in one file.
+        strike: brutex_core::price::Paisa::from_raw(rows.first().map_or(0, |r| r.overlay.spot)),
+        side: if option_type == "CALL" {
+            brutex_core::instrument::OptionSide::Call
+        } else {
+            brutex_core::instrument::OptionSide::Put
+        },
+    })
+    .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
+
+    // FETCHED AND NAMED. NOT YET FILED, and this returns the count rather than
+    // pretending otherwise.
+    //
+    // `land_one` decodes RAW vendor rows on its way to the store, and these are
+    // already decoded — `rolling::read` had to do it here, because the overlay
+    // fields are lifted from the same arrays as the bar and no raw-row shape in
+    // this build carries them. So the last step needs an ingest entry that
+    // takes decoded `Bar` and `Overlay` pairs and files both under one
+    // contract, which is the piece after this one.
+    //
+    // The contract, the expiry and the rows are all established above, so what
+    // remains is the write and not another question.
+    let _ = (site, &contract);
+    Ok(rows.len())
+}
+
+/// Every request in the cross product, fetched and filed.
+///
+/// # Why one failure does not stop the rest
+///
+/// A strike the vendor never listed, a cadence an underlying does not carry, a
+/// window before a regime's verified floor — each is a legitimate empty or
+/// refused answer for ONE contract, and abandoning the other 251 over it would
+/// throw away the month to report the one. Counted and named instead, the same
+/// rule `Chain::unreadable` follows for a name that would not parse.
+///
+/// # Cost
+///
+/// One request per member of the product, each rate-governed. O(1) per
+/// request; nothing here scans the store.
+async fn roll_every(
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    rolling: pull::vendor::RollingSpec,
+    security_id: &str,
+    word: &'static str,
+    offsets: &'static [&'static str],
+) -> (usize, usize, Vec<String>) {
+    let endpoint = pull::rolling::url(&rolling, wire.spec.base_url);
+    let mut stored = 0usize;
+    let mut failed = 0usize;
+    let mut why: Vec<String> = Vec::new();
+
+    for flag in rolling.expiry_flags {
+        for code in rolling.expiry_codes {
+            for strike in offsets {
+                for side in rolling.sides {
+                    // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
+                    // against a ceiling of five a second; a budget charged once
+                    // for the batch is a ceiling observed once.
+                    if let Err(halt) = await_budget(asked.feed, site).await {
+                        why.push(halt);
+                        return (stored, failed.saturating_add(1), why);
+                    }
+                    let one = roll_one(
+                        asked,
+                        site,
+                        wire,
+                        security_id,
+                        word,
+                        flag,
+                        code,
+                        strike,
+                        side,
+                        &endpoint,
+                        rolling,
+                    )
+                    .await;
+                    match one {
+                        Ok(count) => stored = stored.saturating_add(count),
+                        Err(said) => {
+                            failed = failed.saturating_add(1);
+                            if why.len() < 5 {
+                                why.push(said);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (stored, failed, why)
+}
+
+/// The Dhan shape: enumerate the contract set, fetch each, file bar and overlay.
+///
+/// # Why this enumerates instead of discovering
+///
+/// There is nothing to discover. The vendor's endpoint takes a cadence
+/// (WEEK|MONTH), an ordinal (near|next|far), a strike OFFSET (ATM±n) and a side
+/// (CALL|PUT), and every combination of those is a request that can be built
+/// without asking it anything first. The contract set is the descriptor's own
+/// cross product.
+///
+/// That is also why its cost can be STATED rather than found out while running:
+/// 21 index offsets × 2 sides × 2 cadences × 3 ordinals is 252 requests for an
+/// index month and 84 for a stock month, and no answer from any vendor changes
+/// either number.
+///
+/// # Cost
+///
+/// O(1) per request built and per row read. The request COUNT is fixed by the
+/// descriptor, never by an answer.
+async fn fno_roll(
+    page: &FnoPage<'_>,
+    mut facts: Vec<(&'static str, String)>,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    rolling: pull::vendor::RollingSpec,
+) -> (axum::http::StatusCode, String) {
+    // THE UNDERLYING'S OWN ID, never a contract's. There is no contract id to
+    // have — that is the whole reason this path exists — so what goes on the
+    // wire is the spot instrument's, looked up exactly as the spot path looks
+    // it up.
+    let key = brutex_core::instrument::InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Index,
+        underlying: asked.underlying,
+        kind: brutex_core::instrument::Kind::Index,
+    };
+    let Some(security_id) = site
+        .read
+        .merged
+        .by_key
+        .get(&key)
+        .and_then(|e| e.ids.get(wire.store_vendor as usize).copied().flatten())
+    else {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            "this vendor's instrument master lists no id for the underlying, so \
+             there is nothing to name it by. Refused rather than sending \
+             another vendor's id, which would ask for a different instrument \
+             and be answered",
+        );
+    };
+
+    // AN INDEX OPTION AND A STOCK OPTION ARE DIFFERENT WIDTHS. The vendor
+    // serves ATM±10 on an index and ATM±3 on a stock, and an ask outside a
+    // type's own width is a request it answers with nothing — 28 empty calls
+    // per expiry per side on every stock if the wider list were used for both.
+    let word = rolling.index_word;
+    let offsets = rolling.offsets_for(word);
+    let planned = offsets.len()
+        * rolling.sides.len()
+        * rolling.expiry_flags.len()
+        * rolling.expiry_codes.len();
+    facts.push(("Requests planned", planned.to_string()));
+    facts.push((
+        "Addressed by",
+        format!("strike offset — {} offsets, ATM-relative", offsets.len()),
+    ));
+
+    let (stored, failed, why) = roll_every(
+        asked,
+        site,
+        wire,
+        rolling,
+        security_id.as_str(),
+        word,
+        offsets,
+    )
+    .await;
+    facts.push(("Rows fetched and named", stored.to_string()));
+
+    if failed == 0 {
+        return page.say(
+            facts,
+            axum::http::StatusCode::OK,
+            audit::Outcome::Empty,
+            "every planned contract answered and was named; the rows are NOT \
+             filed yet — that needs an ingest entry taking decoded bar and \
+             overlay pairs, which is the next piece",
+        );
+    }
+    facts.push((
+        "Requests that did not land",
+        format!("{failed} of {planned}"),
+    ));
+    if !why.is_empty() {
+        facts.push(("First reasons", why.join(" · ")));
+    }
+    page.say(
+        facts,
+        axum::http::StatusCode::BAD_GATEWAY,
+        audit::Outcome::Failed,
+        "some contracts did not land; the month is incomplete and must not be \
+         read as held",
+    )
 }
 
 /// Turns one walked chain into bars on disk and a page that says what happened.

@@ -1282,6 +1282,65 @@ fn array_at<'a>(
 /// same account, same per-second ceiling — so it takes a permit first and
 /// reports the outcome after. Skipping that would let a contract sweep, which
 /// issues one request per expiry, outrun the ceiling the bars path respects.
+impl HttpSource {
+    /// One POST with a JSON body, answered as text.
+    ///
+    /// # Why this is separate from `window_async`
+    ///
+    /// That one builds its body from an `HttpSpec`'s parameter map, which is
+    /// the shape a BARS request takes. Dhan's expired-options endpoint takes a
+    /// different body entirely — a cadence, an ordinal, a strike offset and a
+    /// side — built by `crate::rolling::body`. Reusing the bars builder would
+    /// mean teaching the parameter map a second grammar it is not for.
+    ///
+    /// The credential, the extra headers, the rate permit and the status
+    /// handling are the same, and those are what this shares.
+    ///
+    /// # Errors
+    ///
+    /// The vendor's own status when it is not a success, or the transport's
+    /// message. Both as text, because the caller records them and does not
+    /// branch on them.
+    ///
+    /// # Cost
+    ///
+    /// One request, one permit. O(1).
+    pub async fn post_json(&self, url: &str, body: String) -> Result<String, String> {
+        self.wait_for_permit().await;
+        let (name, value) = self.header();
+        let mut builder = self.client.post(url);
+        for (header, word) in self.spec.extra_headers {
+            builder = builder.header(*header, *word);
+        }
+        let answer = builder
+            .header(name, value)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .map_err(|why| format!("{why}"))?;
+
+        let status = answer.status();
+        if let Some(lock) = self.governor.as_ref() {
+            let mut g = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status.as_u16() == 429 {
+                g.record_throttled();
+            } else if status.is_success() {
+                g.record_success();
+            }
+        }
+        if !status.is_success() {
+            // THE VENDOR'S OWN STATUS, for the reason `Discovery::get` gives
+            // one line away: a 401 and a 429 mean different things to an
+            // operator, and collapsing them reads a throttle as a dead token.
+            return Err(format!("the vendor answered {status}"));
+        }
+        answer.text().await.map_err(|why| format!("{why}"))
+    }
+}
+
 impl crate::chain::Discovery for HttpSource {
     async fn get(&self, url: &str) -> Result<String, String> {
         self.wait_for_permit().await;
