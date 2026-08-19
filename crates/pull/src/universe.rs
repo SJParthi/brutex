@@ -72,6 +72,55 @@ pub enum JoinKey {
 }
 
 impl JoinKey {
+    /// The key **this vendor's master can actually be joined on**, derived
+    /// rather than chosen.
+    ///
+    /// # The bug this exists to close
+    ///
+    /// `crates/api/src/server.rs` passed `JoinKey::Isin` as a literal, under a
+    /// comment that said:
+    ///
+    /// > EVERY FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for
+    /// > the one that does not, and **asking the descriptor rather than
+    /// > assuming is what keeps that true when it lands.**
+    ///
+    /// The feed that does not publish one **landed on 14 Aug 2026**. Zerodha's
+    /// instrument master has twelve columns and none of them is an ISIN
+    /// (`docs/00-charter.md` §4z), so the comment went stale and the literal
+    /// became wrong for exactly one feed — the one whose rows would then join
+    /// on an EMPTY field. [`resolve`] skips an empty key, deliberately, so the
+    /// failure would not have been an error: every Zerodha instrument would
+    /// simply have landed in `Verdict::Lacks`, and a total join failure reads
+    /// exactly like a vendor that lists nothing.
+    ///
+    /// # Why this is derived and not a second table
+    ///
+    /// `brutex_core::vendor::Vendor::master_columns` already names each
+    /// vendor's ISIN column, and already spells Zerodha's as `""`. A `match`
+    /// here listing which vendors publish an ISIN would be a **second** answer
+    /// to a question the master columns already answer, and the copy that
+    /// drifts is always the one nobody remembers exists — the same argument
+    /// `crates/pull/Cargo.toml` makes for taking `costs::expiry` rather than
+    /// writing a second expiry calendar.
+    ///
+    /// `crates/core/src/vendor.rs` already tests the same field the same way
+    /// when it decides whether to parse an ISIN at all, so this is one rule
+    /// asked in two places rather than two rules that can disagree.
+    ///
+    /// # Constant time
+    ///
+    /// `master_columns` is a `match` over a `#[repr(u8)]` enum — one jump —
+    /// and `is_empty` is a length comparison. No allocation, no scan, and the
+    /// cost does not change when a vendor is added.
+    #[must_use]
+    pub const fn for_vendor(vendor: brutex_core::vendor::Vendor) -> Self {
+        if vendor.master_columns().isin.is_empty() {
+            Self::TradingSymbol
+        } else {
+            Self::Isin
+        }
+    }
+
     /// Whether a match on this key proves the two rows are the same instrument.
     ///
     /// `false` for [`Self::TradingSymbol`], and a caller rendering a count must

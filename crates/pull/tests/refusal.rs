@@ -617,6 +617,15 @@ fn the_join_key_is_derived_from_the_vendors_own_master_columns() {
     use pull::universe::JoinKey;
 
     for vendor in Vendor::ALL {
+        // THE ARMS BELOW ARE NOT DUPLICATES, THEY ARE TWO REASONS WITH ONE
+        // ANSWER. Zerodha is a BROKER whose published master omits the column;
+        // TrueData and GDFL are ARCHIVES with no master of their own at all.
+        // Collapsing them would delete the distinction that makes the first one
+        // a bug worth catching, so the lint is disarmed here and nowhere else.
+        #[allow(
+            clippy::match_same_arms,
+            reason = "same key, different reasons -- see the comment above"
+        )]
         let expected = match vendor {
             // Both publish an ISIN column, spelled differently, which is
             // exactly why the column NAME is the thing consulted.
