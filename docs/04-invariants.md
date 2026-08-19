@@ -13,15 +13,15 @@ reachable (the crate does not exist).
 
 | # | Must hold | Proven by | |
 |---|---|---|---|
-| S-01 | `size_of::<Bar>() == 56` and `align_of::<Bar>() == 8` | `const _: () = assert!(…)` — a compile error, not a test | — |
+| S-01 | `size_of::<Bar>() == 56` and `align_of::<Bar>() == 8` | `const _: () = assert!(…)` — a compile error, not a test | ✓ |
 | S-02 | `read(i)` returns the bytes `write(i, b)` wrote, for every *i* | `store::proptest::roundtrip` | — |
-| S-03 | A reader never observes a record beyond `n_valid` | `store::loom::commit_counter_publishes_last` | — |
-| S-04 | A crash between data write and counter publish loses the tail and corrupts nothing | `store::fault::kill_between_write_and_commit` | — |
+| S-03 | A reader never observes a record beyond `n_valid` | `store::fault::commit_counter_publishes_last` | ✓ |
+| S-04 | A crash between data write and counter publish loses the tail and corrupts nothing | `store::fault::kill_between_write_and_commit` | ✓ |
 | S-05 | A full disk during append returns `Err`, never a signal | `store::fault::enospc_returns_error` | — |
-| S-06 | A flipped bit in any block is detected on the next read of that block | `store::fault::bitflip_detected` | — |
-| S-07 | A file whose length does not divide by the stride truncates to the last whole record and logs | `store::fault::ragged_tail_truncates_loudly` | — |
-| S-08 | `i64::MIN` in `open_interest` round-trips as null and is never confused with `0` | `store::proptest::oi_sentinel_distinct` | — |
-| S-09 | Opening a file with an unknown `format_version` refuses; it never guesses | `store::unit::unknown_version_refuses` | — |
+| S-06 | A flipped bit in any block is detected on the next read of that block | `store::fault::bitflip_detected` | ✓ |
+| S-07 | A file whose length does not divide by the stride truncates to the last whole record and logs | `store::fault::ragged_tail_truncates_loudly` | ✓ |
+| S-08 | `i64::MIN` in `open_interest` round-trips as null and is never confused with `0` | `store::unit::oi_sentinel_distinct` | ✓ |
+| S-09 | Opening a file with an unknown `format_version` refuses; it never guesses | `store::unit::unknown_version_refuses` | ✓ |
 | S-10 | Two concurrent writers on one file are refused by the advisory lock | `store::integration::second_writer_refused` | — |
 | S-11 | The checksum reproduces a hardcoded value at every length a wide kernel can break on — 0, 1, 8, 15, 16, 56, 60, 64, 4087, 4088, 4089 bytes, and the all-zero and all-ones block | `store::unit::the_crc_reproduces_a_hardcoded_value_at_every_length_that_can_break` | ✓ |
 | S-12 | The shipped checksum kernel agrees with an independent bit-by-bit reference at every length across a stride boundary, on every target | `store::unit::the_fast_kernel_agrees_with_a_bit_by_bit_reference_on_every_length` | ✓ |
@@ -65,6 +65,7 @@ reachable (the crate does not exist).
 | C-08 | The block checksum beats the bit-by-bit kernel it replaced by at least 3×, measured in the same process | `store::bench::checksum_beats_the_bit_loop` | ✓ |
 | C-09 | Decoding one vendor row costs the same whether a field is 28 bytes or 4 MiB | `core::bench::decode_is_flat_in_field_width` | ✓ |
 | C-10 | An over-wide vendor field is **refused**, not merely decoded quickly | `core::bench::an_over_wide_row_is_refused` | ✓ |
+| C-11 | Rendering the dashboard costs the same at 1×, 10× and 100× the instrument count | `api::bench::dashboard_is_flat_in_universe_size` | ✓ |
 
 C-01 was previously stated as "bar read cost is flat from 1× to 100× file size"
 and proven by `store::bench::read_ratio`, which did not exist — there is no bar

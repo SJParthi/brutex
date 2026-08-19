@@ -160,7 +160,20 @@ repair merged through it green. What it enforces today, honestly bounded:
 | C-08 | yes | the block checksum against the bit-by-bit kernel it replaced |
 | C-09 | yes | one vendor row's decode at a 28-byte, 64-byte, 6.4 KB and 4 MiB field |
 | C-10 | yes | that the 4 MiB row is **refused**, not merely fast |
+| C-11 | yes | `dashboard_html` at 1×, 10×, 100× the instrument count |
 | C-02, C-03, C-04 | **no** | `crates/engine` does not exist |
+
+**`crates/api` carried no bench at all until C-11.** Gate 8 runs
+`cargo bench --workspace`, so it measured whichever crates happened to have
+one — `core` and `store` — and reported green while the only crate that answers
+a request had never been timed. It was not constant: `dashboard_html` folded
+four times over the whole merged map on every hit of `/`, measuring **6.48×**
+at ten times the instruments and **97.18×** at a hundred, against a 3× ceiling.
+At the real 90,623 instruments that was 376.6 µs per request to recompute six
+numbers fixed at load. `server::Summary` now takes them once and the same
+measurement reads 0.86×. The gap this closes is not the slow page — it is that
+a workspace-wide gate is only as wide as the benches that exist, and nothing
+said which crates those were.
 
 Four things it still does not prove.
 
@@ -188,6 +201,16 @@ checks it on whichever host runs — but the *timings* on `x86_64` are
 just as loudly as one measuring the right thing. These measure what two
 specific defects did; they are not a general proof of constancy.
 
+**The instruments page.** C-11 covers `/` and nothing else. `/instruments`
+filters, sorts and pages the merged map per request, which is O(matched · log
+matched) and **cannot** be made constant: a substring search over n rows is
+Ω(n) without a prepared index, and there is no index. What was fixed there is
+narrower — its universe counts came from the same per-request fold and are now
+read from `Summary` — so the page no longer walks the map an extra time to
+count what it is about to filter. The filter, the sort and the search remain
+linear, deliberately and on the record. If that ever needs to be constant it
+needs an index, and an index is a decision-ledger entry, not a patch.
+
 ---
 
 ## 8. Open questions, carried forward
@@ -210,8 +233,8 @@ then they stay in this table and out of any claim.
 
 ## 9. What the lake actually contains
 
-Measured 2026-08-01 by a full read of all 284 one-minute Parquet files for the
-three engine instruments plus India VIX — 1,706,290 bars. These are
+Measured 2026-08-01 by a full read of all 284 one-minute Parquet files for
+NIFTY, BANKNIFTY and SENSEX plus India VIX — 1,706,290 bars. These are
 observations of the data on disk, not claims about the exchange.
 
 **Resolved.** A bar timestamp is the **open** of its minute. Three independent
@@ -230,7 +253,7 @@ write boundary is exact rather than merely close.
 
 | Limit | Consequence |
 |---|---|
-| **SENSEX history begins 2022-09-01**, not 2020-01 | NIFTY and BANKNIFTY have 2 years 8 months that SENSEX does not. A cross-instrument sweep before 2022-09 has no SENSEX data at all. Never present a three-instrument result over a window SENSEX cannot cover. |
+| **SENSEX history begins 2022-09-01**, not 2020-01 | NIFTY and BANKNIFTY have 2 years 8 months that SENSEX does not. A cross-instrument sweep before 2022-09 has no SENSEX data at all. D-0017 has since dropped SENSEX from the swept set, so no sweep can produce that result; the gap still binds any comparison drawn against the SENSEX bars left on disk. |
 | **India VIX does not print every minute** | 449 of 1,630 dates deviate from 375 bars, against 13 for NIFTY. Gaps are single scattered minutes with no time-of-day concentration — 2024-06 has 7,088 VIX bars against 7,125 NIFTY bars. The `vix_at_entry` / `vix_at_exit` stamp therefore **cannot assume a VIX bar exists for its index bar**, and must carry an explicit absence rather than a zero. |
 | **375 bars per day is the common case, not the rule** | 13 NIFTY days, 8 SENSEX days and 449 VIX days differ. Ten sessions sit wholly or partly outside 09:15–15:29: three weekend budget sessions, four evening Muhurat sessions, one afternoon Muhurat session, one circuit-halt pair, and the 2021-02-24 outage day which runs to 16:59 with a 3.5-hour hole. Any code that hardcodes 375 is wrong on those days. |
 | **Parquet footer statistics are absent** | The writer emitted no min/max/null-count for any column chunk. Integrity verification during conversion requires reading column data; there is no cheap footer path. |
@@ -443,3 +466,35 @@ field measured 28 bytes across 333,840 rows of real data. If a vendor
 legitimately grows past 64, this refuses real rows — loudly, naming the field
 and the length, which is the intended failure. It is a number to revisit, not a
 law.
+
+---
+
+## 16. The mutation floor is five, not zero
+
+X-07 asks that no mutant survive on a touched module. Measured over
+`crates/core` with `cargo-mutants 26.2.0`, 252 mutants, 15 survived. Ten were
+real test gaps and are now killed by tests written for them. **Five cannot be
+killed by any test, because they do not change what the program computes.**
+They are recorded here so a future run reads a floor of five rather than
+concluding the suite regressed.
+
+| Mutant | Why no test can kill it |
+|---|---|
+| `isin.rs` — `(n - 1 - i) % 2` → `(n + 1 - i) % 2` | The two expressions differ by exactly 2, and parity is invariant under adding 2. The branch is chosen identically for every `n` and every `i`. |
+| `isin.rs` — `(n - 1 - i) % 2` → `(n - 1 + i) % 2` | The two differ by `2i`, which is even for every `i`. Same parity, same branch, always. |
+| `universe.rs` — `1 << 0` → `1 >> 0` | Shifting by zero is the identity in either direction. Both are `1`. |
+| `vendor.rs` — `1 << 0` → `1 >> 0` | The same shape, in `Vendor::bit`. Both are `1`. |
+| `symbol.rs` — `is_empty` → `false` | `Symbol::new` refuses an empty symbol, so `self.len == 0` is unreachable and the function already returns `false` for every value that can exist. Its own doc comment says so. |
+
+The first three of these are arithmetic identities, not weak assertions. A test
+written to catch one would have to observe a difference that is not there.
+
+**One survivor looked equivalent and was not.** `doubled / 10 + doubled % 10` →
+`doubled / 10 + doubled + 10` changes each doubled term by 10 or by 20 — always
+a multiple of ten — and the function ends `(10 - sum % 10) % 10`, so the check
+digit is unchanged. It is nonetheless observable, because `sum` is a `u8`: at
+the widest expansion the mutant reaches 264 and overflows. That is what
+`the_widest_expansion_stays_inside_the_eight_bit_accumulator` now exercises,
+and it is the reason the count above is five and not six. The lesson is that
+"equivalent modulo the result" and "equivalent" are different claims, and only
+the second one is a floor.

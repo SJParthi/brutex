@@ -242,7 +242,7 @@ pub struct InstrumentKey {
 }
 
 impl InstrumentKey {
-    /// The three instruments the engine sweeps.
+    /// The two instruments the engine sweeps.
     ///
     /// `docs/00-charter.md` §1. India VIX is deliberately absent: it is stored
     /// and stamped onto trades, but it never enters the condition vocabulary,
@@ -267,7 +267,7 @@ impl InstrumentKey {
     /// Whether the sweep engine may operate on this instrument.
     ///
     /// Storable and sweepable are different questions. Everything is storable;
-    /// exactly three things are sweepable, and widening that set requires a
+    /// exactly two things are sweepable, and widening that set requires a
     /// `docs/05-decisions.md` entry rather than a different argument here.
     #[must_use]
     pub fn is_sweepable(&self) -> bool {
@@ -631,5 +631,59 @@ mod tests {
             },
         };
         assert!(write!(w, "{opt}").is_err());
+    }
+
+    #[test]
+    fn every_month_length_is_enforced_rather_than_defaulted() {
+        // `days_in_month` has one arm per month length. Nothing pinned the
+        // 30-day arm or the common-year February arm, so deleting either one
+        // and letting those months fall through to the `_ => 0` default went
+        // unnoticed: with 0 days, EVERY date in April or February would be
+        // refused, and no test said otherwise.
+        for m in [4u8, 6, 9, 11] {
+            assert!(Expiry::new(2026, m, 30).is_ok(), "month {m} has 30 days");
+            assert_eq!(
+                Expiry::new(2026, m, 31),
+                Err(InstrumentError::Malformed),
+                "month {m} has no 31st"
+            );
+        }
+        for m in [1u8, 3, 5, 7, 8, 10, 12] {
+            assert!(Expiry::new(2026, m, 31).is_ok(), "month {m} has 31 days");
+        }
+        // 2026 is a common year, 2024 a leap year.
+        assert!(Expiry::new(2026, 2, 28).is_ok());
+        assert_eq!(Expiry::new(2026, 2, 29), Err(InstrumentError::Malformed));
+        assert!(Expiry::new(2024, 2, 29).is_ok());
+        assert_eq!(Expiry::new(2024, 2, 30), Err(InstrumentError::Malformed));
+    }
+
+    #[test]
+    fn sweepability_needs_the_segment_and_the_kind_to_agree() {
+        // The guard is two checks joined by `||`, and only the segment half
+        // was ever exercised. A key whose segment and kind disagree is not
+        // sweepable even when the exchange and symbol are both on the swept
+        // list -- joining the halves with `&&` instead would let this
+        // through, because the segment check alone would no longer refuse.
+        let mismatched = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Fno,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Index,
+        };
+        assert!(!mismatched.is_sweepable());
+        assert_eq!(
+            mismatched.require_sweepable(),
+            Err(InstrumentError::NotSweepable)
+        );
+
+        // And the mirror image: the segment says Index, the kind does not.
+        let other_way = InstrumentKey {
+            exchange: Exchange::Nse,
+            segment: Segment::Index,
+            underlying: Symbol::new("NIFTY").expect("valid"),
+            kind: Kind::Equity,
+        };
+        assert!(!other_way.is_sweepable());
     }
 }

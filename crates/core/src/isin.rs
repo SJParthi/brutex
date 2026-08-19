@@ -323,4 +323,21 @@ mod tests {
         let wrong = *b"US0378331000";
         assert_eq!(expected_check_digit(&wrong), 5);
     }
+
+    #[test]
+    fn the_widest_expansion_stays_inside_the_eight_bit_accumulator() {
+        // `sum` is a `u8`, and the comment above it argues that is safe: at
+        // most 22 terms of at most 9 each, so at most 198. Nothing tested the
+        // widest case, because no real ISIN reaches it — every issuer prefix
+        // in either master is two letters and the rest is mostly digits.
+        //
+        // Eleven letters IS the widest a body can expand to: a letter yields
+        // two digits and a digit yields one, so n = 22 exactly. `Z` = 35 is
+        // the largest ordinal, which also puts every doubled term at its
+        // maximum. Synthetic on purpose — no issuer is `ZZZZZZZZZZZ` — and it
+        // exists to exercise the arithmetic at the bound the comment claims.
+        let widest = *b"ZZZZZZZZZZZ6";
+        assert_eq!(expected_check_digit(&widest), 6);
+        assert!(Isin::new("ZZZZZZZZZZZ6").is_ok());
+    }
 }

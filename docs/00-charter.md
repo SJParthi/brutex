@@ -20,7 +20,7 @@ as `vix_at_entry` / `vix_at_exit`, and never in the condition vocabulary, the
 ranking inputs, or run identity.
 
 The store may hold futures, options and single-stock series. Nothing outside
-the three symbols above is ever swept.
+the two symbols above is ever swept.
 
 Widening this list requires an entry in `docs/05-decisions.md`. It does not
 happen because a task seemed to need it.

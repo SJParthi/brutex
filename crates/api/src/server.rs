@@ -147,6 +147,16 @@ fn default_masters_dir_from(home: Option<std::ffi::OsString>) -> PathBuf {
 pub struct Read {
     /// One entry per distinct instrument.
     pub merged: merge::Merged,
+    /// Every count a page reports, taken once when this universe is loaded.
+    ///
+    /// A `Read` is built once, wrapped in an [`Loaded`] and never mutated, so
+    /// each of these numbers is fixed the moment it exists. They used to be
+    /// folded out of `merged.by_key` on every request instead, which made
+    /// answering `/` cost O(instruments): measured at **97.18x** going from
+    /// 900 to 90,000 instruments, against a gate-8 ceiling of 3x, for six
+    /// numbers that could not have changed. `crates/api/benches/ratio.rs` is
+    /// what measures it, and C-11 is what it proves.
+    pub summary: Summary,
     /// Everything an operator has to be told: per-vendor tallies, every
     /// decline reason, every unreadable row's reason, and every disagreement.
     pub notes: Vec<String>,
@@ -165,7 +175,89 @@ pub struct Read {
     pub unrecognised: usize,
 }
 
+/// Every count a page reports, taken once per load rather than per request.
+///
+/// Two count sets, because the instruments page has an escape hatch: the
+/// default view counts the tracked universe, and `?all=1` counts every listing
+/// the gate accepted. Both are properties of a universe that never changes, so
+/// both are taken in the same single pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Summary {
+    /// Counts over the tracked universe — Total Market plus the index series.
+    pub tracked: render::UniverseCounts,
+    /// Counts over every listing the gate accepted, which is what `?all=1`
+    /// reports.
+    pub everything: render::UniverseCounts,
+    /// Tracked instruments both vendors named, which is the cross-checked
+    /// identity figure on the dashboard.
+    pub confirmed_by_both: usize,
+}
+
+impl Summary {
+    /// Takes every count in ONE pass over the merged map.
+    ///
+    /// One pass rather than the four separate folds this replaced: the counts
+    /// are independent of each other but not of the iteration, and walking a
+    /// 90,000-entry map four times to answer one request was the whole defect.
+    fn of(merged: &merge::Merged) -> Self {
+        let mut s = Self::default();
+        for e in merged.by_key.values() {
+            let fno = usize::from(e.universe.contains(Universe::FNO));
+            let ntm = usize::from(e.universe.contains(Universe::TOTAL_MARKET));
+            let index = usize::from(e.universe.contains(Universe::INDEX));
+
+            s.everything.all += 1;
+            s.everything.fno += fno;
+            s.everything.ntm += ntm;
+            s.everything.index += index;
+
+            // The tracked universe is Total Market plus the index series.
+            // F&O needs no clause: every F&O underlying is already a Total
+            // Market constituent, measured 208 of 208.
+            if ntm == 1 || index == 1 {
+                s.tracked.all += 1;
+                s.tracked.fno += fno;
+                s.tracked.ntm += ntm;
+                s.tracked.index += index;
+                if e.vendors.contains(Vendor::Groww) && e.vendors.contains(Vendor::Dhan) {
+                    s.confirmed_by_both += 1;
+                }
+            }
+        }
+        s
+    }
+
+    /// The count set a page showing `all` or not showing it should report.
+    #[must_use]
+    pub const fn for_view(&self, all: bool) -> render::UniverseCounts {
+        if all { self.everything } else { self.tracked }
+    }
+}
+
 impl Read {
+    /// A read with its summary taken from its own map.
+    ///
+    /// This is the only way to build one whose counts are guaranteed to agree
+    /// with what it holds. Assembling the struct literally would let a caller
+    /// pair a map with somebody else's numbers, and a page reporting a count
+    /// that does not match its own rows is worse than a page that is slow.
+    #[must_use]
+    pub fn new(
+        merged: merge::Merged,
+        notes: Vec<String>,
+        unavailable: bool,
+        unrecognised: usize,
+    ) -> Self {
+        let summary = Summary::of(&merged);
+        Self {
+            merged,
+            summary,
+            notes,
+            unavailable,
+            unrecognised,
+        }
+    }
+
     /// Whether this read is fit to be believed.
     ///
     /// A missing vendor counts. So does any disagreement. So does a listing
@@ -267,12 +359,7 @@ pub fn universe(dir: &Path) -> Read {
             alone.join(", ")
         ));
     }
-    Read {
-        merged,
-        notes,
-        unavailable,
-        unrecognised,
-    }
+    Read::new(merged, notes, unavailable, unrecognised)
 }
 
 /// Liveness plus the decode tallies, so a machine can check what a human sees.
@@ -460,18 +547,11 @@ pub fn instruments_html_from(
     // COUNTS OVER THE WHOLE TRACKED SET, never over the rendered page. A pill
     // that counts the 200 rows on screen says 52 when the answer is 208, and
     // looks authoritative doing it.
-    let counts = read
-        .merged
-        .by_key
-        .values()
-        .filter(|e| tracked(e.universe))
-        .fold(render::UniverseCounts::default(), |mut c, e| {
-            c.all += 1;
-            c.fno += usize::from(e.universe.contains(Universe::FNO));
-            c.ntm += usize::from(e.universe.contains(Universe::TOTAL_MARKET));
-            c.index += usize::from(e.universe.contains(Universe::INDEX));
-            c
-        });
+    //
+    // Read from the summary rather than folded here: the set this counts over
+    // does not depend on the query, the sort or the page, only on `all`, and
+    // both answers were taken once at load. See [`Summary`].
+    let counts = read.summary.for_view(all);
     let total = counts.all;
 
     // The universe pill, applied HERE so it selects from the whole set rather
@@ -593,33 +673,13 @@ async fn home(
 /// The dashboard, from a universe already loaded.
 #[must_use]
 pub fn dashboard_html(read: &Read) -> String {
-    let tracked = |u: Universe| u.contains(Universe::TOTAL_MARKET) || u.contains(Universe::INDEX);
-    let counts = read
-        .merged
-        .by_key
-        .values()
-        .filter(|e| tracked(e.universe))
-        .fold((0usize, 0usize, 0usize, 0usize), |(a, f, t, i), e| {
-            (
-                a + 1,
-                f + usize::from(e.universe.contains(Universe::FNO)),
-                t + usize::from(e.universe.contains(Universe::TOTAL_MARKET)),
-                i + usize::from(e.universe.contains(Universe::INDEX)),
-            )
-        });
-    let both = read
-        .merged
-        .by_key
-        .values()
-        .filter(|e| {
-            tracked(e.universe)
-                && e.vendors.contains(Vendor::Groww)
-                && e.vendors.contains(Vendor::Dhan)
-        })
-        .count();
+    // Read, not recomputed. These four folds over the whole merged map used to
+    // run on every hit of `/`, for numbers fixed at load. See [`Summary`].
+    let counts = read.summary.tracked;
+    let both = read.summary.confirmed_by_both;
     let disputes = read.merged.conflicts.len() + read.merged.eligibility.len();
 
-    let (all, fno, ntm, idx) = counts;
+    let (all, fno, ntm, idx) = (counts.all, counts.fno, counts.ntm, counts.index);
     let n = |v: usize| v.to_string();
     let stats = [
         render::Stat {
@@ -1646,5 +1706,100 @@ mod tests {
         assert_ne!(DEGRADED, OK, "a refused universe is not a success");
         assert_ne!(DEGRADED, FAILED, "the run worked; its ANSWER is refused");
         assert_ne!(DEGRADED, MISUSED);
+    }
+
+    use brutex_core::instrument::{Exchange, InstrumentKey, Kind, Segment};
+    use brutex_core::symbol::Symbol;
+    use brutex_core::vendor::VendorSet;
+
+    /// An entry in a named universe, listed by the given vendors.
+    fn entry(universe: Universe, vendors: &[Vendor]) -> merge::Entry {
+        let mut set = VendorSet::EMPTY;
+        for &v in vendors {
+            set = set.with(v);
+        }
+        merge::Entry {
+            vendors: set,
+            isin: None,
+            conflict: None,
+            universe,
+        }
+    }
+
+    /// A merged map holding exactly the given entries, keyed apart by symbol.
+    fn merged_of(entries: &[merge::Entry]) -> merge::Merged {
+        let mut by_key = std::collections::HashMap::new();
+        for (i, e) in entries.iter().enumerate() {
+            let key = InstrumentKey {
+                exchange: Exchange::Nse,
+                segment: Segment::Cash,
+                underlying: Symbol::new(&format!("S{i}")).expect("valid"),
+                kind: Kind::Equity,
+            };
+            by_key.insert(key, *e);
+        }
+        merge::Merged {
+            by_key,
+            conflicts: Vec::new(),
+            eligibility: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_summary_counts_every_field_and_counts_it_once() {
+        // EVERY field asserted at a distinct, non-zero value. A count that is
+        // accumulated but never asserted is a count that can be accumulated
+        // wrongly -- `+= 1` mutated to `*= 1` leaves a counter that starts at
+        // zero sitting at zero forever, and nothing here noticed until every
+        // number below had a value written down beside it.
+        //
+        // The four entries are deliberately all different shapes:
+        //   0  Total Market, both vendors      tracked, confirmed
+        //   1  Total Market + F&O, both        tracked, confirmed, the only fno
+        //   2  Index, ONE vendor               tracked, NOT confirmed
+        //   3  no universe, both vendors       counted only in `everything`
+        let both = [Vendor::Groww, Vendor::Dhan];
+        let merged = merged_of(&[
+            entry(Universe::TOTAL_MARKET, &both),
+            entry(Universe::TOTAL_MARKET.union(Universe::FNO), &both),
+            entry(Universe::INDEX, &[Vendor::Groww]),
+            entry(Universe::NONE, &both),
+        ]);
+        let s = Summary::of(&merged);
+
+        // Everything the gate accepted, which is what `?all=1` reports.
+        assert_eq!(s.everything.all, 4, "every entry is counted once");
+        assert_eq!(s.everything.fno, 1);
+        assert_eq!(s.everything.ntm, 2);
+        assert_eq!(s.everything.index, 1);
+
+        // The tracked universe excludes the entry in no universe at all.
+        assert_eq!(s.tracked.all, 3, "the untracked entry is not tracked");
+        assert_eq!(s.tracked.fno, 1);
+        assert_eq!(s.tracked.ntm, 2);
+        assert_eq!(s.tracked.index, 1);
+
+        // BOTH vendors, not either: entry 2 is tracked and named by Groww
+        // alone, so it is not cross-checked identity and must not be counted
+        // as though it were.
+        assert_eq!(
+            s.confirmed_by_both, 2,
+            "a single-vendor member is not confirmed by both"
+        );
+
+        // The view switch returns the set it names, and they differ.
+        assert_eq!(s.for_view(true).all, 4);
+        assert_eq!(s.for_view(false).all, 3);
+        assert_ne!(s.for_view(true).all, s.for_view(false).all);
+    }
+
+    #[test]
+    fn an_empty_universe_summarises_to_zero_rather_than_to_nothing() {
+        // The degenerate case has its own answer: every field zero, which is
+        // a different statement from "no summary was taken".
+        let s = Summary::of(&merged_of(&[]));
+        assert_eq!(s.everything.all, 0);
+        assert_eq!(s.tracked.all, 0);
+        assert_eq!(s.confirmed_by_both, 0);
     }
 }
