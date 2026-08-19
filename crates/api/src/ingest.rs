@@ -978,8 +978,21 @@ pub struct FnoRequest {
     pub underlying: Symbol,
     /// Future or option chain.
     pub series: Series,
-    /// The expiry, which [`parse_fno`] has already proved is behind `today`.
-    pub expiry: Day,
+    /// One expiry, which [`parse_fno`] has already proved is behind `today` —
+    /// or `None`, meaning **every expiry the window's month held**.
+    ///
+    /// # Why absent is a real answer and not a missing field
+    ///
+    /// A vendor publishes expiries a MONTH at a time; that is the only shape
+    /// either broker's discovery endpoint takes. An operator asking for "July's
+    /// expired options on NIFTY" is naming the month, and requiring them to
+    /// name each expiry inside it would make them enumerate by hand the exact
+    /// list the first discovery call returns.
+    ///
+    /// `Some` narrows the month's answer to one series; `None` takes the month.
+    /// Both are gated: with `None` the whole WINDOW must be behind today, which
+    /// is the same rule one expiry answers for itself.
+    pub expiry: Option<Day>,
     /// The operator's inclusive range.
     pub window: Window,
     /// WHICH FEED IS BEING ASKED. Not inferable and not defaulted to a name in
@@ -1425,20 +1438,53 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
     }
     let series = Series::from_slug(&raw).ok_or(Refusal::UnknownSeries { got: raw })?;
 
-    let expiry = parse_day_field(body, "expiry")?;
-    // THE GATE. Strictly behind today: a contract expiring today is still
-    // trading today, and `CLAUDE.md` §8's argument about a fall-back applies
-    // here too — `<=` would admit exactly the case the rule exists to exclude.
-    if expiry >= today {
-        return Err(Refusal::LiveContract { expiry, today });
-    }
+    // AN ABSENT EXPIRY NAMES THE MONTH, and is not a field somebody forgot.
+    //
+    // `param` answers "" for a field that is not there, and the three-part form
+    // fields are equally empty, so `parse_day_field` would refuse it as
+    // unfinished. That refusal is right when ONE expiry was meant and wrong
+    // when a month was, and only the caller knows which — so the emptiness is
+    // read here, once, before the parse that cannot tell them apart.
+    let named = !param(body, "expiry").is_empty()
+        || !param(body, "expiry_y").is_empty()
+        || !param(body, "expiry_m").is_empty()
+        || !param(body, "expiry_d").is_empty();
+
+    let expiry = if named {
+        let one = parse_day_field(body, "expiry")?;
+        // THE GATE. Strictly behind today: a contract expiring today is still
+        // trading today, and `CLAUDE.md` §8's argument about a fall-back applies
+        // here too — `<=` would admit exactly the case the rule exists to exclude.
+        if one >= today {
+            return Err(Refusal::LiveContract { expiry: one, today });
+        }
+        Some(one)
+    } else {
+        None
+    };
 
     let window = parse_window(body, today)?;
-    if window.to() > expiry {
-        return Err(Refusal::WindowOutlivesTheContract {
-            to: window.to(),
-            expiry,
-        });
+    match expiry {
+        Some(one) => {
+            if window.to() > one {
+                return Err(Refusal::WindowOutlivesTheContract {
+                    to: window.to(),
+                    expiry: one,
+                });
+            }
+        }
+        // THE SAME GATE, ASKED OF THE WINDOW. With no expiry named, every
+        // contract the month holds must already have settled — otherwise a
+        // month-shaped request is a way to reach live contracts that the
+        // single-expiry form refuses one at a time.
+        None => {
+            if window.to() >= today {
+                return Err(Refusal::LiveContract {
+                    expiry: window.to(),
+                    today,
+                });
+            }
+        }
     }
     Ok(FnoRequest {
         underlying,
@@ -2743,7 +2789,7 @@ mod tests {
             "the typing is canonicalised"
         );
         assert_eq!(ok.series, Series::Futures);
-        assert_eq!(ok.expiry, day(2026, 7, 30));
+        assert_eq!(ok.expiry, Some(day(2026, 7, 30)));
         assert_eq!(ok.window.days(), 30);
 
         // THE GATE. An expiry after today, and an expiry ON today, are both
@@ -2777,6 +2823,46 @@ mod tests {
     }
 
     #[test]
+    /// A month-shaped request is legal, and the settled gate moved with it.
+    ///
+    /// Split from the refusal roll-call next door because it is not a refusal:
+    /// it is the one shape that used to BE one. Keeping it there also put that
+    /// function over the workspace's line ceiling.
+    fn month_shaped_requests_are_legal_and_still_gated() {
+        // AN ABSENT EXPIRY IS NO LONGER A MISSING FIELD — it names the month.
+        //
+        // This asserted `FieldMissing { field: "expiry" }`, and that WAS the
+        // contract: one request, one settled expiry. It changed deliberately.
+        // A vendor publishes expiries a month at a time, so an operator asking
+        // for July's expired futures on NIFTY was being made to enumerate by
+        // hand the exact list the first discovery call returns.
+        let whole_month = parse_fno(
+            "underlying=NIFTY&series=fut&from=2026-07-01&to=2026-07-30",
+            today(),
+        )
+        .expect("a month-shaped request is legal");
+        assert_eq!(
+            whole_month.expiry, None,
+            "absent means every expiry the month held, not a field to refuse"
+        );
+
+        // AND THE GATE MOVED WITH IT RATHER THAN BEING DROPPED. One expiry
+        // answers "am I settled" for itself; a month has to answer it with the
+        // window, or a month-shaped request would be a way to reach live
+        // contracts that the single-expiry form refuses one at a time.
+        let reaches_today = parse_fno(
+            "underlying=NIFTY&series=fut&from=2026-07-01&to=2026-08-07",
+            today(),
+        );
+        assert!(
+            matches!(reaches_today, Err(Refusal::LiveContract { .. })),
+            "a window running to today is refused with no expiry named, exactly \
+             as a live expiry is refused with one: {reaches_today:?}"
+        );
+    }
+
+    #[test]
+
     fn an_fno_request_is_refused_by_name_for_every_other_reason_too() {
         let base = "underlying=NIFTY&series=fut&expiry=2026-07-30&from=2026-07-01&to=2026-07-30";
 
@@ -2836,13 +2922,7 @@ mod tests {
             ),
             Err(Refusal::FieldMissing { field: "series" })
         );
-        assert_eq!(
-            parse_fno(
-                "underlying=NIFTY&series=fut&from=2026-07-01&to=2026-07-30",
-                today()
-            ),
-            Err(Refusal::FieldMissing { field: "expiry" })
-        );
+        month_shaped_requests_are_legal_and_still_gated();
         assert_eq!(
             parse_fno(&base.replace("series=fut", "series=swap"), today()),
             Err(Refusal::UnknownSeries {
@@ -3640,8 +3720,14 @@ mod route_tests {
 pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
     pull::fno::Ask {
         underlying: request.underlying.as_str().to_owned(),
-        year: request.expiry.year(),
-        month: request.expiry.month(),
+        // THE NAMED EXPIRY'S MONTH, OR THE WINDOW'S. Both name the month whose
+        // expiry list the vendor is asked for; `parse_fno` has already proved
+        // whichever one is used is behind today.
+        year: request.expiry.unwrap_or_else(|| request.window.to()).year(),
+        month: request
+            .expiry
+            .unwrap_or_else(|| request.window.to())
+            .month(),
         // Empty: this is the EXPIRIES ask, and the expiry it discovers is what
         // keys the contracts ask that follows. `pull::fno` refuses a contracts
         // request with no expiry by name, which is what makes the order of the
@@ -3654,9 +3740,10 @@ pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
 ///
 /// # Why a filter and not a narrower discovery
 ///
-/// The vendor answers a whole month; the operator asked for one expiry and one
-/// series. Discovering less is not on offer — there is no call for it — so the
-/// narrowing happens here, once, over an answer already in hand.
+/// The vendor answers a whole month; the operator asked for one series, and
+/// for either one expiry or the whole month. Discovering less is not on offer —
+/// there is no call for it — so the narrowing happens here, once, over an
+/// answer already in hand.
 ///
 /// # Cost
 ///
@@ -3664,7 +3751,6 @@ pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
 /// contract beyond the ones kept.
 #[must_use]
 pub fn matching(chain: &pull::chain::Chain, request: &FnoRequest) -> Vec<pull::fno::Found> {
-    let wanted = request.expiry.to_string();
     chain
         .contracts
         .iter()
@@ -3673,11 +3759,25 @@ pub fn matching(chain: &pull::chain::Chain, request: &FnoRequest) -> Vec<pull::f
                 Series::Futures => found.contract.is_future(),
                 Series::Options => found.contract.is_option(),
             };
-            // THE EXPIRY IS COMPARED THROUGH THE CONTRACT'S OWN NAME, which is
-            // where this store keeps it — `-<YYYY-MM-DD>-FUT` and
-            // `-<YYYY-MM-DD>-<strike>-CE|PE`. Re-deriving it from the vendor's
-            // spelling would be a second parser for a value already parsed.
-            right_series && found.contract.as_str().contains(&wanted)
+            // THE EXPIRY IS COMPARED AS A DATE, not as a substring of the
+            // rendered contract.
+            //
+            // It read `found.contract.as_str().contains(&expiry.to_string())`,
+            // which is a substring test against a segment that also carries the
+            // STRIKE — so `2026-09-24` matched any contract whose strike digits
+            // happened to spell it, and a filter that admits an extra contract
+            // files bars under a series nobody asked for. `Found` carries the
+            // decoded `Expiry` now, so the comparison is three integers.
+            //
+            // ABSENT MEANS THE WHOLE MONTH. A request that named no expiry
+            // asked for the month, and narrowing it to one would answer a
+            // question nobody put.
+            let right_expiry = request.expiry.is_none_or(|one| {
+                found.expiry.year() == one.year()
+                    && found.expiry.month() == one.month()
+                    && found.expiry.day() == one.day()
+            });
+            right_series && right_expiry
         })
         .cloned()
         .collect()

@@ -6402,7 +6402,7 @@ struct Wire {
 /// One request per contract, each rate-governed. O(1) per contract; nothing
 /// here scans the store.
 async fn fno_land(
-    wanted: &[&pull::fno::Found],
+    wanted: &[pull::fno::Found],
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
@@ -6496,7 +6496,15 @@ async fn fno_walk(
         ("Series", asked.series.label().to_owned()),
         (
             "Expiry",
-            format!("{} — expired, checked against {today}", asked.expiry),
+            asked.expiry.map_or_else(
+                || {
+                    format!(
+                        "every expiry {} held — the whole month, checked against {today}",
+                        asked.window.to()
+                    )
+                },
+                |one| format!("{one} — expired, checked against {today}"),
+            ),
         ),
     ];
     facts.extend(window_facts(asked.window));
@@ -6553,10 +6561,16 @@ async fn fno_walk(
     // year, month) because that is what both vendors publish an expiry list
     // for. The operator asked for ONE expiry and ONE series, and `wanted` in
     // `fno_report` is what narrows the month's answer back to it.
+    // THE MONTH COMES FROM THE EXPIRY WHEN ONE WAS NAMED, AND FROM THE WINDOW
+    // WHEN ONE WAS NOT. Both answer the same question — which month's expiry
+    // list to ask the vendor for — and the window's end is the right end of it:
+    // `parse_fno` has already proved that day is behind today, so the month it
+    // names cannot hold a live contract this build would then try to store.
+    let month_of = asked.expiry.unwrap_or_else(|| asked.window.to());
     let ask = pull::fno::Ask {
         underlying: asked.underlying.as_str().to_owned(),
-        year: asked.expiry.year(),
-        month: asked.expiry.month(),
+        year: month_of.year(),
+        month: month_of.month(),
         expiry: String::new(),
     };
 
@@ -6615,20 +6629,14 @@ async fn fno_report(
     // The comment where `ask` is built claimed this filter existed before the
     // filter did. That is the shape this codebase treats as worse than a
     // missing guard: a protection a reader can see asserted and cannot see run.
-    let wanted: Vec<&pull::fno::Found> = chain
-        .contracts
-        .iter()
-        .filter(|found| {
-            found.expiry.year() == asked.expiry.year()
-                && found.expiry.month() == asked.expiry.month()
-                && found.expiry.day() == asked.expiry.day()
-                && found.contract.is_option() == matches!(asked.series, ingest::Series::Options)
-        })
-        .collect();
-    facts.push((
-        "Contracts for this expiry and series",
-        wanted.len().to_string(),
-    ));
+    // NARROWED BY `ingest::matching`, WHICH ALREADY EXISTED FOR THIS.
+    //
+    // A filter was written inline here first, which was a second answer to a
+    // question one function already answered — and the two would have drifted
+    // on the first vendor whose contract naming changed. This is the one that
+    // ships; the inline copy is gone.
+    let wanted = ingest::matching(chain, asked);
+    facts.push(("Contracts asked for", wanted.len().to_string()));
 
     if wanted.is_empty() {
         return page.say(
