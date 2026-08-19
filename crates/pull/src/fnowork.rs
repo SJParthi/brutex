@@ -292,6 +292,41 @@ impl Work {
     }
 }
 
+/// Gap = discovered − held, asking a PROBE rather than a prepared set.
+///
+/// # Why this exists beside [`gaps`]
+///
+/// [`gaps`] takes a `HashSet`, which a caller has to build first. The manifest
+/// is not a set — it is a counter file with its own `entry` probe — and turning
+/// it into one would mean walking every committed entry to answer a question
+/// about the handful of cells actually discovered. That is O(store) to avoid
+/// O(cells), which is backwards, and `docs/07-o1-architecture.md` law 3 says so:
+/// never scan to answer a question.
+///
+/// `held` is called once per cell and must itself be O(1) — a hash probe, not a
+/// search. That is a contract with the caller this function cannot enforce, and
+/// it is stated rather than assumed.
+///
+/// # Cost
+///
+/// O(cells), one call to `held` each. Nothing here allocates beyond the missing
+/// cells it returns.
+#[must_use]
+pub fn gaps_by<F: Fn(&EntryKey) -> bool>(discovered: &[ContractCell], held: F) -> Work {
+    let mut work = Work {
+        missing: Vec::with_capacity(discovered.len()),
+        held: 0,
+    };
+    for cell in discovered {
+        if held(&cell.key) {
+            work.held = work.held.saturating_add(1);
+        } else {
+            work.missing.push(cell.clone());
+        }
+    }
+    work
+}
+
 /// Gap = discovered − held, one hash probe per cell.
 ///
 /// `held` is the manifest's own key set, so this asks the counter rather than
@@ -576,6 +611,29 @@ mod tests {
             "the two halves must sum to what was offered"
         );
         assert_eq!(work.missing[0].key.month, months[0]);
+    }
+
+    /// The probe form answers the same question as the set form.
+    ///
+    /// Two spellings of one question is two chances to disagree, so this pins
+    /// them to each other on the same input rather than asserting each alone.
+    #[test]
+    fn the_probe_form_and_the_set_form_agree_cell_for_cell() {
+        let months = [month(2025, 12), month(2026, 1)];
+        let out = cells(
+            &[found("BANKNIFTY", 29, 5_800_000)],
+            &months,
+            Timeframe::MINUTE_1,
+        );
+        let mut set = HashSet::new();
+        set.insert(out.cells[1].key);
+
+        let by_set = gaps(&out.cells, &set);
+        let by_probe = gaps_by(&out.cells, |key| set.contains(key));
+
+        assert_eq!(by_set, by_probe);
+        assert_eq!(by_probe.held, 1);
+        assert_eq!(by_probe.missing.len(), 1);
     }
 
     #[test]

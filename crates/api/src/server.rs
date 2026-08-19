@@ -7099,6 +7099,47 @@ async fn roll_one(
     Ok(total)
 }
 
+/// Every month a window touches, ascending.
+///
+/// The store addresses one month per file, so "which months does this window
+/// cover" is the unit a gap is measured in. Ascending because a backfill must
+/// run oldest-first — `store::file::BarFile::append` refuses a batch whose
+/// overlap with what is held is not a suffix of it, so a later month fetched
+/// first permanently blocks the earlier days of that month's file.
+///
+/// # Cost
+///
+/// O(months), which is bounded by the window the operator typed and by
+/// `MAX_WINDOW_DAYS` above it. No allocation per day.
+fn months_of_window(window: pull::session::Window) -> Vec<store::path::YearMonth> {
+    let mut out = Vec::new();
+    let (mut year, mut month) = (window.from().year(), window.from().month());
+    let (last_year, last_month) = (window.to().year(), window.to().month());
+    while (year, month) <= (last_year, last_month) {
+        if let Ok(ym) = store::path::YearMonth::new(year, month) {
+            out.push(ym);
+        }
+        if month == 12 {
+            year = year.saturating_add(1);
+            month = 1;
+        } else {
+            month = month.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// The store directory a rung files under, or the one an expired series uses.
+///
+/// `Granularity::store_timeframe` returns `None` for a rung this store has no
+/// directory for. That cannot happen on this path — `parse_fno` admits only
+/// `Minute1` — but the fallback is stated rather than unwrapped, because a
+/// `None` reached here would otherwise be a panic in a request handler.
+fn timeframe_of(rung: pull::vendor::Granularity) -> store::path::Timeframe {
+    rung.store_timeframe()
+        .unwrap_or(store::path::Timeframe::MINUTE_1)
+}
+
 /// WHICH CONTRACT ONE ROLLING BAR BELONGS TO — its expiry and its strike.
 ///
 /// # Why per row and not per answer
@@ -7544,6 +7585,64 @@ async fn fno_report(
     // window ending yesterday still falls in a month that holds a live expiry.
     let wanted = ingest::matching(chain, asked, page.today);
     facts.push(("Contracts asked for", wanted.len().to_string()));
+
+    // WHAT IS ALREADY HELD IS NOT ASKED FOR AGAIN.
+    //
+    // Until now this route re-fetched every contract of the month on every
+    // run, because nothing asked the store what it already had. The spot side
+    // has answered that question since `work::gaps`: gap = expected minus held,
+    // one probe per cell, and re-running fetches nothing when nothing is
+    // missing. That is what makes a backfill resumable after a kill instead of
+    // a thing that must complete in one sitting.
+    //
+    // The probe is `Manifest::entry` — a hash probe against a counter file, not
+    // a walk — so this is O(contracts × months) and never O(store).
+    // `gaps_by` takes the probe rather than a prepared `HashSet` precisely so
+    // no one builds a set of every committed entry to answer a question about
+    // fifty contracts.
+    //
+    // THE RESUME POINT IS THE STORE, NOT A LEDGER. There is no "this month is
+    // done" marker anywhere, for the reason the autopilot's header gives about
+    // cursors: the copy that is wrong is the one that skips a month in silence.
+    // Discovery is re-run on a complete month — units of requests — and the
+    // bars, which are the thousands, are not.
+    let held_months = months_of_window(asked.window);
+    let discovered = pull::fnowork::cells(&wanted, &held_months, timeframe_of(asked.granularity));
+    let manifest = crate::autopilot::manifest_of(&site.censuses, wire.store_vendor);
+    let work = pull::fnowork::gaps_by(&discovered.cells, |key| {
+        manifest.is_some_and(|m| m.entry(key).is_some())
+    });
+    facts.push((
+        "Already held",
+        format!(
+            "{} of {} contract-month(s) — not asked for again",
+            work.held,
+            work.offered()
+        ),
+    ));
+    if !discovered.refused.is_empty() {
+        // REPORTED, NEVER SKIPPED. A contract whose underlying this store
+        // cannot file is a hole in the month, and a month that reads complete
+        // with a hole in it is the failure this whole route is careful about.
+        facts.push((
+            "Contracts that cannot be filed",
+            discovered
+                .refused
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" · "),
+        ));
+    }
+    if work.is_complete() && !discovered.cells.is_empty() {
+        return page.say(
+            facts,
+            axum::http::StatusCode::OK,
+            audit::Outcome::Empty,
+            "every contract-month this month holds is already on disk, so \
+             nothing was fetched — which is what a re-run is supposed to cost",
+        );
+    }
 
     if wanted.is_empty() {
         return page.say(

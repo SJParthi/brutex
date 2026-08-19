@@ -2042,7 +2042,7 @@ pub fn month_after(month: YearMonth) -> Option<YearMonth> {
 
 /// The manifest one vendor's census holds, if it loaded.
 #[must_use]
-fn manifest_of(
+pub(crate) fn manifest_of(
     censuses: &[VendorCensus],
     vendor: brutex_core::vendor::Vendor,
 ) -> Option<&Manifest> {
