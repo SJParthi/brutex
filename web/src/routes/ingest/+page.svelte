@@ -6917,12 +6917,24 @@
           {/if}
 
           <div class="obar">
+            <!-- TWO SEARCH BOXES STAND ON THIS PAGE ONCE A RUN HAS HAPPENED,
+                 and they are not the same control twice. This one filters THIS
+                 RUN'S outcome list; the one at the head of the census filters
+                 the store's census. Different populations, different lifetimes
+                 — this list does not exist until a run answers.
+                 They also MATCH DIFFERENTLY, and that is the part a reader
+                 cannot be left to discover: this is `startsWith`, the census is
+                 `includes`. Typing BANK here finds BANKNIFTY and nothing else,
+                 while the same four characters below find AXISBANK, HDFCBANK,
+                 ICICIBANK and KOTAKBANK. So each box says which table it
+                 narrows and which rule it uses, on its face. -->
             <input
               class="search"
               type="search"
               bind:value={q}
-              placeholder="Filter by symbol — one Map probe per keystroke, never a scan"
-              aria-label="Filter outcomes by symbol"
+              placeholder="Filter the {n(outcomes.length)} instrument(s) this run touched — symbol starts with"
+              aria-label="Filter this run's outcomes by symbol"
+              title={`Narrows THIS RUN'S outcome list — the ${n(outcomes.length)} instrument(s) the request named and what each one gained. Not the census below, which is a different table over a different population and outlives this run. Matches from the START of the symbol, so BANK finds BANKNIFTY and not AXISBANK; the census box matches any part of a symbol. One Map probe per keystroke against a prefix index built once per run, never a scan.`}
             />
           </div>
 
@@ -7034,9 +7046,9 @@
               type="search"
               bind:value={cQuery}
               oninput={() => (cPage = 1)}
-              placeholder="Find among {n(censusNames)} name(s) — any part of the trading symbol"
+              placeholder="Find among {n(censusNames)} name(s) in the census — any part of the symbol"
               aria-label="Find a trading symbol in the census"
-              title={`Narrows what this table DRAWS and nothing else. The ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. What narrows a PULL is the instrument tick list — it sends one member= per name and the server filters on it — and this box deliberately does not, because two controls narrowing one request is how the button, the receipt and the run come to give three answers to one question. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
+              title={`Narrows what this table DRAWS and nothing else. The ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. What narrows a PULL is the instrument tick list — it sends one member= per name and the server filters on it — and this box deliberately does not, because two controls narrowing one request is how the button, the receipt and the run come to give three answers to one question. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY — the outcome list above, after a run, is a different table and matches from the START instead. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
             />
           </div>
           <div class="cscroll">
