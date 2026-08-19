@@ -58,6 +58,10 @@
      which is the only thing that makes a count under this feed's name
      checkable. See `universeRefusal`. */
   import { catalogue } from '$lib/index.svelte.js';
+  // A STORE KEY IS NOT AN INSTRUMENT NAME. `$lib/instrument.js` takes the
+  // contract tail off before the underlying, which is the difference between
+  // BANKNIFTY and BANKNIFTY-2026-07-28-4810000-PE.
+  import { parseKey, segmentOf } from '$lib/instrument.js';
   /* Display only. `month` stays the raw `YYYY-MM` because it is the filter
      itself — `r.month === month`, `r.month.startsWith(typed)`, the `{#each}`
      keys and the sort comparator all read the key, never the label. See the
@@ -1017,6 +1021,9 @@
       const sole = soleDenom(r);
       const cut = r.instrument.lastIndexOf('-');
       const parts = r.instrument.split('-');
+      // ONCE PER ROW AT READ TIME, for the reason the line above `expiryOf`
+      // gives: this is hoisted off the hot path deliberately.
+      const parsed = parseKey(r.instrument);
       // HOISTED, the way `sessions()` above already does it. `barsPerSession`
       // was called TWICE in each of the two expressions below — once to guard
       // and once to divide — so the guard narrowed nothing the checker could
@@ -1033,7 +1040,25 @@
         // ASCII and searchable.
         key: `${r.instrument}\u0000${r.month}\u0000${r.timeframe}`,
         head: cut > 0 ? r.instrument.slice(0, cut + 1) : '',
+        // `sym` IS THE TAIL AND IS NOT THE NAME. On a spot key the two agree;
+        // on `NSE-FNO-BANKNIFTY-2026-07-28-4810000-PE` this is `PE`. It stays
+        // because the table and the index have always displayed and probed it,
+        // and `underlying` beside it is what an INSTRUMENT actually is.
         sym: cut > 0 ? r.instrument.slice(cut + 1) : r.instrument,
+        // THE NAME A HUMAN USES, and the key the Instrument rung groups by.
+        // Parsed once per row at store-read time, never per keystroke.
+        underlying: parsed.underlying ?? r.instrument,
+        // WHICH SEGMENT RUNG THIS ROW BELONGS TO — spot, futures or options.
+        // `kind` below is the key's own second token and cannot answer it:
+        // FNO covers futures and options alike, and only the tail separates
+        // them.
+        // `expiry`, `strike` and `side` are NOT set here: the row already
+        // carries them, parsed from `ct` further down with a fuller account of
+        // why each is `null`. Adding a second spelling of the same three fields
+        // is how two readers come to disagree about one row -- svelte-check
+        // caught it as three duplicate keys, which is the cheap version of that
+        // lesson.
+        segRung: segmentOf(parsed),
         kind: parts.length > 1 ? parts[1] : '—',
         short,
         days: sessions(r),
@@ -1568,7 +1593,12 @@
     for (const it of universed) {
       /** @type {Set<string>} */
       const seen = new Set();
-      for (const raw of [it.instrument, it.sym, it.month]) {
+      // `it.underlying` IS IN HERE AND IT IS THE ONE THAT MAKES A CONTRACT
+      // REACHABLE BY NAME. Without it the only tokens a contract row offers
+      // are its full key -- which starts `NSE-` -- and `it.sym`, which for
+      // an option is `CE` or `PE`. Typing BANKNIFTY found the spot series
+      // and none of its twenty-six contracts.
+      for (const raw of [it.instrument, it.sym, it.underlying, it.month]) {
         const token = raw.toUpperCase();
         for (let n = 1; n <= Math.min(MAX_PREFIX, token.length); n += 1) {
           const k = token.slice(0, n);
@@ -1600,6 +1630,7 @@
       (r) =>
         r.instrument.toUpperCase().startsWith(typed) ||
         r.sym.toUpperCase().startsWith(typed) ||
+        r.underlying.toUpperCase().startsWith(typed) ||
         r.month.toUpperCase().startsWith(typed)
     );
   });
@@ -1617,14 +1648,30 @@
      there is nothing to keep. The Picker is an enumeration of what the coarser
      rungs left; the text box is the state.
      ====================================================================== */
+  /* FOLDED BY UNDERLYING, NOT BY STORE KEY, and that one word is the fix.
+     Measured on the live store: 27 keys, ONE underlying. Folding by
+     `it.instrument` offered BANKNIFTY twenty-seven times -- once as the spot
+     series and twenty-six times as its option contracts -- so the rung that
+     asks "which instrument" was answering "which contract", and the Segment
+     rung beside it was left asking a question that had already been answered.
+     `key` stays the field name because everything downstream reads it; what
+     changed is what a key IS. */
   const instrumentRows = $derived.by(() => {
     const by = new Map();
     for (const it of universed) {
-      let a = by.get(it.instrument);
-      if (!a) by.set(it.instrument, (a = { key: it.instrument, months: 0, bars: 0, short: 0 }));
+      let a = by.get(it.underlying);
+      if (!a)
+        by.set(
+          it.underlying,
+          (a = { key: it.underlying, months: 0, bars: 0, short: 0, segs: new Set(), keys: new Set() })
+        );
       a.months += 1;
       a.bars += it.rows;
       a.short += it.short;
+      // WHICH SEGMENTS THIS NAME HOLDS, so the Segment rung can offer what is
+      // there and refuse what is not BY NAME rather than by absence.
+      if (it.segRung) a.segs.add(it.segRung);
+      a.keys.add(it.instrument);
     }
     return [...by.values()].sort((a, b) => txt(a.key, b.key));
   });
@@ -1717,7 +1764,13 @@
     const meta = new Map();
     for (const r of masterRows()) {
       const k = censusKeyOf(r);
-      if (k) meta.set(k, { sym: r?.symbol ?? k, kind: r?.kind ? String(r.kind).toLowerCase() : '' });
+      if (!k) continue;
+      // BY UNDERLYING, to match what `instrumentRows` now folds by. The
+      // master's own rows are spot keys, whose underlying is the symbol -- so
+      // this is a no-op for them and the reason it is written anyway is the
+      // day the master carries a contract.
+      const u = parseKey(k).underlying ?? k;
+      meta.set(u, { sym: r?.symbol ?? u, kind: r?.kind ? String(r.kind).toLowerCase() : '' });
     }
     /** @param {string} k @param {{months:number,bars:number,short:number}=} h */
     const decorate = (k, h) => ({
@@ -1729,8 +1782,18 @@
       short: h?.short ?? 0
     });
     if (universeKeys === null) return instrumentRows.map((r) => decorate(r.key, r));
+    /* THE UNIVERSE'S KEYS ARE STORE KEYS AND THIS RUNG NOW SPEAKS UNDERLYINGS,
+       so they are converted and DEDUPLICATED on the way in. Without the dedupe
+       a universe naming both a spot key and its contracts would offer the same
+       name more than once, which is the defect this whole change removes. */
     const out = [];
-    for (const k of universeKeys) out.push(decorate(k, held.get(k)));
+    const seen = new Set();
+    for (const k of universeKeys) {
+      const u = parseKey(k).underlying ?? k;
+      if (seen.has(u)) continue;
+      seen.add(u);
+      out.push(decorate(u, held.get(u)));
+    }
     return out.sort((a, b) => txt(a.sym, b.sym) || txt(a.key, b.key));
   });
 

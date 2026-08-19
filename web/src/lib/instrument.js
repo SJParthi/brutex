@@ -170,7 +170,13 @@ export function groupByUnderlying(keys) {
 }
 
 /**
- * Which of the three segment rungs a parsed key belongs to.
+ * Which of the three segments a parsed key belongs to.
+ *
+ * NAMED `segmentOf` AND NOT `rungOf`, because "rung" already means two other
+ * things in this tree: a TIMEFRAME rung on /ingest, and a MONEYNESS rung
+ * (ITM/ATM/OTM) on /db, whose own `rungOf(k, side)` this collided with by name
+ * on first wiring. Three meanings of one word is how a reader ends up reading
+ * the wrong one.
  *
  * THE KEY'S OWN SEGMENT TOKEN DOES NOT ANSWER THIS ON ITS OWN. `FNO` covers
  * both futures and options, and the difference is in the tail — so the rung is
@@ -180,7 +186,7 @@ export function groupByUnderlying(keys) {
  * @param {Parsed} p
  * @returns {'spot'|'futures'|'options'|null}
  */
-export function rungOf(p) {
+export function segmentOf(p) {
   if (!p || p.underlying === null) return null;
   if (p.kind === 'option') return 'options';
   if (p.kind === 'future') return 'futures';

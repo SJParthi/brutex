@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
   parseKey,
   groupByUnderlying,
-  rungOf,
+  segmentOf,
   strikeExact,
   FUTURE_TAIL,
   OPTION_TAIL
@@ -107,11 +107,11 @@ test('twenty-seven keys over one underlying group to one entry', () => {
 test('the rung comes from the TAIL, because FNO covers both contracts', () => {
   // The key's own segment token cannot separate a future from an option; only
   // the tail can, and that is the whole reason `kind` exists.
-  assert.equal(rungOf(parseKey('NSE-INDEX-BANKNIFTY')), 'spot');
-  assert.equal(rungOf(parseKey('NSE-CASH-TCS')), 'spot');
-  assert.equal(rungOf(parseKey('NSE-FNO-BANKNIFTY-2026-07-28-FUT')), 'futures');
-  assert.equal(rungOf(parseKey('NSE-FNO-BANKNIFTY-2026-07-28-4810000-CE')), 'options');
-  assert.equal(rungOf(parseKey('rubbish')), null);
+  assert.equal(segmentOf(parseKey('NSE-INDEX-BANKNIFTY')), 'spot');
+  assert.equal(segmentOf(parseKey('NSE-CASH-TCS')), 'spot');
+  assert.equal(segmentOf(parseKey('NSE-FNO-BANKNIFTY-2026-07-28-FUT')), 'futures');
+  assert.equal(segmentOf(parseKey('NSE-FNO-BANKNIFTY-2026-07-28-4810000-CE')), 'options');
+  assert.equal(segmentOf(parseKey('rubbish')), null);
 });
 
 test('one underlying can hold several rungs, and that is the cascade', () => {
@@ -120,7 +120,7 @@ test('one underlying can hold several rungs, and that is the cascade', () => {
     'NSE-FNO-BANKNIFTY-2026-07-28-4810000-CE',
     'NSE-FNO-BANKNIFTY-2026-07-28-FUT'
   ]);
-  const rungs = new Set(bucket(byUnderlying, 'BANKNIFTY').map(rungOf));
+  const rungs = new Set(bucket(byUnderlying, 'BANKNIFTY').map(segmentOf));
   assert.deepEqual([...rungs].sort(), ['futures', 'options', 'spot']);
 });
 
