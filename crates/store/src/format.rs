@@ -231,6 +231,131 @@ pub struct Bar {
     pub open_interest: i64,
 }
 
+/// Identifies an overlay file — the sidecar carrying fields a [`Bar`] has no
+/// column for.
+///
+/// # Why a sibling file and not a wider `Bar`
+///
+/// Dhan's expired-options endpoint answers with the underlying's **spot** and
+/// the contract's **implied volatility** beside the OHLC. Neither has a column
+/// here, and both are wanted unchanged — `docs/00-charter.md` forbids deriving
+/// what a vendor states.
+///
+/// Widening `Bar` was the obvious move and is the wrong one. `Bar` is the row
+/// for EVERY instrument: an index, an equity, a future. Two option-only columns
+/// would cost sixteen bytes on every spot bar ever written, and — because
+/// `CLAUDE.md` §3 rule 8 forbids mutating a version in place — would mint a
+/// format version 3 that RETIRES version 2, exactly as 2 retired 1. Every bar
+/// already on disk would stop being readable to gain two fields most of them
+/// have no value for.
+///
+/// `CLAUDE.md` §4 already names the alternative in the row that bans a dynamic
+/// schema: *"a new field is a new file version at its own stride"*. A new
+/// FILE, not a wider record. [`crate::path::FileKind::Overlay`] reserved the
+/// name and the `.ovl` extension for it; this is the geometry.
+/// # Why it is outside [`MAGIC_FAMILY`], and outside [`crate::layout::Layout`]
+///
+/// Both were tried and both refused it, correctly. `Layout` models the BAR
+/// format family: its degeneracy check requires the `BRUTEXB` prefix and a
+/// version number that is not retired, and an overlay carrying version 1 would
+/// collide with the bar version 1 this build has retired — one number meaning
+/// two geometries, which is the exact conflation `Layout`'s dispatch exists to
+/// prevent.
+///
+/// So the overlay is a different family, and says so in its own bytes. `O` for
+/// overlay where a bar file says `B`. A reader that opens the wrong one sees it
+/// in the first eight bytes rather than in a field lifted from the wrong offset.
+/// Its geometry is the four constants below and the `const` assertions under
+/// them, which is the same rule `Layout::declared` applies, spelled where the
+/// family it belongs to can state it.
+pub const OVERLAY_MAGIC: [u8; 8] = *b"BRUTEXO1";
+
+/// The only overlay version this build writes.
+pub const OVERLAY_VERSION: u16 = 1;
+
+/// Bytes of one overlay record. Three `i64`, eight-aligned.
+pub const OVERLAY_STRIDE: u64 = 24;
+
+/// Overlay records in one block.
+///
+/// `24 × 170 = 4,080`, the largest whole multiple of the stride that fits the
+/// same 4,096-byte failure unit the bar file uses. Chosen the same way
+/// [`RECORDS_PER_BLOCK`] is and for the same reason: a torn write damages one
+/// block, and a block that straddled the unit would damage two.
+pub const OVERLAY_RECORDS_PER_BLOCK: u64 = 170;
+
+const _: () = assert!(OVERLAY_STRIDE * OVERLAY_RECORDS_PER_BLOCK <= 4096);
+const _: () = assert!(OVERLAY_STRIDE * (OVERLAY_RECORDS_PER_BLOCK + 1) > 4096);
+
+/// One bar's worth of vendor-stated fields that [`Bar`] has no column for.
+///
+/// # One record per bar, keyed by the same stamp
+///
+/// [`Self::ts_micros`] is the bar's own open, so an overlay row and a bar row
+/// are joined by value rather than by position. Position would be faster and
+/// wrong the first time a bar is dropped by the session filter on one side and
+/// not the other.
+///
+/// # Why both values are integers when one of them is a volatility
+///
+/// `CLAUDE.md` §7 keeps statistical values at full precision, and an implied
+/// volatility is a statistical value — so `f64` is the type it deserves. It is
+/// stored as millionths anyway, and the reason is `CLAUDE.md` §3 rule 5: a
+/// rerun must be byte-for-byte identical. An `f64` has many bit patterns for
+/// NaN and two for zero, so a sentinel written as a float is a sentinel that
+/// can come back as different bytes. Millionths of a percent is finer than any
+/// vendor states, and it makes the record exactly reproducible.
+///
+/// Both fields use [`OI_NULL`] as their absent marker, for the reason that
+/// constant already gives: zero is a real reading and must not mean "missing".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub struct Overlay {
+    /// Microseconds since the Unix epoch, UTC — the open of the bar this
+    /// overlays, and the only thing that joins the two.
+    pub ts_micros: i64,
+    /// The underlying's spot price at that stamp, in paisa, or [`OI_NULL`].
+    pub spot: i64,
+    /// Implied volatility in millionths, or [`OI_NULL`]. `125_000` is 0.125.
+    pub iv_micros: i64,
+}
+
+const _: () = assert!(size_of::<Overlay>() == 24);
+const _: () = assert!(align_of::<Overlay>() == 8);
+const _: () = assert!(OVERLAY_STRIDE == 24);
+
+impl Overlay {
+    /// The spot as a value, or `None` when the vendor stated none.
+    #[must_use]
+    pub const fn spot(&self) -> Option<i64> {
+        if self.spot == OI_NULL {
+            None
+        } else {
+            Some(self.spot)
+        }
+    }
+
+    /// The implied volatility as a value, or `None` when absent.
+    #[must_use]
+    pub const fn iv(&self) -> Option<i64> {
+        if self.iv_micros == OI_NULL {
+            None
+        } else {
+            Some(self.iv_micros)
+        }
+    }
+
+    /// Whether this record states anything at all.
+    ///
+    /// An overlay with neither value is not worth a record, and the writer
+    /// declines it: a file of empty rows costs a block per 170 bars and answers
+    /// nothing a missing file does not answer better.
+    #[must_use]
+    pub const fn states_something(&self) -> bool {
+        self.spot != OI_NULL || self.iv_micros != OI_NULL
+    }
+}
+
 const _: () = assert!(size_of::<Bar>() == 56);
 const _: () = assert!(align_of::<Bar>() == 8);
 const _: () = assert!(RECORD_STRIDE == 56);

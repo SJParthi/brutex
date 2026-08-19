@@ -357,6 +357,79 @@ mod tests {
     /// The whole point of the module. A contract dropped in silence is a month
     /// that looks complete and is not.
     #[tokio::test]
+    async fn the_expiries_are_asked_first_and_each_contracts_call_is_keyed_on_the_answer() {
+        // THE ORDER IS THE REQUIREMENT, not a side effect of how this reads.
+        //
+        // A vendor is asked WHICH EXPIRIES a month held; only then, and only
+        // for an expiry it actually returned, is it asked which contracts that
+        // expiry held; only then is a candle fetched for a contract that came
+        // back. Every test above proves the RESULT of that walk. None proved
+        // the ORDER, because `Canned` answers from a queue and never looks at
+        // the URL — so a walk that asked contracts first, or asked for an
+        // expiry the vendor never named, would have passed all of them.
+        //
+        // This records the URLs and asserts three things a queue cannot:
+        // the first call is the expiries one, every later call is a contracts
+        // one, and each carries an expiry the FIRST call returned.
+        struct Recording {
+            seen: std::cell::RefCell<Vec<String>>,
+            answers: std::cell::RefCell<Vec<String>>,
+        }
+        impl Discovery for Recording {
+            async fn get(&self, url: &str) -> Result<String, String> {
+                self.seen.borrow_mut().push(url.to_owned());
+                let mut left = self.answers.borrow_mut();
+                if left.is_empty() {
+                    return Err("no answer left".to_owned());
+                }
+                Ok(left.remove(0))
+            }
+        }
+
+        let from = Recording {
+            seen: std::cell::RefCell::new(Vec::new()),
+            answers: std::cell::RefCell::new(vec![
+                r#"{"payload":{"expiries":["2025-09-04","2025-09-11"]}}"#.to_owned(),
+                r#"{"payload":{"contracts":["NSE-NIFTY-04Sep25-24650-CE"]}}"#.to_owned(),
+                r#"{"payload":{"contracts":["NSE-NIFTY-11Sep25-24650-PE"]}}"#.to_owned(),
+            ]),
+        };
+
+        let chain = month(Feed::Groww, &ask(), &from)
+            .await
+            .expect("the walk completes");
+        let seen = from.seen.borrow().clone();
+
+        assert_eq!(
+            seen.len(),
+            3,
+            "one expiries call, then one contracts call per expiry: {seen:?}"
+        );
+        assert!(
+            seen[0].contains("expiries"),
+            "the FIRST call asks which expiries the month held: {}",
+            seen[0]
+        );
+        for later in seen.iter().skip(1) {
+            assert!(
+                later.contains("contracts"),
+                "every call after the first asks for contracts: {later}"
+            );
+        }
+        // AND EACH IS KEYED ON AN EXPIRY THE VENDOR ACTUALLY NAMED. A contracts
+        // call for a date the expiries answer never held would be this build
+        // inventing a contract to ask about.
+        for expiry in &chain.expiries {
+            assert!(
+                seen.iter().skip(1).any(|u| u.contains(expiry)),
+                "the contracts call for {expiry} carries that expiry: {seen:?}"
+            );
+        }
+        assert_eq!(chain.expiries.len(), 2);
+        assert_eq!(chain.contracts.len(), 2, "one contract from each expiry");
+    }
+
+    #[tokio::test]
     async fn an_unreadable_name_is_reported_and_the_readable_ones_still_land() {
         let canned = Canned {
             answers: std::cell::RefCell::new(vec![

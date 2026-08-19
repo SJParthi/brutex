@@ -395,3 +395,118 @@ fn the_header_slots_do_not_share_a_failure_unit() {
     assert_eq!(v2.header_len(), HEADER_LEN);
     assert_eq!(v2.slot_offset(2), slot0, "commit 2 returns to slot 0");
 }
+
+// ===========================================================================
+// The overlay sidecar
+// ===========================================================================
+
+/// **THE TWO GEOMETRIES CANNOT BE MISTAKEN FOR ONE ANOTHER.**
+///
+/// The overlay carries version 1, and version 1 is a number this build has
+/// RETIRED for bar files. That collision is deliberate to test: if the two ever
+/// resolved against each other, an overlay would be decoded at a bar's offsets
+/// — every field lifted from the wrong place, and a CRC that passes because the
+/// bytes are genuinely intact.
+///
+/// Three separations, and the test wants all three, because any one of them
+/// alone is a single point of failure:
+///   * the MAGIC differs, so a byte-level reader cannot confuse them;
+///   * the STRIDE differs, so a record count computed for one is wrong for the
+///     other by an amount that cannot round to the same answer;
+///   * the overlay is NOT in `Layout::KNOWN`, so a bar reader walking the list
+///     of readable versions is never offered it at all.
+#[test]
+fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
+    use store::format::{MAGIC, OVERLAY_MAGIC, OVERLAY_STRIDE, RECORD_STRIDE};
+    use store::layout::Layout;
+
+    assert_ne!(OVERLAY_MAGIC, MAGIC, "a byte reader tells them apart");
+    assert_ne!(
+        OVERLAY_STRIDE, RECORD_STRIDE,
+        "and a record count computed for one cannot be right for the other"
+    );
+    assert!(
+        !Layout::KNOWN.iter().any(|l| l.magic() == OVERLAY_MAGIC),
+        "KNOWN answers `which BAR versions can this build read`; offering the \
+         overlay there would hand it to every bar reader as a candidate"
+    );
+    // AND IT IS NOT A MEMBER OF THE BAR FAMILY AT ALL. `Layout::declared`
+    // refuses a magic outside `BRUTEXB` and a retired version number, and the
+    // overlay is both — which is the check doing its job, not an obstacle. A
+    // sidecar admitted to that family would put one version number on two
+    // geometries.
+    assert_ne!(
+        &OVERLAY_MAGIC[..7],
+        &MAGIC[..7],
+        "different family, visible in the first seven bytes"
+    );
+}
+
+/// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**
+///
+/// Both overlay fields carry real readings where zero is meaningful: a spot of
+/// zero is impossible, but an implied volatility genuinely can be, and a
+/// deep-out-of-the-money option late in its life is exactly where it happens.
+/// Reading "the vendor sent nothing" as "the vendor sent zero" would put a
+/// fabricated 0% volatility into a backtest and it would look like data.
+#[test]
+fn an_overlay_tells_an_absent_reading_from_a_zero_one() {
+    use store::format::{OI_NULL, Overlay};
+
+    let nothing = Overlay {
+        ts_micros: 1,
+        spot: OI_NULL,
+        iv_micros: OI_NULL,
+    };
+    assert_eq!(nothing.spot(), None);
+    assert_eq!(nothing.iv(), None);
+    assert!(
+        !nothing.states_something(),
+        "a record stating neither value is not worth a block per 170 bars"
+    );
+
+    let real_zero = Overlay {
+        ts_micros: 1,
+        spot: 0,
+        iv_micros: 0,
+    };
+    assert_eq!(
+        real_zero.spot(),
+        Some(0),
+        "zero is a reading, not an absence"
+    );
+    assert_eq!(real_zero.iv(), Some(0));
+    assert!(real_zero.states_something());
+
+    // AND ONE OF EACH IS STILL WORTH KEEPING. Dhan answers `spot` for a
+    // contract whose `iv` it does not compute, and dropping the record would
+    // lose the spot to save nothing.
+    let half = Overlay {
+        ts_micros: 1,
+        spot: 2_465_000,
+        iv_micros: OI_NULL,
+    };
+    assert!(half.states_something());
+    assert_eq!(half.iv(), None);
+}
+
+/// **THE BLOCK IS THE LARGEST WHOLE MULTIPLE THAT FITS THE FAILURE UNIT.**
+///
+/// Not an arbitrary count. A torn write damages one 4,096-byte unit, so a block
+/// that straddled the boundary would damage two — and the checksum would then
+/// condemn twice the data one fault actually touched. This pins both halves:
+/// the block fits, and one more record would not.
+#[test]
+fn the_overlay_block_fills_its_failure_unit_without_straddling_it() {
+    use store::format::{OVERLAY_RECORDS_PER_BLOCK, OVERLAY_STRIDE};
+
+    let used = OVERLAY_STRIDE * OVERLAY_RECORDS_PER_BLOCK;
+    assert!(
+        used <= 4096,
+        "the block fits inside one failure unit: {used}"
+    );
+    assert!(
+        used + OVERLAY_STRIDE > 4096,
+        "and it is the LARGEST such block — one more record would straddle"
+    );
+}
