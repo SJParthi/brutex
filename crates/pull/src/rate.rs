@@ -202,6 +202,30 @@ pub const DHAN_PER_SECOND: u32 = 5;
 /// `docs/00-charter.md` §4, evidence lane **documented**. The same row records
 /// *"no per-minute governor"*, which is why a governor built from these two
 /// figures passes `None` for the minute span rather than inventing one.
+///
+/// # THE VENDOR'S OWN TABLE READS AS 7,000 AND THAT IS THE WRONG ROW TO TAKE
+///
+/// `Dhan Docs/22-rate-limits.md` publishes four categories:
+///
+/// | API Category | Per Second | Daily Limit |
+/// |---|---|---|
+/// | Order APIs | 10 | 100,000 |
+/// | Data APIs | 5 | 7,000 |
+/// | Market Quote | 1 | — |
+/// | Option Chain | 1 per 3 sec | — |
+///
+/// Read cold, "Data APIs · 7,000" looks like the row a historical puller
+/// belongs in, and this constant looks like it took the Orders figure by
+/// mistake. **It did not.** Operator-stated 2026-08-19: the 7,000 applies to
+/// the live/real-time order-adjacent surface, and **historical pulls carry
+/// 100,000 per day**.
+///
+/// Written down here because the trap is live: a reader diffing this file
+/// against that table will conclude the number is wrong by 14×, "fix" it, and
+/// cut the backfill's daily budget to a fourteenth for no reason. It has
+/// already happened once. The operator's account is the authority on what their
+/// own quota is — the same standing that settled the 45-day rolling window when
+/// the vendor's page stated both 30 and 45.
 pub const DHAN_PER_DAY: u32 = 100_000;
 
 /// The third broker's per-second cap on the historical endpoint: **3**.

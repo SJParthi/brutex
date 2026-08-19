@@ -280,6 +280,7 @@ impl HttpSource {
         // costs nothing to find; building a TLS client first would spend that
         // work to throw it away.
         let header_value = Self::header_value(spec.auth.scheme, credential)?;
+        crate::ensure_tls_provider();
         let client = reqwest::Client::builder()
             .timeout(core::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
             // ── REDIRECTS ARE NOT FOLLOWED, AND THE REASON IS THE CREDENTIAL ──
@@ -1688,6 +1689,33 @@ fn decode_positional(
         // Volume is `null` on an index, which has none. Zero means zero and the
         // charter's null sentinel is for OPEN INTEREST, not volume, so a null
         // volume becomes 0 rather than i64::MIN.
+        // OPEN INTEREST, CELL SIX — AND IT WAS DROPPED ON THE FLOOR.
+        //
+        // This decoder validated that a row carries six cells or seven, said in
+        // its own comment that "the seventh is open interest", read cells 0..=5
+        // and never touched cell 6. `arrays.open_interest` was initialised
+        // empty above and nothing ever pushed to it, so every bar this shape
+        // ever decoded was stored with no open interest at all.
+        //
+        // It did not matter while only SPOT was pulled: Groww's own note reads
+        // "open interest (only for FNO instruments, null for others)", so an
+        // index or an equity has none to lose. It matters entirely for expired
+        // derivatives, where open interest is one of the two columns that make
+        // the series worth holding — and it would have been lost in silence,
+        // because a missing column raises nothing. The bars land, the counts
+        // are right, the receipt says STORED.
+        //
+        // PUSHED FOR EVERY KEPT ROW, never conditionally. `RawWindow::decode`
+        // checks the seven columns against each other, so a vector filled only
+        // on the rows that happened to carry a seventh cell would be short and
+        // refused as a shape error — which is a message about columns for a
+        // problem about one absent cell. A six-cell row and a null seventh both
+        // read as `OI_NULL`, which is the sentinel `CLAUDE.md` §7 names for
+        // exactly this and is distinct from a real zero.
+        arrays.open_interest.push(match cells.get(6) {
+            None | Some(serde_json::Value::Null) => store::format::OI_NULL,
+            Some(given) => one_number(given, "open_interest")?,
+        });
         arrays.volume.push(match cell(5)? {
             serde_json::Value::Null => 0,
             given => one_number(given, "volume")?,
