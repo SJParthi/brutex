@@ -1185,6 +1185,33 @@ jobs:
           # name, which is the same reason `19200` and `2019` are already here.
           rolling_scaffold='contractpath bin call put 9223372036854775807'
 
+          # ---- group 26: TEST FIXTURE NAMES AND PLACEHOLDER TOKENS.
+          #
+          # Every one is a value a TEST constructs, and each is named for the
+          # fault it arranges rather than for anything a vendor or an account is
+          # called:
+          #
+          #   dir-is-a-file lock-is-a-dir  scratch roots in `ingest.rs`, each
+          #     named for the filesystem shape it puts in the writer's way -- a
+          #     directory where a file belongs and the reverse.
+          #   interleaved                  a word asserted to appear IN a refusal
+          #     sentence, so the message keeps naming the condition it refused.
+          #   feed                         a scratch subdirectory in
+          #     `archive.rs`. The English noun, not a vendor.
+          #   t                            a placeholder CREDENTIAL VALUE in
+          #     `http.rs` tests -- one character, chosen so it can never be
+          #     mistaken for a real token, and `Credential` redacts it in Debug
+          #     regardless. Section 8 is about real secrets reaching tracked
+          #     files; a single letter is the opposite of that.
+          #   z zzz                        the filler `http.rs` repeats to build
+          #     an over-long body and prove the refusal is CUT rather than
+          #     echoed whole.
+          #
+          # None is an org, an env, a vendor or a field of a credential. They are
+          # listed because the scanner is shape-based, and a short lowercase word
+          # has the same shape as a path segment whatever it means.
+          pull_fixture='dir-is-a-file lock-is-a-dir interleaved feed t z zzz'
+
           allowed="${seg_shape} ${vendor_wire} ${claim_standing} ${config_fixture}
           ${secret_fixture} ${scaffold} ${timeframe} ${governor}
           ${record_field} ${header_name} ${bound_number}
@@ -1192,7 +1219,7 @@ jobs:
           ${redact_label} ${hash_vector} ${request_field}
           ${totp_vector} ${late_scaffold} ${folder_scaffold} ${layout_field}
           ${telemetry_field} ${year_month} ${nse_published} ${join_verdict} ${nav_word} ${http_status} ${withdrawn_index} ${zerodha_row}
-          ${rolling_word} ${rolling_scaffold}
+          ${rolling_word} ${rolling_scaffold} ${pull_fixture}
           ${ssm_leak_fixture}"
           bad=0
           while IFS= read -r word; do
