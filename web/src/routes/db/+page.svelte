@@ -3205,7 +3205,20 @@
   const READ_BUDGETS = [1, 3, 6, 12, 24, 0];
   /** @param {number} n */
   const budgetLabel = (n) => (n === 0 ? 'Every one' : `${fmt(n)} newest`);
-  let readBudget = $state(6);
+  /* THE DEFAULT IS EVERY MATCHED MONTH, and it was six.
+   *
+   * Operator's rule, 2026-08-19: the grid shows what the QUERY selected — the
+   * chosen feed, universe, segments, timeframes and date range — not a slice of
+   * it. A default of six read the six NEWEST months and rendered the rest as
+   * "absent rather than empty", so a January-to-August query opened on March
+   * and an operator reasonably read that as January never having been pulled.
+   * It had been: 7,500 bars, on disk, structurally perfect.
+   *
+   * A page that answers a narrower question than the one it was asked is worse
+   * than a slow one, because nothing on it is wrong — it is just not the
+   * answer. The budget stays as a CONTROL for anyone who wants to cap a very
+   * wide query; it is no longer the default. */
+  let readBudget = $state(0);
 
   /**
    * The instrument-months the bar grid would read, NEWEST MONTH FIRST.
