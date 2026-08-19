@@ -2104,6 +2104,10 @@ mod tests {
 
     fn spec_top(prices: PriceScale) -> HttpSpec {
         HttpSpec {
+            // The fixture declares no body-level error contract: these tests
+            // are about decoding a SUCCESSFUL answer, and `crate::refusal`
+            // is exercised against the shipped rows instead.
+            error_names: None,
             // The window, named — which is what these tests assert and what
             // the request used to hardcode. A real vendor row carries more
             // (`securityId`, `exchangeSegment`); the fixtures that care about

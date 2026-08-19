@@ -131,6 +131,9 @@ fn broker(body: &str) -> (String, std::sync::mpsc::Receiver<String>) {
 /// makes this a test of the vendor path rather than of a fixture.
 fn spec(base_url: &'static str) -> HttpSpec {
     HttpSpec {
+        // As the shipped Dhan row: no body-level error contract has been
+        // read for this vendor. See `HttpSpec::error_names`.
+        error_names: None,
         // ONE ENDPOINT FOR THIS FIXTURE. The per-rung split is exercised
         // against the SHIPPED descriptor, in
         // `http::tests::dhan_serves_the_two_rungs_from_two_endpoints_and_only_one_takes_an_interval`,

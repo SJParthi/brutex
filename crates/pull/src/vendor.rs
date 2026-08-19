@@ -2876,6 +2876,26 @@ pub struct HttpSpec {
     pub params: &'static [Param],
     /// Headers this feed requires beyond the credential.
     pub extra_headers: &'static [(&'static str, &'static str)],
+    /// THE SECOND AXIS A REFUSAL ARRIVES ON: the body field carrying this
+    /// vendor's own name for what went wrong, and the reader for it.
+    ///
+    /// `None` is a **recorded absence**, in the sense [`FnoAccess::None`]
+    /// already means it here: no body-level error contract this build has
+    /// read, so the status decides alone — which is what every feed did before
+    /// [`crate::refusal`] existed and is therefore no regression for any of
+    /// them. It is NOT "this vendor publishes none": Dhan writes
+    /// `Invalid_Authentication` into a body field that
+    /// `crates/api/src/server.rs` finds today with `str::contains` against its
+    /// own rendering of the error, and the field's name is not recorded in
+    /// `docs/00-charter.md`. Writing one here from memory is the invention
+    /// `CLAUDE.md` §3 rule 1 forbids, so the row stays `None` until the
+    /// vendor's page is read, and `docs/06-limits.md` carries the gap.
+    ///
+    /// Adding a vendor's contract is this field and a `from_wire`. Nothing in
+    /// [`crate::refusal::classify`] or in the retry ladder changes, which is
+    /// what makes the mechanism incremental rather than a growing `match` on
+    /// the feed.
+    pub error_names: Option<&'static crate::refusal::ErrorNames>,
 }
 
 impl HttpSpec {
@@ -4318,6 +4338,14 @@ const DHAN: Descriptor = Descriptor {
             },
         ],
         extra_headers: &[],
+        // NO BODY-LEVEL ERROR CONTRACT READ FOR THIS VENDOR, which is not the
+        // same sentence as "it publishes none". See [`HttpSpec::error_names`]:
+        // this vendor DOES write a body marker -- `Invalid_Authentication`,
+        // which `crates/api/src/server.rs` finds with `str::contains` today --
+        // and the FIELD it arrives in is not recorded in docs/00-charter.md.
+        // Naming one here from memory is section 3 rule 1's invention, so the
+        // status decides alone, exactly as it did before `crate::refusal`.
+        error_names: None,
     }),
     // ONE RUNG, BECAUSE ONE PATH IS ALL `bars_path` CAN HOLD.
     //
@@ -4623,6 +4651,11 @@ const GROWW: Descriptor = Descriptor {
         ],
         // Groww's page shows this on every historical call.
         extra_headers: &[("X-API-VERSION", "1.0")],
+        // NO BODY-LEVEL ERROR CONTRACT READ FOR THIS VENDOR. No page for it
+        // has been read into docs/00-charter.md, so the status decides alone
+        // -- unchanged from before `crate::refusal`, and a row away from not
+        // being. See [`HttpSpec::error_names`].
+        error_names: None,
     }),
     // Same restraint as the row above, and for the same reason.
     granularities: GranularitySet::EMPTY
@@ -5064,6 +5097,21 @@ const ZERODHA: Descriptor = Descriptor {
         // examples carry it beside the credential, and a request without it is
         // a request against an unstated API version.
         extra_headers: &[("X-Kite-Version", "3")],
+        // THE AXIS THIS BUILD COULD NOT SEE, AND THE PAIR THAT PROVES IT
+        // MATTERS.
+        //
+        // `TokenException` and `PermissionException` are BOTH answered under
+        // HTTP 403 -- the first documented on the exceptions page, the second
+        // in the vendor's own Python SDK -- so on the status axis they are one
+        // event. They are not one event to an operator: the first is fixed by
+        // the credential somebody refreshes tonight, and the second is an API
+        // key with no historical-data subscription, which fails identically
+        // forever. Reporting the second as the first is a fallback that hides
+        // a failure, which section 4 bans outright.
+        //
+        // `crate::kite::KITE` is one field name, one reader and one citation.
+        // Every decision made with it is in `crate::refusal`.
+        error_names: Some(&crate::kite::KITE),
     }),
     granularities: GranularitySet::EMPTY
         .with(Granularity::Minute1)

@@ -89,6 +89,8 @@ pub mod fold;
 pub mod folder;
 pub mod http;
 pub mod ingest;
+/// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.
+pub mod kite;
 pub mod manifest;
 /// The exchange's own index directory and the constituent files it links to.
 ///
@@ -96,6 +98,14 @@ pub mod manifest;
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
 pub mod rate;
+/// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
+/// which no retry decision in this workspace read before this module.
+///
+/// A 403 carrying `TokenException` and a 403 carrying `PermissionException`
+/// are the same event on the status axis and different events to an operator:
+/// one is fixed by tomorrow's credential and the other is not fixed by
+/// anything this repository can do. Generic over feeds; `kite` is a row.
+pub mod refusal;
 /// One pass over the exchange's directory, and the dated snapshot it produces.
 ///
 /// Every file in a pass is the same age, and a snapshot is published whole or
