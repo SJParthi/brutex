@@ -1054,6 +1054,67 @@ fn walk_bins(dir: &Path, into: &mut Vec<String>) {
 /// on disk the counter does not know about is one the ladder gate treats as
 /// missing, so the next run refetches what is already there.
 #[test]
+fn a_bar_outside_the_session_is_dropped_and_counted_rather_than_stored() {
+    // THE FIXTURE THAT CAUGHT IT. These two stamps are 08:00 and 08:01 IST on
+    // 2025-07-01 — an hour and a quarter before the 09:15 open — and the test
+    // below asserted, until today, that both reached the store. They did,
+    // because `from_rows` never asked `Window::verdict` anything: it takes bars
+    // that are already decoded and so never touched `fetch::land`, where every
+    // other path's window and session checks live.
+    let scratch = Scratch::new("outside-session");
+    let store_root = scratch.store();
+    let request = request();
+    let bars = vec![
+        store::format::Bar {
+            ts_micros: 1_751_337_000_000_000,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: store::format::OI_NULL,
+        },
+        store::format::Bar {
+            ts_micros: 1_751_337_060_000_000,
+            open: 100,
+            high: 100,
+            low: 100,
+            close: 100,
+            volume: 1,
+            open_interest: store::format::OI_NULL,
+        },
+    ];
+
+    let done = ingest::from_rows(
+        &bars,
+        &[],
+        "NIFTY",
+        "https://x",
+        &store_root,
+        plan(&request),
+    );
+
+    assert_eq!(
+        done.bars_stored, 0,
+        "a pre-open bar must not reach the store"
+    );
+    assert_eq!(done.rows_read, 2, "and both are still COUNTED as read");
+    assert!(
+        done.failures.is_empty(),
+        "a declined bar is not a failure — it is a bar this engine refused, \
+         which is a different answer: {:?}",
+        done.failures
+    );
+    // AND THE BOOKS ARE NO LONGER VACUOUS. `balances()` was trivially true
+    // while the census stayed empty, because there was nothing on either side.
+    assert!(
+        done.census.total() > 0,
+        "the drop must be counted, or the run reports two rows read, none \
+         stored, and no reason anywhere"
+    );
+}
+
+#[test]
 fn decoded_bars_and_their_overlays_are_filed_under_one_contract() {
     use brutex_core::instrument::{Expiry, Kind, OptionSide};
     use store::format::{Bar, OI_NULL, Overlay};
@@ -1071,7 +1132,7 @@ fn decoded_bars_and_their_overlays_are_filed_under_one_contract() {
 
     let bars = [
         Bar {
-            ts_micros: 1_751_337_000_000_000,
+            ts_micros: 1_751_341_500_000_000,
             open: 10_000,
             high: 10_500,
             low: 9_500,
@@ -1080,7 +1141,7 @@ fn decoded_bars_and_their_overlays_are_filed_under_one_contract() {
             open_interest: 4200,
         },
         Bar {
-            ts_micros: 1_751_337_060_000_000,
+            ts_micros: 1_751_341_560_000_000,
             open: 10_200,
             high: 10_600,
             low: 10_100,
@@ -1091,14 +1152,14 @@ fn decoded_bars_and_their_overlays_are_filed_under_one_contract() {
     ];
     let overlays = [
         Overlay {
-            ts_micros: 1_751_337_000_000_000,
+            ts_micros: 1_751_341_500_000_000,
             spot: 2_465_005,
             iv_micros: 125_000,
         },
         // ONE THAT STATES ONLY A SPOT. Dhan answers a spot for a contract whose
         // iv it did not compute, and dropping the row would lose the spot.
         Overlay {
-            ts_micros: 1_751_337_060_000_000,
+            ts_micros: 1_751_341_560_000_000,
             spot: 2_465_100,
             iv_micros: OI_NULL,
         },

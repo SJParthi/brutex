@@ -919,34 +919,28 @@ pub fn from_rows(
         rows_read: bars.len(),
         ..Ingested::default()
     };
+    // THE WINDOW AND THE SESSION, WHICH THIS PATH NEVER APPLIED AT ALL.
+    // See [`keep_in_session`] for what that cost.
+    let (bars, overlays, census) = keep_in_session(bars, overlays, &plan);
+    done.census = census;
+    let (bars, overlays) = (bars.as_slice(), overlays.as_slice());
     if bars.is_empty() {
         return done;
     }
     let Some((first, last)) = bars.first().zip(bars.last()) else {
         return done;
     };
-    let ym = match month_of(first, last) {
-        Ok(ym) => ym,
-        Err(why) => {
-            done.failures.push(Failure {
-                instrument: instrument.to_owned(),
-                why,
-            });
-            return done;
-        }
-    };
-    let timeframe = match plan.timeframe() {
-        Ok(t) => t,
-        Err(why) => {
-            done.failures.push(Failure {
-                instrument: instrument.to_owned(),
-                why,
-            });
-            return done;
-        }
-    };
-    let identity = match identify(instrument, plan.exchange, plan.segment) {
-        Ok(i) => i,
+    let addressed = month_of(first, last).and_then(|ym| {
+        plan.timeframe().and_then(|timeframe| {
+            identify(instrument, plan.exchange, plan.segment)
+                .map(|identity| (ym, timeframe, identity))
+        })
+    });
+    // THREE REFUSALS, ONE ARM. Each was its own `match` with an identical
+    // four-line error branch, which is three chances to get the recording
+    // wrong and, in this function, three copies of the same paragraph.
+    let (ym, timeframe, identity) = match addressed {
+        Ok(three) => three,
         Err(why) => {
             done.failures.push(Failure {
                 instrument: instrument.to_owned(),
@@ -1021,6 +1015,85 @@ pub fn from_rows(
     }
     name_the_origin(&mut done, origin);
     done
+}
+
+/// Drops the bars this engine declines, and counts why.
+///
+/// The same question `fetch::land` asks of a raw vendor row, asked of a bar
+/// that is already decoded: is it inside the operator's window, and is it
+/// inside the venue's session? The venue comes from the request's listing, so
+/// an expired derivative is judged against the derivatives clock (15:40 since
+/// 2026-08-03) and not the cash one.
+///
+/// # Why this did not exist, and what its absence cost
+///
+/// `from_window` reaches `fetch::land`, which asks `Window::verdict` of every
+/// row and counts what it declines. [`from_rows`] takes bars that are ALREADY
+/// decoded and so never touched `land` — so the rolling driver stored whatever
+/// the vendor sent: no before-window check, no after-window check, and no
+/// session-hours check.
+///
+/// Two costs. A vendor that treats `toDate` as inclusive where this build reads
+/// it exclusive appends one extra day past every chunk boundary with nothing to
+/// catch it. And `Ingested::census` stayed empty, which makes
+/// [`Ingested::balances`] trivially true — the books balanced because there was
+/// nothing on either side of them.
+///
+/// The fixture that caught this asserted two bars stamped **08:00 IST** reached
+/// the store. They are an hour and a quarter before the open, and storing them
+/// is what this path did.
+///
+/// Filtered here rather than by routing through `land`: that function decodes
+/// RAW vendor rows and these are `store::format::Bar` already. What is shared is
+/// the QUESTION, and it is asked once in each path rather than answered twice.
+///
+/// # Why the overlays are filtered by the same question and not by the bars
+///
+/// An overlay carries its own stamp and joins on it, so asking the verdict of
+/// each independently keeps the two consistent without a set of kept stamps to
+/// probe against — one pass each, no hashing.
+///
+/// # Cost
+///
+/// One pass over the bars and one over the overlays, one verdict each. The
+/// verdict is arithmetic against a fixed session table.
+fn keep_in_session(
+    bars: &[store::format::Bar],
+    overlays: &[store::format::Overlay],
+    plan: &Plan<'_>,
+) -> (
+    Vec<store::format::Bar>,
+    Vec<store::format::Overlay>,
+    DropCensus,
+) {
+    let mut census = DropCensus::default();
+    let cadence = plan.request.granularity.cadence();
+    let venue = plan.request.listing.venue();
+    let verdict = |ts_micros: i64| {
+        plan.request
+            .window
+            .verdict(ts_micros.div_euclid(1_000_000), cadence, venue)
+    };
+
+    let mut kept = Vec::with_capacity(bars.len());
+    for bar in bars {
+        // A TIMESTAMP THE CALENDAR CANNOT READ IS A DROP, NOT A HALT. `land`
+        // refuses one because it is decoding the vendor and a stamp it cannot
+        // read means the DECODER is wrong. Here the bar is already built, so
+        // the same value is a bar this engine declines — counted, never stored,
+        // and never silently kept.
+        match verdict(bar.ts_micros) {
+            Ok(None) => kept.push(*bar),
+            Ok(Some(reason)) => census.count(reason),
+            Err(_) => census.count(crate::session::DropReason::BeforeWindow),
+        }
+    }
+    let overlays = overlays
+        .iter()
+        .filter(|o| matches!(verdict(o.ts_micros), Ok(None)))
+        .copied()
+        .collect();
+    (kept, overlays, census)
 }
 
 /// Puts the endpoint that produced these rows onto every refusal they caused.
