@@ -4901,6 +4901,19 @@ const GDFL: Descriptor = Descriptor {
 /// several years"*, a phrase and not a figure — so there is nothing to weigh
 /// against and `contested` is `None`. That is not agreement; it is silence, and
 /// the row says so.
+/// Zerodha's history floors — **and there is a second claim now.**
+///
+/// Both rows carried `contested: None` with the reason that kite.trade's
+/// historical page states no depth at any interval, so nothing weighed against
+/// the operator's figure. That is still true **of the page** and it was never
+/// true of the vendor: the same developer forum that publishes the window caps
+/// publishes depths, and they are shorter than the operator's at one rung by
+/// seven years.
+///
+/// The tie resolves the way [`ClaimStanding`] says it does —
+/// `OperatorObservation` outranks a vendor claim, so 10 years still binds at
+/// both rungs — and the cost of that tier-1 widening is named in each
+/// `binds_because` rather than discovered during a backfill.
 const ZERODHA_HISTORY: &[FloorRow] = &[
     FloorRow {
         granularity: Granularity::Minute1,
@@ -4910,14 +4923,30 @@ const ZERODHA_HISTORY: &[FloorRow] = &[
                      10 years",
             standing: ClaimStanding::OperatorObservation,
         },
-        contested: None,
-        binds_because: "it is the only claim there is. kite.trade's historical \
-                        page states no depth for any interval — the nearest it \
-                        comes is the phrase \"spanning back several years\" — so \
-                        nothing weighs against this and nothing confirms it \
-                        either. UNVERIFIED per rung: the figure was stated \
-                        against the VENDOR, not against a rung, and is applied \
-                        to both unchanged.",
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::Rolling { years: 3 },
+            source: "Zerodha's own Kite Connect developer forum, thread \
+                     kite.trade/forum/discussion/7756, posted by the `kiteapi` \
+                     staff account in August 2020: every intraday rung — minute \
+                     through 60minute — reaches up to 3 years. Captured 19 Aug \
+                     2026. NOT on the historical documentation page, which \
+                     states no depth at any interval.",
+            standing: ClaimStanding::VendorDocument,
+        }),
+        binds_because: "tier 1 of `ClaimStanding::outranks`, and nothing else: \
+                        an operator reporting what his own entitlement answered \
+                        beats a general statement made by a party who does not \
+                        know which entitlement is asking. It is NOT the \
+                        stricter claim — tier 2 would have taken the forum's 3 \
+                        years — and this is the one row in this build where \
+                        tier 1 widens a floor at the ONE-MINUTE rung. THE COST, \
+                        STATED RATHER THAN DISCOVERED: if the forum is right, a \
+                        10-year one-minute backfill spends about seven years of \
+                        windows on answers that come back EMPTY, and an empty \
+                        answer is indistinguishable from a market holiday. \
+                        UNVERIFIED until a request measures it; \
+                        docs/00-charter.md section 4z is where that costs \
+                        something.",
     },
     FloorRow {
         granularity: Granularity::Day1,
@@ -4927,10 +4956,28 @@ const ZERODHA_HISTORY: &[FloorRow] = &[
                      10 years",
             standing: ClaimStanding::OperatorObservation,
         },
-        contested: None,
-        binds_because: "as the rung above, and for the same reason: one source, \
-                        uncontested, applied to both rungs because that is how \
-                        it was stated.",
+        contested: Some(FloorClaim {
+            floor: HistoryFloor::Fixed {
+                year: 1990,
+                month: 1,
+                day: 1,
+            },
+            source: "the same forum thread, kite.trade/forum/discussion/7756, \
+                     kiteapi staff, August 2020: the day rung reaches back to \
+                     1990 for some NSE instruments, and to January 2008 for \
+                     BSE. Captured 19 Aug 2026.",
+            standing: ClaimStanding::VendorDocument,
+        }),
+        binds_because: "tier 1 again, and here it NARROWS rather than widens — \
+                        which is the opposite direction from the rung above and \
+                        costs nothing at all. The forum's day floor is 1990 and \
+                        the operator's is ten rolling years, so believing the \
+                        operator asks for LESS history than the vendor says it \
+                        holds. No request is spent on an empty answer by this \
+                        row; what is given up is depth nobody has asked for. \
+                        The 1990 figure is also hedged in its own source — \
+                        \"for some NSE instruments\" — so it is not a floor \
+                        that would hold per instrument even if it bound.",
     },
 ];
 
@@ -5049,11 +5096,31 @@ const ZERODHA: Descriptor = Descriptor {
             per_day: None,
         },
         history_floor: HistoryFloor::Rolling { years: 10 },
-        // ABSENT, AND THAT IS THE FACT. The historical page states no window
-        // cap for any interval. An absent row means "the vendor bounds nothing
-        // here", so the store's one-month-per-file boundary is the only bound —
-        // and inventing a number would be section 3 rule 1's invention.
-        window_caps: &[],
+        // PRESENT NOW, AND NOT FROM THE PAGE.
+        //
+        // This row was empty and its comment said the vendor bounds nothing
+        // here. The half about the PAGE is still true — kite.trade's historical
+        // page states no span limit at any interval — and the half about the
+        // VENDOR was false. docs/00-charter.md section 4z now carries the
+        // figures from Zerodha's own developer forum, thread
+        // kite.trade/forum/discussion/7756, staff-posted May 2020: a request
+        // spanning more than the permitted days for its interval FAILS.
+        //
+        // Only the two rungs this build asks for are carried. The other six the
+        // vendor publishes (3minute 100 · 5minute 100 · 10minute 100 ·
+        // 15minute 200 · 30minute 200 · 60minute 400) are in the charter and
+        // are not here, because `granularities` does not name them and a cap
+        // for a rung that cannot be requested is a number with no caller.
+        //
+        // THE MINUTE CAP DOES NOT BIND TODAY AND IS STILL LOAD-BEARING. The
+        // store addresses one month per file, so `session::split_window`
+        // already breaks every window at a month boundary — at most 31 days,
+        // inside 60. The row is what makes that a MEASURED margin rather than a
+        // coincidence nobody checked, and it is what refuses first if the store
+        // boundary ever widens.
+        //
+        // The daily cap is the first day-level cap in this table, at any feed.
+        window_caps: &[(Granularity::Minute1, 60), (Granularity::Day1, 2000)],
         // TWO RUNGS OF EIGHT, AND THE NARROWING IS THE OPERATOR'S.
         //
         // The vendor publishes `minute 3minute 5minute 10minute 15minute
@@ -5819,14 +5886,30 @@ mod tests {
                     feed.display()
                 );
             }
-            // AND THE DAY-LEVEL ONE IS NOT, at either broker. A number here is
-            // one somebody invented; `CLAUDE.md` §3 rule 1 forbids it, and an
-            // absent cap is already correct — the store's month boundary binds
-            // at every rung.
+            // AND THE DAY-LEVEL ONE IS A PER-FEED FACT NOW, NOT A BLANKET
+            // ABSENCE.
+            //
+            // This asserted `None` for every feed, with the reason that a
+            // number here would be one somebody invented and §3 rule 1 forbids
+            // it. The rule it enforces is unchanged — a cap appears only where
+            // a source records one — and what changed is that a source now
+            // exists for exactly one feed. docs/00-charter.md §4z carries
+            // Kite's 2,000-day cap from the vendor's own developer forum,
+            // thread kite.trade/forum/discussion/7756.
+            //
+            // NO CATCH-ALL, for the same reason `expected_day_word` below has
+            // none: the failure this pins is somebody filling a cap in from
+            // memory and nothing noticing, and a `_ => None` arm would let a
+            // new row carry any number at all.
+            let expected_day_cap = match feed {
+                Feed::Zerodha => Some(2_000),
+                Feed::Dhan | Feed::Groww | Feed::TrueData | Feed::Gdfl => None,
+            };
             assert_eq!(
                 spec.window_cap_days(Granularity::Day1),
-                None,
-                "{}: no day-level cap is recorded in docs/00-charter.md §4",
+                expected_day_cap,
+                "{}: a day-level cap appears here only where docs/00-charter.md \
+                 §4 records one",
                 feed.display()
             );
             // THE DAILY WORD IS NOW A PER-FEED FACT, NOT A BLANKET ABSENCE.
@@ -7565,13 +7648,19 @@ mod tests {
         //
         // THE CONVERSE IS NOT REQUIRED, and it used to be — this was an
         // `assert_eq!`, reading "a row that displaced nothing says nothing".
-        // That is a rule about the two brokers whose vendor tables disagree
-        // with the operator, and it is wrong about a third whose vendor page
-        // states no depth at all. Zerodha's floor is UNCONTESTED, which is not
-        // the same as agreed: nothing weighs against it and nothing confirms it
-        // either, and that is worth a sentence precisely because it makes the
-        // row different in kind from the two above it. Forcing the reason empty
-        // would have deleted the only place that distinction is written down.
+        // That is a rule about the brokers whose vendor tables disagree with
+        // the operator, and it was wrong about one whose vendor PAGE states no
+        // depth at all.
+        //
+        // THAT EXAMPLE HAS SINCE STOPPED BEING ONE, and the rule it justified
+        // has not. Zerodha's two rows were the uncontested pair — nothing
+        // weighing against them and nothing confirming them — until the
+        // vendor's own developer forum was read on 19 Aug 2026 and turned out
+        // to state depths its documentation page does not. Both rows are
+        // contested now. The one-directional rule stays because a future row
+        // may be uncontested and still worth a sentence; forcing the reason
+        // empty would delete the only place such a distinction can be written
+        // down.
         //
         // So: a contest implies a reason, one-directionally.
         let mut contested = 0;
@@ -7599,7 +7688,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(contested, 3, "three of the four rows are contested");
+        // FIVE OF SIX. Was three of four: Zerodha's two rows joined when the
+        // vendor's forum was read — see the paragraph above. The count is
+        // asserted rather than a lower bound so that DROPPING a contest is as
+        // visible as adding one; a `contested > 0` here would pass for a table
+        // that quietly resolved a disagreement away.
+        assert_eq!(contested, 5, "five of the six rows are contested");
     }
 
     /// THE PER-VENDOR FIELD AND THE PER-RUNG TABLE CANNOT DRIFT APART IN THE
@@ -7710,18 +7804,38 @@ mod tests {
         let _ = by_strictness;
     }
 
-    /// TIER 1 IS THE ONLY THING THAT LETS A FLOOR WIDEN, AND EXACTLY ONE ROW
-    /// USES IT.
+    /// TIER 1 IS THE ONLY THING THAT LETS A FLOOR WIDEN, AND TWO ROWS USE IT.
     ///
-    /// The named case, pinned so that a second one cannot appear unnoticed:
-    /// Groww's one-minute rung binds at the operator's fixed January 2020 over
-    /// the vendor's published rolling quarter, which is SIX YEARS wider. That
-    /// is the cost `ClaimStanding` documents — requests spent on days that may
-    /// answer empty — and it is accepted on exactly this row, on the operator's
-    /// statement of 12 Aug 2026, and marked UNVERIFIED until measured.
+    /// The named cases, pinned so that a third cannot appear unnoticed. Both
+    /// are at the ONE-MINUTE rung, which is not a coincidence: it is the rung
+    /// where a vendor's own table is most likely to be shorter than what an
+    /// entitlement actually answers, and it is the rung where being wrong is
+    /// most expensive, because a minute backfill is thousands of windows per
+    /// instrument rather than tens.
     ///
-    /// If another row ever widens, this test fails and the person adding it has
-    /// to say so here.
+    /// | Feed | Binds at | Displaced | Widened by |
+    /// |---|---|---|---|
+    /// | Groww | the operator's fixed January 2020 | the vendor's published rolling quarter | ~6 years |
+    /// | Zerodha | the operator's rolling 10 years | the vendor forum's 3 years | ~7 years |
+    ///
+    /// **Zerodha's is the second, and this test is where it had to be
+    /// declared.** Its own doc used to say "exactly one row uses it"; that was
+    /// true until the vendor's developer forum was read on 19 Aug 2026 and
+    /// gave a depth its documentation page does not state. The tie resolves by
+    /// `ClaimStanding::outranks` — the operator, watching his own entitlement,
+    /// over a general staff post — and the cost is the one `ClaimStanding`'s
+    /// header documents: requests spent on days that may answer EMPTY, where
+    /// an empty answer is indistinguishable from a market holiday. Accepted on
+    /// the operator's statement of 11 Aug 2026, restated 14 Aug, and marked
+    /// UNVERIFIED until a request measures it.
+    ///
+    /// Zerodha's DAY rung is contested too and is deliberately absent from the
+    /// list below: the forum says 1990 and the operator says ten rolling
+    /// years, so believing the operator asks for LESS. It narrows, which costs
+    /// nothing and spends no request.
+    ///
+    /// If another row ever widens, this test fails and the person adding it
+    /// has to say so here.
     #[test]
     fn only_the_named_row_widens_a_floor_on_standing_alone() {
         let today = day(2026, 8, 12);
@@ -7744,9 +7858,12 @@ mod tests {
         }
         assert_eq!(
             widened,
-            vec![(Feed::Groww, Granularity::Minute1)],
-            "exactly one row widens a floor on standing alone, and it is the \
-             one ClaimStanding's header names"
+            vec![
+                (Feed::Groww, Granularity::Minute1),
+                (Feed::Zerodha, Granularity::Minute1),
+            ],
+            "two rows widen a floor on standing alone, both at the one-minute \
+             rung, and this test's own header is where each had to be declared"
         );
     }
 
