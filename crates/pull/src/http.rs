@@ -1169,7 +1169,10 @@ async fn body_within(
 /// Called only when the status is not a success, and it consumes as much of the
 /// body as [`MAX_REFUSAL_BYTES`] allows — so a caller must not read the body
 /// again afterwards. There is nothing left to read.
-async fn refusal_words(answer: &mut reqwest::Response) -> String {
+async fn refusal_words(
+    answer: &mut reqwest::Response,
+    names: Option<&crate::refusal::ErrorNames>,
+) -> (String, Option<crate::refusal::Disposition>) {
     // A REDIRECT IS A REFUSAL, SO IT HAS TO SAY SO IN WORDS.
     //
     // The client does not follow one (see `HttpSource::new`), which means a 3xx
@@ -1221,11 +1224,26 @@ async fn refusal_words(answer: &mut reqwest::Response) -> String {
     } else {
         trim(&body)
     };
-    match hint {
+    // THE CLASSIFICATION IS TAKEN FROM `body`, NOT FROM `said`.
+    //
+    // `said` is `trim`med to 500 characters, and a Kite envelope orders its
+    // keys `status`, `message`, `error_type` — so a vendor message long enough
+    // pushes the name past the cut. Reading it here, from as much of the body
+    // as this build kept, is the difference between classifying the answer and
+    // classifying a rendering of it.
+    //
+    // `None` all the way through when the feed declares no contract: the whole
+    // `and_then` chain is skipped and nothing is parsed at all, which is what
+    // keeps this free for every feed that has no error page read for it.
+    let verdict = names.and_then(|contract| {
+        crate::refusal::named_error_of(&body, contract.field).and_then(|raw| (contract.read)(&raw))
+    });
+    let words = match hint {
         Some(why) if body.is_empty() => why,
         Some(why) => format!("{why} — and it said: {said}"),
         None => said,
-    }
+    };
+    (words, verdict)
 }
 
 /// The keys of a JSON object, for a refusal that tells an operator what to fix.
@@ -1519,9 +1537,11 @@ impl HttpSource {
             // used to do) took `window_async` past `clippy::too_many_lines`.
             // The behaviour is unchanged by the move and `refusal_words` states
             // what it is.
+            let (detail, named) = refusal_words(&mut answer, self.spec.error_names).await;
             return Err(FetchError::VendorRefused {
                 status,
-                detail: refusal_words(&mut answer).await,
+                detail,
+                named,
             });
         }
 
@@ -2777,7 +2797,7 @@ mod tests {
         );
 
         // And the 302 came back as a refusal that says what happened.
-        let Err(FetchError::VendorRefused { status, detail }) = outcome else {
+        let Err(FetchError::VendorRefused { status, detail, .. }) = outcome else {
             panic!("a redirect is a refusal this build reports, not one it hides")
         };
         assert_eq!(status, 302, "the status reaches the caller");
@@ -2824,7 +2844,7 @@ mod tests {
             .expect("a runtime")
             .block_on(source.window_async(&request));
 
-        let Err(FetchError::VendorRefused { status, detail }) = outcome else {
+        let Err(FetchError::VendorRefused { status, detail, .. }) = outcome else {
             panic!("429 is a refusal the governor needs to see")
         };
         assert_eq!(
@@ -2946,7 +2966,7 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..spec(PriceScale::Rupees)
         };
-        let Err(FetchError::VendorRefused { status, detail }) =
+        let Err(FetchError::VendorRefused { status, detail, .. }) =
             source_of(spec, "SUPERSECRET").block_on_window()
         else {
             panic!("500 is a refusal, however long its body")
@@ -3133,7 +3153,7 @@ mod tests {
         );
         // A 5xx is not the governor's business and is not a redirect either, so
         // it carries neither redirect wording nor a body it does not have.
-        let Err(FetchError::VendorRefused { status, detail }) = outcome else {
+        let Err(FetchError::VendorRefused { status, detail, .. }) = outcome else {
             panic!("500 is a refusal")
         };
         assert_eq!(status, 500);
@@ -3156,7 +3176,7 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..spec(PriceScale::Rupees)
         };
-        let Err(FetchError::VendorRefused { status, detail }) =
+        let Err(FetchError::VendorRefused { status, detail, .. }) =
             source_of(no_location, "SUPERSECRET").block_on_window()
         else {
             panic!("a 307 is still a redirect this build refuses")
@@ -3187,7 +3207,7 @@ mod tests {
             base_url: Box::leak(url.into_boxed_str()),
             ..spec(PriceScale::Rupees)
         };
-        let Err(FetchError::VendorRefused { status, detail }) =
+        let Err(FetchError::VendorRefused { status, detail, .. }) =
             source_of(with_body, "SUPERSECRET").block_on_window()
         else {
             panic!("a 301 is still a redirect this build refuses")

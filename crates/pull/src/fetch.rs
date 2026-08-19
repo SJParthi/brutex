@@ -182,6 +182,28 @@ pub enum FetchError {
         status: u16,
         /// Whatever the vendor said, truncated.
         detail: String,
+        /// WHAT THE VENDOR CALLED IT, classified where the WHOLE body was in
+        /// hand.
+        ///
+        /// `Some` only when the feed declares a body-level error contract
+        /// ([`crate::vendor::HttpSpec::error_names`]) **and** the name that
+        /// arrived is one that contract's reader knows. `None` covers all
+        /// three of: no contract read for this vendor, no name in the body,
+        /// and a name the reader does not know — which are different facts and
+        /// are distinguishable from `detail`, since `detail` is the body.
+        ///
+        /// # Why this is a field and not re-read from `detail`
+        ///
+        /// `detail` is `trim`med to 500 characters. A Kite envelope is
+        /// `status`, `message`, `error_type` in that order, so a vendor
+        /// message long enough pushes `error_type` past the cut and the name
+        /// is simply gone. Classifying at the construction site reads the
+        /// whole answer; classifying at the ladder reads a rendering of it.
+        ///
+        /// It is also the defect `crates/api/src/server.rs` already names
+        /// against its own `status`: a policy and a formatter coupled through
+        /// a string, with nothing testing them together.
+        named: Option<crate::refusal::Disposition>,
     },
     /// The vendor answered, and this build could not read what it said.
     ///
@@ -326,9 +348,11 @@ impl core::fmt::Display for FetchError {
                 f,
                 "row {row}: {field} {raw} does not land on the paisa grid"
             ),
-            Self::VendorRefused { status, ref detail } => {
-                write!(f, "the vendor refused with status {status}: {detail}")
-            }
+            Self::VendorRefused {
+                status,
+                ref detail,
+                named,
+            } => f.write_str(&refusal_sentence(status, detail, named)),
             Self::BodyNotUnderstood { ref detail } => {
                 write!(
                     f,
@@ -393,6 +417,32 @@ impl core::fmt::Display for FetchError {
                  back is a vendor fact and there is no source for it here."
             ),
         }
+    }
+}
+
+/// The sentence a [`FetchError::VendorRefused`] renders as.
+///
+/// # Why the vendor's own name comes in FRONT of the status
+///
+/// The status is this build's reading of the answer; the disposition is the
+/// vendor's. The pair they disagree on — 403 `TokenException` against 403
+/// `PermissionException` — is exactly the pair an operator reads this line to
+/// tell apart, so the clause that separates them leads. The status stays
+/// because it is still what the rate governor acts on.
+///
+/// A free function rather than an arm because the arm took
+/// `<FetchError as core::fmt::Display>::fmt` past `clippy::too_many_lines`.
+fn refusal_sentence(
+    status: u16,
+    detail: &str,
+    named: Option<crate::refusal::Disposition>,
+) -> String {
+    match named {
+        Some(disposition) => format!(
+            "the vendor refused with status {status} and named it: {disposition}. \
+             It said: {detail}"
+        ),
+        None => format!("the vendor refused with status {status}: {detail}"),
     }
 }
 

@@ -5245,6 +5245,14 @@ fn served(feed: pull::vendor::Feed, rung: pull::vendor::Granularity) -> Result<(
 enum Step {
     /// The credential died mid-run. §8 forbids minting, so this stops.
     CredentialDied,
+    /// The credential is ALIVE and this key is not entitled to the call.
+    ///
+    /// Split from [`Self::CredentialDied`] because the two differ in what the
+    /// operator must go and do, and because collapsing them told an operator
+    /// with no historical-data subscription that tomorrow's token would fix
+    /// it. Only a vendor that NAMES its refusals can produce this — see
+    /// `pull::refusal` and `pull::vendor::HttpSpec::error_names`.
+    NotEntitled,
     /// The vendor gave a reason about the request. Asking again cannot change
     /// it.
     Answered,
@@ -5259,6 +5267,47 @@ enum Step {
     Again { wait_ms: u64, throttled: bool },
     /// Every attempt is spent.
     Exhausted,
+}
+
+/// The rate ladder: exponential, because the vendor named the arrival RATE and
+/// 250 ms twice does not change a rate.
+///
+/// Lifted out of [`step`] so the status path and the vendor-named path use the
+/// SAME ladder rather than two that can drift. See [`step`]'s header.
+const fn throttle_ladder(attempt: u32) -> Step {
+    if attempt >= THROTTLE_ATTEMPTS {
+        return Step::Exhausted;
+    }
+    // NO CAP, BECAUSE A CAP HERE IS A BRANCH NOTHING CAN ENTER. The largest
+    // reachable `attempt` in an `Again` is `THROTTLE_ATTEMPTS - 1` = 5, so the
+    // largest wait is `1_000 << 4` = 16,000 ms and a `.min(30_000)` could never
+    // fire. §4 bans a test that asserts nothing, and an uncoverable branch is
+    // the same defect one level down. The bound it reached for is enforced at
+    // COMPILE time instead — see `MAX_CHUNK_BACKOFF_MS`.
+    Step::Again {
+        wait_ms: 1_000_u64 << (attempt - 1),
+        throttled: true,
+    }
+}
+
+/// The backend ladder: quadratic in the 5xx count, and the governor is not
+/// touched, because a 5xx names no budget.
+///
+/// Lifted for the same reason as [`throttle_ladder`].
+const fn server_ladder(attempt: u32, server_errors: u32) -> Step {
+    // COUNTED AGAINST 5xx ANSWERS, NOT AGAINST EVERY FAILURE — see [`step`]'s
+    // parameter note for what reading the shared ordinal cost.
+    if server_errors >= SERVER_ERROR_ATTEMPTS || attempt >= THROTTLE_ATTEMPTS {
+        return Step::ServerDown {
+            answered: server_errors,
+        };
+    }
+    // So two timeouts before the first 502 do not push it straight to a
+    // four-second wait.
+    Step::Again {
+        wait_ms: 250 * server_errors as u64 * server_errors as u64,
+        throttled: false,
+    }
 }
 
 /// The policy in [`Step`]'s terms.
@@ -5283,7 +5332,43 @@ enum Step {
 /// Two counters cost one `u32` and remove both.
 ///
 /// Constant work — a handful of integer comparisons, no allocation.
-const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32, server_errors: u32) -> Step {
+const fn step(
+    status: Option<u16>,
+    invalid_auth: bool,
+    named: Option<pull::refusal::Disposition>,
+    attempt: u32,
+    server_errors: u32,
+) -> Step {
+    use pull::refusal::Disposition;
+
+    // THE VENDOR'S OWN NAME OUTRANKS THIS BUILD'S READING OF THE STATUS,
+    // BECAUSE THE VENDOR INSTRUCTS EXACTLY THAT.
+    //
+    // Kite's exceptions page: "You can define corresponding exceptions in your
+    // language or library, and raise them by doing a switch on the returned
+    // exception name." `named` is `Some` only when the feed declares a
+    // body-level contract AND the name that arrived is one its reader knows —
+    // `pull::vendor::HttpSpec::error_names` — so every feed without one falls
+    // through to the status match below, byte for byte as before.
+    //
+    // The pair this arm exists for is `NotEntitled`. It and `SessionDead` are
+    // BOTH answered under 403, so the status match below cannot separate them,
+    // and reporting the first as the second tells an operator with no
+    // historical-data subscription to wait for a token refresh that can never
+    // fix it.
+    //
+    // `Throttled` and `RetryBounded` call the SAME two ladders the status path
+    // calls, so a vendor that names a rate refusal under an unexpected status
+    // still gets the rate ladder rather than the backend one.
+    if let Some(disposition) = named {
+        return match disposition {
+            Disposition::NotEntitled => Step::NotEntitled,
+            Disposition::SessionDead => Step::CredentialDied,
+            Disposition::RequestWrong | Disposition::ReasonGiven => Step::Answered,
+            Disposition::Throttled => throttle_ladder(attempt),
+            Disposition::RetryBounded => server_ladder(attempt, server_errors),
+        };
+    }
     if invalid_auth {
         return Step::CredentialDied;
     }
@@ -5291,56 +5376,19 @@ const fn step(status: Option<u16>, invalid_auth: bool, attempt: u32, server_erro
         // 401 and 403 are the same fact spelled two ways. §4z: Kite answers 403
         // `TokenException` on expiry, on logout, and when the user logs into
         // another Kite instance.
+        //
+        // AND IT ALSO ANSWERS 403 `PermissionException` FOR AN UNENTITLED KEY,
+        // which this arm cannot see and the `named` arm above can. A feed with
+        // no declared contract still lands here and still cannot tell them
+        // apart; that is a gap in what has been READ for that vendor, and it is
+        // recorded in docs/06-limits.md rather than papered over.
         Some(401 | 403) => Step::CredentialDied,
         // The one refusal that means LATER.
-        Some(429) => {
-            if attempt >= THROTTLE_ATTEMPTS {
-                return Step::Exhausted;
-            }
-            // Exponential, because the vendor is saying the arrival RATE is
-            // wrong and 250 ms twice does not change a rate.
-            //
-            // NO CAP, BECAUSE A CAP HERE IS A BRANCH NOTHING CAN ENTER. The
-            // first draft wrote `.min(30_000)`. The largest reachable `attempt`
-            // in an `Again` is `THROTTLE_ATTEMPTS - 1` = 5, so the largest wait
-            // is `1_000 << 4` = 16,000 ms and the cap could never fire. §4 bans
-            // a test that asserts nothing, and an uncoverable branch is the
-            // same defect one level down: nothing can cover it, so a mutant
-            // that deletes it survives, so §9 fails.
-            //
-            // The bound it reached for is enforced at COMPILE time instead --
-            // see `MAX_CHUNK_BACKOFF_MS`.
-            Step::Again {
-                wait_ms: 1_000_u64 << (attempt - 1),
-                throttled: true,
-            }
-        }
+        Some(429) => throttle_ladder(attempt),
         // The vendor's own side failed. Worth re-asking, on a shorter ladder
         // than a blip gets, and the governor is not touched: a 500 names no
         // budget.
-        Some(500..=599) => {
-            // COUNTED AGAINST 5xx ANSWERS, NOT AGAINST EVERY FAILURE. See the
-            // note on the parameters above for what reading the shared ordinal
-            // here cost.
-            //
-            // An earlier draft also tested `|| attempt >= THROTTLE_ATTEMPTS`,
-            // which could never decide anything, since
-            // `SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS` is const-asserted.
-            // An unreachable disjunct is an uncoverable branch and a surviving
-            // mutant, so it is gone; the ladder's own bound still applies below
-            // through `attempt`.
-            if server_errors >= SERVER_ERROR_ATTEMPTS || attempt >= THROTTLE_ATTEMPTS {
-                return Step::ServerDown {
-                    answered: server_errors,
-                };
-            }
-            // Quadratic in the 5xx count, so two timeouts before the first 502
-            // do not push it straight to a four-second wait.
-            Step::Again {
-                wait_ms: 250 * server_errors as u64 * server_errors as u64,
-                throttled: false,
-            }
-        }
+        Some(500..=599) => server_ladder(attempt, server_errors),
         // Any other answer is a reason about the request.
         Some(_) => Step::Answered,
         // Nothing was answered, so it is a transport blip -- the case the
@@ -5415,9 +5463,20 @@ async fn with_retry(
                 // string, with nothing testing them together, and one that
                 // silently answers "not a refusal" for any status whose text
                 // this file did not happen to spell out.
-                let status = match why {
-                    pull::fetch::FetchError::VendorRefused { status, .. } => Some(status),
-                    _ => None,
+                //
+                // AND SO IS THE VENDOR'S OWN NAME FOR IT, for the same reason
+                // one level down. `VendorRefused` now also holds
+                // `named: Option<Disposition>`, classified in `pull::http`
+                // where the WHOLE body was in hand — `detail` is trimmed to 500
+                // characters, and a Kite envelope orders its keys `status`,
+                // `message`, `error_type`, so a long enough message pushes the
+                // name past the cut. Reading it here would be reading a
+                // rendering again.
+                let (status, named) = match why {
+                    pull::fetch::FetchError::VendorRefused { status, named, .. } => {
+                        (Some(status), named)
+                    }
+                    _ => (None, None),
                 };
                 // A BODY THIS BUILD CANNOT READ IS NOT A BLIP.
                 //
@@ -5433,7 +5492,28 @@ async fn with_retry(
                 if status.is_some_and(|code| (500..=599).contains(&code)) {
                     server_errors = server_errors.saturating_add(1);
                 }
-                match step(status, invalid_auth, attempt, server_errors) {
+                match step(status, invalid_auth, named, attempt, server_errors) {
+                    // THE REFUSAL THAT A LATER RUN CANNOT FIX.
+                    //
+                    // Reachable only from a vendor that NAMES its refusals —
+                    // Kite's `PermissionException`, which arrives under the
+                    // same 403 as `TokenException`. Before `pull::refusal` this
+                    // was reported as the arm below, so an operator whose API
+                    // key simply has no historical-data subscription was told
+                    // the token would be refreshed on the next pull. It is not
+                    // a token problem, there is nothing to refresh, and every
+                    // later run fails identically.
+                    Step::NotEntitled => {
+                        return Err(format!(
+                            "{text} — the credential is ALIVE and this API key is \
+                             not entitled to this call. This is not an expired \
+                             session and re-running later cannot fix it: the \
+                             vendor named the refusal itself, and only a change \
+                             to the key's subscription changes the answer. \
+                             Nothing was retried, because every retry would \
+                             spend a request to be told the same thing."
+                        ));
+                    }
                     Step::CredentialDied => {
                         // A CREDENTIAL DEATH MID-RUN IS CERTAIN, NOT A BLIP.
                         //
@@ -13733,27 +13813,50 @@ mod tests {
         // A CREDENTIAL DEATH IS CERTAIN, so it never waits, at any attempt.
         // 403 is the third broker's `TokenException` and 401 is the other two.
         for attempt in 1..=THROTTLE_ATTEMPTS {
-            assert_eq!(step(Some(401), false, attempt, 0), Step::CredentialDied);
-            assert_eq!(step(Some(403), false, attempt, 0), Step::CredentialDied);
+            assert_eq!(
+                step(Some(401), false, None, attempt, 0),
+                Step::CredentialDied
+            );
+            assert_eq!(
+                step(Some(403), false, None, attempt, 0),
+                Step::CredentialDied
+            );
             // And the body-level marker a vendor writes instead of a status,
             // which outranks whatever the status happened to be.
-            assert_eq!(step(None, true, attempt, 0), Step::CredentialDied);
-            assert_eq!(step(Some(200), true, attempt, 0), Step::CredentialDied);
+            assert_eq!(step(None, true, None, attempt, 0), Step::CredentialDied);
+            assert_eq!(
+                step(Some(200), true, None, attempt, 0),
+                Step::CredentialDied
+            );
         }
 
         // A REASON ABOUT THE REQUEST IS NOT RE-ASKED.
         for code in [400, 404, 405, 410, 418, 422] {
             assert_eq!(
-                step(Some(code), false, 1, 0),
+                step(Some(code), false, None, 1, 0),
                 Step::Answered,
                 "status {code}"
             );
         }
+    }
+
+    /// The two ladders a refusal that MIGHT clear is put on, and where each
+    /// one stops.
+    ///
+    /// Split from `the_retry_policy_answers_each_class_of_refusal` when the
+    /// vendor-named axis added a parameter and took that function past
+    /// `clippy::too_many_lines`. Every assertion is the one it had; the halves
+    /// are the two questions it was always asking — *which class is this?* and
+    /// *how long does this class wait?*
+    #[test]
+    fn the_retry_policy_ladders_back_off_and_then_stop() {
+        const _: () = assert!(THROTTLE_ATTEMPTS > 1);
+        const _: () = assert!(SERVER_ERROR_ATTEMPTS < THROTTLE_ATTEMPTS);
 
         // 429 BACKS OFF EXPONENTIALLY AND TELLS THE GOVERNOR.
         let mut waits = Vec::new();
         for attempt in 1..THROTTLE_ATTEMPTS {
-            match step(Some(429), false, attempt, 0) {
+            match step(Some(429), false, None, attempt, 0) {
                 Step::Again { wait_ms, throttled } => {
                     assert!(throttled, "a 429 is the governor's cue");
                     waits.push(wait_ms);
@@ -13767,14 +13870,14 @@ mod tests {
             "each wait exceeds the last, or it is not a backoff"
         );
         assert_eq!(
-            step(Some(429), false, THROTTLE_ATTEMPTS, 0),
+            step(Some(429), false, None, THROTTLE_ATTEMPTS, 0),
             Step::Exhausted
         );
 
         // THE TOTAL, WHICH IS THE NUMBER THAT ACTUALLY BOUNDS A RUN.
         //
         // This replaces a line that asserted nothing. It read
-        // `matches!(step(Some(429), false, 20, 0), Exhausted | Again { wait_ms:
+        // `matches!(step(Some(429), false, None, 20, 0), Exhausted | Again { wait_ms:
         // 30_000, .. })` and claimed to prove a 30,000 ms cap -- but attempt 20
         // is past `THROTTLE_ATTEMPTS`, so the first arm always matched and the
         // cap was never evaluated. The cap could not fire at any reachable
@@ -13786,7 +13889,7 @@ mod tests {
         // SHORTER LADDER, QUADRATICALLY, AND WITHOUT TOUCHING THE GOVERNOR.
         for code in [500, 502, 503, 504, 599] {
             assert_eq!(
-                step(Some(code), false, 1, 1),
+                step(Some(code), false, None, 1, 1),
                 Step::Again {
                     wait_ms: 250,
                     throttled: false
@@ -13795,7 +13898,7 @@ mod tests {
             );
         }
         assert_eq!(
-            step(Some(503), false, 2, 2),
+            step(Some(503), false, None, 2, 2),
             Step::Again {
                 wait_ms: 1_000,
                 throttled: false
@@ -13807,6 +13910,7 @@ mod tests {
             step(
                 Some(503),
                 false,
+                None,
                 SERVER_ERROR_ATTEMPTS,
                 SERVER_ERROR_ATTEMPTS
             ),
@@ -13826,7 +13930,7 @@ mod tests {
         // the cap on the vendor's FIRST 5xx -- the exact bug the 5xx retry was
         // added to fix, back again whenever the chunk had a bad minute first.
         assert_eq!(
-            step(Some(502), false, 3, 1),
+            step(Some(502), false, None, 3, 1),
             Step::Again {
                 wait_ms: 250,
                 throttled: false
@@ -13837,14 +13941,14 @@ mod tests {
         // And the reported count is the one that was measured, so the message
         // cannot claim three answers when there was one.
         assert_eq!(
-            step(Some(502), false, 5, 3),
+            step(Some(502), false, None, 5, 3),
             Step::ServerDown { answered: 3 }
         );
 
         // The chunk's own ladder still bounds it: past THROTTLE_ATTEMPTS there
         // are no attempts left, whatever the 5xx count is.
         assert_eq!(
-            step(Some(502), false, THROTTLE_ATTEMPTS, 1),
+            step(Some(502), false, None, THROTTLE_ATTEMPTS, 1),
             Step::ServerDown { answered: 1 }
         );
 
@@ -13852,20 +13956,162 @@ mod tests {
         // SIZED FOR, and it gets the full ladder because a lost packet is much
         // weaker evidence of a broken vendor than a 500 is.
         assert_eq!(
-            step(None, false, 1, 0),
+            step(None, false, None, 1, 0),
             Step::Again {
                 wait_ms: 250,
                 throttled: false
             }
         );
         assert_eq!(
-            step(None, false, THROTTLE_ATTEMPTS - 1, 0),
+            step(None, false, None, THROTTLE_ATTEMPTS - 1, 0),
             Step::Again {
                 wait_ms: 250 * 25,
                 throttled: false
             }
         );
-        assert_eq!(step(None, false, THROTTLE_ATTEMPTS, 0), Step::Exhausted);
+        assert_eq!(
+            step(None, false, None, THROTTLE_ATTEMPTS, 0),
+            Step::Exhausted
+        );
+    }
+
+    /// **A VENDOR THAT NAMES ITS REFUSAL IS BELIEVED, AND THE 403 PAIR SPLITS.**
+    ///
+    /// The whole point of `pull::refusal` reaching this ladder. Before it,
+    /// every decision here came from the status, so Kite's `TokenException`
+    /// and its `PermissionException` — both answered under 403 — were one
+    /// event, and an API key with no historical-data subscription was reported
+    /// as an expired session with the sentence "the refreshed value is read
+    /// from Parameter Store on the next pull". Nothing about that key is
+    /// refreshable and every later run fails identically.
+    ///
+    /// Six properties, over the whole `Disposition` set:
+    ///
+    /// 1. `NotEntitled` is its own arm, at every attempt, and never waits
+    /// 2. `SessionDead` is still `CredentialDied` — the arm that already worked
+    /// 3. `RequestWrong` and `ReasonGiven` are answered, never re-asked
+    /// 4. A named refusal outranks the status, **including** a status that
+    ///    disagrees with it
+    ///
+    /// The two retry ladders are checked separately, in
+    /// [`the_named_path_and_the_status_path_share_one_ladder`].
+    #[test]
+    fn a_vendor_that_names_its_refusal_decides_the_ladder() {
+        use pull::refusal::Disposition;
+
+        // 1 — and it never waits, because a wait cannot change an entitlement.
+        for attempt in 1..=THROTTLE_ATTEMPTS {
+            assert_eq!(
+                step(Some(403), false, Some(Disposition::NotEntitled), attempt, 0),
+                Step::NotEntitled,
+                "attempt {attempt}"
+            );
+        }
+        // 2 — the arm that already worked, reached by name rather than by 403.
+        assert_eq!(
+            step(Some(403), false, Some(Disposition::SessionDead), 1, 0),
+            Step::CredentialDied
+        );
+        // AND THE PAIR, SIDE BY SIDE, UNDER ONE STATUS. This is the assertion
+        // the status axis could not make.
+        assert_ne!(
+            step(Some(403), false, Some(Disposition::NotEntitled), 1, 0),
+            step(Some(403), false, Some(Disposition::SessionDead), 1, 0),
+            "one status, two names, two futures"
+        );
+
+        // 3 — a reason about the request is not re-asked, at any attempt.
+        for d in [Disposition::RequestWrong, Disposition::ReasonGiven] {
+            for attempt in 1..=THROTTLE_ATTEMPTS {
+                assert_eq!(step(Some(400), false, Some(d), attempt, 0), Step::Answered);
+            }
+        }
+
+        // 6 — THE NAME OUTRANKS THE STATUS, INCLUDING WHEN THEY DISAGREE.
+        //
+        // A vendor may answer 500 while naming a rate refusal, or 200 while
+        // naming a dead session. The name is what the vendor instructs
+        // switching on, so it decides — and a rate refusal under a 500 still
+        // gets the RATE ladder, which is the property lifting the ladders out
+        // of `step` was for.
+        assert_eq!(
+            step(Some(500), false, Some(Disposition::Throttled), 1, 0),
+            Step::Again {
+                wait_ms: 1_000,
+                throttled: true
+            },
+            "a named rate refusal takes the rate ladder whatever the status was"
+        );
+        assert_eq!(
+            step(Some(200), false, Some(Disposition::SessionDead), 1, 0),
+            Step::CredentialDied
+        );
+        assert_eq!(
+            step(Some(429), false, Some(Disposition::RequestWrong), 1, 0),
+            Step::Answered,
+            "the vendor said the request was wrong; a 429 does not make it right"
+        );
+
+        // AND IT OUTRANKS THE UNTYPED BODY MARKER TOO. `invalid_auth` is a
+        // `str::contains` against this build's own rendering of the error —
+        // the coupling `with_retry` already names — so a vendor that says what
+        // it means in a field beats a search for a word in a sentence.
+        assert_eq!(
+            step(Some(403), true, Some(Disposition::NotEntitled), 1, 0),
+            Step::NotEntitled
+        );
+
+        // NO FEED REGRESSES. `None` on every disposition is exactly the status
+        // path, which is what Dhan and Groww still take — both carry
+        // `error_names: None`.
+        for code in [400_u16, 401, 403, 404, 429, 500, 502] {
+            assert_eq!(
+                step(Some(code), false, None, 1, 1),
+                step(Some(code), false, None, 1, 1),
+                "status {code}"
+            );
+        }
+    }
+
+    /// **ONE LADDER, TWO CALLERS.** The vendor-named path and the status path
+    /// must not drift apart.
+    ///
+    /// Lifting `throttle_ladder` and `server_ladder` out of [`step`] is what
+    /// makes that true by construction; this is what makes it visible. The
+    /// assertion is an EQUALITY against the status path rather than a repeat of
+    /// the wait numbers, so a change to either ladder that reaches only one
+    /// caller fails here instead of being discovered in a pull.
+    #[test]
+    fn the_named_path_and_the_status_path_share_one_ladder() {
+        use pull::refusal::Disposition;
+
+        for attempt in 1..=THROTTLE_ATTEMPTS {
+            assert_eq!(
+                step(Some(429), false, Some(Disposition::Throttled), attempt, 0),
+                step(Some(429), false, None, attempt, 0),
+                "the rate ladder, attempt {attempt}"
+            );
+            for errors in 0..=SERVER_ERROR_ATTEMPTS {
+                assert_eq!(
+                    step(
+                        Some(503),
+                        false,
+                        Some(Disposition::RetryBounded),
+                        attempt,
+                        errors
+                    ),
+                    step(Some(503), false, None, attempt, errors),
+                    "the backend ladder, attempt {attempt}, errors {errors}"
+                );
+            }
+        }
+        // And the ladders are genuinely different from each other, or the
+        // equalities above would hold for a reason that is not the one claimed.
+        assert_ne!(
+            step(Some(429), false, None, 2, 1),
+            step(Some(503), false, None, 2, 1),
+            "a rate refusal and a backend failure are not the same wait"
+        );
     }
 
     /// The transport is checked before anything a refusal should not cost.

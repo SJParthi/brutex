@@ -525,6 +525,9 @@ fn every_fetch_refusal_prints_a_sentence_of_its_own() {
         FetchError::VendorRefused {
             status: 429,
             detail: "SLOW DOWN".to_owned(),
+            // A fixture, and a feed with no contract declared answers exactly
+            // this. See `HttpSpec::error_names`.
+            named: None,
         },
         FetchError::TransportFailed {
             detail: "NO ROUTE".to_owned(),
@@ -617,6 +620,7 @@ fn the_fake_source_answers_from_memory_and_can_be_told_to_refuse() {
     let refusing = FakeSource::refusing(FetchError::VendorRefused {
         status: 500,
         detail: "BROKEN".to_owned(),
+        named: None,
     });
     assert_eq!(
         refusing
@@ -625,6 +629,7 @@ fn the_fake_source_answers_from_memory_and_can_be_told_to_refuse() {
         FetchError::VendorRefused {
             status: 500,
             detail: "BROKEN".to_owned(),
+            named: None,
         }
     );
     assert!(
