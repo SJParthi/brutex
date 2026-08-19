@@ -872,10 +872,6 @@
     'July', 'August', 'September', 'October', 'November', 'December'
   ];
 
-  /** One virtual row, in pixels. Must equal `--row-h` or the spacer lies. */
-  const ROW_H = 30;
-  /** Rows kept above and below the viewport so a fast scroll does not tear. */
-  const OVERSCAN = 8;
   /** Prefix depth of the outcome search index — the same bound `$lib/index` uses. */
   const MAX_PREFIX = 4;
 
@@ -4835,9 +4831,6 @@
    * refusals, and the ones nothing accounted for. `Already held` is not short —
    * the store has it — and `Outside the universe` was never asked for.
    */
-  const shortCount = $derived(
-    countIn(GROUP.failed) + countIn(GROUP.refused) + countIn(GROUP.silent)
-  );
   /**
    * THE ONE VERDICT, in the four states that answer four different questions.
    * Collapsing any two would answer a question nobody asked: "as complete as it
@@ -4922,98 +4915,13 @@
    * that says whether this button is the thing to fix. Nothing is lost and
    * nothing is repeated: `rerunBlock` still carries every word.
    */
-  const rerunShort = $derived.by(() => {
-    if (phase === 'running') return 'a pull is already on the wire';
-    if (problems.length > 0) {
-      const fields = [...new Set(problems.map((p) => p.field))].join(', ');
-      return `${n(problems.length)} thing(s) to fix above — ${fields}`;
-    }
-    return null;
-  });
-
-  let q = $state('');
-  /** @type {string | null} */
-  let pickedGroup = $state(null);
-  let sortKey = $state('group');
-  let sortDir = $state(1);
-
-  const filtered = $derived.by(() => {
-    const typed = q.trim().toUpperCase();
-    // ONE PROBE for 1..4 characters; a filter over one bucket beyond that. The
-    // group narrowing is applied to whichever set is already smaller, so the
-    // cost is bounded by the bucket and never by the universe.
-    let base;
-    if (!typed) base = outcomes;
-    else if (typed.length <= MAX_PREFIX) base = outcomeIndex.get(typed) ?? [];
-    else base = (outcomeIndex.get(typed.slice(0, MAX_PREFIX)) ?? []).filter((r) => r.symbol.toUpperCase().startsWith(typed));
-    const narrowed = pickedGroup ? base.filter((r) => r.group === pickedGroup) : base;
-    const dir = sortDir;
-    const sorted = [...narrowed];
-    sorted.sort((a, b) => {
-      if (sortKey === 'gained') return (a.gained - b.gained) * dir;
-      if (sortKey === 'symbol') return a.symbol.localeCompare(b.symbol) * dir;
-      // THE ORDINAL, NOT THE PROSE. `GROUP_ORDER` states what "first" means
-      // here; the label is what the row shows and nothing else. Symbol breaks
-      // ties inside a rank so the list is stable between renders.
-      return (groupRank(a.group) - groupRank(b.group) || a.symbol.localeCompare(b.symbol)) * dir;
-    });
-    return sorted;
-  });
-
-  /** @param {string} key */
-  function sortBy(key) {
-    if (sortKey === key) sortDir = -sortDir;
-    else {
-      sortKey = key;
-      sortDir = key === 'gained' ? -1 : 1;
-    }
-  }
-
-  // --------------------------------------------------------- virtualisation
-  //
-  // ONLY THE VISIBLE ROWS ARE IN THE DOM. 750 today; the store is heading for
-  // ~93,776 census rows and a target list that grows with it. A spacer carries
-  // the full height so the scrollbar is honest.
-
-  /** @type {HTMLDivElement | null} */
-  let vEl = $state(null);
-  let vTop = $state(0);
-  let vH = $state(420);
-  const vFirst = $derived(Math.max(0, Math.floor(vTop / ROW_H) - OVERSCAN));
-  const vCount = $derived(Math.min(filtered.length - vFirst, Math.ceil(vH / ROW_H) + OVERSCAN * 2));
-  const vSlice = $derived(filtered.slice(vFirst, vFirst + Math.max(0, vCount)));
-
-  function onScroll() {
-    if (vEl) vTop = vEl.scrollTop;
-  }
-
-  $effect(() => {
-    if (!vEl) return;
-    // CAPTURED, NOT RE-READ. `vEl` is `$state` and the observer callback fires
-    // LATER — after a route change or a conditional block closing, the binding
-    // can be null by the time it runs, and `vEl.clientHeight` inside the
-    // callback would throw on a page the operator has already left. The early
-    // return above proves nothing about a callback that outlives it.
-    //
-    // Holding the element the observer was attached to also makes the two agree
-    // by construction: it can only ever measure the node it observes.
-    const el = vEl;
-    const ro = new ResizeObserver(() => {
-      vH = el.clientHeight;
-    });
-    ro.observe(el);
-    vH = el.clientHeight;
-    return () => ro.disconnect();
-  });
-
-  // Re-filtering must not leave the viewport scrolled past the end.
-  $effect(() => {
-    const max = Math.max(0, filtered.length * ROW_H - vH);
-    if (vTop > max && vEl) {
-      vEl.scrollTop = max;
-      vTop = max;
-    }
-  });
+  /* REMOVED with the outcome card: its symbol filter (`q`), its group
+     narrowing, its sort, and the virtualiser that drew it -- `vEl`, `vTop`,
+     `vH`, `vFirst`, `vCount`, `vSlice`, `onScroll`, the ResizeObserver that
+     measured the box and the effect that kept the scroll inside it. None of
+     it had a reader once the card went, and a virtualiser with nothing to
+     virtualise is the orphaned-machinery pattern this page has been
+     shedding. */
 
   // ------------------------------------------------------------ the calendar
   //
@@ -5514,8 +5422,6 @@
     outcomes = [];
     outcomeIndex = new Map();
     samples = [];
-    q = '';
-    pickedGroup = null;
 
     // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every outcome
     // below is a difference against it; without one there is nothing to
@@ -6914,197 +6820,17 @@
            SAY something still do: "not built yet" while the second store
            reading is outstanding, and the diagnostic when a finished run
            produced no rows at all. -->
-      {#if phase !== 'idle'}
-      <section class="card wide rise">
-        <header class="card-h">
-          <span class="pane-title">Every instrument this request named</span>
-          <span class="spacer"></span>
-          {#if outcomes.length > 0}
-            <span class="tag">{n(filtered.length)} shown of {n(outcomes.length)}</span>
-          {/if}
-        </header>
+      <!-- REMOVED, AT THE OPERATOR'S INSTRUCTION: the whole "Every instrument
+           this request named" card. It drew only after a run and carried a
+           verdict strip, its own symbol filter, a sort bar and a virtualised
+           outcome list -- 191 lines between the form and the census.
 
-        {#if outcomes.length === 0}
-          <div class="empty">
-            {#if phase === 'running'}
-              The outcome list is built when the run answers — it is a difference between the store
-              before and the store after, and the second reading does not exist yet.
-            {:else}
-              No outcome rows. The universe named
-              {n(members.length)} instrument(s) and nothing could be compared — most likely the
-              catalogue is unavailable, which the header says.
-            {/if}
-          </div>
-        {:else}
-          <!-- ======================================= THE VERDICT STRIP =====
-               AT THE HEAD OF THE TABLE, AND IT ANSWERS THE ONE QUESTION THE
-               PAGE EXISTS FOR: did the window land? One sentence, the judgement
-               under it, the non-zero counts as filters, the total they have to
-               reach, and the one bulk action.
-
-               EVERY NUMBER IS READ, NOT RECOMPUTED. `pills`, `countIn` and
-               `landed` are arithmetic over `groups`, which is one pass over the
-               same `outcomes` rows the table below draws — so a pill, the
-               sentence and the Verdict column are three views of one
-               classification and cannot disagree.
-               ============================================================ -->
-          <div class="lstrip {landed?.tone ?? ''}">
-            {#if landed}
-              <!-- REMOVED: the landed sentence. The Outcome COLUMN carries it. -->
-            {/if}
-
-            <!-- NON-ZERO ONLY. `groups` is built from rows that exist, so a
-                 bucket nobody is in has no pill — a chip reading "0 failed" is
-                 a non-event given the same weight as a result, and five of them
-                 bury the one that matters. Clicking the pill that is already on
-                 clears the filter, which is why there is no "All" chip. -->
-            <div class="lpills">
-              {#each pills as g (g.group)}
-                <button
-                  class="lp"
-                  type="button"
-                  aria-pressed={pickedGroup === g.group}
-                  class:on={pickedGroup === g.group}
-                  title={pickedGroup === g.group
-                    ? `Showing only these ${n(g.count)}. Click again to show every row.`
-                    : `Click to show only these ${n(g.count)} — the same rows the Verdict column marks "${g.group}".`}
-                  onclick={() => (pickedGroup = pickedGroup === g.group ? null : g.group)}
-                >
-                  <span class="dot" class:up={g.tone === 'up'} class:down={g.tone === 'down'} class:warn={g.tone === 'warn'} class:acc={g.tone === 'info'}></span>
-                  <span class="n">{n(g.count)}</span>
-                  {g.group}
-                </button>
-              {/each}
-            </div>
-
-            <!-- THE TOTAL THE PILLS HAVE TO REACH, and it SHOUTS when they do
-                 not: a partition that does not add up is a tidy number hiding a
-                 row nobody accounted for. It is counted here rather than
-                 asserted, from the same two lists. -->
-            {#if pills.reduce((a, g) => a + g.count, 0) === outcomes.length}
-              <span class="ltot">of {n(outcomes.length)} instrument(s)</span>
-            {:else}
-              <span class="ltot bad">
-                MISMATCH — {n(outcomes.length)} row(s), {n(pills.reduce((a, g) => a + g.count, 0))}
-                accounted for
-              </span>
-            {/if}
-
-            <!-- THE ONE BULK ACTION, AND IT ASKS FOR EXACTLY WHAT THE FORM
-                 ABOVE ASKS FOR.
-                 IT CANNOT ASK FOR LESS, AND THE LABEL SAYS SO RATHER THAN
-                 IMPLYING OTHERWISE. `api::ingest::SpotRequest` carries a
-                 target, a window, a feed and a granularity — there is no member
-                 list on it — so a pull restricted to the N short instruments
-                 has nothing to travel on. A button labelled "pull these N"
-                 would be a control that quietly did something else, which is
-                 the fallback CLAUDE.md §4 bans. -->
-            {#if shortCount > 0}
-              <div class="lact">
-                <button
-                  class="btn primary sm"
-                  type="button"
-                  disabled={rerunBlock !== null}
-                  title={rerunBlock
-                    ? `Cannot be pressed: ${rerunBlock}`
-                    : `Sends the same POST /pull/spot again for ${dayLabel(from)} – ${dayLabel(to)}, carrying whatever is ticked above. It is NOT narrowed to the ${n(shortCount)} short instruments, and that is this page's limit rather than the route's: SpotRequest does carry a member set and broker_run filters on it, but nothing here builds a member list out of the short set — it re-sends the ticked one. Untick down to the short names and the request follows.`}
-                  onclick={() => start()}
-                >
-                  Pull the window again — {n(shortCount)} short
-                </button>
-                {#if rerunShort}
-                  <span class="hint warn" title={rerunBlock}>Cannot be pressed: {rerunShort}</span>
-                {/if}
-              </div>
-            {/if}
-          </div>
-
-          {#if hiddenFailures > 0}
-            <p class="caution loud">
-              <span class="tag down">truncated by the server</span>
-              <span class="msg">
-                This run recorded <b>{n(failedCount)}</b> failed member(s) and put
-                <b>{n(namedFailures.length)}</b> reason(s) on the wire.
-                <span class="mono">crates/api/src/server.rs</span> renders
-                <span class="mono">done.failures.iter().take(5)</span>, so
-                <b>{n(hiddenFailures)}</b> reason(s) were never sent and cannot be shown here. The
-                rows below fall back to the measured store difference for those members, which says
-                WHAT happened but not WHY.
-              </span>
-            </p>
-          {/if}
-
-          {#if pickedGroup}
-            {#each groups.filter((g) => g.group === pickedGroup) as g (g.group)}
-              <ul class="reasons">
-                {#each [...g.reasons.entries()].sort((a, b) => b[1] - a[1]) as [why, count] (why)}
-                  <li><span class="tag" class:down={g.tone === 'down'} class:warn={g.tone === 'warn'} class:up={g.tone === 'up'}>{n(count)}</span>{why}</li>
-                {/each}
-              </ul>
-            {/each}
-          {/if}
-
-          <div class="obar">
-            <!-- TWO SEARCH BOXES STAND ON THIS PAGE ONCE A RUN HAS HAPPENED,
-                 and they are not the same control twice. This one filters THIS
-                 RUN'S outcome list; the one at the head of the census filters
-                 the store's census. Different populations, different lifetimes
-                 — this list does not exist until a run answers.
-                 They also MATCH DIFFERENTLY, and that is the part a reader
-                 cannot be left to discover: this is `startsWith`, the census is
-                 `includes`. Typing BANK here finds BANKNIFTY and nothing else,
-                 while the same four characters below find AXISBANK, HDFCBANK,
-                 ICICIBANK and KOTAKBANK. So each box says which table it
-                 narrows and which rule it uses, on its face. -->
-            <input
-              class="search"
-              type="search"
-              bind:value={q}
-              placeholder="Filter the {n(outcomes.length)} instrument(s) this run touched — symbol starts with"
-              aria-label="Filter this run's outcomes by symbol"
-              title={`Narrows THIS RUN'S outcome list — the ${n(outcomes.length)} instrument(s) the request named and what each one gained. Not the census below, which is a different table over a different population and outlives this run. Matches from the START of the symbol, so BANK finds BANKNIFTY and not AXISBANK; the census box matches any part of a symbol. One Map probe per keystroke against a prefix index built once per run, never a scan.`}
-            />
-          </div>
-
-          <div class="ohead">
-            <button class="sort" onclick={() => sortBy('symbol')}>
-              Instrument{sortKey === 'symbol' ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}
-            </button>
-            <!-- The order this column sorts in is a decision, not the alphabet,
-                 so it is written down where the reader can find it. -->
-            <button class="sort" onclick={() => sortBy('group')} title={`Most actionable first: ${GROUP_ORDER.join(' → ')}. Not alphabetical — the label is prose and prose has no order.`}>
-              Outcome{sortKey === 'group' ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}
-            </button>
-            <button class="sort num" onclick={() => sortBy('gained')}>
-              Bars gained{sortKey === 'gained' ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}
-            </button>
-            <span>Why</span>
-          </div>
-
-          <div class="vlist olist" bind:this={vEl} onscroll={onScroll}>
-            {#if filtered.length === 0}
-              <div class="empty">
-                Nothing matches <span class="mono">{q}</span>{pickedGroup ? ` in "${pickedGroup}"` : ''}.
-                {n(outcomes.length)} row(s) exist — clear the filter to see them.
-              </div>
-            {:else}
-              <div class="vspace" style="height:{filtered.length * ROW_H}px">
-                {#each vSlice as row, i (row.key)}
-                  <div class="orow" style="top:{(vFirst + i) * ROW_H}px" title={row.reason}>
-                    <span class="sym">{row.symbol}</span>
-                    <span class="tag" class:up={row.tone === 'up'} class:down={row.tone === 'down'} class:warn={row.tone === 'warn'} class:info={row.tone === 'info'}>{row.group}</span>
-                    <span class="num" class:up={row.gained > 0}>{row.gained > 0 ? `+${n(row.gained)}` : '0'}</span>
-                    <span class="why">{row.reason}</span>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-
-      <!-- REMOVED: the "Bars gained is the difference between two readings" paragraph. Not a control and not a column. -->
-        {/if}
-      </section>
-      {/if}
+           WHAT LEAVES WITH IT, STATED: the per-instrument outcome of a run
+           (which instrument gained how many bars, and why), the second
+           search box on this page, and the group filter over it. The run's
+           receipt is untouched and still names the verdict; the census below
+           still measures what the store holds, per series, and it is the
+           surface that outlives the run. -->
 
       <!-- ══════════════════════════ THE CENSUS ══════════════════════════
            EVERY SERIES IN THE WINDOW, AND WHAT THE STORE ACTUALLY HOLDS FOR
@@ -8030,22 +7756,8 @@
      date row, so the last week of the month and the whole footer were cut off
      by the card edge. The header rounds its own two corners instead, which
      costs one line and does not eat a popover. */
-  .card {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--r4);
-    box-shadow: var(--e1);
-    min-width: 0;
-  }
-  .card-h {
-    display: flex;
-    align-items: center;
-    gap: var(--s4);
-    padding: var(--s4) var(--s5);
-    background: var(--bg-2);
-    border-bottom: 1px solid var(--line);
-    border-radius: var(--r4) var(--r4) 0 0;
-  }
+  
+  
   .spacer {
     flex: 1;
   }
@@ -8093,10 +7805,7 @@
     line-height: var(--lh-base);
     color: var(--dim);
   }
-  .hint.foot {
-    padding: var(--s4) var(--s5) var(--s5);
-    border-top: 1px solid var(--line-soft);
-  }
+  
   /* A `.hint` CARRYING A TONE CLASS HAS TO TAKE THE TONE. The scoped `.hint`
      rule above outranks the global `.warn` colour on specificity, so without
      this the sentence naming why a control is refused rendered in exactly the
@@ -8585,37 +8294,13 @@
     min-width: 420px;
     padding: var(--s5);
   }
-  .ddr {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    width: 100%;
-    appearance: none;
-    border: 0;
-    background: none;
-    text-align: left;
-    color: var(--ink);
-    font: inherit;
-    font-size: var(--fs-md);
-    padding: 9px 12px;
-    min-height: 38px;
-    border-radius: 7px;
-    cursor: pointer;
-  }
-  .ddr:hover:not(:disabled) {
-    background: var(--panel2);
-  }
-  .ddr:focus-visible {
-    outline: 2px solid var(--acc);
-    outline-offset: -2px;
-  }
+  
+  
+  
   /* Drawn and refused, never absent: a row missing from the list reads as a
      set that does not exist rather than one this route cannot spell. The whole
      reason is on the row's own `title`. */
-  .ddr.off {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
+  
 
   /* ---- the two days ----
      A flex pair rather than a 1fr/1fr grid, so that when the rung loses its
@@ -9219,30 +8904,14 @@
   /* THE FOLDED CAUTIONS. Same chrome as `.wire` below it — one disclosure
      idiom on this page, and repeating it on every line was the stutter that made five
      of these unreadable. */
-  .cautions {
-    border: 1px solid var(--warn);
-    border-radius: var(--r3);
-    padding: var(--s4) var(--s5);
-    background: var(--warn-soft);
-  }
+  
   /* `.tiles` IS GONE WITH THE ROW IT DREW. Leaving the rule behind is the
      exact pattern Gate W4 exists to catch — styling whose markup was deleted,
      with the comment beside it still asserting a layout the page no longer
      has. `.metric` is NOT removed: it is theme.css section 8 and other pages
      draw with it. */
-  .wire {
-    border: 1px solid var(--line);
-    border-radius: var(--r3);
-    padding: var(--s4) var(--s5);
-    background: var(--well);
-  }
-  .wirebody {
-    margin: var(--s4) 0 var(--s3);
-    font-size: var(--fs-xs);
-    line-height: 1.6;
-    word-break: break-all;
-    color: var(--ink);
-  }
+  
+  
   /* `.wire iframe` is gone with the frame it styled — see the receipt
      fold above for why a second application nested in this one had to go. */
 
@@ -9262,186 +8931,48 @@
   }
 
   /* ---- the run ---- */
-  .run {
-    display: flex;
-    flex-direction: column;
-    gap: var(--s5);
-    padding: var(--s6) var(--s5);
-  }
-  .runrow {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-  }
-  .big {
-    font-size: var(--fs-xl);
-    font-weight: var(--w-bold);
-    letter-spacing: -0.5px;
-    line-height: var(--lh-tight);
-  }
-  .meter {
-    position: relative;
-    height: 6px;
-    border-radius: var(--r-full);
-    background: var(--well);
-    overflow: hidden;
-  }
-  .gov.hot {
-    border-color: var(--warn);
-    background: var(--warn-soft);
-  }
-  .gov .dot {
-    margin-top: 5px;
-  }
+  
+  
+  
+  
+  
+  
 
-  .verdict {
-    padding: var(--s5);
-    border-radius: var(--r3);
-    background: var(--up-soft);
-    border-left: 3px solid var(--up);
-    font-size: var(--fs-xs);
-    line-height: var(--lh-base);
-  }
-  .verdict.bad {
-    background: var(--down-soft);
-    border-left-color: var(--down);
-  }
+  
+  
 
   /* ---- the verdict strip ----
      ONE ROW AT THE HEAD OF THE TABLE. The sentence takes the space it needs and
      the rest hold their own width, so a long verdict wraps inside its own
      column instead of pushing the pills off the card. */
-  .lstrip {
-    display: flex;
-    align-items: center;
-    gap: var(--s5);
-    flex-wrap: wrap;
-    padding: var(--s4) var(--s5);
-    border-bottom: 1px solid var(--line);
-    background: var(--bg-2);
-  }
-  .lpills {
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s2);
-    align-items: center;
-  }
-  .lp {
-    appearance: none;
-    border: 1px solid transparent;
-    background: var(--panel-2);
-    color: var(--ink-2);
-    font: inherit;
-    font-size: var(--fs-xs);
-    font-weight: var(--w-semi);
-    padding: var(--s2) var(--s4);
-    border-radius: var(--r-full);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .lp:hover {
-    color: var(--ink);
-  }
-  .lp.on {
-    border-color: var(--acc);
-    color: var(--acc);
-  }
-  .lp .n {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-weight: var(--w-bold);
-    margin-right: var(--s2);
-  }
-  .lp .dot {
-    margin-right: var(--s3);
-  }
-  .ltot {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-    font-size: var(--fs-mini);
-    color: var(--faint);
-  }
-  .ltot.bad {
-    color: var(--down);
-    font-weight: var(--w-bold);
-  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
   /* IT MAY SHRINK AND IT MAY WRAP. `flex: 0 0 auto` on a row holding a button
      AND a sentence is a row that cannot give any width back, so the sentence
      pushed the strip wider than the card and ran off the right edge of the
      window — visible in the refused state, which is the one state where the
      sentence matters. `min-width: 0` is the half that lets the hint shrink at
      all; without it the flex item's automatic minimum size is its content. */
-  .lstrip .lact {
-    flex: 0 1 auto;
-    min-width: 0;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--s3);
-  }
-  .lstrip .lact .hint {
-    min-width: 0;
-  }
+  
+  
 
   /* ---- the outcome list ---- */
-  .reasons {
-    list-style: none;
-    margin: 0 var(--s5);
-    padding: var(--s4) var(--s5);
-    display: flex;
-    flex-direction: column;
-    gap: var(--s3);
-    background: var(--well);
-    border-radius: var(--r3);
-    font-size: var(--fs-xs);
-    line-height: var(--lh-base);
-  }
-  .reasons li {
-    display: flex;
-    gap: var(--s4);
-    align-items: baseline;
-  }
-  .obar {
-    padding: var(--s4) var(--s5);
-  }
-  .ohead,
-  .orow {
-    display: grid;
-    grid-template-columns: 9rem 9.5rem 6.5rem minmax(0, 1fr);
-    gap: var(--s5);
-    align-items: center;
-    padding: 0 var(--s5);
-  }
-  .ohead {
-    padding-bottom: var(--s3);
-    border-bottom: 1px solid var(--line);
-    background: var(--bg-2);
-    padding-top: var(--s3);
-  }
-  .ohead > * {
-    font-size: var(--fs-mini);
-    font-weight: var(--w-bold);
-    letter-spacing: var(--track-caps);
-    text-transform: uppercase;
-    color: var(--faint);
-    text-align: left;
-  }
-  .ohead .sort {
-    background: none;
-    border: 0;
-    padding: 0;
-    font: inherit;
-    color: inherit;
-    letter-spacing: inherit;
-    text-transform: inherit;
-    cursor: pointer;
-  }
-  .ohead .sort:hover {
-    color: var(--ink);
-  }
-  .ohead .sort.num {
-    text-align: right;
-  }
+  
+  
+  
+  
+  
+  
+  
+  
+  
   /* `max-height`, NEVER `height`, AND THE DIFFERENCE IS THE WHOLE COMPLAINT.
      This was `height: min(46vh, 520px)`, so the outcome list stood 520px tall
      whether it held two hundred rows or one. A run that names a single
@@ -9454,47 +8985,14 @@
      ResizeObserver on the element itself, so a short list reports a short
      height and `vCount` follows it. Above the cap the box stops growing and
      scrolls, which is the behaviour that was wanted in the first place. */
-  .olist {
-    max-height: min(46vh, 520px);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-  }
-  .vspace {
-    position: relative;
-    width: 100%;
-  }
-  .orow {
-    position: absolute;
-    left: 0;
-    right: 0;
-    height: var(--row-h);
-    border-bottom: 1px solid var(--line-soft);
-    font-size: var(--fs-xs);
-    font-variant-numeric: tabular-nums;
-  }
-  .orow:hover {
-    background: var(--panel-2);
-  }
-  .orow .sym {
-    font-family: var(--mono);
-    font-weight: 650;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .orow .num {
-    font-family: var(--mono);
-    text-align: right;
-  }
-  .orow .why {
-    color: var(--dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .orow .tag {
-    justify-self: start;
-  }
+  
+  
+  
+  
+  
+  
+  
+  
 
   /* ---- the instrument tick list ----
      A SEARCH BOX BIG ENOUGH TO TYPE IN. It is the full width of the menu and
@@ -9918,8 +9416,7 @@
     .cday,
     .padc,
     .calcap,
-    .cal-h .nav,
-    .orow {
+    .cal-h .nav {
       transition:
         background-color var(--d-hover) var(--ease-out),
         border-color var(--d-hover) var(--ease-out),
