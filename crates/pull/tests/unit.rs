@@ -7470,53 +7470,75 @@ fn two_slots_naming_two_versions_are_each_walked_at_their_own_stride() {
     );
 }
 
-/// D-0151 — after 2026-08-03 the three NSE segments close at different times,
-/// and the swept index closes EARLIEST.
+/// After 2026-08-03 exactly ONE segment moved: derivatives, to 15:40. Index and
+/// cash keep the charter's 15:30.
 ///
-/// Before this, `verdict` applied 15:30 to everything, so fifteen one-minute
-/// bars a day — 15:15 to 15:29 — were admitted for NIFTY and BANKNIFTY as
-/// ordinary session bars. `docs/00-charter.md` records what is actually in that
-/// window as UNVERIFIED: the frozen actual index or the indicative auction
-/// index, both published. Either way it is not a continuous-session bar, it
-/// went to disk, and §3 rule 8 makes the month unrewritable.
+/// # What this asserted, and why it was wrong
+///
+/// It demanded 15:15 for the index, on D-0151's inference that an index
+/// computed from constituents in a closing auction must freeze with them.
+/// Operator-stated 2026-08-20: until 2026-08-02 the last bar is 15:29
+/// everywhere, and from 2026-08-03 the extension is **futures and options
+/// alone**, whose last bar becomes 15:39. Nothing else moved.
+///
+/// All three vendors settle it independently — each sends index bars through
+/// 15:29, which is what an unchanged 15:30 close produces. The inference cost
+/// 195 bars of BANKNIFTY August before `fetch::land` stopped discarding on a
+/// session verdict.
 #[test]
-fn the_index_closes_at_1515_after_the_cas_change_and_cash_still_closes_at_1530() {
+fn only_derivatives_moved_on_2026_08_03_and_the_index_kept_its_close() {
     // A day after the change, and one before it.
     let after = Window::new(d(2026, 8, 10), d(2026, 8, 10)).expect("a legal window");
     let before = Window::new(d(2026, 7, 10), d(2026, 7, 10)).expect("a legal window");
 
-    // THE FIFTEEN BARS. Each was admitted before; each is now out of session
-    // for the index, and each is still IN session for cash.
+    // THE FIFTEEN BARS. 15:15 to 15:29 are inside the session on BOTH venues,
+    // which is what the vendors send and what an unchanged 15:30 close means.
     for minute in 15..30 {
         let secs = ist_epoch(2026, 8, 10, 15, minute, 0);
+        for venue in [Venue::NseIndex, Venue::NseCash] {
+            assert_eq!(
+                after
+                    .verdict(secs, Cadence::Minute, venue)
+                    .expect("a real timestamp"),
+                None,
+                "15:{minute} is inside the session on {venue} — only \
+                 derivatives moved"
+            );
+        }
+    }
+
+    // AND DERIVATIVES DID MOVE. 15:30 to 15:39 are inside for F&O and outside
+    // for the other two, which is the whole of the 2026-08-03 change.
+    for minute in 30..40 {
+        let secs = ist_epoch(2026, 8, 10, 15, minute, 0);
+        assert_eq!(
+            after
+                .verdict(secs, Cadence::Minute, Venue::NseDerivatives)
+                .expect("a real timestamp"),
+            None,
+            "15:{minute} is inside the extended derivatives session"
+        );
         assert_eq!(
             after
                 .verdict(secs, Cadence::Minute, Venue::NseIndex)
                 .expect("a real timestamp"),
             Some(DropReason::AtOrAfterSessionClose),
-            "15:{minute} is past the index close of 15:15 after the CAS change"
-        );
-        assert_eq!(
-            after
-                .verdict(secs, Cadence::Minute, Venue::NseCash)
-                .expect("a real timestamp"),
-            None,
-            "15:{minute} is still inside the cash session, which kept 15:30"
+            "and past the index close, which did not extend"
         );
     }
 
-    // The last index bar still opens at 15:14, so the close is exclusive in the
+    // The last derivatives bar opens at 15:39, so the close is exclusive in the
     // same way the anchor's is.
     assert_eq!(
         after
             .verdict(
-                ist_epoch(2026, 8, 10, 15, 14, 0),
+                ist_epoch(2026, 8, 10, 15, 39, 0),
                 Cadence::Minute,
-                Venue::NseIndex
+                Venue::NseDerivatives
             )
             .expect("a real timestamp"),
         None,
-        "15:14 is the last index bar of the continuous session"
+        "15:39 is the last derivatives bar of the extended session"
     );
 
     // AND THE CHANGE IS DATED. Before 2026-08-03 the index used 15:30 like

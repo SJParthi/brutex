@@ -1432,13 +1432,30 @@ const NSE_INDEX_SESSIONS: SessionTable = SessionTable {
         CHARTER_SESSION,
     ),
     later: [
-        // The index is computed from the cash market, so it is NOT safe to
-        // assume the index window survived a change to the cash close. This
-        // row refuses rather than guessing in either direction.
+        // THE INDEX CLOSE DID NOT MOVE, AND THIS ROW SAID 15:15.
+        //
+        // Operator-stated 2026-08-20, and it is the whole rule in one line:
+        // until 2026-08-02 the last bar is 15:29 everywhere; from 2026-08-03
+        // the extension applies to **futures and options ALONE**, whose last
+        // bar becomes 15:39. Nothing else moved. So the index keeps the
+        // charter's 15:30 close and this row now says so rather than inventing
+        // a third bell.
+        //
+        // WHERE 15:15 CAME FROM. `CAS_INDEX_CIRCULAR` reasons that the cash
+        // market's new Closing Auction freezes the constituents at 15:15, so
+        // the index computed from them must freeze too. That is an inference
+        // about a derived value, not a published trading hour — and the vendors
+        // settle it: all three send index bars through 15:29, which is exactly
+        // what an unchanged 15:30 close produces.
+        //
+        // The inference cost 195 bars of BANKNIFTY August before `fetch::land`
+        // stopped discarding on a session verdict. It costs nothing now, which
+        // is the point of that change — but a row that is wrong is still wrong,
+        // and this one is read by every count on the page.
         Some(SessionRow::verified(
             AUG_3_2026,
             SESSION_OPEN_MINUTE,
-            15 * 60 + 15,
+            SESSION_CLOSE_MINUTE,
             SessionKind::Continuous,
             CAS_INDEX_CIRCULAR,
         )),
@@ -6224,11 +6241,16 @@ mod tests {
         let cash = Venue::NseCash.hours_on(after).expect("verified row");
         let fno = Venue::NseDerivatives.hours_on(after).expect("verified row");
 
+        // THE INDEX DID NOT MOVE. This asserted 15:15, on the inference that an
+        // index computed from constituents in a closing auction must freeze
+        // with them. Operator-stated 2026-08-20: from 2026-08-03 the extension
+        // is FUTURES AND OPTIONS ALONE, and everything else keeps 15:29 as its
+        // last bar. All three vendors agree — they send index bars through
+        // 15:29, which is what an unchanged 15:30 close produces.
         assert_eq!(
             index.close_minute(),
-            15 * 60 + 15,
-            "the swept index freezes EARLIEST — every constituent stops trading \
-             continuously at 15:15"
+            SESSION_CLOSE_MINUTE,
+            "the index keeps the charter's close; only derivatives extended"
         );
         assert_eq!(
             cash.close_minute(),
@@ -6241,8 +6263,10 @@ mod tests {
             15 * 60 + 40,
             "derivatives extend by ten"
         );
+        // TWO BELLS AFTER 2026-08-03, NOT THREE. Index and cash share the
+        // charter's close; only derivatives sit later.
         assert!(
-            index.close_minute() < cash.close_minute() && cash.close_minute() < fno.close_minute(),
+            index.close_minute() == cash.close_minute() && cash.close_minute() < fno.close_minute(),
             "the three did not move together, which is why there are three rows"
         );
         for session in [index, cash, fno] {
