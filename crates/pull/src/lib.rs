@@ -145,6 +145,7 @@ pub mod manifest;
 /// Read-only decoders over bytes somebody else fetched — no socket here, the
 /// same seam `fetch::BarSource` draws for vendor bars.
 pub mod nse;
+pub mod pricing;
 pub mod rate;
 /// THE OTHER AXIS A VENDOR ANSWERS ON -- its own error name, inside the body,
 /// which no retry decision in this workspace read before this module.
@@ -167,6 +168,7 @@ pub mod scrub;
 pub mod secret;
 pub mod session;
 pub mod ssm;
+pub mod tenor;
 pub mod totp;
 /// Joining the exchange's published constituents against a vendor's master.
 ///

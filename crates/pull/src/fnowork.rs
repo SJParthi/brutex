@@ -526,7 +526,14 @@ pub fn gaps_by<F: Fn(&EntryKey) -> bool>(discovered: &[ContractCell], held: F) -
 /// #     timeframe: Timeframe::MINUTE_1,
 /// #     month: YearMonth::new(2026, 1)?,
 /// # };
-/// let cell = ContractCell { key, vendor_symbol: "BANKNIFTY26JAN58000CE".to_owned() };
+/// let cell = ContractCell {
+///     key,
+///     vendor_symbol: "BANKNIFTY26JAN58000CE".to_owned(),
+///     // WHEN IT STOPPED TRADING. `gaps` does not read it — a set membership
+///     // test cannot — but `owed` does, and it is the field that keeps a
+///     // contract's final month from reading short on every run forever.
+///     expiry,
+/// };
 ///
 /// // Nothing held: it is missing.
 /// let empty = HashSet::new();

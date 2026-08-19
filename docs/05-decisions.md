@@ -17090,3 +17090,114 @@ are `session.rs`'s 14 or `vwap.rs`'s 13. They are measured, named, and open. A
 crate-wide percentage is deliberately not quoted: the four files here are complete
 and `pattern.rs` is not, so any total would mix a finished measurement with an
 unfinished one, which is the error this entry exists to correct.
+
+### D-0217 — `greeks` had no caller, and the input it needs had no producer
+
+**Two facts, both measured with `cargo metadata --no-deps` and `grep` rather than
+read off `docs/01-architecture.md`.**
+
+First: nothing in this workspace depended on `greeks`.
+
+```
+api    -> core, pull, store, telemetry
+cli    -> core, costs, engine, indicators, runner, store
+lake   -> core, telemetry
+pull   -> core, costs, store, telemetry
+runner -> core, costs, engine, indicators, vocab
+greeks -> []          and NOTHING pointed at greeks
+```
+
+Thirteen crates and not one named it. The crate is complete — Black-Scholes-Merton,
+a bounded implied-volatility solver, `standard_normal_cdf`, moneyness, an error
+type that names every refusal, 100% covered — and **every greek in this repository
+was computed by nobody**. `greeks::moneyness::Moneyness` is the sharper case: its
+only callers are its own doc examples and its own test module. The name is not
+unused in the workspace, which is what makes the absence easy to miss —
+`costs::moneyness::MoneynessSteps` is a *different type in a different crate*, it
+is used by `costs::strike`, and it is not this one.
+
+Second: `years_to_expiry` — one of the five inputs `greeks::bsm::Contract` takes —
+**appeared nowhere outside `crates/greeks` at all.** Not computed, not stored, not
+approximated. So even a caller would have had nothing to hand it.
+
+**Why the missing piece is a MEASUREMENT and not a constant.**
+
+A bar carries a microsecond stamp; a session carries a close minute. Both are
+exact integers, so the distance between them is an exact integer needing no
+convention. Turning that into a fraction of a year needs a year length, and a year
+length is a *choice* — 365, 365.25 and 252 trading days all have defenders and
+none of them is a fact about NSE that `docs/00-charter.md` records. §3 rule 1 is
+what stops `pull::tenor` picking one silently, so `YearBasis` makes every caller
+name it, and it is an enum with one variant rather than a constant because a
+constant can be used without being named.
+
+**The expiry MOMENT needed no new decision.** It is the instant trading stops on
+the expiry day, and `vendor::Venue::NseDerivatives` already carries it per date —
+including the 2026-08-03 change that took the derivatives close from 15:30 to
+15:40. Reading the dated table means the tenor picks that up for free and cannot
+disagree with the filter that decided which bars were stored.
+`the_expiry_moment_follows_the_dated_close_and_is_not_hardcoded` fails the build
+if it is ever inlined. An expiry day whose hours are unverified is REFUSED, not
+guessed: a tenor computed against invented hours is wrong by up to a full session
+on the one day where a wrong tenor costs most.
+
+**A finding this measurement produced, recorded because it changes what may be
+claimed.** `crates/greeks/src/bsm.rs` validates its analytic greeks against
+numerical derivatives, and that loop reads:
+
+```rust
+if contract.years_to_expiry < 0.02 {
+    continue;
+}
+```
+
+0.02 years is 7.3 days. **A NIFTY weekly's entire life is below that line** —
+measured, at 09:15 on its first day, at `0.019910` of a year, half a percent under
+the boundary, and falling from there. So the crate's own proof that its greeks
+match a numerical derivative **has never run at the maturity this market trades
+at**. That is not an argument against the crate; the skip has a good reason,
+stated in its own comment — a one-hour maturity has a theta the size of the
+position and a central difference needs room on both sides. It is an argument for
+naming the band, which `Tenor::below_validated_band` and
+`Tenor::validated_band_seconds` do, and for `docs/06-limits.md` to carry the
+consequence rather than a report implying a validation that did not happen.
+`every_bar_of_a_seven_day_weekly_sits_below_the_validated_band` is the unit.
+
+**The rate is the one input still missing, and the type is what stops it being
+invented.** `pricing::Rate` cannot be constructed without a `source: &'static str`,
+there is no constant of it anywhere in the workspace, and there is no `Default`.
+§3 rule 1 stops being something a reviewer has to notice and becomes something
+that does not compile. Nothing here can price until a rate is measured — which is
+the honest state of this build, made structural instead of documented.
+
+**Everything stays paisa through the model.** Black-Scholes is homogeneous of
+degree one in `(spot, strike, premium)`, so working in paisa is the same equation
+rather than an approximation, and it avoids a division that would round.
+`the_scale_does_not_change_the_implied_volatility` checks that claim instead of
+citing it. Two consequences are stated in `pricing`'s header rather than left to
+be discovered: implied volatility and delta are scale-free, and **gamma, vega,
+theta and rho are not** — they come out per paisa.
+
+**What this does NOT claim.** No greek has been computed from real market data,
+because no rate has been measured and — separately — the Dhan rolling-option path
+that carries the vendor's own implied volatility and spot has **never executed**:
+749 events in `logs/events.ndjson`, zero mentioning an overlay, a rolling request
+or an `iv`. The plumbing for it is complete and is asserted by its own units; it
+is unproven against a vendor, and this entry does not say otherwise. Groww carries
+no implied volatility at all — its candles are a positional
+`[timestamp, open, high, low, close, volume]` array by the vendor's own contract —
+so for that feed there is nothing to map and `solve_iv` is the whole answer.
+
+**Cost.** `Tenor::between` is one `IstMoment::from_epoch_secs`, one `Day::new`,
+one `hours_on` bounded by `MAX_LATER_SESSION_ROWS + 1 = 3` rows, and fixed integer
+arithmetic — O(1) time and space, no allocation, no calendar walk. `greeks_at` is
+a closed form. `solve_iv` is bounded by `greeks::solver::MAX_ITERATIONS`, a
+compile-time constant, and the returned `iterations` is what was actually spent,
+so the bound is observable rather than claimed.
+
+**The graph stays acyclic and gate 9b stays true.** `greeks` declares no
+dependencies at all, so this is a leaf being pointed at rather than a cycle being
+closed. Gate 9b asserts what `greeks` depends on, not what depends on it, and
+`crates/greeks/Cargo.toml` is untouched — which also keeps it usable by the
+`tickvault` repository that takes it by git URL. §5's arrow for `pull` is now
+`core costs greeks store telemetry`.

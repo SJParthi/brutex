@@ -36,6 +36,20 @@ description  = "Vendor ingest: the credential path configuration, the read-only 
 # The graph stays acyclic: `costs` declares `brutex_core` alone, so this is
 # pull -> costs -> core beside the pull -> core that already exists.
 costs = { path = "../costs", version = "0.1.0" }
+# THE FIRST ARROW ANY CRATE HAS EVER POINTED AT `greeks`. D-0217.
+#
+# Measured with `cargo metadata --no-deps` before this line existed: thirteen
+# crates, and not one named `greeks`. It was complete -- Black-Scholes-Merton, a
+# bounded implied-volatility solver, moneyness, 100% covered -- and every greek
+# in this repository was computed by nobody.
+#
+# The graph stays acyclic and gate 9b stays true: `greeks` declares NO
+# dependencies at all, so this is a leaf being pointed at, not a cycle being
+# closed. `pull` is the caller because it already holds the other four BSM
+# inputs -- the strike from `fno`, the spot from Dhan's overlay, the tenor from
+# `tenor`, and a carry of zero for an index -- and because it is where the
+# overlay is written.
+greeks = { path = "../greeks", version = "0.1.0" }
 # The lib target is `brutex_core` and it MUST be referred to by that name: a
 # dependency key of `core` shadows the sysroot crate inside rustdoc's generated
 # doc-test harness. Proven three times now -- in core itself, in store, and the

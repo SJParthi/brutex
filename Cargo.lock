@@ -818,6 +818,7 @@ version = "0.1.0"
 dependencies = [
  "core",
  "costs",
+ "greeks",
  "hmac",
  "reqwest",
  "rustls-graviola",
