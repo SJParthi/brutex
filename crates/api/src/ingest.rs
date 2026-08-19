@@ -3750,11 +3750,44 @@ pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
 /// One pass over the month's contracts, two comparisons each. No allocation per
 /// contract beyond the ones kept.
 #[must_use]
-pub fn matching(chain: &pull::chain::Chain, request: &FnoRequest) -> Vec<pull::fno::Found> {
+pub fn matching(
+    chain: &pull::chain::Chain,
+    request: &FnoRequest,
+    today: Day,
+) -> Vec<pull::fno::Found> {
     chain
         .contracts
         .iter()
         .filter(|found| {
+            // A LIVE CONTRACT IS NEVER FETCHED HERE, AND UNTIL NOW ONE COULD BE.
+            //
+            // `parse_fno` refuses an expiry that has not passed — but only when
+            // the operator NAMES one. With `expiry` absent the request means
+            // "the whole month", `right_expiry` below was unconditionally true,
+            // and every contract the vendor listed for that month was fetched
+            // including the ones still trading.
+            //
+            // The window gate does not cover it and cannot: a window ending
+            // 2026-08-18 is entirely behind today, and the month it falls in
+            // still holds the 2026-08-25 expiry. Measured on 2026-08-19 —
+            // BANKNIFTY's whole `25Aug26` chain was asked for, six days before
+            // it expires.
+            //
+            // A live contract's bars are a PARTIAL series that the append-only
+            // store can never correct, which is the same reason `finished_day_only`
+            // refuses today's session. Same rule, one level up.
+            // Compared as three integers, for the reason the expiry filter
+            // below is: a rendered contract segment also carries the strike,
+            // and a substring test against it once admitted contracts whose
+            // strike digits happened to spell a date.
+            let settled = (
+                found.expiry.year(),
+                found.expiry.month(),
+                found.expiry.day(),
+            ) < (today.year(), today.month(), today.day());
+            if !settled {
+                return false;
+            }
             let right_series = match request.series {
                 Series::Futures => found.contract.is_future(),
                 Series::Options => found.contract.is_option(),

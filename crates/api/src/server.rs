@@ -6454,6 +6454,13 @@ async fn fno_answer(
 struct FnoPage<'a> {
     asked: &'a ingest::FnoRequest,
     now: std::time::SystemTime,
+    /// The day the walk was gated against, carried rather than re-derived.
+    ///
+    /// `ingest::matching` needs it to drop a contract that has not settled, and
+    /// a second `ist_day(SystemTime::now())` down there would be a second
+    /// clock reading in one request — which is how a run that starts at
+    /// 23:59:59 filters against a different day than it validated against.
+    today: Day,
     journal: &'a audit::Journal,
     broker: Broker,
 }
@@ -6524,33 +6531,84 @@ async fn fno_land(
     let mut why: Vec<String> = Vec::new();
     let origin = wire.source.endpoint(asked.granularity);
 
-    for found in wanted {
-        // THE GOVERNOR BEFORE EACH ONE, not once for the batch. A month of two
-        // hundred contracts is two hundred requests, and a budget charged once
-        // would be a ceiling observed once.
-        if let Err(halt) = await_budget(asked.feed, site).await {
-            why.push(halt);
-            failed = failed.saturating_add(wanted.len().saturating_sub(stored));
-            break;
+    // THE VENDOR'S WINDOW CAP BINDS HERE TOO, AND IT DID NOT.
+    //
+    // This loop sent the operator's WHOLE range as one request per contract,
+    // while the spot path has split it to the cap since D-0055. Measured on
+    // 2026-08-19: a BANKNIFTY option chain asked for 2026-01-01..=2026-08-18 at
+    // the one-minute rung went to Groww as a 230-day window against a published
+    // cap of 30 days, and the vendor answered **400 to every contract in the
+    // month** — one 502 after 24.8 seconds with not one bar stored. The
+    // discovery had worked; nothing downstream of it could.
+    //
+    // Computed ONCE, outside the contract loop. The window is the operator's
+    // and does not vary per contract, so splitting it per contract would repeat
+    // one piece of arithmetic two hundred times to reach the same answer.
+    let chunks = match pull::session::split_window(
+        asked.window,
+        wire.spec.window_cap_days(asked.granularity),
+    ) {
+        Ok(chunks) => chunks,
+        Err(refusal) => {
+            // EVERY CONTRACT COUNTS AS FAILED, because not one was asked for.
+            // Reporting "0 stored" with no reason is the silent shape
+            // `CLAUDE.md` §4 bans; the reason is the whole point of the return.
+            return (
+                0,
+                wanted.len(),
+                vec![format!(
+                    "the window could not be split to this feed's cap, so no \
+                     contract was asked for: {refusal}"
+                )],
+            );
         }
-        let request = pull::chain::request(found, asked.window, asked.granularity);
-        let body = match wire.source.window_async(&request).await {
-            Ok(body) => body,
-            Err(refusal) => {
-                failed = failed.saturating_add(1);
-                if why.len() < 5 {
-                    why.push(format!("{}: {refusal}", found.vendor_symbol));
-                }
-                continue;
+    };
+
+    'contracts: for found in wanted {
+        // ONE CONTRACT IS NOW ONE REQUEST PER CHUNK, and a chunk that refuses
+        // abandons that contract rather than storing a hole. A partially
+        // fetched contract would land some of its months and leave the rest
+        // absent, and with no F&O gap driver yet there is nothing that would
+        // ever come back for them — the month would read complete and be short,
+        // which is the one failure this repository is most careful about.
+        let mut bodies = Vec::with_capacity(chunks.len());
+        let mut refused: Option<String> = None;
+        for chunk in &chunks {
+            // THE GOVERNOR BEFORE EACH REQUEST, not once per contract and not
+            // once for the batch. Two hundred contracts over eight chunks is
+            // sixteen hundred requests, and a budget charged per contract would
+            // be a ceiling observed one time in eight.
+            if let Err(halt) = await_budget(asked.feed, site).await {
+                why.push(halt);
+                failed = failed.saturating_add(wanted.len().saturating_sub(stored));
+                break 'contracts;
             }
-        };
+            let request = pull::chain::request(found, *chunk, asked.granularity);
+            match wire.source.window_async(&request).await {
+                // THE CHUNK'S OWN WINDOW TRAVELS WITH ITS ANSWER, exactly as
+                // the spot path carries it — a body filed under the whole range
+                // would claim months it does not hold.
+                Ok(body) => bodies.push((*chunk, body)),
+                Err(refusal) => {
+                    refused = Some(format!("{}: {refusal}", found.vendor_symbol));
+                    break;
+                }
+            }
+        }
+        if let Some(refusal) = refused {
+            failed = failed.saturating_add(1);
+            if why.len() < 5 {
+                why.push(refusal);
+            }
+            continue;
+        }
         // THE UNDERLYING IS THE SYMBOL AND THE CONTRACT IS THE LEVEL BELOW IT.
         // `pull::ingest` parses `instrument` into a `Symbol` and renders the
         // contract as its own path segment, so passing the vendor's contract
         // name here would file `NIFTY-30Sep25-24650-CE` as a symbol and leave
         // the underlying nowhere in the tree.
         let landed = BrokerWindow {
-            bodies: vec![(asked.window, body)],
+            bodies,
             instrument: found.underlying.clone(),
             origin: origin.clone(),
             spec: wire.spec,
@@ -6589,20 +6647,13 @@ async fn fno_land(
 ///
 /// One request for the month's expiries, then one per expiry. O(1) per request;
 /// nothing here scans the store.
-async fn fno_walk(
-    asked: &ingest::FnoRequest,
-    today: Day,
-    now: std::time::SystemTime,
-    journal: &audit::Journal,
-    broker: Broker,
-    site: &Site,
-) -> (axum::http::StatusCode, String) {
-    let page = FnoPage {
-        asked,
-        now,
-        journal,
-        broker,
-    };
+/// The header rows every expired-series report opens with.
+///
+/// Extracted from [`fno_walk`] rather than inlined there because it is pure
+/// formatting over the request and the day — no transport, no store and no
+/// clock read of its own — and leaving it in the walk made that function's
+/// length the thing a reader met first.
+fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, String)> {
     let mut facts = vec![
         ("Underlying", asked.underlying.as_str().to_owned()),
         ("Series", asked.series.label().to_owned()),
@@ -6621,6 +6672,25 @@ async fn fno_walk(
     ];
     facts.extend(window_facts(asked.window));
     facts.push(("Feed", asked.feed.display().to_owned()));
+    facts
+}
+
+async fn fno_walk(
+    asked: &ingest::FnoRequest,
+    today: Day,
+    now: std::time::SystemTime,
+    journal: &audit::Journal,
+    broker: Broker,
+    site: &Site,
+) -> (axum::http::StatusCode, String) {
+    let page = FnoPage {
+        asked,
+        now,
+        today,
+        journal,
+        broker,
+    };
+    let facts = fno_facts(asked, today);
 
     // THE TRANSPORT DECIDES THE PATH, AND IT IS ASKED FIRST.
     //
@@ -7104,7 +7174,10 @@ async fn fno_report(
     // question one function already answered — and the two would have drifted
     // on the first vendor whose contract naming changed. This is the one that
     // ships; the inline copy is gone.
-    let wanted = ingest::matching(chain, asked);
+    // TODAY IS PASSED IN because `matching` now drops a contract that has not
+    // settled. See its own comment: the window gate cannot cover this, since a
+    // window ending yesterday still falls in a month that holds a live expiry.
+    let wanted = ingest::matching(chain, asked, page.today);
     facts.push(("Contracts asked for", wanted.len().to_string()));
 
     if wanted.is_empty() {
