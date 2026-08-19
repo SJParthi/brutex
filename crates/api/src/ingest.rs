@@ -788,6 +788,22 @@ impl Refusal {
     }
 }
 
+/// The refusal an expired series gives for a date inside the current month.
+///
+/// Lifted out of the formatter because [`Refusal`]'s `fmt` is one `match` with
+/// an arm per variant and this arm is six lines of prose — the length of that
+/// function is the first thing a reader meets, and it is not the interesting
+/// part.
+fn live_contract(expiry: Day, today: Day) -> String {
+    format!(
+        "REFUSED · {expiry} is not in a closed month as of {today}. An EXPIRED \
+         SERIES NEVER TOUCHES THE CURRENT MONTH — not even a date inside it \
+         that has already passed, because the month still holds contracts that \
+         have not. Ask for the last closed month or earlier. Spot is not bound \
+         this way: it takes today once the session has closed"
+    )
+}
+
 /// Every bar length this build files, as one readable phrase.
 ///
 /// Lifted out of [`Refusal`]'s formatter because that function is one `match`
@@ -892,11 +908,7 @@ impl fmt::Display for Refusal {
                 "REFUSED · {symbol} carries no F&O series, so there is no \
                  expired contract on it to store"
             ),
-            Self::LiveContract { expiry, today } => write!(
-                f,
-                "REFUSED · {expiry} has not expired as of {today}. A LIVE \
-                 CONTRACT IS NEVER STORED — expired series only"
-            ),
+            Self::LiveContract { expiry, today } => write!(f, "{}", live_contract(expiry, today)),
             Self::WindowOutlivesTheContract { to, expiry } => write!(
                 f,
                 "REFUSED · the window ends {to}, after the contract expired on \
@@ -1505,7 +1517,14 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         // THE GATE. Strictly behind today: a contract expiring today is still
         // trading today, and `CLAUDE.md` §8's argument about a fall-back applies
         // here too — `<=` would admit exactly the case the rule exists to exclude.
-        if one >= today {
+        // THE GATE, AND IT IS THE MONTH'S AND NOT THE DAY'S.
+        //
+        // This read `one >= today`, so an expiry earlier THIS month passed: on
+        // 2026-08-19 a contract that expired 2026-08-05 was accepted. The
+        // operator's rule of 2026-08-19 is stricter and simpler — the current
+        // month is not considered at all for an expired series — and it needs
+        // no expiry calendar to apply. See `last_settled_day`.
+        if one > last_settled_day(today)? {
             return Err(Refusal::LiveContract { expiry: one, today });
         }
         Some(one)
@@ -1638,23 +1657,14 @@ pub fn epoch_secs(at: SystemTime) -> i64 {
 /// then nothing to narrow to, and the operator asked for no settled day at all.
 /// [`Refusal::ClockUnusable`] when yesterday is not a representable date.
 fn clamp_to_settled(window: Window, today: Day) -> Result<(Window, Option<Day>), Refusal> {
-    if window.to() < today {
+    let last = last_settled_day(today)?;
+    if window.to() <= last {
         return Ok((window, None));
     }
-    // NO DAY BEFORE THE EPOCH. Falls in with the branch below rather than
-    // inventing a clock error: either way the request names no settled day, and
-    // one refusal saying so beats two saying it differently.
-    let Some(previous) = today.days_from_epoch().checked_sub(1) else {
-        return Err(Refusal::LiveContract {
-            expiry: window.to(),
-            today,
-        });
-    };
-    let last = Day::from_days(previous).map_err(|why| Refusal::ClockUnusable { why })?;
     if window.from() > last {
-        // NOTHING TO NARROW TO. Every day asked for is today or later, so the
-        // request names no settled session at all and clamping would invent a
-        // window the operator did not ask for.
+        // NOTHING TO NARROW TO. Every day asked for is inside the current month
+        // or later, so the request names no settled month at all and clamping
+        // would invent a window the operator did not ask for.
         return Err(Refusal::LiveContract {
             expiry: window.to(),
             today,
@@ -1663,6 +1673,55 @@ fn clamp_to_settled(window: Window, today: Day) -> Result<(Window, Option<Day>),
     Window::new(window.from(), last)
         .map(|narrowed| (narrowed, Some(window.to())))
         .map_err(|why| Refusal::ClockUnusable { why })
+}
+
+/// The last day an EXPIRED series may be asked for: the end of LAST month.
+///
+/// # Operator's rule, 2026-08-19, and it is a month and not a day
+///
+/// *"Even by mistake, do not consider the entire current month — for expired
+/// futures and expired options alone. If yesterday was the 31st and today is
+/// the 1st, still do not pull the current month."*
+///
+/// This clamped to YESTERDAY, which is a different rule and a much weaker one.
+/// On 2026-08-19 that admitted 1–18 August: eighteen days inside a month whose
+/// contracts have not all expired. Every weekly still to come in August is a
+/// LIVE contract, and the whole reason this route exists is that it stores only
+/// settled ones.
+///
+/// The month is the right unit because expiry is a monthly structure. A
+/// contract's expiry falls somewhere inside its month, and "which day of this
+/// month is safe" has a different answer for every underlying and every
+/// cadence. "No day of this month" has one answer, needs no expiry calendar,
+/// and cannot be wrong.
+///
+/// The 1st-of-the-month case is the one the rule is stated against and the one a
+/// day-based clamp gets wrong most expensively: on 1 September, clamping to
+/// yesterday yields 31 August — the last day of a month whose monthly contract
+/// may have expired only days earlier and whose data is still settling.
+///
+/// **Spot is untouched by this.** Its rule is the session's, not the month's:
+/// today is fine once the session has closed, which `finished_day_only` and the
+/// autopilot's own clamp already enforce. Two different questions, two
+/// different answers, and mixing them is what this function exists to stop.
+///
+/// # Errors
+///
+/// [`Refusal::ClockUnusable`] when the day before this month's first is not a
+/// representable date — a clock at the epoch, not a window this can fix.
+fn last_settled_day(today: Day) -> Result<Day, Refusal> {
+    // THE DAY BEFORE THE FIRST OF THIS MONTH. Computed by stepping back from
+    // the 1st rather than by asking how long last month was, so no month-length
+    // table is consulted and February needs no special case.
+    let first =
+        Day::new(today.year(), today.month(), 1).map_err(|why| Refusal::ClockUnusable { why })?;
+    let previous = first
+        .days_from_epoch()
+        .checked_sub(1)
+        .ok_or(Refusal::ClockUnusable {
+            why: pull::session::SessionError::TimestampOutOfRange { secs: 0 },
+        })?;
+    Day::from_days(previous).map_err(|why| Refusal::ClockUnusable { why })
 }
 
 /// The IST date of a moment.
@@ -2929,20 +2988,63 @@ mod tests {
     /// contracts while pointing at a date control. Four consecutive refusals on
     /// 2026-08-19 were exactly that.
     #[test]
-    fn a_window_that_reaches_today_is_pulled_back_to_yesterday_and_says_so() {
+    fn a_window_reaching_today_is_pulled_back_to_the_end_of_last_month_and_says_so() {
         let out = parse_fno(
             "underlying=NIFTY&series=opt&from=2026-01-01&to=2026-08-07",
             today(),
         )
-        .expect("a window ending today is now askable");
+        .expect("a window ending today is ACCEPTED — the narrowing is internal");
 
-        assert_eq!(out.window.to(), day(2026, 8, 6), "narrowed to yesterday");
+        // THE END OF LAST MONTH, NOT YESTERDAY. Today is 2026-08-07, so a
+        // day-based clamp would have yielded 08-06 and admitted six days of a
+        // month whose contracts have not all expired.
+        assert_eq!(out.window.to(), day(2026, 7, 31), "the end of LAST month");
         assert_eq!(
             out.clamped_from,
             Some(day(2026, 8, 7)),
             "the day that was ASKED for is kept, or the receipt cannot say what changed"
         );
         assert_eq!(out.window.from(), day(2026, 1, 1), "the start is untouched");
+    }
+
+    /// **THE FIRST OF THE MONTH IS THE CASE THE RULE IS STATED AGAINST.**
+    ///
+    /// Yesterday was the 31st and today is the 1st. A day-based clamp yields
+    /// the 31st — the last day of a month whose monthly contract may have
+    /// expired days earlier and whose data is still settling. The month rule
+    /// yields the end of the month before that, with no special case for it.
+    #[test]
+    fn on_the_first_of_a_month_the_whole_previous_day_is_still_out_of_range() {
+        let out = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-01-01&to=2026-09-01",
+            day(2026, 9, 1),
+        )
+        .expect("accepted, and narrowed internally");
+
+        assert_eq!(
+            out.window.to(),
+            day(2026, 8, 31),
+            "September is out because it is the CURRENT month; August is a past \
+             month and is entirely in range. A day-based clamp would also have \
+             said 31 August here and would be right by accident — the two rules \
+             only diverge once the month is a few days old, which is why the \
+             other cases below matter"
+        );
+    }
+
+    /// A request wholly inside the current month has nothing to narrow to.
+    #[test]
+    fn a_window_wholly_inside_the_current_month_is_refused_by_name() {
+        let refused = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-08-01&to=2026-08-06",
+            today(),
+        )
+        .expect_err("every day asked for is inside the current month");
+
+        assert!(
+            matches!(refused, Refusal::LiveContract { .. }),
+            "{refused:?}"
+        );
     }
 
     /// A window already behind today is taken exactly as given.
@@ -2995,11 +3097,16 @@ mod tests {
     /// than trusting the coarser one that was removed.
     #[test]
     fn a_narrowed_window_still_drops_a_contract_that_has_not_settled() {
+        // A WINDOW IN A PAST MONTH. This asked 2026-08-01..08-07 and expected a
+        // narrowing to 08-06 — but the current month is now out entirely, so
+        // that window has nothing to narrow to and is refused. July is the
+        // newest month an expired series can name with today at 2026-08-07.
         let asked = parse_fno(
-            "underlying=NIFTY&series=opt&from=2026-08-01&to=2026-08-07",
+            "underlying=NIFTY&series=opt&from=2026-07-01&to=2026-08-07",
             today(),
         )
-        .expect("narrowed to 2026-08-06");
+        .expect("narrowed to the end of July");
+        assert_eq!(asked.window.to(), day(2026, 7, 31));
 
         let live = pull::fno::Found {
             vendor_symbol: "NSE-NIFTY-25Aug26-24000-CE".to_owned(),
@@ -3022,8 +3129,9 @@ mod tests {
         };
 
         assert!(
-            matching(&chain, &asked, today()).is_empty(),
-            "a contract expiring 2026-08-25 must not be fetched on 2026-08-07"
+            matching(&chain, &asked, asked.window.to()).is_empty(),
+            "a contract expiring 2026-08-25 must not be fetched when the newest \
+             settled month is July"
         );
     }
 
@@ -3128,17 +3236,37 @@ mod tests {
                 "{live} must be refused as live"
             );
             let text = refused.to_string();
-            assert!(text.contains("LIVE CONTRACT IS NEVER STORED"), "{text}");
+            assert!(
+                text.contains("EXPIRED SERIES NEVER TOUCHES THE CURRENT MONTH"),
+                "{text}"
+            );
             assert!(text.contains(live) && text.contains("2026-08-07"), "{text}");
         }
-        // One day before today is the first legal expiry — the bound is tight.
+        // THE BOUND IS THE END OF LAST MONTH, AND IT IS TIGHT ON BOTH SIDES.
+        //
+        // This asserted that YESTERDAY's expiry was the first legal one. The
+        // operator's rule of 2026-08-19 replaced the day with the month: an
+        // expired series never touches the current month, so with today at
+        // 2026-08-07 the last legal expiry is 2026-07-31 and 2026-08-01 is
+        // already out — five days before it, and expired.
         assert!(
             parse_fno(
-                "underlying=NIFTY&series=opt&expiry=2026-08-06&from=2026-08-06&to=2026-08-06",
+                "underlying=NIFTY&series=opt&expiry=2026-07-31&from=2026-07-31&to=2026-07-31",
                 today()
             )
             .is_ok(),
-            "yesterday's expiry is expired"
+            "the last day of last month is the newest legal expiry"
+        );
+        assert!(
+            matches!(
+                parse_fno(
+                    "underlying=NIFTY&series=opt&expiry=2026-08-01&from=2026-08-01&to=2026-08-01",
+                    today()
+                ),
+                Err(Refusal::LiveContract { .. })
+            ),
+            "the first day of THIS month is refused even though it has passed — \
+             the current month is not considered at all"
         );
     }
 
@@ -3194,7 +3322,11 @@ mod tests {
             today(),
         )
         .expect("a window reaching today is narrowed rather than refused");
-        assert_eq!(reaches_today.window.to(), day(2026, 8, 6));
+        // NARROWED TO THE END OF LAST MONTH, not to yesterday. The operator's
+        // rule of 2026-08-19 made the unit the MONTH: an expired series never
+        // touches the current one, so with today at 2026-08-07 the whole of
+        // August is out and July's last day is the bound.
+        assert_eq!(reaches_today.window.to(), day(2026, 7, 31));
         assert_eq!(reaches_today.clamped_from, Some(day(2026, 8, 7)));
     }
 
@@ -3395,7 +3527,7 @@ mod tests {
                     expiry: day,
                     today: day,
                 },
-                "LIVE CONTRACT IS NEVER STORED",
+                "EXPIRED SERIES NEVER TOUCHES THE CURRENT MONTH",
             ),
             (
                 Refusal::WindowOutlivesTheContract {
@@ -4090,13 +4222,13 @@ pub fn discovery_ask(request: &FnoRequest) -> pull::fno::Ask {
 pub fn matching(
     chain: &pull::chain::Chain,
     request: &FnoRequest,
-    today: Day,
+    last_settled: Day,
 ) -> Vec<pull::fno::Found> {
     chain
         .contracts
         .iter()
         .filter(|found| {
-            // A LIVE CONTRACT IS NEVER FETCHED HERE, AND UNTIL NOW ONE COULD BE.
+            // A CONTRACT OF THE CURRENT MONTH IS NEVER FETCHED HERE.
             //
             // `parse_fno` refuses an expiry that has not passed — but only when
             // the operator NAMES one. With `expiry` absent the request means
@@ -4117,11 +4249,22 @@ pub fn matching(
             // below is: a rendered contract segment also carries the strike,
             // and a substring test against it once admitted contracts whose
             // strike digits happened to spell a date.
+            //
+            // AGAINST THE LAST SETTLED DAY, NOT AGAINST TODAY. `last_settled`
+            // is the end of LAST month — the operator's rule of 2026-08-19 — so
+            // a contract expiring anywhere inside the current month is dropped
+            // even though its date has passed. Comparing against today admitted
+            // every August weekly that had already expired, on a route whose
+            // whole premise is that the month is closed.
             let settled = (
                 found.expiry.year(),
                 found.expiry.month(),
                 found.expiry.day(),
-            ) < (today.year(), today.month(), today.day());
+            ) <= (
+                last_settled.year(),
+                last_settled.month(),
+                last_settled.day(),
+            );
             if !settled {
                 return false;
             }

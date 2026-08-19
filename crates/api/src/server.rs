@@ -6743,9 +6743,10 @@ fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, Strin
         facts.push((
             "Window narrowed",
             format!(
-                "you asked to {asked_to} and that day has not finished — an expired \
-                 series is taken to {} instead, because a running session yields a \
-                 partial day the store can never correct",
+                "you asked to {asked_to}, and an expired series never touches the \
+                 CURRENT MONTH — its contracts have not all expired yet. Taken to \
+                 {} instead, the last day of the last closed month. Spot is not \
+                 narrowed this way: its bound is the session's, not the month's",
                 asked.window.to()
             ),
         ));
@@ -7583,7 +7584,12 @@ async fn fno_report(
     // TODAY IS PASSED IN because `matching` now drops a contract that has not
     // settled. See its own comment: the window gate cannot cover this, since a
     // window ending yesterday still falls in a month that holds a live expiry.
-    let wanted = ingest::matching(chain, asked, page.today);
+    // THE LAST SETTLED DAY, NOT TODAY — the end of LAST month. The operator's
+    // rule of 2026-08-19: an expired series never touches the current month,
+    // even on its first day. The window was already clamped to this at the
+    // parse, so `window.to()` IS that bound for a month-shaped request and is
+    // at or before it for one that named an expiry.
+    let wanted = ingest::matching(chain, asked, asked.window.to());
     facts.push(("Contracts asked for", wanted.len().to_string()));
 
     // WHAT IS ALREADY HELD IS NOT ASKED FOR AGAIN.
@@ -11696,7 +11702,7 @@ mod tests {
             .await;
             assert!(live.contains("400 Bad Request"), "{live}");
             assert!(
-                live.contains("LIVE CONTRACT IS NEVER STORED"),
+                live.contains("EXPIRED SERIES NEVER TOUCHES THE CURRENT MONTH"),
                 "the rule is named, loudly: {live}"
             );
             assert!(live.contains("9998-12-31"), "{live}");
@@ -12862,7 +12868,10 @@ mod tests {
         )
         .await;
         assert_eq!(code, axum::http::StatusCode::BAD_REQUEST);
-        assert!(page.contains("LIVE CONTRACT IS NEVER STORED"), "{page}");
+        assert!(
+            page.contains("EXPIRED SERIES NEVER TOUCHES THE CURRENT MONTH"),
+            "{page}"
+        );
 
         // BOTH went into the journal — the refusal as well as the acceptance.
         // An operator debugging a form that never starts anything needs the
@@ -12878,7 +12887,11 @@ mod tests {
         let newest = rows[0].decoded.clone().expect("decodes");
         assert_eq!(newest.outcome, audit::Outcome::Refused);
         assert_eq!(newest.scope, audit::Scope::Fno);
-        assert!(newest.note.contains("has not expired"), "{}", newest.note);
+        assert!(
+            newest.note.contains("is not in a closed month"),
+            "{}",
+            newest.note
+        );
         // AND THE CUT IS VISIBLE. The refusal is 107 bytes and the field holds
         // 68, so what the record keeps is a prefix — and it says so, rather
         // than presenting a half sentence as the whole reason.
