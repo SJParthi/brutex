@@ -1405,7 +1405,25 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // a rung added to `Timeframe::KNOWN` moves both sides at once and this
     // expectation cannot go stale against it. It already knows the one case
     // where zero is correct: an option contract folds into no rung.
-    let derived_expected = derived_count_in(None, timeframe);
+    //
+    // AND IT IS HANDED THE CONTRACT, WHICH IT WAS NOT. The literal `None` sat
+    // directly beneath the sentence naming the case it exists for, so an OPTION
+    // expected seven derived rungs and folds into none: `derived` was 0,
+    // `derived_expected` was 7, `derived_shortfall` fired, and every contract
+    // of the month landed in `done.failures`.
+    //
+    // What that looked like from outside: the bars, the census row and the
+    // closes were all correctly on disk, and `/pull/fno` rendered
+    // "Bars stored: 0 · Contracts that did not land: 200 of 200" and HTTP 502
+    // "the month is incomplete and must not be read as held". A correct month
+    // reported as a total failure — and on the re-run the incremental gate
+    // short-circuits and calls it Empty, so one month gets two different wrong
+    // answers.
+    //
+    // It also drowns any REAL derived shortfall in two hundred false ones,
+    // which is the more expensive half: `note_derived_shortfall` exists to
+    // catch a disk that filled between the pulled rung and the folded ones.
+    let derived_expected = derived_count_in(plan.contract, timeframe);
     Ok(Landed {
         bars: landed.bars.len(),
         folded,

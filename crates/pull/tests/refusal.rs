@@ -560,14 +560,28 @@ fn only_the_feed_whose_error_page_was_read_declares_a_contract() {
         let (field, envelope, entitlement) = match feed {
             pull::vendor::Feed::Zerodha => (KITE.field, None, "PermissionException"),
             pull::vendor::Feed::Dhan => ("errorCode", None, "DH-902"),
-            _ => ("code", Some("error"), "GA005"),
+            // GROWW'S ENTITLEMENT-SHAPED CODE IS NOT AN ENTITLEMENT. Its
+            // published table has no token-expiry code at all, so GA005 is
+            // where one must arrive and `NotEntitled` would decline the retry
+            // it needs. `GA004` is the one that genuinely cannot be retried
+            // into existence. See `pull::groww`'s arm comments.
+            _ => ("code", Some("error"), "GA004"),
         };
         assert_eq!(contract.field, field, "{}", feed.display());
         assert_eq!(contract.envelope, envelope, "{}", feed.display());
+        // EACH VENDOR'S OWN PROBE, and each answers what its own page says.
+        // Kite and Dhan publish a split between "your token died" and "you are
+        // not subscribed", so theirs are `NotEntitled`. Groww publishes no such
+        // split, so the probe here is the code that is unambiguously not
+        // retryable rather than the one that is ambiguous.
+        let expected = match feed {
+            pull::vendor::Feed::Groww => Disposition::ReasonGiven,
+            _ => Disposition::NotEntitled,
+        };
         assert_eq!(
             (contract.read)(entitlement),
-            Some(Disposition::NotEntitled),
-            "{}: {entitlement} is an entitlement, not a dead session",
+            Some(expected),
+            "{}: {entitlement} must read as {expected:?}",
             feed.display()
         );
         assert_eq!((contract.read)(UNKNOWN), None, "{}", feed.display());
@@ -576,4 +590,74 @@ fn only_the_feed_whose_error_page_was_read_declares_a_contract() {
         // row: it reads as though someone verified it.
         assert!(!contract.source.is_empty(), "{}", feed.display());
     }
+}
+
+// ---------------------------------------------------------------------------
+// the OTHER thing a feed must be asked rather than assumed: its join key
+// ---------------------------------------------------------------------------
+
+/// **THE JOIN KEY IS THE VENDOR'S, NOT A LITERAL.**
+///
+/// `crates/api/src/server.rs` passed `JoinKey::Isin` as a constant under a
+/// comment promising that asking the descriptor "is what keeps that true when
+/// it lands". The feed that publishes no ISIN landed on 14 Aug 2026, and the
+/// literal became wrong for exactly one vendor.
+///
+/// The failure it would have produced is the reason this test asserts the
+/// derivation rather than the call site: `universe::resolve` **skips an empty
+/// key on purpose**, so joining Zerodha on a column it does not have raises no
+/// error at all. Every instrument lands in `Verdict::Lacks`, and a total join
+/// failure is indistinguishable from a vendor that lists nothing.
+///
+/// NO CATCH-ALL. Every vendor is named, so a sixth cannot inherit a key by
+/// default — which is the exact mechanism that produced the bug.
+#[test]
+fn the_join_key_is_derived_from_the_vendors_own_master_columns() {
+    use brutex_core::vendor::Vendor;
+    use pull::universe::JoinKey;
+
+    for vendor in Vendor::ALL {
+        let expected = match vendor {
+            // Both publish an ISIN column, spelled differently, which is
+            // exactly why the column NAME is the thing consulted.
+            Vendor::Groww | Vendor::Dhan => JoinKey::Isin,
+            // Twelve columns, none an ISIN. docs/00-charter.md §4z.
+            Vendor::Zerodha => JoinKey::TradingSymbol,
+            // Archives: no master of their own to publish one in.
+            Vendor::TrueData | Vendor::Gdfl => JoinKey::TradingSymbol,
+            // `Vendor` is `#[non_exhaustive]`, so this arm is required from
+            // outside the crate and CANNOT be a default. It panics, because
+            // inheriting a key by omission is precisely the bug this test was
+            // written for: a vendor added without a row here fails loudly, and
+            // whoever adds it has to state which key its master supports.
+            other => panic!(
+                "{other:?} is a vendor with no join-key row in this test. Its \
+                 master_columns().isin is {:?} — name it above rather than \
+                 letting it inherit a key by omission, which is the defect \
+                 `JoinKey::for_vendor` exists to close.",
+                other.master_columns().isin
+            ),
+        };
+        assert_eq!(
+            JoinKey::for_vendor(vendor),
+            expected,
+            "{vendor:?}: the key must follow master_columns().isin, which is \
+             {:?}",
+            vendor.master_columns().isin
+        );
+        // AND THE DERIVATION AGREES WITH THE COLUMN, not merely with this
+        // table — so editing `master_columns` moves both together.
+        assert_eq!(
+            JoinKey::for_vendor(vendor) == JoinKey::Isin,
+            !vendor.master_columns().isin.is_empty(),
+            "{vendor:?}"
+        );
+    }
+
+    // A SYMBOL JOIN IS THE WEAKER ONE AND MUST SAY SO. A page that renders
+    // "500 of 500 matched" identically for both keys tells the reader
+    // something it does not know.
+    assert!(JoinKey::Isin.is_identity());
+    assert!(!JoinKey::TradingSymbol.is_identity());
+    assert!(!JoinKey::for_vendor(Vendor::Zerodha).is_identity());
 }

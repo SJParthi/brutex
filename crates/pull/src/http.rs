@@ -1630,7 +1630,12 @@ fn decode_positional(
         close: Vec::with_capacity(rows.len()),
         volume: Vec::with_capacity(rows.len()),
         timestamp: Vec::with_capacity(rows.len()),
-        open_interest: Vec::new(),
+        // RESERVED LIKE ITS SIX SIBLINGS. `Vec::new()` was harmless while
+        // nothing pushed to this column; the push landed today, once per kept
+        // row, so it grew by doubling with a memcpy at every step while the
+        // other six did not. `docs/07-o1-architecture.md` law 2 — reserve the
+        // bound up front, and it is the same bound.
+        open_interest: Vec::with_capacity(rows.len()),
     };
 
     let mut null_bars = 0usize;

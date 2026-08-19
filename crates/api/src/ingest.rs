@@ -1709,7 +1709,7 @@ fn clamp_to_settled(window: Window, today: Day) -> Result<(Window, Option<Day>),
 ///
 /// [`Refusal::ClockUnusable`] when the day before this month's first is not a
 /// representable date — a clock at the epoch, not a window this can fix.
-fn last_settled_day(today: Day) -> Result<Day, Refusal> {
+pub(crate) fn last_settled_day(today: Day) -> Result<Day, Refusal> {
     // THE DAY BEFORE THE FIRST OF THIS MONTH. Computed by stepping back from
     // the 1st rather than by asking how long last month was, so no month-length
     // table is consulted and February needs no special case.

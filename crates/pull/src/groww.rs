@@ -82,11 +82,31 @@ pub fn read(code: &str) -> Option<Disposition> {
         // entitlement — an instrument or an order this account cannot see. The
         // vendor's own sentence is what an operator needs.
         "GA004" => Some(Disposition::ReasonGiven),
-        // "User not authorised to perform this operation." An ENTITLEMENT, and
-        // the one disposition where a later run cannot succeed. Read from the
-        // status alone it is a dead session, which sends an operator to refresh
-        // a token that is alive and working.
-        "GA005" => Some(Disposition::NotEntitled),
+        // "User not authorised to perform this operation."
+        //
+        // THIS WAS `NotEntitled` AND THAT IS THE DESTRUCTIVE READING.
+        //
+        // `NotEntitled` is the one disposition where `a_later_run_could_succeed`
+        // is false: it returns immediately with "re-running later cannot fix
+        // it. Nothing was retried."
+        //
+        // But look at what this vendor publishes — GA000 internal, GA001 bad
+        // request, GA003 currently unavailable, GA004 entity missing, GA005 not
+        // authorised, GA006 cannot process, GA007 duplicate order ref. **Not
+        // one of the seven is a token expiry.** An expired or revoked access
+        // token has nowhere else to surface: it has to arrive as GA005.
+        //
+        // So mapping it to `NotEntitled` turns every pull after a routine token
+        // expiry into a permanent failure that declines to retry, when the
+        // right instruction is the one the status axis already gave — "the
+        // refreshed value is read from Parameter Store on the next pull".
+        //
+        // Dhan gets a split here only because Dhan PUBLISHES one: DH-901
+        // against DH-902, 807 against 806. Groww publishes no split, so
+        // resolving the ambiguity toward the irrecoverable answer is choosing
+        // the expensive side of an unknown. `NotEntitled` is reserved for a
+        // code the vendor itself distinguishes.
+        "GA005" => Some(Disposition::SessionDead),
         // "Cannot process this request." A named catch-all: the vendor said
         // something and declined to say which thing, so the sentence travels
         // rather than a verdict being invented from it.
@@ -120,8 +140,12 @@ mod tests {
     /// happened before this file — the first sends an operator to refresh a
     /// working token and the second throws away a retry that would have worked.
     #[test]
-    fn an_entitlement_and_a_transient_are_not_what_their_statuses_say() {
-        assert_eq!(read("GA005"), Some(Disposition::NotEntitled));
+    fn a_dead_session_and_a_transient_are_not_what_their_statuses_say() {
+        // GA005 IS A DEAD SESSION, NOT AN ENTITLEMENT. This vendor publishes
+        // no token-expiry code, so GA005 is where one must arrive, and
+        // `NotEntitled` would decline the retry it needs. See the arm's own
+        // comment for why Dhan is split here and Groww is not.
+        assert_eq!(read("GA005"), Some(Disposition::SessionDead));
         assert_eq!(read("GA003"), Some(Disposition::RetryBounded));
     }
 
@@ -176,7 +200,7 @@ mod tests {
         assert_eq!(name.as_deref(), Some("GA005"));
         assert_eq!(
             name.as_deref().and_then(read),
-            Some(Disposition::NotEntitled)
+            Some(Disposition::SessionDead)
         );
     }
 }

@@ -6270,12 +6270,26 @@ fn run_local(
     })?;
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
-        // NOT ON THE WIRE ON THIS PATH. An archive addresses a FILE and a
-        // landing record addresses bars already in hand, so no request
-        // parameter is built from this and no vendor ever sees it. Stated
-        // anyway because `BarRequest` has no `Default` — a field that can be
-        // omitted is a field a later caller omits by accident.
-        listing: pull::vendor::Listing::Equity,
+        // THE SEGMENT'S OWN VENUE, AND THIS WAS THE LITERAL `Equity`.
+        //
+        // The old comment — "no request parameter is built from this and no
+        // vendor ever sees it" — is the exact paragraph `BrokerWindow::listing`
+        // was written to refute, left standing 2,200 lines away. `listing`
+        // never reaches the wire and it DOES decide the venue, and the venue
+        // decides the session hours: index 15:15, cash 15:30, derivatives 15:40
+        // since 2026-08-03.
+        //
+        // This function's own comment nine lines down says it "files every
+        // archive bar under FNO", and GDFL's `.NFO.csv` futures are exactly
+        // what it reads — so every archive derivative was filtered against the
+        // CASH clock and lost the last ten minutes of every session, silently
+        // and irreversibly under §8.
+        //
+        // `Venue::for_segment` already answers this; nothing was calling it.
+        // A DERIVATIVE, flat, because the `Plan` below sets
+        // `segment: Segment::Fno` as a constant — this function files every
+        // archive bar under FNO and says so in its own comment.
+        listing: pull::vendor::Listing::Derivative,
         window,
         // THE OPERATOR'S RUNG HERE TOO, and this path is where a rung the store
         // cannot carry is actually reachable: both archive feeds are
@@ -6926,7 +6940,8 @@ async fn roll_one(
     endpoint: &str,
     rolling: pull::vendor::RollingSpec,
     window: pull::session::Window,
-) -> Result<usize, String> {
+    last_settled: Day,
+) -> Result<(usize, usize), String> {
     let label = format!("{word} {flag}/{code} {strike} {option_type}");
     // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
     //
@@ -7008,7 +7023,7 @@ async fn roll_one(
         // NOT A FAILURE. A strike the vendor never listed for this expiry is an
         // ordinary empty answer, and counting it as a fault would report ~200
         // failures on a healthy month.
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // ONE ANSWER IS MANY CONTRACTS, AND IT WAS FILED AS ONE.
@@ -7044,6 +7059,7 @@ async fn roll_one(
         |row: &pull::rolling::Row| rolling_key(row, asked.underlying.as_str(), flag, code, &label);
 
     let mut total = 0usize;
+    let mut declined = 0usize;
     let mut at = 0usize;
     while at < rows.len() {
         let key = key_at(
@@ -7062,6 +7078,36 @@ async fn roll_one(
             .ok_or_else(|| format!("{label}: rows vanished"))?;
 
         let (expiry_day, strike) = key;
+        // A RUN THAT RESOLVED TO AN UNSETTLED CONTRACT IS NOT FILED.
+        //
+        // The request asks by cadence and ordinal, so the contract a bar lands
+        // on is computed FORWARD from that bar's day — near, next and far
+        // monthly on the last day of a closed month reach one, two and three
+        // months into the future. Bounding the WINDOW is therefore not enough
+        // here; the CONTRACT has to be checked, and this is the only place that
+        // knows which one each run resolved to.
+        //
+        // Skipped rather than refused: the vendor answered correctly and the
+        // ordinal genuinely names a live contract, so this is a run this engine
+        // declines, not a fault — the distinction `keep_in_session` draws one
+        // layer down.
+        if expiry_day > last_settled {
+            // COUNTED, NOT SILENT. This `continue` was written bare an hour
+            // ago, and bare it was the §4 fallback this file bans everywhere
+            // else: with `expiry_codes` 1, 2 and 3, a window inside a closed
+            // month has TWO THIRDS of its monthly cross product resolve to
+            // live contracts, so most of the run stored nothing while
+            // `fno_roll` rendered "every planned contract answered and was
+            // filed under its own expiry and strike".
+            //
+            // The comment claimed the distinction `keep_in_session` draws one
+            // layer down — and that function counts its drops into a
+            // `DropCensus`. This counted nothing. It does now, and the receipt
+            // says so.
+            declined = declined.saturating_add(1);
+            at = end;
+            continue;
+        }
         let expiry = brutex_core::instrument::Expiry::new(
             expiry_day.year(),
             expiry_day.month(),
@@ -7097,50 +7143,128 @@ async fn roll_one(
         )?);
         at = end;
     }
-    Ok(total)
+    Ok((total, declined))
 }
 
-/// Every month a window touches, ascending.
+/// What the receipt says about runs the month gate declined.
 ///
-/// The store addresses one month per file, so "which months does this window
-/// cover" is the unit a gap is measured in. Ascending because a backfill must
-/// run oldest-first — `store::file::BarFile::append` refuses a batch whose
-/// overlap with what is held is not a suffix of it, so a later month fetched
-/// first permanently blocks the earlier days of that month's file.
-///
-/// # Cost
-///
-/// O(months), which is bounded by the window the operator typed and by
-/// `MAX_WINDOW_DAYS` above it. No allocation per day.
-fn months_of_window(window: pull::session::Window) -> Vec<store::path::YearMonth> {
-    let mut out = Vec::new();
-    let (mut year, mut month) = (window.from().year(), window.from().month());
-    let (last_year, last_month) = (window.to().year(), window.to().month());
-    while (year, month) <= (last_year, last_month) {
-        if let Ok(ym) = store::path::YearMonth::new(year, month) {
-            out.push(ym);
-        }
-        if month == 12 {
-            year = year.saturating_add(1);
-            month = 1;
-        } else {
-            month = month.saturating_add(1);
-        }
-    }
-    out
+/// Declined is neither stored nor failed: the vendor answered correctly and the
+/// ordinal genuinely named a live contract. With `expiry_codes` 1, 2 and 3, a
+/// window inside a closed month declines most of the monthly cross product —
+/// which is right, and without a line of its own would leave a receipt reading
+/// as though the whole product had landed.
+fn declined_note(declined: usize) -> String {
+    format!(
+        "{declined} — the cadence and ordinal resolved to a contract that has \
+         not settled. Nothing was filed for them, and that is the rule rather \
+         than a fault"
+    )
 }
 
-/// The store directory a rung files under, or the one an expired series uses.
+/// WHY THE OFFSET PATH REFUSES A FUTURES REQUEST.
 ///
-/// `Granularity::store_timeframe` returns `None` for a rung this store has no
-/// directory for. That cannot happen on this path — `parse_fno` admits only
-/// `Minute1` — but the fallback is stated rather than unwrapped, because a
-/// `None` reached here would otherwise be a panic in a request handler.
-fn timeframe_of(rung: pull::vendor::Granularity) -> store::path::Timeframe {
-    rung.store_timeframe()
-        .unwrap_or(store::path::Timeframe::MINUTE_1)
+/// `asked.series` appeared exactly ONCE in this file — as a display label — so
+/// a request for expired FUTURES ran the options cross product
+/// (`drvOptionType: CALL|PUT`), fetched expired options, filed them, and
+/// rendered a receipt whose "Series" line said *Future*. Asked for one thing,
+/// given another, told it did the first: the `CLAUDE.md` §4 shape exactly.
+///
+/// The vendor publishes no expired-futures history at all. Its endpoint is
+/// `rollingoption` and every axis of it is an option's — a strike offset, a
+/// side, an option instrument word. There is nothing to route a futures request
+/// to, so it refuses by name rather than substituting the series that exists.
+///
+/// Found by walking the permutations rather than by a failed run: two series ×
+/// two feeds is four combinations, and three of them were right.
+///
+/// Whether the window starts below the depth this feed serves, and why.
+///
+/// `RollingSpec::years_back` records the vendor's "last 5 years" and was
+/// consulted by nothing but a test. A request for 2018 therefore went out, got
+/// 252 empty answers per chunk, and every one returned `Ok(0)` — which is not a
+/// failure — so the page rendered HTTP 200 and "every planned contract answered
+/// and was filed" over a window the vendor holds nothing for.
+///
+/// The sibling field on the name-walk, `FnoDiscovery::from_year`, carries the
+/// rule this was missing in its own words: a request below the floor is REFUSED
+/// rather than sent, "because an empty answer and an out-of-range one read
+/// identically".
+///
+/// A ROLLING FLOOR MOVES, so it is recomputed against today rather than stored
+/// — the same argument `clamp_to_floor` makes on the spot path.
+fn below_history_floor(
+    asked: &ingest::FnoRequest,
+    rolling: pull::vendor::RollingSpec,
+    today: Day,
+) -> Option<String> {
+    let floor_year = i64::from(today.year()).saturating_sub(i64::from(rolling.years_back));
+    (i64::from(asked.window.from().year()) < floor_year).then(|| {
+        format!(
+            "this feed serves expired options for the last {} years, so it holds \
+             nothing for {}. Nothing was sent: an out-of-range answer and an \
+             empty one are the same bytes, and a run that cannot tell them apart \
+             reports a month as swept that was never held",
+            rolling.years_back,
+            asked.window.from().year()
+        )
+    })
 }
 
+/// The UNDERLYING's own vendor id for a rolling request — never a contract's.
+///
+/// There is no contract id to have: that is the whole reason the offset path
+/// exists. What goes on the wire is the spot instrument's id, looked up exactly
+/// as the spot path looks it up.
+///
+/// # Errors
+///
+/// A sentence, when this vendor's master lists no id for the underlying.
+/// Refused rather than borrowing another vendor's id, which would name a
+/// different instrument and be answered.
+fn rolling_security_id(
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+) -> Result<brutex_core::vendor::VendorId, String> {
+    let key = brutex_core::instrument::InstrumentKey {
+        exchange: brutex_core::instrument::Exchange::Nse,
+        segment: brutex_core::instrument::Segment::Index,
+        underlying: asked.underlying,
+        kind: brutex_core::instrument::Kind::Index,
+    };
+    site.read
+        .merged
+        .by_key
+        .get(&key)
+        .and_then(|e| e.ids.get(wire.store_vendor as usize).copied().flatten())
+        .ok_or_else(|| {
+            "this vendor's instrument master lists no id for the underlying, so \
+             there is nothing to name it by. Refused rather than sending another \
+             vendor's id, which would ask for a different instrument and be \
+             answered"
+                .to_owned()
+        })
+}
+
+/// THE MONTH GATE ON THE OFFSET PATH — why `last_settled` reaches `roll_every`.
+///
+/// The three gates the current-month rule landed in — the window clamp, the
+/// named-expiry refusal and `ingest::matching` — are all on the NAME walk. This
+/// path reaches none of them, and it is the one the rendered form uses by
+/// default: that form carries no feed control, and `parse_feed("")` answers the
+/// offset-addressed feed.
+///
+/// Worse than an unguarded window. `pull::rolling::expiry_of` resolves "the Nth
+/// expiry ON OR AFTER this day", so a bar dated 2026-07-31 asked at MONTH/near
+/// lands on the AUGUST monthly and at MONTH/far on roughly October. A window
+/// entirely inside a closed month therefore produced contracts months from
+/// expiring — while `fno_facts` printed "an expired series never touches the
+/// CURRENT MONTH" on the same receipt.
+///
+/// Bounding the window is not enough here, because the contract is computed
+/// FORWARD from each bar's own day. The check has to be on the contract, and
+/// `roll_one` is the only place that knows which one each run resolved to.
+///
 /// WHICH CONTRACT ONE ROLLING BAR BELONGS TO — its expiry and its strike.
 ///
 /// # Why per row and not per answer
@@ -7274,6 +7398,14 @@ fn land_rolling_group(
 ///
 /// One request per member of the product, each rate-governed. O(1) per
 /// request; nothing here scans the store.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each is a distinct fact about the one cross product being walked \
+              -- the ask, the site, the wire, the descriptor, the security id, \
+              the instrument word, the offsets that word selects, and the day \
+              the contracts are judged against. A struct to carry them would be \
+              `RollingSpec` with the request glued on"
+)]
 async fn roll_every(
     asked: &ingest::FnoRequest,
     site: &Site,
@@ -7282,10 +7414,12 @@ async fn roll_every(
     security_id: &str,
     word: &'static str,
     offsets: &'static [&'static str],
-) -> (usize, usize, Vec<String>) {
+    last_settled: Day,
+) -> (usize, usize, usize, Vec<String>) {
     let endpoint = pull::rolling::url(&rolling, wire.spec.base_url);
     let mut stored = 0usize;
     let mut failed = 0usize;
+    let mut declined = 0usize;
     let mut why: Vec<String> = Vec::new();
 
     // THE PER-CALL CAP BINDS HERE, AND NOTHING BOUND IT.
@@ -7311,6 +7445,7 @@ async fn roll_every(
                 return (
                     0,
                     1,
+                    0,
                     vec![format!(
                         "the window could not be split to this feed's {}-day \
                      per-call cap, so no rolling request was sent: {refusal}",
@@ -7331,7 +7466,7 @@ async fn roll_every(
                         // charged per CHUNK, because a chunk is a request.
                         if let Err(halt) = await_budget(asked.feed, site).await {
                             why.push(halt);
-                            return (stored, failed.saturating_add(1), why);
+                            return (stored, failed.saturating_add(1), declined, why);
                         }
                         let one = roll_one(
                             asked,
@@ -7346,10 +7481,14 @@ async fn roll_every(
                             &endpoint,
                             rolling,
                             *chunk,
+                            last_settled,
                         )
                         .await;
                         match one {
-                            Ok(count) => stored = stored.saturating_add(count),
+                            Ok((count, skipped)) => {
+                                stored = stored.saturating_add(count);
+                                declined = declined.saturating_add(skipped);
+                            }
                             Err(said) => {
                                 failed = failed.saturating_add(1);
                                 if why.len() < 5 {
@@ -7362,7 +7501,7 @@ async fn roll_every(
             }
         }
     }
-    (stored, failed, why)
+    (stored, failed, declined, why)
 }
 
 /// The Dhan shape: enumerate the contract set, fetch each, file bar and overlay.
@@ -7392,52 +7531,13 @@ async fn fno_roll(
     wire: &Wire,
     rolling: pull::vendor::RollingSpec,
 ) -> (axum::http::StatusCode, String) {
-    // OPTIONS ONLY, AND THE SERIES ASKED FOR WAS NEVER READ HERE.
-    //
-    // `asked.series` appeared exactly ONCE in this file — as a display label —
-    // so a request for expired FUTURES on this feed ran the options cross
-    // product (`drvOptionType: CALL|PUT`), fetched expired options, filed them,
-    // and rendered a receipt whose "Series" line said *Future*. Asked for one
-    // thing, given another, told it did the first. That is precisely the
-    // `CLAUDE.md` §4 shape: a fallback that hides a failure.
-    //
-    // The vendor publishes no expired-FUTURES history at all. Its endpoint is
-    // `rollingoption` and every axis of it is an option's — a strike offset, a
-    // side, an option instrument word. There is no futures equivalent to route
-    // to, so this refuses by name rather than substituting the series it does
-    // serve.
-    //
-    // Found by walking the permutations rather than by a failed run: two series
-    // × two feeds is four combinations, and three of them were right.
-    // THE VENDOR'S HISTORY DEPTH, ENFORCED — IT WAS DECLARED AND NEVER READ.
-    //
-    // `RollingSpec::years_back` records the vendor's "last 5 years" and was
-    // consulted by nothing but a test. So a request for 2018 went out, got 252
-    // empty answers per chunk, and every one returned `Ok(0)` — which is not a
-    // failure — so the page rendered HTTP 200 and "every planned contract
-    // answered and was filed" over a window the vendor holds nothing for.
-    //
-    // The sibling field for the name-walk, `FnoDiscovery::from_year`, carries
-    // the rule this was missing, in its own words: a request below the floor is
-    // REFUSED rather than sent, "because an empty answer and an out-of-range
-    // one read identically". Same rule, same reason, now applied here too.
-    //
-    // A ROLLING FLOOR MOVES, so it is recomputed against today rather than
-    // stored — the same argument `clamp_to_floor` makes on the spot path.
-    let floor_year = i64::from(page.today.year()).saturating_sub(i64::from(rolling.years_back));
-    if i64::from(asked.window.from().year()) < floor_year {
+    // OPTIONS ONLY — see `no_futures_here` for what reading the series cost.
+    if let Some(why) = below_history_floor(asked, rolling, page.today) {
         return page.say(
             facts,
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             audit::Outcome::NotStarted,
-            &format!(
-                "this feed serves expired options for the last {} years, so it \
-                 holds nothing for {}. Nothing was sent: an out-of-range answer \
-                 and an empty one are the same bytes, and a run that cannot \
-                 tell them apart reports a month as swept that was never held",
-                rolling.years_back,
-                asked.window.from().year()
-            ),
+            &why,
         );
     }
 
@@ -7446,36 +7546,22 @@ async fn fno_roll(
             facts,
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             audit::Outcome::NotStarted,
-            "this feed serves expired OPTIONS only, addressed by strike offset —              it publishes no expired-futures history, and nothing was sent              rather than options being filed under a futures request",
+            "this feed serves expired OPTIONS only, addressed by strike offset \
+             — it publishes no expired-futures history, and nothing was sent \
+             rather than options being filed under a futures request",
         );
     }
 
-    // THE UNDERLYING'S OWN ID, never a contract's. There is no contract id to
-    // have — that is the whole reason this path exists — so what goes on the
-    // wire is the spot instrument's, looked up exactly as the spot path looks
-    // it up.
-    let key = brutex_core::instrument::InstrumentKey {
-        exchange: brutex_core::instrument::Exchange::Nse,
-        segment: brutex_core::instrument::Segment::Index,
-        underlying: asked.underlying,
-        kind: brutex_core::instrument::Kind::Index,
-    };
-    let Some(security_id) = site
-        .read
-        .merged
-        .by_key
-        .get(&key)
-        .and_then(|e| e.ids.get(wire.store_vendor as usize).copied().flatten())
-    else {
-        return page.say(
-            facts,
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            audit::Outcome::NotStarted,
-            "this vendor's instrument master lists no id for the underlying, so \
-             there is nothing to name it by. Refused rather than sending \
-             another vendor's id, which would ask for a different instrument \
-             and be answered",
-        );
+    let security_id = match rolling_security_id(asked, site, wire) {
+        Ok(id) => id,
+        Err(why) => {
+            return page.say(
+                facts,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                audit::Outcome::NotStarted,
+                &why,
+            );
+        }
     };
 
     // AN INDEX OPTION AND A STOCK OPTION ARE DIFFERENT WIDTHS. The vendor
@@ -7494,7 +7580,19 @@ async fn fno_roll(
         format!("strike offset — {} offsets, ATM-relative", offsets.len()),
     ));
 
-    let (stored, failed, why) = roll_every(
+    let last_settled = match ingest::last_settled_day(page.today) {
+        Ok(day) => day,
+        Err(why) => {
+            return page.say(
+                facts,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                audit::Outcome::NotStarted,
+                &why.to_string(),
+            );
+        }
+    };
+
+    let (stored, failed, declined, why) = roll_every(
         asked,
         site,
         wire,
@@ -7502,9 +7600,14 @@ async fn fno_roll(
         security_id.as_str(),
         word,
         offsets,
+        last_settled,
     )
     .await;
     facts.push(("Bars stored", stored.to_string()));
+    // A THIRD OUTCOME, AND IT NEEDS ITS OWN LINE. See `roll_one`'s gate.
+    if declined > 0 {
+        facts.push(("Contract runs declined", declined_note(declined)));
+    }
 
     if failed == 0 {
         return page.say(
@@ -7584,72 +7687,71 @@ async fn fno_report(
     // TODAY IS PASSED IN because `matching` now drops a contract that has not
     // settled. See its own comment: the window gate cannot cover this, since a
     // window ending yesterday still falls in a month that holds a live expiry.
-    // THE LAST SETTLED DAY, NOT TODAY — the end of LAST month. The operator's
-    // rule of 2026-08-19: an expired series never touches the current month,
-    // even on its first day. The window was already clamped to this at the
-    // parse, so `window.to()` IS that bound for a month-shaped request and is
-    // at or before it for one that named an expiry.
-    let wanted = ingest::matching(chain, asked, asked.window.to());
+    // THE LAST SETTLED DAY, COMPUTED — NOT THE WINDOW'S END.
+    //
+    // This passed `asked.window.to()` on the reasoning that the clamp had
+    // already pulled it back to the bound. It had not, and the difference lost
+    // real contracts: `clamp_to_settled` returns the window UNTOUCHED when it
+    // already ends inside a closed month, so `window.to()` is whatever the
+    // operator typed. Ask for 2026-07-01..2026-07-15 on 2026-08-19 and the
+    // July expiries of the 16th, 23rd and 30th — all settled for weeks — were
+    // filtered out, and the receipt said the month published nothing for them.
+    //
+    // Worse on a named expiry: `to` is only required to be at or before the
+    // expiry, so any `to` earlier than it dropped the very contract that was
+    // asked for and answered 200 with "the month published no contract", which
+    // blames the vendor for this filter's arithmetic.
+    //
+    // These are two different axes. `window` says WHICH BARS to fetch;
+    // `last_settled_day` says WHICH CONTRACTS may be touched at all. Conflating
+    // them made the first silently narrow the second.
+    let last_settled = match ingest::last_settled_day(page.today) {
+        Ok(day) => day,
+        Err(why) => {
+            return page.say(
+                facts,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                audit::Outcome::NotStarted,
+                &why.to_string(),
+            );
+        }
+    };
+    let wanted = ingest::matching(chain, asked, last_settled);
     facts.push(("Contracts asked for", wanted.len().to_string()));
 
-    // WHAT IS ALREADY HELD IS NOT ASKED FOR AGAIN.
+    // THE INCREMENTAL GATE IS WITHDRAWN, AND THIS IS WHY.
     //
-    // Until now this route re-fetched every contract of the month on every
-    // run, because nothing asked the store what it already had. The spot side
-    // has answered that question since `work::gaps`: gap = expected minus held,
-    // one probe per cell, and re-running fetches nothing when nothing is
-    // missing. That is what makes a backfill resumable after a kill instead of
-    // a thing that must complete in one sitting.
+    // It probed `Manifest::entry(key).is_some()` per contract-month and skipped
+    // what came back held. `EntryKey` is `(contract, exchange, segment, symbol,
+    // timeframe, month)` — **the window is not in it** — and `Entry::check`
+    // refuses only `rows == 0`. So ONE BAR makes a contract-month "held".
     //
-    // The probe is `Manifest::entry` — a hash probe against a counter file, not
-    // a walk — so this is O(contracts × months) and never O(store).
-    // `gaps_by` takes the probe rather than a prepared `HashSet` precisely so
-    // no one builds a set of every committed entry to answer a question about
-    // fifty contracts.
+    // The failure, on 2026-08-19, with no crash and no vendor fault:
     //
-    // THE RESUME POINT IS THE STORE, NOT A LEDGER. There is no "this month is
-    // done" marker anywhere, for the reason the autopilot's header gives about
-    // cursors: the copy that is wrong is the one that skips a month in silence.
-    // Discovery is re-run on a complete month — units of requests — and the
-    // bars, which are the thousands, are not.
-    let held_months = months_of_window(asked.window);
-    let discovered = pull::fnowork::cells(&wanted, &held_months, timeframe_of(asked.granularity));
-    let manifest = crate::autopilot::manifest_of(&site.censuses, wire.store_vendor);
-    let work = pull::fnowork::gaps_by(&discovered.cells, |key| {
-        manifest.is_some_and(|m| m.entry(key).is_some())
-    });
-    facts.push((
-        "Already held",
-        format!(
-            "{} of {} contract-month(s) — not asked for again",
-            work.held,
-            work.offered()
-        ),
-    ));
-    if !discovered.refused.is_empty() {
-        // REPORTED, NEVER SKIPPED. A contract whose underlying this store
-        // cannot file is a hole in the month, and a month that reads complete
-        // with a hole in it is the failure this whole route is careful about.
-        facts.push((
-            "Contracts that cannot be filed",
-            discovered
-                .refused
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(" · "),
-        ));
-    }
-    if work.is_complete() && !discovered.cells.is_empty() {
-        return page.say(
-            facts,
-            axum::http::StatusCode::OK,
-            audit::Outcome::Empty,
-            "every contract-month this month holds is already on disk, so \
-             nothing was fetched — which is what a re-run is supposed to cost",
-        );
-    }
-
+    //   run 1: from=2026-07-15&to=2026-07-20  -> July contracts land 5 days
+    //   run 2: from=2026-07-01&to=2026-07-31  -> every cell probes held
+    //          -> HTTP 200, Outcome::Empty, "every contract-month this month
+    //             holds is already on disk, so nothing was fetched"
+    //
+    // July 1-14 and 21-31 are never fetched and the receipt says the month is
+    // done. Before the gate, run 2 called the fetch, `BarFile::append` refused
+    // the wider batch — `suffix_that_follows` anchors the overlap at the file's
+    // TAIL — and the page answered 502 "the month is incomplete and must not be
+    // read as held". **A loud correct refusal was replaced by a silent false
+    // success**, and under §8's append-only rule the hole cannot be filled by
+    // re-running afterwards: the bar file has to be deleted.
+    //
+    // The spot side it was modelled on does not work this way. `next_window`
+    // takes `held: F -> Option<i64>` — the last held TIMESTAMP — and resumes at
+    // the day after. It is a POSITION, not a boolean. `gaps_by` reduced that to
+    // a boolean and lost resume with it, and a boolean cannot express
+    // completeness without a trading calendar this build does not have.
+    //
+    // `pull::fnowork` stays: its arithmetic is right and tested. What it needs
+    // before it can drive anything is a per-contract-month POSITION to compare
+    // against, and that is a change to the manifest's question, not to this
+    // call site. Wiring it back on the current shape would be a second silent
+    // hole, which is worse than the honest refetch this restores.
     if wanted.is_empty() {
         return page.say(
             facts,
@@ -17943,10 +18045,22 @@ pub async fn universe_resolve(
         INDEX_HOST,
         today,
         &feed,
-        // EVERY FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for
-        // the one that does not, and asking the descriptor rather than assuming
-        // is what keeps that true when it lands.
-        pull::universe::JoinKey::Isin,
+        // ASKED OF THE VENDOR, NOT ASSUMED -- and this line used to assume.
+        //
+        // It was the literal `JoinKey::Isin`, under a comment reading "EVERY
+        // FEED IN THIS BUILD PUBLISHES AN ISIN. The symbol key exists for the
+        // one that does not, and asking the descriptor rather than assuming is
+        // what keeps that true when it lands." **It landed on 14 Aug 2026.**
+        // Zerodha's master has twelve columns and none is an ISIN, so this
+        // literal joined its rows on an EMPTY field -- and `universe::resolve`
+        // skips an empty key deliberately, so nothing would have errored. Every
+        // Zerodha instrument would have landed in `Verdict::Lacks`, which reads
+        // exactly like a vendor that lists nothing.
+        //
+        // `JoinKey::for_vendor` derives it from `master_columns().isin`, which
+        // already spells Zerodha's as empty, so there is no second table to
+        // fall behind the first.
+        pull::universe::JoinKey::for_vendor(vendor),
         &master,
     )
     .await;
