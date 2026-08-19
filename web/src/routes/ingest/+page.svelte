@@ -2575,8 +2575,56 @@
    * puts spot before futures and futures before options, and a derivative
    * request that arrives first is refused for want of the spot month.
    */
+  /**
+   * WHICH FEEDS CAN ANSWER AN EXPIRED-F&O REQUEST AT ALL.
+   *
+   * `/feeds.json` states it as `fno`, one of four words, because there are
+   * four cases and they are not a yes/no:
+   *
+   *   by_name           — a discovery walk over contract names. This is the
+   *                       only shape `POST /pull/fno` builds today.
+   *   by_strike_offset  — no names to discover: the request names ATM±n and an
+   *                       expiry CODE. A different builder, not yet written.
+   *   none              — the vendor serves no derivative history.
+   *   local_folder      — an archive. Its expired contracts are files on disk,
+   *                       not an answer to a GET, and never will be.
+   *
+   * MEASURED, WHICH IS WHY THIS EXISTS. On 2026-08-19 this page fired an
+   * expired-F&O request at every ticked feed. The ones aimed at Dhan came back
+   * 502 — correctly, since Dhan publishes no name to discover — but only after
+   * paying for a credential read and a socket each. A page cannot decline what
+   * it cannot see, and until `/feeds.json` said this, it could not see it.
+   */
+  const fnoCapable = $derived(
+    feedsChosen.filter(
+      (v) => feeds.all.find((f) => f.wire === v)?.fno === 'by_name'
+    )
+  );
+
+  /**
+   * THE FEEDS THAT WERE TICKED AND CANNOT SERVE, with the reason each one
+   * cannot. Rendered rather than dropped: silently sending fewer requests than
+   * the operator ticked is the §4 fallback that hides a failure, and a run that
+   * quietly skipped a broker is one an operator would read as a broker that
+   * quietly failed.
+   */
+  const fnoDeclined = $derived(
+    feedsChosen
+      .map((v) => ({ wire: v, how: feeds.all.find((f) => f.wire === v)?.fno }))
+      .filter((x) => x.how !== 'by_name')
+      .map((x) => ({
+        feed: feedName(x.wire),
+        why:
+          x.how === 'by_strike_offset'
+            ? 'addresses expired options by strike offset (ATM±n) rather than by contract name, so the discovery walk this form builds does not fit it. Its own request builder is not written yet.'
+            : x.how === 'local_folder'
+              ? 'is a folder of files, not an endpoint — there is no expiry list to ask it for.'
+              : 'states no expired-derivative history.'
+      }))
+  );
+
   const fnoBodies = $derived(
-    feedsChosen.flatMap((v) =>
+    fnoCapable.flatMap((v) =>
       segmentsReached
         .filter((seg) => seg.key === 'futures' || seg.key === 'options')
         .flatMap((seg) =>

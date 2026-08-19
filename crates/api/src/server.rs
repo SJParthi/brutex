@@ -1716,9 +1716,40 @@ async fn feeds_json(
         // The REACH of a folder feed is NOT here: it cannot be answered
         // without walking the folder, and this route renders on every page
         // load. `/folder.json` answers it on demand — see `crate::folder`.
+        // WHICH EXPIRED-F&O SHAPE THIS FEED ANSWERS IN, and it is not a
+        // yes/no.
+        //
+        // Three states, because there are three: a feed with no derivative
+        // history at all, one addressed by CONTRACT NAME through a discovery
+        // walk, and one addressed by STRIKE OFFSET with no names to discover.
+        // The two that serve need entirely different request builders, so a
+        // page that knew only "serves F&O" would still send the wrong one.
+        //
+        // It is here because the browser had no way to ask. Measured on
+        // 2026-08-19: the ingest page fired an expired-F&O request at every
+        // ticked feed, and the ones at Dhan came back 502 -- correctly, since
+        // Dhan publishes no name to discover -- after paying for a credential
+        // read and a socket each. A page cannot decline what it cannot see.
+        let fno = match feed.descriptor().transport {
+            pull::vendor::Transport::Http(spec) => {
+                if spec.fno.by_name().is_some() {
+                    "by_name"
+                } else if spec.fno.by_offset().is_some() {
+                    "by_strike_offset"
+                } else {
+                    "none"
+                }
+            }
+            // AN ARCHIVE HAS NO DISCOVERY ENDPOINT and never will: its expired
+            // contracts are files on the operator's disk, not an answer to a
+            // GET. Reported as its own word rather than folded into `none`,
+            // because "this vendor does not serve it" and "this is not a
+            // vendor" send an operator to different places.
+            pull::vendor::Transport::LocalArchive(_) => "local_folder",
+        };
         let _ = write!(
             out,
-            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},"finest":{finest},"history":{history}}}"#,
+            r#"{{"wire":{},"display":{},"kind":{},"kind_label":{},"verb":{},"ready":{ready},"why":{},"fno":{},"finest":{finest},"history":{history}}}"#,
             render::json_string(feed.wire()),
             render::json_string(feed.display()),
             render::json_string(match kind {
@@ -1728,6 +1759,7 @@ async fn feeds_json(
             render::json_string(kind.label()),
             render::json_string(kind.verb()),
             render::json_string(&why),
+            render::json_string(fno),
             finest = finest_fields(feed),
         );
     }
