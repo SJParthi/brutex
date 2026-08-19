@@ -16266,3 +16266,37 @@ visible, which no quotient between them can show.
 
 ---
 
+### D-0206 — `pull` depends on `costs`, for the expiry calendar and nothing else
+
+**Decision.** `crates/pull` declares `costs`.
+
+**Why.** Dhan's expired-options endpoint is addressed by cadence and ordinal —
+`expiryFlag` WEEK|MONTH, `expiryCode` 1 near | 2 next | 3 far — and its answer
+carries a strike and a timestamp and **no expiry date**. Nothing in the request
+or the response names one. But `store::path` files a derivative under
+`Kind::Option { expiry, strike, side }`, so the date must be computed: *the
+near weekly as of this bar's day*.
+
+That calendar exists once already, in `costs::expiry`, with its weekly and
+monthly regimes and the verified-from citations that bound them. Writing a
+second one inside `pull` would be a second answer to "when did that contract
+expire", and the copy that drifts is always the one nobody remembers exists.
+
+**Alternatives considered.**
+
+* *Move the calendar into `core`.* Both crates already depend on `core`, so no
+  arrow is added. Rejected: it relocates working code with citations attached to
+  it, and `core` is the crate every other one loads.
+* *Compute the expiry in `api`, which reaches both, and pass it down.* Rejected:
+  it puts a vendor's calendar decision in the HTTP surface, where a second caller
+  would have to repeat it.
+
+**Cost.** None to the graph's shape. `costs` declares `brutex_core` alone, so
+this is `pull -> costs -> core` beside the `pull -> core` that already existed,
+and the graph stays acyclic. Gate 9 (`core` depends on nothing) and gate 9b
+(`greeks` likewise) are untouched. `pull` is not on gate 22's list and does not
+join it.
+
+**What this does NOT license.** `costs` is taken for its calendar. A later use
+of its fill or slippage model from `pull` would be a different decision, because
+it would put a trading assumption inside the ingest path.

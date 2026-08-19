@@ -39,7 +39,7 @@ see the note at the end of this section for what that cost.
 | `engine` | the Apriori ladder: generation, subset-prune, support, extinction | **`vocab`** | ✓ |
 | `store` | the fixed-stride bar file: open, read, append, verify | `core`, `telemetry` | ✓ |
 | `lake` | the parquet-shaped reader for vendor archives | `core`, `telemetry` | ✓ |
-| `pull` | vendor ingest, rate governor, credential read | `core`, `store`, `telemetry` | ✓ |
+| `pull` | vendor ingest, rate governor, credential read | `core`, `store`, `telemetry`, `costs` | ✓ |
 | `api` | the HTTP surface | `core`, `pull`, `store`, `telemetry` | ✓ |
 | `runner` | the sweep driven end to end: trades, the exit grid, walk-forward, PBO, the bootstrap, the audit | `core`, `vocab`, `indicators`, `engine`, `costs` | ✓ |
 | `cli` | the operator entry point for the sweep: generated bars in, ladder walked, report out | `runner`, `engine`, `indicators`, `costs`, `core`, `store` | ✓ |

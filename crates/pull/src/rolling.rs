@@ -48,6 +48,109 @@
 use crate::vendor::{PriceScale, RollingSpec};
 use store::format::{Bar, OI_NULL, Overlay};
 
+/// The expiry a rolling answer does NOT carry, computed from what it does.
+///
+/// # Why this has to be computed at all
+///
+/// The request asks by cadence and ordinal — `expiryFlag` WEEK|MONTH,
+/// `expiryCode` 1 near | 2 next | 3 far — and the answer carries a strike and a
+/// timestamp. Neither names a DATE. But `store::path` files a derivative under
+/// `Kind::Option { expiry, strike, side }`, so without a date a contract has no
+/// place to go: every expiry of a month would render one path and append into
+/// one file, which is the collision the overlay's own header describes.
+///
+/// # Why `costs` and not a table here
+///
+/// `costs::expiry` already holds the weekly and monthly regimes, with the dates
+/// they were verified from and the citations behind them. A second table in
+/// this crate would be a second answer to "when did that contract expire", and
+/// the copy that drifts is the one nobody remembers exists. D-0206.
+///
+/// # Errors
+///
+/// [`RollingError::NoExpiry`] when the underlying is not one the calendar
+/// knows, when the day is before the regime's verified floor, or when the
+/// cadence has been withdrawn for that slot. A withdrawn weekly is a REFUSAL
+/// and not an empty answer — `costs::expiry` is explicit about that, and
+/// guessing a date for a contract that did not exist is how a backtest gets
+/// bars filed under a series the exchange never listed.
+///
+/// # Cost
+///
+/// O(1). One slot lookup and one calendar step; nothing scans.
+pub fn expiry_of(
+    underlying: &str,
+    flag: &str,
+    code: &str,
+    on: crate::session::Day,
+) -> Result<brutex_core::instrument::Expiry, RollingError> {
+    let symbol =
+        brutex_core::symbol::Symbol::new(underlying).map_err(|_| RollingError::NoExpiry {
+            why: "the underlying is not a symbol this build knows",
+        })?;
+    let slot = costs::venue::swept_slot(symbol).map_err(|_| RollingError::NoExpiry {
+        why: "the underlying has no expiry regime recorded",
+    })?;
+    let day = costs::day::TradeDay::new(on.year(), on.month(), on.day()).map_err(|_| {
+        RollingError::NoExpiry {
+            why: "the bar's own day is not a real date",
+        }
+    })?;
+
+    // THE ORDINAL IS WALKED, NOT INDEXED. "Next" is "the one after near", and
+    // the calendar answers only "the next on or after this day" — so stepping
+    // is the honest way to reach the second and the third, and a step that
+    // finds nothing is a refusal rather than a guess.
+    let steps: u8 = match code {
+        "1" => 1,
+        "2" => 2,
+        "3" => 3,
+        _ => {
+            return Err(RollingError::NoExpiry {
+                why: "the expiry ordinal is not one this vendor serves",
+            });
+        }
+    };
+    let mut at = day;
+    let mut found = None;
+    for _ in 0..steps {
+        let next = match flag {
+            "WEEK" => costs::expiry::next_weekly_expiry(slot, at)
+                .map_err(|_| RollingError::NoExpiry {
+                    why: "the day is before this weekly regime was verified from",
+                })?
+                .ok_or(RollingError::NoExpiry {
+                    why: "this weekly was withdrawn for that slot, so no contract existed",
+                })?,
+            "MONTH" => costs::expiry::next_monthly_expiry(slot, at).map_err(|_| {
+                RollingError::NoExpiry {
+                    why: "the day is before this monthly regime was verified from",
+                }
+            })?,
+            _ => {
+                return Err(RollingError::NoExpiry {
+                    why: "the expiry cadence is not one this vendor serves",
+                });
+            }
+        };
+        found = Some(next);
+        // ONE DAY PAST THE ONE JUST FOUND, so the next step cannot return it
+        // again. `next_*_expiry` answers "on or after", so stepping from the
+        // expiry itself would stand still.
+        at = next.plus_days(1).map_err(|_| RollingError::NoExpiry {
+            why: "the calendar ran past the last day it can represent",
+        })?;
+    }
+    let settled = found.ok_or(RollingError::NoExpiry {
+        why: "no expiry was reached",
+    })?;
+    brutex_core::instrument::Expiry::new(settled.year(), settled.month(), settled.day()).map_err(
+        |_| RollingError::NoExpiry {
+            why: "the calendar produced a date this store cannot name",
+        },
+    )
+}
+
 /// One rolling-option request: a shape, not a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ask {
@@ -114,6 +217,11 @@ pub enum RollingError {
         /// How long this field was.
         found: usize,
     },
+    /// The contract's expiry could not be established.
+    NoExpiry {
+        /// Which step could not answer.
+        why: &'static str,
+    },
     /// A price would not convert to paisa without loss or overflow.
     Unrepresentable {
         /// Which field.
@@ -145,6 +253,13 @@ impl core::fmt::Display for RollingError {
                  mismatch is refused rather than truncated: taking the shorter \
                  would file a bar whose price came from one minute and whose \
                  volume came from another, and nothing downstream could detect it"
+            ),
+            Self::NoExpiry { why } => write!(
+                f,
+                "this answer's contract has no expiry date to file it under — \
+                 {why}. The request asked by cadence and ordinal, and the answer \
+                 carries a strike and a timestamp, so the date is computed or it \
+                 does not exist"
             ),
             Self::Unrepresentable { field } => {
                 write!(f, "a `{field}` value does not fit paisa as an i64")
@@ -707,6 +822,65 @@ mod tests {
             "2025-10-01",
             "the day AFTER the operator's last, because the vendor excludes it \
              — an ask that carried 2025-09-30 would lose that whole session"
+        );
+    }
+
+    /// **THE EXPIRY THE ANSWER DOES NOT CARRY IS COMPUTED, AND THE ORDINALS
+    /// WALK FORWARD.**
+    ///
+    /// Near, next and far must be three DIFFERENT dates. `next_*_expiry`
+    /// answers "on or after", so a walk that stepped from the expiry itself
+    /// would stand still and file all three ordinals under one date — every
+    /// contract of a month rendering one path and appending into one file.
+    #[test]
+    fn near_next_and_far_are_three_different_dates_in_calendar_order() {
+        use crate::session::Day;
+
+        let on = Day::new(2025, 9, 1).expect("a real day");
+        let near = expiry_of("NIFTY", "WEEK", "1", on).expect("near resolves");
+        let next = expiry_of("NIFTY", "WEEK", "2", on).expect("next resolves");
+        let far = expiry_of("NIFTY", "WEEK", "3", on).expect("far resolves");
+
+        assert!(near < next, "next is after near: {near:?} !< {next:?}");
+        assert!(next < far, "far is after next: {next:?} !< {far:?}");
+
+        // AND A MONTHLY IS A DIFFERENT ANSWER FROM A WEEKLY. One cadence
+        // standing in for the other would file a monthly's bars under a
+        // weekly's date, which no later check could detect.
+        let monthly = expiry_of("NIFTY", "MONTH", "1", on).expect("monthly resolves");
+        assert_ne!(
+            monthly, near,
+            "the monthly and the near weekly are not the same contract"
+        );
+    }
+
+    /// **AN UNKNOWN UNDERLYING, CADENCE OR ORDINAL IS REFUSED, NEVER GUESSED.**
+    ///
+    /// Guessing a date for a contract the exchange never listed files bars
+    /// under a series that did not exist — and they would read back as real.
+    #[test]
+    fn an_expiry_that_cannot_be_established_is_refused_and_says_which_step() {
+        use crate::session::Day;
+
+        let on = Day::new(2025, 9, 1).expect("a real day");
+        for (u, flag, code) in [
+            ("NOTASYMBOL", "WEEK", "1"),
+            ("NIFTY", "FORTNIGHT", "1"),
+            ("NIFTY", "WEEK", "4"),
+        ] {
+            let got = expiry_of(u, flag, code, on);
+            assert!(
+                matches!(got, Err(RollingError::NoExpiry { .. })),
+                "{u}/{flag}/{code} is refused rather than guessed: {got:?}"
+            );
+        }
+        let said = RollingError::NoExpiry {
+            why: "the underlying has no expiry regime recorded",
+        }
+        .to_string();
+        assert!(
+            said.contains("computed or it does not exist"),
+            "the sentence explains why there is no date to read: {said}"
         );
     }
 

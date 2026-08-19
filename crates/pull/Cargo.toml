@@ -20,6 +20,22 @@ description  = "Vendor ingest: the credential path configuration, the read-only 
 # takes the dependency is a single `impl` block in the change that first makes a
 # live call. See docs/05-decisions.md D-0035.
 [dependencies]
+# THE EXPIRY CALENDAR, AND NOTHING ELSE FROM IT. D-0206.
+#
+# Dhan's rolling-option answer names a strike and a timestamp and NO EXPIRY
+# DATE -- the request asked by cadence and ordinal (`expiryFlag` WEEK|MONTH,
+# `expiryCode` 1|2|3), never by date. But `store::path` files a contract under
+# `Kind::Option { expiry, strike, side }`, so the date has to be computed:
+# "the near weekly as of this bar's day".
+#
+# That calendar already exists, once, in `costs::expiry`, with its regimes and
+# its verified-from citations. A second copy here would be a second answer to
+# "when did that contract expire", and the one that drifts is always the copy
+# nobody remembers exists.
+#
+# The graph stays acyclic: `costs` declares `brutex_core` alone, so this is
+# pull -> costs -> core beside the pull -> core that already exists.
+costs = { path = "../costs", version = "0.1.0" }
 # The lib target is `brutex_core` and it MUST be referred to by that name: a
 # dependency key of `core` shadows the sysroot crate inside rustdoc's generated
 # doc-test harness. Proven three times now -- in core itself, in store, and the
