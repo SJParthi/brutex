@@ -1134,14 +1134,31 @@ impl Vendor {
             // the derivative ones are declined by name; anything else is
             // unrecognised, which is refused rather than guessed at.
             //
-            // `INDICES` is UNVERIFIED and is deliberately in NEITHER list: the
-            // vendor's published column table gives an instrument-type alphabet
-            // of `EQ FUT CE PE` with no index word among them, and its quote
-            // examples address one as `NSE:NIFTY 50`. So how an index row spells
-            // its segment has not been read, and a guess here would file the
-            // engine's own surface under an invented code. docs/00-charter.md
-            // §4d.
-            Self::Zerodha => (&["NSE"], &["NFO-FUT", "NFO-OPT", "MCX", "BSE"]),
+            // `INDICES` IS READ NOW, AND IT WAS THE WHOLE FAILURE.
+            //
+            // This list carried `NSE` alone, under a comment saying `INDICES`
+            // was UNVERIFIED and deliberately in NEITHER list because "how an
+            // index row spells its segment has not been read, and a guess here
+            // would file the engine's own surface under an invented code".
+            // That restraint was right and it was waiting on a measurement.
+            //
+            // THE MEASUREMENT EXISTS. `api.kite.trade/instruments`, fetched
+            // 19 Aug 2026 and held at `~/.brutex/masters/zerodha_instruments.csv`:
+            // 114,546 rows, of which **136 carry `segment=INDICES` with
+            // `exchange=NSE`** -- including `256265,NIFTY 50` and
+            // `260105,NIFTY BANK`, the two instruments CLAUDE.md section 1 puts
+            // the entire engine surface on, and `264969,INDIA VIX`.
+            //
+            // WHAT ITS ABSENCE COST, measured on the same day. Every one of
+            // those 136 rows failed `segment_of` and was counted a row error --
+            // the live log reads `kept 10049, row_errors 136` -- so the master
+            // held no index at all and the spot pull refused with "zerodha does
+            // not list BANKNIFTY", for a vendor that lists it. An unrecognised
+            // segment is refused loudly, which is why this was a countable
+            // error and not a silent drop; the count is what identified it.
+            //
+            // Recorded in docs/00-charter.md section 4z.
+            Self::Zerodha => (&["NSE", "INDICES"], &["NFO-FUT", "NFO-OPT", "MCX", "BSE"]),
             Self::TrueData | Self::Gdfl => (&[], &[]),
         };
         if store.contains(&code) {
@@ -1204,6 +1221,108 @@ impl Vendor {
                 _ => Err(InstrumentError::Malformed),
             },
             Self::TrueData | Self::Gdfl => Err(InstrumentError::Malformed),
+        }
+    }
+
+    /// The `segment` word that means INDEX for a vendor whose instrument-type
+    /// alphabet has no index code, or `None` when the type column already says it.
+    ///
+    /// # Why this exists, and what its absence cost
+    ///
+    /// Kite's own column table publishes exactly four instrument types --
+    /// `EQ, FUT, CE, PE` (`docs/00-charter.md` §4z, read from
+    /// kite.trade/docs/connect/v3/market-quotes/). **There is no index word in
+    /// that alphabet.** The class lives in `segment`, which the vendor writes as
+    /// `INDICES`.
+    ///
+    /// [`decode_master_row`] resolved everything from the type word, so a Zerodha
+    /// index row arrived as `EQ` and **three separate things went wrong at once**:
+    ///
+    /// | What | Consequence |
+    /// |---|---|
+    /// | The space-collapse is gated on `IDX` | `NIFTY BANK` reached `Symbol::new`, which admits no space, and was `Malformed` |
+    /// | `(Segment, Kind)` is chosen by the type word | had it parsed, it would have been filed `(Cash, Equity)` -- an index stored as a share |
+    /// | The row therefore never entered the master | *"zerodha does not list BANKNIFTY"*, for a vendor that lists it |
+    ///
+    /// Measured on the vendor's own file, 19 Aug 2026: `kept 10049`,
+    /// **`row_errors 136`** -- and the file holds **exactly 136** NSE rows whose
+    /// segment is `INDICES`. Every index row, and no other row.
+    ///
+    /// # Why the fix is one word and not three branches
+    ///
+    /// Answering it here turns the existing `"IDX"` arm into the whole repair:
+    /// the collapse fires, the segment becomes [`Segment::Index`] and the kind
+    /// becomes [`Kind::Index`], all from code that already existed and is already
+    /// tested. Three separate vendor branches would have been three places to
+    /// disagree.
+    ///
+    /// **Constant time.** A `match` over a `#[repr]` enum -- one jump -- and the
+    /// caller's comparison is one `str` equality against a literal whose length is
+    /// known at compile time.
+    #[must_use]
+    // NOT DUPLICATE ARMS, TWO REASONS WITH ONE ANSWER. Groww and Dhan already
+    // publish an index code in the TYPE column, so consulting their segment
+    // could reclassify a row; the archives have no master and therefore no
+    // segment column at all. Collapsing them would delete the distinction that
+    // makes the first one dangerous, so the lint is disarmed here and nowhere
+    // else.
+    #[allow(
+        clippy::match_same_arms,
+        reason = "same answer, different reasons -- see the comment above"
+    )]
+    pub const fn index_segment_word(self) -> Option<&'static str> {
+        match self {
+            // Both publish an index code in the type column, so the segment is
+            // not consulted and must not be: Groww writes `IDX`, Dhan `INDEX`.
+            Self::Groww | Self::Dhan => None,
+            // The vendor's published type alphabet is `EQ FUT CE PE`. Its index
+            // rows carry `EQ` there and `INDICES` here.
+            Self::Zerodha => Some("INDICES"),
+            // No master, so no segment column to read.
+            Self::TrueData | Self::Gdfl => None,
+        }
+    }
+
+    /// The exchange's canonical ticker for an index this vendor spells by NAME.
+    ///
+    /// # Why an alias is needed at all, and why it is not an invention
+    ///
+    /// Collapsing spaces is enough where the vendor writes the ticker with spaces
+    /// in it. It is **not** enough where the vendor writes the index's NAME in the
+    /// symbol column, and Zerodha does exactly that -- which the other two masters
+    /// on this machine witness directly:
+    ///
+    /// | Vendor | symbol column | name column |
+    /// |---|---|---|
+    /// | Groww | `NIFTY` | `NIFTY 50` |
+    /// | Dhan | `NIFTY` | `Nifty 50` |
+    /// | **Zerodha** | **`NIFTY 50`** | `NIFTY 50` |
+    ///
+    /// Zerodha's `tradingsymbol` is character-for-character what the other two put
+    /// in their *name* column, and both of them state the ticker for that name in
+    /// the same row. So this table is READ off two masters that disagree with
+    /// neither each other nor the exchange -- it is not a spelling somebody chose.
+    /// `CLAUDE.md` §3 rule 1 wants a source; the source is
+    /// `~/.brutex/masters/{groww_instruments,dhan_scrip}.csv`, recorded in
+    /// `docs/00-charter.md` §4z.
+    ///
+    /// # Only where the collapsed form is not already the ticker
+    ///
+    /// `INDIA VIX` collapses to `INDIAVIX`, which is what Groww writes, so it needs
+    /// no row here and does not get one. An alias that restates a collapse would be
+    /// a second answer to a question the collapse already answers.
+    ///
+    /// **Constant time.** A `match` over string literals switches on the length
+    /// first and compares at most one arm.
+    #[must_use]
+    pub fn index_alias(self, collapsed: &str) -> Option<&'static str> {
+        match self {
+            Self::Zerodha => match collapsed {
+                "NIFTY50" => Some("NIFTY"),
+                "NIFTYBANK" => Some("BANKNIFTY"),
+                _ => None,
+            },
+            Self::Groww | Self::Dhan | Self::TrueData | Self::Gdfl => None,
         }
     }
 }
@@ -1270,8 +1389,37 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
         return declined(Skip::ForeignSegment);
     }
 
+    // THE INDEX WORD, FOR A VENDOR WHOSE TYPE ALPHABET HAS NONE.
+    //
+    // Kite publishes exactly `EQ FUT CE PE` and puts the class in `segment`
+    // instead. Resolving it here -- once, before anything reads `ty` -- is what
+    // makes the existing `"IDX"` arm below do the whole repair: the space
+    // collapse fires, the segment becomes `Segment::Index`, and the kind
+    // becomes `Kind::Index`. Three defects, one word. See
+    // `Vendor::index_segment_word` for what each of them cost.
+    //
+    // `None` for every vendor that already writes an index code, so this
+    // comparison cannot reclassify a row at Groww or Dhan.
     let Some(ty) = vendor.type_of(row.instrument_type, row.option_side)? else {
         return declined(Skip::ForeignSegment);
+    };
+    // PROMOTED, FOR A VENDOR WHOSE TYPE ALPHABET HAS NO INDEX WORD.
+    //
+    // Kite publishes exactly `EQ FUT CE PE` and carries the class in `segment`
+    // instead, so its index rows arrive here as `EQ`. One reassignment before
+    // anything reads `ty` makes the existing `"IDX"` arm below do the whole
+    // repair -- the space collapse fires, the segment becomes `Segment::Index`
+    // and the kind becomes `Kind::Index`. THREE defects, one word; see
+    // `Vendor::index_segment_word` for what each of them cost and for the
+    // measurement (136 row errors, 136 index rows, no other row).
+    //
+    // `index_segment_word` is `None` for every vendor that already writes an
+    // index code, so this cannot reclassify a Groww or Dhan row: the
+    // comparison is against `None` and fails immediately.
+    let ty = if vendor.index_segment_word() == Some(row.segment) {
+        "IDX"
+    } else {
+        ty
     };
 
     // WHERE THE INSTRUMENT IS NAMED DEPENDS ON WHAT IT IS.
@@ -1347,8 +1495,22 @@ pub fn decode_master_row(vendor: Vendor, row: MasterRow<'_>) -> Result<Decoded, 
     // it was: malformed, loudly.
     //
     // `ty` is already resolved above, so this costs a comparison and no scan.
+    // AND THE COLLAPSED FORM IS NOT ALWAYS THE TICKER.
+    //
+    // Collapsing is enough where the vendor writes the ticker WITH spaces in
+    // it -- Dhan's `NIFTY PVT BANK`. It is not enough where the vendor writes
+    // the index's NAME in the symbol column, which Zerodha does: `NIFTY 50`
+    // collapses to `NIFTY50` and the exchange's ticker is `NIFTY`. Both other
+    // masters on this machine carry that identity in one row -- symbol
+    // `NIFTY`, name `NIFTY 50` -- which is what makes `index_alias` a reading
+    // rather than a choice. `INDIA VIX` needs no row there: it collapses to
+    // `INDIAVIX`, which is already what Groww writes.
     let underlying = if ty == "IDX" {
-        Symbol::new(collapse_spaces(name)?.as_str())?
+        let collapsed = collapse_spaces(name)?;
+        match vendor.index_alias(collapsed.as_str()) {
+            Some(canonical) => Symbol::new(canonical)?,
+            None => Symbol::new(collapsed.as_str())?,
+        }
     } else {
         Symbol::new(name)?
     };

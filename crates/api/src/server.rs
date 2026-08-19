@@ -6865,7 +6865,21 @@ async fn fno_walk(
     if let Some(rolling) = spec.fno.by_offset() {
         return fno_roll(&page, facts, asked, site, &wire, rolling).await;
     }
-    if spec.fno.by_name().is_none() {
+    // ASKED AS THE QUESTION IT IS. This read `by_name().is_none()`, which is
+    // the same verdict reached by a different question -- "has it a NAME walk"
+    // rather than "does it serve expired contracts at all" -- and left
+    // `FnoAccess::serves` with no caller anywhere in shipped code. A predicate
+    // nothing asks is a rule nothing enforces.
+    //
+    // THE OPERATOR'S RULE OF 19 AUG 2026 RESTS ON THIS ARM: Zerodha is spot
+    // only, and an expired future or option must never be attempted for it
+    // even if it is ticked by mistake. Its descriptor declares
+    // `FnoAccess::None`, so this refuses BEFORE any vendor request is built --
+    // and `Vendor::segment_of` declines `NFO-FUT`, `NFO-OPT`, `MCX` and `BSE`
+    // for it besides, so no derivative row of its master exists to be asked
+    // about in the first place. Two independent refusals, neither relying on
+    // the other.
+    if !spec.fno.serves() {
         return page.say(
             facts,
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -6982,43 +6996,21 @@ async fn roll_one(
     // Absent is a REFUSAL, not a fallback to the directory name: a rung this
     // feed has no recorded word for is a request that cannot be spelled, which
     // is the rule `FetchError::RungNotSpellable` already applies to bars.
-    let interval = wire
-        .spec
-        .granularity_token(asked.granularity)
-        .ok_or_else(|| {
-            format!(
-                "{label}: this feed records no wire word for the {} rung, so no \
-                 rolling request was built",
-                asked.granularity.dir()
-            )
-        })?;
-
-    let ask = pull::rolling::Ask {
-        security_id: security_id.to_owned(),
-        instrument: word,
-        expiry_flag: flag,
-        expiry_code: code,
+    let rows = fetch_rolling(
+        asked,
+        wire,
+        &rolling,
+        security_id,
+        word,
+        flag,
+        code,
         strike,
-        side: option_type,
-        interval,
-        from: window.from().to_string(),
-        // EXCLUSIVE ON THE WIRE, which the vendor documents and
-        // `fetch::wire_end` owns. Passing the operator's last day loses that
-        // session silently — the answer parses, the books balance, one day is
-        // absent.
-        to: pull::fetch::wire_end(window.to(), wire.spec.range_end)
-            .map_err(|why| format!("{label}: {why}"))?
-            .to_string(),
-    };
-
-    let body = pull::rolling::body(&rolling, &ask);
-    let answer = wire
-        .source
-        .post_json(endpoint, body)
-        .await
-        .map_err(|why| format!("{label}: {why}"))?;
-    let rows = pull::rolling::read(&answer, option_type, wire.spec.prices)
-        .map_err(|why| format!("{label}: {why}"))?;
+        option_type,
+        endpoint,
+        window,
+        &label,
+    )
+    .await?;
     if rows.is_empty() {
         // NOT A FAILURE. A strike the vendor never listed for this expiry is an
         // ordinary empty answer, and counting it as a fault would report ~200
@@ -7061,6 +7053,9 @@ async fn roll_one(
     let mut total = 0usize;
     let mut declined = 0usize;
     let mut at = 0usize;
+    // AT MOST ONE ROW PER RUN, and a run is at least one bar — reserved from a
+    // bound in hand rather than grown. `docs/07-o1-architecture.md` law 2.
+    let mut census_rows: Vec<pull::manifest::Held> = Vec::with_capacity(rows.len());
     while at < rows.len() {
         let key = key_at(
             rows.get(at)
@@ -7130,7 +7125,7 @@ async fn roll_one(
             })
             .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
 
-        total = total.saturating_add(land_rolling_group(
+        let (filed, pending) = land_rolling_group(
             group,
             contract,
             asked,
@@ -7140,8 +7135,17 @@ async fn roll_one(
             endpoint,
             window,
             &label,
-        )?);
+        )?;
+        total = total.saturating_add(filed);
+        // COLLECTED, NOT WRITTEN PER GROUP.
+        census_rows.extend(pending);
         at = end;
+    }
+
+    // ONE CENSUS CYCLE FOR THE WHOLE ANSWER — see `record_held`'s own note.
+    if let Some(why) = pull::ingest::record_held(&site.store_root, wire.store_vendor, &census_rows)
+    {
+        return Err(format!("{label}: {why}"));
     }
     Ok((total, declined))
 }
@@ -7246,6 +7250,78 @@ fn rolling_security_id(
         })
 }
 
+/// Builds ONE rolling request, sends it, and reads the side that was asked for.
+///
+/// Split out of [`roll_one`] so that function is about *where one contract ends
+/// and the next begins* — the part that was wrong — rather than about request
+/// construction.
+///
+/// # Errors
+///
+/// A rung this feed records no wire word for (refused before the socket, never
+/// defaulted to the store's directory name), a transport failure, or an answer
+/// this build cannot read.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "every one is a field of the vendor's own request body, and a \
+              struct to carry them would be `rolling::Ask` built one call site \
+              earlier"
+)]
+async fn fetch_rolling(
+    asked: &ingest::FnoRequest,
+    wire: &Wire,
+    rolling: &pull::vendor::RollingSpec,
+    security_id: &str,
+    word: &'static str,
+    flag: &'static str,
+    code: &'static str,
+    strike: &'static str,
+    option_type: &'static str,
+    endpoint: &str,
+    window: pull::session::Window,
+    label: &str,
+) -> Result<Vec<pull::rolling::Row>, String> {
+    // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S. `Granularity::dir()`
+    // answers `1min`, which is the DIRECTORY name; this vendor's `interval` is
+    // an enum of 1, 5, 15, 30, 60. An unrecorded rung REFUSES rather than
+    // falling back — a request that cannot be spelled is not one to guess at.
+    let interval = wire
+        .spec
+        .granularity_token(asked.granularity)
+        .ok_or_else(|| {
+            format!(
+                "{label}: this feed records no wire word for the {} rung, so no \
+                 rolling request was built",
+                asked.granularity.dir()
+            )
+        })?;
+
+    let ask = pull::rolling::Ask {
+        security_id: security_id.to_owned(),
+        instrument: word,
+        expiry_flag: flag,
+        expiry_code: code,
+        strike,
+        side: option_type,
+        interval,
+        from: window.from().to_string(),
+        // EXCLUSIVE ON THE WIRE, which the vendor documents and `fetch::wire_end`
+        // owns. Passing the operator's last day loses that session silently.
+        to: pull::fetch::wire_end(window.to(), wire.spec.range_end)
+            .map_err(|why| format!("{label}: {why}"))?
+            .to_string(),
+    };
+
+    let body = pull::rolling::body(rolling, &ask);
+    let answer = wire
+        .source
+        .post_json(endpoint, body)
+        .await
+        .map_err(|why| format!("{label}: {why}"))?;
+    pull::rolling::read(&answer, option_type, wire.spec.prices)
+        .map_err(|why| format!("{label}: {why}"))
+}
+
 /// THE MONTH GATE ON THE OFFSET PATH — why `last_settled` reaches `roll_every`.
 ///
 /// The three gates the current-month rule landed in — the window clamp, the
@@ -7337,7 +7413,7 @@ fn land_rolling_group(
     endpoint: &str,
     window: pull::session::Window,
     label: &str,
-) -> Result<usize, String> {
+) -> Result<(usize, Option<pull::manifest::Held>), String> {
     let bars: Vec<store::format::Bar> = group.iter().map(|r| r.bar).collect();
     // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
     // neither a spot nor a volatility has nothing to overlay, and a file of
@@ -7381,7 +7457,9 @@ fn land_rolling_group(
     if let Some(first) = done.failures.first() {
         return Err(format!("{label}: {}", first.why));
     }
-    Ok(done.bars_stored)
+    // THE CENSUS ROW TRAVELS WITH THE COUNT. `from_rows` no longer writes it;
+    // the caller collects every group's row and records them in one cycle.
+    Ok((done.bars_stored, done.pending))
 }
 
 /// Every request in the cross product, fetched and filed.
@@ -10519,6 +10597,7 @@ mod tests {
             for m in 1..=months {
                 out.push((
                     census::Series {
+                        contract: None,
                         exchange: brutex_core::instrument::Exchange::Nse,
                         segment: brutex_core::instrument::Segment::Index,
                         symbol: brutex_core::symbol::Symbol::new(name).expect("a symbol"),
@@ -12163,6 +12242,7 @@ mod tests {
         site.series = (0..10)
             .filter_map(|i| {
                 Some(census::Series {
+                    contract: None,
                     exchange: brutex_core::instrument::Exchange::Nse,
                     segment: brutex_core::instrument::Segment::Index,
                     symbol: brutex_core::symbol::Symbol::new(&format!("IDX{i:02}")).ok()?,
@@ -17252,6 +17332,7 @@ mod percentage_tests {
     /// that hardcoded the same word.
     fn series_at(segment: Segment, symbol: &str, timeframe: Timeframe) -> census::Series {
         census::Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment,
             symbol: Symbol::new(symbol).expect("a symbol"),

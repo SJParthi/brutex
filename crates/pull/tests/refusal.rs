@@ -670,3 +670,56 @@ fn the_join_key_is_derived_from_the_vendors_own_master_columns() {
     assert!(!JoinKey::TradingSymbol.is_identity());
     assert!(!JoinKey::for_vendor(Vendor::Zerodha).is_identity());
 }
+
+/// **ZERODHA IS SPOT ONLY, AND TWO INDEPENDENT REFUSALS SAY SO.**
+///
+/// The operator's rule of 19 Aug 2026: for this feed an expired future or
+/// option must never be attempted, even if it is selected by mistake. That is
+/// not a UI concern — a page can be wrong — so it is enforced twice in the
+/// descriptor, and neither refusal relies on the other:
+///
+/// | Refusal | Where | What it stops |
+/// |---|---|---|
+/// | `FnoAccess::None` | `HttpSpec::fno` | the expired-F&O route returns 503 **before any request is built** |
+/// | Declined segments | `Vendor::segment_of` | no derivative row of its master is ever stored, so there is nothing to ask about |
+#[test]
+fn zerodha_can_never_be_asked_for_an_expired_contract() {
+    let pull::vendor::Transport::Http(spec) = pull::vendor::Feed::Zerodha.descriptor().transport
+    else {
+        panic!("Zerodha is an HTTP feed");
+    };
+
+    // 1 — the route's own gate. `serves()` is what `crates/api/src/server.rs`
+    // now asks, so a change here changes that refusal.
+    assert!(
+        !spec.fno.serves(),
+        "the expired-F&O route refuses on this, so it must stay false"
+    );
+    assert!(spec.fno.by_name().is_none());
+    assert!(spec.fno.by_offset().is_none());
+
+    // 2 — and the swept surface is spot, so nothing downstream widens it.
+    assert!(
+        pull::vendor::Feed::Zerodha
+            .descriptor()
+            .segments
+            .contains(brutex_core::instrument::Segment::Index),
+        "the two swept indices are Index rows"
+    );
+
+    // 3 — the OTHER feeds are untouched by this rule. A blanket refusal would
+    // have been easier and would have silently disabled Dhan's rolling walk
+    // and Groww's name walk, which are real capabilities this build uses.
+    let mut serving = 0;
+    for feed in pull::vendor::Feed::ALL {
+        if let pull::vendor::Transport::Http(other) = feed.descriptor().transport
+            && other.fno.serves()
+        {
+            serving += 1;
+        }
+    }
+    assert!(
+        serving > 0,
+        "if no feed serves expired contracts, the gate above is proving nothing"
+    );
+}
