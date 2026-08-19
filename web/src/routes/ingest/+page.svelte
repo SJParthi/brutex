@@ -7448,23 +7448,27 @@
         // the expired contracts are exactly what the bought CSVs hold. See
         // `segServed`.
         //
-        // `skipBulk` REVERTED, AND THIS IS WHY THE ARGUMENT FOR CHANGING IT IS
-        // WRITTEN DOWN RATHER THAN ACTED ON.
+        // NO `skipBulk`, AND THIS IS THE OPERATOR'S CALL, TAKEN.
         //
-        // A type sweep briefly shipped `skipBulk: false` here. The case it made
-        // is a decent one: `skipBulk: s.short !== null` means "Select all 3"
-        // ticks one box, because the two segments answering 503 today are
-        // skipped — and a button that says three and does one is arguably
-        // lying about what it did, where the timeframe control it borrowed the
-        // rule from never made that promise on its face.
+        // It was `skipBulk: s.short !== null`, so "Select all" reached only the
+        // segments with no refusal on them. With Spot the sole unrefused row and
+        // Spot already ticked, the bulk press had NOTHING to add: the count read
+        // 1, the click changed no input, and the control read as broken. The note
+        // that stood here recorded the tension and said the decision "belongs to
+        // whoever owns the control's meaning — not to a checker run". It has now
+        // been made: Select all selects all three.
         //
-        // It is still a BEHAVIOUR change, and it arrived inside a commit whose
-        // whole claim was that nothing but types moved. `Picker.svelte:229`
-        // reads this field to decide what the bulk press ticks, so the change
-        // is visible to an operator and belongs to whoever owns the control's
-        // meaning — not to a checker run. Reverted, and left here as the note
-        // it should have been.
-        skipBulk: s.short !== null,
+        // WHAT THAT COSTS IS STATED RATHER THAN HIDDEN. Ticking the two expired
+        // segments builds a request the server answers 503 to, and the page does
+        // not pretend otherwise — each row still carries its three measured
+        // reasons on its own `title`, the run card still reports the refusal
+        // verbatim, and `segmentsUnserved` still names them. A bulk action that
+        // can reach a row a single click can already reach is consistent;
+        // silently skipping it while announcing a count that included it was not.
+        //
+        // The rows were never `disabled` — that is deliberate and unchanged, so
+        // the only thing that moves is whether the BULK press reaches what a
+        // single press always could.
         why: s.short,
         title: s.why
       }))}
