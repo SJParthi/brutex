@@ -12,6 +12,7 @@
 //! | [`header`] | the two-slot header and the single-write commit |
 //! | [`block`] | the per-block checksum, over the committed prefix |
 //! | [`path`] | the only way a store path is built |
+//! | [`catalog`] | what the store HOLDS, walked back off the tree |
 //! | [`mod@file`] | the bytes actually reaching the disk, and every refusal |
 //!
 //! # Seven properties the types enforce rather than document
@@ -52,6 +53,7 @@
 #![forbid(unsafe_code)]
 
 pub mod block;
+pub mod catalog;
 pub mod crc;
 pub mod file;
 pub mod format;

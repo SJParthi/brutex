@@ -16825,3 +16825,70 @@ it forbids what is already absent.
 `P`, `G` — each naming two unrelated subjects across 88 rows, and fixing them
 means choosing which subject keeps each letter and rewriting the bench labels that
 print them. That is a scope call, not a correction, and it stays **OPEN**.
+
+---
+
+### D-0213 — the store can list what it holds, which is what nothing could ask it
+
+**Decision.** `crates/store` gains `catalog`, which walks the tree under
+`root/bars` and returns every spot instrument-month it finds, with a census of
+everything else it saw.
+
+**Why.** The store was **address-only**. `path::StorePath` renders a path from
+parts a caller already knows and `file::BarFile` opens one; ask it *"which months
+of NIFTY are on disk?"* and there was no answer. Measured before this landed:
+`crates/store` contained **zero** `read_dir` calls, and every directory walk in
+the workspace lived in `crates/pull` or `crates/api` — the ingest and HTTP sides.
+
+That is not a cosmetic gap. It is why `cli sweep-stored` takes an explicit
+vendor, underlying, rung, year and month — **it had no alternative** — and why no
+caller could sweep more than one instrument-month per invocation. A loop needs a
+list, and there was none. `docs/07-plan.md` §4's target is ~54,000
+instrument-months; without enumeration that is 54,000 hand-typed invocations.
+
+**Why it belongs in `store` and not in a caller.** `path` is documented as *"the
+only way a store path is built"*. A walker that re-derives the layout somewhere
+else is a second spelling of the same rule, and the copy that drifts is always
+the one nobody remembers exists. Reading the tree back is the inverse of
+rendering it; both halves belong to whoever owns the bytes. It also puts the
+capability where `cli` can reach it without taking `pull` — which would drag a
+whole HTTP client into a binary that makes no requests.
+
+**The census is the design, not decoration.** Seven buckets — spot, contract,
+other-kind, unknown-vendor, unknown-rung, malformed-month, wrong-depth — and
+`reconciles()` asserts they sum to `seen`. A caller that gets fewer rows than it
+expected must be able to tell whether the store is small or the walk refused
+something. Two consequences were chosen deliberately:
+
+* **A contract path is counted, never a row and never an error.** `CLAUDE.md` §1
+  sweeps spot only, but a correctly-populated F&O store is not broken, and
+  reporting it as an error would make it look that way.
+* **Only the root can fail the walk.** An unreadable subdirectory is a census
+  row. One bad corner must not hide the rest of a store.
+
+**Cost, declared rather than discovered.** `walk` is **O(entries)** and
+`docs/06-limits.md` §86 says so. It is not a rule-4 breach: those five operations
+run per bar or per candidate, billions of times in a sweep; this runs once,
+before one, to learn what exists. §86 also records what is **not** measured — there
+is no ratio bench, and there should not be one, because gate 8 divides a cost by
+itself at more input and expects flatness while this function is expected to grow.
+
+**Verified.** 11 tests, clippy clean at `-D warnings`. Proved against the
+operator's real backup rather than fixtures alone: `store.bak-20260819-092235`,
+**36 files seen, 18 spot instrument-months** across both feeds and all nine rungs,
+census reconciling exactly. That is the first time anything in this workspace
+could answer what the store holds.
+
+**Two defects its own tests caught, recorded because both were the same mistake.**
+The depth check added one for `bars/` when `strip_prefix` had already removed it,
+so every spot path measured seven components and was filed as a contract —
+`spot` read **0** on a store containing only spot. And the fixtures used `.bars`
+when the real extension is `.bin`, which is visible in the operator's own store
+and had been read hours earlier. Both were caught because the tests assert the
+census **bucket** rather than merely that the walk returned; a test that only
+checked `held.is_empty()` would have passed the first and failed to explain the
+second.
+
+**What this does NOT do.** It does not sweep anything. The batch driver that
+turns this list into a multi-month run is the next change, and it belongs in
+`cli` — which now needs no new dependency to write it.

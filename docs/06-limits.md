@@ -5046,3 +5046,53 @@ the ladder, and that is the whole point of the shape D-0207 chose.
 memory to make the table look complete is the invention that rule forbids, and
 a wrong field name fails *silently*: `named_error_of` answers `None` for a field
 that is not there, which is indistinguishable from a vendor that sent no name.
+
+---
+
+## 86. Listing what the store holds is O(entries), and that is the floor
+
+`store::catalog::walk` walks the tree under `root/bars` and returns one row per
+spot instrument-month. **Its cost grows with the number of files.** It cannot
+not: listing N things is N units of work, and no arrangement of the store
+changes that.
+
+### Why this is not a rule-4 breach
+
+`CLAUDE.md` §3 rule 4 names **five** operations that must be constant per
+operation — bar lookup, condition lookup, mask evaluation, duplicate rejection
+and result append. **Enumeration is not one of them**, and the distinction is
+not a convenience:
+
+* Those five run **per bar** or **per candidate**, billions of times in one
+  sweep. A cost that grows there grows against the whole run.
+* This runs **once, before the sweep**, to learn what exists. A caller that
+  walks 54,000 instrument-months pays 54,000 units of work and then sweeps
+  54,000 months — the walk is a rounding error against the thing it enables.
+
+Registered here in the shape `named_error_of` already is (§83.1): stated where a
+reader looks for non-constant costs, rather than left for one to discover.
+
+### What is measured, and what is not
+
+**Measured:** correctness over the operator's real backup —
+`store.bak-20260819-092235`, 36 files, 18 spot instrument-months across two feeds
+and nine rungs, census reconciling exactly. Every refusal bucket is exercised on
+a fixture that holds all of them at once.
+
+**NOT measured:** wall-clock at 1×, 10× and 100× the entry count. There is no
+ratio bench for this function and it would not be a ratio bench if there were —
+gate 8 divides a cost by the same cost at more input and expects flatness, and
+this function is *expected* to grow linearly, so a ratio near 10× at 10× input
+is the pass rather than the breach. **A bench asserting a linear bound is a
+different instrument from the one gate 8 owns, and inventing one here would put
+a number nobody measured beside the four gate 8 really took.** If enumeration
+ever moves onto a per-bar path, that is the day it needs one — and the day it
+becomes a rule-4 breach.
+
+### The bound that does exist
+
+`walk` allocates one `Held` per spot month, each holding three `String`s. At the
+~54,000 instrument-months `docs/07-plan.md` §4 targets, that is tens of megabytes
+— bounded by what the store contains, not by anything the walk chooses. There is
+no unbounded intermediate: the directory stack holds at most one level's
+subdirectories at a time.
