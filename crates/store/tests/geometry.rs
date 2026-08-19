@@ -430,16 +430,21 @@ fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
         "KNOWN answers `which BAR versions can this build read`; offering the \
          overlay there would hand it to every bar reader as a candidate"
     );
-    // AND IT IS NOT A MEMBER OF THE BAR FAMILY AT ALL. `Layout::declared`
-    // refuses a magic outside `BRUTEXB` and a retired version number, and the
-    // overlay is both — which is the check doing its job, not an obstacle. A
-    // sidecar admitted to that family would put one version number on two
-    // geometries.
-    assert_ne!(
+    // IT SHARES THE FAMILY AND TAKES A VERSION BARS WILL NOT. That is what
+    // lets it use `Header::validate` and `block::seal` instead of growing a
+    // second copy of the header, the CRC and the block arithmetic — and a
+    // second copy is a second place for a torn write to be handled differently.
+    assert_eq!(
         &OVERLAY_MAGIC[..7],
         &MAGIC[..7],
-        "different family, visible in the first seven bytes"
+        "same family, so one Layout type describes both"
     );
+    assert_ne!(
+        Layout::OVERLAY.version(),
+        Layout::CURRENT.version(),
+        "and a different geometry number, so neither resolves as the other"
+    );
+    assert_eq!(Layout::OVERLAY.record_stride(), OVERLAY_STRIDE);
 }
 
 /// **AN ABSENT VALUE AND A ZERO ARE DIFFERENT, AND STAY DIFFERENT.**

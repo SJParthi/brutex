@@ -106,6 +106,28 @@ impl Layout {
         RECORDS_PER_BLOCK,
     );
 
+    /// The overlay sidecar's geometry — 24-byte records, version 9.
+    ///
+    /// # Why it is NOT in [`Self::KNOWN`]
+    ///
+    /// That list answers "which versions of a BAR file can this build read",
+    /// and a reader resolving a bar file walks it. Offering the overlay there
+    /// would hand a 24-byte geometry to a reader expecting 56, and the header
+    /// would validate because the header region is the same shape in both.
+    ///
+    /// It is a `Layout` at all so the sidecar can use
+    /// [`crate::header::Header::validate`] and [`crate::block::seal`] rather
+    /// than growing a second copy of the header, the commit counter, the CRC
+    /// and the block arithmetic — a second copy being a second place for a torn
+    /// write to be handled differently.
+    pub const OVERLAY: Self = Self::declared(
+        crate::format::OVERLAY_VERSION,
+        crate::format::OVERLAY_MAGIC,
+        SLOT_COUNT,
+        crate::format::OVERLAY_STRIDE,
+        crate::format::OVERLAY_RECORDS_PER_BLOCK,
+    );
+
     /// Every version this build can read, in ascending order.
     ///
     /// Adding a version is adding a row built by [`Layout::declared`]. Nothing

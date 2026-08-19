@@ -253,25 +253,30 @@ pub struct Bar {
 /// schema: *"a new field is a new file version at its own stride"*. A new
 /// FILE, not a wider record. [`crate::path::FileKind::Overlay`] reserved the
 /// name and the `.ovl` extension for it; this is the geometry.
-/// # Why it is outside [`MAGIC_FAMILY`], and outside [`crate::layout::Layout`]
+/// # Why it stays inside [`MAGIC_FAMILY`] and takes a version bars will not
 ///
-/// Both were tried and both refused it, correctly. `Layout` models the BAR
-/// format family: its degeneracy check requires the `BRUTEXB` prefix and a
-/// version number that is not retired, and an overlay carrying version 1 would
-/// collide with the bar version 1 this build has retired — one number meaning
-/// two geometries, which is the exact conflation `Layout`'s dispatch exists to
-/// prevent.
+/// The first attempt put it outside the family as `BRUTEXO1`, and that was
+/// wrong in a way only the next step revealed: [`crate::header::Header::validate`]
+/// and [`crate::block::seal`] both take a [`crate::layout::Layout`], so a file
+/// with no `Layout` has to duplicate the header, the commit counter, the CRC
+/// and the block arithmetic. A second copy of that is a second place for a torn
+/// write to be handled differently.
 ///
-/// So the overlay is a different family, and says so in its own bytes. `O` for
-/// overlay where a bar file says `B`. A reader that opens the wrong one sees it
-/// in the first eight bytes rather than in a field lifted from the wrong offset.
-/// Its geometry is the four constants below and the `const` assertions under
-/// them, which is the same rule `Layout::declared` applies, spelled where the
-/// family it belongs to can state it.
-pub const OVERLAY_MAGIC: [u8; 8] = *b"BRUTEXO1";
+/// `Layout::declared` refuses a magic outside the family and refuses a RETIRED
+/// version, and both refusals are right. The resolution is not to relax either
+/// one: it is to take a version number the bar format will never reach. The
+/// family byte identifies a GEOMETRY, and `9` is the sidecar's — 24-byte
+/// stride against the bar's 56, distinguishable in the first eight bytes as
+/// `BRUTEXB9` against `BRUTEXB2`.
+///
+/// It is still absent from [`crate::layout::Layout::KNOWN`], which answers
+/// "which versions of a BAR file can this build read". A reader walking that
+/// list is never offered the overlay, so the two cannot resolve against each
+/// other even though they share a number space.
+pub const OVERLAY_MAGIC: [u8; 8] = *b"BRUTEXB9";
 
 /// The only overlay version this build writes.
-pub const OVERLAY_VERSION: u16 = 1;
+pub const OVERLAY_VERSION: u16 = 9;
 
 /// Bytes of one overlay record. Three `i64`, eight-aligned.
 pub const OVERLAY_STRIDE: u64 = 24;
