@@ -468,7 +468,23 @@ pub fn read(body: &str, side: &str, scale: PriceScale) -> Result<Vec<Row>, Rolli
             low: paisa(low, at, scale, "low")?,
             close: paisa(close, at, scale, "close")?,
             volume: number(volume, at),
-            open_interest: oi.map_or(OI_NULL, |a| number(a, at)),
+            // A NULL OI **CELL** IS ABSENT, NOT ZERO.
+            //
+            // `map_or(OI_NULL, ..)` covers only the whole array being missing —
+            // which is what `number`'s own doc claims is the only case. It is
+            // not: the vendor can send `"oi": [1200, null, 1350]`, and `number`
+            // answers `0` for any cell it cannot read, so bar two was stored
+            // with an open interest of zero that `Bar::oi()` then reports as a
+            // measurement rather than as absence.
+            //
+            // `spot` two lines down refuses a bad cell outright and `iv`
+            // sentinels it; open interest was the one of the three that
+            // collapsed absence into a real number. `CLAUDE.md` §7 gives it a
+            // sentinel precisely so the two can be told apart.
+            open_interest: oi.map_or(OI_NULL, |a| match a.get(at) {
+                None | Some(serde_json::Value::Null) => OI_NULL,
+                Some(_) => number(a, at),
+            }),
         };
         let overlay = Overlay {
             ts_micros: bar.ts_micros,

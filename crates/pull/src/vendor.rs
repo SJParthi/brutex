@@ -2583,6 +2583,28 @@ impl RollingSpec {
     /// An unrecognised word yields the NARROWER list, which is the safe
     /// direction: too few asks leaves a gap a census can see, too many spends
     /// budget on answers that cannot exist.
+    ///
+    /// # UNVERIFIED: the vendor's sentence may split on EXPIRY, not on class
+    ///
+    /// `Dhan Docs/14-expired-options-data.md` reads, with the literals stripped
+    /// by its own export: *"for At the Money, up to / for Index Options **near
+    /// expiry**, up to / for other contracts"*. This method reads "other
+    /// contracts" as *stock* options and splits on the instrument word. It can
+    /// equally be read as *not-near* contracts — in which case an index at
+    /// `expiryCode` 2 (next) or 3 (far) is also limited to ATM±3, and this asks
+    /// for fourteen offsets the vendor cannot answer, twice per side per
+    /// cadence: about **112 wasted requests per chunk**, each returning empty
+    /// and each counted as an ordinary success.
+    ///
+    /// Not changed on a reading. `CLAUDE.md` §3 rule 1 forbids resolving a
+    /// vendor fact by inference, and the two readings differ in the direction
+    /// that MATTERS: narrowing wrongly loses real contracts silently, while
+    /// widening wrongly only spends budget. So the wider list stands until the
+    /// operator confirms, exactly as the 30-vs-45-day cap did.
+    ///
+    /// The cost of being wrong is measurable from the receipt: at ordinals 2
+    /// and 3 an index should show fourteen offsets per side answering nothing
+    /// at all. One real run settles it.
     #[must_use]
     pub fn offsets_for(&self, instrument_word: &str) -> &'static [&'static str] {
         if instrument_word == self.index_word {
@@ -4361,7 +4383,7 @@ const DHAN: Descriptor = Descriptor {
         // and the FIELD it arrives in is not recorded in docs/00-charter.md.
         // Naming one here from memory is section 3 rule 1's invention, so the
         // status decides alone, exactly as it did before `crate::refusal`.
-        error_names: None,
+        error_names: Some(&crate::dhan::DHAN),
     }),
     // ONE RUNG, BECAUSE ONE PATH IS ALL `bars_path` CAN HOLD.
     //
@@ -4685,12 +4707,26 @@ const GROWW: Descriptor = Descriptor {
             },
         ],
         // Groww's page shows this on every historical call.
-        extra_headers: &[("X-API-VERSION", "1.0")],
+        // ALL THREE, BECAUSE THE VENDOR SAYS ALL THREE ARE MANDATORY.
+        //
+        // `Groww Docs/15-BONUS-REST-introduction.md`: "All requests must have
+        // following headers" — `Authorization`, `Accept: application/json`,
+        // `X-API-VERSION: 1.0` — reinforced twenty lines later with "**All
+        // headers are mandatory.**" Every curl example on the backtesting page
+        // carries all three.
+        //
+        // `Accept` was absent. `Authorization` is built from the credential and
+        // `X-API-VERSION` sat here alone, and reqwest adds no `Accept` of its
+        // own. It works today, which is why this is a latent fault rather than
+        // a live one — but the day the vendor enforces its own stated contract,
+        // every request in the build 4xx's at once and nothing in the code
+        // would explain why.
+        extra_headers: &[("X-API-VERSION", "1.0"), ("Accept", "application/json")],
         // NO BODY-LEVEL ERROR CONTRACT READ FOR THIS VENDOR. No page for it
         // has been read into docs/00-charter.md, so the status decides alone
         // -- unchanged from before `crate::refusal`, and a row away from not
         // being. See [`HttpSpec::error_names`].
-        error_names: None,
+        error_names: Some(&crate::groww::GROWW),
     }),
     // Same restraint as the row above, and for the same reason.
     granularities: GranularitySet::EMPTY

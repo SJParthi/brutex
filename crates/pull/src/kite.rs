@@ -27,6 +27,9 @@ pub const EXCEPTION_COUNT: usize = 10;
 /// were read from.
 pub const KITE: ErrorNames = ErrorNames {
     field: "error_type",
+    // AT THE ROOT. This vendor writes `error_type` as a top-level key; the
+    // field exists because Groww does not.
+    envelope: None,
     read,
     source: "kite.trade/docs/connect/v3/exceptions/, read 19 Aug 2026 — nine \
              names — plus PermissionException from the vendor's own SDK, \

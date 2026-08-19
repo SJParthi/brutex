@@ -235,6 +235,21 @@ pub struct ErrorNames {
     /// The JSON key the vendor writes its own error name into. Kite:
     /// `error_type`.
     pub field: &'static str,
+    /// The object [`Self::field`] sits INSIDE, when the vendor nests it.
+    ///
+    /// # Why this is a field and not a search
+    ///
+    /// Vendors disagree about depth. Kite and Dhan write the code at the root
+    /// (`error_type`, `errorCode`); Groww wraps it —
+    /// `{"status":"FAILURE","error":{"code":"GA001", …}}` — so a root-only
+    /// lookup finds nothing and the whole contract reads as absent. That is the
+    /// worst shape: a vendor whose errors ARE published, silently classified on
+    /// status alone as though they were not.
+    ///
+    /// Named rather than searched for, because a reader that hunted for any key
+    /// called `code` at any depth would eventually find one belonging to
+    /// something else. `None` for a vendor that writes it at the root.
+    pub envelope: Option<&'static str>,
     /// That name → what a caller may do, or `None` for a name this build does
     /// not know. **`None` must not be a catch-all**: see the module header.
     pub read: fn(&str) -> Option<Disposition>,
@@ -249,6 +264,7 @@ impl fmt::Debug for ErrorNames {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ErrorNames")
             .field("field", &self.field)
+            .field("envelope", &self.envelope)
             .field("source", &self.source)
             .finish_non_exhaustive()
     }
@@ -260,7 +276,7 @@ impl PartialEq for ErrorNames {
     /// and two contracts with the same field and the same citation are the
     /// same contract for every purpose this type is used for.
     fn eq(&self, other: &Self) -> bool {
-        self.field == other.field && self.source == other.source
+        self.field == other.field && self.envelope == other.envelope && self.source == other.source
     }
 }
 
@@ -496,16 +512,24 @@ pub fn classify<'a>(names: Option<&ErrorNames>, status: u16, name: Option<&'a st
 ///
 /// let body = r#"{"status":"error","message":"Error message",
 ///                "error_type":"GeneralException"}"#;
-/// assert_eq!(named_error_of(body, KITE.field), Some("GeneralException".to_owned()));
+/// assert_eq!(named_error_of(body, KITE.field, KITE.envelope), Some("GeneralException".to_owned()));
 ///
 /// // Not JSON, not an object, no such field, and a non-string field.
-/// assert_eq!(named_error_of("<html>502</html>", "error_type"), None);
-/// assert_eq!(named_error_of("[1,2,3]", "error_type"), None);
-/// assert_eq!(named_error_of(r#"{"status":"error"}"#, "error_type"), None);
-/// assert_eq!(named_error_of(r#"{"error_type":7}"#, "error_type"), None);
+/// assert_eq!(named_error_of("<html>502</html>", "error_type", None), None);
+/// assert_eq!(named_error_of("[1,2,3]", "error_type", None), None);
+/// assert_eq!(named_error_of(r#"{"status":"error"}"#, "error_type", None), None);
+/// assert_eq!(named_error_of(r#"{"error_type":7}"#, "error_type", None), None);
 /// ```
 #[must_use]
-pub fn named_error_of(body: &str, field: &str) -> Option<String> {
+pub fn named_error_of(body: &str, field: &str, envelope: Option<&str>) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    Some(value.get(field)?.as_str()?.to_owned())
+    // NAMED, NOT SEARCHED. `None` reads the root, which is where Kite and Dhan
+    // write it; `Some("error")` descends exactly one level, which is where
+    // Groww does. A hunt for any key of that name at any depth would sooner or
+    // later find one belonging to something else.
+    let holder = match envelope {
+        Some(name) => value.get(name)?,
+        None => &value,
+    };
+    Some(holder.get(field)?.as_str()?.to_owned())
 }

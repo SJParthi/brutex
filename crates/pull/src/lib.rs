@@ -114,6 +114,13 @@ pub mod archive;
 pub mod chain;
 pub mod config;
 pub mod csv;
+/// DhanHQ v2's TWO error vocabularies -- one vendor's row in `refusal`.
+///
+/// `DH-902` "not subscribed" and `DH-901` "token expired" both arrive as
+/// 401/403 and want opposite handling. Without this row the status decided
+/// alone, and an unsubscribed account was told to wait for tomorrow's
+/// credential.
+pub mod dhan;
 pub mod fetch;
 pub mod fno;
 /// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
@@ -122,6 +129,12 @@ pub mod fno;
 pub mod fnowork;
 pub mod fold;
 pub mod folder;
+/// Groww's `GA00x` error vocabulary -- one vendor's row in `refusal`.
+///
+/// The code is NESTED under `error`, which is why `ErrorNames` carries an
+/// envelope: a root-only lookup finds nothing here, and a published contract
+/// would read as absent.
+pub mod groww;
 pub mod http;
 pub mod ingest;
 /// Kite Connect v3's `error_type` vocabulary -- ONE VENDOR'S ROW in `refusal`.

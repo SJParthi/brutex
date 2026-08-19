@@ -1019,8 +1019,27 @@ pub fn from_rows(
             why,
         });
     }
-    let _ = origin;
+    name_the_origin(&mut done, origin);
     done
+}
+
+/// Puts the endpoint that produced these rows onto every refusal they caused.
+///
+/// # Why it was missing
+///
+/// `from_window` builds `Member { path: PathBuf::from(origin), .. }` for the
+/// stated reason that "a refusal downstream can name where the rows came from —
+/// a URL here, where a folder path would be." [`from_rows`] took the same
+/// argument and threw it away with `let _ = origin`, so every refusal on the
+/// rolling path was anonymous as to which of 252 requests produced it. No wrong
+/// bytes reach disk from that; it costs the diagnosis when wrong bytes do.
+///
+/// Applied once at the end rather than threaded through three construction
+/// sites — those differ in WHY they failed and agree entirely on where from.
+fn name_the_origin(done: &mut Ingested, origin: &str) {
+    for failure in &mut done.failures {
+        failure.why = format!("{} (from {origin})", failure.why);
+    }
 }
 
 /// What one member put on disk, and the counter row that describes it.

@@ -438,7 +438,8 @@ fn a_malformed_error_body_yields_no_name_rather_than_a_new_failure() {
     assert_eq!(
         named_error_of(
             r#"{"status":"error","message":"Error message","error_type":"GeneralException"}"#,
-            KITE.field
+            KITE.field,
+            KITE.envelope
         )
         .as_deref(),
         Some("GeneralException")
@@ -462,7 +463,7 @@ fn a_malformed_error_body_yields_no_name_rather_than_a_new_failure() {
         "{\"error_type\":\"TokenException\"",
     ] {
         assert_eq!(
-            named_error_of(body, KITE.field),
+            named_error_of(body, KITE.field, KITE.envelope),
             None,
             "{body:?} carries no readable name at the top level"
         );
@@ -473,7 +474,8 @@ fn a_malformed_error_body_yields_no_name_rather_than_a_new_failure() {
     assert_eq!(
         named_error_of(
             r#"{"error_type":"TokenException","error_type":"InputException"}"#,
-            KITE.field
+            KITE.field,
+            KITE.envelope
         )
         .as_deref(),
         Some("InputException")
@@ -482,7 +484,7 @@ fn a_malformed_error_body_yields_no_name_rather_than_a_new_failure() {
     // An empty string IS a name that arrived — and it is not a known one, so
     // it must reach the operator rather than being read as absent.
     assert_eq!(
-        named_error_of(r#"{"error_type":""}"#, KITE.field).as_deref(),
+        named_error_of(r#"{"error_type":""}"#, KITE.field, KITE.envelope).as_deref(),
         Some("")
     );
     let v = classify(Some(&KITE), 403, Some(""));
@@ -522,26 +524,56 @@ fn the_kite_contract_carries_the_field_and_the_source() {
 /// a row added from memory is visible.
 #[test]
 fn only_the_feed_whose_error_page_was_read_declares_a_contract() {
+    // THREE FEEDS NOW, AND THE RULE IS UNCHANGED: a contract appears where a
+    // page has been read, and nowhere else. This asserted ONE — Zerodha — back
+    // when the other two brokers' error pages had not been read into the
+    // repository. Both are now in the operator's own doc pack, and leaving the
+    // row at `None` was not caution: it meant `classify` decided on HTTP status
+    // alone, so Dhan's DH-902 "not subscribed" and Groww's GA005 "not
+    // authorised" were both reported as dead sessions, sending an operator to
+    // refresh a credential that was alive.
+    //
+    // Each feed is checked against its OWN field, its OWN nesting and its OWN
+    // reader, because the three vendors agree on none of them: `error_type` at
+    // the root, `errorCode` at the root, `code` inside an `error` object.
     for feed in pull::vendor::Feed::ALL {
         let pull::vendor::Transport::Http(spec) = feed.descriptor().transport else {
             continue;
         };
-        let expected = matches!(feed, pull::vendor::Feed::Zerodha);
+        let expected = matches!(
+            feed,
+            pull::vendor::Feed::Zerodha | pull::vendor::Feed::Dhan | pull::vendor::Feed::Groww
+        );
         assert_eq!(
             spec.error_names.is_some(),
             expected,
             "{}: a contract appears here only when a page has been read for it",
             feed.display()
         );
-        if let Some(contract) = spec.error_names {
-            assert_eq!(contract.field, KITE.field);
-            // And it actually reads the vendor's names, rather than being a
-            // row that points at an empty reader.
-            assert_eq!(
-                (contract.read)("PermissionException"),
-                Some(Disposition::NotEntitled)
-            );
-            assert_eq!((contract.read)(UNKNOWN), None);
-        }
+        let Some(contract) = spec.error_names else {
+            continue;
+        };
+        // AND IT ACTUALLY READS THE VENDOR'S NAMES, rather than being a row
+        // pointing at an empty reader. The probe is each vendor's own
+        // entitlement code — the one the status axis gets wrong — so a row
+        // wired to the wrong reader fails here rather than in production.
+        let (field, envelope, entitlement) = match feed {
+            pull::vendor::Feed::Zerodha => (KITE.field, None, "PermissionException"),
+            pull::vendor::Feed::Dhan => ("errorCode", None, "DH-902"),
+            _ => ("code", Some("error"), "GA005"),
+        };
+        assert_eq!(contract.field, field, "{}", feed.display());
+        assert_eq!(contract.envelope, envelope, "{}", feed.display());
+        assert_eq!(
+            (contract.read)(entitlement),
+            Some(Disposition::NotEntitled),
+            "{}: {entitlement} is an entitlement, not a dead session",
+            feed.display()
+        );
+        assert_eq!((contract.read)(UNKNOWN), None, "{}", feed.display());
+        // AND THE CITATION IS NOT EMPTY. A row whose source nobody can go and
+        // check is the shape this repository treats as worse than an absent
+        // row: it reads as though someone verified it.
+        assert!(!contract.source.is_empty(), "{}", feed.display());
     }
 }

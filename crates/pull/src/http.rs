@@ -1237,7 +1237,8 @@ async fn refusal_words(
     // `and_then` chain is skipped and nothing is parsed at all, which is what
     // keeps this free for every feed that has no error page read for it.
     let verdict = names.and_then(|contract| {
-        crate::refusal::named_error_of(&body, contract.field).and_then(|raw| (contract.read)(&raw))
+        crate::refusal::named_error_of(&body, contract.field, contract.envelope)
+            .and_then(|raw| (contract.read)(&raw))
     });
     let words = match hint {
         Some(why) if body.is_empty() => why,

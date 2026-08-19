@@ -6657,6 +6657,32 @@ async fn fno_land(
             contract: Some(found.contract),
         };
         let done = land_one(&landed, site);
+        // A PARTIAL LANDING IS A FAILURE, AND `bars_stored` CANNOT SEE ONE.
+        //
+        // This branched on `bars_stored == 0` alone and dropped
+        // `Ingested::failures` on the floor. Both siblings read it — the spot
+        // sweep calls `note_member_failure` for each, and `roll_one` returns
+        // `Err` on the first — so this was the one landing site that did not.
+        //
+        // The hole is exactly what `note_derived_shortfall` was built to close:
+        // a disk that filled, a lock lost, or a derived rung that did not land
+        // AFTER the pulled rung did. A contract lands 3,000 bars over eight
+        // chunks and chunk five's census write fails: `bars_stored` is 3,000,
+        // the zero branch is not taken, `failed` stays 0, and the page renders
+        // "every discovered contract fetched and filed" over a month whose
+        // census does not know about a file that exists. The ladder then reads
+        // that month as missing and re-fetches it forever.
+        //
+        // Checked BEFORE the empty case, because a run that both stored
+        // something and failed something is the case the old shape could not
+        // express at all.
+        if let Some(first) = done.failures.first() {
+            failed = failed.saturating_add(1);
+            if why.len() < 5 {
+                why.push(format!("{}: {}", found.vendor_symbol, first.why));
+            }
+            continue;
+        }
         if done.bars_stored == 0 {
             failed = failed.saturating_add(1);
             if why.len() < 5 {
@@ -7341,6 +7367,38 @@ async fn fno_roll(
     //
     // Found by walking the permutations rather than by a failed run: two series
     // × two feeds is four combinations, and three of them were right.
+    // THE VENDOR'S HISTORY DEPTH, ENFORCED — IT WAS DECLARED AND NEVER READ.
+    //
+    // `RollingSpec::years_back` records the vendor's "last 5 years" and was
+    // consulted by nothing but a test. So a request for 2018 went out, got 252
+    // empty answers per chunk, and every one returned `Ok(0)` — which is not a
+    // failure — so the page rendered HTTP 200 and "every planned contract
+    // answered and was filed" over a window the vendor holds nothing for.
+    //
+    // The sibling field for the name-walk, `FnoDiscovery::from_year`, carries
+    // the rule this was missing, in its own words: a request below the floor is
+    // REFUSED rather than sent, "because an empty answer and an out-of-range
+    // one read identically". Same rule, same reason, now applied here too.
+    //
+    // A ROLLING FLOOR MOVES, so it is recomputed against today rather than
+    // stored — the same argument `clamp_to_floor` makes on the spot path.
+    let floor_year = i64::from(page.today.year()).saturating_sub(i64::from(rolling.years_back));
+    if i64::from(asked.window.from().year()) < floor_year {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            &format!(
+                "this feed serves expired options for the last {} years, so it \
+                 holds nothing for {}. Nothing was sent: an out-of-range answer \
+                 and an empty one are the same bytes, and a run that cannot \
+                 tell them apart reports a month as swept that was never held",
+                rolling.years_back,
+                asked.window.from().year()
+            ),
+        );
+    }
+
     if matches!(asked.series, ingest::Series::Futures) {
         return page.say(
             facts,
@@ -7517,9 +7575,17 @@ async fn fno_report(
     // either is the §4 fallback that hides what happened. The counts
     // and the first reasons go on the page, and the outcome says
     // FAILED so the ladder does not read this month as held.
+    // AGAINST WHAT WAS ASKED FOR, NOT WHAT THE MONTH HELD.
+    //
+    // `failed` counts within `wanted` — the set `ingest::matching` narrowed to
+    // the asked-for expiry and series. Reporting it against every contract the
+    // month published turned "all twelve failed" into "12 of 210", which an
+    // operator reads as 198 having succeeded on a run that stored nothing. The
+    // page already carries "Contracts asked for" four lines up, so both numbers
+    // sat on one receipt disagreeing. `fno_roll` has always got this right.
     facts.push((
         "Contracts that did not land",
-        format!("{failed} of {}", chain.contracts.len()),
+        format!("{failed} of {}", wanted.len()),
     ));
     if !why.is_empty() {
         facts.push(("First reasons", why.join(" · ")));
