@@ -85,6 +85,10 @@ pub mod config;
 pub mod csv;
 pub mod fetch;
 pub mod fno;
+/// WHICH EXPIRED CONTRACT-MONTHS ARE MISSING -- `work`'s question, asked about
+/// contracts, so the expired-derivative backfill can drive itself the way the
+/// spot one already does.
+pub mod fnowork;
 pub mod fold;
 pub mod folder;
 pub mod http;
