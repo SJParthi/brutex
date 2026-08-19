@@ -46,6 +46,7 @@
 /// to a ranked result.
 pub mod stored;
 
+use brutex_core::vendor::Vendor;
 use costs::fill::Direction;
 use engine::Ladder;
 use indicators::column::Column;
@@ -53,8 +54,10 @@ use indicators::evaluator::{Evaluator, Widths};
 use indicators::pattern::Thresholds;
 use indicators::vwap::Availability;
 use runner::excursion::Side;
+use runner::identity::{Direction as RunDirection, Params, Run, data_digest, identity};
 use runner::outcome::Horizon;
 use runner::{Sweeper, audit, closed, grid, synthetic, trade};
+use std::fmt::Write as _;
 
 /// Everything went as asked.
 pub const OK: u8 = 0;
@@ -88,9 +91,14 @@ pub const USAGE: &str = "\
 usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli auto     SESSIONS            let the search choose the threshold
        cli audit    SESSIONS MIN_HITS   sweep, then trade the best combination
+       cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
+                                   sweep REAL bars read from the store
 
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
+VENDOR    the feed that wrote them -- groww, dhan, truedata, gdfl
+UNDERLYING  the index, e.g. NIFTY or BANKNIFTY
+RUNG      the bar length as its directory word -- 1min, 1day
 ";
 
 /// Parses one command and runs it, returning the code the shell reads.
@@ -119,6 +127,31 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
                     OK
                 }
                 (Err(why), _) | (_, Err(why)) => refuse(out, why),
+            }
+        }
+        [
+            "sweep-stored",
+            vendor,
+            underlying,
+            rung,
+            year,
+            month,
+            min_hits,
+        ] => {
+            match (
+                year.parse::<u16>(),
+                month.parse::<u8>(),
+                parse_min_hits(min_hits),
+            ) {
+                (Ok(y), Ok(m), Ok(h)) => {
+                    let text = sweep_stored(vendor, underlying, rung, y, m, h);
+                    let refused = text.starts_with("refused: ");
+                    out.push_str(&text);
+                    if refused { MISUSED } else { OK }
+                }
+                (Err(_), _, _) => refuse(out, "YEAR must be a number like 2026"),
+                (_, Err(_), _) => refuse(out, "MONTH must be 1..=12"),
+                (_, _, Err(why)) => refuse(out, why),
             }
         }
         ["auto", sessions] => match parse_sessions(sessions) {
@@ -254,6 +287,181 @@ fn sweep_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
     out
 }
 
+/// What a run over REAL bars says about itself.
+///
+/// The counterpart to [`PROVENANCE`], and it exists for the same reason: a sweep
+/// over stored bars and a sweep over generated ones are byte-identical in shape,
+/// so the report has to say which it was or the reader cannot tell. This one
+/// names the feed, the instrument and the month, because "real data" is not a
+/// provenance — *whose* data, of *what*, for *when* is.
+pub const STORED_PROVENANCE: &str = "\
+=== THESE BARS ARE REAL MARKET DATA, READ FROM THE STORE ===
+Nothing was pulled from a vendor by this process. The bars below were read from
+a file some earlier pull wrote, and the run identity beneath names the exact
+column they came from. A figure here describes that instrument and that month.
+";
+
+/// The commit this binary was BUILT from, if the build was stamped.
+///
+/// # Why `option_env!` and not a `build.rs`, and not `.git/HEAD`
+///
+/// `CLAUDE.md` §2 forbids a `build.rs` that invokes an external process, so
+/// `git rev-parse` at build time is not available and is not wanted.
+///
+/// Reading `.git/HEAD` at RUN time would compile, and it would be wrong. §3
+/// rule 3 identifies a run by the commit **the computation ran at**, and the
+/// computation is this binary — which was compiled from one commit and may be
+/// executed long after the tree moved to another. A runtime read would stamp a
+/// result with a commit whose source never produced it, which is worse than
+/// recording nothing: it is a reproducibility claim that cannot be honoured.
+///
+/// `option_env!` resolves at compile time, in the binary, with no process
+/// spawned. `None` means the build was not stamped, and that is refused rather
+/// than filled in.
+#[must_use]
+pub const fn commit_stamp() -> Option<&'static str> {
+    option_env!("BRUTEX_COMMIT")
+}
+
+/// The store root: `$BRUTEX_STORE`, else `$HOME/.brutex/store`.
+///
+/// The same two-step every other root in this workspace uses, so an operator who
+/// has moved one has moved them all.
+fn store_root() -> Result<std::path::PathBuf, stored::Refusal> {
+    root_from(std::env::var_os("BRUTEX_STORE"), std::env::var_os("HOME"))
+}
+
+/// [`store_root`]'s decision, with the environment passed in.
+///
+/// Split so the three outcomes are testable without mutating process
+/// environment, which `cargo test` runs threads against in parallel: a test that
+/// set `HOME` would change it under every other test in the binary.
+fn root_from(
+    explicit: Option<std::ffi::OsString>,
+    home: Option<std::ffi::OsString>,
+) -> Result<std::path::PathBuf, stored::Refusal> {
+    if let Some(explicit) = explicit {
+        return Ok(std::path::PathBuf::from(explicit));
+    }
+    home.map_or_else(
+        || Err("neither BRUTEX_STORE nor HOME is set, so the store cannot be found".to_owned()),
+        |home| Ok(std::path::PathBuf::from(home).join(".brutex").join("store")),
+    )
+}
+
+/// A vendor's directory word to the vendor, or the list of words that work.
+///
+/// Walks [`Vendor::ALL`], which is five entries and a compile-time constant, so
+/// no word can be accepted here that the store cannot then address.
+fn parse_vendor(word: &str) -> Result<Vendor, stored::Refusal> {
+    Vendor::ALL
+        .into_iter()
+        .find(|v| v.as_str() == word)
+        .ok_or_else(|| {
+            let known: Vec<&str> = Vendor::ALL.iter().map(|v| v.as_str()).collect();
+            format!(
+                "`{word}` is not a feed this build knows: {}",
+                known.join(", ")
+            )
+        })
+}
+
+/// One sweep over REAL bars, with the run identity §3 rule 3 requires.
+///
+/// # What this closes
+///
+/// `crates/api` declared `store` and no `runner`; `crates/cli` declared `runner`
+/// and no `store`, so no crate in the workspace could do both and a pulled bar
+/// could not reach a ranked result. `e302d99` added [`stored::load`] as the
+/// join — and nothing called it, which is the same capability-with-no-caller gap
+/// `CLAUDE.md` §5 says this crate exists to close. This is the caller.
+///
+/// # Why the identity is recorded HERE and not in `sweep`
+///
+/// §3 rule 3 identifies a run by eight terms, and four of them — instrument,
+/// timeframe, data digest and the commit — **do not exist for generated bars**.
+/// `runner::synthetic` invents a column that is of no instrument, at no bar
+/// length, from no pull. That is why `sweep` renders `NOT RECORDED` and is right
+/// to: there is nothing to record. Real bars supply all four, so this function
+/// records them, and refuses rather than inventing one it cannot supply.
+#[must_use]
+pub fn sweep_stored(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    year: u16,
+    month: u8,
+    min_hits: u64,
+) -> String {
+    match sweep_stored_inner(vendor_word, underlying, rung, year, month, min_hits) {
+        Ok(text) => text,
+        Err(why) => format!("refused: {why}\n"),
+    }
+}
+
+/// [`sweep_stored`]'s body, so every refusal is one `?` rather than a nest.
+fn sweep_stored_inner(
+    vendor_word: &str,
+    underlying: &str,
+    rung: &str,
+    year: u16,
+    month: u8,
+    min_hits: u64,
+) -> Result<String, stored::Refusal> {
+    // THE COMMIT IS CHECKED FIRST, BEFORE ANY BAR IS READ. §3 rule 3 is "no
+    // computation without that identity recorded", so a build that cannot be
+    // identified must refuse BEFORE it computes, not sweep and then apologise.
+    let commit = commit_stamp().ok_or_else(|| {
+        "this build carries no commit stamp, so §3 rule 3's run identity cannot be \
+         recorded and the sweep will not run. Rebuild with \
+         `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release -p cli`"
+            .to_owned()
+    })?;
+
+    let vendor = parse_vendor(vendor_word)?;
+    let root = store_root()?;
+    let loaded = stored::load(&root, vendor, underlying, rung, year, month)?;
+
+    let mut ev = evaluator().map_err(str::to_owned)?;
+    let ladder = Ladder::with_min_hits(min_hits);
+    let outcome = Sweeper::new(ladder).run(&loaded.bars, &mut ev);
+
+    // The identity, over the bars actually swept and the ladder actually
+    // applied. `Params::of` reads the ladder rather than the argument, so a
+    // `min_hits` the ladder raised is recorded as what ran, not as what was asked.
+    let id = identity(&Run {
+        // `Default::default()` AND NOT `ConditionMask::default()`, which clippy asks
+        // for and this crate cannot give it. The named path needs `use vocab::…`,
+        // and `vocab` is not among `cli`'s dependencies -- `CLAUDE.md` §5 lists
+        // them, and adding an arrow to satisfy a lint would be the silent scope
+        // change §3 rule 2 forbids. The struct field types this value already.
+        #[expect(
+            clippy::default_trait_access,
+            reason = "the named path would add a dependency arrow §5 does not draw"
+        )]
+        mask: Default::default(),
+        direction: RunDirection::Undirected,
+        instrument: &loaded.key,
+        timeframe: loaded.timeframe,
+        params: Params::of(ladder),
+        data_digest: data_digest(&loaded.bars),
+        commit,
+    });
+
+    let mut out = String::from(STORED_PROVENANCE);
+    let _ = writeln!(
+        out,
+        "feed {} · {} · {} · {year}-{month:02} · {} bars · built at {commit}",
+        vendor.as_str(),
+        underlying,
+        loaded.timeframe,
+        loaded.bars.len(),
+    );
+    out.push('\n');
+    out.push_str(&runner::report::render(&outcome, Some(&id)));
+    Ok(out)
+}
+
 /// The threshold search, rendered.
 #[must_use]
 pub fn auto(sessions: i64) -> String {
@@ -381,8 +589,9 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
 )]
 mod tests {
     use super::{
-        MISUSED, OK, PROVENANCE, USAGE, audit_run, auto, auto_with, evaluator_from, parse_min_hits,
-        parse_sessions, run, sweep, sweep_with,
+        MISUSED, OK, PROVENANCE, STORED_PROVENANCE, USAGE, Vendor, audit_run, auto, auto_with,
+        evaluator_from, parse_min_hits, parse_sessions, parse_vendor, root_from, run, sweep,
+        sweep_stored, sweep_with,
     };
 
     fn argv(words: &[&str]) -> Vec<String> {
@@ -580,5 +789,157 @@ mod tests {
                  finding nothing: {text}"
             );
         }
+    }
+
+    /// EVERY FEED WORD THE STORE CAN WRITE IS A WORD THIS COMMAND ACCEPTS.
+    ///
+    /// Derived from `Vendor::ALL` rather than listed, so a vendor appended to the
+    /// enum is addressable here the same day. A hand-written list is exactly how a
+    /// feed becomes unpullable from the command line while the store happily holds
+    /// its bars — the shape `CLAUDE.md` §4 calls a fallback that hides a failure,
+    /// because the refusal would name the word rather than the missing arm.
+    #[test]
+    fn every_feed_the_store_can_write_is_a_feed_this_command_accepts() {
+        for v in Vendor::ALL {
+            assert_eq!(
+                parse_vendor(v.as_str()),
+                Ok(v),
+                "{} is a store prefix and must be addressable",
+                v.as_str()
+            );
+        }
+        // And an unknown word is refused by NAME, listing what would have worked.
+        let why = parse_vendor("bogus").expect_err("`bogus` is not a feed");
+        assert!(why.contains("bogus"), "the refusal names the word: {why}");
+        for v in Vendor::ALL {
+            assert!(
+                why.contains(v.as_str()),
+                "and lists {} as an alternative: {why}",
+                v.as_str()
+            );
+        }
+    }
+
+    /// THE STORE ROOT HAS THREE OUTCOMES AND THE THIRD IS A REFUSAL, NOT A GUESS.
+    ///
+    /// A default of `./store` or of `/` would be a fallback that hides a failure:
+    /// the sweep would open nothing, report zero bars, and read as an instrument
+    /// with no history rather than as a machine with no `HOME`.
+    #[test]
+    fn the_store_root_prefers_the_override_and_refuses_when_it_has_neither() {
+        assert_eq!(
+            root_from(Some("/tmp/elsewhere".into()), Some("/Users/x".into())),
+            Ok(std::path::PathBuf::from("/tmp/elsewhere")),
+            "the explicit override wins over HOME"
+        );
+        assert_eq!(
+            root_from(None, Some("/Users/x".into())),
+            Ok(std::path::PathBuf::from("/Users/x/.brutex/store")),
+            "and HOME is the fallback, at the workspace's own path"
+        );
+        let why = root_from(None, None).expect_err("neither is set");
+        assert!(
+            why.contains("BRUTEX_STORE"),
+            "the refusal names both: {why}"
+        );
+        assert!(why.contains("HOME"), "the refusal names both: {why}");
+    }
+
+    /// A MONTH THE STORE DOES NOT HOLD IS A REFUSAL THAT SAYS WHAT TO DO NEXT.
+    ///
+    /// The operator's next action is a pull, not a filesystem check, so the
+    /// refusal says so. It also must not render a census: a sweep of a month that
+    /// was never pulled and a sweep that found nothing are different statements,
+    /// and only one of them is about the market.
+    #[test]
+    fn a_month_the_store_does_not_hold_is_refused_and_renders_no_census() {
+        let text = sweep_stored("groww", "NIFTY", "1min", 1970, 1, 1);
+        assert!(text.starts_with("refused: "), "named a refusal: {text}");
+        assert!(
+            !text.contains("BARS"),
+            "a refusal must not render a census that would read as an empty \
+             market: {text}"
+        );
+    }
+
+    /// THE THREE NUMBERS ARE PARSED SEPARATELY AND EACH NAMES ITSELF WHEN WRONG.
+    ///
+    /// One shared "bad arguments" message would leave an operator comparing six
+    /// words against six meanings to find which one this build objected to.
+    #[test]
+    fn each_numeric_argument_of_the_stored_sweep_refuses_in_its_own_words() {
+        let cases = [
+            (
+                ["sweep-stored", "groww", "NIFTY", "1min", "YEAR", "8", "500"],
+                "YEAR",
+            ),
+            (
+                [
+                    "sweep-stored",
+                    "groww",
+                    "NIFTY",
+                    "1min",
+                    "2026",
+                    "MONTH",
+                    "500",
+                ],
+                "MONTH",
+            ),
+            (
+                [
+                    "sweep-stored",
+                    "groww",
+                    "NIFTY",
+                    "1min",
+                    "2026",
+                    "8",
+                    "HITS",
+                ],
+                "MIN_HITS",
+            ),
+        ];
+        for (words, wanted) in cases {
+            let args: Vec<String> = words.iter().map(|w| (*w).to_owned()).collect();
+            let mut out = String::new();
+            let code = run(&args, &mut out);
+            assert_eq!(code, MISUSED, "a misparsed argument is a misuse: {out}");
+            assert!(
+                out.contains(wanted),
+                "the refusal must name {wanted}, not the other two: {out}"
+            );
+            assert!(out.contains("usage:"), "and print the usage: {out}");
+        }
+    }
+
+    /// THE USAGE NAMES THE COMMAND, OR AN OPERATOR CANNOT FIND IT.
+    ///
+    /// `cli` has no `--help`; the usage IS the help, printed on every refusal. A
+    /// command absent from it is a command nobody discovers.
+    #[test]
+    fn the_stored_sweep_appears_in_the_usage_with_its_arguments() {
+        assert!(USAGE.contains("sweep-stored"), "the command is listed");
+        for word in ["VENDOR", "UNDERLYING", "RUNG", "YEAR", "MONTH"] {
+            assert!(USAGE.contains(word), "{word} is explained in the usage");
+        }
+    }
+
+    /// THE TWO PROVENANCE BANNERS CANNOT BE MISTAKEN FOR ONE ANOTHER.
+    ///
+    /// A sweep over generated bars and one over real bars are byte-identical in
+    /// shape, so the banner is the only thing separating them. If both said the
+    /// same words, a generated run could be read as evidence about a market --
+    /// the failure wearing a success's clothes that `CLAUDE.md` §5 bans.
+    #[test]
+    fn the_generated_and_stored_banners_make_opposite_claims() {
+        assert!(PROVENANCE.contains("GENERATED"), "one says generated");
+        assert!(
+            STORED_PROVENANCE.contains("REAL MARKET DATA"),
+            "one says real"
+        );
+        assert_ne!(PROVENANCE, STORED_PROVENANCE);
+        assert!(
+            !STORED_PROVENANCE.contains("not a backtest"),
+            "the real banner must not carry the generated one's disclaimer"
+        );
     }
 }
