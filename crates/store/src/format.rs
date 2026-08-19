@@ -350,6 +350,49 @@ impl Overlay {
         }
     }
 
+    /// The bytes of one overlay record, little-endian.
+    ///
+    /// Field order and width mirror [`Bar::image`] exactly — three `i64` at
+    /// 0, 8 and 16 — because the same block, checksum and commit machinery
+    /// reads both, and a record that laid its fields out differently would
+    /// need a second copy of that machinery to understand it.
+    #[must_use]
+    pub fn image(&self) -> [u8; OVERLAY_LEN] {
+        let mut out = [0u8; OVERLAY_LEN];
+        write_at(&mut out, 0, self.ts_micros.to_le_bytes());
+        write_at(&mut out, 8, self.spot.to_le_bytes());
+        write_at(&mut out, 16, self.iv_micros.to_le_bytes());
+        out
+    }
+
+    /// Decodes one overlay record.
+    ///
+    /// Nothing is validated, for the reason [`Bar::decode`] gives: a record has
+    /// no structure a lost write violates, and an all-zero overlay is a legal
+    /// reading of zero spot and zero volatility. Detecting a lost write is
+    /// [`crate::block`]'s job.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::RecordTooShort`] when fewer than [`OVERLAY_STRIDE`] bytes
+    /// are offered. Refused rather than zero-filled: inventing the missing
+    /// bytes would manufacture a reading nobody wrote, and the null sentinel
+    /// exists precisely so "nothing was stated" has its own value.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+        if bytes.len() < OVERLAY_LEN {
+            return Err(FormatError::RecordTooShort { len: bytes.len() });
+        }
+        let mut image = [0u8; OVERLAY_LEN];
+        for (dst, src) in image.iter_mut().zip(bytes.iter()) {
+            *dst = *src;
+        }
+        Ok(Self {
+            ts_micros: i64::from_le_bytes(le_bytes(&image, 0)),
+            spot: i64::from_le_bytes(le_bytes(&image, 8)),
+            iv_micros: i64::from_le_bytes(le_bytes(&image, 16)),
+        })
+    }
+
     /// Whether this record states anything at all.
     ///
     /// An overlay with neither value is not worth a record, and the writer
@@ -542,6 +585,135 @@ impl Bar {
     }
 }
 
+/// What a record file's writer needs of a record, and nothing more.
+///
+/// # Why this exists rather than a second writer
+///
+/// `BarFile::append` is about a hundred and forty lines of header advance,
+/// commit ordering, offset arithmetic, durable write and block seal — and
+/// exactly ONE of them is record-specific: the line that turns a record into
+/// bytes. A second writer for the overlay would copy the other hundred and
+/// thirty-nine, and a copy of a durability path is a second place for a torn
+/// write to be handled differently.
+///
+/// So the writer is generic over this, and the two implementations are the two
+/// things that genuinely differ: how wide a record is, when it happened, and
+/// what its bytes are.
+pub trait Row: Copy + PartialEq {
+    /// Bytes of one record. The file's stride must equal this.
+    const LEN: usize;
+
+    /// When this record happened, in microseconds since the epoch, UTC.
+    ///
+    /// The writer orders and de-duplicates on this and nothing else, which is
+    /// what lets a bar and its overlay be joined by value rather than by
+    /// position.
+    fn stamp(&self) -> i64;
+
+    /// Appends this record's bytes to `out`.
+    ///
+    /// Writing INTO a buffer rather than returning an array, because the array
+    /// length would have to be `Self::LEN` and a const-generic return is not
+    /// expressible here. The buffer is reserved once per batch by the caller.
+    fn write_into(&self, out: &mut Vec<u8>);
+
+    /// Decodes one record from bytes already read off the file.
+    ///
+    /// The writer needs this for duplicate rejection: an append whose first
+    /// stamp is already committed is compared against what is THERE, and a
+    /// batch matching byte for byte is accepted as a rerun rather than
+    /// refused. `CLAUDE.md` §3 rule 5 — reruns are safe — is that comparison.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the record's own decoder refuses; in practice a short tail.
+    fn read_from(bytes: &[u8]) -> Result<Self, FormatError>;
+
+    /// Whether this record is internally possible.
+    ///
+    /// Checked at the write boundary, never at read: a file that already holds
+    /// an impossible record is corrupt and the CRC is what detects that. This
+    /// exists so an impossible one never reaches the disk.
+    ///
+    /// A [`Bar`] has four prices that must bracket each other. An [`Overlay`]
+    /// has no such relation — a spot and a volatility constrain nothing about
+    /// one another, and an all-zero overlay is a legal reading — so it answers
+    /// `true` because there is genuinely nothing to violate, not because the
+    /// check was skipped.
+    fn is_sane(&self) -> bool;
+
+    /// The two counts, when one of them is impossible.
+    ///
+    /// `Some((volume, open_interest))` names the pair so the refusal can quote
+    /// both — a negative volume reported as "impossible bar" sends an operator
+    /// to the four prices, which is the wrong diagnosis, and `CLAUDE.md` §4
+    /// requires the reason to be the real one.
+    ///
+    /// `None` when the counts are fine, and `None` for an [`Overlay`], which
+    /// carries no counts to be wrong about.
+    fn bad_counts(&self) -> Option<(i64, i64)>;
+}
+
+impl Row for Bar {
+    const LEN: usize = RECORD_LEN;
+
+    fn stamp(&self) -> i64 {
+        self.ts_micros
+    }
+
+    fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.image());
+    }
+
+    fn read_from(bytes: &[u8]) -> Result<Self, FormatError> {
+        Self::decode(bytes)
+    }
+
+    fn is_sane(&self) -> bool {
+        self.ohlc_is_sane()
+    }
+
+    fn bad_counts(&self) -> Option<(i64, i64)> {
+        if self.counts_are_sane() {
+            None
+        } else {
+            Some((self.volume, self.open_interest))
+        }
+    }
+}
+
+impl Row for Overlay {
+    const LEN: usize = OVERLAY_LEN;
+
+    fn stamp(&self) -> i64 {
+        self.ts_micros
+    }
+
+    fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.image());
+    }
+
+    fn read_from(bytes: &[u8]) -> Result<Self, FormatError> {
+        Self::decode(bytes)
+    }
+
+    fn is_sane(&self) -> bool {
+        true
+    }
+
+    fn bad_counts(&self) -> Option<(i64, i64)> {
+        None
+    }
+}
+
+/// [`OVERLAY_STRIDE`] as a length, for the overlay image.
+///
+/// Separate from the stride for the reason `RECORD_LEN` is: one is a file
+/// geometry and one is an array bound, and a `usize` cast at every use site
+/// would be a cast this crate's lint table denies.
+#[allow(clippy::cast_possible_truncation)]
+pub const OVERLAY_LEN: usize = OVERLAY_STRIDE as usize;
+
 /// [`RECORD_STRIDE`] as a length, for the record image.
 ///
 /// Written as a literal in both widths rather than converted, for the reason
@@ -557,14 +729,14 @@ const _: () = assert!(RECORD_STRIDE == 56 && RECORD_LEN == 56);
 /// Index-free, because `clippy::indexing_slicing` is denied across this
 /// workspace and an encoder is exactly where a panicking index would eventually
 /// be reached by an offset that moved.
-fn write_at<const N: usize>(out: &mut [u8; RECORD_LEN], offset: usize, src: [u8; N]) {
+fn write_at<const N: usize>(out: &mut [u8], offset: usize, src: [u8; N]) {
     for (dst, byte) in out.iter_mut().skip(offset).zip(src) {
         *dst = byte;
     }
 }
 
 /// Reads `N` little-endian bytes at `offset` from a record image.
-fn le_bytes<const N: usize>(image: &[u8; RECORD_LEN], offset: usize) -> [u8; N] {
+fn le_bytes<const N: usize>(image: &[u8], offset: usize) -> [u8; N] {
     let mut out = [0u8; N];
     for (dst, src) in out.iter_mut().zip(image.iter().skip(offset)) {
         *dst = *src;

@@ -425,10 +425,28 @@ fn an_overlay_is_not_a_bar_file_and_no_reader_can_take_it_for_one() {
         OVERLAY_STRIDE, RECORD_STRIDE,
         "and a record count computed for one cannot be right for the other"
     );
+    // IT IS IN `KNOWN`, AND THAT IS NOT THE PROTECTION.
+    //
+    // Excluding it was tried and moved the problem rather than solving it:
+    // `Header::decode_parts` resolves a version WHILE DECODING, before any
+    // caller can say which table it meant, so an overlay outside the list is
+    // `UnknownVersion(9)` at the first byte of its own file.
+    //
+    // What keeps them apart is the version number itself — a `.bar` carries 2
+    // and a `.ovl` carries 9, and a header doctored to swap them fails its own
+    // CRC — plus `BarFile` resolving against a table chosen by FILE KIND, so a
+    // `.bar` path is offered only bar geometries whatever its header claims.
     assert!(
-        !Layout::KNOWN.iter().any(|l| l.magic() == OVERLAY_MAGIC),
-        "KNOWN answers `which BAR versions can this build read`; offering the \
-         overlay there would hand it to every bar reader as a candidate"
+        Layout::KNOWN.iter().any(|l| l.magic() == OVERLAY_MAGIC),
+        "the overlay is a geometry this build reads, so it is in KNOWN"
+    );
+    assert_eq!(
+        Layout::KNOWN
+            .iter()
+            .filter(|l| l.version() == Layout::OVERLAY.version())
+            .count(),
+        1,
+        "and exactly one row answers to its version, so resolution is unambiguous"
     );
     // IT SHARES THE FAMILY AND TAKES A VERSION BARS WILL NOT. That is what
     // lets it use `Header::validate` and `block::seal` instead of growing a

@@ -133,7 +133,23 @@ impl Layout {
     /// Adding a version is adding a row built by [`Layout::declared`]. Nothing
     /// else in this module names a version number, so a new row cannot change
     /// how an old one resolves.
-    pub const KNOWN: &'static [Self] = &[Self::V2];
+    /// # Why the overlay is here
+    ///
+    /// `KNOWN` answers "which geometries can this build read", and both can.
+    /// Resolution is BY THE FILE'S OWN VERSION NUMBER — a `.bar` carries 2 and
+    /// a `.ovl` carries 9 — so the two cannot be confused by a reader that
+    /// reads the header it was given, and a header doctored to lie about it
+    /// fails its own CRC.
+    ///
+    /// Excluding it was tried first and moved the problem rather than solving
+    /// it: `Header::decode_parts` resolves the version while decoding, long
+    /// before any caller can say which table it meant, so an overlay outside
+    /// this list is `UnknownVersion(9)` at the first byte.
+    ///
+    /// The second guard remains and is the one that matters: `BarFile` resolves
+    /// against a table chosen by FILE KIND, so a `.bar` path is offered only
+    /// the bar geometries whatever its header claims.
+    pub const KNOWN: &'static [Self] = &[Self::V2, Self::OVERLAY];
 
     /// The version this build writes. Older versions are read, never written.
     pub const CURRENT: Self = Self::V2;
@@ -224,7 +240,8 @@ impl Layout {
     /// ```
     /// # use store::{format::FormatError, layout::Layout};
     /// assert_eq!(Layout::for_version(2)?.record_stride(), 56);
-    /// assert_eq!(Layout::for_version(9), Err(FormatError::UnknownVersion(9)));
+    /// // 7 rather than 9: version 9 is the overlay sidecar's geometry.
+    /// assert_eq!(Layout::for_version(7), Err(FormatError::UnknownVersion(7)));
     /// // Version 1 existed and is not decodable by this build. It is named as
     /// // retired rather than reported as unknown or, worse, read at version
     /// // 2's offsets.

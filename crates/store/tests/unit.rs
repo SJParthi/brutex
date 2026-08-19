@@ -856,7 +856,18 @@ fn the_constants_are_the_current_versions_layout() {
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
     assert_eq!(Layout::CURRENT, v2);
-    assert_eq!(Layout::KNOWN, &[v2]);
+    // TWO GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
+    // build read", and the overlay sidecar is one: 24-byte records at version
+    // 9, beside the bar's 56 at version 2. Resolution is by the file's own
+    // version number, so the two cannot be confused by a reader that reads the
+    // header it was handed.
+    assert_eq!(Layout::KNOWN, &[v2, Layout::OVERLAY]);
+    assert_eq!(Layout::OVERLAY.record_stride(), 24);
+    assert_ne!(
+        Layout::OVERLAY.version(),
+        v2.version(),
+        "and their version numbers differ, which is what resolves them apart"
+    );
     const { assert!(SLOT_COUNT <= MAX_SLOT_COUNT) }
 
     // The header region is exactly `slot_count` slots at SLOT_STRIDE spacing,
@@ -909,7 +920,10 @@ fn every_known_row_is_one_declare_would_admit() {
 fn unknown_version_refuses() {
     // S-09. A future version has its own layout; guessing at it would read
     // fields from the wrong offsets and return plausible nonsense.
-    for version in [0u16, 3, 9, 255, u16::MAX] {
+    // 9 IS NO LONGER A STRANGER. The overlay sidecar took it, so a test that
+    // wants "a version this build does not know" has to pick one that stays
+    // unknown — 3 and 255 and u16::MAX still are, and 7 replaces the 9.
+    for version in [0u16, 3, 7, 255, u16::MAX] {
         let refusal = Layout::for_version(version);
         assert_eq!(refusal, Err(FormatError::UnknownVersion(version)));
         let rendered = refusal.unwrap_err().to_string();
@@ -1339,8 +1353,10 @@ fn a_slot_that_is_not_a_bar_file_is_refused_before_its_version_is_read() {
 #[test]
 fn a_slot_naming_an_unknown_version_is_refused_by_number() {
     let mut slot = genesis_slot();
-    slot[8..10].copy_from_slice(&9u16.to_le_bytes());
-    assert_eq!(Header::decode(&slot), Err(FormatError::UnknownVersion(9)));
+    // 7, NOT 9. The overlay sidecar took version 9, so a slot naming it is a
+    // real geometry and this test needs one that is genuinely unknown.
+    slot[8..10].copy_from_slice(&7u16.to_le_bytes());
+    assert_eq!(Header::decode(&slot), Err(FormatError::UnknownVersion(7)));
 }
 
 #[test]
@@ -1412,10 +1428,10 @@ fn a_slot_naming_the_wrong_stride_for_its_version_is_refused() {
 #[test]
 fn a_header_this_build_cannot_write_is_refused_at_commit() {
     let unknown = Header {
-        format_version: 9,
+        format_version: 7,
         ..Header::genesis(7, 60, 0)
     };
-    assert_eq!(unknown.commit(), Err(FormatError::UnknownVersion(9)));
+    assert_eq!(unknown.commit(), Err(FormatError::UnknownVersion(7)));
 
     let retired = Header {
         format_version: 1,

@@ -222,9 +222,36 @@ impl Header {
     /// same thing to a reader, and both are safe.
     #[must_use]
     pub const fn genesis(symbol_id: u32, timeframe_secs: u32, flags: u32) -> Self {
+        Self::genesis_at(Layout::CURRENT, symbol_id, timeframe_secs, flags)
+    }
+
+    /// The first header of a file at a GIVEN geometry.
+    ///
+    /// # Why the geometry is a parameter
+    ///
+    /// [`Self::genesis`] wrote `Layout::CURRENT` and its stride, which is right
+    /// for a `.bar` and silently wrong for its `.ovl` sibling: the sidecar's
+    /// records are 24 bytes and its version is 9, so a file created at the bar's
+    /// geometry accepts a 24-byte batch at 56-byte offsets. The header would
+    /// validate, the CRC would pass — the bytes written are the bytes read —
+    /// and every field afterwards would come from the wrong place.
+    ///
+    /// Naming the layout at creation is what makes that a compile-time choice
+    /// rather than a default nobody revisits.
+    #[must_use]
+    pub const fn genesis_at(
+        layout: Layout,
+        symbol_id: u32,
+        timeframe_secs: u32,
+        flags: u32,
+    ) -> Self {
+        // THE STRIDE COMES FROM THE LAYOUT, not from a constant beside it, so
+        // the two cannot disagree about one file.
+        #[allow(clippy::cast_possible_truncation)]
+        let record_stride = layout.record_stride() as u16;
         Self {
-            format_version: Layout::CURRENT.version(),
-            record_stride: CURRENT_STRIDE,
+            format_version: layout.version(),
+            record_stride,
             flags,
             generation: 0,
             n_valid: 0,

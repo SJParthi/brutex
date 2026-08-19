@@ -103,7 +103,7 @@ use std::io::{self, ErrorKind};
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use crate::format::{Bar, FormatError, HEADER_LEN, MAX_SLOT_COUNT, RECORD_LEN, SLOT_STRIDE};
+use crate::format::{Bar, FormatError, HEADER_LEN, MAX_SLOT_COUNT, Row, SLOT_STRIDE};
 use crate::header::Header;
 use crate::layout::Layout;
 use crate::path::{FileKind, StorePath};
@@ -593,6 +593,13 @@ pub struct BarFile {
     _lock: Option<File>,
 }
 
+/// The only geometry a `.ovl` file may have.
+///
+/// A one-row table rather than a bare `Layout`, so it goes through the same
+/// `Layout::resolve` the bar path uses — which is what makes a `.ovl` carrying
+/// any other version number a NAMED refusal rather than a silent mis-read.
+const OVERLAY_TABLE: &[Layout] = &[Layout::OVERLAY];
+
 impl BarFile {
     /// Opens a month's bar file, creating it and its directory if absent.
     ///
@@ -629,10 +636,20 @@ impl BarFile {
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Self, StoreError> {
-        if path.file() != FileKind::Bars {
+        // BARS OR THE OVERLAY BESIDE THEM, and nothing else. A `.crc` or a
+        // `.lock` opened here would be read as records at whichever geometry
+        // its first bytes happened to name.
+        if path.file() != FileKind::Bars && path.file() != FileKind::Overlay {
             return Err(StoreError::NotABarPath { found: path.file() });
         }
         let timeframe_secs = path.timeframe().secs();
+        // THE GEOMETRY THIS FILE IS BORN AT AND RESOLVED AGAINST, decided once
+        // from the file kind so creation and reopen cannot disagree.
+        let born = if path.file() == FileKind::Overlay {
+            Layout::OVERLAY
+        } else {
+            Layout::CURRENT
+        };
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
 
@@ -688,7 +705,7 @@ impl BarFile {
             let mut head = vec![0u8; usize::try_from(len).unwrap_or(REGION_LEN)];
             read_fully(&bars, &bars_path, 0, &mut head)?;
             if head.iter().all(|&byte| byte == 0) {
-                initialise(&bars, &bars_path, symbol_id, timeframe_secs)?;
+                initialise(&bars, &bars_path, symbol_id, timeframe_secs, born)?;
                 fsync_dir(&dir)?;
                 len = fault(bars.metadata(), &bars_path, Action::Measure)?.len();
             }
@@ -709,7 +726,23 @@ impl BarFile {
         // a fallback that hides a failure — it reads as safe and refuses
         // nothing. The duplicate is gone and the sentence is now true by
         // construction rather than by inspection.
-        Self::validated(bars, bars_path, Some(lock), len, symbol_id, timeframe_secs)
+        Self::validated(
+            bars,
+            bars_path,
+            Some(lock),
+            len,
+            symbol_id,
+            timeframe_secs,
+            // THE SAME ANSWER CREATION USED. A file born at the overlay's
+            // geometry and reopened against the bar table reports
+            // `UnknownVersion(9)` — which is the resolver being right and the
+            // caller handing it the wrong table.
+            if path.file() == FileKind::Overlay {
+                OVERLAY_TABLE
+            } else {
+                Layout::KNOWN
+            },
+        )
     }
 
     /// Open a month that already exists, **without creating anything**.
@@ -755,7 +788,10 @@ impl BarFile {
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Self, StoreError> {
-        if path.file() != FileKind::Bars {
+        // BARS OR THE OVERLAY BESIDE THEM, and nothing else. A `.crc` or a
+        // `.lock` opened here would be read as records at whichever geometry
+        // its first bytes happened to name.
+        if path.file() != FileKind::Bars && path.file() != FileKind::Overlay {
             return Err(StoreError::NotABarPath { found: path.file() });
         }
         let bars_path = path.to_path_buf(root);
@@ -789,6 +825,14 @@ impl BarFile {
             len,
             symbol_id,
             path.timeframe().secs(),
+            // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed. The
+            // gate above has already refused anything that is not `Bars` or
+            // `Overlay`, so this match is total over what can reach it.
+            if path.file() == FileKind::Overlay {
+                OVERLAY_TABLE
+            } else {
+                Layout::KNOWN
+            },
         )
     }
 
@@ -804,9 +848,19 @@ impl BarFile {
         len: u64,
         symbol_id: u32,
         timeframe_secs: u32,
+        // WHICH GEOMETRIES THIS FILE MAY BE. Passed rather than looked up,
+        // because the answer differs by file KIND: a `.bar` may be any version
+        // in `Layout::KNOWN`, and a `.ovl` may only be `Layout::OVERLAY`.
+        //
+        // Handing the bar table to an overlay would be the dangerous
+        // direction: the header region is the SAME SHAPE in both, so a 24-byte
+        // file opened at a 56-byte geometry validates its header, passes its
+        // CRC, and then reads every field from the wrong offset. The table is a
+        // parameter so that cannot happen by omission.
+        table: &[Layout],
     ) -> Result<Self, StoreError> {
         let (header, claimed) = read_header(&bars, &bars_path, len)?;
-        let layout = refused(Layout::for_version(header.format_version), &bars_path)?;
+        let layout = refused(Layout::resolve(table, header.format_version), &bars_path)?;
 
         // A TORN TAIL PAST THE COUNTER BRICKED THE WHOLE MONTH, PERMANENTLY.
         //
@@ -1013,7 +1067,16 @@ impl BarFile {
     /// [`FormatError::GenerationExhausted`] at the counters' ends. Anything
     /// the host refuses: [`StoreError::DiskFull`], [`StoreError::ShortWrite`],
     /// [`StoreError::Denied`], [`StoreError::Io`].
-    pub fn append(&mut self, batch: &[Bar]) -> Result<Appended, StoreError> {
+    pub fn append<R: Row>(&mut self, batch: &[R]) -> Result<Appended, StoreError> {
+        // THE FILE'S STRIDE AND THE RECORD'S WIDTH MUST AGREE. Writing a
+        // 24-byte record into a 56-byte geometry lays every field at the wrong
+        // offset and the CRC would still pass, because the bytes written are
+        // the bytes read back. Refused here, once, before any of them move.
+        if u64::try_from(R::LEN) != Ok(self.layout.record_stride()) {
+            return Err(StoreError::NotABarPath {
+                found: FileKind::Overlay,
+            });
+        }
         let (first_ts, last_ts) = survey(batch)?;
         let count = len_u64(batch.len());
 
@@ -1066,7 +1129,7 @@ impl BarFile {
                 // — for bars it already held, byte for byte. Only a re-pull
                 // that happened to end at the file's last record could answer.
                 let located = already_stored(batch, first_ts, self.header.n_valid, |index| {
-                    self.read_record(index)
+                    self.read_row::<R>(index)
                 })?;
                 if let Some(first_index) = located {
                     return Ok(Appended::AlreadyPresent {
@@ -1110,9 +1173,9 @@ impl BarFile {
         let first_index = self.header.n_valid;
         let at = refused(self.layout.offset_of(first_index), &self.bars_path)?;
 
-        let mut image = Vec::with_capacity(batch.len().saturating_mul(RECORD_LEN));
-        for bar in batch {
-            image.extend_from_slice(&bar.image());
+        let mut image = Vec::with_capacity(batch.len().saturating_mul(R::LEN));
+        for row in batch {
+            row.write_into(&mut image);
         }
 
         // Step 1 and step 3 of §5: the records, then the barrier. Every byte
@@ -1180,10 +1243,27 @@ impl BarFile {
                 n_valid: self.header.n_valid,
             });
         }
+        self.read_row::<Bar>(index)
+    }
+
+    /// One record of whatever kind this file holds.
+    ///
+    /// # Why the width comes from the RECORD and the offset from the FILE
+    ///
+    /// `offset_of` uses the file's own stride, read from its header; the buffer
+    /// uses the record type's width. If those disagree the read is short or
+    /// long, and `read_fully` refuses rather than serving a partial record —
+    /// which is the check that stops a 24-byte overlay being decoded at a
+    /// 56-byte geometry after its header validated.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError`] for an unreadable offset or a short read.
+    fn read_row<W: Row>(&self, index: u64) -> Result<W, StoreError> {
         let at = refused(self.layout.offset_of(index), &self.bars_path)?;
-        let mut image = [0u8; RECORD_LEN];
+        let mut image = vec![0u8; W::LEN];
         read_fully(&self.bars, &self.bars_path, at, &mut image)?;
-        refused(Bar::decode(&image), &self.bars_path)
+        refused(W::read_from(&image), &self.bars_path)
     }
 
     /// The part of `batch` that follows what is committed, when the part that
@@ -1205,7 +1285,10 @@ impl BarFile {
     /// One record read per OVERLAPPING bar. Bounded by the batch, never by the
     /// file: the partition point comes from `last_ts_micros`, a header field.
     /// A batch with no overlap reads nothing.
-    fn suffix_that_follows<'b>(&self, batch: &'b [Bar]) -> Result<Option<&'b [Bar]>, StoreError> {
+    fn suffix_that_follows<'b, R: Row>(
+        &self,
+        batch: &'b [R],
+    ) -> Result<Option<&'b [R]>, StoreError> {
         if self.header.n_valid == 0 {
             return Ok(None);
         }
@@ -1214,7 +1297,7 @@ impl BarFile {
         // `survey` has already proven the batch is strictly increasing, so the
         // first bar past the held range is the partition and everything before
         // it is the overlap.
-        let split = batch.partition_point(|bar| bar.ts_micros <= held_through);
+        let split = batch.partition_point(|row| row.stamp() <= held_through);
         let (overlap, suffix) = batch.split_at(split);
         if suffix.is_empty() {
             return Ok(None);
@@ -1240,7 +1323,7 @@ impl BarFile {
             return Ok(None);
         };
         for (offset, bar) in overlap.iter().enumerate() {
-            let stored = self.read_record(start.saturating_add(len_u64(offset)))?;
+            let stored = self.read_row::<R>(start.saturating_add(len_u64(offset)))?;
             if stored != *bar {
                 return Ok(None);
             }
@@ -1256,13 +1339,13 @@ impl BarFile {
 /// before a byte is written", and this is that boundary for the two properties
 /// the bytes themselves cannot carry — an impossible bar and a batch out of
 /// order are both well-formed records afterwards.
-fn survey(batch: &[Bar]) -> Result<(i64, i64), StoreError> {
+fn survey<R: Row>(batch: &[R]) -> Result<(i64, i64), StoreError> {
     let Some(first) = batch.first() else {
         return Err(StoreError::EmptyBatch);
     };
     let mut previous: Option<i64> = None;
     for (offset, bar) in batch.iter().enumerate() {
-        if !bar.ohlc_is_sane() {
+        if !bar.is_sane() {
             return Err(StoreError::ImpossibleBar {
                 at: len_u64(offset),
             });
@@ -1275,27 +1358,27 @@ fn survey(batch: &[Bar]) -> Result<(i64, i64), StoreError> {
         // side, one field over. Named as its own fault rather than folded into
         // `ImpossibleBar`, because "impossible OHLC" sent to an operator
         // holding a bad volume is a wrong diagnosis, and §4 requires the reason.
-        if !bar.counts_are_sane() {
+        if let Some((volume, open_interest)) = bar.bad_counts() {
             return Err(StoreError::ImpossibleCount {
                 at: len_u64(offset),
-                volume: bar.volume,
-                open_interest: bar.open_interest,
+                volume,
+                open_interest,
             });
         }
         if let Some(earlier) = previous
-            && bar.ts_micros <= earlier
+            && bar.stamp() <= earlier
         {
             return Err(StoreError::BatchNotOrdered {
                 at: len_u64(offset),
                 previous: earlier,
-                next: bar.ts_micros,
+                next: bar.stamp(),
             });
         }
-        previous = Some(bar.ts_micros);
+        previous = Some(bar.stamp());
     }
     // The batch is non-empty and strictly increasing, so the running
     // timestamp is the last one.
-    Ok((first.ts_micros, previous.unwrap_or(first.ts_micros)))
+    Ok((first.stamp(), previous.unwrap_or(first.stamp())))
 }
 
 /// Where `batch` already sits among `n_valid` committed records, when the file
@@ -1337,14 +1420,14 @@ fn survey(batch: &[Bar]) -> Result<(i64, i64), StoreError> {
 /// [`Positional`] exists in this module, and the reason
 /// `store::file::locating_a_batch_costs_a_bisection_and_not_a_scan` can assert
 /// the read COUNT rather than assert the cost in a comment.
-fn already_stored<R>(
-    batch: &[Bar],
+fn already_stored<W: Row, F>(
+    batch: &[W],
     first_ts: i64,
     n_valid: u64,
-    read: R,
+    read: F,
 ) -> Result<Option<u64>, StoreError>
 where
-    R: Fn(u64) -> Result<Bar, StoreError>,
+    F: Fn(u64) -> Result<W, StoreError>,
 {
     let at = first_at_or_after(n_valid, first_ts, &read)?;
 
@@ -1390,9 +1473,9 @@ where
 /// [`StoreError::ShortRead`], which is the honest outcome: the bytes this
 /// question is about are gone, and "not present" would be a claim about bytes
 /// nobody can see.
-fn first_at_or_after<R>(n_valid: u64, ts: i64, read: R) -> Result<u64, StoreError>
+fn first_at_or_after<W: Row, F>(n_valid: u64, ts: i64, read: F) -> Result<u64, StoreError>
 where
-    R: Fn(u64) -> Result<Bar, StoreError>,
+    F: Fn(u64) -> Result<W, StoreError>,
 {
     let mut low = 0u64;
     let mut high = n_valid;
@@ -1403,7 +1486,7 @@ where
         // Saturating spellings on both, which cannot bite — `low < high`
         // makes the subtraction exact and the sum is below `high`.
         let mid = low.saturating_add(high.saturating_sub(low) / 2);
-        if read(mid)?.ts_micros < ts {
+        if read(mid)?.stamp() < ts {
             // `mid < high`, so this cannot pass `n_valid` and cannot wrap.
             low = mid.saturating_add(1);
         } else {
@@ -1424,8 +1507,13 @@ fn initialise(
     path: &Path,
     symbol_id: u32,
     timeframe_secs: u32,
+    // WHICH GEOMETRY THIS FILE IS BORN AT. A `.ovl` created at the bar's
+    // geometry would accept 24-byte records at 56-byte offsets, and the header
+    // would validate and the CRC would pass because the bytes written are the
+    // bytes read.
+    layout: Layout,
 ) -> Result<(), StoreError> {
-    let genesis = Header::genesis(symbol_id, timeframe_secs, 0);
+    let genesis = Header::genesis_at(layout, symbol_id, timeframe_secs, 0);
     let commit = refused(genesis.commit(), path)?;
     let region = vec![0u8; REGION_LEN];
     write_fully(dst, path, 0, &region)?;
@@ -2059,7 +2147,8 @@ mod tests {
         let path = scratch(tag);
         let _ignored = std::fs::remove_file(&path);
         let bars = open_rw(&path).expect("a temp path opens");
-        initialise(&bars, &path, SYMBOL, 60).expect("a fresh header region is written");
+        initialise(&bars, &path, SYMBOL, 60, Layout::CURRENT)
+            .expect("a fresh header region is written");
         (path.clone(), reopen(&path).expect("and reads back"))
     }
 
@@ -2067,7 +2156,15 @@ mod tests {
     fn reopen(path: &Path) -> Result<BarFile, StoreError> {
         let bars = open_rw(path).expect("the month is there");
         let len = bars.metadata().expect("a length").len();
-        BarFile::validated(bars, path.to_path_buf(), None, len, SYMBOL, 60)
+        BarFile::validated(
+            bars,
+            path.to_path_buf(),
+            None,
+            len,
+            SYMBOL,
+            60,
+            Layout::KNOWN,
+        )
     }
 
     #[test]

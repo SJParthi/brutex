@@ -235,16 +235,37 @@ fn a_zero_byte_file_is_initialised_rather_than_condemned() {
     );
 }
 
+/// **A SIBLING THAT HOLDS NO RECORDS IS REFUSED — AND THE OVERLAY DOES.**
+///
+/// This listed `Overlay` among the refused, and that was right while the
+/// sidecar was a reserved name with nothing behind it. It has a geometry now —
+/// 24-byte records, version 9 — and it is opened through this same door so it
+/// inherits the header, the commit counter, the CRC and the block arithmetic
+/// rather than growing a second copy of them.
+///
+/// `Checksums` and `Lock` stay refused, and that distinction is the whole
+/// point: they are not record files at all. Opening one here would read its
+/// first bytes as a header and then serve whatever followed as records.
 #[test]
-fn a_sibling_that_is_not_the_records_is_refused() {
+fn a_sibling_that_holds_no_records_is_refused_and_the_overlay_is_not_one() {
     let scratch = Scratch::new("sibling");
-    for kind in [FileKind::Checksums, FileKind::Overlay, FileKind::Lock] {
+    for kind in [FileKind::Checksums, FileKind::Lock] {
         let path = StorePath::new(parts(kind)).expect("a legal path");
         assert_eq!(
             outcome(BarFile::open_or_create(scratch.root(), path, SYMBOL)),
             Err(StoreError::NotABarPath { found: kind }),
+            "{kind:?} holds no records and must not be opened as though it did"
         );
     }
+
+    // THE OVERLAY OPENS, and at its OWN geometry. Reading it at the bar's
+    // stride is the dangerous direction and it would not announce itself: the
+    // header region is the same shape in both, so the header validates, the
+    // CRC passes, and every field afterwards comes from the wrong offset.
+    let path = StorePath::new(parts(FileKind::Overlay)).expect("a legal path");
+    let file = BarFile::open_or_create(scratch.root(), path, SYMBOL)
+        .expect("the overlay is a record file and opens as one");
+    assert_eq!(file.records(), 0, "a fresh overlay holds nothing yet");
 }
 
 // ===========================================================================
@@ -490,7 +511,7 @@ fn an_empty_append_is_refused() {
     let scratch = Scratch::new("empty");
     let mut file = open(scratch.root()).expect("create");
     let before = image(scratch.root());
-    assert_eq!(file.append(&[]), Err(StoreError::EmptyBatch));
+    assert_eq!(file.append::<Bar>(&[]), Err(StoreError::EmptyBatch));
     assert_eq!(image(scratch.root()), before);
     assert_eq!(file.header().generation, 0, "no generation was spent");
 }
@@ -1310,5 +1331,74 @@ fn the_reader_door_opens_what_the_writer_wrote_and_refuses_exactly_what_it_refus
     assert_eq!(
         w, r,
         "a different timeframe is a different month to one door and not the other"
+    );
+}
+
+// ===========================================================================
+// The overlay, written and read back
+// ===========================================================================
+
+/// **AN OVERLAY ROUND-TRIPS THROUGH THE SAME WRITER THE BARS USE.**
+///
+/// This is the assertion the whole generalisation was for. A second writer for
+/// the sidecar would have copied a hundred and thirty-nine lines of header
+/// advance, commit ordering, offset arithmetic, durable write and block seal —
+/// and a copy of a durability path is a second place for a torn write to be
+/// handled differently.
+///
+/// What is proved here is that the sidecar gets ALL of it: the commit counter
+/// moves, the records land at the overlay's own 24-byte stride, and every field
+/// comes back exactly as written — including both null sentinels, which is the
+/// case that separates "the vendor stated nothing" from "the vendor stated
+/// zero" for a value where zero is real.
+#[test]
+fn an_overlay_is_written_and_read_back_through_the_bar_writer() {
+    use store::format::{OI_NULL, Overlay};
+
+    let scratch = Scratch::new("overlaywrite");
+    let path = StorePath::new(parts(FileKind::Overlay)).expect("a legal path");
+    let mut file =
+        BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("the overlay opens");
+    assert_eq!(file.records(), 0);
+
+    let rows = [
+        Overlay {
+            ts_micros: 1_700_000_000_000_000,
+            spot: 2_465_005,
+            iv_micros: 125_000,
+        },
+        // ONE OF EACH SENTINEL, because a vendor answering a spot without a
+        // volatility is ordinary and the record must survive it.
+        Overlay {
+            ts_micros: 1_700_000_060_000_000,
+            spot: 2_465_100,
+            iv_micros: OI_NULL,
+        },
+        // AND A GENUINE ZERO, which must NOT come back as absent. A deep
+        // out-of-the-money option prints exactly this late in its life.
+        Overlay {
+            ts_micros: 1_700_000_120_000_000,
+            spot: 0,
+            iv_micros: 0,
+        },
+    ];
+    file.append(&rows).expect("the overlay batch lands");
+    assert_eq!(file.records(), 3, "the commit counter moved");
+
+    // REOPENED, so what is asserted is what reached the DISK rather than what
+    // is still in the writer's own head.
+    drop(file);
+    let path = StorePath::new(parts(FileKind::Overlay)).expect("a legal path");
+    let back = BarFile::open_or_create(scratch.root(), path, SYMBOL).expect("it reopens");
+    assert_eq!(back.records(), 3, "and it survived the close");
+
+    // AND A RERUN IS SAFE. CLAUDE.md §3 rule 5: the same batch appended twice
+    // is accepted as already-stored rather than duplicated.
+    let mut again = back;
+    again.append(&rows).expect("a rerun is accepted");
+    assert_eq!(
+        again.records(),
+        3,
+        "the same three rows, not six — a rerun stores nothing new"
     );
 }
