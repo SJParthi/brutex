@@ -9310,8 +9310,20 @@
   .ohead .sort.num {
     text-align: right;
   }
+  /* `max-height`, NEVER `height`, AND THE DIFFERENCE IS THE WHOLE COMPLAINT.
+     This was `height: min(46vh, 520px)`, so the outcome list stood 520px tall
+     whether it held two hundred rows or one. A run that names a single
+     instrument -- one ticked name, which is the ordinary case for a targeted
+     pull -- drew one 30px row and then 490px of nothing, and the census below
+     it was pushed off the bottom of the screen. Reported from the running page
+     as "before the pull this view is awesome, after the pull it changes": the
+     census had not gone anywhere, it was under half a metre of empty box.
+     The virtualiser is safe with a box that shrinks: `vH` is read from a
+     ResizeObserver on the element itself, so a short list reports a short
+     height and `vCount` follows it. Above the cap the box stops growing and
+     scrolls, which is the behaviour that was wanted in the first place. */
   .olist {
-    height: min(46vh, 520px);
+    max-height: min(46vh, 520px);
     overflow-y: auto;
     overscroll-behavior: contain;
   }
