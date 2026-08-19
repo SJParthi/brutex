@@ -6671,6 +6671,22 @@ fn fno_facts(asked: &ingest::FnoRequest, today: Day) -> Vec<(&'static str, Strin
         ),
     ];
     facts.extend(window_facts(asked.window));
+    // NARROWED, AND SAID SO. A window pulled back to yesterday is a different
+    // request from the one that was typed, and `CLAUDE.md` §4 draws the line
+    // exactly here: degrading loudly is allowed, degrading silently is not.
+    // Absent in the ordinary case, so a receipt does not carry a line about
+    // something that did not happen.
+    if let Some(asked_to) = asked.clamped_from {
+        facts.push((
+            "Window narrowed",
+            format!(
+                "you asked to {asked_to} and that day has not finished — an expired \
+                 series is taken to {} instead, because a running session yields a \
+                 partial day the store can never correct",
+                asked.window.to()
+            ),
+        ));
+    }
     facts.push(("Feed", asked.feed.display().to_owned()));
     facts
 }

@@ -1033,6 +1033,16 @@ pub struct FnoRequest {
     pub expiry: Option<Day>,
     /// The operator's inclusive range.
     pub window: Window,
+    /// The last day the operator ASKED for, when it had to be pulled back.
+    ///
+    /// `None` when the window was taken exactly as given, which is the ordinary
+    /// case. `Some` records that the request was narrowed and by how much, so
+    /// the receipt can SAY it — `CLAUDE.md` §4 bans a fallback that hides a
+    /// failure, and a window silently shortened is exactly that. Narrowing
+    /// loudly is a different thing, and it is what the autopilot already does:
+    /// its own header says it "clamps to yesterday so the backstop is never
+    /// reached".
+    pub clamped_from: Option<Day>,
     /// WHICH FEED IS BEING ASKED. Not inferable and not defaulted to a name in
     /// this file: discovery is a vendor call, the two brokers publish different
     /// endpoints and different JSON field names, and `pull::vendor::DESCRIPTORS`
@@ -1503,34 +1513,55 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         None
     };
 
-    let window = parse_window(body, today)?;
-    match expiry {
-        Some(one) => {
-            if window.to() > one {
-                return Err(Refusal::WindowOutlivesTheContract {
-                    to: window.to(),
-                    expiry: one,
-                });
-            }
+    let asked_window = parse_window(body, today)?;
+    let mut window = asked_window;
+    let mut clamped_from = None;
+    if let Some(one) = expiry {
+        if window.to() > one {
+            return Err(Refusal::WindowOutlivesTheContract {
+                to: window.to(),
+                expiry: one,
+            });
         }
-        // THE SAME GATE, ASKED OF THE WINDOW. With no expiry named, every
-        // contract the month holds must already have settled — otherwise a
-        // month-shaped request is a way to reach live contracts that the
-        // single-expiry form refuses one at a time.
-        None => {
-            if window.to() >= today {
-                return Err(Refusal::LiveContract {
-                    expiry: window.to(),
-                    today,
-                });
-            }
-        }
+    } else {
+        // CLAMPED TO YESTERDAY, NOT REFUSED — and the difference is measured.
+        //
+        // This REFUSED any window reaching today, on the reasoning that a
+        // month-shaped request would otherwise be a way to reach live contracts
+        // that the single-expiry form refuses one at a time. The reasoning was
+        // sound and the mechanism was in the wrong place.
+        //
+        // What it cost: the ingest form defaults TO DATE to today, so the
+        // ordinary act of opening the page and pressing the button produced a
+        // 400 that named a rule about contracts while pointing at a date
+        // control. Measured on 2026-08-19 — four consecutive refusals, all
+        // `2026-08-19 has not expired as of 2026-08-19`, on a request whose
+        // other eight months were perfectly askable.
+        //
+        // Why clamping is now SAFE where it would not have been before:
+        // `crate::ingest::matching` drops every discovered contract that has
+        // not settled, per contract, against the same `today`. That is a
+        // strictly finer guard than a window bound — a window ending yesterday
+        // still falls in a month holding a live expiry, which is the hole this
+        // gate never closed anyway. With the contract-level filter in place the
+        // window bound protects nothing the filter does not, so keeping it as a
+        // refusal buys an outage and no safety.
+        //
+        // It is NOT silent. `clamped_from` carries the day that was asked for
+        // and the receipt prints it — `CLAUDE.md` §4 bans a fallback that hides
+        // a failure, not one that announces itself. The autopilot already
+        // narrows exactly this way and says so: "clamps to yesterday so the
+        // backstop is never reached".
+        let (narrowed, was) = clamp_to_settled(window, today)?;
+        window = narrowed;
+        clamped_from = was;
     }
     Ok(FnoRequest {
         underlying,
         series,
         expiry,
         window,
+        clamped_from,
         // THE SAME TWO PARSES SPOT USES, character for character. Sharing the
         // rule rather than the code is deliberate here — the refusals name the
         // field that was wrong, and a shared helper would have to be told which
@@ -1586,6 +1617,52 @@ pub fn epoch_secs(at: SystemTime) -> i64 {
             i64::try_from(behind.duration().as_secs()).map_or(i64::MIN, i64::saturating_neg)
         }
     }
+}
+
+/// Pulls a window back to yesterday when it reaches today, and says so.
+///
+/// Returns the window to use and, when it differs from the one asked for, the
+/// last day that WAS asked for — which the receipt prints. `None` means the
+/// window was taken exactly as given.
+///
+/// # Why yesterday and not today
+///
+/// A session still running yields a partial day the append-only store can never
+/// correct. That is the same rule `finished_day_only` enforces at the write
+/// boundary and the autopilot clamps to on every tick; this is the third site
+/// and it now agrees with both instead of refusing where they narrow.
+///
+/// # Errors
+///
+/// [`Refusal::LiveContract`] when the whole window is today or later — there is
+/// then nothing to narrow to, and the operator asked for no settled day at all.
+/// [`Refusal::ClockUnusable`] when yesterday is not a representable date.
+fn clamp_to_settled(window: Window, today: Day) -> Result<(Window, Option<Day>), Refusal> {
+    if window.to() < today {
+        return Ok((window, None));
+    }
+    // NO DAY BEFORE THE EPOCH. Falls in with the branch below rather than
+    // inventing a clock error: either way the request names no settled day, and
+    // one refusal saying so beats two saying it differently.
+    let Some(previous) = today.days_from_epoch().checked_sub(1) else {
+        return Err(Refusal::LiveContract {
+            expiry: window.to(),
+            today,
+        });
+    };
+    let last = Day::from_days(previous).map_err(|why| Refusal::ClockUnusable { why })?;
+    if window.from() > last {
+        // NOTHING TO NARROW TO. Every day asked for is today or later, so the
+        // request names no settled session at all and clamping would invent a
+        // window the operator did not ask for.
+        return Err(Refusal::LiveContract {
+            expiry: window.to(),
+            today,
+        });
+    }
+    Window::new(window.from(), last)
+        .map(|narrowed| (narrowed, Some(window.to())))
+        .map_err(|why| Refusal::ClockUnusable { why })
 }
 
 /// The IST date of a moment.
@@ -2845,6 +2922,111 @@ mod tests {
     /// Every rung the ladder carries is driven, not just the daily one, so a
     /// rung added to `Granularity` later cannot slip past this by being neither
     /// `1min` nor `1day`.
+    /// **A WINDOW REACHING TODAY IS NARROWED, NOT REFUSED.**
+    ///
+    /// The form defaults TO DATE to today, so refusing here meant that opening
+    /// the page and pressing the button produced a 400 naming a rule about
+    /// contracts while pointing at a date control. Four consecutive refusals on
+    /// 2026-08-19 were exactly that.
+    #[test]
+    fn a_window_that_reaches_today_is_pulled_back_to_yesterday_and_says_so() {
+        let out = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-01-01&to=2026-08-07",
+            today(),
+        )
+        .expect("a window ending today is now askable");
+
+        assert_eq!(out.window.to(), day(2026, 8, 6), "narrowed to yesterday");
+        assert_eq!(
+            out.clamped_from,
+            Some(day(2026, 8, 7)),
+            "the day that was ASKED for is kept, or the receipt cannot say what changed"
+        );
+        assert_eq!(out.window.from(), day(2026, 1, 1), "the start is untouched");
+    }
+
+    /// A window already behind today is taken exactly as given.
+    ///
+    /// The half that proves the clamp is conditional rather than unconditional:
+    /// a narrowing that fired on every request would quietly cost every
+    /// operator their last settled day.
+    #[test]
+    fn a_settled_window_is_never_narrowed() {
+        let out = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-07-01&to=2026-07-30",
+            today(),
+        )
+        .expect("a settled window");
+
+        assert_eq!(out.window.to(), day(2026, 7, 30));
+        assert_eq!(
+            out.clamped_from, None,
+            "an untouched window must report no narrowing, or every receipt \
+             grows a line about something that did not happen"
+        );
+    }
+
+    /// A window entirely in the future has nothing to narrow to.
+    ///
+    /// Clamping here would invent a window nobody asked for, so this stays a
+    /// refusal — the one case the old gate was right about.
+    #[test]
+    fn a_window_wholly_at_or_after_today_is_still_refused() {
+        // BOTH ENDS ON TODAY. A window reaching PAST today is refused earlier
+        // still, by `parse_window`'s own `WindowInFuture` — a different rule
+        // with a different owner, and not the one under test here.
+        let refused = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-08-07&to=2026-08-07",
+            today(),
+        )
+        .expect_err("no settled day was asked for at all");
+
+        assert!(
+            matches!(refused, Refusal::LiveContract { .. }),
+            "{refused:?}"
+        );
+    }
+
+    /// The contract-level filter is what makes the clamp safe.
+    ///
+    /// A window ending yesterday still falls in a month that can hold a live
+    /// expiry — which is the hole the window gate never closed. `matching`
+    /// closes it per contract, so this asserts the finer guard exists rather
+    /// than trusting the coarser one that was removed.
+    #[test]
+    fn a_narrowed_window_still_drops_a_contract_that_has_not_settled() {
+        let asked = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-08-01&to=2026-08-07",
+            today(),
+        )
+        .expect("narrowed to 2026-08-06");
+
+        let live = pull::fno::Found {
+            vendor_symbol: "NSE-NIFTY-25Aug26-24000-CE".to_owned(),
+            underlying: "NIFTY".to_owned(),
+            contract: brutex_core::instrument::Contract::of(
+                brutex_core::instrument::Kind::Option {
+                    expiry: brutex_core::instrument::Expiry::new(2026, 8, 25)
+                        .expect("a real expiry"),
+                    strike: brutex_core::price::Paisa::from_raw(2_400_000),
+                    side: brutex_core::instrument::OptionSide::Call,
+                },
+            )
+            .expect("an option has a contract segment"),
+            expiry: brutex_core::instrument::Expiry::new(2026, 8, 25).expect("a real expiry"),
+        };
+        let chain = pull::chain::Chain {
+            expiries: vec!["2026-08-25".to_owned()],
+            contracts: vec![live],
+            unreadable: Vec::new(),
+        };
+
+        assert!(
+            matching(&chain, &asked, today()).is_empty(),
+            "a contract expiring 2026-08-25 must not be fetched on 2026-08-07"
+        );
+    }
+
     #[test]
     fn an_expired_series_refuses_every_rung_but_one_minute() {
         for rung in pull::vendor::Granularity::ALL {
@@ -2984,19 +3166,36 @@ mod tests {
             "absent means every expiry the month held, not a field to refuse"
         );
 
-        // AND THE GATE MOVED WITH IT RATHER THAN BEING DROPPED. One expiry
-        // answers "am I settled" for itself; a month has to answer it with the
-        // window, or a month-shaped request would be a way to reach live
-        // contracts that the single-expiry form refuses one at a time.
+        // AND THE GATE MOVED AGAIN — FROM THE WINDOW TO THE CONTRACT.
+        //
+        // This asserted that a window running to today was REFUSED, on the
+        // reasoning that a month-shaped request would otherwise reach live
+        // contracts that the single-expiry form refuses one at a time. That
+        // reasoning was right and the window was the wrong place to enforce it,
+        // twice over.
+        //
+        // It was too COARSE: a window ending yesterday still falls in a month
+        // that holds a live expiry, so the refusal never actually closed the
+        // hole — `matching` does, per contract, and that is where the guard
+        // lives now.
+        //
+        // It was also too BLUNT: the ingest form defaults TO DATE to today, so
+        // this refused the ordinary act of opening the page and pressing the
+        // button. Four consecutive 400s on 2026-08-19, each naming a rule about
+        // contracts while pointing at a date control.
+        //
+        // So the window is NARROWED to yesterday and the narrowing is on the
+        // receipt. `a_window_that_reaches_today_is_pulled_back_to_yesterday_and_says_so`
+        // holds that, and
+        // `a_narrowed_window_still_drops_a_contract_that_has_not_settled` holds
+        // the finer guard that makes it safe.
         let reaches_today = parse_fno(
             "underlying=NIFTY&series=fut&from=2026-07-01&to=2026-08-07",
             today(),
-        );
-        assert!(
-            matches!(reaches_today, Err(Refusal::LiveContract { .. })),
-            "a window running to today is refused with no expiry named, exactly \
-             as a live expiry is refused with one: {reaches_today:?}"
-        );
+        )
+        .expect("a window reaching today is narrowed rather than refused");
+        assert_eq!(reaches_today.window.to(), day(2026, 8, 6));
+        assert_eq!(reaches_today.clamped_from, Some(day(2026, 8, 7)));
     }
 
     #[test]
