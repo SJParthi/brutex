@@ -542,6 +542,26 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
     out
 }
 
+/// How many anchored folds the walk-forward uses.
+///
+/// # A stated assumption, in the form this crate already uses for one
+///
+/// `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` are both constants
+/// their own documentation calls "a stated assumption and not a derivation", and
+/// this is the third. `CLAUDE.md` §3 rule 1 forbids PRETENDING a number is
+/// derived; it does not forbid choosing one and saying so.
+///
+/// Five is the anchored-walk-forward count in common use, and the trade it makes
+/// is legible: each additional fold buys another independent out-of-sample
+/// verdict and costs one more full sweep, while shortening every training window.
+/// On a 91,874-bar column that is roughly 18,000 test bars per fold — enough that
+/// a fold's verdict is not one afternoon.
+///
+/// Nothing in the data says where that trade sits, and no charter source names a
+/// fold count, so this is the assumption and the report prints it beside the
+/// result rather than burying it.
+const WALK_FORWARD_SPLITS: usize = 5;
+
 /// The sweep, then what its best combination actually did.
 ///
 /// # What this reaches that `sweep` does not
@@ -614,10 +634,50 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
     let taken = trade::walk(&bars, &column, &first.mask, horizon, Direction::Long);
     let exits = grid::evaluate(&bars, &column, &first.mask, horizon, Side::Long, 4);
     out.push('\n');
+    // THE WALK-FORWARD, WHICH USED TO BE A `None`.
+    //
+    // `validate::walk_forward` was built, tested and never called: this report
+    // printed "NOT SUPPLIED to this render" for it on every run since the
+    // function existed. What it needed was a fold count, and
+    // `WALK_FORWARD_SPLITS` supplies one as a STATED ASSUMPTION -- the form
+    // `bootstrap::DEFAULT_BLOCK` and `validate::DEFAULT_RUNGS` already use.
+    //
+    // It re-sweeps once per fold, so it costs about `WALK_FORWARD_SPLITS` times
+    // the sweep above. That is what an out-of-sample verdict costs, and it is
+    // paid here rather than skipped.
+    // A FRESH EVALUATOR PER FOLD, AND IT IS A COPY RATHER THAN A REBUILD.
+    //
+    // `walk_forward` wants `FnMut() -> Evaluator` because each fold must start
+    // from an unwarmed detector -- a fold that inherited the previous fold's
+    // state would be reading bars it was never given. `Evaluator` is `Copy`
+    // (1,744 bytes, `docs/10-shared-core.md`), so one built here and copied per
+    // fold is the same value a rebuild would produce, without a fallible call
+    // inside a closure that has no way to report a refusal.
+    let fresh = match evaluator() {
+        Ok(e) => e,
+        Err(why) => return format!("refused: {why}\n"),
+    };
+    let folds = runner::validate::walk_forward(
+        &bars,
+        horizon,
+        WALK_FORWARD_SPLITS,
+        Direction::Long,
+        &Sweeper::new(Ladder::with_min_hits(min_hits)),
+        move || fresh,
+    );
     out.push_str(&audit::render(
         Some(&taken),
         Some(&exits),
-        None,
+        Some(&folds),
+        // PBO AND THE BOOTSTRAP STAY `None`, AND NOT FOR WANT OF A CONSTANT.
+        //
+        // `pbo::place` needs the in-sample and out-of-sample result of EVERY
+        // candidate in each fold; `FoldResult` keeps only the chosen one, so the
+        // input does not exist to be passed. The bootstrap needs one return
+        // series per strategy, which nothing in this workspace assembles today.
+        //
+        // Both are a change to `runner` rather than a number this file can name,
+        // and the report prints NOT SUPPLIED rather than implying they ran.
         None,
         None,
         12,

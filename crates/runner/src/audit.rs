@@ -363,19 +363,33 @@ pub fn walk_forward(out: &mut String, v: &Validated) {
     let _ = writeln!(out);
     let _ = writeln!(
         out,
-        "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}",
-        "fold", "train", "test", "candidates", "in-sample", "out-of-sample"
+        "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
+        "fold", "train", "test", "candidates", "in-sample", "oos no exit", "oos with exit"
     );
     for f in &v.folds {
         let _ = writeln!(
             out,
-            "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}",
+            "  {:<6}{:>10}{:>10}{:>12}{:>14}{:>14}{:>15}",
             f.index,
             f.train_bars,
             f.test_bars,
             f.considered,
             f.in_sample.worst,
-            f.out_of_sample.worst
+            f.out_of_sample.worst,
+            // THE COLUMN `held_up` ACTUALLY JUDGES, and it was not on this table.
+            //
+            // `held_up` counts a fold as holding up when `out_of_sample_exit` is
+            // above zero, falling back to the no-exit walk only when the fold
+            // chose no exit. The table printed the NO-EXIT total under a heading
+            // reading "out-of-sample", so a run could report "still positive out
+            // of sample: 4" above four NEGATIVE figures and look like it was
+            // lying. Neither number was wrong; they are different quantities, and
+            // nothing said so.
+            //
+            // Both are on the table now. A dash means the fold chose no exit
+            // levels, which is when the two columns are the same measurement.
+            f.out_of_sample_exit
+                .map_or_else(|| "--".to_owned(), |v| v.to_string())
         );
     }
     let _ = writeln!(out);
