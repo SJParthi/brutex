@@ -5492,6 +5492,33 @@
       else byFeed.set(k, [b]);
     }
 
+    /* COARSEST RUNG FIRST, WHICH IS NOT THE ORDER THEY ARE DISPLAYED IN.
+       `RUNGS` runs finest-first — ticks, minute, day — because that is how an
+       operator reads a timeframe list. Sending them in that order made the
+       server refuse every minute request it received: `pull::fold`'s ladder
+       requires the DAY pass for a month before the minute pass for it, so a
+       minute request that arrives first is answered "the 1day pass comes
+       first" and nothing is stored.
+       Measured on 2026-08-19 with both feeds and both rungs ticked: journal
+       ordinals 0 and 1 are the two minute requests, both NOT STARTED, and 2
+       and 3 are the two day requests, both STORED. The day pass landed, the
+       minute pass was refused, and the operator saw a run that reported bars
+       and left the rung they actually sweep empty.
+       Sorted here rather than by reordering `RUNGS` because the display order
+       is a separate decision that this must not silently change. */
+    const PULL_ORDER = ['1day', '1min', '1s'];
+    const ladderRank = (/** @type {string} */ dir) => {
+      const at = PULL_ORDER.indexOf(dir);
+      /* A RUNG NOBODY RANKED GOES LAST, NEVER FIRST. `indexOf` answers -1 for
+         an unknown rung, and -1 sorts ahead of every real rank — so a rung
+         added to `RUNGS` and forgotten here would quietly become the first
+         thing sent, which is the one position that breaks the ladder. */
+      return at === -1 ? PULL_ORDER.length : at;
+    };
+    for (const group of byFeed.values()) {
+      group.sort((a, b) => ladderRank(a.dir) - ladderRank(b.dir));
+    }
+
     // ONE CHAIN PER FEED. Each awaits its own requests in turn; the chains
     // themselves are awaited together.
     //
