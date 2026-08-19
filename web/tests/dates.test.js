@@ -19,7 +19,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { MON, monthLabel, dayLabel, stampLabel, istMonth } from '../src/lib/dates.js';
+import { MON, monthLabel, dayLabel, stampLabel, timeLabel, istMonth } from '../src/lib/dates.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -71,6 +71,13 @@ test('the offset is applied: 18:29Z and 18:30Z are different IST days', () => {
   // 18:30 UTC is exactly midnight IST. This pair is the whole zone question in
   // two assertions — a formatter running in UTC prints "01 Sep" for both.
   assert.equal(stampLabel('2024-09-01T18:29:00Z'), '01 Sep 2024, 23:59');
+  /* `timeLabel` IS `stampLabel`'S SECOND HALF AND MUST NOT DRIFT FROM IT.
+     Same instant, same IST shift, same minute — asserted against the same
+     boundary case, which is the one that catches a wrong offset: 18:29Z is
+     23:59 IST on the SAME day, and an implementation that dropped the +5:30
+     would answer 18:29 here and still look plausible. */
+  assert.equal(timeLabel('2024-09-01T18:29:00Z'), '23:59');
+  assert.equal(timeLabel(/** @type {any} */ (null)), '—');
   assert.equal(stampLabel('2024-09-01T18:30:00Z'), '02 Sep 2024, 00:00');
 });
 

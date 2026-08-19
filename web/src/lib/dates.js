@@ -190,3 +190,25 @@ export function stampLabel(d) {
   if (f === null) return '—';
   return `${f.day} ${MON[f.mo - 1]} ${f.y}, ${f.hh}:${f.mm}`;
 }
+
+/**
+ * The wall-clock minute alone, in IST. `15:29`.
+ *
+ * The other half of `stampLabel`, for a table that gives the day and the minute
+ * their own columns. A bar grid is read down a column — every row's minute under
+ * every other row's minute — and a single `06 Aug 2026, 15:29` cell makes that
+ * scan impossible: the minute sits at a different x on every row because the day
+ * in front of it is a different width.
+ *
+ * Minutes, not seconds, for the reason `stampLabel` gives.
+ *
+ * Same inputs and same em dash as `dayLabel`.
+ *
+ * @param {Date | number | string | null | undefined} d
+ * @returns {string}
+ */
+export function timeLabel(d) {
+  const f = istFields(d);
+  if (f === null) return '—';
+  return `${f.hh}:${f.mm}`;
+}

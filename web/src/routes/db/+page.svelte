@@ -74,7 +74,7 @@
      row that says "2020-03" and nothing else cannot distinguish a month held
      from the 2nd to the 31st from one held on the 2nd alone; the window says
      which, in the `02 Sep 2024` form this product uses everywhere. */
-  import { MON, dayLabel, monthLabel, stampLabel } from '$lib/dates.js';
+  import { MON, dayLabel, monthLabel, stampLabel, timeLabel } from '$lib/dates.js';
   import { store, survey, syncStore, refreshStore, surveyStores } from '$lib/store.svelte.js';
   // THE COMPLETENESS ARITHMETIC, OUT OF THE MARKUP AND UNDER A TEST. Two
   // defects lived in these expressions — a denominator taken from whichever
@@ -3020,11 +3020,23 @@
      reorders nothing while claiming to have worked.
      --------------------------------------------------------------------- */
   const BAR_COLS = [
+    /* THE DAY AND THE MINUTE ARE TWO COLUMNS, because a grid is read DOWN a
+       column. One `18 Aug 2026, 15:29` cell put every row's minute at a
+       different x — the day in front of it is a different width on the 9th and
+       the 18th — so the one field a reader scans a bar table for could not be
+       scanned at all. Sorting still keys on `ts`, the instant, so splitting the
+       DISPLAY changes no order. */
     {
       key: 'ts',
-      label: 'Date / time',
-      w: 172,
-      why: 'the bar’s own opening instant, IST - the store holds it in microseconds'
+      label: 'Date',
+      w: 116,
+      why: 'the bar’s own opening day, IST - the store holds the instant in microseconds'
+    },
+    {
+      key: 'tod',
+      label: 'Time',
+      w: 74,
+      why: 'the bar’s own opening minute, IST - absent on a day rung, where every bar opens at the same one'
     },
     {
       key: 'tf',
@@ -3151,10 +3163,25 @@
 
   const OPTION_COLS = new Set(['side', 'strike']);
   const FUTURE_COLS = new Set(['exp', 'dte']);
+  /**
+   * A DAY RUNG HAS NO MINUTE WORTH A COLUMN.
+   *
+   * Every 1day bar opens at the same instant — the session open — so the Time
+   * column would repeat one value down every row and earn none of its width. It
+   * is dropped rather than blanked: a column of identical stamps is not
+   * information, and a column of dashes is worse, since a dash on this table
+   * means "no source" everywhere else.
+   *
+   * `rungSeconds` rather than a string test on '1day', so anything coarser than
+   * a day — were a rung ever added above it — is covered by the same rule
+   * instead of needing a second one.
+   */
+  const dayRung = $derived((TF_SECS.get(timeframe) ?? 0) >= 86400);
   const BAR_SHOWN = $derived(
     BAR_COLS.filter(
       (c) =>
         !c.none &&
+        !(dayRung && c.key === 'tod') &&
         !(!shape.contract && FUTURE_COLS.has(c.key)) &&
         !(!shape.option && OPTION_COLS.has(c.key))
     )
@@ -6764,6 +6791,7 @@
         >
           <table
             class="bgrid lean"
+            class:noday={dayRung}
             class:nofuture={!shape.contract}
             class:nooption={!shape.option}
             style="min-width:{BAR_WIDTH}px"
@@ -6893,7 +6921,15 @@
                       <td
                         class="bt"
                         title="{stampLabel(b.ts)} IST · {b.tf} bar · {b.instrument} · month file {b.month}"
-                        >{stampLabel(b.ts)}</td
+                        >{dayLabel(b.ts)}</td
+                      >
+                      <!-- ALWAYS RENDERED, HIDDEN BY CLASS. This grid hides a
+                           column with positional CSS on `.bgrid`, so header and
+                           body must agree cell-for-cell; an `{#if}` here dropped
+                           the body's cell while the header kept its own and the
+                           two rows slid apart by one. -->
+                      <td class="bt" title="{stampLabel(b.ts)} IST — the bar's opening minute"
+                        >{timeLabel(b.ts)}</td
                       >
                       <td class="bt">{b.tf}</td>
                       <td class="bn" title="{fmt(b.o)} paisa, as stored">{paisaText(b.o)}</td>
@@ -9165,36 +9201,60 @@
      and a spot index has no expiry to report. The reason is still named once,
      in the line under the table, instead of seven hundred times inside it.
      ------------------------------------------------------------------ */
-  .bgrid.lean > colgroup > col:nth-child(8),
-  .bgrid.lean > thead > tr > th:nth-child(8),
-  .bgrid.lean > tbody > tr > td:nth-child(8),
-  .bgrid.lean > colgroup > col:nth-child(n + 16),
-  .bgrid.lean > thead > tr > th:nth-child(n + 16),
-  .bgrid.lean > tbody > tr > td:nth-child(n + 16) {
+  /* 9 AND 17+, BOTH +1 FROM WHAT THEY WERE — `Time` was inserted at position 2
+     and every index after it moved. The comment above is exactly right that
+     `nth-child` keeps header, colgroup and body in lockstep; what it cannot do
+     is keep THESE NUMBERS in step with the column list itself, which is two
+     thousand lines away and has no link to them. Three separate rules were
+     silently pointing one column short until the table was rendered and read. */
+  .bgrid.lean > colgroup > col:nth-child(9),
+  .bgrid.lean > thead > tr > th:nth-child(9),
+  .bgrid.lean > tbody > tr > td:nth-child(9),
+  .bgrid.lean > colgroup > col:nth-child(n + 17),
+  .bgrid.lean > thead > tr > th:nth-child(n + 17),
+  .bgrid.lean > tbody > tr > td:nth-child(n + 17) {
     display: none;
   }
 
-  /* EXPIRY (12) AND DAYS-TO-EXPIRY (13) belong to anything with a contract, so
-     they appear for a future and for an option and for nothing else. */
-  .bgrid.lean.nofuture > colgroup > col:nth-child(12),
+  /* TIME (2) IS ABSENT ON A DAY RUNG. Every 1day bar opens at the same instant,
+     so the column would repeat one value down every row and earn none of its
+     width. Hidden rather than blanked: a column of identical stamps is not
+     information, and a column of dashes is worse, because a dash means "no
+     source" everywhere else on this table. */
+  .bgrid.lean.noday > colgroup > col:nth-child(2),
+  .bgrid.lean.noday > thead > tr > th:nth-child(2),
+  .bgrid.lean.noday > tbody > tr > td:nth-child(2) {
+    display: none;
+  }
+
+  /* EXPIRY (13) AND DAYS-TO-EXPIRY (14) belong to anything with a contract, so
+     they appear for a future and for an option and for nothing else.
+
+     THESE INDICES MOVED +1 WHEN `Time` WAS INSERTED AT POSITION 2, and that is
+     the hazard of hiding by position: the numbers here are a silent duplicate of
+     the column ORDER two thousand lines up, and nothing checks them against it.
+     Adding a column at the front shifted every rule below and broke both
+     contract hidings with no error anywhere — caught by rendering the table, not
+     by a gate. */
   .bgrid.lean.nofuture > colgroup > col:nth-child(13),
-  .bgrid.lean.nofuture > thead > tr > th:nth-child(12),
+  .bgrid.lean.nofuture > colgroup > col:nth-child(14),
   .bgrid.lean.nofuture > thead > tr > th:nth-child(13),
-  .bgrid.lean.nofuture > tbody > tr > td:nth-child(12),
-  .bgrid.lean.nofuture > tbody > tr > td:nth-child(13) {
+  .bgrid.lean.nofuture > thead > tr > th:nth-child(14),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(13),
+  .bgrid.lean.nofuture > tbody > tr > td:nth-child(14) {
     display: none;
   }
 
-  /* TYPE (14) AND STRIKE (15) belong to an OPTION only. A future has an expiry
-     and no strike, so a futures selection keeps 12 and 13 and loses these two.
+  /* TYPE (15) AND STRIKE (16) belong to an OPTION only. A future has an expiry
+     and no strike, so a futures selection keeps 13 and 14 and loses these two.
      That is the whole difference between the two contract shapes, and it is
-     the reason these are two rules rather than one range. */
-  .bgrid.lean.nooption > colgroup > col:nth-child(14),
+     the reason these are two rules rather than one range. Also +1 — see above. */
   .bgrid.lean.nooption > colgroup > col:nth-child(15),
-  .bgrid.lean.nooption > thead > tr > th:nth-child(14),
+  .bgrid.lean.nooption > colgroup > col:nth-child(16),
   .bgrid.lean.nooption > thead > tr > th:nth-child(15),
-  .bgrid.lean.nooption > tbody > tr > td:nth-child(14),
-  .bgrid.lean.nooption > tbody > tr > td:nth-child(15) {
+  .bgrid.lean.nooption > thead > tr > th:nth-child(16),
+  .bgrid.lean.nooption > tbody > tr > td:nth-child(15),
+  .bgrid.lean.nooption > tbody > tr > td:nth-child(16) {
     display: none;
   }
 
