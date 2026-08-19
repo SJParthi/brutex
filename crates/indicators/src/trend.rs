@@ -1493,6 +1493,51 @@ mod tests {
     /// The latch advances once per candle, not once per read.
     ///
     /// The companion to the test above: `bits` being pure is only worth having if
+    /// **A close exactly ON a swing level is a touch, not a break.**
+    ///
+    /// `close > s.price` and `close < s.price` are strict, and both mutate to
+    /// their non-strict forms. Under either mutation, price merely REACHING the
+    /// prior swing high reports a break of structure — and in a range that
+    /// retests the same level repeatedly, every retest becomes a signal. The
+    /// distinction between touching a level and breaking it is the whole content
+    /// of the word "break".
+    #[test]
+    fn a_close_exactly_on_a_swing_level_is_not_a_break() {
+        let s = Structure::new();
+        let high = Swing {
+            price: 2_500_000,
+            confirmed_at: 10,
+            window_span: 1_000,
+        };
+        let low = Swing {
+            price: 2_400_000,
+            confirmed_at: 5,
+            window_span: 1_000,
+        };
+
+        assert_eq!(
+            s.classify(2_500_000, Some(high), Some(low)),
+            None,
+            "a close exactly AT the swing high is a touch, not a break up"
+        );
+        assert_eq!(
+            s.classify(2_400_000, Some(high), Some(low)),
+            None,
+            "a close exactly AT the swing low is a touch, not a break down"
+        );
+
+        // One paisa past either level IS a break, so the strictness is a
+        // boundary and not a refusal to answer.
+        assert!(
+            s.classify(2_500_001, Some(high), Some(low)).is_some(),
+            "one paisa above the swing high breaks it"
+        );
+        assert!(
+            s.classify(2_399_999, Some(high), Some(low)).is_some(),
+            "one paisa below the swing low breaks it"
+        );
+    }
+
     /// something still moves the structure on. Pinned through the public accessor rather
     /// than the private field.
     #[test]

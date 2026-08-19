@@ -579,6 +579,82 @@ mod tests {
     /// unreachable is to build the precondition. `session_day` is set from the
     /// timestamp of the bar that will be folded, and `live` is true, so `fold` does
     /// **not** reset the accumulators before reaching the guard under test.
+    /// **`isqrt` of a perfect square is exact, and the step-down must not overrun.**
+    ///
+    /// The Newton loop can overshoot by one, so a bounded step-down corrects it
+    /// while `guess * guess > v`. Mutated to `>= v` that condition is TRUE at a
+    /// perfect square, so the correction fires once too often and `isqrt(144)`
+    /// answers **11**. A standard deviation one unit low on every exact square is
+    /// the kind of wrong that never looks wrong.
+    #[test]
+    fn isqrt_is_exact_on_perfect_squares_and_does_not_overshoot_down() {
+        for n in [1_i128, 2, 3, 12, 100, 1_000, 46_341, 1_000_000] {
+            let (root, _) = isqrt_i128_counted(n * n);
+            assert_eq!(root, n, "isqrt({}) must be exactly {n}", n * n);
+        }
+        // And one either side of a square, so the floor is a floor.
+        let (below, _) = isqrt_i128_counted(143);
+        let (above, _) = isqrt_i128_counted(145);
+        assert_eq!(below, 11, "floor below 144");
+        assert_eq!(above, 12, "floor above 144");
+    }
+
+    /// **The iteration ceiling is the sum of its two halves.**
+    ///
+    /// `ITERATION_CEILING` is what the ratio bench compares a measured step count
+    /// against. Mutated from `+` to `-` it becomes 126 — BELOW the Newton budget
+    /// alone — and to `*` it becomes 256. Either silently changes what the bench
+    /// is allowed to accept, and nothing in the library asserted the arithmetic.
+    #[test]
+    fn the_iteration_ceiling_is_the_sum_of_the_two_loops() {
+        assert_eq!(
+            ITERATION_CEILING,
+            NEWTON_STEPS + STEP_DOWN_STEPS,
+            "the ceiling is the two budgets added, not any other operation"
+        );
+        assert_eq!(ITERATION_CEILING, 130, "128 Newton steps plus 2 step-downs");
+    }
+
+    /// **A close exactly ON the VWAP is neither above it nor below it.**
+    ///
+    /// `if close > vwap` and `if close < vwap` are strict, and both mutate to
+    /// their non-strict forms. Under either mutation a close sitting exactly on
+    /// the VWAP sets a directional bit, so the two positions stop being mutually
+    /// exclusive — a bar reported as both above and below.
+    #[test]
+    fn a_close_exactly_on_the_vwap_sets_neither_direction() {
+        // `pv` is held on the ×3 scale — `hlc3` as high+low+close — so the VWAP
+        // is `pv / (3v)`. For an exact 100 at v = 10 that is pv = 3000, and a
+        // session where every price was 100 has p2v = 3 · v · 100² = 300,000.
+        // The first draft of this test used pv = 1000 and asserted a VWAP of
+        // 100; the real value was 33, and the test failed for that reason rather
+        // than finding a defect. The scale is now written down here.
+        let vw = primed(at(0, 100, 1).ts_micros, 3_000, 10, 300_000);
+        let bits = vw.bits(100, tol());
+        assert!(!bits.get(52) && !bits.get(143), "not above: {bits:?}");
+        assert!(!bits.get(53) && !bits.get(144), "not below: {bits:?}");
+        // One paisa either side does set exactly one side.
+        assert!(vw.bits(101, tol()).get(52), "a paisa above is above");
+        assert!(vw.bits(99, tol()).get(53), "a paisa below is below");
+    }
+
+    /// **Sigma is absent when availability is absent, whatever the volume.**
+    ///
+    /// The guard is `availability == Absent || v <= 0`. Mutated to `&&` it
+    /// demands BOTH, so an evaluator that was told the session's volume is not
+    /// trustworthy would still publish a standard deviation from it — the exact
+    /// reading `Availability::Absent` exists to withhold.
+    #[test]
+    fn sigma_is_withheld_when_availability_is_absent_even_with_volume() {
+        let mut vw = primed(at(0, 100, 1).ts_micros, 1_000, 10, 100_000);
+        assert!(vw.sigma().is_some(), "present and positive volume answers");
+        vw.availability = Availability::Absent;
+        assert!(
+            vw.sigma().is_none(),
+            "absent availability withholds sigma even though v > 0"
+        );
+    }
+
     fn primed(ts_micros: i64, pv: i128, v: i128, p2v: i128) -> Vwap {
         Vwap {
             availability: Availability::Present,

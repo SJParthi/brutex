@@ -487,6 +487,73 @@ mod tests {
     }
 
     /// Every position is live and its kind matches how this module sets it.
+    /// **The running day LOW updates, and only downward.**
+    ///
+    /// Written against mutation survivors. `day_high`'s comparison was fully
+    /// covered and `day_low`'s was not: the fixtures made a new high and never a
+    /// new low, so `if bar.low < self.day_low` could be mutated to `==` or `>`
+    /// and every test still passed. A `>` mutation drags the day low UPWARD on
+    /// every bar that is not the low of the day, which silently rewrites the
+    /// denominator of every day-range position below.
+    #[test]
+    fn the_day_low_moves_down_and_never_up() {
+        let mut st = SessionState::default();
+        ok(&mut st, &at(0, 100, 110, 90, 105), None);
+        assert_eq!(st.day_low, 90, "the opening bar seeds the low");
+
+        // A bar that does NOT make a new low must leave it alone. Kills `<` -> `>`.
+        ok(&mut st, &at(1, 105, 120, 95, 115), None);
+        assert_eq!(st.day_low, 90, "95 is above 90 and must not replace it");
+        assert_eq!(st.day_high, 120, "but the high did move");
+
+        // A bar that DOES make a new low must take it. Kills `<` -> `==`.
+        ok(&mut st, &at(2, 115, 118, 80, 82), None);
+        assert_eq!(st.day_low, 80, "80 is below 90 and must replace it");
+    }
+
+    /// **A day whose range is zero sets no position-in-range bit.**
+    ///
+    /// `if day_range > 0` guards a cross-multiplied comparison. Mutated to
+    /// `>= 0` the guard admits a zero range, and `(close - dl) * 3 >= 0 * 2`
+    /// reduces to `0 >= 0` — **true** — so a halted minute, where every price is
+    /// the same, would report itself in the upper third of a day that has no
+    /// thirds. That is a fabricated reading, not a rounding error.
+    #[test]
+    fn a_zero_range_day_reports_no_position_within_it() {
+        let mut st = SessionState::default();
+        // Every price identical: high == low, so the day range is exactly zero.
+        let bits = ok(&mut st, &at(0, 100, 100, 100, 100), None);
+        assert!(
+            !bits.get(42) && !bits.get(43),
+            "a day with no range has no upper or lower third: {bits:?}"
+        );
+    }
+
+    /// **The time-of-day windows are half-open, and the boundary minute belongs
+    /// to the LATER window.**
+    ///
+    /// `if since < w.early_ends` mutated to `<=` moves the boundary minute into
+    /// the earlier bucket. One minute of every session would carry the wrong
+    /// time-of-day bit, which is invisible in aggregate and wrong in every
+    /// individual case.
+    #[test]
+    fn a_boundary_minute_belongs_to_the_later_window() {
+        let w = DayWindows::default();
+        let mut st = SessionState::default();
+        let early = ok(&mut st, &at(w.early_ends - 1, 100, 101, 99, 100), None);
+        assert!(
+            early.get(44),
+            "the minute before the edge is the early window"
+        );
+
+        let mut st2 = SessionState::default();
+        let edge = ok(&mut st2, &at(w.early_ends, 100, 101, 99, 100), None);
+        assert!(
+            !edge.get(44) && edge.get(45),
+            "the boundary minute itself belongs to the NEXT window: {edge:?}"
+        );
+    }
+
     #[test]
     fn the_positions_agree_with_the_vocabulary() {
         let mut seen = std::collections::BTreeSet::new();
