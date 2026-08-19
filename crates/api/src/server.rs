@@ -6546,34 +6546,110 @@ struct Wire {
     store_vendor: brutex_core::vendor::Vendor,
 }
 
-/// Fetches and files the bars for every contract a walk discovered.
+/// What one expired-series landing did, as counts an operator can add up.
 ///
-/// # Why this is a second pass and not part of the walk
+/// # Why a struct and not the tuple it replaced
 ///
-/// Discovery answers *which contracts existed*; this answers *what they did*.
-/// Keeping them apart is what lets the page report a month whose contracts were
-/// all found and none could be fetched as exactly that, rather than as a walk
-/// that failed.
+/// Three `usize`s in a row is exactly the shape a transposed argument hides in:
+/// `(stored, failed, settled)` and `(stored, settled, failed)` compile the same
+/// and report opposite things on a page somebody reads to decide whether to run
+/// again. They are named rather than positional.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FnoLanded {
+    /// Bars written to disk by this run.
+    stored: usize,
+    /// Contracts that asked for bars and did not get them.
+    failed: usize,
+    /// Contract-months already held through their last owed day, so this run
+    /// did not ask for them. **Not a success and not a failure** — see the
+    /// `continue` in [`fno_land`] that counts it.
+    settled: usize,
+    /// The first few reasons, verbatim, capped at five.
+    why: Vec<String>,
+}
+
+/// The windows one contract still owes, and how many of its months are done.
 ///
-/// # One contract's failure is not the month's
+/// # What this closes
 ///
+/// Before it, a re-run of a month whose pull had died part-way asked the vendor
+/// for the WHOLE month again, and `store::file::BarFile::append` refused the
+/// batch — `suffix_that_follows` anchors the overlap at the file's TAIL, so a
+/// wider batch is not a suffix of what is already there. The page answered 502,
+/// which was honest and correct and also meant the month could never be
+/// finished: the only way forward was to delete the bar file by hand.
+///
+/// Resuming from the day after the last held one makes that same re-run an
+/// append the store accepts. That is the difference between a pull an operator
+/// can repeat and one they can only restart.
+///
+/// # Both fallbacks err toward ASKING
+///
+/// A rung with no store directory (`timeframe` is `None`) and a split that
+/// refuses both fall back to the operator's own window. Asking for more than is
+/// owed costs vendor budget and lands as an overlap the store verifies byte for
+/// byte; asking for less leaves a hole nothing comes back for. Only one of
+/// those is recoverable, and `CLAUDE.md` §4 names the other one.
+///
+/// # Cost
+///
+/// One hash probe per month the window spans, and a fixed number of integer
+/// comparisons each. **O(months)** per contract, never O(store).
+fn owed_chunks<F>(
+    found: &pull::fno::Found,
+    months: &[store::path::YearMonth],
+    timeframe: Option<store::path::Timeframe>,
+    window: pull::session::Window,
+    cap: Option<u32>,
+    held: F,
+) -> (Vec<pull::session::Window>, usize)
+where
+    F: Fn(&pull::manifest::EntryKey) -> Option<i64>,
+{
+    let split = |one| pull::session::split_window(one, cap).unwrap_or_else(|_| vec![one]);
+
+    // NO STORE DIRECTORY FOR THIS RUNG. Nothing can be filed under it either
+    // way — `pull::ingest` refuses with the reason and names the rungs that do
+    // exist — so the whole window is asked for and that refusal is left to say
+    // so, rather than being pre-empted here by a silent skip.
+    let Some(timeframe) = timeframe else {
+        return (split(window), 0);
+    };
+
+    let discovered = pull::fnowork::cells(std::slice::from_ref(found), months, timeframe);
+    let owed = pull::fnowork::owed(&discovered.cells, (window.from(), window.to()), held);
+    let mut chunks = Vec::with_capacity(owed.resume.len());
+    for one in &owed.resume {
+        // `owed` guarantees `from <= through` — the resume day is clamped up to
+        // the span's first day, and a span is only produced when it holds one,
+        // so `Window::new`'s only refusal cannot arise. If that ever stops
+        // being true the contract's whole asked-for window is fetched rather
+        // than none of it, for the reason above.
+        chunks.extend(split(
+            pull::session::Window::new(one.from, one.through).unwrap_or(window),
+        ));
+    }
+    (chunks, owed.complete)
+}
+
 /// A contract that will not fetch, or will not land, is counted and its first
 /// reason is kept. It does not abandon the other two hundred — the same rule
 /// `Chain::unreadable` follows for a name that would not parse.
 ///
 /// # Cost
 ///
-/// One request per contract, each rate-governed. O(1) per contract; nothing
-/// here scans the store.
+/// One request per contract-month still owed, each rate-governed. One census
+/// read for the whole run and one hash probe per contract-month. O(1) per
+/// contract; nothing here scans the store.
 async fn fno_land(
     wanted: &[pull::fno::Found],
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
-) -> (usize, usize, Vec<String>) {
-    let mut stored = 0usize;
-    let mut failed = 0usize;
-    let mut why: Vec<String> = Vec::new();
+) -> FnoLanded {
+    let mut out = FnoLanded::default();
+    // CONTRACTS ATTEMPTED, NOT BARS STORED. See the budget halt below.
+    let mut attempted = 0usize;
     let origin = wire.source.endpoint(asked.granularity);
 
     // THE VENDOR'S WINDOW CAP BINDS HERE TOO, AND IT DID NOT.
@@ -6586,30 +6662,74 @@ async fn fno_land(
     // month** — one 502 after 24.8 seconds with not one bar stored. The
     // discovery had worked; nothing downstream of it could.
     //
-    // Computed ONCE, outside the contract loop. The window is the operator's
-    // and does not vary per contract, so splitting it per contract would repeat
-    // one piece of arithmetic two hundred times to reach the same answer.
-    let chunks = match pull::session::split_window(
-        asked.window,
-        wire.spec.window_cap_days(asked.granularity),
-    ) {
-        Ok(chunks) => chunks,
-        Err(refusal) => {
-            // EVERY CONTRACT COUNTS AS FAILED, because not one was asked for.
-            // Reporting "0 stored" with no reason is the silent shape
-            // `CLAUDE.md` §4 bans; the reason is the whole point of the return.
-            return (
-                0,
-                wanted.len(),
-                vec![format!(
-                    "the window could not be split to this feed's cap, so no \
-                     contract was asked for: {refusal}"
-                )],
-            );
-        }
-    };
+    // NO LONGER HOISTED, AND THAT IS THE POINT OF THIS COMMIT. The split was
+    // computed once outside the contract loop because the window was the
+    // operator's and did not vary per contract. IT VARIES NOW: each
+    // contract-month resumes from its own last held day, so there is no shared
+    // answer left to reuse. It is a handful of integer comparisons either way.
+    let cap = wire.spec.window_cap_days(asked.granularity);
+
+    // THE CAP IS THE SAME FOR EVERY CONTRACT, so a window that cannot be split
+    // to it fails all of them — and it must fail before one request is sent
+    // rather than two hundred times over with the same sentence. Splitting the
+    // operator's own window is the cheapest way to ask that question, and the
+    // answer is thrown away: `split_window` refuses only a zero cap, which does
+    // not depend on the window at all.
+    if let Err(refusal) = pull::session::split_window(asked.window, cap) {
+        // EVERY CONTRACT COUNTS AS FAILED, because not one was asked for.
+        // Reporting "0 stored" with no reason is the silent shape
+        // `CLAUDE.md` §4 bans; the reason is the whole point of the return.
+        return FnoLanded {
+            failed: wanted.len(),
+            why: vec![format!(
+                "the window could not be split to this feed's cap, so no \
+                 contract was asked for: {refusal}"
+            )],
+            ..FnoLanded::default()
+        };
+    }
+
+    // ONE CENSUS READ FOR THE WHOLE RUN, then ONE HASH PROBE per contract-month
+    // — never a directory listing and never a file open.
+    //
+    // `pull::fnowork::owed` carries the rule and the long form of why the
+    // BOOLEAN version of this was withdrawn on 2026-08-19. The short form is
+    // that `EntryKey` does not carry the window, so "does this key exist"
+    // cannot tell a five-day month from a whole one, and answering it with a
+    // flag turned a correct 502 into a silent success.
+    //
+    // A CENSUS THAT WILL NOT READ IS NOT AN EMPTY ONE, and `manifest_of` says
+    // so itself: it answers `None` for an absent census AND for an unreadable
+    // one. `None` here makes every cell resume from the window's first day,
+    // which is precisely what this function did before it could resume at all.
+    // Degrading to a full refetch costs vendor budget and `BarFile::append`
+    // verifies the overlap byte for byte; degrading to a SKIP would cost bars
+    // that nothing comes back for. Only one of those is recoverable.
+    let censuses = census::read_all(&site.store_root);
+    let manifest = autopilot::manifest_of(&censuses, wire.store_vendor);
+    let months = crate::ladder::months_of(asked.window);
+    let timeframe = asked.granularity.store_timeframe();
 
     'contracts: for found in wanted {
+        attempted = attempted.saturating_add(1);
+
+        // WHAT THIS CONTRACT STILL OWES — its months, less the ones already
+        // held through their last owed day, each narrowed to its resume point.
+        let (chunks, done) = owed_chunks(found, &months, timeframe, asked.window, cap, |key| {
+            manifest
+                .and_then(|m| m.entry(key))
+                .map(|e| e.last_ts_micros)
+        });
+        out.settled = out.settled.saturating_add(done);
+        if chunks.is_empty() {
+            // NOTHING OWED, WHICH IS NEITHER A FETCH NOR A FAILURE. Counting
+            // it as either would be false on a receipt an operator reads to
+            // decide whether to run again: as a failure it invites a re-run
+            // that cannot help, and as a success it claims bars this run did
+            // not write. It is already in `settled`.
+            continue;
+        }
+
         // ONE CONTRACT IS NOW ONE REQUEST PER CHUNK, and a chunk that refuses
         // abandons that contract rather than storing a hole. A partially
         // fetched contract would land some of its months and leave the rest
@@ -6624,8 +6744,19 @@ async fn fno_land(
             // sixteen hundred requests, and a budget charged per contract would
             // be a ceiling observed one time in eight.
             if let Err(halt) = await_budget(asked.feed, site).await {
-                why.push(halt);
-                failed = failed.saturating_add(wanted.len().saturating_sub(stored));
+                out.why.push(halt);
+                // CONTRACTS NOT REACHED, and this line said `wanted.len() -
+                // stored`. `stored` counts BARS and `wanted.len()` counts
+                // CONTRACTS, so for any run that had stored more bars than
+                // there were contracts — which is every real run, a single
+                // contract-month being some 5,600 bars — the subtraction
+                // saturated to ZERO. A budget halt three contracts into two
+                // hundred reported no failures at all and the page rendered
+                // "every discovered contract fetched and filed" over 197
+                // contracts nothing had asked for.
+                out.failed = out
+                    .failed
+                    .saturating_add(wanted.len().saturating_sub(attempted));
                 break 'contracts;
             }
             let request = pull::chain::request(found, *chunk, asked.granularity);
@@ -6641,9 +6772,9 @@ async fn fno_land(
             }
         }
         if let Some(refusal) = refused {
-            failed = failed.saturating_add(1);
-            if why.len() < 5 {
-                why.push(refusal);
+            out.failed = out.failed.saturating_add(1);
+            if out.why.len() < 5 {
+                out.why.push(refusal);
             }
             continue;
         }
@@ -6691,25 +6822,26 @@ async fn fno_land(
         // something and failed something is the case the old shape could not
         // express at all.
         if let Some(first) = done.failures.first() {
-            failed = failed.saturating_add(1);
-            if why.len() < 5 {
-                why.push(format!("{}: {}", found.vendor_symbol, first.why));
+            out.failed = out.failed.saturating_add(1);
+            if out.why.len() < 5 {
+                out.why
+                    .push(format!("{}: {}", found.vendor_symbol, first.why));
             }
             continue;
         }
         if done.bars_stored == 0 {
-            failed = failed.saturating_add(1);
-            if why.len() < 5 {
-                why.push(format!(
+            out.failed = out.failed.saturating_add(1);
+            if out.why.len() < 5 {
+                out.why.push(format!(
                     "{}: fetched {} row(s) and stored none",
                     found.vendor_symbol, done.rows_read
                 ));
             }
             continue;
         }
-        stored = stored.saturating_add(done.bars_stored);
+        out.stored = out.stored.saturating_add(done.bars_stored);
     }
-    (stored, failed, why)
+    out
 }
 
 /// The discovery walk for one accepted expired-series request.
@@ -7843,10 +7975,39 @@ async fn fno_report(
 
     // AND NOW THE BARS. Discovery said which contracts existed; this
     // fetches what they did and files it.
-    let (stored, failed, why) = fno_land(&wanted, asked, site, wire).await;
+    let FnoLanded {
+        stored,
+        failed,
+        settled,
+        why,
+    } = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
+    // WHAT WAS NOT ASKED FOR, AND WHY THE NUMBER MUST BE ON THE PAGE. A run
+    // that resumes stores fewer bars than one that starts cold, and without
+    // this row that difference is indistinguishable from a run that lost them.
+    if settled > 0 {
+        facts.push((
+            "Contract-months already held",
+            format!("{settled}, resumed rather than refetched"),
+        ));
+    }
 
     if failed == 0 {
+        // A RUN THAT ASKED FOR NOTHING DID NOT FETCH ANYTHING, and saying it
+        // did is the §4 fallback wearing a success's clothes. `Outcome::Empty`
+        // rather than `Stored`, because a ladder reading this must not record a
+        // fetch that no vendor was asked for.
+        if stored == 0 && settled > 0 {
+            return page.say(
+                facts,
+                axum::http::StatusCode::OK,
+                audit::Outcome::Empty,
+                "every contract-month asked for was already held through its \
+                 last owed day — its month end, this window's end, or the day \
+                 the contract expired, whichever came first — so no vendor was \
+                 asked and no bar was written",
+            );
+        }
         return page.say(
             facts,
             axum::http::StatusCode::OK,
