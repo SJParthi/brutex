@@ -216,8 +216,28 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
             url: url.clone(),
             why,
         })?;
+        // THE DATE THIS BATCH IS KEYED ON, DECODED ONCE PER EXPIRY.
+        //
+        // Every contract the vendor is about to name belongs to this date — it
+        // is the parameter the call was made with — so the date is handed to
+        // `read_contract` rather than parsed back out of each display symbol.
+        // That is what lets a MONTHLY name be read at all: Groww spells those
+        // `Mar25`, with no day in the string, and no amount of parsing recovers
+        // a day that was never written.
+        //
+        // An expiry this build cannot decode takes its own contracts down and
+        // says so by name, rather than the whole walk failing or the batch
+        // vanishing: the vendor answered, and what could not be read is the
+        // thing to report.
+        let Some(keyed_expiry) = iso_expiry(&keyed.expiry) else {
+            chain.unreadable.push(format!(
+                "expiry {:?} (its contracts were not asked for)",
+                keyed.expiry
+            ));
+            continue;
+        };
         for name in fno::names(&body, contracts_field).map_err(ChainError::Lookup)? {
-            match fno::read_contract(&name) {
+            match fno::read_contract(&name, keyed_expiry) {
                 Some(found) => chain.contracts.push(found),
                 // REPORTED, NEVER SKIPPED. See the module header.
                 None => chain.unreadable.push(name),
@@ -225,6 +245,24 @@ pub async fn month<D: Discovery>(feed: Feed, ask: &Ask, from: &D) -> Result<Chai
         }
     }
     Ok(chain)
+}
+
+/// `2024-01-25` into an expiry.
+///
+/// The shape the vendor's own expiries endpoint answers in — "Array of expiry
+/// dates in **YYYY-MM-DD** format" — and the shape its contracts endpoint takes
+/// back. Strict: exactly ten characters, two dashes where they belong, and
+/// three integers, because a date read loosely is a contract filed under the
+/// wrong month.
+fn iso_expiry(text: &str) -> Option<brutex_core::instrument::Expiry> {
+    let bytes = text.as_bytes();
+    if bytes.len() != 10 || bytes.get(4) != Some(&b'-') || bytes.get(7) != Some(&b'-') {
+        return None;
+    }
+    let year: u16 = text.get(0..4)?.parse().ok()?;
+    let month: u8 = text.get(5..7)?.parse().ok()?;
+    let day: u8 = text.get(8..10)?.parse().ok()?;
+    brutex_core::instrument::Expiry::new(year, month, day).ok()
 }
 
 /// Turns one discovered contract into the bars request that fetches it.

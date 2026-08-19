@@ -473,7 +473,8 @@ mod tests {
                 "2025-09-25-7950000-CE",
             ),
         ] {
-            let got = read_contract(name).unwrap_or_else(|| panic!("{name} must read"));
+            let got =
+                read_contract(name, keyed_on(name)).unwrap_or_else(|| panic!("{name} must read"));
             assert_eq!(got.underlying, underlying, "{name}");
             assert_eq!(got.contract.as_str(), contract, "{name}");
             assert_eq!(
@@ -484,6 +485,85 @@ mod tests {
         }
     }
 
+    /// The expiry a discovery would have been keyed on, for a `DDMmmYY` name.
+    ///
+    /// `read_contract` now takes the date from the contracts call rather than
+    /// from the display symbol — see its own comment. These tests pre-date that
+    /// and assert on names alone, so this reconstructs the date the vendor
+    /// would have answered under, keeping every case asserting what it did.
+    fn keyed_on(name: &str) -> brutex_core::instrument::Expiry {
+        let token = name.split('-').nth(2).expect("a contract name has a token");
+        let day: u8 = token[0..2].parse().expect("DDMmmYY");
+        let word = token[2..5].to_ascii_lowercase();
+        let month = u8::try_from(
+            MONTHS
+                .iter()
+                .position(|m| *m == word)
+                .expect("a real month word")
+                + 1,
+        )
+        .expect("1..=12");
+        let year: u16 = token[5..7].parse().expect("YY");
+        brutex_core::instrument::Expiry::new(2000 + year, month, day).expect("a real expiry")
+    }
+
+    /// **A MONTHLY NAME CARRIES NO DAY, AND IT USED TO BE UNREADABLE.**
+    ///
+    /// Groww spells weeklies `DDMmmYY` and monthlies `MmmYY`. Its own
+    /// instrument dump carries both — `NSE-NIFTY-27Mar25-29050-PE` beside
+    /// `NSE-FINNIFTY-Mar25-29600-PE` and `NSE-ASIANPAINT-Feb25-FUT`. The reader
+    /// demanded exactly seven characters, so every monthly contract returned
+    /// `None`, went to `Chain::unreadable`, and was never fetched — while the
+    /// page still called the month stored. Stock F&O and monthly index series
+    /// are exactly the ones that disappeared.
+    #[test]
+    fn a_monthly_name_with_no_day_reads_from_the_expiry_the_call_was_keyed_on() {
+        let march = brutex_core::instrument::Expiry::new(2025, 3, 27).expect("a real expiry");
+        let found = read_contract("NSE-FINNIFTY-Mar25-29600-PE", march).expect("a monthly reads");
+
+        assert_eq!(found.underlying, "FINNIFTY");
+        // THE DAY COMES FROM THE DISCOVERY. It is not in the string at all, and
+        // deriving it from an expiry-rule table would be inventing a date this
+        // build already had exactly.
+        assert_eq!(found.expiry.day(), 27);
+        assert_eq!(found.contract.as_str(), "2025-03-27-2960000-PE");
+
+        let feb = brutex_core::instrument::Expiry::new(2025, 2, 27).expect("a real expiry");
+        let fut = read_contract("NSE-ASIANPAINT-Feb25-FUT", feb).expect("a monthly future reads");
+        assert!(fut.contract.is_future());
+        assert_eq!(fut.contract.as_str(), "2025-02-27-FUT");
+    }
+
+    /// A NAME THAT CONTRADICTS ITS OWN BATCH IS REFUSED.
+    ///
+    /// The date is taken from the contracts call, so the token is free to be a
+    /// cross-check — and it has to be one. A call keyed on 2024-01-25 answering
+    /// a name spelled `27Mar25` is a vendor answer that would otherwise be
+    /// filed under January, which is the silent misfiling this whole reader
+    /// exists to prevent.
+    #[test]
+    fn a_name_whose_token_disagrees_with_the_keyed_expiry_is_refused() {
+        let january = brutex_core::instrument::Expiry::new(2024, 1, 25).expect("a real expiry");
+
+        assert_eq!(
+            read_contract("NSE-NIFTY-27Mar25-29050-PE", january),
+            None,
+            "a different month and year"
+        );
+        assert_eq!(
+            read_contract("NSE-NIFTY-24Jan24-29050-PE", january),
+            None,
+            "the right month, the WRONG DAY — the one a monthly cannot state \
+             and a weekly must"
+        );
+        // AND THE MONTHLY FORM OF THE SAME BATCH IS ACCEPTED. It states no day,
+        // so there is no day to disagree with — month and year are all it can
+        // prove and all that is asked of it.
+        let monthly = read_contract("NSE-NIFTY-Jan24-29050-PE", january)
+            .expect("a monthly agrees on month and year alone");
+        assert_eq!(monthly.expiry.day(), 25, "the day comes from the discovery");
+    }
+
     /// A STRIKE WITH PAISE IS EXACT, AND NEVER GOES THROUGH A FLOAT.
     ///
     /// `19200.05` is not representable in binary floating point. §7 is what
@@ -492,8 +572,11 @@ mod tests {
     #[test]
     fn a_fractional_strike_is_read_as_exact_paisa_and_a_third_place_is_refused() {
         let paisa = |s: &str| {
-            read_contract(&format!("NSE-NIFTY-04Jan24-{s}-CE"))
-                .map(|f| f.contract.as_str().to_owned())
+            read_contract(
+                &format!("NSE-NIFTY-04Jan24-{s}-CE"),
+                brutex_core::instrument::Expiry::new(2024, 1, 4).expect("a real expiry"),
+            )
+            .map(|f| f.contract.as_str().to_owned())
         };
         assert_eq!(paisa("19200"), Some("2024-01-04-1920000-CE".to_owned()));
         assert_eq!(
@@ -569,7 +652,8 @@ mod tests {
             "NIFTY",                        // not a contract at all
             "",
         ] {
-            assert_eq!(read_contract(bad), None, "must refuse: {bad}");
+            let keyed = brutex_core::instrument::Expiry::new(2024, 1, 4).expect("a real expiry");
+            assert_eq!(read_contract(bad, keyed), None, "must refuse: {bad}");
         }
     }
 
@@ -588,7 +672,7 @@ mod tests {
         // expiry did not: it was decoded, spent on building the path segment,
         // and dropped. A caller then had nothing to compare, so every contract
         // of every expiry in the month looked equally wanted.
-        let read = |n: &str| read_contract(n).expect("each name reads");
+        let read = |n: &str| read_contract(n, keyed_on(n)).expect("each name reads");
         let sep4_call = read("NSE-NIFTY-04Sep25-24650-CE");
         let sep4_put = read("NSE-NIFTY-04Sep25-24650-PE");
         let sep11_call = read("NSE-NIFTY-11Sep25-24650-CE");
@@ -630,7 +714,11 @@ mod tests {
 
     #[test]
     fn a_read_contract_is_one_the_store_can_file_under() {
-        let found = read_contract("NSE-BANKNIFTY-30Sep25-52000-PE").expect("it reads");
+        let found = read_contract(
+            "NSE-BANKNIFTY-30Sep25-52000-PE",
+            brutex_core::instrument::Expiry::new(2025, 9, 30).expect("a real expiry"),
+        )
+        .expect("it reads");
         assert!(found.contract.is_option() && !found.contract.is_future());
         assert_eq!(found.contract.as_str(), "2025-09-30-5200000-PE");
         // AND IT FITS A PATH SEGMENT, which is the bound that made the contract
@@ -851,14 +939,39 @@ const MONTHS: [&str; 12] = [
 /// than two decimal places is refused rather than rounded: the tick grid is two
 /// places, so a third is a name this build does not understand.
 #[must_use]
-pub fn read_contract(name: &str) -> Option<Found> {
+pub fn read_contract(name: &str, known: brutex_core::instrument::Expiry) -> Option<Found> {
     let mut parts = name.split('-');
     let _exchange = parts.next()?;
     let underlying = parts.next()?;
     if underlying.is_empty() {
         return None;
     }
-    let expiry = parse_expiry(parts.next()?)?;
+    // THE EXPIRY COMES FROM THE DISCOVERY, NOT FROM THE NAME.
+    //
+    // The contracts call is keyed on ONE expiry date, so every name it answers
+    // with belongs to that date and this build already has it exactly. Parsing
+    // it back out of the display symbol was re-deriving something in hand — and
+    // it could not be done at all for half the vendor's own names.
+    //
+    // Groww writes TWO expiry spellings. Weeklies carry `DDMmmYY`
+    // (`NSE-NIFTY-27Mar25-29050-PE`), and monthlies carry `MmmYY` with **no day
+    // at all** (`NSE-FINNIFTY-Mar25-29600-PE`, `NSE-ASIANPAINT-Feb25-FUT` — the
+    // vendor's own instrument dump). `parse_expiry` required exactly seven
+    // characters, so every monthly contract returned `None`, landed in
+    // `Chain::unreadable`, and was never fetched — while the page still
+    // reported the month STORED. Stock F&O and monthly index series are
+    // precisely the ones that vanished.
+    //
+    // This is the same rule `brutex_core::vendor` states for the instrument
+    // master: the structured field is exact, the display symbol is never an
+    // input to identity. The token is still CHECKED below, because a name that
+    // disagrees with the expiry it was returned under is a vendor answer this
+    // build should refuse rather than file.
+    let token = parts.next()?;
+    if !expiry_token_agrees(token, known) {
+        return None;
+    }
+    let expiry = known;
     let tail: Vec<&str> = parts.collect();
     let contract = match tail.as_slice() {
         // A FUTURE: nothing after the expiry but the word.
@@ -887,21 +1000,56 @@ pub fn read_contract(name: &str) -> Option<Found> {
     })
 }
 
-/// `04Jan24` into an expiry.
+/// Whether a name's expiry token can belong to the expiry it was returned under.
 ///
-/// The two-digit year is read as 20xx. Groww answers for 2020 onward and this
-/// build stores no contract older than that, so there is no century to be
-/// ambiguous about — and a name this build cannot read is refused rather than
-/// resolved by a rule nobody wrote down.
-fn parse_expiry(token: &str) -> Option<brutex_core::instrument::Expiry> {
-    if token.len() != 7 {
-        return None;
-    }
-    let day: u8 = token.get(0..2)?.parse().ok()?;
-    let month = token.get(2..5)?.to_ascii_lowercase();
-    let month = u8::try_from(MONTHS.iter().position(|m| *m == month)? + 1).ok()?;
-    let year: u16 = token.get(5..7)?.parse().ok()?;
-    brutex_core::instrument::Expiry::new(2000u16.checked_add(year)?, month, day).ok()
+/// # Why this checks rather than decodes
+///
+/// The date is already known — see [`read_contract`]. What is worth asking of
+/// the name is whether it CONTRADICTS that date, because a contracts call keyed
+/// on 2024-01-25 answering a name spelled `27Mar25` is a vendor answer this
+/// build must not file under January.
+///
+/// # The two spellings, and what each can prove
+///
+/// * `DDMmmYY` — a weekly. Day, month and year are all present and all three
+///   are checked.
+/// * `MmmYY` — a monthly. The vendor omits the day entirely, so only the month
+///   and the year can be checked and the day is taken from the discovery. That
+///   is not a weakness of this function: the day is **not in the string**, and
+///   inventing one from an expiry-rule table would be the invention `CLAUDE.md`
+///   §3 rule 1 forbids when the exact date is already in hand.
+///
+/// Any other shape is refused. The two-digit year reads as 20xx; Groww answers
+/// from 2020 and this build stores nothing older, so there is no century to be
+/// ambiguous about.
+fn expiry_token_agrees(token: &str, known: brutex_core::instrument::Expiry) -> bool {
+    let (day, rest) = match token.len() {
+        // `27Mar25` — the day is stated, so it is checked.
+        7 => match token.get(0..2).and_then(|d| d.parse::<u8>().ok()) {
+            Some(day) => (Some(day), token.get(2..)),
+            None => return false,
+        },
+        // `Mar25` — the vendor states no day for a monthly.
+        5 => (None, token.get(0..)),
+        _ => return false,
+    };
+    let Some(rest) = rest else { return false };
+    let Some(word) = rest.get(0..3).map(str::to_ascii_lowercase) else {
+        return false;
+    };
+    let Some(month) = MONTHS.iter().position(|m| *m == word) else {
+        return false;
+    };
+    let Ok(month) = u8::try_from(month + 1) else {
+        return false;
+    };
+    let Some(Ok(year)) = rest.get(3..).map(str::parse::<u16>) else {
+        return false;
+    };
+    let Some(year) = 2000u16.checked_add(year) else {
+        return false;
+    };
+    year == known.year() && month == known.month() && day.is_none_or(|stated| stated == known.day())
 }
 
 /// A strike in rupees, as an exact number of paisa.
