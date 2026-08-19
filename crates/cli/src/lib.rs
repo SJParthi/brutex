@@ -44,6 +44,7 @@
 /// gap. `crates/api` declared `store` and no `runner`; this crate declared
 /// `runner` and no `store`, so nothing in the workspace connected a pulled bar
 /// to a ranked result.
+pub mod batch;
 pub mod stored;
 
 use brutex_core::vendor::Vendor;
@@ -93,6 +94,9 @@ usage: cli sweep    SESSIONS MIN_HITS   walk the ladder at one threshold
        cli audit    SESSIONS MIN_HITS   sweep, then trade the best combination
        cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS
                                    sweep REAL bars read from the store
+       cli sweep-all    VENDOR RUNG MIN_HITS
+                                   sweep EVERY stored instrument-month at that
+                                   feed and rung, one report for all of them
 
 SESSIONS  how many generated trading days to sweep, 1..=3650
 MIN_HITS  bars a combination must fire on to be kept, 1 or more
@@ -154,6 +158,15 @@ pub fn run(args: &[String], out: &mut String) -> u8 {
                 (_, _, Err(why)) => refuse(out, why),
             }
         }
+        ["sweep-all", vendor, rung, min_hits] => match parse_min_hits(min_hits) {
+            Ok(h) => {
+                let text = batch::sweep_all(vendor, rung, h);
+                let refused = text.starts_with("refused: ");
+                out.push_str(&text);
+                if refused { MISUSED } else { OK }
+            }
+            Err(why) => refuse(out, why),
+        },
         ["auto", sessions] => match parse_sessions(sessions) {
             Ok(s) => {
                 out.push_str(&auto(s));
@@ -599,16 +612,39 @@ const BOOTSTRAP_CANDIDATES: usize = 16;
 /// A trade lands in the session its EXIT falls in, because that is when its
 /// result is known. `Trade::worst` and not `best`: the pessimistic fill, the
 /// same side every other figure in this report is taken on.
-fn session_returns(days: &[i64], bars: &[indicators::Candle], taken: &trade::Trades) -> Vec<i64> {
-    let mut series = vec![0_i64; days.len()];
+///
+/// # Why a probe and not a `binary_search`
+///
+/// This ran a `binary_search` over the day slice, once per trade. (Written
+/// without the receiver, because CI gate 11 rule 1 greps SOURCE and would
+/// otherwise match this very sentence — a gate that reads comments is a gate
+/// that stays red for a line of prose.) It was correct and it was
+/// against the law: `docs/07-o1-architecture.md` layer 4 is "No search of any
+/// kind … **Never `binary_search`**", and CI gate 11 rule 1 refuses the
+/// construct workspace-wide with an allowlist whose own comment reads "AND IT
+/// STAYS EMPTY". The gate was RED on this line, while `docs/06-limits.md` §11
+/// asserted the last such call had been removed by D-0065.
+///
+/// `crates/runner/src/excursion.rs` goes to real trouble — a two-cursor merge
+/// over monotone sequences — specifically to honour that ban, so leaving this
+/// here made one crate's discipline pay for another's convenience.
+///
+/// The index is a `HashMap` built ONCE per report from the same `days` slice
+/// the caller already owns, and every trade is one probe. O(sessions) to build,
+/// O(1) per trade, and nothing searches.
+fn session_returns(
+    index: &std::collections::HashMap<i64, usize>,
+    sessions: usize,
+    bars: &[indicators::Candle],
+    taken: &trade::Trades,
+) -> Vec<i64> {
+    let mut series = vec![0_i64; sessions];
     for t in &taken.trades {
         let Some(bar) = bars.get(t.exit_bar) else {
             continue;
         };
         let day = indicators::ist_day(bar.ts_micros);
-        if let Ok(slot) = days.binary_search(&day)
-            && let Some(cell) = series.get_mut(slot)
-        {
+        if let Some(cell) = index.get(&day).and_then(|slot| series.get_mut(*slot)) {
             *cell = cell.saturating_add(t.worst);
         }
     }
@@ -786,13 +822,21 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
     // cannot refuse the set for a length mismatch — alignment is a property of
     // how this is built.
     let days = session_index(&bars);
+    // BUILT ONCE, PROBED PER TRADE. `session_returns` runs once per candidate
+    // and each walks its own trades, so the index is hoisted here rather than
+    // rebuilt inside — one pass over the sessions for the whole family.
+    let index: std::collections::HashMap<i64, usize> = days
+        .iter()
+        .enumerate()
+        .map(|(slot, day)| (*day, slot))
+        .collect();
     let family: Vec<Vec<i64>> = distinct
         .kept
         .iter()
         .take(BOOTSTRAP_CANDIDATES)
         .map(|item| {
             let walked = trade::walk(&bars, &column, &item.mask, horizon, Direction::Long);
-            session_returns(&days, &bars, &walked)
+            session_returns(&index, days.len(), &bars, &walked)
         })
         .collect();
     // Two of the three tests, and they answer different questions: Reality Check

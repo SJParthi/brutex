@@ -16892,3 +16892,71 @@ second.
 **What this does NOT do.** It does not sweep anything. The batch driver that
 turns this list into a multi-month run is the next change, and it belongs in
 `cli` — which now needs no new dependency to write it.
+
+---
+
+### D-0214 — one command sweeps the whole store, and the loop lives in `cli`
+
+**Decision.** `cli sweep-all VENDOR RUNG MIN_HITS` sweeps every stored
+instrument-month at that feed and rung, in one invocation.
+
+**Why.** `sweep-stored` takes one vendor, one underlying, one rung, one year and
+one month. **It had no alternative** — until D-0213 nothing could list what the
+store held. `docs/07-plan.md` §4 targets ~800 instruments over ~68 months; one
+invocation each is 54,000 invocations typed by hand. This is the loop D-0213
+made writable.
+
+**Why `cli` and not an HTTP route.** A sweep of the whole store is minutes to
+hours of CPU. That belongs in something an operator starts and leaves running,
+with output they can redirect — not a browser tab a reload abandons. The web
+surface should call this code when it exists; it should not be the place the code
+first appears, because then the batch logic would be invented inside a job
+registry, behind a poll endpoint, in the one crate another session is editing.
+
+**Gate 17 decides the progress granularity, and it is not a compromise.** That
+gate forbids **any** `telemetry::` reference in the crates holding the mask, the
+vocabulary and the sweep, and its reasoning is arithmetic: the ladder evaluates
+`(bits & mask) == mask` billions of times, so *"each call is cheap"* is not the
+bar — *"the innermost loop calls nothing at all"* is. So this reports **between**
+instrument-months, never inside one. A 54,000-month run prints a line per month.
+**There is no progress bar from inside the ladder and there must not be one**;
+asking for both O(1) and live inner-loop telemetry is asking for two things that
+exclude each other, and this repository already chose.
+
+**Three reporting choices that are not cosmetic.**
+
+* **A refused month is named and the run continues.** One unreadable file must
+  not abandon 53,999 others — the same rule `store::catalog` applies to an
+  unreadable subdirectory.
+* **The tally reconciles.** `offered == swept + refused`, announced in the report
+  if it ever fails. A run reporting "12 swept" out of 54,000 has lost 53,988
+  months and would otherwise read as a success.
+* **A ceiling breach is a floor, not a depth.** §6 says depth is decided by
+  extinction. A month that stopped on the candidate ceiling did not get there,
+  and printing its `k` unqualified would state a depth the search never reached.
+
+**Verified on real data, not fixtures alone.** Against the operator's own backup:
+`groww NIFTY 1min 2026-08` — **2,624 bars swept, ladder to k=4, 29 combinations
+kept**. Both feeds agree exactly at the 5-minute rung (524 bars, k=1, 1 kept),
+which is a cross-feed sanity signal the single-month command could not produce.
+**This is the first multi-instrument-month sweep this repository has run.**
+
+**Three defects of my own, recorded because two were process rather than logic.**
+A string replace intended to add `mod batch;` matched the tail of
+`pub mod stored;` and silently demoted an existing public module — caught by
+clippy's `unreachable_pub`, not by review. `one()` re-read `BRUTEX_STORE` per
+month, which is both wasteful and makes tests race on a process-wide variable;
+the root is now read once and threaded down, and `sweep_under` takes it so a test
+never touches the environment. And an `#[expect(clippy::panic)]` was unfulfilled
+because nothing in the module uses the macro — in this workspace an unfulfilled
+expectation is itself an error, which is the lint working.
+
+**Cost.** One module in `cli`, one dispatch arm, one `USAGE` line. No new
+dependency: `cli` already declared `store`. No engine, vocabulary or ladder code
+is touched.
+
+**What this does NOT do.** It does not rank across months — each month is swept
+and reported independently, and a cross-month ranking is a statistical decision
+about what "best over 68 months" means, not a loop. It does not sweep F&O:
+`store::catalog` counts contract paths and returns none, per §1. And it is not
+reachable from the web page, which still needs the `api → runner` arrow.
