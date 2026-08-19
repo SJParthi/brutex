@@ -6845,6 +6845,7 @@ async fn roll_one(
     option_type: &'static str,
     endpoint: &str,
     rolling: pull::vendor::RollingSpec,
+    window: pull::session::Window,
 ) -> Result<usize, String> {
     let label = format!("{word} {flag}/{code} {strike} {option_type}");
     // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
@@ -6853,8 +6854,39 @@ async fn roll_one(
     // the contract cannot be filed whatever comes back, and finding that out
     // after the round-trip spends a request to learn something the calendar
     // already knew.
-    let expiry = pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, asked.window.to())
+    // DERIVED FROM THIS CHUNK'S END, not the operator's. A rolling series is
+    // ATM-relative and its underlying contract changes every week, so resolving
+    // a 230-day ask to ONE expiry would file eight months of bars under a
+    // single contract. The chunk's own end names the contract its own bars
+    // belong to.
+    let expiry = pull::rolling::expiry_of(asked.underlying.as_str(), flag, code, window.to())
         .map_err(|why| format!("{label}: {why}"))?;
+
+    // THE VENDOR'S WORD FOR THE RUNG, NOT THE STORE'S — and this sent the
+    // store's.
+    //
+    // `Granularity::dir()` answers `1min`, which is the DIRECTORY name. Dhan's
+    // `rollingoption` `interval` is an enum of `1`, `5`, `15`, `30`, `60`
+    // (`Dhan Docs/14-expired-options-data.md`, request table), so every rolling
+    // request this build ever sent carried an interval the vendor does not
+    // define. The descriptor has held the right word all along —
+    // `granularity_tokens: &[(Granularity::Minute1, "1")]` — and this call site
+    // did not ask for it. Three vocabularies for one rung is exactly what that
+    // table exists to keep apart.
+    //
+    // Absent is a REFUSAL, not a fallback to the directory name: a rung this
+    // feed has no recorded word for is a request that cannot be spelled, which
+    // is the rule `FetchError::RungNotSpellable` already applies to bars.
+    let interval = wire
+        .spec
+        .granularity_token(asked.granularity)
+        .ok_or_else(|| {
+            format!(
+                "{label}: this feed records no wire word for the {} rung, so no \
+                 rolling request was built",
+                asked.granularity.dir()
+            )
+        })?;
 
     let ask = pull::rolling::Ask {
         security_id: security_id.to_owned(),
@@ -6863,13 +6895,13 @@ async fn roll_one(
         expiry_code: code,
         strike,
         side: option_type,
-        interval: asked.granularity.dir(),
-        from: asked.window.from().to_string(),
+        interval,
+        from: window.from().to_string(),
         // EXCLUSIVE ON THE WIRE, which the vendor documents and
         // `fetch::wire_end` owns. Passing the operator's last day loses that
         // session silently — the answer parses, the books balance, one day is
         // absent.
-        to: pull::fetch::wire_end(asked.window.to(), wire.spec.range_end)
+        to: pull::fetch::wire_end(window.to(), wire.spec.range_end)
             .map_err(|why| format!("{label}: {why}"))?
             .to_string(),
     };
@@ -6975,37 +7007,73 @@ async fn roll_every(
     let mut failed = 0usize;
     let mut why: Vec<String> = Vec::new();
 
+    // THE PER-CALL CAP BINDS HERE, AND NOTHING BOUND IT.
+    //
+    // `pull::rolling::Ask::to` has said since it was written that the value is
+    // "at most `RollingSpec::max_days_per_call` after `from`; splitting a wider
+    // window is the caller's job" — and THIS is the caller, and it was passing
+    // the operator's whole range. A BANKNIFTY chain asked for eight months went
+    // out as one 230-day request against a 45-day cap, 252 times.
+    //
+    // That is the same defect the name-walk had at `fno_land` and the same one
+    // the spot path fixed at D-0055: a limit written down in the descriptor,
+    // documented as somebody's job, and nobody's in fact. Three instances, one
+    // shape.
+    //
+    // Split ONCE, outside the cross product: the window is the operator's and
+    // does not vary with the strike, the side or the cadence.
+    let chunks =
+        match pull::session::split_window(asked.window, Some(u32::from(rolling.max_days_per_call)))
+        {
+            Ok(chunks) => chunks,
+            Err(refusal) => {
+                return (
+                    0,
+                    1,
+                    vec![format!(
+                        "the window could not be split to this feed's {}-day \
+                     per-call cap, so no rolling request was sent: {refusal}",
+                        rolling.max_days_per_call
+                    )],
+                );
+            }
+        };
+
     for flag in rolling.expiry_flags {
         for code in rolling.expiry_codes {
             for strike in offsets {
                 for side in rolling.sides {
-                    // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
-                    // against a ceiling of five a second; a budget charged once
-                    // for the batch is a ceiling observed once.
-                    if let Err(halt) = await_budget(asked.feed, site).await {
-                        why.push(halt);
-                        return (stored, failed.saturating_add(1), why);
-                    }
-                    let one = roll_one(
-                        asked,
-                        site,
-                        wire,
-                        security_id,
-                        word,
-                        flag,
-                        code,
-                        strike,
-                        side,
-                        &endpoint,
-                        rolling,
-                    )
-                    .await;
-                    match one {
-                        Ok(count) => stored = stored.saturating_add(count),
-                        Err(said) => {
-                            failed = failed.saturating_add(1);
-                            if why.len() < 5 {
-                                why.push(said);
+                    for chunk in &chunks {
+                        // THE GOVERNOR BEFORE EACH ONE. A month is 252 requests
+                        // against a ceiling of five a second; a budget charged once
+                        // for the batch is a ceiling observed once — and now it is
+                        // charged per CHUNK, because a chunk is a request.
+                        if let Err(halt) = await_budget(asked.feed, site).await {
+                            why.push(halt);
+                            return (stored, failed.saturating_add(1), why);
+                        }
+                        let one = roll_one(
+                            asked,
+                            site,
+                            wire,
+                            security_id,
+                            word,
+                            flag,
+                            code,
+                            strike,
+                            side,
+                            &endpoint,
+                            rolling,
+                            *chunk,
+                        )
+                        .await;
+                        match one {
+                            Ok(count) => stored = stored.saturating_add(count),
+                            Err(said) => {
+                                failed = failed.saturating_add(1);
+                                if why.len() < 5 {
+                                    why.push(said);
+                                }
                             }
                         }
                     }
@@ -13398,15 +13466,35 @@ mod tests {
                 panic!("{} is a broker", feed.display());
             };
 
-            // THE CAP IS ABSENT AT THE DAY RUNG, and that is the recorded fact
-            // rather than a hole: no day-level figure is in the charter for
-            // either broker. If one is ever read live and written down, this
-            // line is what has to change with it.
+            // THE DAY-RUNG CAP, PER FEED, AND ONE OF THEM WAS READ SINCE.
+            //
+            // This asserted `None` for BOTH brokers on the reasoning that no
+            // day-level figure existed anywhere. The comment it carried said
+            // "if one is ever read live and written down, this line is what has
+            // to change with it" — and that is what happened, from the vendor's
+            // own page rather than from a live call.
+            //
+            // `Groww Docs/11-backtesting.md`, "Backtesting Data Limits", puts
+            // `1 day` in the row capped at 180 days. Dhan's historical-data
+            // page publishes no day-level figure at all, so its `None` is still
+            // the recorded fact and not a hole.
+            //
+            // NEITHER NUMBER CHANGES A SINGLE REQUEST, and that is worth saying
+            // rather than leaving for a reader to wonder about: the month bound
+            // is tighter than 180 days at every month of the calendar, so the
+            // daily chunk count below is 80 either way. What the row buys is
+            // that "this vendor published no daily cap" stops being asserted
+            // about a vendor that published one.
+            let expected_daily_cap = match feed {
+                pull::vendor::Feed::Groww => Some(180),
+                _ => None,
+            };
             assert_eq!(
                 spec.window_cap_days(Granularity::Day1),
-                None,
-                "{} publishes no day-level cap in docs/00-charter.md §4 — a \
-                 number here is one somebody invented",
+                expected_daily_cap,
+                "{}'s day-rung cap must be what its own documentation prints \
+                 and nothing else — an invented number here would send a \
+                 window no vendor agreed to",
                 feed.display()
             );
 

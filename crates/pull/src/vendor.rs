@@ -4120,6 +4120,22 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     // `docs/14-expired-options-data.md`: 1=Near, 2=Next, 3=Far. A fourth is a
     // request the vendor answers with nothing.
     expiry_codes: &["1", "2", "3"],
+    // FORTY-FIVE, AND THE VENDOR'S OWN PAGE SAYS BOTH NUMBERS.
+    //
+    // `Dhan Docs/14-expired-options-data.md` contradicts itself inside one
+    // file: "Historical Rolling Data" says *"You can fetch up to 30 days of
+    // data per API call"*, and "Historical Rolling Options Data" two sections
+    // below says *"Up to 45 days per call"* and *"upto 45 days of data in a
+    // single API call"*. Both are the vendor's words about the same endpoint,
+    // so the page cannot settle it.
+    //
+    // **Operator-stated 2026-08-19: it is 45 for expired options.** That is
+    // what resolves it — the same standing this repository already gives an
+    // operator statement for Dhan's history depth and Groww's per-minute
+    // budget, and it is a real source where picking the smaller number would
+    // have been a guess wearing caution's clothes. The contradiction is
+    // recorded here rather than silently resolved, because the next reader of
+    // that page will meet both numbers too.
     max_days_per_call: 45,
     years_back: 5,
 };
@@ -4535,7 +4551,26 @@ const GROWW: Descriptor = Descriptor {
         // The day row is absent for the same reason as the vendor above: the
         // charter records no day-level cap for this feed either. UNVERIFIED,
         // and absent rather than guessed.
-        window_caps: &[(Granularity::Minute1, 30)],
+        // BOTH ROWS THE VENDOR PUBLISHES, and the daily one was missing.
+        //
+        // `Groww Docs/11-backtesting.md`, "Backtesting Data Limits":
+        //
+        //   1 min, 2 min, 3 min, 5 min          -> 30 days
+        //   10 min, 15 min, 30 min              -> 90 days
+        //   1 hour, 4 hours, 1 day, 1 week, ... -> 180 days
+        //
+        // Only the first row was here. `docs/07-plan.md` went further and said
+        // a 180-day daily cap "appears in no source" — it appears in the
+        // vendor's own limits table, which is the source, and the plan is the
+        // stale copy. The middle row is deliberately absent: `store::path`
+        // files two rungs, and a cap for a rung nothing can request is a fact
+        // with nowhere to apply.
+        //
+        // It changes no request today — `split_window` binds the MONTH at every
+        // rung and a month is never 180 days — but a declared cap that is
+        // absent reads as "this vendor published none", which is a different
+        // claim about the vendor and the wrong one.
+        window_caps: &[(Granularity::Minute1, 30), (Granularity::Day1, 180)],
         // The one rung this feed's wire word is recorded for. Read first-hand
         // from groww.in/trade-api/docs/curl/historical-data, which is where
         // `1minute` came from.
@@ -5901,15 +5936,27 @@ mod tests {
             // none: the failure this pins is somebody filling a cap in from
             // memory and nothing noticing, and a `_ => None` arm would let a
             // new row carry any number at all.
+            //
+            // AND NOW A SECOND SOURCE EXISTS. `Groww Docs/11-backtesting.md`
+            // prints a "Backtesting Data Limits" table whose third row is
+            // "1 hour, 4 hours, 1 day, 1 week, 1 month -> 180 days". That is
+            // the vendor's own page, so the rule is satisfied by a citation
+            // rather than bent by one.
+            //
+            // Worth recording because `docs/07-plan.md` states the opposite —
+            // that a 180-day daily cap "appears in no source" — and it is the
+            // stale copy. `CLAUDE.md` §10: this file wins over the document.
             let expected_day_cap = match feed {
                 Feed::Zerodha => Some(2_000),
-                Feed::Dhan | Feed::Groww | Feed::TrueData | Feed::Gdfl => None,
+                Feed::Groww => Some(180),
+                Feed::Dhan | Feed::TrueData | Feed::Gdfl => None,
             };
             assert_eq!(
                 spec.window_cap_days(Granularity::Day1),
                 expected_day_cap,
-                "{}: a day-level cap appears here only where docs/00-charter.md \
-                 §4 records one",
+                "{}: a day-level cap appears here only where a vendor source \
+                 records one — docs/00-charter.md §4, or the vendor page the \
+                 descriptor row cites",
                 feed.display()
             );
             // THE DAILY WORD IS NOW A PER-FEED FACT, NOT A BLANKET ABSENCE.
@@ -6363,7 +6410,9 @@ mod tests {
         );
         assert_eq!(
             spec.max_days_per_call, 45,
-            "the vendor documents 45 days per call"
+            "the vendor's page says BOTH 30 and 45 on this endpoint; 45 is \
+             operator-confirmed (2026-08-19) and the row above records the \
+             contradiction rather than hiding it"
         );
         assert_eq!(spec.years_back, 5, "the vendor documents five years");
         assert_eq!(spec.sides, &["CALL", "PUT"], "the annexure's two sides");
