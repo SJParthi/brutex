@@ -336,7 +336,17 @@ pub fn body(spec: &RollingSpec, ask: &Ask) -> String {
     // to a subset, and a default is a decision made elsewhere that changes what
     // lands on disk. `iv` and `spot` are here because the overlay exists for
     // exactly them.
-    out.push_str(r#","requiredData":["open","high","low","close","volume","oi","iv","spot"]"#);
+    // `strike` IS NOT DECORATION HERE — IT IS THE CONTRACT'S NAME.
+    //
+    // The request asks by OFFSET (`ATM+10`), which is a question. Only the
+    // answer's `strike` array says which price that question resolved to, and
+    // without it there is nothing to file the contract under. It was absent
+    // from this list and absent from `read`, and `roll_one` used the
+    // underlying's SPOT in its place — so all 21 offsets of one expiry resolved
+    // to one path and appended into one file.
+    out.push_str(
+        r#","requiredData":["open","high","low","close","volume","oi","iv","spot","strike"]"#,
+    );
     out.push('}');
     out
 }
@@ -366,6 +376,20 @@ pub struct Row {
     pub bar: Bar,
     /// The vendor-stated spot and implied volatility for the same stamp.
     pub overlay: Overlay,
+    /// The strike this offset RESOLVED TO, in paisa, or `None` when the vendor
+    /// sent no `strike` array.
+    ///
+    /// # Why it is not on [`Overlay`]
+    ///
+    /// The overlay is a per-BAR sidecar — spot and implied volatility move
+    /// every minute. A strike does not: it is a property of the CONTRACT, and
+    /// it is what names the file every one of these bars is written into. Two
+    /// different lifetimes, so two different places.
+    ///
+    /// `None` rather than a default, because a contract whose strike is unknown
+    /// cannot be filed at all and the caller must refuse rather than pick one.
+    /// See `api::server::roll_one`.
+    pub strike: Option<i64>,
 }
 
 /// Reads one side of a rolling answer into rows.
@@ -401,6 +425,10 @@ pub fn read(body: &str, side: &str, scale: PriceScale) -> Result<Vec<Row>, Rolli
     let oi = optional(one, "oi", stamps.len())?;
     let iv = optional(one, "iv", stamps.len())?;
     let spot = optional(one, "spot", stamps.len())?;
+    // OPTIONAL AT THE PARSE, REQUIRED AT THE FILE. Absent here is a fact about
+    // the answer and reads as `None`; it becomes a refusal one layer up, where
+    // the contract is named and the absence actually bites.
+    let strike = optional(one, "strike", stamps.len())?;
 
     let mut rows = Vec::with_capacity(stamps.len());
     for at in 0..stamps.len() {
@@ -428,7 +456,19 @@ pub fn read(body: &str, side: &str, scale: PriceScale) -> Result<Vec<Row>, Rolli
             // volatility is stored as an integer despite being a statistic.
             iv_micros: iv.map_or(OI_NULL, |a| a.get(at).map_or(OI_NULL, micros_of)),
         };
-        rows.push(Row { bar, overlay });
+        // THE STRIKE FOR THIS STAMP. A rolling series is ATM-relative, so the
+        // resolved strike genuinely can differ between two bars of one answer
+        // when the underlying crosses a step; the caller takes the FIRST and
+        // that choice is recorded there, not silently made here.
+        let resolved = match strike {
+            Some(a) => Some(paisa(a, at, scale, "strike")?),
+            None => None,
+        };
+        rows.push(Row {
+            bar,
+            overlay,
+            strike: resolved,
+        });
     }
     Ok(rows)
 }

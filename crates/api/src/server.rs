@@ -6942,7 +6942,35 @@ async fn roll_one(
         // THE STRIKE THE VENDOR RESOLVED, not the offset that was asked for.
         // `ATM+10` is a question; the answer carries the price it meant, and
         // filing under the question would put every month's ATM+10 in one file.
-        strike: brutex_core::price::Paisa::from_raw(rows.first().map_or(0, |r| r.overlay.spot)),
+        //
+        // THIS READ `overlay.spot` AND THE COMMENT ABOVE IS THE ONE IT BROKE.
+        //
+        // Spot is the UNDERLYING's price; the strike is the OPTION's. Two
+        // different numbers, and the code took the wrong one — so every offset
+        // of one expiry resolved to whatever the underlying happened to be
+        // trading at on the first bar, which is the SAME value for all 21 of
+        // them. Twenty-one strikes, one contract path, one file. Nothing would
+        // have errored: the receipt would have said STORED with plausible
+        // counts, and the corruption would have surfaced years later as a
+        // BANKNIFTY option series whose strike tracked the index.
+        //
+        // `strike` was not in `requiredData`, was not parsed by
+        // `rolling::read`, and had no field on its `Row`. All three now exist.
+        //
+        // THE FIRST ROW'S, and that is a choice rather than an accident: a
+        // rolling series is ATM-relative, so a long answer can cross a strike
+        // step. The first bar names the contract the request resolved to at its
+        // start, which is the only one every bar in the answer is guaranteed to
+        // share a file with.
+        strike: brutex_core::price::Paisa::from_raw(
+            rows.first().and_then(|r| r.strike).ok_or_else(|| {
+                format!(
+                    "{label}: the vendor sent no strike for this offset, so the \
+                     contract it resolved to has no name — nothing was filed \
+                     rather than bars being written under a guessed strike"
+                )
+            })?,
+        ),
         side: if option_type == "CALL" {
             brutex_core::instrument::OptionSide::Call
         } else {
