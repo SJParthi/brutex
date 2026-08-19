@@ -4221,11 +4221,28 @@
   /**
    * HOW MANY COLUMNS ARE DRAWN. Segment and Timeframe appear only when more
    * than one is ticked — a column of one repeated value is a sort control over
-   * nothing. The empty row's `colspan` is counted from the same rule, so it can
-   * never span the wrong number.
+   * nothing.
+   *
+   * IT SAID THIS COUNT "CAN NEVER SPAN THE WRONG NUMBER" AND IT WAS SPANNING
+   * THE WRONG NUMBER. The base was 5 against SIX unconditional `<th>`, because
+   * `Attempts` was added to the header and this constant was not bumped with
+   * it. Measured in the browser with one segment and one rung ticked: six
+   * header cells, `colspan="5"` on the empty row. The refusal sentence was
+   * laid out to the wrong width and the last column hung off the end of it,
+   * which is how it was noticed at all.
+   *
+   * SO THE GUARANTEE IS WITHDRAWN AND THE COLUMNS ARE NAMED INSTEAD. This is a
+   * hand-kept number, it has drifted once, and the only thing standing between
+   * it and drifting again is that the six are written down here where the next
+   * person adding a seventh will read them:
+   *
+   *   Instrument · Bars stored/expected · Months unproved · Verdict ·
+   *   Attempts · Next step
+   *
+   * Add a column to the header, add it to that list and add one here.
    */
   const censusColCount = $derived(
-    5 + (segmentsReached.length > 1 ? 1 : 0) + (rungsChosen.length > 1 ? 1 : 0)
+    6 + (segmentsReached.length > 1 ? 1 : 0) + (rungsChosen.length > 1 ? 1 : 0)
   );
 
   const censusPages = $derived(Math.max(1, Math.ceil(censusSorted.length / PAGE_SIZE)));
@@ -9643,6 +9660,29 @@
   .cscroll .dash {
     color: var(--faint);
   }
+  /* A REFUSAL YOU HAVE TO SCROLL SIDEWAYS TO READ IS A REFUSAL NOBODY MEETS.
+     The empty row spans every column, so its cell is as wide as the widest
+     data row -- measured at 1,274px inside a 742px window -- and `.empty`'s
+     centring put the sentence 504px past the right edge, where the only clue
+     that anything had been said was a stray fragment of it.
+     `sticky` pins the block to the SCROLLER's left edge rather than the
+     cell's, so it stays where the eye already is however wide the columns
+     grow, and the text reads from the left like every other sentence on the
+     page. */
+  .cscroll .empty {
+    position: sticky;
+    left: 0;
+    max-width: 68ch;
+    text-align: left;
+    /* `nowrap` IS INHERITED FROM THE TABLE and it defeats `max-width` on its
+       own: the BOX obeys the 68ch and the TEXT runs straight out of it. That
+       is why the first attempt at this measured as fixed and was not --
+       `getBoundingClientRect()` on the div reported 25..560, inside the
+       window, while a Range over its text nodes reported 41..1259, still 504px
+       past the right edge. A sentence is not a column heading; it wraps. */
+    white-space: normal;
+  }
+
   .cscroll .empty b {
     display: block;
     color: var(--ink);
