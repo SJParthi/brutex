@@ -704,6 +704,25 @@ pub enum Refusal {
         /// What arrived.
         got: String,
     },
+    /// An expired series was asked for at a rung other than one minute.
+    ///
+    /// **Operator's rule, 2026-08-19: expired futures and expired options are
+    /// pulled at ONE MINUTE and at no other bar length.**
+    ///
+    /// It is a refusal and not a silent coercion to `1min`, for the reason
+    /// every other rung refusal here is: the bar length is the DIRECTORY, so a
+    /// coerced rung files bars where the operator did not ask and no later
+    /// reader can tell a substituted bar from a real one.
+    ///
+    /// Enforced at the PARSE rather than at the fetch, so nothing is spent
+    /// finding out — no credential read, no discovery walk, no vendor
+    /// contacted. A daily ask for one month of BANKNIFTY options would
+    /// otherwise spend one expiries call, one contracts call per expiry and one
+    /// bars call per contract before anything could be filed.
+    ExpiredSeriesIsOneMinuteOnly {
+        /// The rung that was asked for.
+        got: String,
+    },
     /// The underlying is not a symbol this engine can even name.
     BadUnderlying {
         /// What arrived.
@@ -767,6 +786,21 @@ impl Refusal {
             _ => write!(f, "REFUSED · a member field this build cannot describe"),
         }
     }
+}
+
+/// Every bar length this build files, as one readable phrase.
+///
+/// Lifted out of [`Refusal`]'s formatter because that function is one `match`
+/// with an arm per refusal and its length is the thing a reader meets first —
+/// and because "what does this build store" is a question about the STORE, so
+/// deriving it from `store::path::Timeframe::KNOWN` in one place keeps a second
+/// hand-written list from appearing beside it.
+fn stored_rungs() -> String {
+    store::path::Timeframe::KNOWN
+        .iter()
+        .map(|tf| tf.as_str())
+        .collect::<Vec<_>>()
+        .join(" and ")
 }
 
 impl fmt::Display for Refusal {
@@ -833,6 +867,14 @@ impl fmt::Display for Refusal {
                  Nothing was pulled rather than another vendor's bars being \
                  filed under a prefix you did not ask for"
             ),
+            Self::ExpiredSeriesIsOneMinuteOnly { ref got } => write!(
+                f,
+                "REFUSED · an expired series is pulled at ONE MINUTE only, and \
+                 {got:?} was asked for. Nothing was sent: no discovery walk, no \
+                 credential read and no vendor contacted. Ask again with \
+                 granularity={}.",
+                pull::vendor::Granularity::Minute1.dir()
+            ),
             Self::UnknownGranularity { ref got } => write!(
                 f,
                 "REFUSED · {got:?} is not a bar length on this ladder. Nothing \
@@ -840,11 +882,7 @@ impl fmt::Display for Refusal {
                  not ask for — the bar length is the DIRECTORY here, and no \
                  reader can tell a substituted bar from a real one. This build \
                  stores {}.",
-                store::path::Timeframe::KNOWN
-                    .iter()
-                    .map(|tf| tf.as_str())
-                    .collect::<Vec<_>>()
-                    .join(" and ")
+                stored_rungs()
             ),
             Self::BadUnderlying { ref got } => {
                 write!(f, "REFUSED · {got:?} is not a symbol this engine can name")
@@ -1187,7 +1225,9 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
         Refusal::UnknownTarget { .. } => Some("target"),
         Refusal::UnknownSeries { .. } => Some("series"),
         Refusal::UnknownVendor { .. } => Some("vendor"),
-        Refusal::UnknownGranularity { .. } => Some("granularity"),
+        Refusal::UnknownGranularity { .. } | Refusal::ExpiredSeriesIsOneMinuteOnly { .. } => {
+            Some("granularity")
+        }
         Refusal::BadUnderlying { .. } | Refusal::NotAnFnoUnderlying { .. } => Some("underlying"),
         Refusal::LiveContract { .. } => Some("expiry"),
         Refusal::ClockUnusable { .. } => None,
@@ -1501,7 +1541,26 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         },
         granularity: {
             let raw = param(body, "granularity");
-            parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?
+            let rung = parse_granularity(&raw).ok_or(Refusal::UnknownGranularity { got: raw })?;
+            // ONE MINUTE, AND ONLY ONE MINUTE, FOR AN EXPIRED SERIES.
+            //
+            // The operator's rule of 2026-08-19. Spot keeps both rungs -- its
+            // day-level pass is the cheap first sweep D-0055 added -- but an
+            // expired contract is stored at minute resolution or not at all: a
+            // daily bar on a contract that traded for three months is sixty
+            // rows that cannot be re-derived into the minute series later, and
+            // the append-only store makes that irreversible.
+            //
+            // Compared by discriminant, like every other rung comparison in
+            // this workspace, rather than by the rendered word -- two spellings
+            // of one rung is what `vendor::granularity_tokens` exists to keep
+            // apart.
+            if rung as u8 != pull::vendor::Granularity::Minute1 as u8 {
+                return Err(Refusal::ExpiredSeriesIsOneMinuteOnly {
+                    got: rung.dir().to_owned(),
+                });
+            }
+            rung
         },
     })
 }
@@ -2774,6 +2833,85 @@ mod tests {
         );
         assert_eq!(parse_granularity("1week"), Some(Granularity::Week1));
         assert_eq!(Granularity::Week1.store_timeframe(), None);
+    }
+
+    /// **AN EXPIRED SERIES IS ONE MINUTE AND NOTHING ELSE.**
+    ///
+    /// The operator's rule of 2026-08-19. Spot keeps both rungs; an expired
+    /// contract is stored at minute resolution or not at all, because a daily
+    /// bar on a contract that traded for three months is sixty rows that cannot
+    /// be re-derived into the minute series later and the store is append-only.
+    ///
+    /// Every rung the ladder carries is driven, not just the daily one, so a
+    /// rung added to `Granularity` later cannot slip past this by being neither
+    /// `1min` nor `1day`.
+    #[test]
+    fn an_expired_series_refuses_every_rung_but_one_minute() {
+        for rung in pull::vendor::Granularity::ALL {
+            let body = format!(
+                "underlying=NIFTY&series=opt&from=2026-07-01&to=2026-07-30&granularity={}",
+                rung.dir()
+            );
+            let out = parse_fno(&body, today());
+            if rung as u8 == pull::vendor::Granularity::Minute1 as u8 {
+                assert_eq!(
+                    out.expect("one minute is the one legal rung").granularity as u8,
+                    rung as u8
+                );
+                continue;
+            }
+            assert_eq!(
+                out.expect_err("every other rung is refused"),
+                Refusal::ExpiredSeriesIsOneMinuteOnly {
+                    got: rung.dir().to_owned()
+                },
+                "{} reached an expired-series request",
+                rung.dir()
+            );
+        }
+    }
+
+    /// The refusal names the field to fix and says nothing was sent.
+    ///
+    /// Both halves matter. The field is what the form highlights, and "nothing
+    /// was sent" is what tells an operator their vendor quota was not spent —
+    /// the gate is at the parse precisely so it is not.
+    #[test]
+    fn the_one_minute_refusal_names_the_control_and_says_nothing_was_contacted() {
+        let refused = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-07-01&to=2026-07-30&granularity=1day",
+            today(),
+        )
+        .expect_err("a daily expired-series ask");
+
+        assert_eq!(refused_field(&refused), Some("granularity"));
+        let said = refused.to_string();
+        assert!(said.contains("ONE MINUTE only"), "{said}");
+        assert!(said.contains("1day"), "{said}");
+        assert!(said.contains("no vendor contacted"), "{said}");
+        assert!(
+            said.contains("granularity=1min"),
+            "the refusal must name the ask that would work: {said}"
+        );
+    }
+
+    /// An ABSENT rung still defaults, and the default is the one legal one.
+    ///
+    /// The gate must not turn "said nothing" into a refusal — every other
+    /// parse here treats absent as the default and present-but-wrong as the
+    /// refusal, and an expired-series form that refused an unset control would
+    /// break every caller that omits it.
+    #[test]
+    fn an_absent_rung_on_an_expired_series_is_still_the_default_and_is_legal() {
+        let ok = parse_fno(
+            "underlying=NIFTY&series=opt&from=2026-07-01&to=2026-07-30",
+            today(),
+        )
+        .expect("an omitted rung defaults rather than refusing");
+        assert_eq!(
+            ok.granularity as u8,
+            pull::vendor::Granularity::Minute1 as u8
+        );
     }
 
     #[test]
