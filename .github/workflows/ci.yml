@@ -727,12 +727,19 @@ jobs:
           # can be asked for; `pull::vendor::FnoDiscovery` is the shape that
           # records how. Six ordinary English words a vendor chose. They name no
           # org, no env and no account, which is what section 8 is about.
+          #
+          # `underlying` joined them as the field key on the `pull.fno discovery
+          # refused` event -- the one that carries a failed walk's WHOLE reason,
+          # because the journal's note is stride-bound to 68 bytes and a
+          # discovery failure's reason begins with the URL, so the vendor's
+          # status was exactly the part that fell off. It holds an instrument
+          # name, which is public market vocabulary.
           request_field='
           securityId exchangeSegment instrument
           exchange segment trading_symbol start_time end_time
           13
           groww_symbol candle_interval 1minute
-          expiries contracts underlying_symbol expiry_date year month
+          expiries contracts underlying_symbol expiry_date year month underlying
           jan feb mar apr may jun jul aug sep oct nov dec
           19200 2019 2020
           '

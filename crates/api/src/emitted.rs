@@ -1081,16 +1081,36 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// driven by the second-server test in `server::tests` — which holds the
     /// store's own lock file on a handle of its own, so the refusal is the OS's
     /// and needs no second process.
+    ///
+    /// AND ONE THAT NO TEST IN THIS BINARY DRIVES, named here rather than
+    /// quietly counted: `pull.fno discovery refused`. It fires when a vendor
+    /// declines an expired-F&O discovery walk, and reaching it needs a
+    /// credentialed source, a live endpoint and that endpoint answering
+    /// non-2xx — three things a unit test cannot arrange and a loopback
+    /// listener cannot stand in for, because the credential is read from
+    /// Parameter Store before the socket is opened.
+    ///
+    /// It exists because the journal's note is stride-bound to 68 bytes and a
+    /// discovery failure's reason BEGINS with the URL, so the vendor's status
+    /// was the part that fell off the end. Measured: three 502s whose notes
+    /// were all `https://api.groww.in/v1/historical/expiries?exchange=…` and
+    /// nothing else. The run was legible as "it failed" and illegible as "why".
+    ///
+    /// Counted below as the one UNREACHABLE site, which is the honest column
+    /// for it: that column exists for exactly this, and putting it anywhere
+    /// else would claim a proof that does not exist.
     const REACHED_IN_SERVER_TESTS: usize = 12;
-    /// The rows of the table above, every one of them struck through.
-    const UNREACHABLE: usize = 0;
-    // COUNTED FROM THE SOURCE, not declared. A twenty-EIGHTH emit added
+    /// The rows of the table above, every one of them struck through — plus
+    /// `pull.fno discovery refused`, described above, which is the first site
+    /// since this accounting began that no test in this binary can drive.
+    const UNREACHABLE: usize = 1;
+    // COUNTED FROM THE SOURCE, not declared. A thirty-FIRST emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 29,
+        lib_sites, 30,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

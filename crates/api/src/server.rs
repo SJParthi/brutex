@@ -6579,12 +6579,41 @@ async fn fno_walk(
     // refused expiries call returns before one contracts URL is built, which is
     // what makes a half-walked month impossible rather than merely unlikely.
     match pull::chain::month(asked.feed, &ask, &wire.source).await {
-        Err(why) => page.say(
-            facts,
-            axum::http::StatusCode::BAD_GATEWAY,
-            audit::Outcome::Failed,
-            &why.to_string(),
-        ),
+        Err(why) => {
+            // THE WHOLE REASON, WHERE THE STRIDE CANNOT CUT IT.
+            //
+            // The journal's note is 68 bytes and a discovery failure's reason
+            // starts with the URL, so what an operator actually needed — the
+            // vendor's status, or the field that would not read — was exactly
+            // the part that fell off the end. Measured: three 502s whose notes
+            // were all `https://api.groww.in/v1/historical/expiries?exchange=…`
+            // and nothing else, and no event anywhere carried the rest. The
+            // run was legible as "it failed" and illegible as "why".
+            //
+            // `note_bytes` said the note was cut, which is honest and useless:
+            // knowing a sentence was truncated does not tell you the sentence.
+            // The journal keeps the stride it needs; this carries the reason.
+            // BOUND FIRST: `Value::Str` borrows, so a temporary built inside
+            // the call would not outlive it.
+            let said = why.to_string();
+            let _dropped_when_filtered = telemetry::emit(
+                &telemetry::Event::error("pull.fno", "discovery refused")
+                    .with("feed", telemetry::Value::Str(asked.feed.wire()))
+                    .with(
+                        "underlying",
+                        telemetry::Value::Str(asked.underlying.as_str()),
+                    )
+                    .with("year", telemetry::Value::Uint(u64::from(month_of.year())))
+                    .with("month", telemetry::Value::Uint(u64::from(month_of.month())))
+                    .with("why", telemetry::Value::Str(&said)),
+            );
+            page.say(
+                facts,
+                axum::http::StatusCode::BAD_GATEWAY,
+                audit::Outcome::Failed,
+                &why.to_string(),
+            )
+        }
         Ok(chain) => fno_report(&page, facts, &chain, asked, site, &wire).await,
     }
 }
