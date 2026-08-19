@@ -63,6 +63,7 @@
 
 use std::collections::HashSet;
 
+use crate::session::Day;
 use brutex_core::error::InstrumentError;
 use brutex_core::instrument::{Exchange, Segment};
 use brutex_core::symbol::Symbol;
@@ -148,6 +149,14 @@ pub struct ContractCell {
     pub key: EntryKey,
     /// The vendor's own contract name, as discovered.
     pub vendor_symbol: String,
+    /// When this contract expired.
+    ///
+    /// Carried because completeness needs it: a contract's last possible bar in
+    /// a month is the earliest of the month's end, the operator's window end,
+    /// and the day it expired. Without the expiry, every contract's final month
+    /// reads short forever — it stops trading mid-month and no vendor will ever
+    /// send the rest.
+    pub expiry: brutex_core::instrument::Expiry,
 }
 
 /// Why a discovered contract could not be turned into a cell.
@@ -246,6 +255,7 @@ pub fn cells(found: &[Found], months: &[YearMonth], timeframe: Timeframe) -> Dis
         };
         for month in months {
             out.cells.push(ContractCell {
+                expiry: contract.expiry,
                 key: EntryKey {
                     contract: Some(contract.contract),
                     exchange: VENUE,
@@ -290,6 +300,171 @@ impl Work {
     pub const fn offered(&self) -> usize {
         self.missing.len().saturating_add(self.held)
     }
+}
+
+/// One contract-month that still owes bars, and the day to resume it from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resume {
+    /// The cell, exactly as discovery offered it.
+    pub cell: ContractCell,
+    /// The first day still owed. Never before the window's own start.
+    pub from: Day,
+    /// The last day this cell can EVER owe a bar for — see [`owed`].
+    pub through: Day,
+}
+
+/// What a round of discovery still owes, as POSITIONS rather than flags.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Owed {
+    /// The cells that are short, each with the day to resume from.
+    pub resume: Vec<Resume>,
+    /// How many offered cells owe nothing more.
+    pub complete: usize,
+}
+
+impl Owed {
+    /// Whether there is nothing left to fetch.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.resume.is_empty()
+    }
+
+    /// How many cells were offered in total.
+    #[must_use]
+    pub const fn offered(&self) -> usize {
+        self.resume.len().saturating_add(self.complete)
+    }
+}
+
+/// What is still owed on each contract-month — a POSITION, not a boolean.
+///
+/// # Why the boolean version of this was withdrawn
+///
+/// [`gaps_by`] asks `held: Fn(&EntryKey) -> bool`, and a first attempt at an
+/// incremental F&O gate wired it to `Manifest::entry(key).is_some()`.
+///
+/// [`EntryKey`] is `(contract, exchange, segment, symbol, timeframe, month)` —
+/// **the window is not in it** — and `Entry::check` refuses only `rows == 0`.
+/// So ONE BAR made a contract-month "held", and a month whose pull died on day
+/// five reported complete for all thirty-one. Worse, §8's append-only rule
+/// meant a re-run could not repair it: the file already held the prefix, so the
+/// wider batch was refused.
+///
+/// It replaced a loud, correct 502 with a silent success — which is exactly the
+/// "fallback that hides a failure" §4 bans. The gate was withdrawn rather than
+/// patched, because a boolean cannot express half a month no matter how it is
+/// wired.
+///
+/// # What replaces it
+///
+/// The shape `api::autopilot::next_window` has used for spot since it was
+/// written: probe the last held TIMESTAMP and resume from the day after. The
+/// manifest already carries it as `Entry::last_ts_micros`, so this costs the
+/// same single probe the boolean did and answers a strictly harder question.
+///
+/// `held` returns that stamp for a key, or `None` for a key the manifest does
+/// not carry. It must be O(1) — a hash probe, not a search — and that is a
+/// contract with the caller this function cannot enforce, so it is stated
+/// rather than assumed.
+///
+/// # The last day a CONTRACT can owe is not the last day of the month
+///
+/// This is the one place F&O differs from spot, and getting it wrong costs
+/// every run rather than one. A contract's owed-through is the earliest of:
+///
+/// * the month's own last day,
+/// * the operator's window end,
+/// * **the day the contract expired**.
+///
+/// A spot series trades every session of every month, so its month end is its
+/// answer. A contract stops trading mid-month and no vendor will ever send the
+/// rest — so judged against the month end, every contract's final month reads
+/// short forever and is refetched on every run, returning empty every time.
+///
+/// A cell whose whole span falls outside the window — an expiry before the
+/// window opens, a month after it closes — owes nothing and is counted
+/// complete rather than asked for.
+///
+/// # Cost
+///
+/// **O(cells)**: one probe and a fixed number of integer comparisons each.
+/// Never O(store). Nothing here opens a file or lists a directory.
+#[must_use]
+pub fn owed<F>(cells: &[ContractCell], window: (Day, Day), held: F) -> Owed
+where
+    F: Fn(&EntryKey) -> Option<i64>,
+{
+    let mut out = Owed {
+        resume: Vec::with_capacity(cells.len()),
+        complete: 0,
+    };
+    for cell in cells {
+        // NOTHING FETCHABLE. Not a gap — a cell the window and the expiry
+        // between them leave no day in.
+        let Some((first, through)) = span_of(cell, window) else {
+            out.complete = out.complete.saturating_add(1);
+            continue;
+        };
+        // ONE PROBE. Nothing here opens a file or lists a directory.
+        let from = match held(&cell.key).and_then(day_of) {
+            // Nothing held for this key in this month: the whole span is owed.
+            None => first,
+            Some(day) if day < through => {
+                // The last representable day has no successor. Counted as
+                // complete rather than asked for again, because there is no
+                // day after it to ask for.
+                let Ok(next) = day.succ() else {
+                    out.complete = out.complete.saturating_add(1);
+                    continue;
+                };
+                next
+            }
+            // Held through the last day this cell can ever owe.
+            Some(_) => {
+                out.complete = out.complete.saturating_add(1);
+                continue;
+            }
+        };
+        out.resume.push(Resume {
+            cell: cell.clone(),
+            // A resume point before the window's start is clamped UP to it,
+            // never down: asking earlier than the operator did would write
+            // days they did not request, and asking later would lose them.
+            from: from.max(first),
+            through,
+        });
+    }
+    out
+}
+
+/// The days of `window` this cell can hold bars for, or `None` for none.
+///
+/// Clamped below by the month's first day and the window's start, above by the
+/// month's last day, the window's end, and the expiry. See [`owed`] on why the
+/// expiry belongs in that list.
+fn span_of(cell: &ContractCell, window: (Day, Day)) -> Option<(Day, Day)> {
+    let (from, to) = window;
+    let month = cell.key.month;
+    let opens = Day::new(month.year(), month.month(), 1).ok()?;
+    let expiry = Day::new(cell.expiry.year(), cell.expiry.month(), cell.expiry.day()).ok()?;
+    let first = opens.max(from);
+    let through = opens.end_of_month().min(to).min(expiry);
+    if through < first {
+        None
+    } else {
+        Some((first, through))
+    }
+}
+
+/// The IST day a stored stamp falls in.
+///
+/// `api::autopilot::day_of` is the same three lines for spot. It is not shared
+/// because the arrow points the other way: `api` depends on `pull`, so `pull`
+/// cannot reach it, and CLAUDE.md §5's graph is acyclic by rule.
+fn day_of(ts_micros: i64) -> Option<Day> {
+    crate::session::IstMoment::from_epoch_secs(ts_micros.div_euclid(1_000_000))
+        .ok()
+        .map(crate::session::IstMoment::day)
 }
 
 /// Gap = discovered − held, asking a PROBE rather than a prepared set.
@@ -401,6 +576,264 @@ mod tests {
 
     fn month(year: u16, month: u8) -> YearMonth {
         YearMonth::new(year, month).expect("a real month")
+    }
+
+    fn day(year: u16, m: u8, d: u8) -> Day {
+        Day::new(year, m, d).expect("a real day")
+    }
+
+    /// 15:29 IST on `on`, as the epoch micros the manifest stores.
+    ///
+    /// IST is UTC+5:30, so the UTC second is that day's midnight less 19,800
+    /// plus the minute of day. Round-tripped by the unit below rather than
+    /// trusted — an arithmetic slip here would make every assertion beneath it
+    /// agree with the same wrong day.
+    fn stamp(on: Day) -> i64 {
+        let secs = i64::from(on.days_from_epoch()) * 86_400 - 19_800 + (15 * 3_600 + 29 * 60);
+        secs * 1_000_000
+    }
+
+    #[test]
+    fn the_test_stamp_round_trips_through_the_reader_it_feeds() {
+        for d in [day(2025, 11, 1), day(2026, 1, 15), day(2026, 1, 31)] {
+            assert_eq!(day_of(stamp(d)), Some(d), "{d} did not survive the trip");
+        }
+    }
+
+    /// **THE REGRESSION THAT WITHDREW THE BOOLEAN GATE.**
+    ///
+    /// A month pulled to day five, then interrupted. `gaps_by` — which asks
+    /// only whether the key exists — calls it held and fetches nothing, so the
+    /// remaining twenty-six days are reported complete and, under §8's
+    /// append-only rule, can never be filled by re-running.
+    ///
+    /// `owed` sees the same manifest and answers with a POSITION.
+    #[test]
+    fn a_month_pulled_to_day_five_is_short_where_the_boolean_gate_called_it_held() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("BANKNIFTY", 29, 5_800_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+        let window = (day(2026, 1, 1), day(2026, 1, 31));
+
+        // WHAT THE WITHDRAWN GATE SAW: a key that exists, therefore done.
+        let flagged = gaps_by(&cells.cells, |_| true);
+        assert!(
+            flagged.is_complete(),
+            "the boolean gate cannot see a partial month — this assertion is \
+             the bug, kept so the contrast below is a fact rather than a claim"
+        );
+
+        // WHAT A POSITION SEES.
+        let out = owed(&cells.cells, window, |_| Some(stamp(day(2026, 1, 5))));
+        assert_eq!(out.complete, 0);
+        assert_eq!(out.resume.len(), 1);
+        assert_eq!(
+            out.resume[0].from,
+            day(2026, 1, 6),
+            "the day AFTER the last held"
+        );
+        assert_eq!(
+            out.resume[0].through,
+            day(2026, 1, 29),
+            "the expiry, not the 31st"
+        );
+    }
+
+    /// **THE EXPIRY CLAMP.** Held to the expiry is held to the end.
+    ///
+    /// Without it the contract's final month reads short on every run: it stops
+    /// trading on the 29th and no vendor will ever send the 30th or 31st, so
+    /// the same fetch is reissued forever and returns empty each time.
+    #[test]
+    fn a_contract_held_through_its_expiry_owes_nothing_more_of_that_month() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("BANKNIFTY", 29, 5_800_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+        let window = (day(2026, 1, 1), day(2026, 1, 31));
+
+        let out = owed(&cells.cells, window, |_| Some(stamp(day(2026, 1, 29))));
+        assert!(
+            out.is_complete(),
+            "the 30th and 31st are not this contract's to owe"
+        );
+        assert_eq!(out.complete, 1);
+
+        // ONE DAY SHORT OF THE EXPIRY IS STILL SHORT.
+        let out = owed(&cells.cells, window, |_| Some(stamp(day(2026, 1, 28))));
+        assert_eq!(out.resume.len(), 1);
+        assert_eq!(out.resume[0].from, day(2026, 1, 29));
+    }
+
+    /// A key the manifest does not carry owes its whole span.
+    ///
+    /// `None` is not "complete and empty" — nothing has ever been written for
+    /// it, which is the strongest reason to ask.
+    #[test]
+    fn a_key_the_manifest_does_not_carry_owes_the_whole_span() {
+        let dec = month(2025, 12);
+        let cells = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[dec],
+            Timeframe::MINUTE_1,
+        );
+        let out = owed(&cells.cells, (day(2025, 11, 20), day(2026, 1, 31)), |_| {
+            None
+        });
+
+        assert_eq!(out.resume.len(), 1);
+        assert_eq!(
+            out.resume[0].from,
+            day(2025, 12, 1),
+            "the month opens after the window does"
+        );
+        assert_eq!(
+            out.resume[0].through,
+            day(2025, 12, 31),
+            "a January expiry does not clamp a December month — the month end does"
+        );
+    }
+
+    /// The window clamps on both sides, and the month clamps inside it.
+    #[test]
+    fn the_span_is_the_intersection_of_the_month_the_window_and_the_expiry() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+
+        // A window that opens mid-month and closes before the expiry.
+        let out = owed(&cells.cells, (day(2026, 1, 12), day(2026, 1, 20)), |_| None);
+        assert_eq!(
+            out.resume[0].from,
+            day(2026, 1, 12),
+            "the window opens after the month"
+        );
+        assert_eq!(
+            out.resume[0].through,
+            day(2026, 1, 20),
+            "the window closes before the expiry"
+        );
+
+        // Held past the window's end is held enough, even though the contract
+        // itself traded for nine days more.
+        let out = owed(&cells.cells, (day(2026, 1, 12), day(2026, 1, 20)), |_| {
+            Some(stamp(day(2026, 1, 20)))
+        });
+        assert!(out.is_complete(), "the operator did not ask for the 21st");
+    }
+
+    /// A resume point BEFORE the window is clamped up to it, never asked early.
+    #[test]
+    fn a_resume_point_before_the_window_opens_is_clamped_up_to_it() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+
+        // Held through the 3rd, but the operator asked from the 12th. Asking
+        // from the 4th would write eight days they did not request.
+        let out = owed(&cells.cells, (day(2026, 1, 12), day(2026, 1, 20)), |_| {
+            Some(stamp(day(2026, 1, 3)))
+        });
+        assert_eq!(out.resume.len(), 1);
+        assert_eq!(out.resume[0].from, day(2026, 1, 12));
+    }
+
+    /// A cell the window and the expiry leave no day in owes nothing.
+    #[test]
+    fn a_cell_with_no_fetchable_day_is_complete_rather_than_asked_for() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+
+        // The window opens after the contract expired.
+        let out = owed(&cells.cells, (day(2026, 1, 30), day(2026, 2, 28)), |_| None);
+        assert!(
+            out.is_complete(),
+            "nothing traded after the 29th to ask for"
+        );
+        assert_eq!(out.complete, 1);
+
+        // The window closes before the month opens.
+        let out = owed(&cells.cells, (day(2025, 1, 1), day(2025, 6, 30)), |_| None);
+        assert!(out.is_complete());
+    }
+
+    /// Every offered cell is accounted for, in either column.
+    ///
+    /// A count rather than a spot check: the failure this guards is a cell
+    /// falling out of both — neither fetched nor reported — which no example
+    /// test notices.
+    #[test]
+    fn every_offered_cell_lands_in_exactly_one_column() {
+        let months = [month(2025, 11), month(2025, 12), month(2026, 1)];
+        let cells = cells(
+            &[
+                found("BANKNIFTY", 29, 5_800_000),
+                found("NIFTY", 29, 2_600_000),
+            ],
+            &months,
+            Timeframe::MINUTE_1,
+        );
+        assert_eq!(cells.cells.len(), 6);
+
+        // A mixed manifest: nothing for the odd cells, complete for the even.
+        let seen = std::cell::Cell::new(0usize);
+        let out = owed(&cells.cells, (day(2025, 11, 1), day(2026, 1, 31)), |_| {
+            let n = seen.get();
+            seen.set(n + 1);
+            (n % 2 == 1).then(|| stamp(day(2026, 1, 31)))
+        });
+        assert_eq!(out.offered(), 6, "three cells each for two contracts");
+        assert_eq!(out.resume.len() + out.complete, 6);
+    }
+
+    /// An empty round is complete, not one empty row.
+    #[test]
+    fn nothing_offered_is_complete_and_offers_nothing() {
+        let out = owed(&[], (day(2026, 1, 1), day(2026, 1, 31)), |_| None);
+        assert!(out.is_complete());
+        assert_eq!(out.offered(), 0);
+        assert_eq!(out, Owed::default());
+    }
+
+    /// A stamp no calendar can read is treated as nothing held.
+    ///
+    /// The alternative is worse in both directions: trusting it would resume
+    /// from a day that does not exist, and refusing the cell would drop it from
+    /// both columns.
+    #[test]
+    fn a_stamp_outside_the_calendar_reads_as_nothing_held() {
+        let jan = month(2026, 1);
+        let cells = cells(
+            &[found("NIFTY", 29, 2_600_000)],
+            &[jan],
+            Timeframe::MINUTE_1,
+        );
+        assert_eq!(day_of(i64::MIN), None, "the reader must refuse it first");
+
+        let out = owed(&cells.cells, (day(2026, 1, 1), day(2026, 1, 31)), |_| {
+            Some(i64::MIN)
+        });
+        assert_eq!(out.resume.len(), 1);
+        assert_eq!(
+            out.resume[0].from,
+            day(2026, 1, 1),
+            "the whole span, as for a key never seen"
+        );
     }
 
     fn found(underlying: &str, day: u8, strike: i64) -> Found {
