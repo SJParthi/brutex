@@ -66,8 +66,14 @@ by building the workspace with `web/` moved aside.
   inferring it rather than this repository promising it**. Promising it to
   IntelliJ specifically is still **OPEN**, and is a smaller question than this
   row used to state.
-* **`web/build` can be stale.** Nothing ties it to `web/src`; see
-  `docs/06-limits.md` §38 and D-0068's cost list.
+* ~~**`web/build` can be stale.** Nothing ties it to `web/src`~~ — **closed.**
+  Gate W1 runs `npm run build` and fails on any diff under `web/build`, so the
+  committed bundle is now tied to the source that produced it. This row cited
+  `docs/06-limits.md` **§38**, which does not exist and never did; the subject
+  lives in **§82**, which records what W1, W2 and W3 close and which two of the
+  three are ratchets rather than floors. Both the dead reference and the false
+  claim are corrected here. D-0068's cost list still applies to the commit
+  itself.
 
 ### The two other configurations, and when they are not what you want
 
@@ -255,7 +261,7 @@ Four of the five operations rule 4 names are now measured:
 | Condition lookup | `C-V-04` | 0.965× popcount, 1 bit → 234 bits |
 | Mask evaluation | `C-V-01`, `C-V-02`, `C-V-03` | 0.998× hit→miss, **0.996× word 0 → word 5**, 1.037× k=1 → k=234 |
 | Duplicate rejection | `C-E-04` | 0.842× per bar, 10,000 → 100,000 bars |
-| Result append | **UNMEASURED** — `C-04`, `docs/06-limits.md` §53 | a `Vec::push`, O(1) amortised by construction rather than by a measurement taken here |
+| Result append | **MEASURED** — `C-E-11` | 0.633×–0.811×. `C-04` still carried UNMEASURED long after this landed; both are corrected together |
 | Bar lookup | `C-01` | already measured in `store` |
 
 The 0.996× is the one that matters: an early-exit loop would return sooner on a
@@ -268,7 +274,7 @@ cost varies **217×**, because the Newton loop exits on convergence — bounded,
 flat, now stated as the bound it is with the spread in `06-limits.md` §51. And a
 candle's cost varies **1.87×** with its content, recorded in §52.
 
-**Where it still does not reach.** Result append (`C-04`) and peak memory (`E-08`)
+**Where it still does not reach.** Peak memory (`E-08`) alone — result append was closed by `C-E-11` and this paragraph is corrected with it. `E-08`
 have no measurement, and both say so in `docs/04-invariants.md` with the word
 UNMEASURED rather than a test name. `E-08` needs a declared budget before it needs a
 measurement, and inventing a budget is what §3 rule 1 forbids.

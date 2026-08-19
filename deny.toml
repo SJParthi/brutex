@@ -112,6 +112,22 @@ deny = [
     { name = "node-bindgen" },
     { name = "neon" },
     { name = "jni" },
+    # ADDED BY D-0211, WHICH REMOVED `ring` FROM THE BUILD. The list above is
+    # about interpreted runtimes; these three are C and assembly, and nothing
+    # stopped them returning once the TLS feature that pulled them was changed.
+    # `ring` vendors 17 .c, 28 .h, 73 .S and 17 .asm and compiles them through
+    # its own build.rs -- both halves of what CLAUDE.md section 2 forbids
+    # without exception. `aws-lc-rs`/`aws-lc-sys` are the other rustls provider
+    # and are worse on the same axis. `cc` is the compiler driver whose presence
+    # is the tell that some crate is building C.
+    #
+    # A crate that legitimately needs one of these does not edit this list
+    # quietly: it needs a docs/05-decisions.md entry saying why section 2 bends,
+    # which is the whole point of naming them here rather than trusting a test.
+    { name = "ring" },
+    { name = "aws-lc-rs" },
+    { name = "aws-lc-sys" },
+    { name = "cc" },
 ]
 
 [sources]

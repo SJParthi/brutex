@@ -6395,6 +6395,11 @@ anything else here would be dishonest.** Concretely, what is being accepted:
    Edit a `.svelte` file, commit without rebuilding, and the repository serves
    the previous front end while the source says otherwise. Recorded as a real
    gap in `docs/06-limits.md` §38 — there is no gate for it today.
+   **[Added by D-0212, not a rewrite of the entry above: `§38` does not exist and
+   never did — the subject is `§82` — and "no gate for it today" stopped being
+   true when gate W1 landed. W1 runs the build and fails on any diff under
+   `web/build`. The sentence is left standing because this ledger is append-only;
+   the correction is this bracket.]**
 2. **Every front-end change is a diff nobody reads.** The bundler renames its
    chunks by content hash, so a one-line source change rewrites most of the
    36 file names. Review of `web/build` is not review; it is noise.
@@ -15925,7 +15930,7 @@ done.
 the same number. The two in `Shape::of` are the same. Recorded rather than
 hunted.
 
-`docs/06-limits.md` §82 carries the corrected figures and what would close the
+`docs/06-limits.md` §84 carries the corrected figures and what would close the
 rest.
 
 ---
@@ -16615,3 +16620,208 @@ the divergence the entry closes.
 **What this does NOT license.** No other extension anywhere, and no `.json`
 outside `.claude/`. `web/` remains the only path where the language rule itself
 is lifted.
+
+---
+
+### D-0211 — §2's last breach is closed: `ring` is gone and the workspace is Rust to the bottom
+
+**Decision.** `reqwest` moves from the `rustls-tls` feature to
+`rustls-tls-webpki-roots-no-provider`, which drops rustls's default `ring`
+provider, and **`rustls-graviola` replaces it**. `pull::ensure_tls_provider`
+installs it once per process, and CI gate 26 refuses a client construction that
+does not call it.
+
+**Why.** `crates/vocab/tests/workspace_is_rust.rs` named `ring` in capitals as
+**THE OPEN §2 BREACH**: 17 `.c`, 28 `.h`, 73 `.S` and 17 `.asm` — **135 non-Rust
+files** — compiled through its own `build.rs`, which invokes `cc`. §2 forbids
+"any vendored binding to another language" and "any `build.rs` that invokes an
+external process" *without exception*, and this was the one place the workspace
+did not hold. It arrived transitively: `pull` → `reqwest` → `rustls` → `ring`.
+
+**Measured, both sides, same tree, only the feature changed:**
+
+| | with `rustls-tls` | with `-no-provider` + graviola |
+|---|---|---|
+| `ring` object files built | **19** | **0** |
+| `Compiling ring` lines | 1 | 0 |
+| `cc` in the build graph | yes | **no** |
+| crates in the build graph | ~157 | **136** |
+| crates shipping `.c`/`.S`/`.asm`/`.js` | 1 | **0** |
+
+The only non-Rust file left anywhere in the graph is `libc`'s
+`etc/libc-util.py`, a repository maintenance script that neither its
+`Cargo.toml` nor its `build.rs` references and which no build executes.
+
+**Why graviola and not the pure-RustCrypto provider.** `rustls-rustcrypto` is
+100% Rust and was rejected: it is **`0.0.2-alpha`, last published 2024-04-24**,
+and its own README says **"⚠️USE THIS AT YOUR OWN RISK! DO NOT USE THIS IN
+PRODUCTION⚠️"**. Swapping audited crypto for that, on the path that carries a
+broker credential, would trade a documented language-purity breach for an
+undocumented security one. `graviola` ships **no `.c`, no `.S`, no `.asm` and no
+`build.rs` at all** — its assembly is `core::arch::asm!`, ordinary stable Rust
+needing no external assembler — and its bignum routines come from **s2n-bignum,
+formally proven**. It is written by the rustls maintainer.
+
+**What it costs, stated rather than discovered later.**
+
+* **Hardware.** x86_64 requires `aes`, `pclmulqdq`, `bmi1`, `adx` and more —
+  roughly Intel Haswell (2013) onward; aarch64 requires `aes`, `sha2`, `pmull`,
+  `neon`, which its README says *"notably excludes Raspberry PI 4 and earlier"*.
+  **Both failure modes are the loud kind**: an unsupported architecture is a
+  `compile_error!`, so a broken binary cannot be built; a missing CPU feature is
+  an `assert!` naming it — *"graviola requires aes CPU support"*. Neither can
+  produce a wrong answer, which is what §4 asks of a degradation.
+* **Maturity.** Its README says *"This project is very new, so exercise due
+  caution."* Recorded here rather than paraphrased away.
+* **A new way to be wrong.** Under `rustls-tls` a provider was compiled in and
+  installed by default, so forgetting was impossible. Now a `Client::builder()`
+  reached without `ensure_tls_provider()` compiles and panics at run time with
+  `No provider set`. That is why gate 26 exists, and it was proved to FAIL on a
+  deliberately unguarded site before it was trusted.
+
+**Verified.** `cargo test --workspace` **70 suites, 2,558 passed, 0 failed,
+exit 0** — the same suite count as the baseline before the change.
+`cargo deny check`: advisories ok, bans ok, licenses ok, sources ok.
+Licence `Apache-2.0 OR ISC OR MIT-0`, both already on `deny.toml`'s allow list.
+Real TLS handshakes completed by hand against three production stacks —
+`example.com`, `www.cloudflare.com` and **`aws.amazon.com`**, the last being the
+stack `pull::ssm` reads Parameter Store over — all HTTP 200.
+
+**What is NOT verified, and only the operator can.** A handshake with **Groww or
+Dhan**. That is a live vendor request, which no session but the operator's may
+originate. Every suite and key-exchange group those endpoints could negotiate is
+supported — TLS 1.2 and 1.3, AES-GCM 128/256, ChaCha20-Poly1305, ECDHE with RSA
+and ECDSA, X25519, P-256, P-384 and the X25519MLKEM768 hybrid — so failure is
+unlikely rather than impossible. **The acceptance test is one pull from the
+Ingest page.** If it refuses, reverting is the single feature string.
+
+**The guard test flipped rather than being deleted.**
+`the_open_breach_is_named_and_not_papered_over` asserted that native code was
+*still* compiled, so a green suite could not imply purity while `ring` was
+present. It carried its own retirement instruction — *"When `ring` leaves the
+tree, this test fails and tells you to delete it, which is the moment the
+workspace actually becomes Rust-only"* — and it did exactly that. Deleting it
+would leave the invariant unguarded in the direction that now matters, so the
+assertion is **inverted** into
+`no_declared_native_dependency_is_compiled_any_more`, proved to fail by marking
+`ring` compiled again. `DECLARED` stays: every entry is still in the lockfile as
+an unactivated optional, and `the_dependency_set_has_not_moved_without_review`
+reads it so a declaration can never outlive the crate it describes. That test's
+pin moved 189 → 176 with the registry scan run first, as its own comment demands.
+
+**This overturns a conclusion, and the reason it was wrong is the useful part.**
+D-0074 closed with: *"Removing the breach is not a one-line change. `rustls`
+takes `ring` or `aws-lc-rs`, and D-0051 measured the second as worse. Whether to
+accept it with an amended §2, or to drop HTTPS, remains the operator's
+decision."* Those three options — accept `ring`, accept `aws-lc-rs`, drop HTTPS —
+were the whole space as that entry saw it, and **it was a false trichotomy**.
+`rustls` 0.23 takes *any* `CryptoProvider`, and a third-party pure-Rust one
+existed. The entry was not careless; it enumerated the providers rustls itself
+ships and stopped there. The lesson is narrow and worth keeping: **an option list
+drawn from one project's defaults is not the option space**, and "no alternative
+in reach" deserves a search before it is written down. `docs/06-limits.md`'s
+"What is claimed now" list is corrected in the same change.
+
+**What this does NOT license.** No other native dependency, and no relaxation of
+§2. `deny.toml` still bans eleven crates by name, and `ring` is still absent from
+that list — a gap worth closing separately, because nothing today stops a second
+C crypto crate arriving under a different name.
+
+---
+
+### D-0212 — eight defects found by resolving references rather than reading prose
+
+**Decision.** Eight separate corrections, grouped because each was found the same
+way — by resolving a reference instead of trusting it — and because none is large
+enough to carry an entry alone.
+
+**1. `deny.toml` now bans `ring`, `aws-lc-rs`, `aws-lc-sys` and `cc` by name.**
+D-0211 removed `ring` from the build, and **nothing stopped it returning.** The
+ban list had eleven entries, all interpreted runtimes — `pyo3`, `mlua`, `v8`,
+`jni` — and no C-or-assembly crate at all, because until D-0211 the workspace had
+accepted one. A removal with no guard is a state, not a rule. The mechanism was
+proved rather than assumed: banning `axum`, which *is* in the graph, produced
+`error[banned]: crate 'axum = 0.8.9' is explicitly banned` and `bans FAILED`;
+restoring gave `bans ok`.
+
+**2. `C-04` claimed UNMEASURED long after `C-E-11` measured it.** The row read
+*"the engine appends to a `Vec`, whose amortised push is O(1) by construction
+rather than by measurement here"* while `C-E-11` had measured exactly that at
+**0.633×–0.811×**. `docs/07-plan.md` §6 carried the same stale claim in its rule-4
+table **and** in the paragraph below it, which said two operations were unmeasured
+when only `E-08` is. All three are corrected. The row is kept rather than deleted:
+`C-04` is the id rule 4's fifth operation was cited under.
+
+**A near-miss worth recording.** The first draft of that correction named
+`engine::bench::result_append_is_flat` as the proof — **a function that does not
+exist.** It was invented because it sounded like the others. Gate 10 would have
+caught it; it was caught first by resolving the name against the tree. The real
+function is `result_append_costs_the_same_however_many_are_held`. A plausible
+identifier is the easiest kind of wrong thing to write into this file.
+
+**3. `docs/06-limits.md` had two `§82` and two `§43`.** Four sections, two
+numbers. Citations pointed at **both** members of the `§82` pair, so a reader
+following one had no way to know which they would land on — the ambiguity D-0045
+described for `C-16`, recurring in a different document. Disambiguated by reading
+each citation: the browser-gates section keeps `§82` (cited from D-0189's
+ratchet-not-floor argument and from the render duplication entry); the
+`crates/indicators` mutants section becomes **`§84`**, and its two citations —
+`docs/05-decisions.md` and `crates/indicators/src/pattern.rs:1710` — are updated
+with it. The mutation-floor section becomes **`§85`**. Every section number in
+that file is now unique.
+
+**4. `§38` never existed, and two live citations pointed at it.** Both were about
+`web/build` going stale. The subject lives in `§82`. **The claim was also false:**
+`docs/07-plan.md` §0 said *"Nothing ties `web/build` to `web/src`"*, and gate W1
+has tied them since it landed — it runs the build and fails on any diff under
+`web/build`. The plan's row is corrected. The ledger's copy is left standing with
+an additive bracket, because this file is append-only and a bracket is not a
+rewrite.
+
+**5. `CLAUDE.md` §10 listed eight documents while fourteen existed.** Six carried
+no stated authority, so a reader could not tell whether they bound anything. All
+fourteen are listed. Two numbers are used twice — `07-` and `09-` — which is a
+naming defect and is now named rather than hidden.
+
+**6. §10's precedence rule gained the caveat that had already bitten it.** It said
+this file wins a disagreement and the document is the stale copy. D-0208 found the
+opposite: `docs/01-architecture.md` was right and §5 was stale, because
+`crates/core/tests/graph.rs` checks that document and **nothing checks this
+file**. The rule resolves a contradiction; it is not evidence about which copy is
+correct. Where a document is gate-checked and this file is not, believe the gate.
+
+**7. `crates/cli/src/main.rs` documented two of four commands.** Its header read
+`cli sweep | cli auto`, omitting `audit` and — more importantly —
+`sweep-stored`, the only command that touches real market data. The operator-facing
+`USAGE` string was correct all along, which is why the drift went unnoticed: a doc
+comment reaches nobody at a terminal.
+
+**8. §3 rule 7 named an enforcement that is not wired.** It read *"Enforced by an
+index-guarded accessor, not by review"*, meaning `indicators::PastPrefix`.
+Measured: that type has **zero production call sites** — one doc comment, two
+declaration lines, and every other reference inside `#[cfg(test)]`. **The property
+holds; the stated reason does not.** What holds it is the shape of the fold:
+`Column::build` walks `for (index, bar) in bars.iter().enumerate()` and hands the
+evaluator one bar at a time, so a later bar is not in scope when an earlier one
+folds — look-ahead is unreachable rather than rejected.
+
+The distinction matters because it is not inherited. A future consumer that takes
+`&[Candle]` and indexes into it gets no protection at all, which is precisely why
+`cli` and `runner` pass `Availability::Absent` instead of deriving it —
+`vwap::availability_of` reads the whole slice. Rule 7 now says what is true and
+names what would make the original sentence true: wire `PastPrefix` into the fold,
+or gate slice indexing on that path. Neither is done here. **OPEN.**
+
+**Also removed:** `header.n_valid`, an untracked zero-byte file at the repository
+root from a stray shell redirect on 2026-08-18. Harmless while untracked, and a
+gate 1 failure the moment anyone runs `git add -A`.
+
+**Cost.** Documentation, one manifest, one module header. No behaviour changes and
+no gate logic changes — the `deny.toml` addition is the only executable line, and
+it forbids what is already absent.
+
+**What this does NOT license.** The remaining 44 duplicate ids in
+`docs/04-invariants.md` are untouched. They are three overloaded letters — `I`,
+`P`, `G` — each naming two unrelated subjects across 88 rows, and fixing them
+means choosing which subject keeps each letter and rewriting the bench labels that
+print them. That is a scope call, not a correction, and it stays **OPEN**.

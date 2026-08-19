@@ -2824,13 +2824,31 @@ about this, and the two bounds are different numbers for different reasons.
 
 ---
 
-## 42. The binary links C and hand-written assembly, and no gate said so until now
+## 42. ~~The binary links C and hand-written assembly, and no gate said so until now~~ — CLOSED by D-0211
 
-**Measured, on this tree:** `nm target/release/api` returns **72 `ring_core`
-symbols**. `ring` 0.17.14 arrives `reqwest → rustls → ring`, vendors 17 `.c`, 28
-`.h`, 73 `.S` and 17 `.asm` files, and compiles them through its own `build.rs`
-calling `cc::Build::compile`. Five `target/*/build/ring-*/out/` directories hold
+**The binary no longer links either.** This section is kept because the
+measurement below is what made the removal checkable, and because a limit that
+was real once is the one a reader will re-derive. Everything in it is now past
+tense.
+
+**Measured when it was true:** `nm target/release/api` returned **72 `ring_core`
+symbols**. `ring` 0.17.14 arrived `reqwest → rustls → ring`, vendored 17 `.c`, 28
+`.h`, 73 `.S` and 17 `.asm` files, and compiled them through its own `build.rs`
+calling `cc::Build::compile`. Five `target/*/build/ring-*/out/` directories held
 the resulting `libring_core_0_17_14_.a`.
+
+**Measured after D-0211,** same tree, only the `reqwest` TLS feature changed:
+a clean build produces **zero** `ring` object files against nineteen before,
+`cc` has left the build graph, and no crate in the graph ships `.c`, `.h`, `.S`,
+`.asm` or `.js`. `rustls-graviola` replaces it — no C, no assembler source, no
+`build.rs` — and `pull::ensure_tls_provider` installs it, with **CI gate 26**
+refusing a client construction that does not call it.
+
+**The one guard that still matters, and is unchanged.**
+`crates/lake/Cargo.toml`'s `default-features = false` is still load-bearing for
+exactly the reason its comment gives: the `encryption` feature pulls `ring` back.
+Removing `ring` from the TLS path did not remove it from the registry, and that
+line is now the nearest remaining way for it to return.
 
 ### What was claimed instead
 
@@ -2844,16 +2862,28 @@ tree carried two manifests contradicting each other and neither was checked.
 
 ### What is claimed now
 
-* A **C compiler is required** to build this workspace. That was always true and
-  was written down nowhere.
-* Exactly **one** dependency compiles bundled native source: `ring`, through
-  `cc`. The other native-looking packages are declarations only —
-  `core-foundation-sys` (macOS), `windows-sys` (Windows), and `js-sys`/`web-sys`
-  which resolve solely because `deny.toml` lists `wasm32-unknown-unknown` as a
-  graph target and are in no native build.
-* D-0074 rules that this is permitted and **declared**. §2's four prohibitions
-  are about what *this repository* contains and runs; a third-party crate's own
-  build script is neither.
+**CLOSED by D-0211 — every claim in this list was true until `ring` was removed,
+and each is now stated in the past tense with what replaced it.** The section is
+kept rather than deleted because a limit that was real once is the limit a reader
+will re-derive, and because the arithmetic below is what made the removal
+checkable.
+
+* A **C compiler was required** to build this workspace. That was always true and
+  was written down nowhere until this section. **It is no longer true**: `cc`
+  left the build graph with `ring`, and a clean build produces zero `ring` object
+  files where it previously produced nineteen.
+* Exactly **one** dependency compiled bundled native source: `ring`, through
+  `cc`. **Now none does.** The other native-looking packages were declarations
+  only and still are — `core-foundation-sys` (macOS), `windows-sys` (Windows),
+  and `js-sys`/`web-sys`, which resolve solely because `deny.toml` lists
+  `wasm32-unknown-unknown` as a graph target and are in no native build. The one
+  non-Rust file left anywhere in the graph is `libc`'s `etc/libc-util.py`, a
+  repository maintenance script no build executes.
+* D-0074 ruled that this was permitted and **declared**, on the reading that §2's
+  four prohibitions are about what *this repository* contains and runs and that a
+  third-party crate's own build script is neither. **That reading is no longer
+  load-bearing** — the question it settled has gone away — and D-0211 did not
+  need to overturn it.
 
 ### What is NOT claimed
 
@@ -4748,7 +4778,7 @@ its subject is deleted rather than left reading as coverage.
 
 ---
 
-## 82. `crates/indicators` has 49 surviving mutants, and they are almost all boundaries
+## 84. `crates/indicators` has 49 surviving mutants, and they are almost all boundaries
 
 Measured 2026-08-18, `cargo-mutants 26.2.0`, first run ever over this crate:
 **589 mutants, 506 caught, 49 missed, 32 unviable, 2 timed out.**
@@ -4918,7 +4948,7 @@ already covers. The run that would say is the one that did not finish.
 <!-- Arrived on `main` as §16 and renumbered here: this file already had a
      §16 ("The pasted-secret check is a backstop") and runs to §42, so the two
      collided on a number rather than on content. Nothing in it changed. -->
-## 43. The mutation floor is five, not zero
+## 85. The mutation floor is five, not zero
 
 X-07 asks that no mutant survive on a touched module. Measured over
 `crates/core` with `cargo-mutants 26.2.0`, 252 mutants, 15 survived. Ten were

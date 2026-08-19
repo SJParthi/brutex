@@ -99,8 +99,30 @@ CI gate 1 enforces this by walking every tracked file. It is not advisory.
 5. **Idempotence.** Same inputs, same outputs, byte for byte. Reruns are safe.
 6. **Honest limits.** If a bound cannot be met, say so. Never claim a
    measurement you did not take. Label extrapolations as extrapolations.
-7. **No look-ahead.** At bar N the engine may read bars 0..N. Enforced by an
-   index-guarded accessor, not by review.
+7. **No look-ahead.** At bar N the engine may read bars 0..N.
+
+   **Enforced by the SHAPE of the fold, not by an accessor.** This rule used to
+   end *"enforced by an index-guarded accessor, not by review"*, naming
+   `indicators::PastPrefix`. That type exists and has **zero production call
+   sites** — measured: one doc comment and two declaration lines, every other
+   reference inside `#[cfg(test)]`. The property does hold, but not for the
+   stated reason.
+
+   What actually holds it: `Column::build` walks
+   `for (index, bar) in bars.iter().enumerate()` and hands the evaluator **one
+   bar at a time**, so a later bar is not in scope when an earlier one folds —
+   look-ahead is unreachable rather than rejected. `Evaluator` keeps its own
+   running state and is never given the slice.
+
+   `PastPrefix` remains for a caller that indexes rather than streams, and is
+   the right tool there. Two rules follow from the distinction, and the second
+   is the one that bites: **a new consumer that takes `&[Candle]` and indexes
+   into it inherits no protection at all** — `vwap::availability_of` reads the
+   whole slice, which is exactly why `cli` and `runner` pass
+   `Availability::Absent` rather than deriving it. Wiring `PastPrefix` into the
+   fold, or writing a gate that refuses slice indexing on that path, would make
+   the original sentence true; until one of those lands this is the honest
+   statement. D-0212.
 8. **Append-only history.** Condition bits are never renumbered or reused.
    Store format versions are never mutated in place.
 
@@ -291,6 +313,22 @@ Report failures plainly. Do not paper over a red gate.
 | `docs/05-decisions.md` | append-only ledger |
 | `docs/06-limits.md` | what is not constant-time, and what is unmeasured |
 | `docs/07-plan.md` | the requirements, what is done, what is next, and what blocks it |
+| `docs/07-o1-architecture.md` | the layered O(1) design the bench gate measures against |
+| `docs/08-vendor-samples.md` | what a real vendor payload actually looked like |
+| `docs/09-design-sources.md` | where the front end's design came from |
+| `docs/09-verify.md` | the verification surface and what it proves |
+| `docs/10-shared-core.md` | the crates shared with `tickvault`, and their contracts |
+| `docs/11-findings.md` | the adversarial findings ledger — append only, no row deleted |
+
+**The table was eight rows while fourteen documents existed**, so six carried no
+stated authority at all and a reader had no way to know whether they bound
+anything. All fourteen are listed now. Two numbers are used twice — `07-` and
+`09-` — which is a naming defect, not two documents pretending to be one; both
+of each pair are named above and neither is authoritative over the other.
 
 If this file and a document disagree, **this file wins** and the document is
-the stale copy to fix.
+the stale copy to fix — **with one caveat that has already bitten.** That rule
+resolves a *contradiction*; it is not evidence about which copy is *correct*.
+D-0208 found the opposite case: `docs/01-architecture.md` was right and §5 was
+stale, because a test checks that document and nothing checks this file. Where a
+document is gate-checked and this file is not, believe the gate.

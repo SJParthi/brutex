@@ -1707,7 +1707,7 @@ mod degenerate {
     /// { close }`. At `open == close` both arms return the same number, so `>`
     /// and `>=` compute the same function and no assertion can separate them.
     /// The two inside `Shape::of` have the same shape. Recorded at
-    /// `docs/06-limits.md` §82 rather than hunted.
+    /// `docs/06-limits.md` §84 rather than hunted.
     #[test]
     fn a_doji_is_neither_bullish_nor_bearish() {
         // `open == close` is exactly where `>` and `>=` disagree, and the only

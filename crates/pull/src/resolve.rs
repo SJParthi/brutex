@@ -418,6 +418,7 @@ impl HttpDocuments {
     /// means the TLS backend is unavailable — a deployment fault rather than an
     /// exchange one, and worth distinguishing.
     pub fn new() -> Result<Self, String> {
+        crate::ensure_tls_provider();
         let client = reqwest::Client::builder()
             .timeout(core::time::Duration::from_secs(DOCUMENT_TIMEOUT_SECS))
             .redirect(reqwest::redirect::Policy::none())

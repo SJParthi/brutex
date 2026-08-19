@@ -94,6 +94,7 @@ telemetry = { path = "../telemetry", version = "0.1.0" }
 # tracked, which is the only reading under which this passes. Recorded in
 # D-0071 and registered in docs/06-limits.md; §2 itself is untouched.
 reqwest = { workspace = true }
+rustls-graviola = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 

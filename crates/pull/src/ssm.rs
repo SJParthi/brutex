@@ -657,6 +657,7 @@ pub async fn get_parameter(
     };
     let authorization = signable.authorization(identity)?;
 
+    crate::ensure_tls_provider();
     let client = reqwest::Client::builder()
         .timeout(core::time::Duration::from_secs(CREDENTIAL_TIMEOUT_SECS))
         // REDIRECTS ARE NOT FOLLOWED HERE EITHER, for the reason D-0050 gives

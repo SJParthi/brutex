@@ -9,7 +9,22 @@
 //! and deliberately so: two binaries that end differently are two things an
 //! operator has to learn.
 //!
-//! Usage: `cli sweep SESSIONS MIN_HITS | cli auto SESSIONS`.
+//! # The four commands
+//!
+//! ```text
+//! cli sweep        SESSIONS MIN_HITS                          generated bars
+//! cli audit        SESSIONS MIN_HITS                          generated bars
+//! cli auto         SESSIONS                                   generated bars
+//! cli sweep-stored VENDOR UNDERLYING RUNG YEAR MONTH MIN_HITS  REAL bars
+//! ```
+//!
+//! This list read `sweep | auto` and omitted half the surface, including the
+//! only command that touches real market data. `sweep-stored` also needs the
+//! binary stamped -- `BRUTEX_COMMIT=$(git rev-parse HEAD) cargo build --release
+//! -p cli` -- because CLAUDE.md section 3 rule 3 forbids a computation whose run
+//! identity cannot be recorded, and an unstamped build refuses before it reads a
+//! bar. [`cli::USAGE`] is what an operator actually sees; a doc comment here
+//! reaches nobody at a terminal, which is why it had drifted unnoticed.
 
 // A BINARY IS ITS OWN CRATE ROOT. `lib.rs` carries this attribute and it does
 // not reach here, so CI gate 16 checks every root separately.

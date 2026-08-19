@@ -78,6 +78,37 @@
 
 #![forbid(unsafe_code)]
 
+/// Installs the process-wide TLS cryptography provider, exactly once.
+///
+/// # Why this function exists at all
+///
+/// `rustls` 0.23 ships no cryptography of its own: a provider must be chosen.
+/// The default `reqwest` feature selects `ring`, which vendors **135 non-Rust
+/// files** -- 17 `.c`, 28 `.h`, 73 `.S`, 17 `.asm` -- and compiles them through
+/// its own `build.rs`. That is `CLAUDE.md` s2's "vendored binding to another
+/// language" and "build.rs that invokes an external process", both of which s2
+/// forbids without exception, and it was the workspace's one open breach.
+///
+/// `graviola` replaces it with **no C, no assembler source file and no build
+/// script at all** -- its assembly is `core::arch::asm!`, which is ordinary
+/// stable Rust and needs no external assembler.
+///
+/// # Why it is idempotent rather than called once from `main`
+///
+/// `install_default` refuses a second call, and a test binary has no `main` of
+/// this crate's. A `Once` makes every entry point -- the server, a test, a
+/// bench -- reach a client through the same guarantee, so a caller cannot
+/// forget it and get "No provider set" at run time instead of compile time.
+pub fn ensure_tls_provider() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // The Err arm means a provider was already installed by someone else,
+        // which is the outcome this function wants. It is not a failure and is
+        // deliberately not escalated.
+        let _ = rustls_graviola::default_provider().install_default();
+    });
+}
+
 pub mod archive;
 /// THE CALLER `crate::fno` NEVER HAD -- expiries, then contracts, then bars.
 pub mod chain;

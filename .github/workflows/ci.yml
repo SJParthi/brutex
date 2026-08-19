@@ -3493,6 +3493,63 @@ jobs:
           fi
           echo "OK — the release profile still panics on overflow and aborts on panic."
 
+      - name: Gate 26 — every HTTPS client installs the TLS provider
+        run: |
+          set -eu
+          # `rustls` 0.23 ships NO cryptography of its own: a provider must be
+          # installed into the process before the first client is built. A
+          # `Client::builder()` reached without `pull::ensure_tls_provider()`
+          # COMPILES CLEANLY and panics at run time with "No provider set" --
+          # a failure the compiler cannot see and a test finds only if it
+          # happens to drive that exact path.
+          #
+          # This gate exists because D-0211 removed `ring`. Under the old
+          # `rustls-tls` feature a provider was compiled in and installed by
+          # default, so forgetting was impossible; now it is possible, and the
+          # cost of forgetting is a panic in front of an operator rather than a
+          # red build. The rule is mechanical, so a gate can hold it.
+          #
+          # WHAT IT CANNOT SEE, said plainly:
+          #   * A client built through a helper in another file. The check is
+          #     per-file, so a wrapper that hides `Client::builder()` behind its
+          #     own name defeats it exactly as a rename defeats gate 13.
+          #   * Whether the call happens BEFORE the builder on the executed
+          #     path. It counts occurrences in a file, not order.
+          # Both are the conservative direction: it can miss, it cannot
+          # falsely accuse.
+          #
+          # NO UNTRUSTED INPUT REACHES THIS STEP: `git ls-files` and the
+          # patterns below. Gate 1c's discipline.
+          bad=0; sites=0; files=0
+          for f in $(git ls-files 'crates/*.rs'); do
+            n=$( { grep -c 'Client::builder()' "$f" || true; } | tr -d ' ')
+            [ "$n" -eq 0 ] && continue
+            files=$((files + 1)); sites=$((sites + n))
+            g=$( { grep -c 'ensure_tls_provider()' "$f" || true; } | tr -d ' ')
+            if [ "$g" -lt "$n" ]; then
+              printf 'UNGUARDED CLIENT  %s — %s Client::builder() call(s), %s ensure_tls_provider()\n' \
+                "$f" "$n" "$g"
+              bad=1
+            else
+              printf '  ok  %s — %s site(s), %s guard(s)\n' "$f" "$n" "$g"
+            fi
+          done
+          echo "checked ${sites} client construction site(s) in ${files} file(s)"
+          # A pattern that stops matching is the failure mode gate 8 shipped
+          # with: it reported success while measuring nothing.
+          if [ "$sites" -eq 0 ]; then
+            echo "GATE 26 FOUND NO CLIENT SITES. Either reqwest left the workspace"
+            echo "or the pattern stopped matching. A silent zero is not a pass."
+            exit 1
+          fi
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "Call pull::ensure_tls_provider() before building the client."
+            echo "See docs/05-decisions.md D-0211."
+            exit 1
+          fi
+          echo "OK — every client construction is guarded."
+
       - name: Gate 19 — a failure an operator can see is a failure the log records
         run: |
           set -euo pipefail

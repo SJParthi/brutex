@@ -56,14 +56,14 @@ const DECLARED: &[Declared] = &[
     Declared {
         name: "ring",
         ships: "17 .c, 28 .h, 73 .S, 17 .asm, plus build.rs",
-        compiled_on_this_target: true,
+        compiled_on_this_target: false,
         why: "reqwest -> rustls -> ring. THE OPEN §2 BREACH. Measured: `nm` on the \
               release binary returns 72 ring_core symbols, so this is linked, not dormant.",
     },
     Declared {
         name: "cc",
         ships: "1 .c",
-        compiled_on_this_target: true,
+        compiled_on_this_target: false,
         why: "The compiler driver ring builds through. Its own .c is a probe fixture, \
               but the crate's PURPOSE is invoking a C compiler from a build script.",
     },
@@ -230,14 +230,22 @@ fn the_dependency_set_has_not_moved_without_review() {
     // `vocab` -- every one already in this lock. So the delta is exactly the member
     // itself and NO third-party code entered the tree with it. `DECLARED` is
     // unchanged because there is nothing new to declare.
+    // 189 -> 176 IS THE REMOVAL OF `ring`, AND THE SCAN WAS RUN BEFORE THIS
+    // NUMBER MOVED. `reqwest` moved from the `rustls-tls` feature to
+    // `rustls-tls-webpki-roots-no-provider`, which drops rustls's default
+    // `ring` provider, and `rustls-graviola` replaces it. Thirteen names left
+    // the lockfile and none arrived that ships non-Rust source: the registry
+    // scan over the resulting build graph found ZERO crates shipping .c, .h,
+    // .S, .asm, .cc, .cpp or .js. graviola itself ships none of those and has
+    // no build.rs -- its assembly is `core::arch::asm!`, ordinary stable Rust.
     assert_eq!(
         names.len(),
-        189,
+        176,
         "the dependency count changed. Run the registry scan for non-Rust source \
          before re-pinning: any new crate may ship C, and DECLARED is the record."
     );
     assert_eq!(
-        h, 0xB802_B1B9_67F8_38F3,
+        h, 0xDA2C_4162_D043_B7FE,
         "the dependency SET changed — a package was added, removed or renamed. \
          Scan the new set for .c/.cc/.h/.S/.asm and build.rs, update DECLARED if \
          anything ships non-Rust source, then re-pin this fingerprint. Do not \
@@ -245,32 +253,48 @@ fn the_dependency_set_has_not_moved_without_review() {
     );
 }
 
-/// The breach is real, it is named, and this test says so out loud rather than
-/// letting a green suite imply the workspace is pure Rust.
+/// **§2 is satisfied without exception, and this test is what keeps it that way.**
 ///
-/// It passes today **because the breach is declared**, not because it is
-/// absent. When `ring` leaves the tree, this test fails and tells you to delete
-/// it — which is the moment the workspace actually becomes Rust-only.
+/// This replaces `the_open_breach_is_named_and_not_papered_over`, which asserted
+/// the opposite: that at least one declared crate was still compiled, so a green
+/// suite could not imply purity while `ring` was in the tree. That test carried
+/// its own retirement instruction — *"When `ring` leaves the tree, this test
+/// fails and tells you to delete it, which is the moment the workspace actually
+/// becomes Rust-only"* — and this is that moment, so the assertion is inverted
+/// rather than deleted. Deleting it would leave the invariant unguarded in the
+/// exact direction that now matters.
+///
+/// The `DECLARED` table stays. Every entry is still in the lockfile as an
+/// unactivated optional dependency, and
+/// `the_dependency_set_has_not_moved_without_review` reads it to prove a
+/// declaration never outlives the crate it describes.
 #[test]
-fn the_open_breach_is_named_and_not_papered_over() {
+fn no_declared_native_dependency_is_compiled_any_more() {
     let packages = lockfile_packages();
     let compiled: Vec<&Declared> = DECLARED
         .iter()
         .filter(|d| d.compiled_on_this_target && packages.contains(d.name))
         .collect();
 
-    assert!(
-        !compiled.is_empty(),
-        "no native code is compiled into this workspace any more — delete this test \
-         and the DECLARED table, because §2 is finally satisfied without exception"
-    );
+    // The failure text carries `ships` and `why` from the table, not just the
+    // name. A reader who trips this needs to know WHAT came back and HOW it got
+    // in -- "ring is compiled again" is a fact, "ring ships 17 .c ... via
+    // reqwest -> rustls -> ring" is an instruction. It also keeps both fields
+    // read: the test this replaced printed them, and dropping the print made
+    // them dead code under `-D warnings`, which is the compiler noticing that
+    // the declaration had stopped being used for anything.
+    let named: Vec<String> = compiled
+        .iter()
+        .map(|d| format!("{} (ships {}) — {}", d.name, d.ships, d.why))
+        .collect();
 
-    // Named in the failure text of nothing, but printed so `cargo test -- --nocapture`
-    // shows an operator exactly what is in the tree and why.
-    for d in compiled {
-        println!(
-            "§2 BREACH, declared: {} ships {} — {}",
-            d.name, d.ships, d.why
-        );
-    }
+    assert!(
+        compiled.is_empty(),
+        "native code is compiled into this workspace again:\n  {}\n\n§2 forbids \
+         a vendored binding to another language and a build.rs that invokes an \
+         external process, both without exception. Either remove the dependency \
+         or record the breach in DECLARED and change this assertion back — but \
+         do not let a green suite imply purity that is gone. See D-0211.",
+        named.join("\n  ")
+    );
 }
