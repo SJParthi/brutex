@@ -486,20 +486,32 @@ fn note_not_landed(member: &Member, why: &str) {
     );
 }
 
-/// A DERIVED RUNG THAT WOULD NOT FILE, at `warn` and never silently.
+/// Records one derived-rung shortfall in the log, beside the receipt.
 ///
-/// The minute bars are already committed when this fires, so the member did not
-/// fail — a copy of it did. That distinction is the whole reason this is a log
-/// line rather than a `Failure` on the receipt: a run that stored every minute
-/// it was asked for and could not fold one of them into thirty is not a run
-/// that failed, and reporting it as one would send an operator to re-pull data
-/// he already has. `CLAUDE.md` §4 still requires it NAMED, which is this.
+/// # Why both surfaces and not one
+///
+/// The `Failure` this accompanies reaches the receipt, and a receipt is read by
+/// whoever is watching the run. `/logs` is what gets handed to a diagnosis
+/// afterwards, and gate 19 exists because a failure visible on one and absent
+/// from the other reads as a quiet file to the operator who arrives later.
+///
+/// At `error` rather than `warn`: this is a shortfall the run REPORTS as a
+/// failure, so a log line that sat below the default floor would be the same
+/// silence in a different place.
+fn note_derived_shortfall(member: &Member, short: &Failure) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::error("pull.derived", "a folded rung did not land")
+            .with("instrument", telemetry::Value::Str(&member.instrument))
+            .with("why", telemetry::Value::Str(&short.why)),
+    );
+}
+
 /// A member whose folded rungs did not all land, or [`None`] when they did.
 ///
 /// # The failure this exists to stop being silent
 ///
-/// `derive` returning `Err` fed [`note_not_derived`] and nothing else — a
-/// telemetry line, and no entry in `failures`. So a disk that filled, or a
+/// `derive` returning `Err` once fed a telemetry line and nothing else — no
+/// entry in `failures` at all. So a disk that filled, or a
 /// permission lost, AFTER the pulled rung landed but before the folded ones did
 /// produced a run that reported SUCCESS: `Outcome::Stored` journalled, the
 /// receipt reading "every row accounted for", and seven of eight timeframes
@@ -651,6 +663,9 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                 done.derived_files += landed.derived;
                 // A DERIVED RUNG THAT DID NOT LAND IS A FAILURE, NOT A NOTE.
                 if let Some(short) = derived_shortfall(member, &landed) {
+                    // BOTH SURFACES, NEVER ONE. The receipt is for whoever is
+                    // watching; the log is what a diagnosis is handed later.
+                    note_derived_shortfall(member, &short);
                     done.failures.push(short);
                 }
                 for held in landed.entries {
