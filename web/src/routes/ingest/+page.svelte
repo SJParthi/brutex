@@ -4116,37 +4116,8 @@
     return out;
   });
 
-  // ---- the strip: one verdict, the pills that partition it, the one action
-
-  /** Counts by verdict, one pass. `0` for a verdict nothing is in. */
-  const censusCounts = $derived.by(() => {
-    const t = { fail: 0, never: 0, short: 0, retry: 0, unknown: 0, beyond: 0, ok: 0 };
-    for (const r of censusRows) t[r.state] += 1;
-    return t;
-  });
-  /** Non-zero only, worst first. A pill reading "0 failed" is a non-event. */
-  const censusPills = $derived(
-    VORDER.filter((k) => censusCounts[k] > 0).map((k) => ({ k, count: censusCounts[k] }))
-  );
-  /** The partition's own sum, shown on screen beside the total it must reach. */
-  const censusDrawn = $derived(censusPills.reduce((a, p) => a + p.count, 0));
-
-  /** Month files inside the window that are neither settled nor out of reach. */
-  const censusShort = $derived(censusRows.reduce((a, r) => a + r.unproved, 0));
-  /** What the store already holds for exactly these series — measured, not asked. */
-  const heldInWindow = $derived(
-    censusRows.reduce((a, r) => a + r.months.filter((m) => m.got !== null).length, 0)
-  );
-  const heldBarsInWindow = $derived(censusRows.reduce((a, r) => a + r.got, 0));
   /** Sessions inside the window, from the same calendar every row is judged by. */
   const windowSessions = $derived([...sessionsByMonth.values()].reduce((a, b) => a + b, 0));
-  /** The subtitle: the size of the ask, beside the thing it describes. */
-  const censusSub = $derived(
-    windowOk
-      ? `${dayLabel(from)} – ${dayLabel(to)} · ${n(windowDays)} day(s) · ${n(windowSessions)} NSE session(s) · ${n(windowMonths.length)} month file(s) · ${n(censusRows.length)} series`
-      : 'no window picked — both ends need a date before a series can be counted'
-  );
-
   /**
    * WHY THE CENSUS IS EMPTY, when it is empty — always a control the reader can
    * reach, in the order the cascade asks for them.
@@ -4160,72 +4131,12 @@
     if (rungsChosen.length === 0) return ['No timeframe is ticked', 'Tick at least one bar length. A window with no rung names no series.'];
     if (!windowOk) return ['No window', 'Both ends of the window need a date before anything can be counted against it.'];
     if (windowMonths.length === 0) return ['No month file in that window', `${dayLabel(from)} – ${dayLabel(to)} touches no month file at all.`];
-    return ['Nothing matches', 'Clear the verdict filter above to see every row.'];
+    return ['Nothing matches', 'Every row was filtered out. Widen the window, or tick another instrument, segment or timeframe above.'];
   }
-
-  /** The one sentence at the head of the table. Five states, five questions. */
-  const censusVerdict = $derived.by(() => {
-    const t = censusCounts;
-    const total = censusRows.length;
-    if (total === 0) {
-      const b = censusBlocker();
-      return { tone: 'warn', title: b[0], why: `${b[1]} Nothing has been asked for, so nothing can be said to be complete.` };
-    }
-    const open = t.fail + t.never + t.short + t.retry;
-    if (t.ok === total) {
-      return {
-        tone: 'good',
-        title: total === 1 ? 'Complete — the one series in this window is verified' : `Complete — all ${n(total)} series in this window are verified`,
-        why: `Every month file from ${dayLabel(from)} to ${dayLabel(to)} holds at least the bars the NSE calendar expects. Nothing is outstanding and no pull is warranted.`
-      };
-    }
-    if (!open && t.beyond === total) {
-      return {
-        tone: 'warn',
-        title: 'None of this window is on this feed',
-        why: `Not one of the ${n(total)} series is served this far back — ${floorSentence ?? 'the feed states no floor'} Nothing failed and nothing is outstanding, because there was never anything here to ask for.`
-      };
-    }
-    if (!open) {
-      return {
-        tone: 'good',
-        title: 'As complete as it will ever get',
-        why: `${n(t.ok)} of the ${n(total)} series are verified and the rest are out of reach or have no yardstick at this rung. Nothing is short, nothing is empty, nothing failed.`
-      };
-    }
-    if (t.fail > 0) {
-      return {
-        tone: 'bad',
-        title: `Not complete — ${n(t.fail)} of ${n(total)} series failed and need you`,
-        why: `The sweep ladder for ${feedName(feeds.active)} has halted: ${feedHalt}. A retry on its own will NOT help — fix that cause, then pull.`
-      };
-    }
-    if (t.never > 0) {
-      return {
-        tone: 'warn',
-        title: `Not complete — ${n(t.never)} of ${n(total)} series ${t.never === 1 ? 'has' : 'have'} a month nothing has ever pulled`,
-        why: `/store.json has no entry at all for at least one month file of each. A pull IS warranted and will very likely settle it — nothing has tried once.`
-      };
-    }
-    if (t.short > 0) {
-      return {
-        tone: 'warn',
-        title: `Not complete — ${n(t.short)} of ${n(total)} series ${t.short === 1 ? 'is' : 'are'} short of the calendar`,
-        why: `Every month file was written and at least one holds fewer bars than the sessions inside ${dayLabel(from)} – ${dayLabel(to)} call for. A pull re-asks for those month files, oldest first.`
-      };
-    }
-    return {
-      tone: 'warn',
-      title: `${n(t.retry)} of ${n(total)} series ${t.retry === 1 ? 'is' : 'are'} in flight`,
-      why: 'The sweep names them right now. Nothing is waiting on you; each settles into verified, short or failed on its own.'
-    };
-  });
 
   // ---- sort, filter, page
 
   let cSort = $state({ key: 'sym', dir: 1 });
-  /** @type {Verdict | null} */
-  let cBucket = $state(null);
   let cPage = $state(1);
 
   /** @param {string} key */
@@ -4237,7 +4148,7 @@
   }
 
   const censusSorted = $derived.by(() => {
-    const rows = cBucket ? censusRows.filter((r) => r.state === cBucket) : [...censusRows];
+    const rows = [...censusRows];
     const d = cSort.dir;
     const k = cSort.key;
     rows.sort((a, b) => {
@@ -7276,9 +7187,7 @@
                   ? '0'
                   : `${n((censusPage - 1) * PAGE_SIZE + 1)}–${n(Math.min(censusPage * PAGE_SIZE, censusSorted.length))}`}</b
               >
-              of {n(censusSorted.length)} series{cBucket
-                ? ` marked "${VERDICT[cBucket][1]}" · ${n(censusRows.length)} in all`
-                : ''}
+              of {n(censusSorted.length)} series
             </span>
             <span class="pages">
               <button
