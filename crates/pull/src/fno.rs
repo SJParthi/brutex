@@ -580,6 +580,55 @@ mod tests {
     /// no second validation between discovery and the write boundary that could
     /// disagree with this one.
     #[test]
+    fn one_month_holds_several_expiries_and_both_series_and_they_are_told_apart() {
+        // WHY THIS EXISTS: `/pull/fno` asks a vendor for a MONTH -- that is the
+        // only shape either broker publishes an expiry list in -- while the
+        // operator names ONE expiry and ONE series. Narrowing the answer back
+        // to the request needs both facts to survive `read_contract`, and the
+        // expiry did not: it was decoded, spent on building the path segment,
+        // and dropped. A caller then had nothing to compare, so every contract
+        // of every expiry in the month looked equally wanted.
+        let read = |n: &str| read_contract(n).expect("each name reads");
+        let sep4_call = read("NSE-NIFTY-04Sep25-24650-CE");
+        let sep4_put = read("NSE-NIFTY-04Sep25-24650-PE");
+        let sep11_call = read("NSE-NIFTY-11Sep25-24650-CE");
+        let sep30_fut = read("NSE-NIFTY-30Sep25-FUT");
+
+        // THE EXPIRY SURVIVES, and it is what separates the two weeklies.
+        assert_eq!(sep4_call.expiry.day(), 4);
+        assert_eq!(sep11_call.expiry.day(), 11);
+        assert_ne!(
+            sep4_call.expiry, sep11_call.expiry,
+            "two weeklies in one month are different expiries, and a filter \
+             that could not see this would pull both when one was asked for"
+        );
+        assert_eq!(
+            sep4_call.expiry, sep4_put.expiry,
+            "a call and a put share one"
+        );
+
+        // THE SERIES IS READABLE TOO, off the contract rather than the name.
+        assert!(sep4_call.contract.is_option());
+        assert!(sep4_put.contract.is_option());
+        assert!(
+            !sep30_fut.contract.is_option(),
+            "the future is not an option, which is the other half of the filter"
+        );
+
+        // AND THE NARROWING ACTUALLY NARROWS: four contracts, and asking for
+        // 4 Sep options leaves exactly the call and the put.
+        let month = [sep4_call, sep4_put, sep11_call, sep30_fut];
+        let kept = month
+            .iter()
+            .filter(|f| f.expiry.day() == 4 && f.contract.is_option())
+            .count();
+        assert_eq!(
+            kept, 2,
+            "one expiry's options, not the month's four contracts"
+        );
+    }
+
+    #[test]
     fn a_read_contract_is_one_the_store_can_file_under() {
         let found = read_contract("NSE-BANKNIFTY-30Sep25-52000-PE").expect("it reads");
         assert!(found.contract.is_option() && !found.contract.is_future());
@@ -764,6 +813,17 @@ pub struct Found {
     pub underlying: String,
     /// This store's contract segment.
     pub contract: brutex_core::instrument::Contract,
+    /// When this contract expires.
+    ///
+    /// # Why it is kept rather than re-parsed
+    ///
+    /// [`read_contract`] already decodes it on the way to building
+    /// [`Self::contract`], and threw it away. A caller that asked for ONE
+    /// expiry then had no way to tell this contract's expiry from any other in
+    /// the same month, because a rendered `Contract` is a path segment rather
+    /// than a value to compare. Recovering it by parsing that segment back
+    /// would be re-deriving something this function already had.
+    pub expiry: brutex_core::instrument::Expiry,
 }
 
 /// The twelve month tokens Groww writes, lower-cased for comparison.
@@ -823,6 +883,7 @@ pub fn read_contract(name: &str) -> Option<Found> {
         vendor_symbol: name.to_owned(),
         underlying: underlying.to_owned(),
         contract,
+        expiry,
     })
 }
 

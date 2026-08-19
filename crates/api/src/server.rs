@@ -6402,7 +6402,7 @@ struct Wire {
 /// One request per contract, each rate-governed. O(1) per contract; nothing
 /// here scans the store.
 async fn fno_land(
-    chain: &pull::chain::Chain,
+    wanted: &[&pull::fno::Found],
     asked: &ingest::FnoRequest,
     site: &Site,
     wire: &Wire,
@@ -6412,13 +6412,13 @@ async fn fno_land(
     let mut why: Vec<String> = Vec::new();
     let origin = wire.source.endpoint(asked.granularity);
 
-    for found in &chain.contracts {
+    for found in wanted {
         // THE GOVERNOR BEFORE EACH ONE, not once for the batch. A month of two
         // hundred contracts is two hundred requests, and a budget charged once
         // would be a ceiling observed once.
         if let Err(halt) = await_budget(asked.feed, site).await {
             why.push(halt);
-            failed = failed.saturating_add(chain.contracts.len().saturating_sub(stored));
+            failed = failed.saturating_add(wanted.len().saturating_sub(stored));
             break;
         }
         let request = pull::chain::request(found, asked.window, asked.granularity);
@@ -6551,7 +6551,8 @@ async fn fno_walk(
 
     // THE MONTH IS THE EXPIRY'S OWN MONTH. Discovery is keyed on (underlying,
     // year, month) because that is what both vendors publish an expiry list
-    // for; the operator's single expiry is what the answer is filtered to.
+    // for. The operator asked for ONE expiry and ONE series, and `wanted` in
+    // `fno_report` is what narrows the month's answer back to it.
     let ask = pull::fno::Ask {
         underlying: asked.underlying.as_str().to_owned(),
         year: asked.expiry.year(),
@@ -6603,19 +6604,46 @@ async fn fno_report(
             ),
         ));
     }
-    if chain.contracts.is_empty() {
+    // NARROWED TO WHAT WAS ASKED FOR, WHICH IS NOT WHAT WAS DISCOVERED.
+    //
+    // A month publishes several expiries and both series. The request names ONE
+    // of each. Without this the fetch below walked every contract of every
+    // expiry in the month: for a weekly-expiry index that is five times the
+    // requests, five times the rate budget, and bars filed for series nobody
+    // asked for -- under a page whose own "Expiry" line named a single date.
+    //
+    // The comment where `ask` is built claimed this filter existed before the
+    // filter did. That is the shape this codebase treats as worse than a
+    // missing guard: a protection a reader can see asserted and cannot see run.
+    let wanted: Vec<&pull::fno::Found> = chain
+        .contracts
+        .iter()
+        .filter(|found| {
+            found.expiry.year() == asked.expiry.year()
+                && found.expiry.month() == asked.expiry.month()
+                && found.expiry.day() == asked.expiry.day()
+                && found.contract.is_option() == matches!(asked.series, ingest::Series::Options)
+        })
+        .collect();
+    facts.push((
+        "Contracts for this expiry and series",
+        wanted.len().to_string(),
+    ));
+
+    if wanted.is_empty() {
         return page.say(
             facts,
             axum::http::StatusCode::OK,
             audit::Outcome::Empty,
-            "the walk succeeded and the month held no readable contract, \
-             which is not the same as a month that was not walked",
+            "the walk succeeded and the month published no contract for the \
+             expiry and series asked for, which is not the same as a month \
+             that was not walked",
         );
     }
 
     // AND NOW THE BARS. Discovery said which contracts existed; this
     // fetches what they did and files it.
-    let (stored, failed, why) = fno_land(chain, asked, site, wire).await;
+    let (stored, failed, why) = fno_land(&wanted, asked, site, wire).await;
     facts.push(("Bars stored", stored.to_string()));
 
     if failed == 0 {
