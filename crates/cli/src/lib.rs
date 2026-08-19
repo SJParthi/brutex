@@ -542,6 +542,95 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
     out
 }
 
+/// Resamples the bootstrap takes.
+///
+/// A stated assumption, in the form `bootstrap::DEFAULT_BLOCK` and
+/// `validate::DEFAULT_RUNGS` already use. A thousand is the conventional floor
+/// for a test read at 5%: the p-value is a proportion of draws, so its own
+/// resolution is `1/draws`, and below about a thousand the answer is quantised
+/// coarser than the threshold it is compared against. More draws narrow the
+/// Monte Carlo error and cost linearly; nothing in the data says where that
+/// trade sits, so this is the assumption and the report prints it.
+const BOOTSTRAP_DRAWS: usize = 1_000;
+
+/// The seed the resampler is started from.
+///
+/// # Why a constant and not a clock
+///
+/// `CLAUDE.md` §3 rule 5 requires the same inputs to give the same outputs byte
+/// for byte. A bootstrap seeded from the clock would produce a different p-value
+/// on every run and reruns would stop being safe — so the seed is fixed, stated
+/// here, and folded into the run identity like every other parameter. An
+/// operator who wants a different draw changes this deliberately rather than
+/// getting one by accident.
+///
+/// The value carries no meaning. It is `0xB2_07_E8` — "brutex" in the only
+/// digits that spell it — chosen so nobody mistakes it for a measurement.
+const BOOTSTRAP_SEED: u64 = 0x00B2_07E8;
+
+/// How many combinations the bootstrap compares.
+///
+/// White's Reality Check asks whether the BEST of a set beats what the same
+/// search would find on resampled data, so the set is the point: comparing one
+/// strategy against itself answers nothing. Sixteen is a stated assumption —
+/// enough that the maximum is a real maximum over a family, small enough that
+/// sixteen full trade walks stay affordable beside the sweep that produced them.
+const BOOTSTRAP_CANDIDATES: usize = 16;
+
+/// One combination's pessimistic return per SESSION, aligned to the day index.
+///
+/// # Why sessions and not bars
+///
+/// A bootstrap resamples periods, and a period has to be a unit over which a
+/// return means something. A one-minute bar is not: most bars hold no trade at
+/// all, so a per-bar series is almost entirely zeros and the block resampling
+/// would be shuffling emptiness. A session is the natural unit for an intraday
+/// strategy that squares off daily, and `DEFAULT_BLOCK`'s own documentation
+/// reasons in sessions too.
+///
+/// # Why every series is the same length by construction
+///
+/// `bootstrap::aligned` refuses a set whose members differ in length, and it is
+/// right to: two series of different lengths are not two views of one period
+/// set. The day index is built ONCE from the bars and every combination is
+/// bucketed into it, so alignment is a property of how this is built rather than
+/// something a caller has to check.
+///
+/// A trade lands in the session its EXIT falls in, because that is when its
+/// result is known. `Trade::worst` and not `best`: the pessimistic fill, the
+/// same side every other figure in this report is taken on.
+fn session_returns(days: &[i64], bars: &[indicators::Candle], taken: &trade::Trades) -> Vec<i64> {
+    let mut series = vec![0_i64; days.len()];
+    for t in &taken.trades {
+        let Some(bar) = bars.get(t.exit_bar) else {
+            continue;
+        };
+        let day = indicators::ist_day(bar.ts_micros);
+        if let Ok(slot) = days.binary_search(&day)
+            && let Some(cell) = series.get_mut(slot)
+        {
+            *cell = cell.saturating_add(t.worst);
+        }
+    }
+    series
+}
+
+/// The distinct IST days the bars span, ascending.
+///
+/// Built from the bars rather than assumed, so a half-day, a holiday gap or a
+/// Muhurat session changes the index instead of shifting every later bucket by
+/// one — which is the defect a fixed 375-bar stride would have.
+fn session_index(bars: &[indicators::Candle]) -> Vec<i64> {
+    let mut days: Vec<i64> = bars
+        .iter()
+        .map(|b| indicators::ist_day(b.ts_micros))
+        .collect();
+    days.dedup();
+    days.sort_unstable();
+    days.dedup();
+    days
+}
+
 /// How many anchored folds the walk-forward uses.
 ///
 /// # A stated assumption, in the form this crate already uses for one
@@ -685,17 +774,52 @@ fn audit_with(ev: Result<Evaluator, &'static str>, sessions: i64, min_hits: u64)
     let overfit =
         (!placements.is_empty()).then(|| runner::pbo::probability_of_overfitting(&placements));
 
+    // THE BOOTSTRAP, WHICH NEEDED A DIFFERENT SHAPE OF DATA FROM PBO.
+    //
+    // PBO needed one NUMBER per candidate. This needs one SERIES per candidate —
+    // a return per period — because it resamples periods and asks whether the
+    // best of the family beats what the same search finds on resampled data.
+    // Comparing one strategy against itself answers nothing, so a family is
+    // walked rather than the winner alone.
+    //
+    // Every series is bucketed into the SAME day index, so `bootstrap::aligned`
+    // cannot refuse the set for a length mismatch — alignment is a property of
+    // how this is built.
+    let days = session_index(&bars);
+    let family: Vec<Vec<i64>> = distinct
+        .kept
+        .iter()
+        .take(BOOTSTRAP_CANDIDATES)
+        .map(|item| {
+            let walked = trade::walk(&bars, &column, &item.mask, horizon, Direction::Long);
+            session_returns(&days, &bars, &walked)
+        })
+        .collect();
+    // Two of the three tests, and they answer different questions: Reality Check
+    // says "something in this family is real", SPA says the same with poor
+    // strategies no longer diluting the null. Romano-Wolf is the per-strategy
+    // stepdown and needs a decision about which strategies to report, which this
+    // caller does not have — so it is not run rather than run and discarded.
+    let rc = runner::bootstrap::reality_check(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+    );
+    let spa = runner::bootstrap::spa(
+        &family,
+        BOOTSTRAP_DRAWS,
+        BOOTSTRAP_SEED,
+        runner::bootstrap::DEFAULT_BLOCK,
+    );
+    let boot = (!family.is_empty()).then_some((rc.as_ref(), spa.as_ref(), family.len()));
+
     out.push_str(&audit::render(
         Some(&taken),
         Some(&exits),
         Some(&folds),
         overfit.as_ref(),
-        // THE BOOTSTRAP STAYS `None`, and unlike PBO it is not a data gap that
-        // this commit closes. It needs one RETURN SERIES per strategy -- a value
-        // per period, per candidate -- where PBO needed one number per candidate.
-        // Nothing in the workspace assembles that, and the report prints NOT
-        // SUPPLIED rather than implying it ran.
-        None,
+        boot,
         12,
     ));
     out
@@ -842,26 +966,40 @@ mod tests {
         );
     }
 
-    /// THE AUDIT SURFACE HAS A CALLER NOW, AND SAYS WHAT IT DID NOT RENDER.
+    /// THE WHOLE INSTITUTIONAL STACK RENDERS — NOTHING IS NAMED ABSENT ANY MORE.
     ///
-    /// `audit::render` shows trades, the exit grid, the walk-forward, PBO and
-    /// the bootstrap, and until `audit_run` existed **nothing in the workspace
-    /// called it** — the whole institutional stack was reachable only from its
-    /// own tests.
+    /// # What this test used to assert, and why the change is the point
     ///
-    /// The three stages this build does not supply are asserted to be NAMED as
-    /// absent rather than rendered as zero. `CLAUDE.md` §4 bans a failure
-    /// wearing a success's clothes, and a walk-forward printed as 0.0 would be
-    /// exactly that.
+    /// It was `the_audit_names_the_stages_it_did_not_render`, and it asserted the
+    /// report contained `NOT SUPPLIED` — because the walk-forward, PBO and the
+    /// bootstrap were all passed as `None` and §4 requires an unsupplied stage to
+    /// be NAMED rather than rendered as a zero. That was the right assertion for
+    /// a build that could not drive them.
+    ///
+    /// All three are driven now, so the same assertion inverted is the honest
+    /// one: every section must carry a real figure, and `NOT SUPPLIED` must not
+    /// appear anywhere. A test still demanding the old string would be pinning a
+    /// gap as though it were a feature.
     #[test]
-    fn the_audit_names_the_stages_it_did_not_render() {
+    fn the_audit_renders_every_stage_of_the_institutional_stack() {
         let text = audit_run(12, 300);
         assert!(text.starts_with(PROVENANCE), "provenance leads it too");
         assert!(text.contains("BARS"), "the sweep report is still there");
+        for section in [
+            "TRADES",
+            "EXIT GRID",
+            "WALK-FORWARD",
+            "OVERFITTING",
+            "BOOTSTRAP",
+        ] {
+            assert!(
+                text.contains(section),
+                "{section} must be rendered, not skipped:\n{text}"
+            );
+        }
         assert!(
-            text.contains("NOT SUPPLIED"),
-            "the stages this build does not drive must be named absent, not \
-             rendered as zero:\n{text}"
+            !text.contains("NOT SUPPLIED"),
+            "every stage is driven now, so nothing may be named absent:\n{text}"
         );
     }
 
