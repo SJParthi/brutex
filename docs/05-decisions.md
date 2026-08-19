@@ -16455,3 +16455,86 @@ corrected here already existed in the manifests. Nothing recompiles.
 arrow is still absent, `api` still declares `core`, `pull`, `store`, `telemetry`,
 `axum` and `tokio` and names the sweep crates zero times, and it still has no
 sweep route among its twenty-two. Closing that is its own decision.
+
+---
+
+### D-0209 — the C-14…C-17 collision D-0045 fixed happened again, in the same ids
+
+**Decision.** `crates/store`'s two rows move to **`C-28`** (bar lookup is flat in
+the file) and **`C-29`** (one read against the address floor). `crates/api` keeps
+`C-14` … `C-17`. Gate 14's coverage table is extended from 47 checked ids to 67.
+
+**Why this is a recurrence and not a new defect.** D-0045 found `C-14` … `C-17`
+naming two invariants each — `crates/api`'s rendering rows and `crates/costs`'s
+regime-lookup rows — and ruled:
+
+> **`crates/api` keeps C-14 … C-17.** Those four ids are cited from
+> `crates/api/benches/ratio.rs` — the bench *prints* them — and from
+> `docs/05-decisions.md` D-0042 and `docs/06-limits.md` §24.
+
+It also wrote down exactly why the collision had been invisible: *"Nothing in CI
+checks row-id uniqueness — gate 10 checks only that a named test exists."*
+
+**Then `C-16` and `C-17` were assigned to `crates/store` anyway** — D-0177 and
+D-0202 — and D-0177 recorded that it had been *"verified against gate 10's own
+resolver before this entry was written"*. Gate 10 cannot see a duplicate id: it
+reads a row, takes the first `crate::module::fn` token, and asks whether that
+function exists. Two rows sharing an id both pass. The entry verified against the
+one check D-0045 had already named as unable to detect this.
+
+**Which side moved, by D-0045's own evidence rule.** `api` keeps them: its bench
+prints them, gate 14's coverage table already assigned them to
+`crates/api/benches/ratio.rs`, and they are cited from `docs/07-o1-architecture.md`
+§76 and §163, `docs/06-limits.md` 1207 and 1843, and six places in this ledger.
+`store`'s claim rested on its own bench and the two entries that made it.
+
+**Why `C-28` and `C-29` rather than a `C-S-*` family.** The D-0202 campaign that
+introduced the collision gave every other crate either a scoped family — `C-T-04`,
+`C-K-13`, `C-G-05`, `C-L-04`, `C-R-04` — or the next free unscoped number:
+`pull` took `C-26`, `api` took `C-27`. `store` is an unscoped crate like those
+two, and `C-28`/`C-29` are the next free numbers. `C-18` … `C-25` stay retired
+and unreused, per D-0045 and `CLAUDE.md` §3 rule 8.
+
+**The second finding, which is larger than the first.** Gate 14's coverage table
+lists the ids each bench is required to print, and layer 4 checks each one is both
+a row in `docs/04-invariants.md` and present in the bench. **The lists were pinned
+when each row was added and never grew.** Measured across all twelve benches: they
+print **70** labels and the table named **47**. Every crate was short. `engine`
+was worst — `C-E-05` through `C-E-11` unlisted, and `C-E-11` is the row that
+closes rule 4's fifth operation, result append, which `docs/04-invariants.md`
+C-04 and `docs/07-plan.md` §6 still call UNMEASURED. The table is extended to
+every printed label that has a row: 67.
+
+**Three printed labels are deliberately still absent.** `C-V-05`, `C-I-05` and
+`C-I-06` are measured and printed by their benches and appear in
+`docs/04-invariants.md` **nowhere**. Listing them would fail layer 4, and that
+refusal would be correct: the repair is to write the rows, not to widen the gate.
+They are a measurement with no claim — the inverse of what gate 12 forbids — and
+they are named in the gate's own comment rather than left as a silent shortfall.
+**OPEN.**
+
+**What this does NOT close, and it is the reason a third recurrence is likely.**
+Row-id uniqueness is *still* unchecked, exactly as D-0045 said. Measured over
+`docs/04-invariants.md`: **603 table rows, 559 distinct ids, 44 ids used twice,
+88 rows involved.** The cause is three overloaded letters, not 44 typos:
+
+| family | collisions | the two subjects sharing the letter |
+|---|---|---|
+| `I-*` | 22 | Instrument identity and the vendor merge · the indicator fold's predicates |
+| `P-*` | 13 | Ingest · the pull order |
+| `G-*` | 9 | The rung (Granularity) · Greeks |
+
+D-0045 renumbered `I-16` … `I-22` for this same reason and the letter collided
+again, because nothing stops it. Fixing 88 rows means choosing which subject
+keeps each letter and rewriting the bench labels that print them, which is a
+scope call and not a correction — it is **OPEN**, and it is recorded here so the
+next collision is a known recurrence rather than a discovery.
+
+**Cost.** Two invariant ids renumbered, eight string literals in
+`crates/store/benches/ratio.rs`, and twenty ids added to a CI table. No
+measurement changes, no bench gains or loses a point, and no ratio moves. Layer 4
+was simulated against the edited table before the change was committed: 67 of 67
+resolve, 0 refusals.
+
+**What this does NOT license.** It does not renumber anything in `crates/api`,
+and it does not touch the retired `C-18` … `C-25` band.

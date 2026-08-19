@@ -213,7 +213,7 @@ fn budget(label: &str, floor: u128, at_ps: u128, allowed: u128) -> bool {
     ok
 }
 
-/// C-17 — one record read costs a bounded multiple of the address arithmetic.
+/// C-29 — one record read costs a bounded multiple of the address arithmetic.
 fn record_read_stays_within_its_budget() -> bool {
     /// Floors allowed per record read.
     ///
@@ -245,14 +245,14 @@ fn record_read_stays_within_its_budget() -> bool {
     println!("  the per-read floor is {floor} ps — one offset computation");
     let at = cost_ps(2_000, || file.read_record(black_box(9_999)));
     budget(
-        "C-17 read_record against the address floor",
+        "C-29 read_record against the address floor",
         floor,
         at,
         ALLOWED,
     )
 }
 
-/// C-16 — reading one record costs the same whatever the file holds.
+/// C-28 — reading one record costs the same whatever the file holds.
 ///
 /// # Why this row did not exist until now
 ///
@@ -285,17 +285,17 @@ fn record_read_is_flat_in_the_file() -> bool {
 
     let base = first(&small);
     let mut ok = true;
-    ok &= ratio("C-16 read_record[0], 10x file", base, first(&medium));
-    ok &= ratio("C-16 read_record[0], 100x file", base, first(&large));
+    ok &= ratio("C-28 read_record[0], 10x file", base, first(&medium));
+    ok &= ratio("C-28 read_record[0], 100x file", base, first(&large));
 
     let base_last = last(&small, 1_000);
     ok &= ratio(
-        "C-16 read_record[last], 10x file",
+        "C-28 read_record[last], 10x file",
         base_last,
         last(&medium, 10_000),
     );
     ok &= ratio(
-        "C-16 read_record[last], 100x file",
+        "C-28 read_record[last], 100x file",
         base_last,
         last(&large, 100_000),
     );
@@ -303,7 +303,7 @@ fn record_read_is_flat_in_the_file() -> bool {
     // And the two ends of the SAME file cost the same, which is the shape a
     // scan would break first.
     ok &= ratio(
-        "C-16 read_record: first against last, same file",
+        "C-28 read_record: first against last, same file",
         first(&large),
         last(&large, 100_000),
     );

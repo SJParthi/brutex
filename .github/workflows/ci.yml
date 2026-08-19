@@ -5465,19 +5465,43 @@ jobs:
           #
           # min_points are pinned at what each bench carries at the commit that
           # added its row — api 4, costs 27, counted with layer 3's own awk.
+          # THE ID LISTS WERE PINNED AT THE COMMIT THAT ADDED EACH ROW AND NEVER
+          # GREW, so layer 4 checked 47 of the 70 labels the benches actually
+          # print. Every crate was short. D-0177 already named the shape of this
+          # -- "a bench row no invariant names is invisible to gate 14, which is
+          # how five of `engine`'s nine rows went undocumented until D-0162" --
+          # and the same blindness runs the other way: a row the TABLE does not
+          # name is unchecked however well documented it is. `engine` was the
+          # worst, with C-E-05 through C-E-11 unlisted; C-E-11 is the row that
+          # closes rule 4's fifth operation, result append.
+          #
+          # Extended to every printed label that also has a `| ID |` row, which
+          # is exactly what layer 4 below requires. D-0209.
+          #
+          # THREE PRINTED LABELS ARE DELIBERATELY ABSENT: C-V-05, C-I-05 and
+          # C-I-06 are measured and printed by their benches and appear in
+          # docs/04-invariants.md NOWHERE. Listing them here would fail layer 4,
+          # which is correct -- the repair is to write the rows, not to widen
+          # the gate. Until then they are a measurement with no claim, the
+          # inverse of what gate 12 forbids, and they are named here rather than
+          # left as a silent shortfall.
+          #
+          # min_points stay pinned at what each bench carried when its row was
+          # added -- api 4, costs 27 -- because they bound the MEASUREMENT
+          # count, not the id count, and nothing here adds a measurement.
           cover='
-          core   crates/core/benches/ratio.rs   3  C-09 C-10
-          pull   crates/pull/benches/ratio.rs   4  C-11 C-12
-          store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08
-          api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17
-          costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12
-          lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03
-          telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-02 C-T-03
-          greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03
-          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04
+          core   crates/core/benches/ratio.rs   3  C-09 C-09b C-10
+          pull   crates/pull/benches/ratio.rs   4  C-11 C-12 C-13 C-26
+          store  crates/store/benches/ratio.rs  4  C-01 C-07 C-08 C-28 C-29
+          api    crates/api/benches/ratio.rs    4  C-14 C-15 C-16 C-17 C-27
+          costs  crates/costs/benches/ratio.rs  27 C-K-01 C-K-02 C-K-03 C-K-04 C-K-05 C-K-06 C-K-07 C-K-08 C-K-09 C-K-10 C-K-11 C-K-12 C-K-13
+          lake      crates/lake/benches/ratio.rs      6  C-L-01 C-L-02 C-L-03 C-L-04
+          telemetry crates/telemetry/benches/ratio.rs 6  C-T-01 C-T-01b C-T-02 C-T-03 C-T-04
+          greeks    crates/greeks/benches/ratio.rs    6  C-G-01 C-G-02 C-G-03 C-G-05
+          vocab     crates/vocab/benches/ratio.rs     7  C-V-01 C-V-02 C-V-03 C-V-04 C-V-06
           indicators crates/indicators/benches/ratio.rs 5  C-I-01 C-I-02 C-I-03 C-I-04
-          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04
-          runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03
+          engine    crates/engine/benches/ratio.rs    4  C-E-01 C-E-02 C-E-03 C-E-04 C-E-05 C-E-06 C-E-07 C-E-08 C-E-09 C-E-10 C-E-11
+          runner    crates/runner/benches/ratio.rs    3  C-R-01 C-R-02 C-R-03 C-R-04
           '
 
           inv=docs/04-invariants.md
