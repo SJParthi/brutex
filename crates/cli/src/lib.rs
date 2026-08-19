@@ -462,6 +462,51 @@ fn sweep_stored_inner(
     Ok(out)
 }
 
+/// The candidate ceiling a THRESHOLD SEARCH probes with.
+///
+/// # Why this is not the sweep's ceiling, and what it cost to leave it so
+///
+/// `Sweeper::auto` probes each rung with **the caller's** ceiling — deliberately,
+/// because an earlier version silently discarded whatever budget the `Sweeper`
+/// was built with. This crate then handed it `Ladder::with_min_hits(1)`, whose
+/// ceiling is `engine::DEFAULT_CEILING` = `1 << 26` = 67,108,864. That is the
+/// budget for producing an ANSWER, and the search runs roughly seventeen probes
+/// with it.
+///
+/// Measured on this machine with nothing else running, `cli auto 20`, whole
+/// search end to end:
+///
+/// | probe ceiling | search time | threshold chosen | depth |
+/// |---|---|---|---|
+/// | 67,108,864 (`DEFAULT_CEILING`, what shipped) | **> 240 s, killed** | — | — |
+/// | 50,000 | 0.8 s | 1,831 | 14 |
+/// | **500,000** | **3.7 s** | **1,036** | **17** |
+/// | 5,000,000 | 35.6 s | 496 | 19 |
+///
+/// This is the knee, and it is where the CURVE TURNS rather than where the
+/// numbers are round: 50,000 to 500,000 costs 4.6x the time and buys three more
+/// levels, while 500,000 to 5,000,000 costs 9.6x and buys two. The step after
+/// the one taken is the expensive one -- the same shape `PROBE_PAIRS` records for
+/// the pair budget.
+///
+/// A probe only has to answer "is this threshold cheap" — the same argument
+/// `runner`'s `PROBE_PAIRS` already makes for the pair budget, and the same safe
+/// direction: a threshold needing more than this is rejected, so the chosen
+/// threshold may be higher than strictly necessary. The sweep that is finally
+/// KEPT is the probe's own, walked at this ceiling, so the report never claims a
+/// budget it did not use.
+const SEARCH_CEILING: usize = 500_000;
+
+// A PROBE BUDGET AT OR ABOVE THE ANSWER BUDGET IS NOT A PROBE, and this is a
+// BUILD failure rather than a test one -- the same form the streaming indicators
+// use for their size ceilings. `Sweeper::auto` probes with the CALLER's ceiling,
+// so the caller is what decides whether the search is a search; this crate handed
+// it `DEFAULT_CEILING` and `cli auto 250` then produced no output in twenty
+// minutes. Asserted as a RATIO against the engine's own default rather than
+// against a literal, so raising that default cannot quietly undo the fix.
+const _: () = assert!(SEARCH_CEILING < engine::DEFAULT_CEILING);
+const _: () = assert!(engine::DEFAULT_CEILING / SEARCH_CEILING >= 100);
+
 /// The threshold search, rendered.
 #[must_use]
 pub fn auto(sessions: i64) -> String {
@@ -489,7 +534,8 @@ fn auto_with(ev: Result<Evaluator, &'static str>, sessions: i64) -> String {
         Err(why) => return format!("refused: {why}\n"),
     };
     let bars = synthetic::sessions(sessions);
-    let found = Sweeper::new(Ladder::with_min_hits(1)).auto(&bars, &mut ev);
+    let found =
+        Sweeper::new(Ladder::with_min_hits(1).with_ceiling(SEARCH_CEILING)).auto(&bars, &mut ev);
     let mut out = String::from(PROVENANCE);
     out.push('\n');
     out.push_str(&runner::report::render_auto(&found, None));
@@ -940,6 +986,26 @@ mod tests {
         assert!(
             !STORED_PROVENANCE.contains("not a backtest"),
             "the real banner must not carry the generated one's disclaimer"
+        );
+    }
+
+    /// AND THE SEARCH ACTUALLY FINISHES, ON A COLUMN WITH BARS TO SWEEP.
+    ///
+    /// The const assertion beside `SEARCH_CEILING` is necessary and not
+    /// sufficient: a ceiling low enough to probe cheaply is worthless if the rung
+    /// it settles on cannot then be walked. This asserts the whole command returns
+    /// a COMPLETE sweep, which `runner::Auto` refuses to do when every probe it
+    /// tried was itself refused.
+    #[test]
+    fn the_threshold_search_returns_a_complete_sweep_rather_than_a_refusal() {
+        let text = auto(6);
+        assert!(
+            !text.starts_with("refused: "),
+            "the search refused a column it should tune: {text}"
+        );
+        assert!(
+            text.contains("complete"),
+            "a search that settles on a rung it cannot walk has not searched: {text}"
         );
     }
 }
