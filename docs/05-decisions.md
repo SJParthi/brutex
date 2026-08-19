@@ -16300,3 +16300,74 @@ join it.
 **What this does NOT license.** `costs` is taken for its calendar. A later use
 of its fill or slippage model from `pull` would be a different decision, because
 it would put a trading assumption inside the ingest path.
+
+---
+
+### D-0207 — a refusal has two axes, and the vendor's own name is the one that binds
+
+**Decision.** `pull::refusal` classifies a refused answer on **both** the HTTP
+status and the vendor's own error name. A recognised name binds; the status
+decides when no contract is declared, no name arrived, or the name is one the
+vendor's reader does not know. What the losing axis would have said is kept in
+`Verdict::contested` and is never resolved away.
+
+The names are per feed. `HttpSpec::error_names` carries an `ErrorNames` — one
+JSON field, one `fn(&str) -> Option<Disposition>`, one citation — and
+`pull::kite` is the first and only row. Adding a vendor is that struct and a
+`from_wire`; nothing in `classify`, in `status_disposition` or in the retry
+ladder changes.
+
+**Why.** Every retry decision in this workspace came from the status, plus one
+`str::contains` for `Invalid_Authentication`. Kite's whole error contract is a
+name in the body, and its own page instructs switching on it: *"You can define
+corresponding exceptions in your language or library, and raise them by doing a
+switch on the returned exception name."* A grep for `error_type` across
+`crates/` returned one hit and it was Amazon's word, in `src/ssm.rs`.
+
+**The pair that forced it.** `TokenException` and `PermissionException` are both
+answered under HTTP 403 — the first documented on the exceptions page, the
+second in the vendor's own Python SDK. On the status axis they are one event.
+They are not one event to an operator: the first is fixed by the credential
+somebody refreshes tonight, and the second is an API key with no
+historical-data subscription, which fails identically forever. The unentitled
+key was being handed `Step::CredentialDied` and the sentence *"the refreshed
+value is read from Parameter Store on the next pull"*, false in every clause.
+That is a failure wearing another failure's clothes, which `CLAUDE.md` §4 bans
+outright, and no amount of care in the status match could have separated them.
+
+**Alternatives considered.**
+
+* *Resolve the two axes by taking the stricter, as `FloorRow` does for floors.*
+  Rejected: strictness is the right tie-break for a claim about **how far back a
+  vendor answers**, where both sources are describing the same quantity. Here
+  they are describing different things — a transport-level summary and the API's
+  own classification — and the vendor states which one a client should read.
+* *A `&[(&str, Disposition)]` table per vendor instead of a `fn`.* Rejected on
+  §3 rule 4: a table is walked, and the walk grows with the vendor's exception
+  count. A `match` over string literals switches on the length first, so the
+  cost is bounded by the longest name rather than by how many names there are.
+* *Fold an unrecognised name into `GeneralException`.* Rejected, and the vendor
+  itself says why: the nine published names are *"the complete set documented on
+  this page, not the complete set of `error_type` strings the API can return"*.
+  `PermissionException` is the standing proof. An unknown name reaches the
+  operator verbatim.
+* *Classify in `with_retry` from `VendorRefused::detail`.* Rejected: `detail`
+  is trimmed to 500 characters and a Kite envelope orders its keys `status`,
+  `message`, `error_type` — so a long enough message pushes the name past the
+  cut. It is also the defect that file already names against its own `status`: a
+  policy and a formatter coupled through a string.
+
+**Cost.** One new field on `HttpSpec`, one on `FetchError::VendorRefused`, one
+new `Step` arm, and `serde_json` parsing of a refusal body — `named_error_of`,
+which is O(body) and the only non-constant function in the module. It runs once
+per refused request, against a body already bounded at 8 KiB, and its own
+header says so rather than leaving a reader to find it. Registered in
+`docs/06-limits.md`.
+
+**What this does NOT license.** `error_names: None` on Dhan and Groww is a
+**recorded absence**, in the sense `FnoAccess::None` already means it here — no
+error-name contract this build has read — and not "this vendor publishes none".
+Dhan demonstrably writes `Invalid_Authentication` into a body field, and that
+field's name is not in `docs/00-charter.md`. Filling one in from memory to make
+the table look complete is §3 rule 1's invention. The row stays `None` until the
+vendor's page is read.

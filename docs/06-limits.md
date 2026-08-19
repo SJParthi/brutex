@@ -4947,3 +4947,72 @@ the widest expansion the mutant reaches 264 and overflows. That is what
 and it is the reason the count above is five and not six. The lesson is that
 "equivalent modulo the result" and "equivalent" are different claims, and only
 the second one is a floor.
+
+---
+
+## 83. Reading a vendor's error name is O(body), and one broker's field is still unread
+
+Two limits, both introduced by `pull::refusal` (D-0207), both named here rather
+than claimed away.
+
+### 83.1 `named_error_of` is linear in the refusal body
+
+Every other function in `pull::refusal` and `pull::kite` is constant-time:
+`status_disposition` is at most ten integer compares over a status set the
+vendor closed, and `ErrorNames::read` is a `match` over string literals, which
+rustc switches on the length first — so a megabyte of hostile `error_type`
+fails every length bucket without a byte being compared. That is measured by
+answer rather than by clock in
+`pull::refusal::a_megabyte_of_error_type_is_refused_like_any_other_wrong_name`.
+
+`named_error_of` is not. A field's offset inside a JSON body is not known
+before the bytes are read, so it is O(body).
+
+**Why that is accepted rather than removed.** It runs **once per refused
+request**, never per bar and never per instrument. The body it parses is
+already bounded at `MAX_REFUSAL_BYTES` = 8 KiB by `refusal_words`, which reads
+the socket a frame at a time and stops — so the input is bounded before this
+function sees it, and the bound is enforced by the transport rather than by
+this function's good behaviour. A pull refusing often enough for 8 KiB of JSON
+parsing to matter has a larger problem than parsing.
+
+**What would make it a defect.** Calling it on a success path, or per row, or
+without the transport bound in front of it. None of those exist today, and
+CI gate 11 cannot see any of them — it refuses spellings, and `serde_json::from_str`
+is not one of the five it refuses.
+
+### 83.2 Dhan writes a body-level error marker and its FIELD is unrecorded
+
+`crates/api/src/server.rs` finds Dhan's credential failure with
+
+```
+let invalid_auth = text.contains("Invalid_Authentication");
+```
+
+— a `str::contains` against **this build's own rendering** of the error, which
+is the coupling that file's own comments name as a defect on the neighbouring
+`status` line. The vendor plainly writes that word into a field. Which field is
+not recorded anywhere in `docs/00-charter.md`.
+
+So Dhan's descriptor carries `error_names: None`, and that is a **recorded
+absence** in `FnoAccess::None`'s sense — no contract this build has read — and
+not the claim that the vendor publishes none. Groww is the same: no error page
+for it has been read into the charter.
+
+**What this costs today.** Nothing that was not already being paid: `named` is
+`None` for both feeds, `step` falls through to the status match, and the
+behaviour is byte-for-byte what it was before D-0207 — asserted over every
+status the ladder distinguishes, in
+`api::server::a_vendor_that_names_its_refusal_decides_the_ladder`.
+
+**What it costs later.** Both brokers keep the 403 ambiguity Kite no longer has.
+If either answers one status for two different reasons — an expired session and
+an unentitled key, say — this build cannot tell them apart, and will report the
+retryable one. Closing it is a page read, a charter row, one `const ErrorNames`
+and one `from_wire`. It is not a code change to `refusal`, to `classify` or to
+the ladder, and that is the whole point of the shape D-0207 chose.
+
+**Why it was not closed now.** `CLAUDE.md` §3 rule 1. Writing a field name from
+memory to make the table look complete is the invention that rule forbids, and
+a wrong field name fails *silently*: `named_error_of` answers `None` for a field
+that is not there, which is indistinguishable from a vendor that sent no name.
