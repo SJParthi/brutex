@@ -62,6 +62,10 @@
   // `web/src` so the ceiling cannot be reverted silently a second time.
   import { ask as request } from '$lib/ask.js';
   import { exact } from '$lib/money.js';
+  // FINDING A NAME IN 750 OF THEM. One `Map.get` per keystroke against an
+  // index over distinct symbols; see `$lib/find.js` for why an infix index
+  // rather than the prefix one the typeahead uses.
+  import { build as buildFind, probe as probeFind, symbolCount } from '$lib/find.js';
 
   // ─────────────────────── WHAT AN ANSWER LOOKS LIKE ───────────────────────
   //
@@ -4131,6 +4135,12 @@
     if (rungsChosen.length === 0) return ['No timeframe is ticked', 'Tick at least one bar length. A window with no rung names no series.'];
     if (!windowOk) return ['No window', 'Both ends of the window need a date before anything can be counted against it.'];
     if (windowMonths.length === 0) return ['No month file in that window', `${dayLabel(from)} – ${dayLabel(to)} touches no month file at all.`];
+    if (cQuery.trim())
+      return [
+        `Nothing matches “${cQuery.trim()}”`,
+        `Not one of the ${n(censusNames)} name(s) in this window contains that anywhere in its trading symbol. ` +
+          `Clear the box to see all ${n(censusRows.length)} series. A shorter fragment finds more — the match is on any part of a symbol, not just its start.`
+      ];
     return ['Nothing matches', 'Every row was filtered out. Widen the window, or tick another instrument, segment or timeframe above.'];
   }
 
@@ -4138,6 +4148,16 @@
 
   let cSort = $state({ key: 'sym', dir: 1 });
   let cPage = $state(1);
+  /**
+   * WHAT IS IN THE SEARCH BOX. Text, and it never becomes a request.
+   *
+   * `api::ingest::SpotRequest` carries target, window, feed and granularity
+   * and NO member field, so no control on this page can narrow a pull to one
+   * symbol. This narrows what is DRAWN. The box says so on its face and the
+   * pager keeps the unfiltered total beside the filtered one, so a reader can
+   * never mistake a shorter table for a smaller ask.
+   */
+  let cQuery = $state('');
 
   /** @param {string} key */
   function sortCensus(key) {
@@ -4147,8 +4167,20 @@
     cPage = 1;
   }
 
+  /**
+   * THE INDEX, REBUILT WHEN THE ROWS CHANGE — which is a selection or a window
+   * change, never a keystroke. It is built over DISTINCT SYMBOLS, so 750 names
+   * at three segments and six rungs is 13,500 rows and still 750 entries.
+   */
+  const censusIndex = $derived(buildFind(censusRows, (r) => r.sym));
+  /** One `Map.get`. An empty box is `censusRows` itself, by reference. */
+  const censusFound = $derived(probeFind(censusIndex, censusRows, cQuery));
+  /** How many NAMES are on offer. Never the row count: a name is drawn once
+      per segment per rung, so 750 names can be 13,500 rows. */
+  const censusNames = $derived(symbolCount(censusIndex));
+
   const censusSorted = $derived.by(() => {
-    const rows = [...censusRows];
+    const rows = [...censusFound];
     const d = cSort.dir;
     const k = cSort.key;
     rows.sort((a, b) => {
@@ -6947,6 +6979,27 @@
              window; the reading still refreshes when a run finishes. -->
 
         <div class="cgrid">
+          <!-- THE SEARCH. One control, no caption: the count it changes is
+               already in the pager at the foot, and a line here restating it
+               would be the narration this page had removed from it.
+
+               IT NARROWS THE VIEW AND IT CANNOT NARROW THE ASK. That is a
+               missing FIELD, not a missing widget -- `api::ingest::SpotRequest`
+               carries target, window, feed and granularity and no member list.
+               So the pager keeps the unfiltered total beside the filtered one
+               and the title says it outright, because a table that got shorter
+               after typing looks exactly like a request that got smaller. -->
+          <div class="cfind">
+            <input
+              class="search"
+              type="search"
+              bind:value={cQuery}
+              oninput={() => (cPage = 1)}
+              placeholder="Find among {n(censusNames)} name(s) — any part of the trading symbol"
+              aria-label="Find a trading symbol in the census"
+              title={`Narrows what this table DRAWS and nothing else. api::ingest::SpotRequest carries target, window, feed and granularity and no member field, so no control on this page can narrow a pull to one symbol — the ask above is unchanged by anything typed here, and the pager keeps the unfiltered total beside the filtered one. Matches ANY PART of a symbol, not just the start: BANK finds AXISBANK, HDFCBANK, ICICIBANK and KOTAKBANK as well as BANKNIFTY. ${n(censusNames)} name(s) across ${n(censusRows.length)} series in this window.`}
+            />
+          </div>
           <div class="cscroll">
             <table>
               <thead>
@@ -7187,7 +7240,9 @@
                   ? '0'
                   : `${n((censusPage - 1) * PAGE_SIZE + 1)}–${n(Math.min(censusPage * PAGE_SIZE, censusSorted.length))}`}</b
               >
-              of {n(censusSorted.length)} series
+              of {n(censusSorted.length)} series{cQuery.trim()
+                ? ` matching “${cQuery.trim()}” · ${n(censusRows.length)} in all`
+                : ''}
             </span>
             <span class="pages">
               <button
@@ -9376,6 +9431,15 @@
   }
   /* THE TABLE SCROLLS INSIDE ITS OWN BOX. A wide table that widens the page
      puts the form's own controls off screen. */
+  /* The pager's twin at the head of the panel: same padding, same ground,
+     same hairline, turned the other way up. A search bar that invented its
+     own band would be a second idiom for one job. */
+  .cfind {
+    padding: var(--s3) var(--s5);
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-2);
+  }
+
   .cscroll {
     max-height: min(58vh, 640px);
     overflow: auto;
