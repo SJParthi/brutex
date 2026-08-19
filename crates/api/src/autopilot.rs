@@ -2008,6 +2008,10 @@ pub fn tracked_series(site: &Site, timeframe: Timeframe) -> Vec<Series> {
         .iter()
         .filter(|(_, entry)| crate::catalog::tracked(entry.universe))
         .map(|(key, _)| Series {
+            // SPOT. The autopilot walks the master's merged keys, which the
+            // instrument masters build as Index and Cash only — there is no
+            // derivative row in them to carry a contract from.
+            contract: None,
             exchange: key.exchange,
             segment: key.segment,
             symbol: key.underlying,
@@ -3501,6 +3505,7 @@ mod tests {
 
     fn series(name: &str) -> Series {
         Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol: Symbol::new(name).unwrap(),

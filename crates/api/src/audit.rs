@@ -1542,6 +1542,8 @@ mod tests {
 
     fn run() -> Ingested {
         Ingested {
+            pending: None,
+            bars_committed: 0,
             derived_files: 0,
             members: 194,
             rows_read: 354_675,

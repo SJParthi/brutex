@@ -421,6 +421,28 @@ pub fn month_back(today: Day, back: usize) -> Option<YearMonth> {
 /// same values and a miss means *not held* rather than *not askable*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Series {
+    /// The derivative contract, or `None` for a spot series.
+    ///
+    /// # Why this had to be added, and what its absence cost
+    ///
+    /// `EntryKey` gained `contract` because "two different option series would
+    /// collide on one key … not a smaller feature — it is silent data loss".
+    /// `Series` was not widened with it, so the store page's axis and its
+    /// probes both dropped the field on the floor:
+    ///
+    /// * `held_series` and `held_entries` map every held key through
+    ///   [`Self::of`] and then dedup, so two hundred NIFTY option contracts in
+    ///   one month collapsed to a single row, `NSE-FNO-NIFTY`;
+    /// * `store_body` probes [`Self::at`], which built `contract: None`, so
+    ///   every contract-month on disk MISSED and was `continue`d past with no
+    ///   counter anywhere — a short JSON that says nothing about being short;
+    /// * `coverage_page` built the same contract-less key, so the whole grid
+    ///   read `— / — / —` over months that were fully held.
+    ///
+    /// This is the exact failure this type's own doc describes in the past
+    /// tense — "Every cell missed. The page said `0 of 200 held` beside a
+    /// counter reading 62,978 rows" — arriving again from the other side.
+    pub contract: Option<brutex_core::instrument::Contract>,
     /// Trading venue.
     pub exchange: Exchange,
     /// Exchange segment.
@@ -436,7 +458,7 @@ impl Series {
     #[must_use]
     pub const fn at(&self, month: YearMonth) -> EntryKey {
         EntryKey {
-            contract: None,
+            contract: self.contract,
             exchange: self.exchange,
             segment: self.segment,
             symbol: self.symbol,
@@ -449,6 +471,7 @@ impl Series {
     #[must_use]
     pub const fn of(key: &EntryKey) -> Self {
         Self {
+            contract: key.contract,
             exchange: key.exchange,
             segment: key.segment,
             symbol: key.symbol,
@@ -458,10 +481,20 @@ impl Series {
 }
 
 impl std::fmt::Display for Series {
-    /// `NSE-FNO-ABB-III`, which is the store path with the separators changed.
+    /// `NSE-FNO-ABB-III`, which is the store path with the separators changed —
+    /// and, for a derivative, the contract that path also carries.
     ///
     /// Sorting the text sorts by venue, then segment, then symbol — the order
     /// [`Ord`] gives the struct, so the grid's rows read in the order they sort.
+    ///
+    /// # Why the contract is here and not left off
+    ///
+    /// Without it, `2025-09-25-24650-CE` and `2025-09-25-24700-CE` render the
+    /// identical string `NSE-FNO-NIFTY`, so a page listing both is a page
+    /// listing one row twice. Two hundred strikes of one expiry would read as
+    /// two hundred copies of one name. The contract is what separates them in
+    /// the store path, in `EntryKey` and in the manifest, and this is the one
+    /// place it was dropped.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -469,7 +502,11 @@ impl std::fmt::Display for Series {
             self.exchange.as_str(),
             self.segment.as_str(),
             self.symbol
-        )
+        )?;
+        match self.contract {
+            Some(ref contract) => write!(f, "-{}", contract.as_str()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -822,6 +859,7 @@ pub fn swept_series() -> Vec<Series> {
         .into_iter()
         .filter_map(|s| Symbol::new(s).ok())
         .map(|symbol| Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol,
@@ -854,6 +892,7 @@ mod tests {
     /// Any series, so a test can name the store's own vocabulary directly.
     fn series(segment: Segment, symbol: &str) -> Series {
         Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment,
             symbol: Symbol::new(symbol).expect("valid"),
@@ -1362,6 +1401,7 @@ mod tests {
     fn the_axis_is_sorted_and_deduplicated_whatever_order_the_censuses_arrive_in() {
         let month = YearMonth::new(2026, 7).expect("valid");
         let index = |symbol: &str| Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol: Symbol::new(symbol).expect("a legal symbol"),
@@ -1420,6 +1460,7 @@ mod tests {
             "the widest haystack `keeps` can ever be handed"
         );
         let series = Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol: widest,

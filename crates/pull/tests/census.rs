@@ -389,7 +389,28 @@ fn a_re_run_leaves_the_census_byte_for_byte() {
         "a re-run appended a second entry saying what the first entry already \
          said, and two identical runs left two different files"
     );
-    assert_eq!(first, second, "and the two runs report the same thing");
+    // THE TWO RUNS AGREE ON EVERYTHING THEY MEASURED, AND DIFFER ON WHAT THEY
+    // WROTE — which is the whole point of the second counter.
+    //
+    // This asserted `first == second` outright, and that passed only because
+    // `bars_stored` counted bars OFFERED and nothing counted bars written. A
+    // re-run offers every bar and commits none, and the receipt said "Bars
+    // stored 375" over a run that wrote nothing at all. `bars_committed` is
+    // what tells the two apart, so it is the one field that MUST differ here.
+    assert_eq!(first.bars_committed, 3, "the first run wrote the month");
+    assert_eq!(
+        second.bars_committed, 0,
+        "and the second wrote nothing — the file already held it byte for byte"
+    );
+    assert_eq!(
+        pull::ingest::Ingested {
+            bars_committed: second.bars_committed,
+            ..first.clone()
+        },
+        second,
+        "and every other counter agrees, because every other counter is about \
+         what was READ and offered rather than what was written"
+    );
     assert_eq!(second.failures, Vec::new());
     assert_eq!(
         second.counted,

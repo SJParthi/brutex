@@ -183,8 +183,36 @@ pub struct Ingested {
     pub members: usize,
     /// Rows the vendor's files held, before any filtering.
     pub rows_read: usize,
-    /// Bars written to the store.
+    /// Bars OFFERED to the store — not necessarily written.
+    ///
+    /// # The distinction, and why the name kept the wrong one
+    ///
+    /// This was documented as "bars written" and fed from the post-fold batch
+    /// length. `BarFile::append` answers `Committed` or `AlreadyPresent`, and
+    /// `write_and_count` discarded the discriminant — so re-running a pull the
+    /// store already held reported *"Rows read 375, Bars stored 375"* with zero
+    /// bytes written and the census untouched. `balances()` was true, the
+    /// journal said `Stored`, and nothing had been.
+    ///
+    /// The arithmetic is not the bug: `balances()` genuinely needs the OFFERED
+    /// count, because it reconciles rows read against rows accounted for. What
+    /// was wrong is that the number an operator reads to decide whether a
+    /// backfill is progressing was the wrong one. So this keeps its meaning and
+    /// says so, and [`Self::bars_committed`] carries the other.
     pub bars_stored: usize,
+    /// The census row this run produced and did NOT write.
+    ///
+    /// `None` once it has been recorded, or when nothing was filed. A caller
+    /// filing several contracts from one vendor answer collects these and calls
+    /// [`record_held`] once — see `record_all`'s cost note for what paying it
+    /// per contract cost.
+    pub pending: Option<crate::manifest::Held>,
+    /// Bars this run actually WROTE — `Appended::Committed` only.
+    ///
+    /// Zero on a re-run of a month already held, which is the number that makes
+    /// "nothing happened" distinguishable from "nothing was there". See
+    /// [`Self::bars_stored`] for why both exist.
+    pub bars_committed: usize,
     /// Month files written for a rung NOBODY ASKED FOR, folded from the minute
     /// bars this run landed.
     ///
@@ -239,6 +267,7 @@ impl Ingested {
         self.members += other.members;
         self.rows_read += other.rows_read;
         self.bars_stored += other.bars_stored;
+        self.bars_committed += other.bars_committed;
         // A FIELD ADDED TO THE RECEIPT AND NOT TO THIS LINE IS A COUNT THAT
         // SILENTLY RESETS on every window after the first — the whole reason
         // `absorb` exists is that a run is many calls and the receipt is one.
@@ -641,6 +670,10 @@ fn from_members_inner(members: &[Member], store_root: &Path, plan: Plan<'_>) -> 
                 // already says. The member is the unit an operator resumes at.
                 note_landed(member, &landed);
                 done.bars_stored += landed.bars;
+                // AND WHAT WAS ACTUALLY WRITTEN, beside what was offered. A
+                // re-run of a month already held offers every bar and commits
+                // none, and only this number can say so.
+                done.bars_committed += landed.committed;
                 done.rows_folded += landed.folded;
                 // The census is folded so the totals describe the RUN. A
                 // per-member census would answer "why did this contract drop
@@ -847,11 +880,30 @@ pub fn from_window(
 /// already there. `CLAUDE.md` §3 rule 5 makes that harmless and §3 rule 4 makes
 /// it expensive.
 ///
-/// # Cost
+/// # Cost — and the doc this replaces claimed the opposite of the truth
 ///
-/// One lock, one read, one incremental append. O(1) in the entries the census
-/// already holds.
-fn record_one(store_root: &Path, vendor: Vendor, held: Held) -> Option<String> {
+/// It read: *"One lock, one read, one incremental append. O(1) in the entries
+/// the census already holds."* The middle clause is the whole cost.
+/// `read_census` reads the entire manifest file and `Manifest::load` decodes
+/// **every one of `n_valid` entries**, checksum-verifies each, inserts each
+/// into a `HashMap`, and walks the values again for the row total. It is
+/// Θ(entries the census already holds) — precisely the quantity it named itself
+/// constant in.
+///
+/// That mattered little at one call per member. It matters now: splitting a
+/// rolling answer into its several contracts made this run once per GROUP, so
+/// one vendor answer could trigger thirty full manifest walks, against 252
+/// requests a month, while the manifest grows by that same count. Total
+/// backfill cost was quadratic in entries written.
+///
+/// **So it takes a SLICE.** One lock, one read, one decode and one install for
+/// however many entries a caller has in hand — which is the shape
+/// `from_members_inner` has always used for the spot path, and the reason that
+/// path never had this problem.
+///
+/// Per call: Θ(entries) for the read, plus O(offered) to fold them in. Per
+/// ENTRY offered it is now amortised, which is the property that was missing.
+fn record_all(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
     let census_path = crate::manifest::manifest_path(store_root, vendor);
     let lock = match CensusLock::take(&census_path) {
         Ok(lock) => lock,
@@ -861,20 +913,49 @@ fn record_one(store_root: &Path, vendor: Vendor, held: Held) -> Option<String> {
         Ok(census) => census,
         Err(why) => return Some(why),
     };
-    let mut appends: Vec<Append> = Vec::new();
-    match count(&mut census, held) {
-        Ok(changed) => {
-            if let Some(append) = changed {
-                appends.push(append);
-            }
+    // RESERVED FROM THE BOUND IN HAND — at most one append per entry offered.
+    let mut appends: Vec<Append> = Vec::with_capacity(held.len());
+    for one in held {
+        match count(&mut census, *one) {
+            Ok(Some(append)) => appends.push(append),
+            Ok(None) => {}
+            Err(why) => return Some(why),
         }
-        Err(why) => return Some(why),
     }
     if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
         note_census_unpublished(&census_path, appends.len(), &why);
         return Some(why);
     }
     None
+}
+
+/// Writes a batch of census rows in ONE cycle — one lock, one read, one install.
+///
+/// # Why a batch, and what one-at-a-time cost
+///
+/// `record_all` reads the entire manifest and decodes every entry in it. Paying
+/// that per CONTRACT meant one rolling vendor answer — which spans four or five
+/// weekly contracts and steps strike whenever spot crosses a boundary —
+/// triggering thirty full manifest walks, against 252 requests a month, while
+/// the manifest grows by that same count. Total backfill cost was quadratic in
+/// entries written.
+///
+/// The spot path never had this shape: `from_members_inner` reads the census
+/// once, accumulates, and installs once. This is that shape, made available
+/// where the contract split made it necessary.
+///
+/// The public face of `record_all`. A caller that filed several contracts from
+/// a single vendor answer collects each run's [`Ingested::pending`] and calls
+/// this once, instead of paying a full manifest decode per contract.
+///
+/// Returns the reason when the census could not be published, exactly as the
+/// single-row path reports it.
+#[must_use]
+pub fn record_held(store_root: &Path, vendor: Vendor, held: &[Held]) -> Option<String> {
+    if held.is_empty() {
+        return None;
+    }
+    record_all(store_root, vendor, held)
 }
 
 /// Files bars and their overlays that are ALREADY DECODED.
@@ -981,8 +1062,9 @@ pub fn from_rows(
         },
     );
     let one = match held {
-        Ok(one) => {
+        Ok((one, committed)) => {
             done.bars_stored = bars.len();
+            done.bars_committed = committed;
             one
         }
         Err(why) => {
@@ -994,14 +1076,23 @@ pub fn from_rows(
         }
     };
 
-    if let Some(why) = record_one(store_root, plan.vendor, one) {
-        done.failures.push(Failure {
-            instrument: instrument.to_owned(),
-            why,
-        });
-    } else {
-        done.counted = 1;
-    }
+    // THE CENSUS ROW IS HANDED BACK, NOT WRITTEN HERE.
+    //
+    // A caller filing SEVERAL contracts from one vendor answer — which is every
+    // rolling answer, since one spans four or five weekly contracts and steps
+    // strike with spot — would otherwise pay a full census cycle per contract:
+    // lock, read the whole manifest, decode every entry, install, fsync. Thirty
+    // groups is thirty walks, against 252 requests a month, while the manifest
+    // grows by that same count. `from_rows` below records the one entry it has;
+    // `roll_one` collects and records once.
+    done.pending = Some(one);
+    // COUNTED, BECAUSE IT WILL BE. The row is going to the caller's batch and
+    // the caller returns an error if the batch cannot be published, so there is
+    // no path where this reports counted and the census does not hold it —
+    // which is the property `Ingested::counted`'s own doc asserts: a member
+    // that stored bars is either in this count or named in `failures`, with no
+    // third place to be.
+    done.counted = 1;
 
     // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails there is
     // nothing for an overlay row to be a column of, and a sidecar describing
@@ -1119,6 +1210,8 @@ fn name_the_origin(done: &mut Ingested, origin: &str) {
 struct Landed {
     /// Bars the member offered to the store.
     bars: usize,
+    /// Bars actually WRITTEN — zero when the month already held this batch.
+    committed: usize,
     /// Snapshots that merged into a bar which was already open.
     folded: usize,
     /// Why rows were declined.
@@ -1265,6 +1358,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     let mut landed = fetch::land(&raw, request, encoding, scale).map_err(|why| why.to_string())?;
     if landed.bars.is_empty() {
         return Ok(Landed {
+            committed: 0,
             bars: 0,
             folded: 0,
             census: landed.census,
@@ -1282,14 +1376,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // The bucket width comes from the TIMEFRAME the caller is filing under, so
     // a one-second feed, a one-minute feed and a daily feed all fold through
     // this same line. Nothing here knows which vendor it came from.
-    let bucket = crate::fold::Bucket::of_secs(timeframe.secs())
-        .ok_or("a timeframe of zero seconds has no bucket to fold into")?;
-    let snapshots = landed.bars.len();
-    landed.bars = crate::fold::fold(&landed.bars, bucket).map_err(|why| why.to_string())?;
-    // Measured at the fold, where the two lengths are both in hand. `fold`
-    // emits one bar per bucket that held anything and never invents one, so
-    // this subtraction cannot go negative.
-    let folded = snapshots.saturating_sub(landed.bars.len());
+    let folded = fold_in_place(&mut landed.bars, timeframe, member)?;
 
     // The month comes from the FIRST surviving bar. A member whose bars cross a
     // month boundary would need two files, and that split is a decision about
@@ -1301,7 +1388,6 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // rows into N bars means the vendor already sent one bar per day, and the
     // bucket is only ever re-stamping them. `rows_folded = 0` on a 1day rung
     // is the signature, and nothing wrote it down.
-    note_fold(member, snapshots, landed.bars.len(), folded, bucket);
 
     // `fold` returns at least one bar for an input that had at least one, and
     // the empty input already returned above — but the type does not say so,
@@ -1309,6 +1395,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // it rather than a panic.
     let (Some(first), Some(last)) = (landed.bars.first(), landed.bars.last()) else {
         return Ok(Landed {
+            committed: 0,
             bars: 0,
             folded,
             census: landed.census,
@@ -1331,15 +1418,7 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // plan's strings a second time. `exchange.as_str()` is the parsed
     // `Exchange` speaking, so the directory a bar lands in and the code the
     // census records cannot disagree — there is only one value.
-    //
-    // A consequence worth naming: with the venue a closed enum, the symbol a
-    // `Symbol` (whose byte set is a subset of `store::path::check_segment`'s
-    // and whose capacity is the same 24), the vendor a `Vendor`, the timeframe
-    // one of `Timeframe::KNOWN` and the month a `YearMonth`, this refusal is
-    // no longer reachable from here. It stays because `StorePath::new` is the
-    // only thing that renders a path and a caller that skipped it would be
-    // asserting the above rather than checking it — but it is a backstop now,
-    // and `docs/06-limits.md` should not be told it is exercised.
+    // See `write_and_count` for why the path refusal below is a backstop.
     let parts = PathParts {
         vendor,
         exchange: exchange.as_str(),
@@ -1350,23 +1429,22 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
         month: ym,
         file: FileKind::Bars,
     };
-    let mut entries = vec![
-        write_and_count(
-            &landed.bars,
-            store_root,
-            symbol_id,
-            parts,
-            EntryKey {
-                contract: plan.contract,
-                exchange,
-                segment,
-                symbol,
-                timeframe,
-                month: ym,
-            },
-        )
-        .map_err(|why| format!("{}: {why}", member.instrument))?,
-    ];
+    let (pulled, committed) = write_and_count(
+        &landed.bars,
+        store_root,
+        symbol_id,
+        parts,
+        EntryKey {
+            contract: plan.contract,
+            exchange,
+            segment,
+            symbol,
+            timeframe,
+            month: ym,
+        },
+    )
+    .map_err(|why| format!("{}: {why}", member.instrument))?;
+    let mut entries = vec![pulled];
 
     // THE SEVEN THAT WERE NEVER PULLED. Split into its own function only to
     // stay under clippy's 100-line ceiling for `one`; the argument for it is
@@ -1405,27 +1483,11 @@ fn one(member: &Member, store_root: &Path, plan: Plan<'_>) -> Result<Landed, Str
     // a rung added to `Timeframe::KNOWN` moves both sides at once and this
     // expectation cannot go stale against it. It already knows the one case
     // where zero is correct: an option contract folds into no rung.
-    //
-    // AND IT IS HANDED THE CONTRACT, WHICH IT WAS NOT. The literal `None` sat
-    // directly beneath the sentence naming the case it exists for, so an OPTION
-    // expected seven derived rungs and folds into none: `derived` was 0,
-    // `derived_expected` was 7, `derived_shortfall` fired, and every contract
-    // of the month landed in `done.failures`.
-    //
-    // What that looked like from outside: the bars, the census row and the
-    // closes were all correctly on disk, and `/pull/fno` rendered
-    // "Bars stored: 0 · Contracts that did not land: 200 of 200" and HTTP 502
-    // "the month is incomplete and must not be read as held". A correct month
-    // reported as a total failure — and on the re-run the incremental gate
-    // short-circuits and calls it Empty, so one month gets two different wrong
-    // answers.
-    //
-    // It also drowns any REAL derived shortfall in two hundred false ones,
-    // which is the more expensive half: `note_derived_shortfall` exists to
-    // catch a disk that filled between the pulled rung and the folded ones.
     let derived_expected = derived_count_in(plan.contract, timeframe);
     Ok(Landed {
         bars: landed.bars.len(),
+        // WRITTEN, AS DISTINCT FROM OFFERED. See `Ingested::bars_stored`.
+        committed,
         folded,
         census: landed.census,
         entries,
@@ -1614,13 +1676,35 @@ fn derive_all(
             exchange: into.exchange.as_str(),
             segment: into.segment.as_str(),
             symbol: into.symbol.as_str(),
-            contract: None,
+            // THE CONTRACT THESE BARS WERE FOLDED FROM, and both of these read
+            // the literal `None`.
+            //
+            // `DeriveInto::contract` was added and then consulted ONLY by the
+            // `is_option()` line above — so an OPTION returned early and was
+            // safe, and a FUTURE walked straight past two hardcoded `None`s.
+            //
+            // What that filed: `NSE-NIFTY-25Sep25-FUT`'s seven coarser rungs
+            // went to `bars/groww/NSE/FNO/NIFTY/2min/2025-09.bin` — a directory
+            // naming no contract — under `EntryKey { contract: None, … }`. So
+            // did October's and November's, because September, October and
+            // November futures all trade every minute of September. The first
+            // contract won the path; the other two hit the same file with the
+            // same stamps and different prices, and `BarFile::append` refused
+            // them as out of order.
+            //
+            // Nothing caught it because `StorePath::new` checks the contract
+            // segment only when one is PRESENT: `NSE/FNO/NIFTY/2min/` is a
+            // legal path, so it was created, appended to, sealed and counted.
+            // HTTP 200, `derived_files: 7`, `balances()` true — and one
+            // contract's coarse bars sitting at an address that belongs to no
+            // contract at all, unrewritable under §8.
+            contract: into.contract,
             timeframe: rung,
             month: into.month,
             file: FileKind::Bars,
         };
         let key = EntryKey {
-            contract: None,
+            contract: into.contract,
             exchange: into.exchange,
             segment: into.segment,
             symbol: into.symbol,
@@ -1634,6 +1718,53 @@ fn derive_all(
     }
 }
 
+/// Folds a member's bars to the rung being filed under, in place, and answers
+/// how many rows the fold absorbed.
+///
+/// # Why the fold exists at all
+///
+/// Without it a real run produced 354,675 rows and ZERO bars: both archive
+/// vendors ship one-second snapshots with two to four rows per second and no
+/// sub-second field, and the store correctly refuses two records claiming the
+/// same instant. The fold is what turns a snapshot stream into bars.
+///
+/// The absorbed count is measured HERE, where both lengths are in hand. `fold`
+/// emits one bar per bucket that held anything and never invents one, so the
+/// subtraction cannot go negative.
+///
+/// # Errors
+///
+/// A rung whose bucket is zero seconds, or a fold the bar set refuses.
+fn fold_in_place(
+    bars: &mut Vec<store::format::Bar>,
+    timeframe: Timeframe,
+    member: &Member,
+) -> Result<usize, String> {
+    let bucket = crate::fold::Bucket::of_secs(timeframe.secs())
+        .ok_or("a timeframe of zero seconds has no bucket to fold into")?;
+    let snapshots = bars.len();
+    *bars = crate::fold::fold(bars, bucket).map_err(|why| why.to_string())?;
+    let folded = snapshots.saturating_sub(bars.len());
+    note_fold(member, snapshots, bars.len(), folded, bucket);
+    Ok(folded)
+}
+
+/// WHY `derived_count_in` IS HANDED THE CONTRACT, AND WHAT THE LITERAL COST.
+///
+/// The call in `one` passed `None` directly beneath the sentence naming the
+/// case it exists for. So an OPTION expected seven derived rungs and folds into
+/// none: `derived` was 0, `derived_expected` was 7, `derived_shortfall` fired,
+/// and every contract of the month landed in `Ingested::failures`.
+///
+/// From outside that looked like: bars, census row and closes all correctly on
+/// disk, and `/pull/fno` rendering "Bars stored: 0 · Contracts that did not
+/// land: 200 of 200" with HTTP 502 "the month is incomplete and must not be
+/// read as held". A correct month reported as a total failure.
+///
+/// It also drowned any REAL derived shortfall in two hundred false ones, which
+/// is the more expensive half: `note_derived_shortfall` exists to catch a disk
+/// that filled between the pulled rung landing and the folded ones.
+///
 /// How many rungs a file at `source` is folded into — COMPUTED, never listed.
 ///
 /// # Why this is a rule and not an array
@@ -1721,11 +1852,34 @@ fn derive(
     if bars.is_empty() {
         return Err(format!("{} folded to no bars", rung.as_str()));
     }
-    write_and_count(&bars, store_root, symbol_id, parts, key)
+    // ONLY THE CENSUS ROW. A derived rung's committed count is not reported
+    // separately — the receipt's `derived` line already says how many rungs
+    // landed, and a second number for the same fact would be a second thing to
+    // keep in step.
+    write_and_count(&bars, store_root, symbol_id, parts, key).map(|(held, _)| held)
 }
 
 /// Appends `bars` under `parts` and answers the census row for what the FILE
 /// now holds — not for the batch that was offered.
+///
+/// # The path refusal here is a backstop, not a live check
+///
+/// With the venue a closed enum, the symbol a `Symbol` (whose byte set is a
+/// subset of `store::path::check_segment`'s and whose capacity is the same 24),
+/// the vendor a `Vendor`, the timeframe one of `Timeframe::KNOWN` and the month
+/// a `YearMonth`, `StorePath::new` cannot fail from this caller. It stays
+/// because this is the only thing that renders a path, and a caller that
+/// skipped it would be ASSERTING the above rather than checking it — but
+/// `docs/06-limits.md` should not be told the arm is exercised.
+///
+/// # It answers what it WROTE, beside what it was given
+///
+/// `BarFile::append` returns `Committed` or `AlreadyPresent`, and this
+/// discarded the discriminant with a bare `?`. So re-running a pull the store
+/// already held reported "Rows read 375, Bars stored 375" with zero bytes
+/// written and the census untouched — `balances()` true, the journal saying
+/// `Stored`, and nothing stored. The second return value is the number that
+/// tells those two runs apart.
 ///
 /// The one place a bar reaches the disk, shared by the rung that was pulled and
 /// every rung derived from it. Two copies of this would be two chances for the
@@ -1742,21 +1896,33 @@ fn write_and_count(
     symbol_id: u32,
     parts: PathParts<'_>,
     key: EntryKey,
-) -> Result<Held, String> {
+) -> Result<(Held, usize), String> {
     let path = StorePath::new(parts).map_err(|why| why.to_string())?;
     let mut file =
         BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
-    file.append(bars).map_err(|why| why.to_string())?;
+    // THE DISCRIMINANT IS KEPT, AND IT WAS THROWN AWAY. `Committed` and
+    // `AlreadyPresent` are the difference between a run that wrote a month and
+    // one that re-offered it, and `?` on its own erased that.
+    let committed = matches!(
+        file.append(bars).map_err(|why| why.to_string())?,
+        store::file::Appended::Committed { .. }
+    );
     let header = file.header();
     let closes = month_closes(&file, &header, bars)?;
-    Ok(Held::new(
-        Entry {
-            key,
-            rows: header.n_valid,
-            first_ts_micros: header.first_ts_micros,
-            last_ts_micros: header.last_ts_micros,
-        },
-        closes,
+    Ok((
+        Held::new(
+            Entry {
+                key,
+                rows: header.n_valid,
+                first_ts_micros: header.first_ts_micros,
+                last_ts_micros: header.last_ts_micros,
+            },
+            closes,
+        ),
+        // WRITTEN, NOT MERELY OFFERED. Zero when the month already held this
+        // batch byte for byte — the number that makes a re-run distinguishable
+        // from a first run on a receipt.
+        if committed { bars.len() } else { 0 },
     ))
 }
 

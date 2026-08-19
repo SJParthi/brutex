@@ -4302,6 +4302,7 @@ mod tests {
     #[test]
     fn the_store_page_marks_a_held_month_and_dashes_one_it_does_not_hold() {
         let nifty_key = crate::census::Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: brutex_core::instrument::Segment::Index,
             symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
@@ -4655,6 +4656,7 @@ mod tests {
         }];
 
         let series = crate::census::Series {
+            contract: None,
             exchange: Exchange::Nse,
             segment: Segment::Index,
             symbol: Symbol::new("NIFTY").expect("valid"),
@@ -5048,6 +5050,7 @@ mod store_links_tests {
     #[test]
     fn every_held_count_on_the_store_page_links_to_the_bars_it_counts() {
         let series = crate::census::Series {
+            contract: None,
             exchange: brutex_core::instrument::Exchange::Nse,
             segment: brutex_core::instrument::Segment::Index,
             symbol: brutex_core::symbol::Symbol::new("NIFTY").expect("valid"),
