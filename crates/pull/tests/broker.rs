@@ -1033,3 +1033,116 @@ fn walk_bins(dir: &Path, into: &mut Vec<String>) {
         }
     }
 }
+
+// ===========================================================================
+// Decoded rows, bar and overlay together
+// ===========================================================================
+
+/// **THE OPTION'S BARS AND ITS iv/spot LAND TOGETHER, UNDER ONE CONTRACT.**
+///
+/// This is the join `/pull/fno` needs for Dhan. Its answer arrives already
+/// decoded — the spot and the implied volatility are lifted from the SAME
+/// parallel arrays as the open and the close, so no raw-row shape in this build
+/// can carry them — and `from_rows` is the door that takes them.
+///
+/// Three things are asserted because each fails differently:
+/// the bars reach a `.bar` under the contract, the overlay reaches a `.ovl`
+/// BESIDE it, and the census counts the month so `/store` can see it. A month
+/// on disk the counter does not know about is one the ladder gate treats as
+/// missing, so the next run refetches what is already there.
+#[test]
+fn decoded_bars_and_their_overlays_are_filed_under_one_contract() {
+    use brutex_core::instrument::{Expiry, Kind, OptionSide};
+    use store::format::{Bar, OI_NULL, Overlay};
+
+    let scratch = Scratch::new("fromrows");
+    let store_root = scratch.store();
+    let request = request();
+    let expiry = Expiry::new(2025, 9, 25).expect("a real expiry");
+    let contract = Contract::of(Kind::Option {
+        expiry,
+        strike: Paisa::from_raw(2_465_000),
+        side: OptionSide::Call,
+    })
+    .expect("it renders");
+
+    let bars = [
+        Bar {
+            ts_micros: 1_751_337_000_000_000,
+            open: 10_000,
+            high: 10_500,
+            low: 9_500,
+            close: 10_200,
+            volume: 75,
+            open_interest: 4200,
+        },
+        Bar {
+            ts_micros: 1_751_337_060_000_000,
+            open: 10_200,
+            high: 10_600,
+            low: 10_100,
+            close: 10_400,
+            volume: 50,
+            open_interest: 4250,
+        },
+    ];
+    let overlays = [
+        Overlay {
+            ts_micros: 1_751_337_000_000_000,
+            spot: 2_465_005,
+            iv_micros: 125_000,
+        },
+        // ONE THAT STATES ONLY A SPOT. Dhan answers a spot for a contract whose
+        // iv it did not compute, and dropping the row would lose the spot.
+        Overlay {
+            ts_micros: 1_751_337_060_000_000,
+            spot: 2_465_100,
+            iv_micros: OI_NULL,
+        },
+    ];
+
+    let plan = Plan {
+        contract: Some(contract),
+        segment: "FNO",
+        ..plan(&request)
+    };
+    let done = ingest::from_rows(&bars, &overlays, "NIFTY", "https://x", &store_root, plan);
+    assert!(
+        done.failures.is_empty(),
+        "nothing should refuse: {:?}",
+        done.failures
+    );
+    assert_eq!(done.bars_stored, 2, "both bars reached the store");
+    assert_eq!(done.counted, 1, "and the census counted the month");
+
+    // ── THE TWO FILES, SIDE BY SIDE ─────────────────────────────────────
+    let mut bins = Vec::new();
+    walk_bins(&store_root, &mut bins);
+    assert!(
+        bins.iter().any(|p| p.contains(contract.as_str())),
+        "the bars are filed under the contract: {bins:?}"
+    );
+
+    let mut ovls = Vec::new();
+    walk_ext(&store_root, "ovl", &mut ovls);
+    assert_eq!(ovls.len(), 1, "exactly one overlay file: {ovls:?}");
+    assert!(
+        ovls[0].contains(contract.as_str()),
+        "and it sits BESIDE the bars, under the same contract: {ovls:?}"
+    );
+}
+
+/// Every file with `ext` under a root, as slash-joined strings.
+fn walk_ext(dir: &Path, ext: &str, into: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_ext(&path, ext, into);
+        } else if path.extension().is_some_and(|e| e == ext) {
+            into.push(path.display().to_string());
+        }
+    }
+}

@@ -6753,20 +6753,48 @@ async fn roll_one(
     })
     .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
 
-    // FETCHED AND NAMED. NOT YET FILED, and this returns the count rather than
-    // pretending otherwise.
-    //
-    // `land_one` decodes RAW vendor rows on its way to the store, and these are
-    // already decoded — `rolling::read` had to do it here, because the overlay
-    // fields are lifted from the same arrays as the bar and no raw-row shape in
-    // this build carries them. So the last step needs an ingest entry that
-    // takes decoded `Bar` and `Overlay` pairs and files both under one
-    // contract, which is the piece after this one.
-    //
-    // The contract, the expiry and the rows are all established above, so what
-    // remains is the write and not another question.
-    let _ = (site, &contract);
-    Ok(rows.len())
+    let bars: Vec<store::format::Bar> = rows.iter().map(|r| r.bar).collect();
+    // ONLY THE OVERLAYS THAT STATE SOMETHING. A contract whose vendor sent
+    // neither a spot nor a volatility has nothing to overlay, and a file of
+    // null rows costs a block per 170 bars to answer what an absent file
+    // answers better.
+    let overlays: Vec<store::format::Overlay> = rows
+        .iter()
+        .map(|r| r.overlay)
+        .filter(store::format::Overlay::states_something)
+        .collect();
+
+    let request = pull::fetch::BarRequest {
+        instrument_id: security_id.to_owned(),
+        listing: pull::vendor::Listing::Derivative,
+        window: asked.window,
+        granularity: asked.granularity,
+    };
+    let plan = pull::ingest::Plan {
+        columns: pull::csv::Columns::Gdfl,
+        request: &request,
+        encoding: wire.spec.timestamps,
+        // ALREADY PAISA. `rolling::read` converted at the boundary through
+        // `csv::paisa`, so saying Rupees here would multiply by a hundred a
+        // second time — the trap `DECODED_PRICE_SCALE` exists to name.
+        scale: pull::vendor::PriceScale::Paisa,
+        vendor: wire.store_vendor,
+        exchange: brutex_core::instrument::Exchange::Nse.as_str(),
+        segment: brutex_core::instrument::Segment::Fno.as_str(),
+        contract: Some(contract),
+    };
+    let done = pull::ingest::from_rows(
+        &bars,
+        &overlays,
+        asked.underlying.as_str(),
+        endpoint,
+        &site.store_root,
+        plan,
+    );
+    if let Some(first) = done.failures.first() {
+        return Err(format!("{label}: {}", first.why));
+    }
+    Ok(done.bars_stored)
 }
 
 /// Every request in the cross product, fetched and filed.
@@ -6919,16 +6947,19 @@ async fn fno_roll(
         offsets,
     )
     .await;
-    facts.push(("Rows fetched and named", stored.to_string()));
+    facts.push(("Bars stored", stored.to_string()));
 
     if failed == 0 {
         return page.say(
             facts,
             axum::http::StatusCode::OK,
-            audit::Outcome::Empty,
-            "every planned contract answered and was named; the rows are NOT \
-             filed yet — that needs an ingest entry taking decoded bar and \
-             overlay pairs, which is the next piece",
+            if stored == 0 {
+                audit::Outcome::Empty
+            } else {
+                audit::Outcome::Stored
+            },
+            "every planned contract answered and was filed under its own \
+             expiry and strike",
         );
     }
     facts.push((

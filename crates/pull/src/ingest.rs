@@ -837,6 +837,192 @@ pub fn from_window(
     from_members(std::slice::from_ref(&member), store_root, plan)
 }
 
+/// Records one written month in the census, through the same lock and install
+/// the raw-row door uses.
+///
+/// # Why the counter is not optional
+///
+/// A month on disk the census does not know about is a month `/store` cannot
+/// see and the ladder gate treats as missing, so the next run refetches what is
+/// already there. `CLAUDE.md` §3 rule 5 makes that harmless and §3 rule 4 makes
+/// it expensive.
+///
+/// # Cost
+///
+/// One lock, one read, one incremental append. O(1) in the entries the census
+/// already holds.
+fn record_one(store_root: &Path, vendor: Vendor, held: Held) -> Option<String> {
+    let census_path = crate::manifest::manifest_path(store_root, vendor);
+    let lock = match CensusLock::take(&census_path) {
+        Ok(lock) => lock,
+        Err(why) => return Some(why.clone()),
+    };
+    let mut census = match read_census(&census_path, vendor) {
+        Ok(census) => census,
+        Err(why) => return Some(why),
+    };
+    let mut appends: Vec<Append> = Vec::new();
+    match count(&mut census, held) {
+        Ok(changed) => {
+            if let Some(append) = changed {
+                appends.push(append);
+            }
+        }
+        Err(why) => return Some(why),
+    }
+    if let Err(why) = install_census(&lock, &census_path, &census, &appends, false) {
+        note_census_unpublished(&census_path, appends.len(), &why);
+        return Some(why);
+    }
+    None
+}
+
+/// Files bars and their overlays that are ALREADY DECODED.
+///
+/// # Why this door exists beside [`from_window`]
+///
+/// That one takes RAW vendor rows and decodes them on the way in, which is
+/// right for every bars endpoint in this build. Dhan's expired-options answer
+/// cannot arrive that way: the spot and the implied volatility are lifted from
+/// the SAME parallel arrays as the open and the close, so a raw-row shape that
+/// carried them would have to be a second row type — and the reader that
+/// splits those arrays is the only thing that knows which is which.
+///
+/// So `pull::rolling` decodes, and this files what it produced.
+///
+/// # What it does NOT do, and why
+///
+/// It does not fold and it does not derive. A derived rung of an option is not
+/// a thing this store keeps — `derived_count_in` already answers zero for a
+/// contract — and folding a minute series that arrived at minute resolution
+/// would be a no-op wearing a cost.
+///
+/// # Errors
+///
+/// Reported through [`Ingested::failures`] rather than returned, so one
+/// contract that will not file does not abandon the month's other two hundred.
+///
+/// # Cost
+///
+/// Two opens and two appends per call, both O(1). Nothing scans.
+#[must_use]
+pub fn from_rows(
+    bars: &[store::format::Bar],
+    overlays: &[store::format::Overlay],
+    instrument: &str,
+    origin: &str,
+    store_root: &Path,
+    plan: Plan<'_>,
+) -> Ingested {
+    let mut done = Ingested {
+        members: 1,
+        rows_read: bars.len(),
+        ..Ingested::default()
+    };
+    if bars.is_empty() {
+        return done;
+    }
+    let Some((first, last)) = bars.first().zip(bars.last()) else {
+        return done;
+    };
+    let ym = match month_of(first, last) {
+        Ok(ym) => ym,
+        Err(why) => {
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            return done;
+        }
+    };
+    let timeframe = match plan.timeframe() {
+        Ok(t) => t,
+        Err(why) => {
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            return done;
+        }
+    };
+    let identity = match identify(instrument, plan.exchange, plan.segment) {
+        Ok(i) => i,
+        Err(why) => {
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            return done;
+        }
+    };
+    let Identity {
+        symbol,
+        exchange,
+        segment,
+        symbol_id,
+    } = identity;
+
+    let parts = PathParts {
+        vendor: plan.vendor,
+        exchange: exchange.as_str(),
+        segment: segment.as_str(),
+        symbol: symbol.as_str(),
+        contract: plan.contract,
+        timeframe,
+        month: ym,
+        file: FileKind::Bars,
+    };
+    let held = write_and_count(
+        bars,
+        store_root,
+        symbol_id,
+        parts,
+        EntryKey {
+            contract: plan.contract,
+            exchange,
+            segment,
+            symbol,
+            timeframe,
+            month: ym,
+        },
+    );
+    let one = match held {
+        Ok(one) => {
+            done.bars_stored = bars.len();
+            one
+        }
+        Err(why) => {
+            done.failures.push(Failure {
+                instrument: instrument.to_owned(),
+                why,
+            });
+            return done;
+        }
+    };
+
+    if let Some(why) = record_one(store_root, plan.vendor, one) {
+        done.failures.push(Failure {
+            instrument: instrument.to_owned(),
+            why,
+        });
+    } else {
+        done.counted = 1;
+    }
+
+    // THE OVERLAY AFTER THE BARS, NEVER BEFORE. If the bar write fails there is
+    // nothing for an overlay row to be a column of, and a sidecar describing
+    // bars that are not there is worse than no sidecar: the next reader joins
+    // on a stamp that has no bar.
+    if let Err(why) = write_overlay(overlays, store_root, symbol_id, parts) {
+        done.failures.push(Failure {
+            instrument: instrument.to_owned(),
+            why,
+        });
+    }
+    let _ = origin;
+    done
+}
+
 /// What one member put on disk, and the counter row that describes it.
 struct Landed {
     /// Bars the member offered to the store.
@@ -1462,6 +1648,51 @@ fn write_and_count(
         },
         closes,
     ))
+}
+
+/// Writes the overlay records beside the bars they belong to.
+///
+/// # Why this is separate from [`write_and_count`]
+///
+/// The overlay is not counted. `write_and_count` returns a [`Held`] because a
+/// bar file's row count is what `/store` and the ladder gate answer from; an
+/// overlay row is a COLUMN of a bar that is already counted, and counting it
+/// again would give a reader two numbers for one month and two answers when
+/// they drifted.
+///
+/// # Why an empty batch is a success and not a write
+///
+/// A contract whose vendor stated neither a spot nor a volatility has nothing
+/// to overlay, and a file of null rows costs a block per 170 bars to answer
+/// what an absent file answers better. So the caller filters and this refuses
+/// nothing.
+///
+/// # Errors
+///
+/// The store's own, as text — the same shape `write_and_count` returns, so a
+/// caller reports both the same way.
+///
+/// # Cost
+///
+/// One open and one append. O(1) per call.
+fn write_overlay(
+    rows: &[store::format::Overlay],
+    store_root: &Path,
+    symbol_id: u32,
+    parts: PathParts<'_>,
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let path = StorePath::new(PathParts {
+        file: FileKind::Overlay,
+        ..parts
+    })
+    .map_err(|why| why.to_string())?;
+    let mut file =
+        BarFile::open_or_create(store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    file.append(rows).map_err(|why| why.to_string())?;
+    Ok(())
 }
 
 /// Records one month in the census, unless it is already recorded exactly.
