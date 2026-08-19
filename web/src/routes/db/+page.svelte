@@ -9186,6 +9186,14 @@
     text-align: left;
     background: linear-gradient(180deg, var(--panel-2), var(--bg-2));
     border-bottom: 1px solid var(--line);
+    /* THE ONE MEASURED GAP IN THIS GRID, and it is depth rather than type. The
+       header is already opaque and already sticky -- measured `rgb(26,32,48)`
+       -- so a row scrolling under it is correctly clipped and nothing bleeds
+       through. What it had no cue for was that the clipping is a LAYER:
+       `box-shadow` measured `none`, so the join between the pinned header and a
+       half-scrolled row read as a cut through the row rather than as the header
+       sitting over it. One hairline says which is in front. */
+    box-shadow: 0 6px 12px -8px rgb(0 0 0 / 0.55);
     /* THE HEADER IS MONO BECAUSE THE COLUMN UNDER IT IS.
      *
      * The alignment was already exact -- both the header text and the cell text
@@ -9362,6 +9370,15 @@
      computed-value time and the row simply never lit. */
   .brow:hover > td {
     background: color-mix(in srgb, var(--acc) 7%, var(--bg-2));
+  }
+  /* THE HOVER LANDS INSTEAD OF SNAPPING. Background ONLY -- never `all`, which
+     would animate the row's geometry and reflow a 50-row grid on a mouse move.
+     Inside `no-preference` because an operator who asked for stillness gets a
+     grid that highlights instantly and never moves. */
+  @media (prefers-reduced-motion: no-preference) {
+    .brow > td {
+      transition: background-color var(--d-hover) var(--ease-out);
+    }
   }
   .bt {
     font-family: var(--mono);
