@@ -2527,6 +2527,20 @@ pub struct RollingSpec {
     pub stock_offsets: &'static [&'static str],
     /// The two sides, in the vendor's own spelling.
     pub sides: &'static [&'static str],
+    /// The expiry cadences this vendor serves, in its own spelling — Dhan
+    /// `WEEK` and `MONTH`.
+    ///
+    /// Written down because an ATM-relative request names no DATE: it names a
+    /// cadence and an ordinal within it. A driver that assumed one cadence
+    /// would silently fetch only the weeklies of an index that also has
+    /// monthlies, and report a complete month.
+    pub expiry_flags: &'static [&'static str],
+    /// The expiry ordinals within a cadence — Dhan `1` near, `2` next, `3` far.
+    ///
+    /// Three, not "all of them": the vendor answers a fixed depth, and asking
+    /// for a fourth is a request it answers with nothing. Kept as the vendor's
+    /// own strings so the request carries what the documentation shows.
+    pub expiry_codes: &'static [&'static str],
     /// The most days one call may span. Dhan documents 45.
     ///
     /// A window wider than this is SPLIT by the driver, never sent and hoped
@@ -4080,6 +4094,12 @@ const DHAN_ROLLING: RollingSpec = RollingSpec {
     // would have sent fourteen empty asks per expiry per side on every stock.
     stock_offsets: &["ATM-3", "ATM-2", "ATM-1", "ATM", "ATM+1", "ATM+2", "ATM+3"],
     sides: &["CALL", "PUT"],
+    // BOTH CADENCES. An index carries weeklies AND monthlies, and a driver
+    // that walked one would report a whole month while holding half of it.
+    expiry_flags: &["WEEK", "MONTH"],
+    // `docs/14-expired-options-data.md`: 1=Near, 2=Next, 3=Far. A fourth is a
+    // request the vendor answers with nothing.
+    expiry_codes: &["1", "2", "3"],
     max_days_per_call: 45,
     years_back: 5,
 };
