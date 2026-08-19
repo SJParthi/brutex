@@ -3672,12 +3672,12 @@ async fn spot_answer(
 fn land_one(landed: &BrokerWindow, site: &Site) -> pull::ingest::Ingested {
     let request = pull::fetch::BarRequest {
         instrument_id: String::new(),
-        // NOT ON THE WIRE ON THIS PATH. An archive addresses a FILE and a
-        // landing record addresses bars already in hand, so no request
-        // parameter is built from this and no vendor ever sees it. Stated
-        // anyway because `BarRequest` has no `Default` — a field that can be
-        // omitted is a field a later caller omits by accident.
-        listing: pull::vendor::Listing::Equity,
+        // THE INSTRUMENT'S OWN CLASS, WHICH DECIDES THE SESSION CLOCK.
+        //
+        // Not on the wire here — that part of the old comment was right — but
+        // `Listing::venue()` is what `fetch::land` filters the bars against,
+        // and this was the literal `Equity`. See `BrokerWindow::listing`.
+        listing: landed.listing,
         // THE TEMPLATE'S WINDOW, AND EVERY BODY OVERRIDES IT BELOW. Landing a
         // body against this value is the defect the loop's comment names; it
         // stands here only because `BarRequest` has no `Default`.
@@ -4537,6 +4537,32 @@ pub(crate) async fn broker_run(
 /// a broker is a row in `crate::vendor`, not an edit here". A literal at this
 /// seam is an edit here.
 struct BrokerWindow {
+    /// WHICH SESSION CLOCK THESE BARS ARE FILTERED AGAINST.
+    ///
+    /// # Why this is a field and not a literal at the landing site
+    ///
+    /// `land_one` wrote `Listing::Equity` under a comment saying the field is
+    /// "not on the wire on this path … no vendor ever sees it". True about the
+    /// wire, and it is not what the field decides. `Listing::venue()` picks the
+    /// venue, and `fetch::land` filters every bar against that venue's hours —
+    /// so this literal set the trading day for every broker pull in the build.
+    ///
+    /// NSE's 2026-08-03 CAS change split the three clocks that had agreed for
+    /// years: index closes **15:15**, cash **15:30**, derivatives **15:40**.
+    /// Filing everything as cash therefore did two silent things at once.
+    ///
+    /// * An expired option or future lost every bar stamped 15:30–15:39 — ten
+    ///   minutes of every session of every contract — dropped as
+    ///   `AtOrAfterSessionClose` into a census `fno_land` never reads.
+    /// * An index re-acquired the exact defect `session::verdict` was written
+    ///   to fix: the fifteen post-close bars from 15:15 to 15:29 admitted as
+    ///   ordinary session bars. `crates/pull/src/session.rs` describes that
+    ///   failure in the past tense; the caller kept it alive.
+    ///
+    /// Both are irreversible under §8's append-only rule. The class is resolved
+    /// per instrument upstream on the spot path and is a constant on the F&O
+    /// path — it exists in both callers, and had nowhere to ride.
+    listing: pull::vendor::Listing,
     /// The bars, exactly as the vendor sent them — ONE BODY PER LEGAL CHUNK,
     /// in window order.
     ///
@@ -5933,6 +5959,11 @@ async fn broker_window(
     // Even `Swept` is two series and this fetches one. Saying which, rather
     // than letting the receipt imply both.
     Ok(BrokerWindow {
+        // THE CLASS THIS FUNCTION ALREADY RESOLVED, twenty lines up, from the
+        // instrument's own universe bits. It was used for the wire words and
+        // then dropped, so the landing filtered an INDEX against the cash
+        // clock — fifteen post-close bars a day admitted that must not be.
+        listing,
         // SPOT. `broker_window` serves the spot path; the expired-F&O walk
         // builds its own with the contract discovery returned.
         contract: None,
@@ -6608,6 +6639,12 @@ async fn fno_land(
         // name here would file `NIFTY-30Sep25-24650-CE` as a symbol and leave
         // the underlying nowhere in the tree.
         let landed = BrokerWindow {
+            // A DERIVATIVE, WHICH `chain::request` HAS SAID SINCE D-0170 — and
+            // the landing then overrode it with `Equity`. NSE's derivatives
+            // session runs to 15:40 and cash to 15:30, so every bar of the last
+            // ten minutes was dropped as after-close, silently, into a census
+            // this loop does not read.
+            listing: pull::vendor::Listing::Derivative,
             bodies,
             instrument: found.underlying.clone(),
             origin: origin.clone(),
