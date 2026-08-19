@@ -6687,19 +6687,21 @@
                 {#if phase === 'running'}
                   <span class="spin ring" aria-hidden="true"></span> Running…
                 {:else}
-                  <!-- THE VERB IS THE SOURCE KIND'S, NOT THIS BUTTON'S. A
-                       broker is PULLED over the network; a folder of bought
-                       files is READ off a disk. This read "archive pull" for
-                       both, which is the wrong diagnostic frame printed on the
-                       control that starts it. `verb` comes from /feeds.json,
-                       which takes it from pull::vendor::SourceKind::verb.
+                  <!-- ONE WORD, AT THE OPERATOR'S INSTRUCTION. It read
+                       "Start broker pull" -- a verb, a noun and a second verb
+                       for a button with one job.
 
-                       THE NOUN IS THE SAME FIELD'S. It read
-                       `isBroker ? 'broker' : 'folder'`, which called an
-                       unstated kind a folder — the else branch of a two-way
-                       question with three answers. -->
-                  Start {isBroker ? 'broker' : isFolderFeed ? 'folder' : 'feed'}
-                  {verb}
+                       IT IS STILL THE SOURCE KIND'S WORD AND NOT THIS BUTTON'S,
+                       and that is why this is `{Verb}` rather than the literal
+                       "Pull" that was asked for. A broker is PULLED over the
+                       network; a folder of bought files is READ off a disk, and
+                       hardcoding "Pull" would print the wrong diagnostic frame
+                       on the control that starts it -- the exact defect the
+                       comment this replaces was written to record. `verb` comes
+                       from /feeds.json, which takes it from
+                       pull::vendor::SourceKind::verb, so a broker reads "Pull"
+                       and an archive reads "Read". -->
+                  {Verb}
                 {/if}
               </button>
               {#if phase === 'done'}
@@ -8557,7 +8559,11 @@
   /* The submit rung closes the panel the way the strip's own rungs are
      separated — a rule above it and the press on the right. */
   .form > .actions {
-    justify-content: flex-end;
+    /* LEFT, AT THE OPERATOR'S INSTRUCTION. It sat at `flex-end`, so the one
+       control that starts a run was the furthest thing on the strip from the
+       controls that configure it -- the eye crossed the whole form to reach it
+       and crossed back to check what it had chosen. */
+    justify-content: flex-start;
     padding-top: var(--s5);
     border-top: 1px solid var(--line);
   }
