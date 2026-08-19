@@ -7127,6 +7127,32 @@ async fn fno_roll(
     wire: &Wire,
     rolling: pull::vendor::RollingSpec,
 ) -> (axum::http::StatusCode, String) {
+    // OPTIONS ONLY, AND THE SERIES ASKED FOR WAS NEVER READ HERE.
+    //
+    // `asked.series` appeared exactly ONCE in this file — as a display label —
+    // so a request for expired FUTURES on this feed ran the options cross
+    // product (`drvOptionType: CALL|PUT`), fetched expired options, filed them,
+    // and rendered a receipt whose "Series" line said *Future*. Asked for one
+    // thing, given another, told it did the first. That is precisely the
+    // `CLAUDE.md` §4 shape: a fallback that hides a failure.
+    //
+    // The vendor publishes no expired-FUTURES history at all. Its endpoint is
+    // `rollingoption` and every axis of it is an option's — a strike offset, a
+    // side, an option instrument word. There is no futures equivalent to route
+    // to, so this refuses by name rather than substituting the series it does
+    // serve.
+    //
+    // Found by walking the permutations rather than by a failed run: two series
+    // × two feeds is four combinations, and three of them were right.
+    if matches!(asked.series, ingest::Series::Futures) {
+        return page.say(
+            facts,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            audit::Outcome::NotStarted,
+            "this feed serves expired OPTIONS only, addressed by strike offset —              it publishes no expired-futures history, and nothing was sent              rather than options being filed under a futures request",
+        );
+    }
+
     // THE UNDERLYING'S OWN ID, never a contract's. There is no contract id to
     // have — that is the whole reason this path exists — so what goes on the
     // wire is the spot instrument's, looked up exactly as the spot path looks
