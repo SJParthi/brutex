@@ -57,11 +57,11 @@ impl std::error::Error for PriceError {}
 pub enum InstrumentError {
     /// The exchange segment of the identifier was not recognised.
     UnknownExchange,
-    /// The symbol is not one of the three the engine sweeps.
+    /// The symbol is not one of the two the engine sweeps.
     ///
     /// This is not a parse failure. The symbol may be perfectly valid and
     /// stored — futures, options and single stocks all are — but
-    /// `docs/00-charter.md` section 1 fixes the swept set at exactly three,
+    /// `docs/00-charter.md` section 1 fixes the swept set at exactly two,
     /// and widening it requires a decision-ledger entry rather than a caller
     /// passing a different string.
     NotSweepable,
@@ -93,7 +93,7 @@ impl fmt::Display for InstrumentError {
         match self {
             Self::UnknownExchange => f.write_str("unknown exchange"),
             Self::NotSweepable => f.write_str(
-                "instrument is storable but not sweepable; the engine surface is fixed at three",
+                "instrument is storable but not sweepable; the engine surface is fixed at two",
             ),
             Self::Malformed => f.write_str("malformed instrument identifier"),
             Self::FieldTooWide { field, len } => write!(

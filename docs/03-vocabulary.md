@@ -60,7 +60,7 @@ On a daily timeframe they are cleared, not left as noise. A bit that cannot be
 evaluated evaluates false — it never evaluates to "probably".
 
 VWAP additionally requires traded volume. Spot indices carry none, so bits
-52–53 permanently abstain on the three engine instruments. That is honest and
+52–53 permanently abstain on the two engine instruments. That is honest and
 documented rather than quietly producing zeros that look like signal.
 
 ---

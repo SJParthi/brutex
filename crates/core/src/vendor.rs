@@ -2839,4 +2839,62 @@ mod tests {
             Ok(Some(Skip::TestInstrument))
         );
     }
+
+    #[test]
+    fn judges_the_paper_answers_both_ways_and_not_one_constant() {
+        // Every variant, asserted in the direction it belongs. Nothing here
+        // pinned the return value before, so the whole predicate could be
+        // replaced by `true` or by `false` and the suite stayed green -- and
+        // this is the predicate that decides whether a cross-vendor
+        // disagreement is a real conflict about the security or just two
+        // correct answers about two different venues.
+        for about_the_paper in [
+            Skip::NotEquityListing,
+            Skip::SmeBoard,
+            Skip::UnrecognisedListingClass,
+        ] {
+            assert!(
+                about_the_paper.judges_the_paper(),
+                "{about_the_paper:?} is a verdict about the security itself"
+            );
+        }
+        for about_the_venue in [
+            Skip::ForeignExchange,
+            Skip::TestInstrument,
+            Skip::ForeignSegment,
+            Skip::LiveContract,
+        ] {
+            assert!(
+                !about_the_venue.judges_the_paper(),
+                "{about_the_venue:?} says where the row was found, not what it is"
+            );
+        }
+    }
+
+    #[test]
+    fn a_groww_call_is_not_folded_into_the_put_arm() {
+        // The inner match ends `_ => "PE"`, so deleting the "CE" arm silently
+        // relabels every call option as a put. Both sides are asserted here
+        // because only the pair distinguishes the arm from the fallback.
+        assert_eq!(Vendor::Groww.type_of("CE", ""), Ok(Some("CE")));
+        assert_eq!(Vendor::Groww.type_of("PE", ""), Ok(Some("PE")));
+        assert_eq!(Vendor::Groww.type_of("FUT", ""), Ok(Some("FUT")));
+    }
+
+    #[test]
+    fn each_date_component_is_width_checked_on_its_own() {
+        // The width guard is three checks joined by `||`, and every previous
+        // test got more than one of them wrong at once -- which any of `&&`,
+        // `||` or a mixture would refuse identically. These get exactly ONE
+        // component wrong, so each `||` has to carry the refusal alone.
+        assert!(parse_expiry("2026-08-04").is_ok(), "the well-formed case");
+
+        // Month one character short; year and day are correct widths, and
+        // the whole date is otherwise a real one.
+        assert_eq!(parse_expiry("2026-8-04"), Err(InstrumentError::Malformed));
+        // Day one character short.
+        assert_eq!(parse_expiry("2026-08-4"), Err(InstrumentError::Malformed));
+        // Year two characters short.
+        assert_eq!(parse_expiry("26-08-04"), Err(InstrumentError::Malformed));
+    }
 }
