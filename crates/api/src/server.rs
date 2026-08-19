@@ -13167,16 +13167,24 @@ mod tests {
                 // TWO REASONS FOR A MISSING NUMBER, AND THEY ARE TOLD APART BY
                 // THE ROW ITSELF RATHER THAN BY A LIST KEPT HERE.
                 //
-                // An EMPTY `window_caps` is a vendor that publishes no
-                // per-request cap at any rung — Zerodha, whose historical page
-                // states none, recorded UNVERIFIED in docs/00-charter.md §4z.
-                // That is a legal state: the store's month boundary is then the
-                // only bound, and inventing a figure would be §3 rule 1.
+                // An EMPTY `window_caps` is a vendor for which no per-request
+                // cap has been read at any rung. That is a legal state: the
+                // store's month boundary is then the only bound, and inventing
+                // a figure would be §3 rule 1.
+                //
+                // ZERODHA USED TO BE THIS BRANCH'S EXAMPLE and is no longer,
+                // which is why this comment names none. Its historical page
+                // still states no cap — that part was always true — and the
+                // vendor's own developer forum does, so §4z now carries minute
+                // 60 and day 2000 and this feed takes the `Some(cap)` path
+                // below. The two shipped archives have no HTTP transport at all
+                // and never reach here.
                 //
                 // A POPULATED table with no minute row is a number that went
-                // missing, which is the case this test was written for. Both
-                // shipped brokers carry theirs — Groww 30, Dhan 90 — and losing
-                // one would send a window wider than the vendor accepts.
+                // missing, which is the case this test was written for. Every
+                // shipped broker carries theirs — Groww 30, Dhan 90, Zerodha 60
+                // — and losing one would send a window wider than the vendor
+                // accepts.
                 assert!(
                     spec.window_caps.is_empty(),
                     "{} publishes caps at other rungs and none at ONE MINUTE — \
