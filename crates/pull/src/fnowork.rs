@@ -222,6 +222,10 @@ pub struct Discovered {
 ///     underlying: "BANKNIFTY".to_owned(),
 ///     contract: Contract::of(kind).expect("an option has a contract segment"),
 ///     expiry,
+///     // THE STRIKE AND THE SIDE, KEPT rather than re-parsed out of the
+///     // rendered contract — which is a path segment, not a pair of values to
+///     // compute with. `pull::pricing` needs both.
+///     option: Some((Paisa::from_raw(5_800_000), OptionSide::Call)),
 /// };
 ///
 /// let jan = YearMonth::new(2026, 1)?;
