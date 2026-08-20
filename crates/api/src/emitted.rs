@@ -439,6 +439,7 @@ fn cases() -> Vec<Case> {
                         "EMITGONE",
                         Timeframe::MINUTE_1,
                         YearMonth::new(2026, 8).expect("a real month"),
+                        None,
                     )
                     .expect_err("an empty store holds no month, and never creates one");
                     assert!(why.contains("EMITGONE"), "{why}");
@@ -736,6 +737,7 @@ fn truncated_month_reads_no_rows(root: &std::path::Path) {
         SYMBOL,
         Timeframe::MINUTE_1,
         month,
+        None,
     )
     .expect("the month this test just wrote");
     assert_eq!(
@@ -964,6 +966,7 @@ fn clean_month_reads_every_row(root: &std::path::Path) {
         SYMBOL,
         Timeframe::MINUTE_1,
         month,
+        None,
     )
     .expect("the month this test just wrote");
     let (rows, faults) = crate::bars::page(&reader, 0, 1);

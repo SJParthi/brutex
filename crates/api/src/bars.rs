@@ -189,6 +189,20 @@ fn note_refused(
 /// The path could not be rendered, or the file could not be opened — both
 /// carried as the refusal's own words, so a missing month names the path it
 /// looked for rather than answering "no data".
+#[expect(
+    clippy::too_many_arguments,
+    reason = "these ARE a store path's segments, and `store::path::PathParts` \
+              already exists to group exactly them — its own doc gives the \
+              reason: `exchange` and `segment` are both short uppercase \
+              strings and swapping them builds a valid-looking path to the \
+              wrong place. This function deliberately does not take one, \
+              because `PathParts` carries `file` and this function must fix \
+              that to `FileKind::Bars` itself: a caller free to set it could \
+              open a `.crc` or a `.lock` through a bar reader and have its \
+              first bytes read as a header. Grouping the other seven into a \
+              second near-identical struct would put two spellings of one \
+              address in the crate, which is worse than the count"
+)]
 pub fn open(
     store_root: &std::path::Path,
     vendor: Vendor,
@@ -205,13 +219,31 @@ pub fn open(
     // question was wrong.
     timeframe: Timeframe,
     month: YearMonth,
+    // THE CONTRACT SEGMENT, AND IT USED TO BE `None` UNCONDITIONALLY.
+    //
+    // The store's layout is `symbol/contract/`, so an option's bars live one
+    // level below the underlying's. Hardcoding `None` here meant **no F&O
+    // contract was addressable through this reader at all**, and the front end
+    // compensated the only way it could: by concatenating the two into the
+    // symbol field.
+    //
+    // Measured 2026-08-20, journal seq 910–922: `GET /bars.json` with
+    // `symbol=BANKNIFTY-2026-07-28-5410000-CE` refused with *"path segment
+    // symbol is 31 bytes, max 24"* — thirteen 400s in three seconds, one per
+    // contract the page tried to draw. The refusal was correct and the question
+    // was malformed, and it had been malformed since this function was written;
+    // it only surfaced when F&O bars first existed on disk to be asked for.
+    //
+    // `None` remains right for spot, whose path IS one level shallower — that
+    // absence is the signal `StorePath` branches on, per `Contract::of`.
+    contract: Option<brutex_core::instrument::Contract>,
 ) -> Result<BarFile, String> {
     let path = StorePath::new(PathParts {
         vendor,
         exchange,
         segment,
         symbol,
-        contract: None,
+        contract,
         timeframe,
         month,
         file: FileKind::Bars,
@@ -584,6 +616,7 @@ mod tests {
             "NOTAREALSYMBOL",
             Timeframe::MINUTE_1,
             month,
+            None,
         );
 
         let why = outcome.expect_err(

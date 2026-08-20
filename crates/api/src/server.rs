@@ -1954,6 +1954,32 @@ async fn bars_json(
         Ok(tf) => tf,
         Err(why) => return refuse(why),
     };
+    // THE CONTRACT IS ITS OWN PARAMETER, and absent is a real answer.
+    //
+    // A spot series has no contract segment and its path is one level
+    // shallower; an option's bars live under `symbol/contract/`. Before this,
+    // the route took only `symbol` and `bars::open` passed `None`, so the page
+    // concatenated the two — `BANKNIFTY-2026-07-28-5410000-CE` — and the store
+    // refused it at 31 bytes against a 24-byte cap. Present-but-unparseable
+    // refuses by name rather than falling back to `None`: falling back would
+    // read the UNDERLYING's month and answer with a different instrument's
+    // bars, which is the one failure worse than a 400.
+    let raw_contract = param(query, "contract");
+    let contract = if raw_contract.is_empty() {
+        None
+    } else {
+        match brutex_core::instrument::Contract::parse(&raw_contract) {
+            Some(contract) => Some(contract),
+            None => {
+                return refuse(format!(
+                    "{raw_contract:?} is not a contract segment this store can \
+                     name. It is the part BELOW the symbol — `2026-07-28-5410000-CE`, \
+                     not `BANKNIFTY-2026-07-28-5410000-CE` — and it takes only \
+                     uppercase letters, digits and hyphens."
+                ));
+            }
+        }
+    };
     let file = match bars::open(
         &site.store_root,
         vendor,
@@ -1962,6 +1988,7 @@ async fn bars_json(
         &param(query, "symbol"),
         timeframe,
         month,
+        contract,
     ) {
         Ok(file) => file,
         Err(why) => return refuse(why),
@@ -9595,6 +9622,13 @@ pub fn bars_html(site: &Site, query: &str) -> (axum::http::StatusCode, String) {
         &symbol,
         timeframe,
         month,
+        // THE HTML BARS PAGE ADDRESSES SPOT ONLY, and says so rather than
+        // silently passing `None` the way this whole family used to. It takes
+        // no contract in its query, so there is nothing to pass; the JSON route
+        // beside it is the one that grew the parameter. A contract asked for
+        // here would need a control on the page first, and inventing one to
+        // match a parameter is the wrong order.
+        None,
     ) {
         Err(why) => empty_bars_page(
             axum::http::StatusCode::NOT_FOUND,
