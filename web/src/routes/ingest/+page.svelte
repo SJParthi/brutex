@@ -7280,7 +7280,38 @@
                  THE SENTENCE IS THE SERVER'S NOW, not this page's. It comes
                  from `pullrun::summary_of` on the last poll, because the server
                  is what counted the passes. This page only shows it. -->
+            <!-- WHAT THE RUN IS DOING RIGHT NOW, PER FEED.
+                 The run moved to the server and the page stopped being able to
+                 show per-leg receipts, because it no longer makes the per-leg
+                 requests. Without this block a run reports NOTHING until it
+                 ends — the operator presses Pull, the store fills for twenty
+                 minutes, and the page says nothing at all. That is a report
+                 with nothing behind it in the other direction, and it is the
+                 first thing an operator asks about. -->
+            {#if runState && (runState.running || runState.passes > 0)}
+              <div class="runcard">
+                <div class="runtop">
+                  <span><b>{n(runState.rowsNow - runState.rowsAtStart)}</b> bar(s) landed</span>
+                  <span>pass <b>{n(runState.passes)}</b></span>
+                  {#if runState.retries > 0}<span><b>{n(runState.retries)}</b> retried</span>{/if}
+                  <span class="runwhere">{runState.running ? (runState.stopping ? 'stopping at the next leg' : 'running on the server') : 'finished'}</span>
+                </div>
+                <table class="runfeeds">
+                  <tbody>
+                    {#each runState.feeds ?? [] as f (f.vendor)}
+                      <tr>
+                        <td class="rf-v">{feedName(f.vendor)}</td>
+                        <td class="rf-n">{n(f.legsDone)}/{n(f.legs)}</td>
+                        <td class="rf-d">{f.finished ? '—' : (f.doing || 'waiting for its turn')}</td>
+                        <td class="rf-e">{f.lastError ? 'retrying after a failure' : ''}</td>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+            {/if}
             {#if passSummary}
+
               <p class="note" style="margin-top:10px">{passSummary}</p>
             {/if}
           </form>
@@ -9983,4 +10014,30 @@
       animation: bx-pop-in var(--d-enter) var(--ease-out);
     }
   }
+  /* THE SERVER-OWNED RUN'S OWN CARD. Deliberately quiet: it is on screen for
+     the whole of a long backfill, so it reads as instrumentation rather than
+     as an alert. */
+  .runcard {
+    margin-top: 10px;
+    border: 1px solid var(--line, #2a333c);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .runtop {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+    padding: 8px 12px;
+    font-size: 12.5px;
+    border-bottom: 1px solid var(--line, #2a333c);
+  }
+  .runtop .runwhere { margin-left: auto; opacity: .7; }
+  table.runfeeds { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.runfeeds td { padding: 6px 12px; border-bottom: 1px solid var(--line, #2a333c); }
+  table.runfeeds tr:last-child td { border-bottom: 0; }
+  td.rf-v { font-weight: 600; white-space: nowrap; }
+  td.rf-n { white-space: nowrap; font-variant-numeric: tabular-nums; opacity: .8; }
+  td.rf-d { width: 99%; opacity: .8; }
+  td.rf-e { white-space: nowrap; opacity: .8; }
 </style>
+
