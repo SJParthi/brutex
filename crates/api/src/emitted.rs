@@ -1103,17 +1103,36 @@ fn the_three_sites_this_binary_cannot_reach_are_named_rather_than_forgotten() {
     /// for it: that column exists for exactly this, and putting it anywhere
     /// else would claim a proof that does not exist.
     const REACHED_IN_SERVER_TESTS: usize = 12;
+    /// AND THREE MORE THAT NO TEST IN THIS BINARY DRIVES, added 2026-08-20 and
+    /// named here rather than quietly counted: `pull.roll walk starting`,
+    /// `pull.roll group starting` and `pull.roll walk finished`. They report a
+    /// rolling-option walk's progress, and reaching them needs the same three
+    /// things the site above needs — a credentialed source, a live endpoint and
+    /// a vendor that serves options by strike offset.
+    ///
+    /// THEY EXIST BECAUSE THAT WALK REPORTED NOTHING AT ALL. Measured
+    /// 2026-08-20: `roll_every` held 0 emit sites and `roll_one` 0, and the
+    /// audit journal writes one record per COMPLETED request — so a walk of
+    /// roughly fifteen hundred requests was a single silence until it returned.
+    /// A Dhan leg sat for twenty-eight minutes having stored no file, written
+    /// no record and opened no socket, and none of those three facts
+    /// distinguished it from a walk that was working and simply not finished.
+    /// The operator's question was *"why is it not even called yet"* and this
+    /// build could not answer it. `CLAUDE.md` §4 bans a fallback that hides a
+    /// failure; a path that hides its own progress is that rule pointing
+    /// inward.
+    ///
     /// The rows of the table above, every one of them struck through — plus
-    /// `pull.fno discovery refused`, described above, which is the first site
-    /// since this accounting began that no test in this binary can drive.
-    const UNREACHABLE: usize = 1;
-    // COUNTED FROM THE SOURCE, not declared. A thirty-FIRST emit added
+    /// `pull.fno discovery refused` and the three named here, which are the
+    /// sites no test in this binary can drive.
+    const UNREACHABLE: usize = 4;
+    // COUNTED FROM THE SOURCE, not declared. A thirty-FOURTH emit added
     // anywhere under `crates/api/src` fails this test until somebody decides
     // which of the three columns it belongs in, which is the whole point of
     // the accounting.
     let lib_sites = lib_emit_sites();
     assert_eq!(
-        lib_sites, 30,
+        lib_sites, 33,
         "the LIB target holds {lib_sites} emit site(s); if that is a deliberate \
          change, move the row into the table above or into the unreachable list \
          and update this figure in the same commit"

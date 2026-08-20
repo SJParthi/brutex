@@ -68,6 +68,13 @@ pub const MAX_PASSES: u32 = 400;
 /// finished window both store zero -- which is why the cause is what decides.
 pub const CLEAN_EMPTY_PASSES: u32 = 3;
 
+/// How often the store is re-counted while a pass is still running.
+///
+/// Five seconds. One manifest read per vendor, against a page that polls the
+/// document it feeds every two — so this is the cheaper half of the pair, and
+/// it is the half that makes the other one worth reading.
+pub const ROWS_TICK: core::time::Duration = core::time::Duration::from_secs(5);
+
 /// The gap between a pass that FAILED and the next one.
 ///
 /// Without it a dropped socket becomes a spin: the loop re-issues instantly,
@@ -639,6 +646,34 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
             .collect();
     });
 
+    // THE STORE IS READ WHILE THE PASS RUNS, NOT ONLY BETWEEN PASSES.
+    //
+    // `rows_now` was refreshed at pass boundaries alone. A pass is one leg per
+    // feed and a single F&O leg can run for half an hour, so for that whole
+    // time the document said `rowsNow: 0` -- measured 2026-08-20 20:41, with
+    // **2,213 bar files on disk** and the run reporting zero. The operator read
+    // it exactly as it was written: *"keeps on running but no results stored
+    // anywhere"*.
+    //
+    // A ticker rather than a read per leg, because the leg is the thing that is
+    // slow: updating after each one would still leave the half-hour gap it is
+    // meant to fill. One manifest read every [`ROWS_TICK`] costs far less than
+    // the page's own two-second poll of the document it feeds.
+    //
+    // ABORTED, NEVER LEAKED. The handle is dropped at the end of `conduct`
+    // after an explicit `abort`, so a finished run leaves nothing reading the
+    // store behind it.
+    let ticker = {
+        let site = Loaded::clone(&site);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(ROWS_TICK).await;
+                let seen = rows_now(&site);
+                with_progress(&site, |progress| progress.rows_now = seen);
+            }
+        })
+    };
+
     let mut passes = 0_u32;
     let mut retries = 0_u32;
     let mut clean_empty = 0_u32;
@@ -703,6 +738,7 @@ pub async fn conduct(site: Loaded, legs: Vec<Leg>) {
         }
     }
 
+    ticker.abort();
     let landed = rows_now(&site).saturating_sub(started_rows);
     let summary = summary_of(passes, retries, landed, stopping(&site));
     with_progress(&site, |progress| progress.finished = Some(summary));

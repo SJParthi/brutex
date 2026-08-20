@@ -9185,8 +9185,23 @@ async fn roll_every(
             }
         };
 
+    // WHAT THIS WALK IS ABOUT TO DO, BEFORE IT DOES ANY OF IT.
+    //
+    // Measured 2026-08-20: this function emitted NOTHING. Not one event, from
+    // the first request to the last -- `roll_every` 0, `roll_one` 0. The audit
+    // journal writes one record per COMPLETED request, so a walk of a thousand
+    // requests is a single silence until it returns, and a walk that is
+    // grinding forward looks exactly like a walk that never started. The
+    // operator's question was "why is it not even called yet", and the honest
+    // answer was that nothing in this build could tell them. `CLAUDE.md` §4
+    // bans a fallback that hides a failure; a path that hides its own progress
+    // is the same rule pointing inward.
+    let planned = planned_rolling_requests(rolling, offsets.len(), chunks.len());
+    say_walk_starting(asked, &endpoint, chunks.len(), offsets.len(), planned);
+
     for flag in rolling.expiry_flags {
         for code in rolling.expiry_codes {
+            say_group_starting(asked, flag, code, stored, failed, declined);
             for strike in offsets {
                 for side in rolling.sides {
                     for chunk in &chunks {
@@ -9250,7 +9265,120 @@ async fn roll_every(
             }
         }
     }
+    say_walk_finished(asked, stored, failed, declined, planned);
     (stored, failed, declined, why, priced)
+}
+
+/// How many vendor requests this walk will make, before it makes any of them.
+///
+/// The cross product, spelled out: cadences × ordinals × offsets × sides ×
+/// window chunks. Reported rather than left to be inferred — an operator
+/// watching a walk that has stored nothing needs to know whether it is one
+/// request from finishing or nine hundred.
+///
+/// # Cost
+///
+/// Four multiplications. O(1), and it allocates nothing.
+fn planned_rolling_requests(
+    rolling: pull::vendor::RollingSpec,
+    offsets: usize,
+    chunks: usize,
+) -> usize {
+    rolling
+        .expiry_flags
+        .len()
+        .saturating_mul(rolling.expiry_codes.len())
+        .saturating_mul(offsets)
+        .saturating_mul(rolling.sides.len())
+        .saturating_mul(chunks)
+}
+
+/// WHAT THIS WALK IS ABOUT TO DO, BEFORE IT DOES ANY OF IT.
+///
+/// # The silence this replaces
+///
+/// Measured 2026-08-20: the rolling walk emitted NOTHING — `roll_every` 0
+/// events, `roll_one` 0. The audit journal writes one record per COMPLETED
+/// request, so a walk of a thousand requests was a single silence until it
+/// returned, and a walk grinding forward looked exactly like a walk that never
+/// started. The operator asked "why is it not even called yet" after seventeen
+/// minutes, and nothing in this build could answer: Dhan had stored 0 files,
+/// written 0 records, and named 0 URLs, all of which are also true of a walk
+/// that is working perfectly and is not finished.
+///
+/// `CLAUDE.md` §4 bans a fallback that hides a failure. A path that hides its
+/// own PROGRESS is the same rule pointing inward, and this is the fix.
+fn say_walk_starting(
+    asked: &ingest::FnoRequest,
+    endpoint: &str,
+    chunks: usize,
+    offsets: usize,
+    planned: usize,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.roll", "walk starting")
+            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+            .with(
+                "underlying",
+                telemetry::Value::Str(asked.underlying.as_str()),
+            )
+            .with("endpoint", telemetry::Value::Str(endpoint))
+            .with("chunks", telemetry::Value::Uint(chunks as u64))
+            .with("offsets", telemetry::Value::Uint(offsets as u64))
+            .with("planned_requests", telemetry::Value::Uint(planned as u64)),
+    );
+}
+
+/// One event per cadence-and-ordinal group — six for an index, not six hundred.
+///
+/// Enough to prove the walk is ALIVE and to watch the counters move; few enough
+/// that a long backfill does not drown the log it is trying to be visible in.
+/// The counters are the ones that matter: a group whose `stored_so_far` never
+/// moves while `declined_so_far` climbs is a vendor answering empty, which is a
+/// different problem from a vendor answering slowly and wants a different fix.
+fn say_group_starting(
+    asked: &ingest::FnoRequest,
+    flag: &'static str,
+    code: &'static str,
+    stored: usize,
+    failed: usize,
+    declined: usize,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.roll", "group starting")
+            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+            .with("expiry_flag", telemetry::Value::Str(flag))
+            .with("expiry_code", telemetry::Value::Str(code))
+            .with("stored_so_far", telemetry::Value::Uint(stored as u64))
+            .with("failed_so_far", telemetry::Value::Uint(failed as u64))
+            .with("declined_so_far", telemetry::Value::Uint(declined as u64)),
+    );
+}
+
+/// And what it actually did.
+///
+/// Without this the only report is the receipt, and a receipt is written once
+/// the whole request returns — which is exactly the moment an operator no
+/// longer needs to be told.
+fn say_walk_finished(
+    asked: &ingest::FnoRequest,
+    stored: usize,
+    failed: usize,
+    declined: usize,
+    planned: usize,
+) {
+    let _dropped_when_filtered = telemetry::emit(
+        &telemetry::Event::info("pull.roll", "walk finished")
+            .with("feed", telemetry::Value::Str(asked.feed.wire()))
+            .with(
+                "underlying",
+                telemetry::Value::Str(asked.underlying.as_str()),
+            )
+            .with("stored", telemetry::Value::Uint(stored as u64))
+            .with("failed", telemetry::Value::Uint(failed as u64))
+            .with("declined", telemetry::Value::Uint(declined as u64))
+            .with("planned_requests", telemetry::Value::Uint(planned as u64)),
+    );
 }
 
 /// The Dhan shape: enumerate the contract set, fetch each, file bar and overlay.
