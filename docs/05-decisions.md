@@ -17341,3 +17341,69 @@ measured*, per `docs/00-charter.md` §4. This entry fixes permits-per-request, n
 the ceiling those permits are counted against. Whether 8/s is Groww's real limit
 remains unverified and `docs/06-limits.md` §21 still records the 500-versus-300
 per-minute disagreement.
+
+### D-0220 — one bad item abandoned every item after it, in four places
+
+**The class, not the instance.** A loop over INDEPENDENT items where one item's
+failure ends the loop. Each item is a separate request, a separate contract, a
+separate month; none depends on the one before it; and in four places a single
+failure threw away everything queued behind it.
+
+It was found the expensive way first. Dhan's expired options were never pulled,
+and six independent signals all agreed while none pointed at the cause:
+
+| Signal | Reading |
+|---|---|
+| page badge | `Last pull HTTP 0` |
+| Dhan spot 1min | 58,572 / 59,625 — **SHORT** |
+| Dhan options | 0 — **NEVER PULLED** |
+| audit journal | no `fno_roll` record, because it was never called |
+| `/feeds.json` | `"fno":"by_strike_offset"`, `"ready":true` — **correct** |
+| bundle | carried the `by_strike_offset` fix — **correct** |
+
+The cause was one `return` in a `catch`. `PULL_ORDER` is
+`['1day','1min','1s','futures','options']`, so **options is last**. Dhan's chain
+ran 1day, then 1min — a request the server answered by storing 58,572 bars — and
+the browser's socket dropped before the reply arrived. The fetch threw, the
+`return` fired, and the options body was never sent.
+
+**Order chosen for correctness became order that concentrates risk.**
+`PULL_ORDER` puts options last because the fold ladder needs the day pass before
+the minute pass. That is right, and it silently made options the thing most
+likely to be lost to any failure anywhere earlier in the chain.
+
+**Then the same shape was hunted rather than waited for**, and `roll_one` had it
+three more times — in the one path in this build that had *never executed*. Dhan's
+cross product is 21 offsets × 2 sides × 2 cadences × 3 ordinals = **252 runs**:
+
+| Site | Was | One failure cost |
+|---|---|---|
+| `name_the_contract(..)?` | `?` | a strike past `CONTRACT_CAPACITY` discarded 251 good runs |
+| `land_rolling_group(..)?` | `?` | a torn month or held lock discarded 251 good runs |
+| `file_the_greeks(..)` | `return Err` | a greeks write discarded 251 good runs |
+
+The third is the interesting one, because its comment ARGUED for the behaviour:
+*"a month whose bars landed and whose greeks did not would read as priced on the
+next pass, and §8's append-only rule means the gap could not be filled
+afterwards."* Both halves are true. **Neither implies killing the other 251
+runs.** The consequence is scoped to that contract-month; scoping the reaction
+to the whole walk is the conflation.
+
+`fno_land` had it right for Groww from the start — a contract that will not
+fetch is counted, its reason kept, and the other two hundred continue. The rule
+existed; three sites had not adopted it, and the path was never run so nothing
+found out.
+
+**What is NOT changed.** `fetch_chain_chunks` still abandons a contract on its
+first failed chunk, and that is deliberate and argued: a partially fetched
+contract lands some months and leaves the rest absent, so the month reads
+complete while being short — which §8 makes unrepairable. Abandoning ONE
+contract there is the narrow reaction; abandoning the walk is not. The budget
+halt still breaks the whole loop, correctly: an exhausted budget is a statement
+about every remaining request, not about one.
+
+**Counted, not silent.** `Rolled` gained `failed` and `why`, `roll_every` folds
+them out of the `Ok` arm rather than only out of `Err`, and the receipt carries
+them. A run that partly failed is no longer an `Err` — so without that fold it
+would have become a run that succeeds quietly while having lost groups, which is
+the same §4 failure wearing the opposite mask.

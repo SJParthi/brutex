@@ -7687,6 +7687,19 @@ async fn walk_months<D: pull::chain::Discovery>(
 /// Every arm names the contract it was working on, because "a request failed"
 /// with 252 in flight tells an operator nothing.
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "four helpers already came out of this while D-0220 was being \
+              fixed — `next_group`, `price_rolling_group`, `note_run_failure` \
+              and `name_the_contract` — and each of them earns its place on \
+              its own terms rather than as line-count relief. What remains is \
+              one driver loop: walk the answer in runs of equal (expiry, \
+              strike), gate on settlement, name, price, land, file, count. \
+              Splitting it further would put the loop's state — `at`, `end`, \
+              `failed`, `why_not`, `census_rows`, `priced` — behind a struct \
+              whose only reader is the loop, which trades a length a reader \
+              can scroll for an indirection a reader must chase"
+)]
 async fn roll_one(
     asked: &ingest::FnoRequest,
     site: &Site,
@@ -7798,6 +7811,10 @@ async fn roll_one(
 
     let mut total = 0usize;
     let mut declined = 0usize;
+    // ONE BAD RUN IS COUNTED, NEVER THE END OF THE RUN. See the two `match`
+    // arms below that replaced `?`.
+    let mut failed = 0usize;
+    let mut why_not: Vec<String> = Vec::new();
     let mut priced = PricedCount::default();
     // THE SWEPT SLOT, RESOLVED ONCE FOR THE WHOLE RUN. It is a property of the
     // underlying and cannot change inside one, so resolving it per bar would
@@ -7810,17 +7827,7 @@ async fn roll_one(
     // bound in hand rather than grown. `docs/07-o1-architecture.md` law 2.
     let mut census_rows: Vec<pull::manifest::Held> = Vec::with_capacity(rows.len());
     while at < rows.len() {
-        let key = key_at(
-            rows.get(at)
-                .ok_or_else(|| format!("{label}: row vanished"))?,
-        )?;
-        let mut end = at.saturating_add(1);
-        while let Some(row) = rows.get(end) {
-            if key_at(row)? != key {
-                break;
-            }
-            end = end.saturating_add(1);
-        }
+        let (end, key) = next_group(&rows, at, &label, key_at)?;
         let group = rows
             .get(at..end)
             .ok_or_else(|| format!("{label}: rows vanished"))?;
@@ -7856,22 +7863,36 @@ async fn roll_one(
             at = end;
             continue;
         }
-        let (contract, contract_side, expiry) =
-            name_the_contract(expiry_day, strike, option_type, &label)?;
+        // ONE UNNAMEABLE CONTRACT IS ONE FAILURE, NOT 252.
+        //
+        // This was `?`, which abandoned every remaining group in the run. Dhan's
+        // cross product is 21 offsets × 2 sides × 2 cadences × 3 ordinals =
+        // **252 runs**, so a single strike this store cannot render — one past
+        // `CONTRACT_CAPACITY`, or an expiry day the calendar refuses — threw
+        // away the other 251 along with it.
+        //
+        // `fno_land` has always had this right for Groww: a contract that will
+        // not fetch is counted and its reason kept, and the other two hundred
+        // continue. This is the same rule, reached late because this path had
+        // never run — the whole class is D-0220.
+        let named = match name_the_contract(expiry_day, strike, option_type, &label) {
+            Ok(named) => named,
+            Err(why) => {
+                note_run_failure(&mut failed, &mut why_not, why);
+                at = end;
+                continue;
+            }
+        };
+        let (contract, contract_side, expiry) = named;
 
         // THE GREEKS THIS GROUP PRODUCED, held until its bars have landed.
         // Empty when no rate was supplied, which is the ordinary case.
-        let mut records: Vec<store::format::Greek> = Vec::new();
         // AND NOW THE GREEKS, from bars this run already holds.
         //
         // Dhan sends `iv` and `spot` on the overlay, so nothing extra is
-        // fetched: the volatility is the vendor's where it sent one and solved
-        // from the premium where it did not, and `VolSource` records which per
-        // row. Skipped in full when no rate was supplied — see
-        // `ingest::FnoRequest::rate` on why the repository will not supply one
-        // itself.
-        if let (Some(rate), Some(slot)) = (asked.rate, slot) {
-            let done = price_group(
+        // fetched. Empty when no rate was supplied, which is the ordinary case.
+        let records = match (asked.rate, slot) {
+            (Some(rate), Some(slot)) => price_rolling_group(
                 group,
                 PriceInputs {
                     strike,
@@ -7881,16 +7902,20 @@ async fn roll_one(
                     rate,
                     vendor: wire.store_vendor,
                 },
-            );
-            priced.absorb(&done);
-            // HELD, NOT WRITTEN YET. The greeks are a sidecar to bars that have
-            // not landed, and a sidecar describing bars that are not there is
-            // worse than no sidecar — the next reader joins on a stamp with no
-            // bar behind it. Filed below, after `land_rolling_group` returns.
-            records = greek_records(&done);
-        }
+                &mut priced,
+            ),
+            _ => Vec::new(),
+        };
 
-        let (filed, pending) = land_rolling_group(
+        // AND ONE GROUP THAT WILL NOT LAND IS ONE FAILURE, NOT 252 EITHER.
+        //
+        // Same `?`, same blast radius: a vendor answer this build cannot file —
+        // a torn month, a lock another writer holds, a disk that filled — ended
+        // the entire run and discarded every group after it. The bars already
+        // written stayed on disk with nothing on the receipt naming what was
+        // abandoned, which is the §4 fallback that hides a failure wearing a
+        // partial success.
+        let (landed_bars, pending) = match land_rolling_group(
             group,
             contract,
             asked,
@@ -7900,19 +7925,31 @@ async fn roll_one(
             endpoint,
             window,
             &label,
-        )?;
-        total = total.saturating_add(filed);
+        ) {
+            Ok(landed) => landed,
+            Err(why) => {
+                note_run_failure(&mut failed, &mut why_not, why);
+                at = end;
+                continue;
+            }
+        };
+        total = total.saturating_add(landed_bars);
         // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
         //
         // `land_rolling_group` has returned, so the bars are on disk and every
-        // stamp a greeks row joins on has one behind it. A failure here is the
-        // run's failure and not a warning: a month whose bars landed and whose
-        // greeks did not would read as priced on the next pass, and §8's
-        // append-only rule means the gap could not be filled afterwards.
+        // stamp a greeks row joins on has one behind it.
+        //
+        // A FAILURE HERE IS THIS RUN'S, NOT THE WALK'S — and this line said the
+        // opposite until D-0220. The old comment argued that a month whose bars
+        // landed and whose greeks did not would read as priced on the next
+        // pass, and §8 means the gap cannot be filled afterwards. **Both halves
+        // are true and neither implies killing the other 251 runs.** The
+        // consequence is scoped to THIS contract-month; scoping the reaction to
+        // the whole walk was the same conflation the two `?` above made.
         if !records.is_empty()
             && let Some(why) = file_the_greeks(&records, contract, asked, site, wire, window)
         {
-            return Err(format!("{label}: {why}"));
+            note_run_failure(&mut failed, &mut why_not, format!("{label}: {why}"));
         }
         // COLLECTED, NOT WRITTEN PER GROUP.
         census_rows.extend(pending);
@@ -7927,6 +7964,8 @@ async fn roll_one(
     Ok(Rolled {
         stored: total,
         declined,
+        failed,
+        why: why_not,
         priced,
     })
 }
@@ -8192,6 +8231,87 @@ fn spot_book_for(
     Some(pull::pricing::SpotBook::of(&bars))
 }
 
+/// Counts one failed run and keeps its reason, capped.
+///
+/// Written once because both sites that need it — a contract that cannot be
+/// named and a group that cannot be filed — must behave identically. They were
+/// both `?` until D-0220, which abandoned every remaining run; two hand-written
+/// copies of the replacement would be two chances for one of them to drift back
+/// toward ending the walk.
+fn note_run_failure(failed: &mut usize, why_not: &mut Vec<String>, why: String) {
+    *failed = failed.saturating_add(1);
+    if why_not.len() < pull::pricing::REASONS_KEPT {
+        why_not.push(why);
+    }
+}
+
+/// Where the run starting at `at` ends, and the key every row in it shares.
+///
+/// A rolling answer arrives as one flat list covering several contracts, so the
+/// driver walks it in RUNS of equal `(expiry day, strike)` — that pair is the
+/// contract, and a run is one contract-month's bars. See `rolling_key`.
+///
+/// # Errors
+///
+/// A row index the loop computed and then could not read. Unreachable by
+/// construction — `at` is always below `rows.len()` at the call site — and kept
+/// as an error rather than an index, because `clippy::indexing_slicing` is
+/// denied across this workspace and a panicking index on a vendor's answer is
+/// exactly where one would eventually be reached.
+///
+/// # Cost
+///
+/// O(rows in this run). Every row is visited once across the whole walk, so the
+/// driver is O(rows) in total and not O(rows × runs).
+fn next_group<F>(
+    rows: &[pull::rolling::Row],
+    at: usize,
+    label: &str,
+    // THE KEY FUNCTION IS PASSED IN, not rebuilt here. It closes over the
+    // underlying, the cadence flag and the ordinal code — all of which are the
+    // caller's request — and a second copy of that binding would be a second
+    // answer to "which contract is this row", which is the one question this
+    // whole walk turns on.
+    key_at: F,
+) -> Result<(usize, (Day, i64)), String>
+where
+    F: Fn(&pull::rolling::Row) -> Result<(Day, i64), String>,
+{
+    let key = key_at(
+        rows.get(at)
+            .ok_or_else(|| format!("{label}: row vanished"))?,
+    )?;
+    let mut end = at.saturating_add(1);
+    while let Some(row) = rows.get(end) {
+        if key_at(row)? != key {
+            break;
+        }
+        end = end.saturating_add(1);
+    }
+    Ok((end, key))
+}
+
+/// Prices one rolling group and folds its counts in, returning what to file.
+///
+/// The records are RETURNED rather than written, and that ordering is the whole
+/// reason this is a separate step: the greeks are a sidecar to bars that have
+/// not landed yet, and a sidecar describing bars that are not there is worse
+/// than no sidecar — the next reader joins on a stamp with no bar behind it.
+/// The caller files them after `land_rolling_group` returns.
+///
+/// # Cost
+///
+/// O(rows): one `price` each, which is O(1), plus one fixed-width encode.
+fn price_rolling_group(
+    group: &[pull::rolling::Row],
+    inputs: PriceInputs,
+    into: &mut PricedCount,
+) -> Vec<store::format::Greek> {
+    let done = price_group(group, inputs);
+    into.absorb(&done);
+    greek_records(&done)
+}
+
 /// Turns priced rows into the records the `.grk` file holds.
 ///
 /// Pure: no store, no clock, no network. Separated from [`price_group`] because
@@ -8387,6 +8507,15 @@ struct Rolled {
     stored: usize,
     /// Runs the month gate declined — neither stored nor failed.
     declined: usize,
+    /// Runs that could not be named or could not be filed.
+    ///
+    /// **Each is ONE failure, not the end of the run.** Both sites used to be
+    /// `?`, which abandoned every remaining group — and Dhan's cross product is
+    /// 252 runs, so one bad strike discarded 251 good ones. See the two `match`
+    /// arms in [`roll_one`] for the measurement and D-0220 for the class.
+    failed: usize,
+    /// The first few reasons, verbatim, capped at `pull::pricing::REASONS_KEPT`.
+    why: Vec<String>,
     /// What pricing produced, or all zeroes when no rate was supplied.
     priced: PricedCount,
 }
@@ -8869,6 +8998,24 @@ async fn roll_every(
                                 stored = stored.saturating_add(done.stored);
                                 declined = declined.saturating_add(done.declined);
                                 priced.absorb_count(&done.priced);
+                                // A RUN THAT PARTLY FAILED IS NOT AN `Err`, and
+                                // its failures must not vanish into `Ok`.
+                                //
+                                // `roll_one` used to `?` on the first group it
+                                // could not name or file, so every such failure
+                                // arrived here as `Err(said)` and was counted.
+                                // Now that it counts and continues — which is
+                                // what stops one bad strike discarding 251 good
+                                // ones — those counts live INSIDE the `Ok`, and
+                                // dropping them here would trade a run that
+                                // died loudly for one that succeeds quietly
+                                // while having lost groups.
+                                failed = failed.saturating_add(done.failed);
+                                for said in done.why {
+                                    if why.len() < 5 {
+                                        why.push(said);
+                                    }
+                                }
                             }
                             Err(said) => {
                                 failed = failed.saturating_add(1);
