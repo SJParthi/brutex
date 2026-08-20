@@ -856,18 +856,35 @@ fn the_constants_are_the_current_versions_layout() {
     assert_eq!(v2.records_per_block(), RECORDS_PER_BLOCK);
     assert_eq!(v2.block_len(), BLOCK_LEN);
     assert_eq!(Layout::CURRENT, v2);
-    // TWO GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
-    // build read", and the overlay sidecar is one: 24-byte records at version
-    // 9, beside the bar's 56 at version 2. Resolution is by the file's own
-    // version number, so the two cannot be confused by a reader that reads the
-    // header it was handed.
-    assert_eq!(Layout::KNOWN, &[v2, Layout::OVERLAY]);
+    // THREE GEOMETRIES, NOT ONE. `KNOWN` answers "which geometries can this
+    // build read", and two of the three are sidecars: the overlay's 24-byte
+    // records at version 9 and the computed greeks' 80 at version 8, beside the
+    // bar's 56 at version 2. Resolution is by the file's own version number, so
+    // none can be confused by a reader that reads the header it was handed.
+    assert_eq!(Layout::KNOWN, &[v2, Layout::OVERLAY, Layout::GREEKS]);
     assert_eq!(Layout::OVERLAY.record_stride(), 24);
-    assert_ne!(
-        Layout::OVERLAY.version(),
-        v2.version(),
-        "and their version numbers differ, which is what resolves them apart"
-    );
+    assert_eq!(Layout::GREEKS.record_stride(), 80);
+
+    // EVERY VERSION IN THE LIST IS DISTINCT, and every stride with it. A
+    // duplicate version makes resolution pick whichever row is first, and a
+    // duplicate stride makes two geometries indistinguishable to a reader that
+    // resolved correctly — asserted as a property over the whole list rather
+    // than as a pair, so a fourth row is checked against all three.
+    for (index, one) in Layout::KNOWN.iter().enumerate() {
+        for other in Layout::KNOWN.iter().skip(index + 1) {
+            assert_ne!(
+                one.version(),
+                other.version(),
+                "two geometries share a version, which is what resolves them apart"
+            );
+            assert_ne!(
+                one.record_stride(),
+                other.record_stride(),
+                "two geometries share a stride, so a record count computed for \
+                 one would be right for the other"
+            );
+        }
+    }
     const { assert!(SLOT_COUNT <= MAX_SLOT_COUNT) }
 
     // The header region is exactly `slot_count` slots at SLOT_STRIDE spacing,
@@ -1935,6 +1952,7 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.bin".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.crc".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.ovl".to_owned(),
+            "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.grk".to_owned(),
             "bars/groww/NSE/INDEX/NIFTY/1min/2024-06.lock".to_owned(),
         ],
     );
@@ -1943,7 +1961,11 @@ fn the_sibling_files_of_a_month_share_every_segment_but_the_extension() {
     // concatenates -- docs/02 §9's "one writer per file, enforced by an
     // advisory lock" needs a name that cannot drift from the file it guards.
     assert_eq!(FileKind::Lock.extension(), ".lock");
-    assert_eq!(FileKind::ALL.len(), 4);
+    // FIVE, since the computed greeks joined the family. Bars, their block
+    // checksums, the vendor-stated overlay, the computed greeks, and the lock.
+    // The count is asserted rather than the list alone so a sixth sibling added
+    // without a rendered path above fails here instead of silently.
+    assert_eq!(FileKind::ALL.len(), 5);
 
     let bars = StorePath::new(base).expect("legal");
     assert_eq!(bars.timeframe(), Timeframe::MINUTE_1);

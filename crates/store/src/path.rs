@@ -170,10 +170,11 @@ const _: () = assert!(MAX_VENDOR_LEN <= MAX_SEGMENT_LEN);
 pub const MAX_EXTENSION_LEN: usize = 5;
 
 const _: () = {
-    let [bars, checksums, overlay, lock] = FileKind::ALL;
+    let [bars, checksums, overlay, greeks, lock] = FileKind::ALL;
     assert!(bars.extension().len() <= MAX_EXTENSION_LEN);
     assert!(checksums.extension().len() <= MAX_EXTENSION_LEN);
     assert!(overlay.extension().len() <= MAX_EXTENSION_LEN);
+    assert!(greeks.extension().len() <= MAX_EXTENSION_LEN);
     assert!(lock.extension().len() <= MAX_EXTENSION_LEN);
 };
 
@@ -586,6 +587,17 @@ pub enum FileKind {
     Checksums,
     /// Computed overlay fields, at their own stride.
     Overlay,
+    /// Computed greeks — implied volatility, delta, gamma, vega, theta, rho,
+    /// moneyness and the provenance that makes the row reproducible — at their
+    /// own stride.
+    ///
+    /// **A third file rather than a wider overlay**, and the reason is a rule
+    /// rather than a preference: [`crate::format::Overlay`] is exactly 24 bytes
+    /// with a compile-time assert, five greeks do not fit, and `CLAUDE.md` §3
+    /// rule 8 forbids mutating a format version in place. §4's row banning a
+    /// dynamic schema names the alternative outright — *"a new field is a new
+    /// file version at its own stride"*. See [`crate::format::GREEK_MAGIC`].
+    Greeks,
     /// The advisory lock a writer holds for the month.
     ///
     /// `docs/02-store-format.md` §9: "One writer per file, enforced by an
@@ -599,7 +611,13 @@ pub enum FileKind {
 
 impl FileKind {
     /// Every sibling file a month has.
-    pub const ALL: [Self; 4] = [Self::Bars, Self::Checksums, Self::Overlay, Self::Lock];
+    pub const ALL: [Self; 5] = [
+        Self::Bars,
+        Self::Checksums,
+        Self::Overlay,
+        Self::Greeks,
+        Self::Lock,
+    ];
 
     /// The file extension, dot included.
     #[must_use]
@@ -608,6 +626,7 @@ impl FileKind {
             Self::Bars => ".bin",
             Self::Checksums => ".crc",
             Self::Overlay => ".ovl",
+            Self::Greeks => ".grk",
             Self::Lock => ".lock",
         }
     }

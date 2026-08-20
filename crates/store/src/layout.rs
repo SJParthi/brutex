@@ -128,6 +128,26 @@ impl Layout {
         crate::format::OVERLAY_RECORDS_PER_BLOCK,
     );
 
+    /// The computed-greeks sidecar's geometry — 80-byte records, version 8.
+    ///
+    /// Not in [`Self::KNOWN`], for exactly the reason [`Self::OVERLAY`] is not:
+    /// that list answers "which versions of a BAR file can this build read", and
+    /// offering an 80-byte geometry to a reader expecting 56 would validate at
+    /// the header and disagree at the first record.
+    ///
+    /// It is a `Layout` for the same reason too — so the sidecar reuses
+    /// [`crate::header::Header::validate`] and [`crate::block::seal`] instead of
+    /// growing a second copy of the header, the commit counter, the CRC and the
+    /// block arithmetic. Three files now share one torn-write story rather than
+    /// three.
+    pub const GREEKS: Self = Self::declared(
+        crate::format::GREEK_VERSION,
+        crate::format::GREEK_MAGIC,
+        SLOT_COUNT,
+        crate::format::GREEK_STRIDE,
+        crate::format::GREEK_RECORDS_PER_BLOCK,
+    );
+
     /// Every version this build can read, in ascending order.
     ///
     /// Adding a version is adding a row built by [`Layout::declared`]. Nothing
@@ -149,7 +169,14 @@ impl Layout {
     /// The second guard remains and is the one that matters: `BarFile` resolves
     /// against a table chosen by FILE KIND, so a `.bar` path is offered only
     /// the bar geometries whatever its header claims.
-    pub const KNOWN: &'static [Self] = &[Self::V2, Self::OVERLAY];
+    /// **AND THE GREEKS SIDECAR IS HERE FOR THE SAME REASON, NOT A DIFFERENT
+    /// ONE.** It was written outside this list first, and that is a `.grk` file
+    /// reporting `UnknownVersion(8)` at its own first byte — the identical
+    /// failure the paragraph above records for the overlay, rediscovered one
+    /// sidecar later. `Header::decode_parts` resolves a version while decoding.
+    /// Whether a geometry may be handed to a BAR reader is decided by
+    /// `crate::file::table_of`, from the file kind, and never by this list.
+    pub const KNOWN: &'static [Self] = &[Self::V2, Self::OVERLAY, Self::GREEKS];
 
     /// The version this build writes. Older versions are read, never written.
     pub const CURRENT: Self = Self::V2;

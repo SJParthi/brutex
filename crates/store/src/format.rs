@@ -404,6 +404,313 @@ impl Overlay {
     }
 }
 
+/// The geometry of a computed-greeks sidecar.
+///
+/// # Why a THIRD file and not a wider overlay
+///
+/// [`Overlay`] is exactly 24 bytes with a compile-time assert, and five greeks
+/// do not fit. Widening it would mint an overlay version that RETIRES the
+/// current one — `CLAUDE.md` §3 rule 8 forbids mutating a version in place —
+/// and every overlay already on disk would stop being readable to gain fields
+/// most of them have no value for. §4's row banning a dynamic schema names the
+/// alternative in so many words: *"a new field is a new file version at its own
+/// stride"*. This is that stride.
+///
+/// # Why version 8
+///
+/// The same argument [`OVERLAY_MAGIC`] makes at length, one number down. The
+/// family byte identifies a GEOMETRY: `9` is the 24-byte sidecar, `8` is this
+/// 80-byte one, and the bar format is at 2. Taking a number the bar format will
+/// not reach lets [`crate::layout::Layout::declared`] keep refusing a magic
+/// outside the family and a retired version — both refusals are right and
+/// neither is relaxed. Like the overlay, it is absent from
+/// [`crate::layout::Layout::KNOWN`], which answers "which versions of a BAR
+/// file can this build read", so a reader walking that list is never offered
+/// this and the two cannot resolve against each other.
+pub const GREEK_MAGIC: [u8; 8] = *b"BRUTEXB8";
+
+/// The only greeks version this build writes.
+pub const GREEK_VERSION: u16 = 8;
+
+/// Bytes of one greeks record. Two `i64`, seven `f64`, one packed `i64`.
+pub const GREEK_STRIDE: u64 = 80;
+
+/// Greeks records in one block.
+///
+/// `80 × 51 = 4,080` — the largest whole multiple of the stride that fits the
+/// same 4,096-byte failure unit the bar and overlay files use, and by
+/// coincidence the exact figure the overlay reaches with `24 × 170`. Chosen the
+/// same way and for the same reason: a torn write damages one block, and a
+/// block that straddled the unit would damage two.
+pub const GREEK_RECORDS_PER_BLOCK: u64 = 51;
+
+const _: () = assert!(GREEK_STRIDE * GREEK_RECORDS_PER_BLOCK <= 4096);
+const _: () = assert!(GREEK_STRIDE * (GREEK_RECORDS_PER_BLOCK + 1) > 4096);
+
+/// [`GREEK_STRIDE`] as a length, for the greeks image.
+///
+/// Separate from the stride for the reason [`OVERLAY_LEN`] is.
+#[allow(clippy::cast_possible_truncation)]
+pub const GREEK_LEN: usize = GREEK_STRIDE as usize;
+
+/// Where the volatility in a [`Greek`] came from — bits 0..8 of the provenance.
+///
+/// `0` and `1` rather than a bool because a third source is already foreseeable
+/// (a model-implied surface), and a bool that has to grow is a format change.
+pub const VOL_FROM_SOLVED: i64 = 0;
+/// The vendor stated it. See [`VOL_FROM_SOLVED`].
+pub const VOL_FROM_VENDOR: i64 = 1;
+
+/// Where the rate came from — bits 8..16 of the provenance.
+///
+/// `0` is a figure cited in `docs/00-charter.md`, `1` is one the operator
+/// supplied with the request, `2` is one solved against a vendor's own published
+/// implied volatility. Stored because `CLAUDE.md` §3 rule 3 makes a greek
+/// computed under an unrecorded rate unreproducible, and therefore not a result.
+pub const RATE_FROM_CHARTER: i64 = 0;
+/// The operator supplied it. See [`RATE_FROM_CHARTER`].
+pub const RATE_FROM_OPERATOR: i64 = 1;
+/// Solved against a vendor's published volatility. See [`RATE_FROM_CHARTER`].
+pub const RATE_FROM_SOLVED: i64 = 2;
+
+/// Bit offset of the rate source inside the provenance word.
+const RATE_FROM_SHIFT: u32 = 8;
+/// Bit offset of the below-validated-band flag.
+const BELOW_BAND_SHIFT: u32 = 16;
+/// Bit offset of the signed moneyness step count.
+const MONEYNESS_SHIFT: u32 = 32;
+/// Mask for one byte-wide provenance field.
+const BYTE_FIELD: i64 = 0xFF;
+
+/// One option bar, priced: implied volatility, five greeks, and the provenance
+/// that makes the row reproducible.
+///
+/// # One record per bar, keyed by the same stamp
+///
+/// [`Self::ts_micros`] is the bar's own open, exactly as [`Overlay`]'s is, so a
+/// greeks row joins to a bar row by value rather than by position.
+///
+/// # Why the spot is stored again
+///
+/// It is on the overlay for a vendor that sends one — and Groww does not. There
+/// the level is JOINED from the index bar at the same stamp, and if it is not
+/// written here it exists nowhere: the row could never be recomputed and §3
+/// rule 3 would be broken by omission. Storing it costs eight bytes and makes
+/// every row self-contained.
+///
+/// # Full precision, never rounded
+///
+/// `CLAUDE.md` §7 puts prices in `i64` paisa and then says the opposite thing
+/// about this class: *"Statistical values (Sharpe, p-values, ratios) keep full
+/// precision and are never rounded for storage."* A greek is a derivative, not
+/// a price. The two `i64` fields are the stamp and the spot, which are.
+///
+/// # The scale-dependent four
+///
+/// `delta` is scale-free. **`gamma`, `vega`, `theta` and `rho` are not** — they
+/// are computed in paisa and stored in paisa, so vega and theta are a hundred
+/// times their rupee values and gamma is a hundredth. Recorded here because a
+/// reader who assumes rupees is wrong by two orders of magnitude in a direction
+/// that looks plausible.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(C)]
+pub struct Greek {
+    /// Microseconds since the epoch, UTC — the open of the bar this prices.
+    pub ts_micros: i64,
+    /// The underlying's level used, in paisa. See the type's own note on why.
+    pub spot: i64,
+    /// The volatility used, as a decimal. `0.1425`, not `14.25`.
+    pub volatility: f64,
+    /// `dPrice / dSpot`. Scale-free.
+    pub delta: f64,
+    /// `d2Price / dSpot2`. **Per paisa.**
+    pub gamma: f64,
+    /// `dPrice / dVolatility`, per `1.00` of volatility. **Per paisa.**
+    pub vega: f64,
+    /// `dPrice / dTime`, per year. **Per paisa.**
+    pub theta: f64,
+    /// `dPrice / dRate`, per `1.00` of rate. **Per paisa.**
+    pub rho: f64,
+    /// The continuously-compounded rate this row was priced under.
+    pub rate: f64,
+    /// Volatility source, rate source, band flag and moneyness steps, packed.
+    ///
+    /// Read it with [`Greek::vol_from`], [`Greek::rate_from`],
+    /// [`Greek::below_validated_band`] and [`Greek::moneyness_steps`] rather
+    /// than by hand — the moneyness half is a SIGNED `i32` in the upper word
+    /// and reading it without the sign extension gives a plausible wrong answer
+    /// for every in-the-money strike.
+    pub provenance: i64,
+}
+
+const _: () = assert!(size_of::<Greek>() == 80);
+const _: () = assert!(align_of::<Greek>() == 8);
+const _: () = assert!(GREEK_STRIDE == 80);
+
+impl Greek {
+    /// Packs the four provenance fields into one word.
+    ///
+    /// `steps` is the signed distance from the at-the-money rung, which is
+    /// negative below the money and is why the field is an `i32` rather than a
+    /// count.
+    #[must_use]
+    pub const fn provenance_of(
+        vol_from: i64,
+        rate_from: i64,
+        below_validated_band: bool,
+        steps: i32,
+    ) -> i64 {
+        let band = if below_validated_band { 1 } else { 0 };
+        ((steps as i64) << MONEYNESS_SHIFT)
+            | (band << BELOW_BAND_SHIFT)
+            | ((rate_from & BYTE_FIELD) << RATE_FROM_SHIFT)
+            | (vol_from & BYTE_FIELD)
+    }
+
+    /// [`VOL_FROM_SOLVED`] or [`VOL_FROM_VENDOR`].
+    #[must_use]
+    pub const fn vol_from(&self) -> i64 {
+        self.provenance & BYTE_FIELD
+    }
+
+    /// One of [`RATE_FROM_CHARTER`], [`RATE_FROM_OPERATOR`],
+    /// [`RATE_FROM_SOLVED`].
+    #[must_use]
+    pub const fn rate_from(&self) -> i64 {
+        (self.provenance >> RATE_FROM_SHIFT) & BYTE_FIELD
+    }
+
+    /// Whether this row's tenor sat below the band `greeks` validates itself in.
+    ///
+    /// On a weekly this is every row. Stored rather than derived because
+    /// deriving it at read time needs the dated session table, and a reader that
+    /// cannot reach one would print the greeks without the caveat.
+    #[must_use]
+    pub const fn below_validated_band(&self) -> bool {
+        (self.provenance >> BELOW_BAND_SHIFT) & 1 == 1
+    }
+
+    /// Signed steps from the at-the-money rung. Negative below the money.
+    ///
+    /// The `as i32` is the SIGN EXTENSION, and it is the whole reason this is a
+    /// method: reading the upper word as an `i64` gives `4,294,967,294` where
+    /// `-2` was meant, which is a plausible-looking number for an
+    /// in-the-money strike.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "the truncation IS the decode. The field was written as an \
+                  i32 at this offset by `provenance_of`, so narrowing back to \
+                  i32 restores exactly what was packed, and the sign travels \
+                  with it"
+    )]
+    pub const fn moneyness_steps(&self) -> i32 {
+        (self.provenance >> MONEYNESS_SHIFT) as i32
+    }
+
+    /// The bytes of one greeks record, little-endian.
+    ///
+    /// Field order and width mirror [`Bar::image`] and [`Overlay::image`]: the
+    /// stamp first, then eight-byte fields at eight-byte offsets, because the
+    /// same block, checksum and commit machinery reads all three and a record
+    /// laid out differently would need a second copy of it.
+    #[must_use]
+    pub fn image(&self) -> [u8; GREEK_LEN] {
+        let mut out = [0u8; GREEK_LEN];
+        write_at(&mut out, 0, self.ts_micros.to_le_bytes());
+        write_at(&mut out, 8, self.spot.to_le_bytes());
+        write_at(&mut out, 16, self.volatility.to_le_bytes());
+        write_at(&mut out, 24, self.delta.to_le_bytes());
+        write_at(&mut out, 32, self.gamma.to_le_bytes());
+        write_at(&mut out, 40, self.vega.to_le_bytes());
+        write_at(&mut out, 48, self.theta.to_le_bytes());
+        write_at(&mut out, 56, self.rho.to_le_bytes());
+        write_at(&mut out, 64, self.rate.to_le_bytes());
+        write_at(&mut out, 72, self.provenance.to_le_bytes());
+        out
+    }
+
+    /// Decodes one greeks record.
+    ///
+    /// # Errors
+    ///
+    /// [`FormatError::RecordTooShort`] when fewer than [`GREEK_STRIDE`] bytes
+    /// are offered. Refused rather than zero-filled, for the reason
+    /// [`Overlay::decode`] gives: inventing the missing bytes manufactures a
+    /// reading nobody wrote, and a zero delta is a legal one.
+    pub fn decode(bytes: &[u8]) -> Result<Self, FormatError> {
+        if bytes.len() < GREEK_LEN {
+            return Err(FormatError::RecordTooShort { len: bytes.len() });
+        }
+        let mut image = [0u8; GREEK_LEN];
+        for (dst, src) in image.iter_mut().zip(bytes.iter()) {
+            *dst = *src;
+        }
+        Ok(Self {
+            ts_micros: i64::from_le_bytes(le_bytes(&image, 0)),
+            spot: i64::from_le_bytes(le_bytes(&image, 8)),
+            volatility: f64::from_le_bytes(le_bytes(&image, 16)),
+            delta: f64::from_le_bytes(le_bytes(&image, 24)),
+            gamma: f64::from_le_bytes(le_bytes(&image, 32)),
+            vega: f64::from_le_bytes(le_bytes(&image, 40)),
+            theta: f64::from_le_bytes(le_bytes(&image, 48)),
+            rho: f64::from_le_bytes(le_bytes(&image, 56)),
+            rate: f64::from_le_bytes(le_bytes(&image, 64)),
+            provenance: i64::from_le_bytes(le_bytes(&image, 72)),
+        })
+    }
+
+    /// Whether every stored derivative is a finite number.
+    ///
+    /// The write-boundary gate. A `NaN` delta looks exactly like a real one
+    /// until it is multiplied by something, and unlike an [`Overlay`] — where
+    /// an all-zero row is a legal reading — a non-finite greek is never a
+    /// reading at all.
+    #[must_use]
+    pub fn is_finite(&self) -> bool {
+        [
+            self.volatility,
+            self.delta,
+            self.gamma,
+            self.vega,
+            self.theta,
+            self.rho,
+            self.rate,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+    }
+}
+
+impl Row for Greek {
+    const LEN: usize = GREEK_LEN;
+
+    fn stamp(&self) -> i64 {
+        self.ts_micros
+    }
+
+    fn write_into(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.image());
+    }
+
+    fn read_from(bytes: &[u8]) -> Result<Self, FormatError> {
+        Self::decode(bytes)
+    }
+
+    /// **UNLIKE [`Overlay`], THIS ONE HAS SOMETHING TO VIOLATE.**
+    ///
+    /// The overlay answers `true` because a spot and a volatility constrain
+    /// nothing about one another. A greeks row is different: a non-finite
+    /// derivative is not a reading, and it must never reach the disk.
+    fn is_sane(&self) -> bool {
+        self.is_finite()
+    }
+
+    fn bad_counts(&self) -> Option<(i64, i64)> {
+        None
+    }
+}
+
 const _: () = assert!(size_of::<Bar>() == 56);
 const _: () = assert!(align_of::<Bar>() == 8);
 const _: () = assert!(RECORD_STRIDE == 56);

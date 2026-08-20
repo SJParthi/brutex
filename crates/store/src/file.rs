@@ -600,6 +600,46 @@ pub struct BarFile {
 /// any other version number a NAMED refusal rather than a silent mis-read.
 const OVERLAY_TABLE: &[Layout] = &[Layout::OVERLAY];
 
+/// The one geometry a `.grk` file can resolve to.
+const GREEKS_TABLE: &[Layout] = &[Layout::GREEKS];
+
+/// Whether this kind of file holds records at a declared geometry.
+///
+/// `.crc` and `.lock` do not: opening either through [`BarFile`] would read its
+/// first bytes as a header and its rest as records at whatever stride that
+/// header happened to name.
+const fn holds_records(kind: FileKind) -> bool {
+    matches!(kind, FileKind::Bars | FileKind::Overlay | FileKind::Greeks)
+}
+
+/// The geometry a file of this kind is BORN at.
+///
+/// Decided once, from the kind, so creation and reopen cannot disagree — a file
+/// born at the overlay's geometry and reopened against the bar table reports
+/// `UnknownVersion(9)`, which is the resolver being right and the caller having
+/// handed it the wrong table. `Layout::CURRENT` for anything that is not a
+/// sidecar, which after [`holds_records`] can only be [`FileKind::Bars`].
+const fn geometry_of(kind: FileKind) -> Layout {
+    match kind {
+        FileKind::Overlay => Layout::OVERLAY,
+        FileKind::Greeks => Layout::GREEKS,
+        _ => Layout::CURRENT,
+    }
+}
+
+/// The versions a file of this kind may resolve against.
+///
+/// A sidecar gets a one-row table; a bar file gets every bar version this build
+/// can read. See [`geometry_of`] on why the two answers must be derived from
+/// the same input.
+const fn table_of(kind: FileKind) -> &'static [Layout] {
+    match kind {
+        FileKind::Overlay => OVERLAY_TABLE,
+        FileKind::Greeks => GREEKS_TABLE,
+        _ => Layout::KNOWN,
+    }
+}
+
 impl BarFile {
     /// Opens a month's bar file, creating it and its directory if absent.
     ///
@@ -636,20 +676,20 @@ impl BarFile {
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Self, StoreError> {
-        // BARS OR THE OVERLAY BESIDE THEM, and nothing else. A `.crc` or a
+        // BARS OR A SIDECAR BESIDE THEM, and nothing else. A `.crc` or a
         // `.lock` opened here would be read as records at whichever geometry
         // its first bytes happened to name.
-        if path.file() != FileKind::Bars && path.file() != FileKind::Overlay {
+        //
+        // Asked of `FileKind` rather than spelled as a chain of `!=`. There are
+        // three record kinds now and the chain had to be edited in two places
+        // to add the third — two places that could have disagreed.
+        if !holds_records(path.file()) {
             return Err(StoreError::NotABarPath { found: path.file() });
         }
         let timeframe_secs = path.timeframe().secs();
         // THE GEOMETRY THIS FILE IS BORN AT AND RESOLVED AGAINST, decided once
         // from the file kind so creation and reopen cannot disagree.
-        let born = if path.file() == FileKind::Overlay {
-            Layout::OVERLAY
-        } else {
-            Layout::CURRENT
-        };
+        let born = geometry_of(path.file());
         let bars_path = path.to_path_buf(root);
         let lock_path = path.with_file(FileKind::Lock).to_path_buf(root);
 
@@ -733,15 +773,8 @@ impl BarFile {
             len,
             symbol_id,
             timeframe_secs,
-            // THE SAME ANSWER CREATION USED. A file born at the overlay's
-            // geometry and reopened against the bar table reports
-            // `UnknownVersion(9)` — which is the resolver being right and the
-            // caller handing it the wrong table.
-            if path.file() == FileKind::Overlay {
-                OVERLAY_TABLE
-            } else {
-                Layout::KNOWN
-            },
+            // THE SAME ANSWER CREATION USED, from the same function.
+            table_of(path.file()),
         )
     }
 
@@ -788,10 +821,14 @@ impl BarFile {
         path: StorePath<'_>,
         symbol_id: u32,
     ) -> Result<Self, StoreError> {
-        // BARS OR THE OVERLAY BESIDE THEM, and nothing else. A `.crc` or a
+        // BARS OR A SIDECAR BESIDE THEM, and nothing else. A `.crc` or a
         // `.lock` opened here would be read as records at whichever geometry
         // its first bytes happened to name.
-        if path.file() != FileKind::Bars && path.file() != FileKind::Overlay {
+        //
+        // Asked of `FileKind` rather than spelled as a chain of `!=`. There are
+        // three record kinds now and the chain had to be edited in two places
+        // to add the third — two places that could have disagreed.
+        if !holds_records(path.file()) {
             return Err(StoreError::NotABarPath { found: path.file() });
         }
         let bars_path = path.to_path_buf(root);
@@ -825,14 +862,9 @@ impl BarFile {
             len,
             symbol_id,
             path.timeframe().secs(),
-            // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed. The
-            // gate above has already refused anything that is not `Bars` or
-            // `Overlay`, so this match is total over what can reach it.
-            if path.file() == FileKind::Overlay {
-                OVERLAY_TABLE
-            } else {
-                Layout::KNOWN
-            },
+            // WHICH TABLE, DECIDED BY THE FILE KIND rather than assumed, and by
+            // the same function the creating door uses.
+            table_of(path.file()),
         )
     }
 

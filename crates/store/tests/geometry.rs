@@ -533,3 +533,191 @@ fn the_overlay_block_fills_its_failure_unit_without_straddling_it() {
         "and it is the LARGEST such block — one more record would straddle"
     );
 }
+
+/// **THE PACKED MONEYNESS SURVIVES A NEGATIVE VALUE.**
+///
+/// The provenance word carries the signed step count in its upper 32 bits, and
+/// reading it back without the sign extension yields `4,294,967,294` where `-2`
+/// was meant — a number large enough to look like corruption and small enough
+/// to look like a strike far out of the money. Every in-the-money row would
+/// carry it.
+#[test]
+fn a_below_the_money_strike_survives_the_provenance_packing() {
+    use store::format::{Greek, RATE_FROM_OPERATOR, VOL_FROM_SOLVED, VOL_FROM_VENDOR};
+
+    for steps in [-32_768_i32, -300, -3, -1, 0, 1, 3, 300, 32_767] {
+        let packed = Greek::provenance_of(VOL_FROM_SOLVED, RATE_FROM_OPERATOR, true, steps);
+        let row = Greek {
+            ts_micros: 1,
+            spot: 2_500_000,
+            volatility: 0.14,
+            delta: 0.5,
+            gamma: 0.0001,
+            vega: 1.0,
+            theta: -1.0,
+            rho: 0.1,
+            rate: 0.0655,
+            provenance: packed,
+        };
+        assert_eq!(row.moneyness_steps(), steps, "packed {packed:#x}");
+        assert_eq!(row.vol_from(), VOL_FROM_SOLVED);
+        assert_eq!(row.rate_from(), RATE_FROM_OPERATOR);
+        assert!(row.below_validated_band());
+    }
+
+    // AND THE FOUR FIELDS DO NOT BLEED INTO ONE ANOTHER. A negative step count
+    // sets every upper bit, which is exactly the value that would corrupt the
+    // three byte-wide fields below it if a mask were missing.
+    let packed = Greek::provenance_of(VOL_FROM_VENDOR, RATE_FROM_OPERATOR, false, -1);
+    let row = Greek {
+        provenance: packed,
+        ..Greek {
+            ts_micros: 0,
+            spot: 0,
+            volatility: 0.0,
+            delta: 0.0,
+            gamma: 0.0,
+            vega: 0.0,
+            theta: 0.0,
+            rho: 0.0,
+            rate: 0.0,
+            provenance: 0,
+        }
+    };
+    assert_eq!(
+        row.vol_from(),
+        VOL_FROM_VENDOR,
+        "a -1 step count clobbered it"
+    );
+    assert_eq!(row.rate_from(), RATE_FROM_OPERATOR);
+    assert!(
+        !row.below_validated_band(),
+        "the band flag is not the sign bit"
+    );
+    assert_eq!(row.moneyness_steps(), -1);
+}
+
+/// A greeks record round-trips its bytes exactly, every field.
+#[test]
+fn a_greeks_record_survives_its_own_encoding() {
+    use store::format::{GREEK_LEN, Greek, RATE_FROM_SOLVED, VOL_FROM_VENDOR};
+
+    let row = Greek {
+        ts_micros: 1_787_158_703_618_000,
+        spot: 2_500_125,
+        volatility: 0.142_537_891_2,
+        delta: 0.523_9,
+        gamma: 0.000_012_34,
+        vega: 1_234.567_8,
+        theta: -987.654_3,
+        rho: 45.678_9,
+        rate: 0.065_5,
+        provenance: Greek::provenance_of(VOL_FROM_VENDOR, RATE_FROM_SOLVED, true, -7),
+    };
+    let image = row.image();
+    assert_eq!(image.len(), GREEK_LEN);
+    assert_eq!(GREEK_LEN, 80);
+
+    let back = Greek::decode(&image).expect("its own bytes");
+    assert_eq!(back, row, "a field moved between encode and decode");
+    assert_eq!(back.moneyness_steps(), -7);
+    assert!(back.is_finite());
+
+    // A SHORT TAIL IS REFUSED, never zero-filled. Inventing the missing bytes
+    // manufactures a reading nobody wrote, and a zero delta is a legal one.
+    assert!(Greek::decode(&image[..79]).is_err());
+    assert!(Greek::decode(&[]).is_err());
+}
+
+/// **A NON-FINITE GREEK NEVER REACHES THE DISK.**
+///
+/// Unlike the overlay — where an all-zero row is a legal reading of zero spot
+/// and zero volatility — a `NaN` delta is not a reading at all. It looks
+/// exactly like a real one until it is multiplied by something.
+#[test]
+fn a_non_finite_derivative_is_refused_at_the_write_boundary() {
+    use store::format::{Greek, Row};
+
+    let sane = Greek {
+        ts_micros: 1,
+        spot: 2_500_000,
+        volatility: 0.14,
+        delta: 0.5,
+        gamma: 0.0001,
+        vega: 1.0,
+        theta: -1.0,
+        rho: 0.1,
+        rate: 0.0655,
+        provenance: 0,
+    };
+    assert!(sane.is_sane(), "an ordinary row must pass");
+
+    for poisoned in [
+        Greek {
+            delta: f64::NAN,
+            ..sane
+        },
+        Greek {
+            gamma: f64::INFINITY,
+            ..sane
+        },
+        Greek {
+            vega: f64::NEG_INFINITY,
+            ..sane
+        },
+        Greek {
+            theta: f64::NAN,
+            ..sane
+        },
+        Greek {
+            rho: f64::NAN,
+            ..sane
+        },
+        Greek {
+            volatility: f64::NAN,
+            ..sane
+        },
+        Greek {
+            rate: f64::NAN,
+            ..sane
+        },
+    ] {
+        assert!(
+            !poisoned.is_sane(),
+            "a non-finite field passed the write gate: {poisoned:?}"
+        );
+    }
+
+    // THE STAMP AND THE SPOT ARE INTEGERS and cannot be non-finite, which is
+    // why they are the two i64 fields — CLAUDE.md §7 puts prices in paisa and
+    // derivatives in full precision, and this record holds both kinds.
+    assert_eq!(sane.stamp(), 1);
+    assert_eq!(<Greek as Row>::LEN, 80);
+}
+
+/// The greeks sidecar cannot be mistaken for a bar file or for the overlay.
+#[test]
+fn three_geometries_are_told_apart_by_magic_stride_and_version() {
+    use store::format::{
+        GREEK_MAGIC, GREEK_RECORDS_PER_BLOCK, GREEK_STRIDE, MAGIC, OVERLAY_MAGIC, OVERLAY_STRIDE,
+        RECORD_STRIDE,
+    };
+
+    for (name, magic) in [
+        ("bar", MAGIC),
+        ("overlay", OVERLAY_MAGIC),
+        ("greeks", GREEK_MAGIC),
+    ] {
+        assert_eq!(magic.len(), 8, "{name} magic is the wrong width");
+    }
+    assert_ne!(GREEK_MAGIC, MAGIC);
+    assert_ne!(GREEK_MAGIC, OVERLAY_MAGIC);
+    assert_ne!(GREEK_STRIDE, RECORD_STRIDE);
+    assert_ne!(GREEK_STRIDE, OVERLAY_STRIDE);
+
+    // AND THE BLOCK IS THE LARGEST THAT FITS THE 4,096-BYTE FAILURE UNIT. One
+    // more record straddles it, and a straddling block turns one torn write
+    // into two damaged blocks.
+    assert_eq!(GREEK_STRIDE * GREEK_RECORDS_PER_BLOCK, 4_080);
+    const { assert!(GREEK_STRIDE * (GREEK_RECORDS_PER_BLOCK + 1) > 4_096) }
+}
