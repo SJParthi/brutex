@@ -5555,18 +5555,102 @@
    * them.
    */
   /** @param {Event} [e] */
+  /**
+   * HOW MANY PASSES ONE PRESS MAY MAKE, and why there is a ceiling at all.
+   *
+   * A window can be bigger than one sitting at a legal rate: eight months of
+   * BANKNIFTY option chains is roughly 1,984 contracts, each needing its own
+   * candle fetch, against a vendor ceiling the governor halves on every 429.
+   * One pass reaches a few hundred and stops when its budget is spent, and the
+   * operator's requirement is that the run KEEPS GOING until the window is
+   * satisfied rather than waiting to be pressed again.
+   *
+   * The ceiling is not a guess about how many are needed — it is a stop for a
+   * loop that would otherwise be unbounded if the vendor never recovered. It is
+   * reported when it is reached; see `passSummary`.
+   */
+  const MAX_PASSES = 40;
+
+  /**
+   * HOW MANY CONSECUTIVE PASSES MAY GAIN NOTHING BEFORE THE LOOP STOPS.
+   *
+   * **Two, and this is the guard that makes the loop terminate.** A pass that
+   * gains no bars has either finished the window or hit something a retry
+   * cannot fix — a dead credential, a contract the vendor will not serve, a
+   * ceiling that has collapsed to nothing. Retrying that forever is not
+   * persistence, it is a spin that burns the vendor's goodwill and reports
+   * progress it is not making.
+   *
+   * Two rather than one because a single empty pass is ordinary: the governor
+   * can spend a whole pass waiting out a backoff and store nothing through no
+   * fault of the request.
+   */
+  const MAX_IDLE_PASSES = 2;
+
+  /** What the last multi-pass run did, for the card to state plainly. */
+  let passSummary = $state(/** @type {string | null} */ (null));
+
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
     if (problems.length > 0 || phase === 'running') return;
-    await runPull(
-      /* SPOT FIRST, THEN THE DERIVATIVES — concatenated here so ONE chain per
-         feed carries the whole ladder. The sort inside `runPull` puts them in
-         the order the server will accept; this only decides what is in the
-         run. */
-      [...wireBodies, ...fnoBodies],
-      new Set(ticked.map((m) => m.key))
-    );
+
+    /* SPOT FIRST, THEN THE DERIVATIVES — concatenated here so ONE chain per
+       feed carries the whole ladder. The sort inside `runPull` puts them in
+       the order the server will accept; this only decides what is in the run. */
+    const bodies = [...wireBodies, ...fnoBodies];
+    const asked = new Set(ticked.map((m) => m.key));
+
+    /* KEEP GOING UNTIL THE WINDOW IS SATISFIED.
+       Operator's requirement, 2026-08-20: a run stopped by a rate ceiling, a
+       dropped socket or a partial month must RESUME rather than wait to be
+       pressed again — "until or unless that particular requested window is
+       finished it should never be stopped".
+       THE LOOP IS ON THE PAGE, NOT IN THE SERVER, and that is deliberate. One
+       HTTP request that ran for hours is exactly what produced the `HTTP 0`
+       that abandoned Dhan's options: a socket held open across a whole backfill
+       is a socket that will drop. Each pass is a bounded request; the RESUME is
+       what makes the next one cheap — `fnowork::owed` probes each
+       contract-month's last stored timestamp, so a pass never refetches what
+       the one before it landed.
+       PROGRESS IS MEASURED AGAINST THE STORE, not against what a receipt
+       claims. `live.rows` is the census bar count read after every pass, so a
+       pass that reported success and wrote nothing counts as idle — which is
+       the only reading that cannot be fooled by a run reporting bars it did not
+       commit. */
+    let passes = 0;
+    let idle = 0;
+    let gained = 0;
+    const started = live?.rows ?? 0;
+
+    while (passes < MAX_PASSES) {
+      const before = live?.rows ?? 0;
+      await runPull(bodies, asked);
+      passes += 1;
+      const after = live?.rows ?? before;
+
+      /* STOPPED BY THE OPERATOR ENDS IT AT ONCE. `aborted` is set by the
+         abort branch inside the chain, and pressing Stop is an answer — not a
+         failure to retry around. */
+      if (aborted) break;
+
+      if (after > before) {
+        gained += after - before;
+        idle = 0;
+      } else {
+        idle += 1;
+        if (idle >= MAX_IDLE_PASSES) break;
+      }
+    }
+
+    const total = (live?.rows ?? started) - started;
+    passSummary = aborted
+      ? `Stopped after ${passes} pass(es); ${n(total)} bar(s) landed before you pressed stop.`
+      : passes >= MAX_PASSES
+        ? `Reached the ${MAX_PASSES}-pass ceiling with ${n(total)} bar(s) landed. The window is not necessarily finished — press Pull again to continue from where this stopped; nothing already stored is refetched.`
+        : idle >= MAX_IDLE_PASSES && gained === 0
+          ? `${passes} pass(es) gained no bars. Either the window is already complete, or something a retry cannot fix is in the way — read the receipt below rather than pressing again.`
+          : `${passes} pass(es), ${n(total)} bar(s) landed. The last ${MAX_IDLE_PASSES} gained nothing, which is how this run knows the window is done.`;
   }
 
   /**
@@ -5800,6 +5884,9 @@
 
   function reset() {
     phase = 'idle';
+    // CLEARED WITH THE REST. A pass summary left standing over a cleared
+    // receipt describes a run whose evidence is gone.
+    passSummary = null;
     receipt = null;
     receipts = [];
     sent = { done: 0, of: 0, label: '' };
@@ -6981,6 +7068,16 @@
                 <button class="btn ghost" type="button" onclick={reset}>Clear the result</button>
               {/if}
             </div>
+            <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.
+                 One press is now several passes — a window can be bigger than
+                 one sitting at a legal rate, and the operator's requirement is
+                 that it keeps going until the window is satisfied. Without this
+                 line the difference between "finished", "hit the ceiling" and
+                 "gained nothing twice" is invisible, and those three want three
+                 different next actions from the reader. -->
+            {#if passSummary}
+              <p class="note" style="margin-top:10px">{passSummary}</p>
+            {/if}
           </form>
         </section>
 
