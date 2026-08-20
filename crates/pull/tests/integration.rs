@@ -144,11 +144,14 @@ const BODY: &str = "\
 /// How many rows [`BODY`] holds.
 const ROWS: usize = 8;
 /// How many of them survive the window, the session and the fold.
-/// Five: the three inside the published session, plus `09:14:59` and
-/// `15:30:00`, which this build KEEPS rather than discards — operator's rule of
-/// 2026-08-19, whatever the vendor provides is stored. Only rows outside the
-/// operator's WINDOW are declined.
-const BARS: usize = 5;
+///
+/// **Three, and it was five.** `09:14:59` and `15:30:00` sit outside the
+/// published session and are DROPPED again — operator rule of 2026-08-20,
+/// which replaced their own rule of 2026-08-19 that stored whatever the vendor
+/// sent. What decided it: Dhan sends NSE index bars through 15:38 while Groww
+/// and Zerodha stop at 15:29, so keeping everything made the last bar of a
+/// session depend on which broker filled it.
+const BARS: usize = 3;
 
 /// The first and last day the operator asked for.
 fn window() -> Window {
@@ -274,15 +277,16 @@ fn a_bar_outside_the_requested_window_is_never_stored() {
     assert_eq!(done.census.of(DropReason::AfterWindow), 1);
     assert_eq!(
         done.census.of(DropReason::BeforeSessionOpen),
-        0,
-        "the pre-open row is kept, so it is not a drop"
+        1,
+        "the pre-open row is dropped again — operator rule of 2026-08-20"
     );
     assert_eq!(
         done.census.of(DropReason::AtOrAfterSessionClose),
-        0,
-        "and neither is the post-close one"
+        1,
+        "and neither is the post-close one — both are drops again"
     );
-    assert_eq!(done.census.total(), 2);
+    // FOUR: two outside the window, two outside the session.
+    assert_eq!(done.census.total(), 4);
 
     // THE INVARIANT, READ OFF THE DISK. Not "the pipeline said it dropped
     // two" — every record the file actually holds is inside the operator's
@@ -317,14 +321,15 @@ fn a_bar_outside_the_requested_window_is_never_stored() {
         );
     }
 
-    // And the FIVE that survived are the five expected ones, at the minute each
-    // bucket opens rather than at the snapshot that opened it.
+    // And the THREE that survived are the three expected ones, at the minute
+    // each bucket opens rather than at the snapshot that opened it.
+    //
+    // It was five. `09:14:59` and `15:30:00` are outside the published session
+    // and are dropped again — operator rule of 2026-08-20.
     let days: Vec<Day> = bars.iter().map(|bar| moment_of(bar).day()).collect();
     assert_eq!(
         days,
         vec![
-            Day::new(2022, 10, 3).expect("2022-10-03"),
-            Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 3).expect("2022-10-03"),
             Day::new(2022, 10, 4).expect("2022-10-04"),
@@ -334,20 +339,20 @@ fn a_bar_outside_the_requested_window_is_never_stored() {
         .iter()
         .map(|bar| moment_of(bar).minute_of_day())
         .collect();
-    // THE PRE-OPEN AND POST-CLOSE MINUTES ARE HERE, and that is the change.
-    // `SESSION_OPEN_MINUTE - 1` is the 09:14 bucket the 09:14:59 snapshot
-    // opened; `SESSION_CLOSE_MINUTE` is the 15:30 bucket. Both used to be
-    // discarded; both are stored now, because the vendor sent them.
+    // THE PRE-OPEN AND POST-CLOSE MINUTES ARE GONE AGAIN, and that is the
+    // change. `SESSION_OPEN_MINUTE - 1` is the 09:14 bucket the 09:14:59
+    // snapshot opened and `SESSION_CLOSE_MINUTE` is the 15:30 bucket; both were
+    // stored under the 2026-08-19 rule and both are dropped under the
+    // 2026-08-20 one, which the operator chose knowing it cannot be undone —
+    // §8 is append-only, so a row declined here is not recoverable by
+    // re-running.
+    //
+    // What remains is exactly the published session: the open minute, the last
+    // minute before the close, and the next day's bar.
     assert_eq!(
         minutes,
-        vec![
-            SESSION_OPEN_MINUTE - 1,
-            SESSION_OPEN_MINUTE,
-            SESSION_CLOSE_MINUTE - 1,
-            SESSION_CLOSE_MINUTE,
-            9 * 60 + 20
-        ],
-        "everything the vendor sent inside the window is on disk, in order"
+        vec![SESSION_OPEN_MINUTE, SESSION_CLOSE_MINUTE - 1, 9 * 60 + 20],
+        "everything inside the window AND inside the session is on disk, in order"
     );
     assert_eq!(
         SESSION_CLOSE_MINUTE - SESSION_OPEN_MINUTE,
@@ -355,22 +360,21 @@ fn a_bar_outside_the_requested_window_is_never_stored() {
         "and those two minutes bound the 375-bar session the charter records"
     );
 
-    // BARS[0] IS THE PRE-OPEN BUCKET NOW, kept rather than discarded, so the
-    // fold this test is about has moved one along.
-    assert_eq!(bars[0].open, 3_841_000, "38410.00, the 09:14:59 row");
-
-    // The fold is visible in bars[1]: two snapshots inside 09:15 became one bar
-    // whose open is the first and whose close is the last, in file order. A
-    // WINDOW filter that ran after the fold would have folded a dropped row
-    // into a kept bar — that is still the thing being pinned, and it still
-    // holds, because the window checks still run before the fold.
-    assert_eq!(bars[1].open, 3_844_565, "38445.65 in paisa, the first");
-    assert_eq!(bars[1].close, 3_845_000, "38450.00 in paisa, the last");
-    assert_eq!(bars[1].high, 3_845_000);
-    assert_eq!(bars[1].low, 3_844_565);
-    assert_eq!(bars[2].close, 3_850_000);
-    assert_eq!(bars[3].close, 3_851_000, "38510.00, the 15:30:00 row, kept");
-    assert_eq!(bars[4].close, 3_860_000);
+    // BARS[0] IS THE 09:15 BUCKET AGAIN. The pre-open row is dropped under the
+    // 2026-08-20 rule, so it no longer sorts ahead of the open and the fold
+    // this test is about is bars[0] itself.
+    //
+    // The fold: two snapshots inside 09:15 became one bar whose open is the
+    // first and whose close is the last, in file order. A WINDOW filter that
+    // ran after the fold would have folded a dropped row into a kept bar —
+    // that is the thing being pinned, and it still holds, because the window
+    // checks run before the fold.
+    assert_eq!(bars[0].open, 3_844_565, "38445.65 in paisa, the first");
+    assert_eq!(bars[0].close, 3_845_000, "38450.00 in paisa, the last");
+    assert_eq!(bars[0].high, 3_845_000);
+    assert_eq!(bars[0].low, 3_844_565);
+    assert_eq!(bars[1].close, 3_850_000, "38500.00, the 15:29:59 row");
+    assert_eq!(bars[2].close, 3_860_000, "38600.00, the next day");
 }
 
 #[test]
@@ -394,9 +398,10 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
 
     let done = run(&archive, &store_root, &request);
     assert_eq!(done.failures, Vec::new(), "no member failed");
-    // FOUR: the two inside the session plus the pre-open and post-close rows
-    // the vendor sent, which are now kept.
-    assert_eq!(done.bars_stored, 4);
+    // TWO: only the rows inside the published session. The pre-open and
+    // post-close rows the vendor sent are dropped again — operator rule of
+    // 2026-08-20.
+    assert_eq!(done.bars_stored, 2);
     assert_eq!(
         done.census.of(DropReason::AfterWindow),
         2,
@@ -404,7 +409,8 @@ fn a_narrower_window_stores_strictly_fewer_bars_and_says_why() {
     );
 
     let bars = stored_bars(&store_root);
-    assert_eq!(bars.len(), 4);
+    // TWO, not four: the pre-open and post-close rows are dropped again.
+    assert_eq!(bars.len(), 2);
     for bar in &bars {
         assert_eq!(
             moment_of(bar).day(),
@@ -485,8 +491,8 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store_root, &narrow);
-    assert_eq!(first.bars_stored, 4);
-    assert_eq!(stored_bars(&store_root).len(), 4);
+    assert_eq!(first.bars_stored, 2);
+    assert_eq!(stored_bars(&store_root).len(), 2);
 
     let wider = BarRequest {
         instrument_id: String::new(),
@@ -502,9 +508,9 @@ fn a_second_window_over_the_same_month_appends_rather_than_rewrites() {
     assert_eq!(second.bars_stored, 1);
 
     let bars = stored_bars(&store_root);
-    // FIVE: the first day's four — two inside the session, plus the pre-open
-    // and post-close rows now kept — and the second day's one.
-    assert_eq!(bars.len(), 5, "the second day was appended to the first");
+    // THREE: the first day.s two inside the published session, and the second
+    // day.s one. The pre-open and post-close rows are dropped again.
+    assert_eq!(bars.len(), 3, "the second day was appended to the first");
     let last = bars.last().expect("a bar");
     assert_eq!(
         moment_of(last).day(),

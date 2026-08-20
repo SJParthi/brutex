@@ -785,16 +785,44 @@ pub fn land(
         // fell outside the published hours. Counted and kept is a different
         // thing from counted and gone.
         if let Some(reason) = verdict {
-            if matches!(
+            let out_of_session = !matches!(
                 reason,
                 crate::session::DropReason::BeforeWindow | crate::session::DropReason::AfterWindow
-            ) {
-                census.count(reason);
-                continue;
+            );
+            if out_of_session {
+                // COUNTED SEPARATELY, because `outside_session` is what the
+                // receipt reports and `census` is what `balances()` reconciles.
+                // A row on both sides would be counted twice.
+                outside_session = outside_session.saturating_add(1);
             }
-            // KEPT, AND COUNTED SOMEWHERE ELSE. Counting it in `census` too
-            // would put one row on both sides of `balances()`.
-            outside_session = outside_session.saturating_add(1);
+            // AND NOW DROPPED, WHICHEVER KIND IT IS. Operator's rule of
+            // 2026-08-20, chosen over their own rule of 2026-08-19 with the
+            // cost of the reversal stated first.
+            //
+            // The 2026-08-19 rule was "whatever the vendor provides, we store",
+            // and it is why this branch used to KEEP a session-hours drop. What
+            // it produced, measured: Dhan sends NSE index bars through 15:38
+            // while Groww and Zerodha stop at 15:29, so one vendor's index
+            // month held nine bars past a close the exchange publishes as
+            // 15:30 — and the same file, before 2026-08-03, ended at 15:29. A
+            // store where the last bar of a session depends on which broker
+            // filled it is not one two vendors can be compared in.
+            //
+            // WHAT THE REVERSAL COSTS, stated because it is permanent: a row
+            // dropped here cannot be recovered by re-running. §8 is
+            // append-only, `BarFile::append` anchors its overlap at the file's
+            // tail, and a later run offering the missing row would be refused
+            // as a non-suffix. Measured on the run that first showed this:
+            // `rows_read 58,500` against `bars_stored 58,305` — 195 rows, all
+            // of them real prints the vendor sent.
+            //
+            // IT IS NOT SILENT, which is the whole difference from the version
+            // this replaces. `outside_session` reaches the receipt and
+            // `DropCensus` carries the reason by name, so the count that used
+            // to be visible only as the difference between two numbers nobody
+            // subtracted is now a line an operator reads.
+            census.count(reason);
+            continue;
         }
 
         let price = |raw: i64, field: &'static str| {

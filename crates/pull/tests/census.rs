@@ -157,16 +157,34 @@ const BODY: &str = "\
 
 /// Rows in [`BODY`].
 const ROWS: usize = 8;
-/// How many become bars. Five: the three inside the session, plus the pre-open
-/// and post-close rows this build now keeps rather than discards.
-const BARS: usize = 5;
+/// How many become bars.
+///
+/// **Three, and it was five.** The operator's rule of 2026-08-20 replaced their
+/// own rule of 2026-08-19: a row outside the venue's published session is
+/// DROPPED again rather than stored. `09:14:59` and `15:30:00` were the two
+/// that moved.
+///
+/// What decided it, measured: Dhan sends NSE index bars through 15:38 while
+/// Groww and Zerodha stop at 15:29, so under the keep-everything rule one
+/// vendor's index month held nine bars past a close the exchange publishes as
+/// 15:30 — and the same file, before 2026-08-03, ended at 15:29. A store whose
+/// last bar of a session depends on which broker filled it is not one two
+/// vendors can be compared in.
+const BARS: usize = 3;
 /// How many fold into a bar that is already open — 09:15:30 into 09:15:00.
 const FOLDED: usize = 1;
-/// How many are declined — by the WINDOW only. A row outside the session is
-/// KEPT and counted separately; only a row outside the window is dropped.
-const DROPPED: usize = 2;
-/// How many are kept although the exchange's timetable did not expect them:
+/// How many are declined — by the window OR by the session.
+///
+/// Four: `20221002` and `20221005` are outside the window, `09:14:59` and
+/// `15:30:00` are outside the session. All four are in `census` now, which is
+/// what keeps `balances()` reconciling without double-counting.
+const DROPPED: usize = 4;
+/// How many of those four the exchange's timetable is what declined:
 /// `09:14:59` and `15:30:00`.
+///
+/// Counted SEPARATELY from `census` on the way out — `outside_session` is what
+/// the receipt reports and `census` is what `balances()` reconciles — but both
+/// now describe rows that are gone rather than rows that were kept.
 const OUTSIDE_SESSION: usize = 2;
 
 /// The vendor whose census these tests write.
@@ -386,12 +404,10 @@ fn a_folded_row_is_counted_as_consumed_and_the_books_balance() {
 
     // The folded row is not a claim about arithmetic: it is in the bar.
     let file = bar_file(&store, "NIFTY");
-    // RECORD 0 IS NOW THE PRE-OPEN ROW. `09:14:59` used to be discarded, so the
-    // first record was `09:15:00`. It is kept now, so it sorts first — and the
-    // fold this test is about is one record along.
-    let preopen = file.read_record(0).expect("record 0");
-    assert_eq!(preopen.open, 3_841_000, "38410.00, the 09:14:59 row, kept");
-    let first = file.read_record(1).expect("record 1");
+    // RECORD 0 IS THE FIRST IN-SESSION ROW AGAIN. `09:14:59` is dropped once
+    // more under the operator rule of 2026-08-20, so the pre-open row does not
+    // sort ahead of it and the fold this test is about is record 0 itself.
+    let first = file.read_record(0).expect("record 0");
     assert_eq!(first.open, 3_844_565, "38445.65, the first snapshot");
     assert_eq!(
         first.close, 3_845_000,
@@ -431,9 +447,10 @@ fn a_re_run_leaves_the_census_byte_for_byte() {
     // stored 375" over a run that wrote nothing at all. `bars_committed` is
     // what tells the two apart, so it is the one field that MUST differ here.
     assert_eq!(
-        first.bars_committed, 5,
-        "the first run wrote the month — five bars, because the two rows \
-         outside the published session are kept rather than discarded"
+        first.bars_committed, 3,
+        "the first run wrote the month — three bars, because the two rows \
+         outside the published session are dropped again under the operator \
+         rule of 2026-08-20"
     );
     assert_eq!(
         second.bars_committed, 0,
@@ -522,18 +539,19 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
         granularity: pull::vendor::Granularity::Minute1,
     };
     let first = run(&archive, &store, &narrow);
-    // FOUR, NOT TWO. A one-day window now keeps the pre-open and post-close
-    // rows the vendor sent rather than discarding them.
-    assert_eq!(first.bars_stored, 4);
-    // AND THE CENSUS AGREES WITH THE FILE. Four, for the same reason: the
-    // counter records what the month HOLDS, and it now holds the pre-open and
-    // post-close rows too.
+    // TWO. A one-day window drops the pre-open and post-close rows again —
+    // the operator rule of 2026-08-20 replaced the keep-everything rule of
+    // 2026-08-19.
+    assert_eq!(first.bars_stored, 2);
+    // AND THE CENSUS AGREES WITH THE FILE. Two, for the same reason: the
+    // counter records what the month HOLDS, and the pre-open and post-close
+    // rows are no longer in it.
     assert_eq!(
         census_of(&store)
             .entry(&key("NIFTY"))
             .expect("the month is in the census")
             .rows,
-        4
+        2
     );
 
     let wider = BarRequest {
@@ -553,7 +571,7 @@ fn a_second_window_records_the_whole_month_not_the_suffix() {
     let entry = census.entry(&key("NIFTY")).expect("still recorded");
     let file = bar_file(&store, "NIFTY");
     assert_eq!(
-        entry.rows, 5,
+        entry.rows, 3,
         "the entry counts the FILE, not the one-bar batch that was offered — \
          five now, since the pre-open and post-close rows are kept"
     );
