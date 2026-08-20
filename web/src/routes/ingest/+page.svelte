@@ -2620,10 +2620,37 @@
    * paying for a credential read and a socket each. A page cannot decline what
    * it cannot see, and until `/feeds.json` said this, it could not see it.
    */
+  /**
+   * WHICH SEGMENTS EACH TICKED FEED CAN ACTUALLY BE ASKED FOR.
+   *
+   * THIS USED TO BE `fno === 'by_name'` AND DROPPED DHAN ENTIRELY.
+   *
+   * Dhan reports `by_strike_offset` — it addresses expired options by ATM±n
+   * rather than by contract name — and that one-word filter meant **no F&O
+   * request was ever built for it**. Measured 2026-08-20: zero Dhan contracts
+   * on disk, zero `rollingoption` requests in a 1,253-event journal. The path
+   * was not failing; it was never being asked.
+   *
+   * The declined-reason beside it said the cause was that Dhan's *"own request
+   * builder is not written yet"*. That was FALSE — `fno_roll` and `roll_one`
+   * are about a thousand lines, and `fno_walk` already routes `by_offset`
+   * straight to them. The filter was excluding a feed on the strength of a
+   * stale sentence.
+   *
+   * OPTIONS ONLY FOR AN OFFSET FEED, and that part is real: the endpoint is
+   * `v2/charts/rollingoption`, and `fno_roll` refuses `Series::Futures` by
+   * name. Sending it a futures request would earn a refusal this page can
+   * predict, so it does not send one.
+   */
+  const fnoSegmentsFor = (/** @type {string} */ wire) => {
+    const how = feeds.all.find((f) => f.wire === wire)?.fno;
+    if (how === 'by_name') return ['futures', 'options'];
+    if (how === 'by_strike_offset') return ['options'];
+    return [];
+  };
+
   const fnoCapable = $derived(
-    feedsChosen.filter(
-      (v) => feeds.all.find((f) => f.wire === v)?.fno === 'by_name'
-    )
+    feedsChosen.filter((v) => fnoSegmentsFor(v).length > 0)
   );
 
   /**
@@ -2636,22 +2663,45 @@
   const fnoDeclined = $derived(
     feedsChosen
       .map((v) => ({ wire: v, how: feeds.all.find((f) => f.wire === v)?.fno }))
-      .filter((x) => x.how !== 'by_name')
+      /* NOW ONLY THE FEEDS THAT GENUINELY CANNOT BE ASKED. `by_strike_offset`
+         used to land here with a reason that was not true — see `fnoCapable`.
+         It is served now, so it is no longer declined. */
+      .filter((x) => x.how !== 'by_name' && x.how !== 'by_strike_offset')
       .map((x) => ({
         feed: feedName(x.wire),
         why:
-          x.how === 'by_strike_offset'
-            ? 'addresses expired options by strike offset (ATM±n) rather than by contract name, so the discovery walk this form builds does not fit it. Its own request builder is not written yet.'
-            : x.how === 'local_folder'
-              ? 'is a folder of files, not an endpoint — there is no expiry list to ask it for.'
-              : 'states no expired-derivative history.'
+          x.how === 'local_folder'
+            ? 'is a folder of files, not an endpoint — there is no expiry list to ask it for.'
+            : 'states no expired-derivative history.'
+      }))
+  );
+
+  /**
+   * THE FEEDS SERVED FOR SOME SEGMENTS AND NOT ALL, with which and why.
+   *
+   * Neither declined nor fully served, and the gap between those two is where a
+   * silent drop lives. Dhan answers expired OPTIONS by strike offset and has no
+   * expired-futures endpoint at all — so a run that ticks both segments sends it
+   * one and not the other, and this line is what stops that being invisible.
+   */
+  const fnoPartial = $derived(
+    fnoCapable
+      .map((v) => ({ wire: v, segs: fnoSegmentsFor(v) }))
+      .filter((x) => x.segs.length > 0 && x.segs.length < 2)
+      .map((x) => ({
+        feed: feedName(x.wire),
+        why: `serves expired ${x.segs.join(' and ')} only — its endpoint is v2/charts/rollingoption, which addresses options by ATM±n and publishes no expired-futures series.`
       }))
   );
 
   const fnoBodies = $derived(
     fnoCapable.flatMap((v) =>
       segmentsReached
-        .filter((seg) => seg.key === 'futures' || seg.key === 'options')
+        /* PER FEED, NOT GLOBALLY. A name-discovery feed answers both segments;
+           an offset feed answers options only. Filtering once for all vendors
+           would either send Dhan a futures request it refuses by name, or drop
+           futures from Groww to match Dhan — and both are wrong. */
+        .filter((seg) => fnoSegmentsFor(v).includes(seg.key))
         .flatMap((seg) =>
           ticked.map((m) => {
             const p = new URLSearchParams();
@@ -6651,6 +6701,30 @@
                         no window picked
                       {/if}
                     </span>
+                  {/if}
+                  <!-- WHICH TICKED FEEDS WILL NOT BE ASKED FOR F&O, AND WHY.
+                       `fnoDeclined` has existed for a long time carrying a
+                       comment that says silently sending fewer requests than
+                       the operator ticked is the §4 fallback that hides a
+                       failure — and it was NEVER RENDERED. One occurrence in
+                       the whole file: its own definition. The list that exists
+                       to stop a feed being dropped silently was itself dropped
+                       silently, which is how Dhan went unasked for weeks with
+                       nothing on screen to say so.
+                       `fnoPartial` is the finer case beside it: a feed that is
+                       asked for SOME segments. Dhan answers expired options and
+                       has no expired-futures series at all, so ticking both
+                       sends it one — and that gap is exactly where a silent
+                       drop lives. -->
+                  {#if fnoDeclined.length > 0 || fnoPartial.length > 0}
+                    <div class="note warn" style="display:flex;flex-direction:column;gap:4px">
+                      {#each fnoPartial as p (p.feed)}
+                        <span><strong>{p.feed}</strong> {p.why}</span>
+                      {/each}
+                      {#each fnoDeclined as d (d.feed)}
+                        <span><strong>{d.feed}</strong> {d.why}</span>
+                      {/each}
+                    </div>
                   {/if}
                   <!-- WHAT ACTUALLY GOES OUT, WHEN IT IS NOT WHAT IS ABOVE.
                        The two boxes are the operator's intent and are the same
