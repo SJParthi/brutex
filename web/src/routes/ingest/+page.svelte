@@ -5569,23 +5569,44 @@
    * loop that would otherwise be unbounded if the vendor never recovered. It is
    * reported when it is reached; see `passSummary`.
    */
-  const MAX_PASSES = 40;
+  const MAX_PASSES = 400;
 
   /**
-   * HOW MANY CONSECUTIVE PASSES MAY GAIN NOTHING BEFORE THE LOOP STOPS.
+   * HOW MANY CLEAN EMPTY PASSES MEAN "THERE IS NOTHING LEFT TO GET".
    *
-   * **Two, and this is the guard that makes the loop terminate.** A pass that
-   * gains no bars has either finished the window or hit something a retry
-   * cannot fix — a dead credential, a contract the vendor will not serve, a
-   * ceiling that has collapsed to nothing. Retrying that forever is not
-   * persistence, it is a spin that burns the vendor's goodwill and reports
-   * progress it is not making.
+   * **Three, and only for a pass that FAILED AT NOTHING.** Operator's rule of
+   * 2026-08-20: a vendor answering "no data available" is acceptable after
+   * three attempts; every other outcome must be retried until it succeeds.
    *
-   * Two rather than one because a single empty pass is ordinary: the governor
-   * can spend a whole pass waiting out a backoff and store nothing through no
-   * fault of the request.
+   * So the loop splits an empty pass by its CAUSE, which is the whole of this
+   * design:
+   *
+   * | Pass gained no bars and… | Meaning | What the loop does |
+   * |---|---|---|
+   * | nothing refused, nothing errored | there is no more data to get | count toward three, then stop |
+   * | a request failed, refused or dropped | rate, socket, power, credential | **retry, with no limit** |
+   *
+   * The distinction matters because the two are indistinguishable by bar count
+   * alone. A throttled pass and a finished window both store zero, and stopping
+   * on the first is the failure this replaces: it abandoned a window that a
+   * later attempt would have completed.
+   *
+   * Three rather than one because a clean empty pass can still be transient —
+   * the governor may spend a whole pass waiting out a backoff, refuse nothing,
+   * and store nothing.
    */
-  const MAX_IDLE_PASSES = 2;
+  const CLEAN_EMPTY_PASSES = 3;
+
+  /**
+   * How long to wait before retrying after a pass that FAILED and gained
+   * nothing.
+   *
+   * Without it a dropped socket or a dead credential becomes a spin: the loop
+   * re-issues instantly, fails instantly, and burns the vendor's goodwill while
+   * making no progress. The vendor's own governor already backs off inside a
+   * pass; this is the gap BETWEEN passes, which nothing else covers.
+   */
+  const RETRY_WAIT_MS = 20_000;
 
   /** What the last multi-pass run did, for the card to state plainly. */
   let passSummary = $state(/** @type {string | null} */ (null));
@@ -5619,38 +5640,55 @@
        the only reading that cannot be fooled by a run reporting bars it did not
        commit. */
     let passes = 0;
-    let idle = 0;
-    let gained = 0;
+    let cleanEmpty = 0;
+    let retried = 0;
     const started = live?.rows ?? 0;
 
     while (passes < MAX_PASSES) {
       const before = live?.rows ?? 0;
+      netError = null;
       await runPull(bodies, asked);
       passes += 1;
       const after = live?.rows ?? before;
 
-      /* STOPPED BY THE OPERATOR ENDS IT AT ONCE. `aborted` is set by the
-         abort branch inside the chain, and pressing Stop is an answer — not a
-         failure to retry around. */
+      /* STOPPED BY THE OPERATOR ENDS IT AT ONCE. `aborted` is set by the abort
+         branch inside the chain, and pressing Stop is an answer — not a failure
+         to retry around. */
       if (aborted) break;
 
       if (after > before) {
-        gained += after - before;
-        idle = 0;
-      } else {
-        idle += 1;
-        if (idle >= MAX_IDLE_PASSES) break;
+        /* PROGRESS. Whatever else went wrong this pass, bars landed, so the
+           window is not finished and the next pass is worth making. */
+        cleanEmpty = 0;
+        continue;
       }
+
+      /* NOTHING GAINED — and the CAUSE decides whether this is the end.
+         A failed request is transient by default: rate, socket, power,
+         internet, a credential that will be refreshed. The operator's rule is
+         that those are retried until they succeed, with no ceiling. Only a
+         pass that asked for everything and was refused NOTHING can mean the
+         window has no more data in it. */
+      const failed = netError !== null || (receipt !== null && !receipt.good);
+      if (failed) {
+        cleanEmpty = 0;
+        retried += 1;
+        /* WAITED, NOT SPUN. The governor backs off inside a pass; this is the
+           gap between passes, which nothing else covers. */
+        await new Promise((done) => setTimeout(done, RETRY_WAIT_MS));
+        continue;
+      }
+      cleanEmpty += 1;
+      if (cleanEmpty >= CLEAN_EMPTY_PASSES) break;
     }
 
     const total = (live?.rows ?? started) - started;
+    const retries = retried > 0 ? ` ${n(retried)} pass(es) were retried after a failure.` : '';
     passSummary = aborted
-      ? `Stopped after ${passes} pass(es); ${n(total)} bar(s) landed before you pressed stop.`
+      ? `Stopped after ${n(passes)} pass(es); ${n(total)} bar(s) landed before you pressed stop.${retries}`
       : passes >= MAX_PASSES
-        ? `Reached the ${MAX_PASSES}-pass ceiling with ${n(total)} bar(s) landed. The window is not necessarily finished — press Pull again to continue from where this stopped; nothing already stored is refetched.`
-        : idle >= MAX_IDLE_PASSES && gained === 0
-          ? `${passes} pass(es) gained no bars. Either the window is already complete, or something a retry cannot fix is in the way — read the receipt below rather than pressing again.`
-          : `${passes} pass(es), ${n(total)} bar(s) landed. The last ${MAX_IDLE_PASSES} gained nothing, which is how this run knows the window is done.`;
+        ? `Reached the ${n(MAX_PASSES)}-pass ceiling with ${n(total)} bar(s) landed.${retries} This is a runaway stop, not a verdict on the window — press Pull again to continue from where this stopped; nothing already stored is refetched.`
+        : `${n(passes)} pass(es), ${n(total)} bar(s) landed.${retries} The last ${CLEAN_EMPTY_PASSES} asked for everything, were refused nothing and gained nothing — which is what "no more data" looks like, and the only reading this run treats as finished.`;
   }
 
   /**
