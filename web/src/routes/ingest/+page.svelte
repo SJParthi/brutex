@@ -5720,7 +5720,29 @@
             return;
           }
           if (!netError) netError = String(why);
-          return;
+          /* CONTINUE, DO NOT ABANDON THE REST OF THIS FEED'S CHAIN.
+             This was `return`, and `return` here throws away every request
+             still queued for the feed — which is how Dhan's expired options
+             went unpulled with nothing on screen naming them.
+             Measured 2026-08-20: `PULL_ORDER` is
+             ['1day','1min','1s','futures','options'], so options is LAST. Dhan's
+             chain ran 1day, then 1min — a request the server answered by
+             storing 58,572 bars — and the browser's connection dropped before
+             the reply arrived. The fetch threw, this `return` fired, and the
+             OPTIONS body was never sent. The page reported `HTTP 0`, the store
+             held a short month, and `fno_roll` never wrote an audit record
+             because it was never called.
+             A dropped socket on one request says nothing about the next: the
+             bodies are independent, one per (rung × segment), and the server
+             has already committed whatever landed. The error is recorded in
+             `netError` and shown; the chain goes on.
+             WHAT THIS DOES NOT PRETEND: `PULL_ORDER` exists because the fold
+             ladder needs the day pass before the minute pass. If the 1day body
+             is the one that dropped, the minute body that follows may be
+             refused by the server with "the 1day pass comes first" — which is a
+             LOUD refusal on the receipt, and strictly better than a silent hole
+             where a segment was never asked for at all. */
+          continue;
         }
         sent = { done: sent.done + 1, of: bodies.length, label: b.label };
       }
