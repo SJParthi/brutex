@@ -157,7 +157,7 @@ depends on NOTHING          core · vocab · greeks · telemetry
 core          <-- costs
 core telemetry <-- store · lake
 vocab         <-- indicators · engine
-core costs store telemetry      <-- pull
+core costs greeks store telemetry <-- pull
 core pull store telemetry       <-- api
 core costs engine indicators vocab         <-- runner
 core costs engine indicators runner store  <-- cli
