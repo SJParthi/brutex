@@ -17276,3 +17276,68 @@ days are priced: the `.grk` starts partway through a `.bin` that starts at day
 one. §8 forbids prepending, so it cannot be repaired in place. The receipt
 carries "Rows priced" against "Bars stored" so the two numbers are visible
 side by side, which is the honest handling available rather than a fix.
+
+### D-0219 — the discovery walk was 1 + N requests on one permit, and it earned a 429
+
+**Measured, from `logs/events.ndjson` seq 790–823 on 2026-08-20.** Groww
+answered **429** to `/v1/historical/candles`, the governor logged *"throttled —
+every span backed off"* **after** the refusal rather than before it, its spans
+halved from 8/s and 500/min down through 4/250 to 4/131, and `POST /pull/fno`
+returned **502** twice with `discovery refused … was not reached`. The spot pass
+of the same run stored **58,572 bars with `failed: 0`** — so this was never a
+crash and never a bug in the pricing work; it was a rate breach.
+
+**The cause, and the comment that predicted it.** `pull::chain::month` is a
+**1 + N** walk: one request for a month's expiries, then one per expiry for its
+contracts, in a `for` loop with nothing between the calls. `fno_walk` charged
+`await_budget` **exactly once**, before the whole walk. A month with five weekly
+expiries therefore issued six requests back to back against a ceiling of eight a
+second.
+
+Three lines above that single charge stood this comment, unchanged:
+
+> *"One walk is 1 + N requests against a vendor whose ceiling is five a second,
+> so a discovery path that skipped the budget would be the one path in this
+> process able to earn a 429 that every other path then pays for."*
+
+It names the danger exactly and then guards the first of the 1 + N. **A comment
+that describes a rule is not the rule.**
+
+**Why the 429s also hit paths that WERE governed.** The ungoverned walk spent the
+vendor's real allowance without spending permits, so the governor still believed
+it had budget while Groww had already been exhausted. The spot candle requests —
+correctly charged, one permit per chunk — were refused anyway. That is the second
+half of the comment's own prediction: *"a 429 that every other path then pays
+for."*
+
+**The fix is a TRANSPORT WRAPPER, not another call-site guard.** `Governed<D>`
+implements `pull::chain::Discovery` and charges before delegating, so every
+request through it is paid for — including the ones a future walk adds. A guard
+at a call site protects only the requests that call site knows about, which is
+precisely the class of mistake being repaired. `pull` stays governor-agnostic;
+`api` supplies a governed source.
+
+The standalone charge in `fno_walk` is **removed** rather than kept: the wrapper
+covers the first request too, and leaving it would spend one permit on nothing.
+`credentialed_source` reads AWS Parameter Store, not the vendor, so no vendor
+request occurs between that point and the walk.
+
+**A second site of the same shape, found by auditing rather than by failing.**
+`with_retry` re-issues up to `THROTTLE_ATTEMPTS` real requests per chunk on the
+single permit its caller charged. Every attempt after the first is now charged.
+It composes with the retry's own backoff rather than replacing it — both waits
+apply, which is conservative, and being conservative toward a vendor that has
+just refused you is the correct direction to err.
+
+**What is asserted.** `every_request_through_the_governed_source_is_charged`
+drives twelve requests through `Governed` against Dhan's published 5/s and
+asserts BOTH that all twelve reached the transport and that the wall clock
+exceeded a second. The elapsed-time half is the one that matters: a test that
+only counted requests would pass over the exact bug this entry records.
+
+**What this does NOT claim.** The rate ceilings themselves are unchanged and one
+of them is still marked `GROWW_PER_SECOND_UNVERIFIED` — 8/s, *chosen not
+measured*, per `docs/00-charter.md` §4. This entry fixes permits-per-request, not
+the ceiling those permits are counted against. Whether 8/s is Groww's real limit
+remains unverified and `docs/06-limits.md` §21 still records the 500-versus-300
+per-minute disagreement.

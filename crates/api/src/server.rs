@@ -4724,6 +4724,61 @@ fn finished_day_only(asked: &ingest::SpotRequest) -> Result<(), String> {
 ///
 /// A poisoned budget lock, or a feed with no HTTP transport: returned on the
 /// first attempt without sleeping, because neither becomes true later.
+/// A [`pull::chain::Discovery`] that charges the rate governor before EVERY
+/// request it makes.
+///
+/// # The 429 this exists to stop
+///
+/// `pull::chain::month` is a **1 + N** walk: one call for the month's expiries,
+/// then one per expiry for its contracts, in a tight loop with nothing between
+/// them. `fno_walk` charged [`await_budget`] exactly ONCE, before the whole
+/// thing — so a month with five weekly expiries fired six requests back to back
+/// against a ceiling of four a second.
+///
+/// Measured 2026-08-20, journal seq 790–823: Groww answered **429** to
+/// `/v1/historical/candles`, the governor logged *"throttled — every span backed
+/// off"* AFTER the refusal rather than before it, and `POST /pull/fno` returned
+/// 502 twice with `discovery refused … was not reached`. The spot pass in the
+/// same run stored 58,572 bars with `failed: 0`; only the walk was throttled.
+///
+/// The comment above that single `await_budget` call had already named the
+/// danger in these words: *"One walk is 1 + N requests against a vendor whose
+/// ceiling is five a second, so a discovery path that skipped the budget would
+/// be the one path in this process able to earn a 429 that every other path
+/// then pays for."* It then guarded the first of the 1 + N.
+///
+/// # Why a transport wrapper and not another call site
+///
+/// A guard at a call site protects the requests that call site knows about. The
+/// governor belongs to the TRANSPORT, so every request through it is charged —
+/// including the ones a later walk adds, which is exactly the class of mistake
+/// that produced this one. `pull` stays governor-agnostic; `api` supplies a
+/// governed source.
+///
+/// # Cost
+///
+/// One `admit` withdrawal per request, which is what the governor costs
+/// anywhere. It adds no request and skips none.
+struct Governed<'a, D> {
+    /// The real transport.
+    inner: &'a D,
+    /// Whose ceiling is being spent.
+    feed: pull::vendor::Feed,
+    /// Where the budgets live.
+    site: &'a Site,
+}
+
+impl<D: pull::chain::Discovery> pull::chain::Discovery for Governed<'_, D> {
+    async fn get(&self, url: &str) -> Result<String, String> {
+        // BEFORE THE REQUEST, NOT AFTER THE REFUSAL. A governor that learns its
+        // ceiling from a 429 has already spent the run's goodwill: the vendor's
+        // backoff applies to every later call, including the ones that would
+        // have succeeded.
+        await_budget(self.feed, self.site).await?;
+        self.inner.get(url).await
+    }
+}
+
 async fn await_budget(feed: pull::vendor::Feed, site: &Site) -> Result<(), String> {
     let mut last = String::new();
     for _ in 0..MAX_ADMISSION_WAITS {
@@ -5466,6 +5521,21 @@ async fn with_retry(
     // Counted apart from `attempt`, so a 5xx budget is spent by 5xx answers.
     let mut server_errors = 0u32;
     for attempt in 1..=THROTTLE_ATTEMPTS {
+        // A RETRY IS A REAL REQUEST AND COSTS A REAL PERMIT.
+        //
+        // The caller charged one permit for this chunk. This loop could issue
+        // `THROTTLE_ATTEMPTS` requests against it — the same "N requests, one
+        // permit" shape that let the discovery walk earn the 429 of 2026-08-20,
+        // reached by a different road. The first attempt is the caller's; every
+        // one after it is charged here.
+        //
+        // It composes with the retry's own backoff rather than replacing it,
+        // and that is deliberate: the two waits both apply, which is
+        // conservative — and being conservative toward a vendor that has just
+        // refused us is the correct direction to err.
+        if attempt > 1 {
+            await_budget(feed, site).await?;
+        }
         match source.window_async(request).await {
             // THE ADDITIVE INCREASE. Without this the governor admits
             // against a fixed budget forever and never learns the vendor's
@@ -7317,15 +7387,12 @@ async fn fno_walk(
     // one path in this process able to earn a 429 that every other path then
     // pays for. Waited for rather than refused, for the reason the spot path's
     // comment gives.
-    if let Err(why) = await_budget(asked.feed, site).await {
-        return page.say(
-            facts,
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            audit::Outcome::NotStarted,
-            &why,
-        );
-    }
-
+    // AND THE CHARGE IS NO LONGER MADE HERE. It used to be, once, for a walk
+    // that makes 1 + N requests — which is the shape that earned the 429 of
+    // 2026-08-20. `Governed` below charges before EVERY request, so a charge at
+    // this point would be one permit spent on nothing: `credentialed_source`
+    // reads AWS Parameter Store, not the vendor, so no vendor request happens
+    // between here and the walk.
     let wire = match credentialed_source(asked.feed, &spec).await {
         Ok((source, store_vendor)) => Wire {
             source,
@@ -7402,7 +7469,14 @@ async fn fno_walk(
     // inside `chain::month` rather than by this call site's good manners. A
     // refused expiries call returns before one contracts URL is built, which is
     // what makes a half-walked month impossible rather than merely unlikely.
-    match pull::chain::month(asked.feed, &ask, &wire.source).await {
+    // THROUGH THE GOVERNED SOURCE, so all 1 + N requests are charged and not
+    // just the first. See `Governed` for the 429 this replaced.
+    let governed = Governed {
+        inner: &wire.source,
+        feed: asked.feed,
+        site,
+    };
+    match pull::chain::month(asked.feed, &ask, &governed).await {
         Err(why) => {
             // THE WHOLE REASON, WHERE THE STRIDE CANNOT CUT IT.
             //
@@ -14942,6 +15016,70 @@ mod tests {
     /// Measured on the real universe: 785 instruments attempted, 6 reached,
     /// 779 refused for a wait of 0.198 s. A backfill that abandons 99% of its
     /// work rather than waiting a fifth of a second is not automated.
+    /// **THE 1 + N WALK CHARGES 1 + N PERMITS, NOT ONE.**
+    ///
+    /// The regression this exists for, measured 2026-08-20 (journal seq
+    /// 790–823): `pull::chain::month` makes one expiries request and one per
+    /// expiry, in a tight loop with nothing between them, and `fno_walk`
+    /// charged the governor ONCE before the whole thing. A month with five
+    /// weekly expiries fired six requests against a ceiling of eight a second;
+    /// Groww answered 429, the governor halved its spans AFTER the refusal, and
+    /// `POST /pull/fno` returned 502 twice — while the spot pass in the same run
+    /// stored 58,572 bars with `failed: 0`.
+    ///
+    /// The fix is a transport wrapper rather than another call-site guard, so
+    /// what this asserts is that EVERY request through [`Governed`] is charged
+    /// — the property a future walk inherits without anyone remembering to add
+    /// a guard.
+    #[tokio::test]
+    async fn every_request_through_the_governed_source_is_charged() {
+        /// A `Discovery` that answers instantly and counts what it was asked.
+        struct Counting(std::sync::atomic::AtomicU32);
+        impl pull::chain::Discovery for Counting {
+            async fn get(&self, _url: &str) -> Result<String, String> {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(String::new())
+            }
+        }
+
+        const CALLS: u32 = 12;
+        let dir = agreeing("governedwalk");
+        let site = site("governedwalk", &dir);
+        let feed = pull::vendor::Feed::Dhan;
+        let inner = Counting(std::sync::atomic::AtomicU32::new(0));
+        let governed = Governed {
+            inner: &inner,
+            feed,
+            site: &site,
+        };
+
+        let started = std::time::Instant::now();
+        for n in 0..CALLS {
+            pull::chain::Discovery::get(&governed, "https://example.invalid/x")
+                .await
+                .unwrap_or_else(|why| panic!("request {n} was refused: {why}"));
+        }
+        let took = started.elapsed();
+
+        // EVERY CALL REACHED THE TRANSPORT — nothing was swallowed.
+        assert_eq!(
+            inner.0.load(std::sync::atomic::Ordering::Relaxed),
+            CALLS,
+            "the wrapper must not drop or duplicate a request"
+        );
+
+        // AND EVERY CALL WAS CHARGED. Dhan publishes 5 a second, so twelve
+        // cannot clear in under two full seconds' worth of allowance. If this
+        // elapsed instantly the governor is not being consulted — which is
+        // precisely the bug, and an assertion that only counted requests would
+        // pass straight over it.
+        assert!(
+            took >= std::time::Duration::from_secs(1),
+            "twelve requests cleared in {took:?}, so the governed source is \
+             not charging the budget — the 1 + N walk is ungoverned again"
+        );
+    }
+
     #[tokio::test]
     async fn a_burst_past_the_ceiling_is_throttled_and_still_admitted_in_full() {
         const BURST: u32 = 12;
