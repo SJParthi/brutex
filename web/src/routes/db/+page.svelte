@@ -1453,24 +1453,42 @@
   });
 
   /**
-   * The chosen universe's members as census keys, or `null` for NO JOIN.
+   * The chosen universe's members as UNDERLYINGS, or `null` for NO JOIN.
    *
    * `null` is returned both for Everything and for every state the refusal
    * above names, so there is ONE expression deciding whether rows are narrowed
    * and one sentence explaining it. Two would drift.
+   *
+   * UNDERLYINGS AND NOT CENSUS KEYS, and that is a fix rather than a rename.
+   * It held the master's own keys -- `NSE-FNO-BANKNIFTY` -- and `universed`
+   * compared them against `r.instrument`, which for a contract row is
+   * `NSE-FNO-BANKNIFTY-2026-07-28-4810000-PE`. Those are never equal, so
+   * choosing ANY membership universe hid every stored contract: with "F&O
+   * underlyings" selected both contract segments reported "nothing stored under
+   * this segment" while 78 instrument-months were on disk, and the underlying
+   * itself was a member of that very universe -- the picker said "1 of 211
+   * held".
+   *
+   * A membership universe lists UNDERLYINGS; it does not and cannot list every
+   * expiry and strike. So the join is by name on both sides, which is the same
+   * correction the Instrument rung took: a contract belongs to a universe when
+   * its underlying does.
    */
-  const universeKeys = $derived.by(() => {
+  const universeNames = $derived.by(() => {
     const token = chosenUniverse.token;
     if (!token || tierState(chosenUniverse) !== 'ready') return null;
     const s = new Set();
     for (const r of masterRows()) {
-      if (tokensOf(r).includes(token)) s.add(censusKeyOf(r));
+      if (!tokensOf(r).includes(token)) continue;
+      const k = censusKeyOf(r);
+      if (!k) continue;
+      s.add(parseKey(k).underlying ?? k);
     }
     return s;
   });
 
   const universed = $derived(
-    universeKeys === null ? deco : deco.filter((r) => universeKeys.has(r.instrument))
+    universeNames === null ? deco : deco.filter((r) => universeNames.has(r.underlying))
   );
 
   /**
@@ -1733,7 +1751,7 @@
    * /ingest sources the same rung from `/instruments.json` and offers all 213
    * F&O underlyings whether or not a bar exists for any of them. This is that,
    * on the reading this page already has: `masterRows()` is the catalogue and
-   * `universeKeys` is the membership join, both already here and both already
+   * `universeNames` is the membership join, both already here and both already
    * used by `universeCount` two hundred lines up.
    *
    * # What each row carries
@@ -1745,7 +1763,7 @@
    *
    * # Everything is still Everything
    *
-   * `universeKeys === null` means NO JOIN — Everything, or a universe whose
+   * `universeNames === null` means NO JOIN — Everything, or a universe whose
    * membership could not be read. There is no catalogue set to offer then, so it
    * falls back to what the store holds, which is the only honest answer
    * available: with no membership list there is nothing to be missing FROM.
@@ -1781,19 +1799,12 @@
       bars: h?.bars ?? 0,
       short: h?.short ?? 0
     });
-    if (universeKeys === null) return instrumentRows.map((r) => decorate(r.key, r));
-    /* THE UNIVERSE'S KEYS ARE STORE KEYS AND THIS RUNG NOW SPEAKS UNDERLYINGS,
-       so they are converted and DEDUPLICATED on the way in. Without the dedupe
-       a universe naming both a spot key and its contracts would offer the same
-       name more than once, which is the defect this whole change removes. */
+    if (universeNames === null) return instrumentRows.map((r) => decorate(r.key, r));
+    /* ALREADY UNDERLYINGS AND ALREADY UNIQUE -- `universeNames` is a Set of
+       names, so the conversion and the dedupe that used to sit here are the
+       source's job now and happen once rather than per rung. */
     const out = [];
-    const seen = new Set();
-    for (const k of universeKeys) {
-      const u = parseKey(k).underlying ?? k;
-      if (seen.has(u)) continue;
-      seen.add(u);
-      out.push(decorate(u, held.get(u)));
-    }
+    for (const u of universeNames) out.push(decorate(u, held.get(u)));
     return out.sort((a, b) => txt(a.sym, b.sym) || txt(a.key, b.key));
   });
 
@@ -3335,11 +3346,39 @@
        TWO separators are structural; everything after them is the symbol.
        Splitting on the last one instead is how `-CE` becomes a segment. */
     const parts = String(r.instrument).split('-');
+    /* THE CONTRACT IS ITS OWN SEGMENT, AND THIS USED TO SWALLOW IT.
+       `symbol: parts.slice(2).join('-')` put everything after the segment into
+       the symbol, so an option asked for
+       `symbol=BANKNIFTY-2026-07-28-5410000-CE` — 31 bytes against the store's
+       24-byte cap. Measured 2026-08-20, journal seq 910–922: thirteen 400s in
+       three seconds, one per contract this page tried to draw, every one
+       reading "path segment symbol is 31 bytes, max 24". The store's refusal
+       was correct; the question was malformed, and had been since F&O bars
+       could not exist to ask about.
+       WHERE THE SPLIT IS: a contract segment always opens with a `YYYY-MM-DD`
+       triple — `crates/core/src/instrument.rs` renders it `{:04}-{:02}-{:02}`
+       before the strike and side. So the symbol runs until a four-digit part
+       FOLLOWED BY two two-digit parts, and the contract is everything from
+       there. Matching on the four-digit year alone would be looser than it
+       needs to be; requiring the whole triple means an instrument whose name
+       merely contains digits cannot be split in the middle.
+       No triple means no contract, which is spot — and spot's path is one
+       level shallower, so an empty `contract` is the right answer rather than
+       a missing one. */
+    const two = (/** @type {string} */ s) => /^\d{2}$/.test(s);
+    let at = -1;
+    for (let i = 2; i + 2 < parts.length; i += 1) {
+      if (/^\d{4}$/.test(parts[i] ?? '') && two(parts[i + 1] ?? '') && two(parts[i + 2] ?? '')) {
+        at = i;
+        break;
+      }
+    }
     const q = new URLSearchParams({
       feed,
       exchange: parts[0] ?? '',
       segment: parts[1] ?? '',
-      symbol: parts.slice(2).join('-'),
+      symbol: at === -1 ? parts.slice(2).join('-') : parts.slice(2, at).join('-'),
+      contract: at === -1 ? '' : parts.slice(at).join('-'),
       /* THE RUNG THE ROW ITSELF CARRIES. Omitted, the server defaults to
          `1min`, and a daily file is then asked for at a rung that has no
          file - the exact refusal /markets already paid for once. */
