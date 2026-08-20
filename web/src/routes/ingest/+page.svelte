@@ -2177,6 +2177,26 @@
   let toDay = $state('');
   let fromText = $state('');
   let toText = $state('');
+
+  /**
+   * THE RISK-FREE RATE, AS A DECIMAL, AND EMPTY BY DEFAULT.
+   *
+   * Empty is a real answer and the ordinary one: `crates/api/src/ingest.rs`
+   * treats an absent `rate` as "compute no greek", and the receipt then says so
+   * in words rather than rendering the same as a run that priced everything.
+   *
+   * It is NOT defaulted to a plausible number, and that is the whole point.
+   * `docs/00-charter.md` records no rate, so `CLAUDE.md` §3 rule 1 forbids this
+   * build claiming one; `pull::pricing::Rate` cannot even be constructed
+   * without naming where its value came from. A box the operator fills is the
+   * only honest source there is today, and what they type travels into every
+   * priced row so the result stays reproducible.
+   *
+   * A value outside ±1.0 is refused by the server, by name — `9.46` where
+   * `0.0655` was meant prices every option in the run wrongly, comes out finite
+   * everywhere, and errors nowhere downstream.
+   */
+  let rateText = $state('');
   /** The refusal a typed string earned, per field. Cleared the moment one takes. */
   /** @type {{ from: string | null, to: string | null }} */
   let typedErr = $state({ from: null, to: null });
@@ -2640,6 +2660,12 @@
             p.set('vendor', v);
             p.set('from', floorFor(v, '1day'));
             p.set('to', to);
+            /* SENT ONLY WHEN TYPED. An empty `rate` and an absent one mean the
+               same thing to the server — compute no greek — but sending an
+               empty string would make the receipt's "no rate was supplied"
+               line arrive for a field the operator can see is present, which
+               reads as a bug rather than as the answer it is. */
+            if (rateText.trim()) p.set('rate', rateText.trim());
             return {
               dir: seg.key,
               vendor: v,
@@ -6574,6 +6600,37 @@
                       </div>
                       {#if cal.field === 'to'}{@render dayGrid()}{/if}
                     </div>
+                    <!-- THE RATE, AND ONLY WHERE IT DOES ANYTHING.
+                         Drawn when an F&O body is going out and not otherwise:
+                         a spot bar has no strike, no expiry and nothing to
+                         price, so a rate box beside a spot-only pull would be a
+                         control that changes nothing — which is worse than a
+                         missing one, because the reader fills it and expects an
+                         effect.
+                         EMPTY IS THE DEFAULT AND IS A REAL ANSWER. See
+                         `rateText`: no page in docs/00-charter.md records a
+                         rate, so this build will not supply one, and the
+                         receipt says "not computed" rather than quietly using a
+                         number nobody chose. -->
+                    {#if fnoBodies.length > 0}
+                      <div class="dcell field">
+                        <span class="dlbl">Risk-free rate</span>
+                        <div class="dwrap">
+                          <input
+                            class="din mono"
+                            type="text"
+                            autocomplete="off"
+                            spellcheck="false"
+                            inputmode="decimal"
+                            placeholder="leave empty for no greeks"
+                            aria-label="Risk-free rate for the greeks, as a decimal"
+                            title={'A DECIMAL, NOT A PERCENTAGE: 0.0655 for 6.55%. Anything outside ±1.0 is refused by name, because a percentage typed where a decimal was meant prices every option wrongly and errors nowhere.\n\nLeave it empty and no greek is computed — docs/00-charter.md records no rate, so this build will not invent one. What you type is stored beside every priced row, so the result can be reproduced.'}
+                            value={rateText}
+                            oninput={(e) => (rateText = e.currentTarget.value)}
+                          />
+                        </div>
+                      </div>
+                    {/if}
                   </div>
                   <!-- THE WINDOW LINE SAID WHAT THE TWO FIELDS ABOVE IT AND
                        THE TILE BELOW IT WERE ALREADY SAYING.

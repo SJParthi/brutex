@@ -7245,6 +7245,9 @@ async fn roll_one(
         let (contract, contract_side, expiry) =
             name_the_contract(expiry_day, strike, option_type, &label)?;
 
+        // THE GREEKS THIS GROUP PRODUCED, held until its bars have landed.
+        // Empty when no rate was supplied, which is the ordinary case.
+        let mut records: Vec<store::format::Greek> = Vec::new();
         // AND NOW THE GREEKS, from bars this run already holds.
         //
         // Dhan sends `iv` and `spot` on the overlay, so nothing extra is
@@ -7254,7 +7257,7 @@ async fn roll_one(
         // `ingest::FnoRequest::rate` on why the repository will not supply one
         // itself.
         if let (Some(rate), Some(slot)) = (asked.rate, slot) {
-            priced.absorb(&price_group(
+            let done = price_group(
                 group,
                 PriceInputs {
                     strike,
@@ -7264,7 +7267,13 @@ async fn roll_one(
                     rate,
                     vendor: wire.store_vendor,
                 },
-            ));
+            );
+            priced.absorb(&done);
+            // HELD, NOT WRITTEN YET. The greeks are a sidecar to bars that have
+            // not landed, and a sidecar describing bars that are not there is
+            // worse than no sidecar — the next reader joins on a stamp with no
+            // bar behind it. Filed below, after `land_rolling_group` returns.
+            records = greek_records(&done);
         }
 
         let (filed, pending) = land_rolling_group(
@@ -7279,6 +7288,18 @@ async fn roll_one(
             &label,
         )?;
         total = total.saturating_add(filed);
+        // AND NOW THE GREEKS, AFTER THE BARS THEY PRICE.
+        //
+        // `land_rolling_group` has returned, so the bars are on disk and every
+        // stamp a greeks row joins on has one behind it. A failure here is the
+        // run's failure and not a warning: a month whose bars landed and whose
+        // greeks did not would read as priced on the next pass, and §8's
+        // append-only rule means the gap could not be filled afterwards.
+        if !records.is_empty()
+            && let Some(why) = file_the_greeks(&records, contract, asked, site, wire, window)
+        {
+            return Err(format!("{label}: {why}"));
+        }
         // COLLECTED, NOT WRITTEN PER GROUP.
         census_rows.extend(pending);
         at = end;
@@ -7459,6 +7480,92 @@ struct PriceInputs {
 /// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
 /// O(1). The volatility lookup is one hash probe. Nothing here scans the store
 /// and nothing reaches the network.
+/// Turns priced rows into the records the `.grk` file holds.
+///
+/// Pure: no store, no clock, no network. Separated from [`price_group`] because
+/// the computation and the ENCODING are different concerns, and because the
+/// caller must hold these until the bars land — see the ordering note at the
+/// call site.
+///
+/// # Cost
+///
+/// O(rows), one fixed-width encode each, one allocation for the batch.
+fn greek_records(done: &pull::pricing::PricedAll) -> Vec<store::format::Greek> {
+    done.rows
+        .iter()
+        .map(|row| store::format::Greek {
+            ts_micros: row.ts_micros,
+            spot: row.spot,
+            volatility: row.volatility,
+            delta: row.greeks.delta,
+            gamma: row.greeks.gamma,
+            vega: row.greeks.vega,
+            theta: row.greeks.theta,
+            rho: row.greeks.rho,
+            rate: row.rate.annual(),
+            provenance: store::format::Greek::provenance_of(
+                match row.vol_from {
+                    pull::pricing::VolSource::Vendor(_) => store::format::VOL_FROM_VENDOR,
+                    pull::pricing::VolSource::Solved { .. } => store::format::VOL_FROM_SOLVED,
+                },
+                match row.rate.source() {
+                    pull::pricing::RateSource::Charter(_) => store::format::RATE_FROM_CHARTER,
+                    pull::pricing::RateSource::Operator => store::format::RATE_FROM_OPERATOR,
+                    pull::pricing::RateSource::SolvedAgainst(_) => store::format::RATE_FROM_SOLVED,
+                },
+                row.below_validated_band,
+                row.moneyness.steps,
+            ),
+        })
+        .collect()
+}
+
+/// Files one contract-month's greeks beside its bars.
+///
+/// Returns the reason on failure rather than a `Result`, matching every other
+/// filing step on this path — the caller turns it into the run's error with the
+/// contract's label attached, which a bare store error does not carry.
+///
+/// # Why the month comes from the WINDOW
+///
+/// `pull::session::split_window` never lets a chunk cross a month boundary, so
+/// one chunk is one month and its first day names it. Taking the month from a
+/// bar's stamp instead would be right for every row and wrong for an empty
+/// batch, which this function is never handed.
+///
+/// # Cost
+///
+/// One path build, one open, one append. O(1) per call.
+fn file_the_greeks(
+    records: &[store::format::Greek],
+    contract: brutex_core::instrument::Contract,
+    asked: &ingest::FnoRequest,
+    site: &Site,
+    wire: &Wire,
+    window: pull::session::Window,
+) -> Option<String> {
+    let timeframe = asked.granularity.store_timeframe()?;
+    let month = window.from().year_month().ok()?;
+    pull::ingest::write_greeks(
+        records,
+        pull::ingest::GreekTarget {
+            store_root: &site.store_root,
+            vendor: wire.store_vendor,
+            exchange: brutex_core::instrument::Exchange::Nse.as_str(),
+            segment: brutex_core::instrument::Segment::Fno.as_str(),
+            // THE UNDERLYING, and the contract is the level below it — the same
+            // distinction `land_rolling_group` draws, and for the same reason:
+            // passing the vendor's contract name here would file `NIFTY-…-CE`
+            // as a symbol and leave the underlying nowhere in the tree.
+            symbol: asked.underlying.as_str(),
+            contract: Some(contract),
+            timeframe,
+            month,
+        },
+    )
+    .err()
+}
+
 fn price_group(group: &[pull::rolling::Row], inputs: PriceInputs) -> pull::pricing::PricedAll {
     let mut quotes: Vec<pull::pricing::Quote> = Vec::with_capacity(group.len());
     let mut sent: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();

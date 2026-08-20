@@ -1971,6 +1971,101 @@ fn write_overlay(
     Ok(())
 }
 
+/// Where one month's computed greeks are filed.
+///
+/// A struct rather than eight positional arguments, for the reason
+/// [`store::path::PathParts`] gives about itself: `exchange`, `segment` and
+/// `symbol` are three short strings, and swapping any two at a call site builds
+/// a valid-looking path to the wrong place with nothing to catch it.
+#[derive(Debug, Clone, Copy)]
+pub struct GreekTarget<'a> {
+    /// The store root.
+    pub store_root: &'a Path,
+    /// Whose feed the bars came from.
+    pub vendor: brutex_core::vendor::Vendor,
+    /// `NSE`.
+    pub exchange: &'a str,
+    /// `FNO`.
+    pub segment: &'a str,
+    /// The UNDERLYING, not the contract — `NIFTY`, never `NIFTY26AUG…CE`.
+    pub symbol: &'a str,
+    /// The contract segment, which for an option is always `Some`.
+    pub contract: Option<brutex_core::instrument::Contract>,
+    /// The rung these bars were stored at.
+    pub timeframe: Timeframe,
+    /// The month. One file per month, so every row must fall inside it.
+    pub month: store::path::YearMonth,
+}
+
+/// Writes one month's computed greeks beside the bars they price.
+///
+/// # Why this is public and [`write_overlay`] is not
+///
+/// The overlay is a VENDOR-STATED column and arrives with the bars, so it is
+/// filed by the same function that files them. Greeks are COMPUTED, by a caller
+/// that holds the rate and the contract's strike and side — neither of which
+/// survives into `Plan`, because `brutex_core::instrument::Contract` is a
+/// rendered string that cannot be read back into its parts. So the computation
+/// happens at the caller and the filing happens here, once, rather than the
+/// path being rebuilt at every call site that wants to write one.
+///
+/// # An empty batch is a success and not a write
+///
+/// A month whose rows all refused to price has nothing to file, and a file of
+/// zero rows costs a block to answer what an absent file answers better. The
+/// same rule [`write_overlay`] follows.
+///
+/// # Ordering
+///
+/// **After the bars, never before.** A sidecar describing bars that are not
+/// there is worse than no sidecar: the next reader joins on a stamp that has no
+/// bar. This function does not enforce that — it cannot see the bar write — so
+/// it is stated here and obeyed by the caller, exactly as the overlay's is.
+///
+/// # Errors
+///
+/// The store's own, as text: a path this store cannot name, a month that will
+/// not open, or an append the file refuses — including a batch that is not a
+/// suffix of what is already there, which is `CLAUDE.md` §8's append-only rule
+/// doing its job rather than a fault.
+///
+/// # Cost
+///
+/// One `fnv1a` over the symbol, one open and one append. **O(1) per call**,
+/// O(rows) in the bytes written and nothing else.
+pub fn write_greeks(rows: &[store::format::Greek], into: GreekTarget<'_>) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let path = StorePath::new(PathParts {
+        vendor: into.vendor,
+        exchange: into.exchange,
+        segment: into.segment,
+        symbol: into.symbol,
+        contract: into.contract,
+        timeframe: into.timeframe,
+        month: into.month,
+        file: FileKind::Greeks,
+    })
+    .map_err(|why| why.to_string())?;
+    // THE SAME DERIVATION THE BAR PATH USES. A second way of computing this
+    // would be a second answer to "which slot does this symbol occupy", and the
+    // header records it — so a greeks file and its bars would disagree about
+    // their own identity.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "`fnv1a` is a 64-bit hash narrowed to the header's 32-bit \
+                  slot id. The narrowing is the identity this store uses \
+                  everywhere; computing it differently here would be the \
+                  disagreement the comment above names"
+    )]
+    let symbol_id = brutex_core::universe::fnv1a(into.symbol) as u32;
+    let mut file =
+        BarFile::open_or_create(into.store_root, path, symbol_id).map_err(|why| why.to_string())?;
+    file.append(rows).map_err(|why| why.to_string())?;
+    Ok(())
+}
+
 /// Records one month in the census, unless it is already recorded exactly.
 ///
 /// Returns whether anything changed, which is what decides whether the file is
