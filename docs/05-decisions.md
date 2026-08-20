@@ -17531,3 +17531,62 @@ and the mutant now fails on the first of those.
 
 Proved by `pull::http::a_shared_governor_is_charged_by_the_caller_and_not_again_here`
 and recorded as invariant P-51.
+
+### D-0223 — the run moved out of the browser tab
+
+The multi-pass loop lived in `web/src/routes/ingest`. It fired one request per
+leg, re-read the census, decided whether the window was satisfied, and fired the
+whole set again — up to four hundred times. It was **correct about what to
+retry** and it put the operator's backfill inside a browser tab.
+
+The symptom was a stop that looked like a restart. A leg answering 502 ended the
+pass; twenty seconds later the set went out again; the operator watched
+`Pull running` become `NOT STARTED` and then, unasked, a fresh run:
+
+> *"why stopped and again auto repulled … only one pull from the webpage and
+> automatically everything should be entirely taken care internally"*
+
+**Why not one long request instead.** Holding the connection until the window is
+satisfied is a failure this repository has already had: a socket held across a
+whole backfill is a socket that drops, recorded as `HTTP 0`, which is what
+abandoned Dhan's options. The page's own comment defended the loop on exactly
+that ground and it was right about the alternative it named.
+
+So the run is in **neither** place. `POST /pull/run` starts a task and returns at
+once; `GET /pull/run.json` is one lock take; `POST /pull/run/stop` sets a flag.
+Nothing is held open and nothing is driven from outside. Closing the tab no
+longer stops the run, and reopening it picks the run back up — the state is on
+the server rather than in a closure.
+
+| | Before | After |
+|---|---|---|
+| Who decides to retry | the tab | `pullrun::conduct` |
+| A dropped connection | ends the run | loses sight of it for 2s |
+| Closing the tab | ends the run | nothing |
+| Two presses at once | two runs | the second is refused by name |
+
+**What did NOT change, deliberately.** `/pull/spot` and `/pull/fno` are
+untouched and still serve one leg each — the census row's own Pull button still
+uses them, and leaving them in place means the new route is additive rather than
+a rewrite of the thing that works. The retry POLICY is ported verbatim: a pass
+that gained nothing retries **without limit** if anything failed, and only a
+pass that asked for everything and was refused nothing counts toward the three
+that mean "no more data".
+
+**The slot is claimed under the same lock take that checked it**, so two presses
+landing together cannot both see it empty. Two runs over one store would
+interleave two vendors' writes into a single month file, which the append-only
+format cannot correct afterwards.
+
+**A panicked task releases the slot.** `finished: None` is the only reading of
+"in flight", so a task that panicked or was cancelled at shutdown would leave it
+set forever and every later press would be refused against a run that no longer
+exists. `pullrun::Finisher` writes a summary on `Drop`, which runs on the panic
+path too, and writes only when nothing else has.
+
+**One bug was caught by its own test before it ever ran**: `running()` was
+`finished.is_none()`, so `Progress::default()` — the document `/pull/run.json`
+renders for a site that has never run — answered `"running":true`. Every fresh
+tab would have believed a backfill was in flight. Recorded as invariant A-45.
+
+Invariants A-45 … A-48.

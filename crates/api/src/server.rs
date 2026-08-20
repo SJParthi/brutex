@@ -2992,6 +2992,22 @@ pub struct Site {
     /// is a single decision over three numbers, and splitting it would let a
     /// request the day window refused still drain the second window.
     pub budgets: std::sync::Mutex<Vec<Option<SharedGovernor>>>,
+    /// The run the operator started, if one is in flight or has just ended.
+    ///
+    /// # Why it is state on the site and not a global
+    ///
+    /// The tests in this crate start many servers in one process. A `static`
+    /// run slot would be shared between them, so one test's run would refuse
+    /// another's and the two would fail in whichever order they happened to
+    /// interleave. One slot per `Site` is one slot per server, which is what
+    /// the refusal is actually about.
+    ///
+    /// `Some(progress)` with `progress.finished == None` is the ONE reading of
+    /// "a run is in flight", and `pullrun::Finisher` guarantees it is cleared
+    /// on every exit including a panic. A finished run is deliberately LEFT
+    /// here rather than taken out: the page reads its summary after it ends,
+    /// and a slot emptied on completion would answer that read with nothing.
+    pub run: std::sync::Mutex<Option<crate::pullrun::Progress>>,
     /// The instrument universe, merged from both masters.
     pub read: Read,
     /// One manifest census per vendor, in [`Vendor::ALL`] order.
@@ -3126,6 +3142,11 @@ impl Site {
         let entries = census::held_entries(&censuses);
         Self {
             budgets: std::sync::Mutex::new(feed_budgets()),
+            // NO RUN UNTIL SOMEBODY PRESSES PULL. A site that started life
+            // holding one would answer `/pull/run.json` for a run nobody asked
+            // for, which is the shape `CLAUDE.md` §4 bans in the other
+            // direction: a report with nothing behind it.
+            run: std::sync::Mutex::new(None),
             read,
             censuses,
             series,
@@ -6565,7 +6586,135 @@ pub const RECEIPT_HEADER: &str = "x-brutex-receipt";
 pub const SPOT_RECEIPT: &str = "pull-spot";
 
 /// Starting a spot pull. **POST only.**
-async fn pull_spot(
+/// The JSON content type, for the three run routes.
+///
+/// Built rather than shared with `store_json` because that function stamps
+/// census counters beside it, and a run document has no census to describe.
+fn json_headers() -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers
+}
+
+/// `POST /pull/run` — the ONE press, and everything after it is this process's
+/// problem.
+///
+/// # Why it returns immediately
+///
+/// It starts a task and answers. It does not hold the connection while the run
+/// proceeds: a socket held open across a whole backfill is a socket that drops,
+/// and this repository has the `HTTP 0` that abandoned Dhan's options to show
+/// for it. The page watches `/pull/run.json`, which costs one lock take.
+///
+/// # The slot is claimed BEFORE the task is spawned
+///
+/// Under one take of the lock, so two presses landing together cannot both see
+/// an empty slot and both start. Two runs over one store would interleave two
+/// vendors' writes into a single month file, which the append-only format
+/// cannot correct afterwards.
+///
+/// # Cost
+///
+/// One parse of the body, one lock take, one spawn. Nothing here scales with
+/// the size of the window being asked for.
+pub(crate) async fn pull_run(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+    body: String,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let legs = match crate::pullrun::legs_from(&body) {
+        Ok(legs) => legs,
+        Err(why) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                json_headers(),
+                run_refusal_json(&why.why()),
+            );
+        }
+    };
+
+    {
+        let mut held = site
+            .run
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if held.as_ref().is_some_and(crate::pullrun::Progress::running) {
+            return (
+                axum::http::StatusCode::CONFLICT,
+                json_headers(),
+                run_refusal_json(&crate::pullrun::Refusal::AlreadyRunning.why()),
+            );
+        }
+        // CLAIMED HERE, UNDER THE SAME TAKE THAT CHECKED IT.
+        *held = Some(crate::pullrun::Progress::claimed());
+    }
+
+    let legs_asked = legs.len();
+    let _flying = tokio::spawn(crate::pullrun::conduct(Loaded::clone(&site), legs));
+    (
+        axum::http::StatusCode::ACCEPTED,
+        json_headers(),
+        format!("{{\"started\":true,\"legs\":{legs_asked}}}"),
+    )
+}
+
+/// A refusal, as the document the page reads.
+fn run_refusal_json(why: &str) -> String {
+    let mut out = String::from("{\"started\":false,\"why\":");
+    out.push_str(&crate::pullrun::quote_for_json(why));
+    out.push('}');
+    out
+}
+
+/// `GET /pull/run.json` — what the run is doing, for the page to poll.
+///
+/// A site that has never run answers a document with `running:false` and no
+/// feeds rather than a 404: the page asks this on load, and a missing route
+/// would be indistinguishable from a server that had stopped.
+pub(crate) async fn pull_run_json(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let held = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let body = held.as_ref().map_or_else(
+        || crate::pullrun::Progress::default().json(),
+        crate::pullrun::Progress::json,
+    );
+    (axum::http::StatusCode::OK, json_headers(), body)
+}
+
+/// `POST /pull/run/stop` — stop at the next leg boundary.
+///
+/// It sets a flag; it does not cancel a leg in flight. A leg that has already
+/// asked the vendor for bars must be allowed to write them, or pressing stop
+/// would throw away answers that were already paid for and leave the store
+/// short of what the vendor was charged for.
+pub(crate) async fn pull_run_stop(
+    axum::extract::State(site): axum::extract::State<Loaded>,
+) -> (axum::http::StatusCode, axum::http::HeaderMap, String) {
+    let mut held = site
+        .run
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let stopping = match held.as_mut() {
+        Some(progress) if progress.running() => {
+            progress.stopping = true;
+            true
+        }
+        _ => false,
+    };
+    (
+        axum::http::StatusCode::OK,
+        json_headers(),
+        format!("{{\"stopping\":{stopping}}}"),
+    )
+}
+
+pub(crate) async fn pull_spot(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> (
@@ -9443,7 +9592,7 @@ async fn fno_report(
 }
 
 /// Starting an expired-series pull. **POST only.**
-async fn pull_fno(
+pub(crate) async fn pull_fno(
     axum::extract::State(site): axum::extract::State<Loaded>,
     body: String,
 ) -> (axum::http::StatusCode, axum::response::Html<String>) {
@@ -10125,6 +10274,13 @@ pub fn router_serving(site: Loaded, assets: std::sync::Arc<assets::Assets>) -> a
         .route("/pull", axum::routing::get(pull_get))
         .route("/pull/spot", axum::routing::post(pull_spot))
         .route("/pull/fno", axum::routing::post(pull_fno))
+        // THE ONE PRESS. `/pull/spot` and `/pull/fno` above are unchanged and
+        // still serve one leg each; this starts a run that drives them itself,
+        // so the operator's retry loop is no longer inside a browser tab. See
+        // `crate::pullrun`.
+        .route("/pull/run", axum::routing::post(pull_run))
+        .route("/pull/run.json", axum::routing::get(pull_run_json))
+        .route("/pull/run/stop", axum::routing::post(pull_run_stop))
         // THE AUTOPILOT'S THREE. Status is a read of one in-memory struct
         // behind an uncontended lock — never `census_now`, because this is the
         // route an operator refreshes every few seconds through a twelve-hour

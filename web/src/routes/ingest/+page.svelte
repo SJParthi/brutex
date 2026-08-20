@@ -5555,140 +5555,266 @@
    * them.
    */
   /** @param {Event} [e] */
-  /**
-   * HOW MANY PASSES ONE PRESS MAY MAKE, and why there is a ceiling at all.
-   *
-   * A window can be bigger than one sitting at a legal rate: eight months of
-   * BANKNIFTY option chains is roughly 1,984 contracts, each needing its own
-   * candle fetch, against a vendor ceiling the governor halves on every 429.
-   * One pass reaches a few hundred and stops when its budget is spent, and the
-   * operator's requirement is that the run KEEPS GOING until the window is
-   * satisfied rather than waiting to be pressed again.
-   *
-   * The ceiling is not a guess about how many are needed — it is a stop for a
-   * loop that would otherwise be unbounded if the vendor never recovered. It is
-   * reported when it is reached; see `passSummary`.
-   */
-  const MAX_PASSES = 400;
-
-  /**
-   * HOW MANY CLEAN EMPTY PASSES MEAN "THERE IS NOTHING LEFT TO GET".
-   *
-   * **Three, and only for a pass that FAILED AT NOTHING.** Operator's rule of
-   * 2026-08-20: a vendor answering "no data available" is acceptable after
-   * three attempts; every other outcome must be retried until it succeeds.
-   *
-   * So the loop splits an empty pass by its CAUSE, which is the whole of this
-   * design:
-   *
-   * | Pass gained no bars and… | Meaning | What the loop does |
-   * |---|---|---|
-   * | nothing refused, nothing errored | there is no more data to get | count toward three, then stop |
-   * | a request failed, refused or dropped | rate, socket, power, credential | **retry, with no limit** |
-   *
-   * The distinction matters because the two are indistinguishable by bar count
-   * alone. A throttled pass and a finished window both store zero, and stopping
-   * on the first is the failure this replaces: it abandoned a window that a
-   * later attempt would have completed.
-   *
-   * Three rather than one because a clean empty pass can still be transient —
-   * the governor may spend a whole pass waiting out a backoff, refuse nothing,
-   * and store nothing.
-   */
-  const CLEAN_EMPTY_PASSES = 3;
-
-  /**
-   * How long to wait before retrying after a pass that FAILED and gained
-   * nothing.
-   *
-   * Without it a dropped socket or a dead credential becomes a spin: the loop
-   * re-issues instantly, fails instantly, and burns the vendor's goodwill while
-   * making no progress. The vendor's own governor already backs off inside a
-   * pass; this is the gap BETWEEN passes, which nothing else covers.
-   */
-  const RETRY_WAIT_MS = 20_000;
+  /* THE THREE PASS CONSTANTS ARE GONE FROM THIS FILE, AND THAT IS THE POINT.
+     `MAX_PASSES`, `CLEAN_EMPTY_PASSES` and `RETRY_WAIT_MS` described a loop
+     this page ran. It runs in `crates/api/src/pullrun.rs` now, which holds all
+     three with the reasoning that goes with them. Keeping declarations here
+     would leave a second copy of a rule only one of them enforces — and the
+     copy nobody remembers exists is always the one that drifts. */
 
   /** What the last multi-pass run did, for the card to state plainly. */
   let passSummary = $state(/** @type {string | null} */ (null));
 
+  /**
+   * THE ONE PRESS, AND THE SERVER OWNS EVERYTHING AFTER IT.
+   *
+   * # What this used to do, and why it stopped
+   *
+   * It used to BE the run: it fired every leg, re-read the census, decided
+   * whether the window was satisfied, and fired the whole set again — up to
+   * four hundred times. It was correct about what to retry and it put the
+   * operator's backfill inside a browser tab.
+   *
+   * The symptom was a stop that looked like a restart. A leg answering 502
+   * ended the pass; twenty seconds later the set went out again; the operator
+   * watched `Pull running` turn into `NOT STARTED` and then, unasked, a fresh
+   * run. Reported on 2026-08-20: *"why stopped and again auto repulled ... only
+   * one pull from the webpage and automatically everything should be entirely
+   * taken care internally"*.
+   *
+   * So the loop moved into `crates/api/src/pullrun.rs`. This function now sends
+   * ONE request, which returns at once, and then WATCHES. Closing the tab no
+   * longer stops the run; reopening it picks the run back up, because the state
+   * lives on the server rather than in this closure.
+   *
+   * # The wire shape
+   *
+   * One `leg` field per leg, `route|vendor|dir|label|body`, with the body
+   * encoded a SECOND time inside the field. Every form body contains `&` and
+   * some contain `|`, so without the inner encoding the server could not tell a
+   * separator from a payload.
+   *
+   * The parallel-across-feeds, sequential-within-one rule went with it: the
+   * server groups these legs by vendor and spawns one chain each. It is not a
+   * preference — a rate budget is per vendor, so two legs fired at one broker
+   * together spend one ceiling twice, while two brokers share none.
+   */
+  /**
+   * PICKS UP A RUN THAT WAS ALREADY GOING WHEN THIS PAGE LOADED.
+   *
+   * The run is a task on the server, not a closure in this tab, so closing the
+   * page does not stop it — and opening the page must not pretend nothing is
+   * happening. A tab that showed an idle form during a backfill would offer a
+   * Pull button the server then refuses, and the operator would meet "a run is
+   * already in flight" for a run this page gave no sign of.
+   *
+   * Quiet when there is nothing to pick up, which is the common case: a server
+   * with no run answers a whole document saying so, and this returns without
+   * touching anything the page shows.
+   *
+   * THE ELAPSED CLOCK COUNTS FROM HERE, not from when the run started. The
+   * status document carries no start time, and inventing one would be a number
+   * nobody measured; what the card shows after a resume is how long THIS TAB
+   * has been watching.
+   */
+  async function resumeRun() {
+    let doc;
+    try {
+      const r = await request('/pull/run.json', { ms: 15_000 });
+      if (!r.ok) return;
+      doc = await r.json();
+    } catch {
+      /* A status this page could not read is not a run this page may claim.
+         The Pull button stays offered; the server refuses it by name if a run
+         really is going, which is a better answer than a page that locked
+         itself out on one failed read. */
+      return;
+    }
+    if (doc?.running !== true) return;
+
+    runState = doc;
+    phase = 'running';
+    startedAt = Date.now();
+    lastGrowthAt = startedAt;
+    finishedAt = 0;
+    releaseWatch?.();
+    seenRead = store.reads;
+    releaseWatch = watchStore(5000);
+    try {
+      baseline = await snapshot();
+      live = baseline;
+    } catch {
+      /* Without a baseline the card cannot show a difference, but the run is
+         real and worth watching; the census table reads the store on its own
+         clock either way. */
+    }
+    await watchRun();
+  }
+
+  /** @param {Event} [e] */
   async function start(e) {
     e?.preventDefault?.();
     showProblems = true;
     if (problems.length > 0 || phase === 'running') return;
 
-    /* SPOT FIRST, THEN THE DERIVATIVES — concatenated here so ONE chain per
-       feed carries the whole ladder. The sort inside `runPull` puts them in
-       the order the server will accept; this only decides what is in the run. */
+    /* SPOT FIRST, THEN THE DERIVATIVES. The server sorts each vendor's legs
+       onto `pull::fold`'s ladder itself, so this only decides what is IN the
+       run; the order below is the order they are offered, not the order they
+       are sent. */
     const bodies = [...wireBodies, ...fnoBodies];
-    const asked = new Set(ticked.map((m) => m.key));
+    if (bodies.length === 0) return;
 
-    /* KEEP GOING UNTIL THE WINDOW IS SATISFIED.
-       Operator's requirement, 2026-08-20: a run stopped by a rate ceiling, a
-       dropped socket or a partial month must RESUME rather than wait to be
-       pressed again — "until or unless that particular requested window is
-       finished it should never be stopped".
-       THE LOOP IS ON THE PAGE, NOT IN THE SERVER, and that is deliberate. One
-       HTTP request that ran for hours is exactly what produced the `HTTP 0`
-       that abandoned Dhan's options: a socket held open across a whole backfill
-       is a socket that will drop. Each pass is a bounded request; the RESUME is
-       what makes the next one cheap — `fnowork::owed` probes each
-       contract-month's last stored timestamp, so a pass never refetches what
-       the one before it landed.
-       PROGRESS IS MEASURED AGAINST THE STORE, not against what a receipt
-       claims. `live.rows` is the census bar count read after every pass, so a
-       pass that reported success and wrote nothing counts as idle — which is
-       the only reading that cannot be fooled by a run reporting bars it did not
-       commit. */
-    let passes = 0;
-    let cleanEmpty = 0;
-    let retried = 0;
-    const started = live?.rows ?? 0;
+    const form = bodies
+      .map((b) =>
+        `leg=${encodeURIComponent(
+          [
+            b.route ?? '/pull/spot',
+            b.vendor ?? '',
+            b.dir,
+            b.label,
+            encodeURIComponent(b.body)
+          ].join('|')
+        )}`
+      )
+      .join('&');
 
-    while (passes < MAX_PASSES) {
-      const before = live?.rows ?? 0;
-      netError = null;
-      await runPull(bodies, asked);
-      passes += 1;
-      const after = live?.rows ?? before;
+    receipt = null;
+    receipts = [];
+    outcomes = [];
+    outcomeIndex = new Map();
+    samples = [];
+    netError = null;
+    pollError = null;
+    aborted = false;
+    passSummary = null;
+    runState = null;
+    askedKeys = new Set(ticked.map((m) => m.key));
+    sent = { done: 0, of: bodies.length, label: bodies[0].label };
 
-      /* STOPPED BY THE OPERATOR ENDS IT AT ONCE. `aborted` is set by the abort
-         branch inside the chain, and pressing Stop is an answer — not a failure
-         to retry around. */
-      if (aborted) break;
-
-      if (after > before) {
-        /* PROGRESS. Whatever else went wrong this pass, bars landed, so the
-           window is not finished and the next pass is worth making. */
-        cleanEmpty = 0;
-        continue;
-      }
-
-      /* NOTHING GAINED — and the CAUSE decides whether this is the end.
-         A failed request is transient by default: rate, socket, power,
-         internet, a credential that will be refreshed. The operator's rule is
-         that those are retried until they succeed, with no ceiling. Only a
-         pass that asked for everything and was refused NOTHING can mean the
-         window has no more data in it. */
-      const failed = netError !== null || (receipt !== null && !receipt.good);
-      if (failed) {
-        cleanEmpty = 0;
-        retried += 1;
-        /* WAITED, NOT SPUN. The governor backs off inside a pass; this is the
-           gap between passes, which nothing else covers. */
-        await new Promise((done) => setTimeout(done, RETRY_WAIT_MS));
-        continue;
-      }
-      cleanEmpty += 1;
-      if (cleanEmpty >= CLEAN_EMPTY_PASSES) break;
+    // THE BEFORE READING IS TAKEN FIRST AND IS NOT OPTIONAL. Every count the
+    // card shows is a difference against it.
+    try {
+      baseline = await snapshot();
+      live = baseline;
+    } catch (why) {
+      baseline = null;
+      live = null;
+      netError = `The store could not be read before starting, so nothing this run does could be measured against it: ${why}`;
+      return;
     }
 
-    const total = (live?.rows ?? started) - started;
-    const retries = retried > 0 ? ` ${n(retried)} pass(es) were retried after a failure.` : '';
-    passSummary = aborted
-      ? `Stopped after ${n(passes)} pass(es); ${n(total)} bar(s) landed before you pressed stop.${retries}`
-      : passes >= MAX_PASSES
-        ? `Reached the ${n(MAX_PASSES)}-pass ceiling with ${n(total)} bar(s) landed.${retries} This is a runaway stop, not a verdict on the window — press Pull again to continue from where this stopped; nothing already stored is refetched.`
-        : `${n(passes)} pass(es), ${n(total)} bar(s) landed.${retries} The last ${CLEAN_EMPTY_PASSES} asked for everything, were refused nothing and gained nothing — which is what "no more data" looks like, and the only reading this run treats as finished.`;
+    startedAt = Date.now();
+    lastGrowthAt = startedAt;
+    finishedAt = 0;
+    phase = 'running';
+    releaseWatch?.();
+    seenRead = store.reads;
+    releaseWatch = watchStore(5000);
+    controller = new AbortController();
+
+    try {
+      const r = await request('/pull/run', {
+        ms: 30_000,
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: form,
+        signal: controller.signal
+      });
+      const answer = await r.json();
+      if (!r.ok || answer?.started !== true) {
+        /* REFUSED, AND THE SERVER SAID WHY. A refusal here is a decision — a
+           run already in flight, or a leg that could not be read — not a
+           transient failure to retry around, so it ends the press and says so
+           rather than looping. */
+        netError =
+          answer?.why ??
+          `The run was refused and gave no reason, which is itself the fault: HTTP ${r.status}.`;
+        phase = 'done';
+        finishedAt = Date.now();
+        return;
+      }
+    } catch (why) {
+      netError = `The run could not be started: ${why}. Nothing was asked of any vendor and nothing was written.`;
+      phase = 'done';
+      finishedAt = Date.now();
+      return;
+    }
+
+    await watchRun();
+  }
+
+  /**
+   * How often the page asks the server what its run is doing.
+   *
+   * Two seconds. The document is one lock take on the server and a few hundred
+   * bytes on the wire, so this is cheap — and it is the ONLY thing this page
+   * does while a run is on. It is not a retry: a poll that fails changes
+   * nothing about the run.
+   */
+  const POLL_MS = 2000;
+
+  /** The server's own account of the run, or `null` before the first answer. */
+  let runState = $state(/** @type {any} */ (null));
+
+  /**
+   * WATCHING, NOT DRIVING.
+   *
+   * A failed poll is reported and the watch CONTINUES. This is the distinction
+   * the old loop could not make: when the page WAS the run, a broken request
+   * meant a broken pull. Now the run is a task on the server, so a dropped poll
+   * means only that this tab lost sight of it for two seconds.
+   *
+   * It ends when the server says `running:false` and on nothing else — not on a
+   * poll error, not on a timeout, not on the operator switching tabs.
+   */
+  async function watchRun() {
+    for (;;) {
+      await new Promise((done) => setTimeout(done, POLL_MS));
+      if (controller?.signal.aborted && aborted) {
+        /* The operator pressed Stop AND the server was told. The run winds down
+           at its next leg boundary; the summary arrives on a later poll, so the
+           watch keeps going rather than guessing at one here. */
+      }
+      let doc;
+      try {
+        const r = await request('/pull/run.json', { ms: 15_000 });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        doc = await r.json();
+      } catch (why) {
+        pollError = `The run is still going; this page just could not read its status: ${why}. Retrying every ${POLL_MS / 1000}s.`;
+        continue;
+      }
+      pollError = null;
+      runState = doc;
+
+      /* ANNOTATED BECAUSE THE DOCUMENT IS UNTYPED ON PURPOSE. `runState` holds
+         whatever `/pull/run.json` sent; pinning a shape here would be a second
+         declaration of it, and the server's is the one that is true. */
+      /** @type {{ legs?: number, legsDone?: number, doing?: string, lastError?: string }[]} */
+      const feeds = doc.feeds ?? [];
+      const legs = feeds.reduce((sum, f) => sum + (f.legs ?? 0), 0);
+      const done = feeds.reduce((sum, f) => sum + (f.legsDone ?? 0), 0);
+      const doing = feeds.find((f) => f.doing)?.doing ?? '';
+      sent = { done, of: legs, label: doing };
+
+      if (doc.running === false) {
+        passSummary = doc.finished ?? null;
+        /* THE FIRST FEED THAT FAILED NAMES THE CAUSE. A run can finish having
+           retried past a failure, so this is shown beside the summary rather
+           than instead of it. */
+        const hurt = feeds.find((f) => f.lastError);
+        if (hurt) netError = hurt.lastError;
+        phase = 'done';
+        finishedAt = Date.now();
+        try {
+          live = await snapshot();
+        } catch {
+          /* The census refreshes on its own five-second clock; a failed read
+             here is not worth overwriting the summary for. */
+        }
+        return;
+      }
+    }
   }
 
   /**
@@ -5916,9 +6042,29 @@
     readPilot();
   }
 
-  function stopWatching() {
+  /**
+   * STOP MEANS STOP THE RUN, NOT STOP LOOKING AT IT.
+   *
+   * The run is a task on the server now. Aborting the poll would end the
+   * WATCHING and leave the run going — a button that says Stop and hides a
+   * backfill instead of ending it, which is worse than no button. So the server
+   * is told first, and a failure to tell it is REPORTED rather than swallowed.
+   *
+   * The server stops at the next leg boundary and not inside one: a leg that
+   * has already asked the vendor for bars must be allowed to write them, or
+   * pressing Stop would throw away answers that were already paid for.
+   */
+  async function stopWatching() {
+    aborted = true;
+    try {
+      await request('/pull/run/stop', { ms: 10_000, method: 'POST' });
+    } catch (why) {
+      pollError = `Stop could not be delivered, so the run may still be going: ${why}. Reload this page to see what it is doing.`;
+      return;
+    }
     controller?.abort();
   }
+
 
   function reset() {
     phase = 'idle';
@@ -5995,6 +6141,10 @@
   );
 
   onMount(() => {
+    /* A RUN OUTLIVES THIS TAB. See `resumeRun`: the first thing this page does
+       is ask whether one is already going, because the server owns the run and
+       this page is only watching it. */
+    void resumeRun();
     const want = decodeSel(window.location.search);
     urlWant = want;
     // THE FIELDS WITH NO ASYNC PREREQUISITE, applied at once.
@@ -7102,9 +7252,22 @@
                   {Verb}
                 {/if}
               </button>
+              {#if phase === 'running'}
+                <!-- STOP IS A REAL CONTROL NOW, AND IT HAS TO BE.
+                     `stopWatching` existed before this and had NO call site —
+                     harmless while the run lived in this tab, because closing
+                     the tab ended it. The run is a task on the server now, and
+                     a failed pass retries WITHOUT limit, so without this button
+                     the only way to end one is to restart the process.
+                     It tells the server BEFORE it stops watching: aborting the
+                     poll alone would end the looking and leave the run going,
+                     which is worse than offering no button at all. -->
+                <button class="btn ghost" type="button" onclick={stopWatching}>Stop</button>
+              {/if}
               {#if phase === 'done'}
                 <button class="btn ghost" type="button" onclick={reset}>Clear the result</button>
               {/if}
+
             </div>
             <!-- WHAT THE MULTI-PASS RUN DID, AND WHY IT STOPPED.
                  One press is now several passes — a window can be bigger than
@@ -7112,7 +7275,11 @@
                  that it keeps going until the window is satisfied. Without this
                  line the difference between "finished", "hit the ceiling" and
                  "gained nothing twice" is invisible, and those three want three
-                 different next actions from the reader. -->
+                 different next actions from the reader.
+
+                 THE SENTENCE IS THE SERVER'S NOW, not this page's. It comes
+                 from `pullrun::summary_of` on the last poll, because the server
+                 is what counted the passes. This page only shows it. -->
             {#if passSummary}
               <p class="note" style="margin-top:10px">{passSummary}</p>
             {/if}
