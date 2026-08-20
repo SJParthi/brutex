@@ -17459,3 +17459,75 @@ api's — which can only hold if they are one object.
 **What this does NOT claim.** The ceilings themselves are unchanged and
 `GROWW_PER_SECOND_UNVERIFIED` is still 8/s, *chosen not measured*. This entry
 fixes which governor learns; it does not fix what it was told to enforce.
+
+### D-0222 — one governor per vendor, and exactly ONE side spends it
+
+D-0221 replaced two governors per vendor with one, so that every path would
+teach the same numbers. It did not say **which side spends it**, and both kept
+doing so.
+
+`Governor::admit` is a WITHDRAWAL, not a question: the verdict it answers with
+has already taken the permit. There is no peek in the type —
+`crates/pull/src/rate.rs` offers `admit`, `record_success`, `record_throttled`,
+`ceiling`, `permitted` and `credit_micro_permits`, and only the first decides
+anything. So two layers "checking" one governor is two permits for one request.
+
+| Layer | Charges at | Bounded? |
+|---|---|---|
+| `api::server::await_budget`, and `Governed` for the discovery walk | before the call | yes — 64 waits, then `Err` |
+| `pull::http::HttpSource::wait_for_permit` | as the socket opens | no — waits until admitted |
+
+Both were complete, and both were 1:1 with a real request: the five
+`await_budget` sites are placed per chunk, per retry attempt and per instrument,
+and the transport charges once per socket. **Complete plus complete is exactly
+the problem** — the ceiling halved, and nothing said so.
+
+**What it cost**, measured 2026-08-20, journal seq 1956:
+
+```
+pull.spot  instrument refused  BANKNIFTY 2026-01 dhan
+  "BANKNIFTY: Dhan's second budget is spent. The next request is admitted
+   in 0.013s. Nothing was asked of the vendor and nothing was written."
+```
+
+A bounded waiter and an unbounded waiter on one budget are not peers: whatever
+the pressure, the bounded one is the one that runs out. It did — over a wait of
+thirteen milliseconds — and `POST /pull/fno` served the refusal as **502**. The
+ingest page then retried around that 502, which is the stop-and-restart the
+operator saw and reported in these words: *"why stopped and again auto
+repulled … only one pull from the webpage and automatically everything should be
+entirely taken care internally"*.
+
+**The decision: the caller that shares is the caller that charges.** `sharing`
+now sets `charged_by_caller`, and `wait_for_permit` returns without asking. The
+feedback path is deliberately untouched — `record_success` and
+`record_throttled` still run on every answer, because a shared governor must
+learn from every path whether or not that path is the one that pays.
+
+**Why not the other direction.** Deleting the api's five charge sites would also
+give one charge per request, and would give up the property that makes this
+safe: a request path added later either shares — and its caller charges — or
+does not, and keeps the private governor `new` built for it and gates itself.
+There is no third state, so an ungoverned path cannot be created by forgetting
+something. `Governed`'s own comment names the hazard the other direction
+reopens: *"a guard at a call site protects the requests that call site knows
+about"*.
+
+**What this does NOT claim.** It does not claim the exact mechanism by which
+sixty-four consecutive waits were each denied over a thirteen-millisecond
+horizon. The double withdrawal is read off the code and is certain; that it
+halves the effective ceiling follows; that the bounded side is the side that
+fails follows. The precise contention that exhausted all sixty-four attempts is
+consistent with those facts and is **not separately measured**.
+
+**The first test written for this proved nothing, and the mutation check is
+what said so.** It spent the second's ceiling and asserted that a shared source
+still returned quickly. It passed — and it passed with the guard replaced by
+`if false`, because the unguarded path slept out the remainder of the second and
+finished inside the 250 ms timeout anyway. Timing was the wrong witness. The
+assertion now reads `cursor_micros`, which `admit` alone moves and moves forward
+only: a shared source must leave it untouched, an owning source must move it,
+and the mutant now fails on the first of those.
+
+Proved by `pull::http::a_shared_governor_is_charged_by_the_caller_and_not_again_here`
+and recorded as invariant P-51.

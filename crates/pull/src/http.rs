@@ -175,6 +175,38 @@ pub struct HttpSource {
     /// One `Arc` per feed now, created once and handed to every source built
     /// for that vendor, so every path teaches the same instance.
     governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
+
+    /// Whether the CALLER charges that governor, leaving this source to
+    /// observe rather than withdraw.
+    ///
+    /// # The double withdrawal this exists to stop
+    ///
+    /// `Governor::admit` is not a question, it is a WITHDRAWAL: the verdict it
+    /// answers with has already spent the permit. Once `api` began sharing its
+    /// governor with this source -- one instance per vendor, so every path
+    /// teaches the same numbers -- BOTH sides went on calling it for one
+    /// request: `api::server::await_budget` before the call, and
+    /// [`Self::wait_for_permit`] as the socket opened. Two permits per request
+    /// against a ceiling written for one.
+    ///
+    /// What it cost, measured 2026-08-20, journal seq 1956:
+    /// `pull.spot instrument refused -- Dhan's second budget is spent. The next
+    /// request is admitted in 0.013s.` The api's wait is BOUNDED and this
+    /// one is not, so this loop took the permit each time the window freed one
+    /// and the bounded side exhausted all sixty-four of its attempts over a
+    /// wait of thirteen milliseconds. It then returned the refusal that
+    /// `POST /pull/fno` served as 502 -- the stop the operator watched the page
+    /// retry around.
+    ///
+    /// # Why the flag rides on `sharing` rather than a parameter
+    ///
+    /// Handing a governor over and spending from it are the same act. A caller
+    /// shares BECAUSE it charges; a caller that does not share keeps the
+    /// private governor `new` built and is gated here exactly as before. There
+    /// is no third state to get wrong, and a request path added later is
+    /// governed either way -- which is the property the other candidate fix,
+    /// deleting the api's five charge sites, would have given up.
+    charged_by_caller: bool,
 }
 
 // The token is the reason this is hand-written. A derived `Debug` prints every
@@ -359,6 +391,9 @@ impl HttpSource {
             header_value,
             client,
             governor,
+            // OWNED, THEREFORE CHARGED HERE. `sharing` is the only thing that
+            // moves the charge to the caller.
+            charged_by_caller: false,
         })
     }
 
@@ -382,6 +417,11 @@ impl HttpSource {
         governor: Option<std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>>,
     ) -> Self {
         if self.governor.is_some() {
+            // THE CALLER NOW CHARGES, and only if it actually handed one over.
+            // Sharing a governor and spending from it are one act; both sides
+            // calling `admit` is two permits for one request. See
+            // `charged_by_caller`.
+            self.charged_by_caller = governor.is_some();
             self.governor = governor;
         }
         self
@@ -414,6 +454,16 @@ impl HttpSource {
     /// windows -- a constant three -- so this is O(1) per request and does not
     /// grow with how many requests came before it.
     async fn wait_for_permit(&self) {
+        // THE CALLER ALREADY WITHDREW. Charging again here is two permits for
+        // one request -- see `charged_by_caller` for what that measured and how
+        // it surfaced as a 502.
+        //
+        // THE FEEDBACK IS NOT SKIPPED. `record_success` and `record_throttled`
+        // still run on every answer below, because a shared governor must learn
+        // from every path whether or not that path is the one that pays.
+        if self.charged_by_caller {
+            return;
+        }
         let Some(lock) = self.governor.as_ref() else {
             return;
         };
@@ -2100,6 +2150,87 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A SHARED governor is charged by the CALLER, and never charged twice.
+    ///
+    /// # What the second charge cost
+    ///
+    /// `admit` is a WITHDRAWAL, not a question: the verdict it answers with has
+    /// already spent the permit. Once `api` handed its governor to this source
+    /// -- so that one instance per vendor would see every request -- BOTH sides
+    /// went on calling it for a single request: `api::server::await_budget`
+    /// before the call, and `wait_for_permit` as the socket opened. One request,
+    /// two permits, against a ceiling written for one.
+    ///
+    /// Measured 2026-08-20, journal seq 1956:
+    /// `pull.spot instrument refused -- Dhan's second budget is spent. The next
+    /// request is admitted in 0.013s.` The api's wait is BOUNDED at sixty-four
+    /// attempts and this one is not, so the bounded side is the one that ran
+    /// out of patience, and its refusal reached the browser as HTTP 502.
+    ///
+    /// # Why the witness is the cursor and not the clock
+    ///
+    /// The first draft of this test spent the ceiling and asserted that a
+    /// shared source still RETURNED QUICKLY. It passed -- and it passed with
+    /// the guard removed too, because the unguarded path simply slept out the
+    /// remainder of the second and finished inside the timeout anyway. A
+    /// surviving mutant is a missing test (`CLAUDE.md` §4), so the assertion
+    /// moved off timing altogether.
+    ///
+    /// `Governor::admit` is the only thing that moves `cursor_micros`, and it
+    /// moves it forward only. The cursor therefore answers the exact question
+    /// this test is about -- **was the governor asked at all** -- with no sleep,
+    /// no ceiling to exhaust, and no race against the second rolling over.
+    #[tokio::test]
+    async fn a_shared_governor_is_charged_by_the_caller_and_not_again_here() {
+        let crate::vendor::Transport::Http(spec) = crate::vendor::Feed::Dhan.descriptor().transport
+        else {
+            panic!("Dhan is an HTTP feed");
+        };
+        // ONE GOVERNOR, TWO SOURCES. `owned` keeps the instance `new` built for
+        // it; `shared` is handed that same instance, which is precisely what
+        // the server does. The flag is the only difference between them.
+        let owned = HttpSource::new(spec, Credential::token("t".to_owned())).expect("Dhan builds");
+        let held = std::sync::Arc::clone(owned.governor.as_ref().expect("Dhan is budgeted"));
+        let shared = HttpSource::new(spec, Credential::token("t".to_owned()))
+            .expect("Dhan builds")
+            .sharing(Some(std::sync::Arc::clone(&held)));
+
+        assert!(
+            !owned.charged_by_caller,
+            "a source that built its own governor is the one that spends it"
+        );
+        assert!(
+            shared.charged_by_caller,
+            "a source handed a governor leaves the spending to whoever handed it over"
+        );
+
+        // THE CURSOR IS THE WITNESS. Only `admit` moves it, so it moves if and
+        // only if the governor was actually asked for a permit.
+        let cursor_of = |held: &std::sync::Arc<std::sync::Mutex<crate::rate::Governor>>| {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cursor_micros()
+        };
+
+        let untouched = cursor_of(&held);
+        shared.wait_for_permit().await;
+        assert_eq!(
+            untouched,
+            cursor_of(&held),
+            "a shared source asks the governor for nothing -- its caller withdrew already"
+        );
+
+        // AND THE OTHER HALF, WHICH IS WHAT KEEPS THIS FROM BEING VACUOUS. If
+        // `wait_for_permit` charged nobody at all, the assertion above would
+        // hold for entirely the wrong reason. A source that owns its governor
+        // must still move that cursor.
+        owned.wait_for_permit().await;
+        assert!(
+            cursor_of(&held) > untouched,
+            "a source that owns its governor is still the one that spends it"
+        );
     }
 
     /// A throttle lowers the allowance; clean answers raise it again.
