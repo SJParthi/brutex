@@ -3862,6 +3862,41 @@ async fn broker_answer(
         return (blocked.code, refused_html("Spot pull", facts, &blocked.why));
     }
 
+    // WHAT THIS RUN WAS ACTUALLY ASKED FOR, BY NAME.
+    //
+    // The page ticks instruments; the request carries a `member` set; the run
+    // filters on it. Three hops, and until now the receipt reported only the
+    // COUNTS at the far end — so "I ticked BANKNIFTY and it pulled NIFTY" was a
+    // question answerable only by listing the store afterwards. A selection that
+    // cannot be read back off the page is a mapping the operator has to trust.
+    //
+    // THE EMPTY SET IS THE ROW THAT MATTERS. `broker_run` filters
+    // `members.is_empty() || members.contains(..)`, so naming NOTHING means
+    // EVERY instrument in the target — and the page sends nothing on purpose
+    // when every row is ticked, rather than putting 750 fields on a query
+    // string to say "everything". Those two are the same request and read as
+    // opposites, so this says which one arrived in words.
+    facts.push((
+        "Instruments asked for",
+        if asked.members.is_empty() {
+            format!(
+                "every instrument in {} — no member was named, which this route \
+                 reads as all of them",
+                asked.target.label()
+            )
+        } else {
+            // ORDERED, because a `HashSet` is not and a receipt that reorders
+            // between two identical runs invites a reader to look for a change
+            // that is not there. `CLAUDE.md` §3 rule 5 is about bytes.
+            let mut named: Vec<&str> = asked
+                .members
+                .iter()
+                .map(brutex_core::symbol::Symbol::as_str)
+                .collect();
+            named.sort_unstable();
+            format!("{} named: {}", named.len(), named.join(", "))
+        },
+    ));
     facts.push(("Instruments attempted", run.attempted.to_string()));
     facts.push(("Instruments reached", run.reached.to_string()));
     if !run.refused.is_empty() {
