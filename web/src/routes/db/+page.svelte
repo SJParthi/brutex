@@ -61,7 +61,7 @@
   // A STORE KEY IS NOT AN INSTRUMENT NAME. `$lib/instrument.js` takes the
   // contract tail off before the underlying, which is the difference between
   // BANKNIFTY and BANKNIFTY-2026-07-28-4810000-PE.
-  import { parseKey, segmentOf } from '$lib/instrument.js';
+  import { parseKey, segmentOf, strikeExact } from '$lib/instrument.js';
   /* Display only. `month` stays the raw `YYYY-MM` because it is the filter
      itself — `r.month === month`, `r.month.startsWith(typed)`, the `{#each}`
      keys and the sort comparator all read the key, never the label. See the
@@ -1039,12 +1039,28 @@
         // sweep to find. The runtime key is byte-identical; the source is now
         // ASCII and searchable.
         key: `${r.instrument}\u0000${r.month}\u0000${r.timeframe}`,
-        head: cut > 0 ? r.instrument.slice(0, cut + 1) : '',
+        /* WHAT DISTINGUISHES A ROW GOES IN `sym`, AND THE REST IN `head`.
+           `head`/`sym` were "everything before the last hyphen" / "everything
+           after it", which is right for a spot key and useless for a contract:
+           on `NSE-FNO-BANKNIFTY-2026-07-28-4810000-PE` it puts thirty-six
+           characters in `head` and the two characters `PE` in `sym`.
+
+           The instrument column is 224px and that string needs 303px, so 137px
+           are clipped -- and the clipped end is the STRIKE and the SIDE, the
+           only fields that tell one contract from another. Measured on 18
+           option rows: three visually distinct labels, because every one read
+           `NSE-FNO-BANKNIFTY-2026-0...`. The column was showing the part that
+           is identical on every row and hiding the part that is not.
+
+           The underlying is already named once, at the top of the page, by the
+           Instrument rung. Repeating it per row buys nothing and costs the
+           strike. */
+        head: contractHead(parsed, cut, r.instrument),
         // `sym` IS THE TAIL AND IS NOT THE NAME. On a spot key the two agree;
         // on `NSE-FNO-BANKNIFTY-2026-07-28-4810000-PE` this is `PE`. It stays
         // because the table and the index have always displayed and probed it,
         // and `underlying` beside it is what an INSTRUMENT actually is.
-        sym: cut > 0 ? r.instrument.slice(cut + 1) : r.instrument,
+        sym: contractSym(parsed, cut, r.instrument),
         // THE NAME A HUMAN USES, and the key the Instrument rung groups by.
         // Parsed once per row at store-read time, never per keystroke.
         underlying: parsed.underlying ?? r.instrument,
@@ -1674,6 +1690,54 @@
      rung beside it was left asking a question that had already been answered.
      `key` stays the field name because everything downstream reads it; what
      changed is what a key IS. */
+  /**
+   * The INVARIANT half of a row's name — dimmed, and the same on every sibling.
+   *
+   * @param {ReturnType<typeof parseKey>} p
+   * @param {number} cut index of the last hyphen, for the spot path
+   * @param {string} raw the whole store key
+   */
+  function contractHead(p, cut, raw) {
+    if (p.underlying === null || p.kind === 'spot') {
+      return cut > 0 ? raw.slice(0, cut + 1) : '';
+    }
+    /* NOTHING. Not the underlying, not the exchange, not the segment.
+       All three are already named ABOVE the grid -- the Instrument rung says
+       BANKNIFTY, the Segment rung says Expired options -- and they are
+       identical on all 247 rows. Repeating them per row spent the column on
+       the one part that never varies and clipped the part that does: with the
+       prefix in place the strike fitted and the SIDE did not, so a CE and its
+       PE still read the same. The full store key is on the cell's title. */
+    return '';
+  }
+
+  /**
+   * The half that VARIES — bold, and the reason one row is not another.
+   *
+   * A future is its expiry; an option is its strike and side. The expiry is on
+   * the Contract rung above and is the same for every row under one chosen
+   * contract, so it is not repeated per row for an option.
+   *
+   * @param {ReturnType<typeof parseKey>} p
+   * @param {number} cut
+   * @param {string} raw
+   */
+  function contractSym(p, cut, raw) {
+    if (p.underlying === null || p.kind === 'spot') {
+      return cut > 0 ? raw.slice(cut + 1) : raw;
+    }
+    if (p.kind === 'future') return `${p.expiry} FUT`;
+    /* GROUPED THE INDIAN WAY when the strike is a whole rupee, which is the
+       ordinary case for a listed strike -- the Strike rung above says
+       "50,000 to 67,500" and a row reading `50000` beside it is the same
+       number spelled two ways. `strikeExact` stays the source of truth: it is
+       integer arithmetic on paisa per §7, and its output is only grouped, never
+       recomputed. */
+    const exact = strikeExact(p.strike);
+    const rupees = exact.includes('.') ? exact : fmt(Number(exact));
+    return `${rupees} ${p.side}`;
+  }
+
   const instrumentRows = $derived.by(() => {
     const by = new Map();
     for (const it of universed) {
@@ -6660,7 +6724,10 @@
                     }}
                     style="top:{n * ROW}px; animation-delay:{Math.min(i * 8, 180)}ms"
                   >
-                    <span class="cell inst" role="gridcell">
+                    <!-- THE STORE'S OWN KEY IS ONE HOVER AWAY. This cell had
+                         no title at all, so the 137px the column clips were
+                         simply gone -- not moved, not abbreviated, gone. -->
+                    <span class="cell inst" role="gridcell" title={it.instrument}>
                       <span class="pip" aria-hidden="true"></span>
                       <span class="ihead">{it.head}</span><span class="isym">{it.sym}</span>
                     </span>
