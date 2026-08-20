@@ -696,6 +696,17 @@ pub enum Refusal {
     },
     /// A bar length was named, and it is not a rung of the ladder.
     ///
+    /// A `rate` was supplied and is not a rate.
+    ///
+    /// **Absent is legal** and means no greek is computed for this run. What is
+    /// refused is a rate that was OFFERED and cannot be read, or one outside
+    /// any plausible band — `9.46` where `0.0946` was meant prices every option
+    /// in the run wrongly, comes out finite everywhere, and errors nowhere
+    /// downstream. Refusing here is the only place that catches it.
+    UnreadableRate {
+        /// What arrived, or what `pull::pricing` said about it.
+        got: String,
+    },
     /// The same rule as [`Self::UnknownVendor`] and for the same reason: absent
     /// defaults to `1min`, present-but-unknown refuses by name. A coerced rung
     /// files bars under a directory the operator did not ask for, and the bar
@@ -877,6 +888,12 @@ impl fmt::Display for Refusal {
             Self::UnknownSeries { ref got } => {
                 write!(f, "REFUSED · {got:?} is neither a future nor an option")
             }
+            Self::UnreadableRate { ref got } => write!(
+                f,
+                "the risk-free rate could not be read: {got}. Leave it empty \
+                 and no greek is computed for this run, which is honest; a \
+                 rate that cannot be read is not one to guess at"
+            ),
             Self::UnknownVendor { ref got } => write!(
                 f,
                 "REFUSED · {got:?} is not a vendor this build has a feed for. \
@@ -1022,7 +1039,12 @@ pub struct SpotRequest {
 }
 
 /// One expired-derivative pull, validated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// `Eq` IS GONE AND CANNOT COME BACK. A rate is an `f64`, and `f64` is not
+// `Eq` because `NaN != NaN`. `PartialEq` is kept — every comparison this type
+// is actually subjected to is a test assertion, and a derived `Eq` would only
+// have been an invitation to use it as a `HashMap` key, where a `NaN` rate
+// would make a request that never equals itself.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FnoRequest {
     /// The underlying, canonicalised.
     pub underlying: Symbol,
@@ -1045,6 +1067,23 @@ pub struct FnoRequest {
     pub expiry: Option<Day>,
     /// The operator's inclusive range.
     pub window: Window,
+    /// The risk-free rate for this run, or `None` to compute no greek.
+    ///
+    /// # Why it rides on the REQUEST and not on a constant
+    ///
+    /// No page in `docs/00-charter.md` records a rate, and §3 rule 1 forbids
+    /// this repository claiming one it has no source for. It does not forbid an
+    /// OPERATOR naming one for their own run — that is exactly the shape §8
+    /// already uses for credentials, where the repo holds the shape and the
+    /// operator supplies the value.
+    ///
+    /// Per-request rather than per-install for a second reason: a rate moves.
+    /// Baked into a configuration it would silently apply last quarter's number
+    /// to this quarter's bars, and every row would look right.
+    ///
+    /// It travels into every priced row so the result is reproducible under §3
+    /// rule 3. `None` computes nothing and the receipt says which.
+    pub rate: Option<pull::pricing::Rate>,
     /// The last day the operator ASKED for, when it had to be pulled back.
     ///
     /// `None` when the window was taken exactly as given, which is the ordinary
@@ -1244,6 +1283,9 @@ fn refused_field(why: &Refusal) -> Option<&'static str> {
         | Refusal::WindowReachesToday { .. }
         | Refusal::WindowOutlivesTheContract { .. } => Some("to"),
         Refusal::ArchiveFolderMissing { .. } => Some("folder"),
+        // THE RATE BOX, which is the control that produced it. Sending the
+        // reader anywhere else would have them edit a field that is fine.
+        Refusal::UnreadableRate { .. } => Some("rate"),
         Refusal::UnknownTarget { .. } => Some("target"),
         Refusal::UnknownSeries { .. } => Some("series"),
         Refusal::UnknownVendor { .. } => Some("vendor"),
@@ -1581,6 +1623,30 @@ fn parse_fno_inner(body: &str, today: Day) -> Result<FnoRequest, Refusal> {
         expiry,
         window,
         clamped_from,
+        // ABSENT IS LEGAL AND MEANS NO GREEK. Present-but-unreadable refuses
+        // by name, and so does a value outside any plausible band — see
+        // `Refusal::UnreadableRate` and `pull::pricing::MAX_PLAUSIBLE_RATE`.
+        rate: {
+            let raw = crate::server::param(body, "rate");
+            let text = raw.trim();
+            if text.is_empty() {
+                None
+            } else {
+                let annual = text
+                    .parse::<f64>()
+                    .map_err(|_| Refusal::UnreadableRate { got: raw.clone() })?;
+                Some(
+                    pull::pricing::Rate::measured(
+                        annual,
+                        pull::tenor::YearBasis::Calendar365,
+                        pull::pricing::RateSource::Operator,
+                    )
+                    .map_err(|why| Refusal::UnreadableRate {
+                        got: why.to_string(),
+                    })?,
+                )
+            }
+        },
         // THE SAME TWO PARSES SPOT USES, character for character. Sharing the
         // rule rather than the code is deliberate here — the refusals name the
         // field that was wrong, and a shared helper would have to be told which

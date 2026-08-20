@@ -7087,7 +7087,7 @@ async fn roll_one(
     rolling: pull::vendor::RollingSpec,
     window: pull::session::Window,
     last_settled: Day,
-) -> Result<(usize, usize), String> {
+) -> Result<Rolled, String> {
     let label = format!("{word} {flag}/{code} {strike} {option_type}");
     // THE EXPIRY THE ANSWER WILL NOT CARRY, established BEFORE the request.
     //
@@ -7147,7 +7147,7 @@ async fn roll_one(
         // NOT A FAILURE. A strike the vendor never listed for this expiry is an
         // ordinary empty answer, and counting it as a fault would report ~200
         // failures on a healthy month.
-        return Ok((0, 0));
+        return Ok(Rolled::default());
     }
 
     // ONE ANSWER IS MANY CONTRACTS, AND IT WAS FILED AS ONE.
@@ -7184,6 +7184,13 @@ async fn roll_one(
 
     let mut total = 0usize;
     let mut declined = 0usize;
+    let mut priced = PricedCount::default();
+    // THE SWEPT SLOT, RESOLVED ONCE FOR THE WHOLE RUN. It is a property of the
+    // underlying and cannot change inside one, so resolving it per bar would
+    // be the same lookup two hundred thousand times. `None` means this
+    // underlying has no recorded strike-ladder regime, and pricing is then
+    // skipped with that reason rather than guessed at.
+    let slot = pull::pricing::slot_of(asked.underlying);
     let mut at = 0usize;
     // AT MOST ONE ROW PER RUN, and a run is at least one bar — reserved from a
     // bound in hand rather than grown. `docs/07-o1-architecture.md` law 2.
@@ -7235,27 +7242,30 @@ async fn roll_one(
             at = end;
             continue;
         }
-        let expiry = brutex_core::instrument::Expiry::new(
-            expiry_day.year(),
-            expiry_day.month(),
-            expiry_day.day(),
-        )
-        .map_err(|why| format!("{label}: {why}"))?;
-        let contract =
-            brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
-                expiry,
-                // THE STRIKE THE VENDOR RESOLVED, not the offset that was
-                // asked for. `ATM+10` is a question; the answer carries the
-                // price it meant, and filing under the question would put every
-                // month's ATM+10 in one file.
-                strike: brutex_core::price::Paisa::from_raw(strike),
-                side: if option_type == "CALL" {
-                    brutex_core::instrument::OptionSide::Call
-                } else {
-                    brutex_core::instrument::OptionSide::Put
+        let (contract, contract_side, expiry) =
+            name_the_contract(expiry_day, strike, option_type, &label)?;
+
+        // AND NOW THE GREEKS, from bars this run already holds.
+        //
+        // Dhan sends `iv` and `spot` on the overlay, so nothing extra is
+        // fetched: the volatility is the vendor's where it sent one and solved
+        // from the premium where it did not, and `VolSource` records which per
+        // row. Skipped in full when no rate was supplied — see
+        // `ingest::FnoRequest::rate` on why the repository will not supply one
+        // itself.
+        if let (Some(rate), Some(slot)) = (asked.rate, slot) {
+            priced.absorb(&price_group(
+                group,
+                PriceInputs {
+                    strike,
+                    side: contract_side,
+                    expiry,
+                    slot,
+                    rate,
+                    vendor: wire.store_vendor,
                 },
-            })
-            .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
+            ));
+        }
 
         let (filed, pending) = land_rolling_group(
             group,
@@ -7279,7 +7289,346 @@ async fn roll_one(
     {
         return Err(format!("{label}: {why}"));
     }
-    Ok((total, declined))
+    Ok(Rolled {
+        stored: total,
+        declined,
+        priced,
+    })
+}
+
+/// The receipt rows about pricing, or the row that says why there are none.
+///
+/// # Why silence is not an option
+///
+/// A run that computed nothing and a run that computed everything would render
+/// identically, and an operator would have no way to tell which they had. So
+/// the counts go on the page when pricing ran, and the REASON goes on it when
+/// it did not — `CLAUDE.md` §4's loud degrade rather than its banned silent
+/// one.
+///
+/// # Cost
+///
+/// O(1): at most five rows, and the reasons were already capped at
+/// `pull::pricing::REASONS_KEPT` when they were collected.
+fn greek_facts(priced: &PricedCount, no_rate: bool) -> Vec<(&'static str, String)> {
+    let mut rows = Vec::new();
+    if priced.ran() {
+        rows.push((
+            "Rows priced",
+            format!(
+                "{} ({} solved here, {} sent by the vendor)",
+                priced.rows,
+                priced.solved,
+                priced.rows.saturating_sub(priced.solved)
+            ),
+        ));
+        if priced.refused > 0 {
+            rows.push((
+                "Rows that could not be priced",
+                format!("{} — {}", priced.refused, priced.why.join(" · ")),
+            ));
+        }
+        if priced.below_band > 0 {
+            // NOT A WARNING, A FACT ABOUT THE ROWS. `crates/greeks` skips
+            // maturities under 0.02 years in its own analytic-versus-numerical
+            // test, and every weekly's whole life is under that line — so a
+            // receipt that prints greeks without this row is implying a
+            // validation that did not happen.
+            rows.push((
+                "Rows below the validated band",
+                format!(
+                    "{} of {} — under 0.02 years, the maturity crates/greeks \
+                     does not check its own derivatives at",
+                    priced.below_band, priced.rows
+                ),
+            ));
+        }
+        // AND WHERE THEY WENT, WHICH IS NOWHERE YET. Saying "rows priced" and
+        // leaving an operator to find an empty directory is the §4 fallback
+        // that hides a failure; saying it here is the loud degrade it allows.
+        rows.push((
+            "Where the greeks were stored",
+            "nowhere — store::format::Overlay is exactly 24 bytes (stamp, \
+             spot, implied volatility) and five greeks do not fit. §4 makes a \
+             new field a new file version at its own stride, so these were \
+             computed, counted and dropped"
+                .to_owned(),
+        ));
+    } else if no_rate {
+        rows.push((
+            "Greeks",
+            "not computed — no risk-free rate was supplied with this request. \
+             docs/00-charter.md records none, so this build will not invent \
+             one; send `rate` as a decimal (0.0655, not 6.55) to price"
+                .to_owned(),
+        ));
+    }
+    rows
+}
+
+/// The contract one resolved run names, with the parts kept alongside it.
+///
+/// # Why the parts come back too
+///
+/// `brutex_core::instrument::Contract` is a RENDERED STRING and cannot be read
+/// back into its expiry, strike and side. Anything downstream that needs them —
+/// and pricing needs all three — has to take them from where they still exist
+/// as values, which is here. Returning the contract alone would force a second
+/// parse of a string this function just built, and a second parse is a second
+/// chance to disagree.
+///
+/// # Cost
+///
+/// O(1): one date build and one bounded render.
+fn name_the_contract(
+    expiry_day: Day,
+    strike: i64,
+    option_type: &str,
+    label: &str,
+) -> Result<
+    (
+        brutex_core::instrument::Contract,
+        brutex_core::instrument::OptionSide,
+        brutex_core::instrument::Expiry,
+    ),
+    String,
+> {
+    let expiry = brutex_core::instrument::Expiry::new(
+        expiry_day.year(),
+        expiry_day.month(),
+        expiry_day.day(),
+    )
+    .map_err(|why| format!("{label}: {why}"))?;
+    let side = if option_type == "CALL" {
+        brutex_core::instrument::OptionSide::Call
+    } else {
+        brutex_core::instrument::OptionSide::Put
+    };
+    let contract = brutex_core::instrument::Contract::of(brutex_core::instrument::Kind::Option {
+        expiry,
+        // THE STRIKE THE VENDOR RESOLVED, not the offset that was asked for.
+        // `ATM+10` is a question; the answer carries the price it meant, and
+        // filing under the question would put every month's ATM+10 in one file.
+        strike: brutex_core::price::Paisa::from_raw(strike),
+        side,
+    })
+    .ok_or_else(|| format!("{label}: this store cannot name that contract"))?;
+    Ok((contract, side, expiry))
+}
+
+/// Everything one contract-month's pricing needs that is not the bars.
+///
+/// A struct rather than six positional arguments: `strike` is an `i64` and so
+/// is nothing else here, but `side`, `expiry` and `slot` are three small `Copy`
+/// values that a call site could transpose without the compiler noticing.
+#[derive(Debug, Clone, Copy)]
+struct PriceInputs {
+    /// The strike the vendor resolved, in paisa.
+    strike: i64,
+    /// Call or put.
+    side: brutex_core::instrument::OptionSide,
+    /// When the contract stopped trading.
+    expiry: brutex_core::instrument::Expiry,
+    /// The swept underlying, for the dated strike ladder.
+    slot: pull::pricing::SweptSlot,
+    /// The rate the operator supplied, carried into every row it prices.
+    rate: pull::pricing::Rate,
+    /// Whose feed this is, so a vendor-sent volatility can name it.
+    vendor: brutex_core::vendor::Vendor,
+}
+
+/// Prices one rolling-option group from bars this run already holds.
+///
+/// # Nothing extra is fetched
+///
+/// Dhan's rolling answer carries `iv` and `spot` beside every bar — see
+/// `pull::rolling::Overlay` — so the spot needs no join here and the volatility
+/// is the vendor's wherever it sent one. Where it sent none, it is solved from
+/// the premium, and `pull::pricing::VolSource` records which per row so a
+/// receipt can never present the two as one number.
+///
+/// # A row that cannot become a quote is REFUSED, not skipped
+///
+/// A bar with no overlay spot, or one stamped at or past the expiry, cannot be
+/// priced. Both are counted with their reason rather than dropped: a row that
+/// vanishes between "bars stored" and "rows priced" makes those two numbers
+/// disagree on a receipt with nothing explaining the gap.
+///
+/// # Cost
+///
+/// **O(rows)**: one `Tenor::between` and one `pull::pricing::price` each, both
+/// O(1). The volatility lookup is one hash probe. Nothing here scans the store
+/// and nothing reaches the network.
+fn price_group(group: &[pull::rolling::Row], inputs: PriceInputs) -> pull::pricing::PricedAll {
+    let mut quotes: Vec<pull::pricing::Quote> = Vec::with_capacity(group.len());
+    let mut sent: std::collections::HashMap<i64, f64> = std::collections::HashMap::new();
+    let mut out = pull::pricing::PricedAll::default();
+
+    for row in group {
+        let ts = row.bar.ts_micros;
+        let Some(spot) = row.overlay.spot() else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(
+                &mut out,
+                "the vendor sent no underlying level beside this bar, so there                  is nothing to price it against",
+            );
+            continue;
+        };
+        let tenor = match pull::tenor::Tenor::between(ts, inputs.expiry) {
+            Ok(tenor) => tenor,
+            Err(why) => {
+                out.refused = out.refused.saturating_add(1);
+                note_price_refusal(&mut out, &why.to_string());
+                continue;
+            }
+        };
+        let Ok(at) = pull::session::IstMoment::from_epoch_secs(ts.div_euclid(1_000_000)) else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(
+                &mut out,
+                "the bar's stamp is not a moment any calendar places",
+            );
+            continue;
+        };
+        let day = at.day();
+        let Some(on) = pull::pricing::trade_day_of(day) else {
+            out.refused = out.refused.saturating_add(1);
+            note_price_refusal(&mut out, "the bar's own day is outside the cost calendar");
+            continue;
+        };
+        // THE VENDOR'S OWN VOLATILITY, IN MILLIONTHS. `125_000` is `0.125`.
+        if let Some(iv) = row.overlay.iv() {
+            sent.insert(ts, millionths_to_decimal(iv));
+        }
+        quotes.push(pull::pricing::Quote {
+            ts_micros: ts,
+            spot,
+            strike: inputs.strike,
+            premium: row.bar.close,
+            tenor,
+            side: inputs.side,
+            slot: inputs.slot,
+            on,
+            vendor: inputs.vendor,
+        });
+    }
+
+    let done = pull::pricing::price_all(
+        &quotes,
+        |ts| sent.get(&ts).copied(),
+        inputs.rate,
+        pull::tenor::YearBasis::Calendar365,
+    );
+    out.rows = done.rows;
+    out.refused = out.refused.saturating_add(done.refused);
+    for why in done.why {
+        note_price_refusal(&mut out, &why);
+    }
+    out
+}
+
+/// A vendor's millionths as a decimal — `125_000` becomes `0.125`.
+///
+/// The one float this file produces, and it is a UNIT CONVERSION rather than a
+/// price: `api` inherits `pull`'s ban on float arithmetic because §7 is about
+/// prices, and a volatility is in the class §7 puts beside Sharpe and p-values.
+fn millionths_to_decimal(millionths: i64) -> f64 {
+    #[expect(
+        clippy::float_arithmetic,
+        clippy::cast_precision_loss,
+        reason = "an i64 count of millionths, exact in f64 to 2^53 — nine \
+                  orders of magnitude above anything a volatility reaches. The \
+                  quotient is the decimal the model takes and no integer type \
+                  carries it"
+    )]
+    {
+        millionths as f64 / 1_000_000.0
+    }
+}
+
+/// Keeps one distinct pricing refusal, capped.
+///
+/// Five thousand rows refused for one reason is ONE fact. The cap and the
+/// de-duplication are `pull::pricing::price_all`'s own rule, applied to the
+/// refusals this function raises before a quote could even be built.
+fn note_price_refusal(out: &mut pull::pricing::PricedAll, why: &str) {
+    if out.why.len() < pull::pricing::REASONS_KEPT && !out.why.iter().any(|kept| kept == why) {
+        out.why.push(why.to_owned());
+    }
+}
+
+/// What one rolling-option run did, as counts an operator can add up.
+///
+/// Named rather than a tuple of three `usize`s, for the reason `FnoLanded`
+/// gives at length: `(stored, declined, priced)` and `(stored, priced,
+/// declined)` compile the same and report opposite things.
+#[derive(Debug, Default, PartialEq)]
+struct Rolled {
+    /// Bars written to disk.
+    stored: usize,
+    /// Runs the month gate declined — neither stored nor failed.
+    declined: usize,
+    /// What pricing produced, or all zeroes when no rate was supplied.
+    priced: PricedCount,
+}
+
+/// How many rows priced, how many refused, and why.
+///
+/// Flattened out of `pull::pricing::PricedAll` because the rows themselves have
+/// nowhere to go yet: `store::format::Overlay` is exactly 24 bytes — stamp,
+/// spot, implied volatility — and five greeks do not fit. §4 says a new field
+/// is a new file version at its own stride, so persisting them is a
+/// `crates/store` change and not this one. **Until it lands the greeks are
+/// computed and counted and then dropped**, which is stated here rather than
+/// left for someone to discover from an empty directory.
+#[derive(Debug, Default, PartialEq)]
+struct PricedCount {
+    /// Rows that produced a volatility, five greeks and a moneyness.
+    rows: usize,
+    /// Rows that could not be priced.
+    refused: usize,
+    /// Rows whose volatility this build solved rather than the vendor sending.
+    solved: usize,
+    /// Rows whose tenor is below the band `greeks` validates itself in.
+    ///
+    /// On a weekly this is every row, and a receipt that does not say so is
+    /// implying a validation that did not happen.
+    below_band: usize,
+    /// The first few distinct reasons, verbatim.
+    why: Vec<String>,
+}
+
+impl PricedCount {
+    /// Folds one contract-month's answer in.
+    fn absorb(&mut self, from: &pull::pricing::PricedAll) {
+        self.rows = self.rows.saturating_add(from.rows.len());
+        self.refused = self.refused.saturating_add(from.refused);
+        self.solved = self.solved.saturating_add(from.solved());
+        self.below_band = self.below_band.saturating_add(from.below_validated_band());
+        for why in &from.why {
+            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
+                self.why.push(why.clone());
+            }
+        }
+    }
+
+    /// Folds another run's counts in.
+    fn absorb_count(&mut self, from: &Self) {
+        self.rows = self.rows.saturating_add(from.rows);
+        self.refused = self.refused.saturating_add(from.refused);
+        self.solved = self.solved.saturating_add(from.solved);
+        self.below_band = self.below_band.saturating_add(from.below_band);
+        for why in &from.why {
+            if self.why.len() < pull::pricing::REASONS_KEPT && !self.why.contains(why) {
+                self.why.push(why.clone());
+            }
+        }
+    }
+
+    /// Whether anything was priced or refused at all.
+    const fn ran(&self) -> bool {
+        self.rows > 0 || self.refused > 0
+    }
 }
 
 /// What the receipt says about runs the month gate declined.
@@ -7625,11 +7974,12 @@ async fn roll_every(
     word: &'static str,
     offsets: &'static [&'static str],
     last_settled: Day,
-) -> (usize, usize, usize, Vec<String>) {
+) -> (usize, usize, usize, Vec<String>, PricedCount) {
     let endpoint = pull::rolling::url(&rolling, wire.spec.base_url);
     let mut stored = 0usize;
     let mut failed = 0usize;
     let mut declined = 0usize;
+    let mut priced = PricedCount::default();
     let mut why: Vec<String> = Vec::new();
 
     // THE PER-CALL CAP BINDS HERE, AND NOTHING BOUND IT.
@@ -7661,6 +8011,7 @@ async fn roll_every(
                      per-call cap, so no rolling request was sent: {refusal}",
                         rolling.max_days_per_call
                     )],
+                    PricedCount::default(),
                 );
             }
         };
@@ -7676,7 +8027,7 @@ async fn roll_every(
                         // charged per CHUNK, because a chunk is a request.
                         if let Err(halt) = await_budget(asked.feed, site).await {
                             why.push(halt);
-                            return (stored, failed.saturating_add(1), declined, why);
+                            return (stored, failed.saturating_add(1), declined, why, priced);
                         }
                         let one = roll_one(
                             asked,
@@ -7695,9 +8046,10 @@ async fn roll_every(
                         )
                         .await;
                         match one {
-                            Ok((count, skipped)) => {
-                                stored = stored.saturating_add(count);
-                                declined = declined.saturating_add(skipped);
+                            Ok(done) => {
+                                stored = stored.saturating_add(done.stored);
+                                declined = declined.saturating_add(done.declined);
+                                priced.absorb_count(&done.priced);
                             }
                             Err(said) => {
                                 failed = failed.saturating_add(1);
@@ -7711,7 +8063,7 @@ async fn roll_every(
             }
         }
     }
-    (stored, failed, declined, why)
+    (stored, failed, declined, why, priced)
 }
 
 /// The Dhan shape: enumerate the contract set, fetch each, file bar and overlay.
@@ -7802,7 +8154,7 @@ async fn fno_roll(
         }
     };
 
-    let (stored, failed, declined, why) = roll_every(
+    let (stored, failed, declined, why, priced) = roll_every(
         asked,
         site,
         wire,
@@ -7814,6 +8166,7 @@ async fn fno_roll(
     )
     .await;
     facts.push(("Bars stored", stored.to_string()));
+    facts.extend(greek_facts(&priced, asked.rate.is_none()));
     // A THIRD OUTCOME, AND IT NEEDS ITS OWN LINE. See `roll_one`'s gate.
     if declined > 0 {
         facts.push(("Contract runs declined", declined_note(declined)));

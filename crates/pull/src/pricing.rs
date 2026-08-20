@@ -69,6 +69,44 @@ use greeks::solver::ImpliedVolatility;
 
 use crate::tenor::{Tenor, YearBasis};
 
+// THE TWO `costs` TYPES A CALLER NEEDS, RE-EXPORTED RATHER THAN REACHED FOR.
+//
+// `Quote` names both in its public surface, so any caller has to be able to
+// build them. `api` does NOT depend on `costs` — its dependency set is `core`,
+// `pull`, `store`, `telemetry` — and adding an arrow to the crate graph to pass
+// two `Copy` values through would be a §5 change and a `docs/05-decisions.md`
+// entry for no gain. `pull` already depends on `costs` and is the crate on the
+// path, so the conversions live here, once.
+pub use costs::day::TradeDay;
+pub use costs::venue::SweptSlot;
+
+/// The swept underlying a symbol names, or `None` for one with no regime.
+///
+/// `None` is a recorded absence and not a failure: an underlying with no
+/// strike-ladder regime cannot have a moneyness, so pricing is skipped for it
+/// with that reason rather than a ladder being guessed at.
+///
+/// # Cost
+///
+/// O(1) — see `costs::venue::swept_slot`.
+#[must_use]
+pub fn slot_of(symbol: brutex_core::symbol::Symbol) -> Option<SweptSlot> {
+    costs::venue::swept_slot(symbol).ok()
+}
+
+/// The cost calendar's day for a session day, or `None` outside its window.
+///
+/// The two calendars have different accepted ranges — `costs` anchors at
+/// 1990-01-01 — so this is a real refusal rather than a formality.
+///
+/// # Cost
+///
+/// O(1): three field reads and two range checks.
+#[must_use]
+pub fn trade_day_of(day: crate::session::Day) -> Option<TradeDay> {
+    TradeDay::new(day.year(), day.month(), day.day()).ok()
+}
+
 /// The risk-free rate, and where it came from.
 ///
 /// # Why the source is a field and not a comment
@@ -259,14 +297,14 @@ pub struct Quote {
     ///
     /// Resolved once per contract by `costs::venue::swept_slot`, not once per
     /// bar: the answer cannot change inside one contract.
-    pub slot: costs::venue::SweptSlot,
+    pub slot: SweptSlot,
     /// The bar's own trading day, for the dated strike ladder.
     ///
     /// The interval is dated — `costs::strike::strike_step_on` carries its own
     /// verified-from row — so moneyness computed against a fixed 50 or 100
     /// would be silently wrong across every interval change and would look
     /// right on every row.
-    pub on: costs::day::TradeDay,
+    pub on: TradeDay,
     /// Whose feed this bar came from, so a vendor-sent volatility can name it.
     pub vendor: brutex_core::vendor::Vendor,
 }
